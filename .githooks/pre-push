@@ -68,7 +68,7 @@ fi
 
 # Resolve base branch dynamically
 BASE_REF=""
-for branch in "origin/epic/ETP-3504" "origin/develop" "origin/main"; do
+for branch in "origin/develop" "origin/main"; do
   if git rev-parse --verify --quiet "$branch" >/dev/null; then
     BASE_REF="$branch"
     break
@@ -214,12 +214,12 @@ run_step() {
   # A hit means every input this step reads is byte-identical to the last time it
   # passed. Announced loudly and never silently.
   if step_cache_lookup "$step_num" "$cache_key"; then
-    echo "==> [$step_num/3] $step_name... CACHED (inputs unchanged since it last passed)"
+    echo "==> [$step_num/4] $step_name... CACHED (inputs unchanged since it last passed)"
     record_summary_row "$step_name" "$(prev_duration "step-${step_num}")" "CACHED" ""
     return 0
   fi
 
-  echo "==> [$step_num/3] $step_name..."
+  echo "==> [$step_num/4] $step_name..."
 
   # NOTE: capture the exit status without tripping `set -e`. Calling
   # exec_with_progress bare would abort the whole script on a non-zero return
@@ -229,11 +229,11 @@ run_step() {
   exec_with_progress "step-${step_num}" "$run_dir" "$abs_log" "$cmd" || exit_status=$?
 
   if [ $exit_status -eq 0 ]; then
-    echo "==> [$step_num/3] $step_name... SUCCESS ✅ (${LAST_DURATION}s)"
+    echo "==> [$step_num/4] $step_name... SUCCESS ✅ (${LAST_DURATION}s)"
     step_cache_store "$step_num" "$cache_key"
     record_summary_row "$step_name" "$LAST_DURATION" "OK" ""
   else
-    echo "==> [$step_num/3] $step_name... FAILED ❌ (${LAST_DURATION}s)"
+    echo "==> [$step_num/4] $step_name... FAILED ❌ (${LAST_DURATION}s)"
     step_cache_invalidate "$step_num"
     record_summary_row "$step_name" "$LAST_DURATION" "FAILED" ""
     echo ""
@@ -263,7 +263,7 @@ run_step() {
 # Report a step that relevance detection decided not to run. Non-blocking: the
 # push proceeds and the (already Hooks-Verified) commits stay valid.
 skip_step() {
-  echo "==> [$1/3] $2... SKIPPED ⏭️  (not relevant to these changes)"
+  echo "==> [$1/4] $2... SKIPPED ⏭️  (not relevant to these changes)"
   record_summary_row "$2" "-" "SKIPPED" ""
 }
 
@@ -292,9 +292,9 @@ junit_test_counts() {
 check_base_conflicts() {
   echo "==> Checking for conflicts with base branch (fetch + merge-tree)..."
 
-  # Fetch the latest base branch (prefer epic/ETP-3504, then develop, then main).
+  # Fetch the latest base branch (prefer develop, then main).
   local base_branch=""
-  for b in "epic/ETP-3504" "develop" "main"; do
+  for b in "develop" "main"; do
     if git fetch --quiet origin "$b" 2>/dev/null; then
       base_branch="$b"
       break
@@ -364,7 +364,7 @@ if [ -n "$BASE_REF" ] && CHANGED_FILES="$(git diff --name-only "$BASE_REF"...HEA
   case " $CHECKS " in *" coverage "*) RUN_STEP3=1 ;; esac
   n_files="$(printf '%s\n' "$CHANGED_FILES" | grep -Evc '^[[:space:]]*$' || true)"
   _p() { [ "$1" = "1" ] && printf run || printf skip; }
-  echo "==> Relevance: ${n_files} changed file(s) vs ${BASE_REF} → [1 XML]=$(_p $RUN_STEP1) · [2 JUnit]=$(_p $RUN_STEP2) · [3 Sonar]=$(_p $RUN_STEP3)"
+  echo "==> Relevance: ${n_files} changed file(s) vs ${BASE_REF} → [1 XML]=$(_p $RUN_STEP1) · [1b Sonar issues]=$(_p $RUN_STEP2) · [2 JUnit]=$(_p $RUN_STEP2) · [3 Sonar]=$(_p $RUN_STEP3)"
 else
   RUN_STEP1=1; RUN_STEP2=1; RUN_STEP3=1
   echo "==> Relevance: no reliable change set (base='${BASE_REF:-none}') → running ALL steps."
@@ -384,6 +384,23 @@ if [ "$RUN_STEP1" = "1" ]; then
   run_step "1" "Validating sourcedata XML order/constraints" "$MODULE_DIR" "tmp/pre-push/xml-check.log" "./check-etgo-xml.sh" "$STEP1_KEY"
 else
   skip_step "1" "Validating sourcedata XML order/constraints"
+fi
+
+# 1b. Sonar issues, BRANCH mode (real parse) — runs BEFORE the expensive JUnit
+# step so a genuine Sonar finding is reported quickly. Exists because step 3
+# below analyzes in PULL REQUEST mode, and in PR mode sonar.java.binaries=.
+# points at a dir with ZERO .class files, so ECJ cannot resolve types and the
+# JavaSensor always reports 0 issues — the PR-mode issues gate never actually
+# blocks anything. Branch mode does a full parse and finds real issues. Own
+# step id ("1b", not "2"/"3") on purpose: it must never collide with step 2/3's
+# cache or duration keys ("step-2"/"step-3" in tmp/pre-push/), and — like step 3
+# — must NEVER be cached: the verdict depends on the live Sonar server, not just
+# this tree's content. Gated on the same relevance token as step 2 (junit) since
+# it needs no new bucket in lib/relevance.sh.
+if [ "$RUN_STEP2" = "1" ]; then
+  run_step "1b" "Checking Sonar issues (branch-mode, real parse)" "$MODULE_DIR" "tmp/pre-push/sonar-issues.log" "./check-sonar-issues.sh \"$BASE_REF\""
+else
+  skip_step "1b" "Checking Sonar issues (branch-mode, real parse)"
 fi
 
 # 2. Run the Etendo Go test suite (com.etendoerp.go.*) — mirrors CI's "Etendo Go

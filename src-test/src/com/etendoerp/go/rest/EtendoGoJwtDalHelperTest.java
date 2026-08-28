@@ -26,6 +26,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -54,8 +55,12 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.auth0.jwt.interfaces.Claim;
+import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.Invitation;
+import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * Unit tests for {@link EtendoGoJwtDalHelper}.
@@ -368,6 +373,7 @@ class EtendoGoJwtDalHelperTest {
 
       verify(account).setPasswordHash("new-hash");
       verify(account).setSessionToken(null);
+      verify(account).set("status", "active");
       verify(account).set("resetTokenHash", null);
       verify(account).set("resetTokenExpires", null);
       verify(account).set("resetTokenConsumed", changedAt);
@@ -672,6 +678,284 @@ class EtendoGoJwtDalHelperTest {
 
       verify(query).setNamedParameter("accountEmail", "a_b%@x.com");
       verify(query).setNamedParameter("accountPrefix", "a\\_b\\%@x.com+%");
+    }
+  }
+
+  @Nested
+  @DisplayName("email verification state (ETP-4798)")
+  class EmailVerificationState {
+
+    @Test
+    @DisplayName("a confirmed address reads as verified and not pending")
+    void confirmedAddress() {
+      Account account = mock(Account.class);
+      when(account.get(EtendoGoJwtDalHelper.PROPERTY_EMAIL_VERIFIED)).thenReturn(new Date());
+      when(account.get(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH)).thenReturn("hash");
+
+      assertTrue(EmailVerificationDalHelper.isEmailVerified(account));
+      // Still holding the hash — the link stays replayable for idempotency — but nothing is owed.
+      assertFalse(EmailVerificationDalHelper.isEmailVerificationPending(account));
+    }
+
+    @Test
+    @DisplayName("an issued but unused token reads as pending")
+    void issuedTokenIsPending() {
+      Account account = mock(Account.class);
+      when(account.get(EtendoGoJwtDalHelper.PROPERTY_EMAIL_VERIFIED)).thenReturn(null);
+      when(account.get(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH)).thenReturn("hash");
+
+      assertFalse(EmailVerificationDalHelper.isEmailVerified(account));
+      assertTrue(EmailVerificationDalHelper.isEmailVerificationPending(account));
+    }
+
+    @Test
+    @DisplayName("an account that predates the feature is neither verified nor pending")
+    void legacyAccountIsNeverGated() {
+      // The regression this guards: gating on "not verified" alone would lock every pre-ETP-4798
+      // account out of creating an environment the moment this deploys.
+      Account account = mock(Account.class);
+      when(account.get(EtendoGoJwtDalHelper.PROPERTY_EMAIL_VERIFIED)).thenReturn(null);
+      when(account.get(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH)).thenReturn(null);
+
+      assertFalse(EmailVerificationDalHelper.isEmailVerified(account));
+      assertFalse(EmailVerificationDalHelper.isEmailVerificationPending(account));
+    }
+
+    @Test
+    @DisplayName("a null account is neither verified nor pending")
+    void nullAccount() {
+      assertFalse(EmailVerificationDalHelper.isEmailVerified(null));
+      assertFalse(EmailVerificationDalHelper.isEmailVerificationPending(null));
+    }
+
+    @Test
+    @DisplayName("storing a token writes the hash and expiry and commits")
+    void storeEmailVerifyToken() {
+      Account account = mock(Account.class);
+      Date expiresAt = new Date();
+
+      EmailVerificationDalHelper.storeEmailVerifyToken(account, "hash", expiresAt);
+
+      verify(account).set(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH, "hash");
+      verify(account).set(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_EXPIRES, expiresAt);
+      verify(obDal).save(account);
+    }
+
+    @Test
+    @DisplayName("consuming marks the address verified without clearing the token or the session")
+    void consumeEmailVerification() {
+      Account account = mock(Account.class);
+      Date verifiedAt = new Date();
+
+      EmailVerificationDalHelper.consumeEmailVerification(account, verifiedAt);
+
+      verify(account).set(EtendoGoJwtDalHelper.PROPERTY_EMAIL_VERIFIED, verifiedAt);
+      // Keeping the hash is what makes a second click on the link answer 200 instead of "invalid".
+      verify(account, never()).set(EtendoGoJwtDalHelper.PROPERTY_VERIFY_TOKEN_HASH, null);
+      // And the user stays signed in — they are usually mid-onboarding when they click.
+      verify(account, never()).setSessionToken(any());
+      verify(obDal).save(account);
+    }
+
+    @Test
+    @DisplayName("the lookup only accepts an unexpired token on an active account")
+    void findAccountByVerifyTokenHash() {
+      @SuppressWarnings("unchecked")
+      OBQuery<Account> query = mock(OBQuery.class);
+      Account expected = mock(Account.class);
+      Date now = new Date();
+      when(obDal.createQuery(eq(Account.class), anyString())).thenReturn(query);
+      when(query.uniqueResult()).thenReturn(expected);
+
+      Account result = EmailVerificationDalHelper.findAccountByVerifyTokenHash("hash", now);
+
+      assertEquals(expected, result);
+      verify(query).setNamedParameter("verifyTokenHash", "hash");
+      verify(query).setNamedParameter("now", now);
+      verify(query).setFilterOnReadableClients(false);
+      verify(query).setFilterOnReadableOrganization(false);
+    }
+  }
+
+  @Nested
+  @DisplayName("findActiveAccountByBearerToken")
+  class FindActiveAccountByBearerToken {
+
+    private static final String ENVIRONMENT_JWT = "environment-jwt";
+    private static final String USER_ID = "USER-1";
+    private static final String CLIENT_ID = "CLIENT-1";
+    private static final String ACCOUNT_EMAIL = "owner@example.com";
+
+    @Mock private OBDal readOnlyDal;
+
+    /**
+     * Builds the environment's {@code AD_User} exactly as onboarding leaves it: {@code email} is
+     * null, because {@code InitialSetupUtility.insertUser} never sets it, so the account identity
+     * lives entirely in {@code username}.
+     */
+    private User environmentUser(String username) {
+      Client client = mock(Client.class);
+      when(client.getId()).thenReturn(CLIENT_ID);
+      User user = mock(User.class);
+      when(user.isActive()).thenReturn(Boolean.TRUE);
+      when(user.getEmail()).thenReturn(null);
+      when(user.getUsername()).thenReturn(username);
+      when(user.getClient()).thenReturn(client);
+      return user;
+    }
+
+    /**
+     * Stubs the account lookups the resolver performs against {@code dal}: the session-token query
+     * always misses (the caller presents an environment JWT, not an account session token), and the
+     * by-email query yields {@code account} only for {@code registeredEmail}. Any other email
+     * resolves to null, so a passing assertion proves which email the production code actually
+     * looked up rather than merely that it looked something up.
+     */
+    private void stubAccountLookups(OBDal dal, String registeredEmail, Account account) {
+      @SuppressWarnings("unchecked")
+      OBQuery<Account> bySessionToken = mock(OBQuery.class);
+      when(bySessionToken.uniqueResult()).thenReturn(null);
+
+      @SuppressWarnings("unchecked")
+      OBQuery<Account> byEmail = mock(OBQuery.class);
+      // The helper binds the email before reading the result, so the stub can answer based on what
+      // was actually requested — including a second lookup with a different value.
+      String[] requestedEmail = new String[1];
+      when(byEmail.setNamedParameter(anyString(), any())).thenAnswer(call -> {
+        if ("email".equals(call.getArgument(0))) {
+          requestedEmail[0] = String.valueOf((Object) call.getArgument(1));
+        }
+        return byEmail;
+      });
+      when(byEmail.uniqueResult())
+          .thenAnswer(call -> registeredEmail.equalsIgnoreCase(requestedEmail[0]) ? account : null);
+
+      when(dal.createQuery(eq(Account.class), anyString())).thenAnswer(invocation ->
+          String.valueOf((Object) invocation.getArgument(1)).contains("sessionToken")
+              ? bySessionToken : byEmail);
+    }
+
+    /** Stubs the tenant-isolation check: whether the JWT's client is owned by the account. */
+    private void stubClientOwnership(boolean owned) {
+      @SuppressWarnings("unchecked")
+      OBQuery<User> ownershipQuery = mock(OBQuery.class);
+      when(ownershipQuery.uniqueResult()).thenReturn(owned ? mock(User.class) : null);
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(ownershipQuery);
+    }
+
+    /**
+     * Drives the helper with an environment JWT issued for {@code username}, against an account
+     * registered under {@code registeredEmail}.
+     */
+    private Account resolve(String username, String registeredEmail, Account account,
+        boolean clientOwned) {
+      stubAccountLookups(obDal, registeredEmail, account);
+      stubAccountLookups(readOnlyDal, registeredEmail, account);
+      obDalMock.when(OBDal::getReadOnlyInstance).thenReturn(readOnlyDal);
+      // Built before the stubbing call: environmentUser() stubs its own mocks, and Mockito forbids
+      // that while an outer when(...) is still open.
+      User user = environmentUser(username);
+      when(obDal.get(User.class, USER_ID)).thenReturn(user);
+      when(account.getEmail()).thenReturn(registeredEmail);
+      stubClientOwnership(clientOwned);
+
+      DecodedJWT jwt = mock(DecodedJWT.class);
+      Claim userClaim = mock(Claim.class);
+      when(userClaim.asString()).thenReturn(USER_ID);
+      when(jwt.getClaim("user")).thenReturn(userClaim);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {
+        swsMock.when(() -> SecureWebServicesUtils.decodeToken(ENVIRONMENT_JWT)).thenReturn(jwt);
+        return EtendoGoJwtDalHelper.findActiveAccountByBearerToken(ENVIRONMENT_JWT);
+      }
+    }
+
+    @Test
+    @DisplayName("resolves the account for a first environment, whose username is the plain email")
+    void resolvesFirstEnvironment() {
+      Account expected = mock(Account.class);
+
+      assertEquals(expected, resolve(ACCOUNT_EMAIL, ACCOUNT_EMAIL, expected, true));
+    }
+
+    @Test
+    @DisplayName("resolves the account for a later environment, whose username carries the client suffix")
+    void resolvesSuffixedEnvironment() {
+      // From the second tenant onwards buildClientUsername names the environment user
+      // "<accountEmail>+<clientName>". An exact-match-only lookup misses it and the caller
+      // answers 401 for a perfectly valid, freshly issued token.
+      Account expected = mock(Account.class);
+
+      assertEquals(expected, resolve(ACCOUNT_EMAIL + "+acmeltd", ACCOUNT_EMAIL, expected, true));
+    }
+
+    @Test
+    @DisplayName("keeps plus-addressed account emails intact by splitting on the last '+'")
+    void resolvesSuffixedEnvironmentForPlusAddressedEmail() {
+      // "owner+tag@example.com+acmeltd" must resolve to "owner+tag@example.com". Splitting on the
+      // FIRST '+' would corrupt exactly the accounts that use plus-addressing.
+      Account expected = mock(Account.class);
+      String plusAddressed = "owner+tag@example.com";
+
+      assertEquals(expected,
+          resolve(plusAddressed + "+acmeltd", plusAddressed, expected, true));
+    }
+
+    @Test
+    @DisplayName("refuses a suffixed username whose client belongs to another account")
+    void refusesWhenClientBelongsToAnotherAccount() {
+      // Stripping the suffix must not become a way past tenant isolation: the JWT's client still
+      // has to be owned by the resolved account.
+      assertNull(resolve(ACCOUNT_EMAIL + "+acmeltd", ACCOUNT_EMAIL, mock(Account.class), false));
+    }
+
+    @Test
+    @DisplayName("refuses a username that maps to no account")
+    void refusesUnknownAccount() {
+      assertNull(resolve("stranger@example.com+acmeltd", ACCOUNT_EMAIL, mock(Account.class), true));
+    }
+
+    @Test
+    @DisplayName("refuses an inactive environment user")
+    void refusesInactiveUser() {
+      Account account = mock(Account.class);
+      stubAccountLookups(obDal, ACCOUNT_EMAIL, account);
+      User inactive = mock(User.class);
+      when(inactive.isActive()).thenReturn(Boolean.FALSE);
+      when(obDal.get(User.class, USER_ID)).thenReturn(inactive);
+
+      DecodedJWT jwt = mock(DecodedJWT.class);
+      Claim userClaim = mock(Claim.class);
+      when(userClaim.asString()).thenReturn(USER_ID);
+      when(jwt.getClaim("user")).thenReturn(userClaim);
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {
+        swsMock.when(() -> SecureWebServicesUtils.decodeToken(ENVIRONMENT_JWT)).thenReturn(jwt);
+        assertNull(EtendoGoJwtDalHelper.findActiveAccountByBearerToken(ENVIRONMENT_JWT));
+      }
+    }
+
+    @Test
+    @DisplayName("prefers the account session token and never decodes it as a JWT")
+    void prefersAccountSessionToken() {
+      Account expected = mock(Account.class);
+      @SuppressWarnings("unchecked")
+      OBQuery<Account> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(Account.class), anyString())).thenReturn(query);
+      when(query.uniqueResult()).thenReturn(expected);
+
+      assertEquals(expected, EtendoGoJwtDalHelper.findActiveAccountByBearerToken("account-session"));
+    }
+
+    @Test
+    @DisplayName("returns null for a blank token without touching the JWT decoder")
+    void returnsNullForBlankToken() {
+      @SuppressWarnings("unchecked")
+      OBQuery<Account> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(Account.class), anyString())).thenReturn(query);
+      when(query.uniqueResult()).thenReturn(null);
+
+      assertNull(EtendoGoJwtDalHelper.findActiveAccountByBearerToken("   "));
     }
   }
 }

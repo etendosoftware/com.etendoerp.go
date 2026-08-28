@@ -106,6 +106,12 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   private static final String PARAM_SHIPMENT_IDS = "shipmentIds";
   private static final String PARAM_PRICE_LIST_ID = "priceListId";
   private static final String ERR_RECORD_ID_REQUIRED = "Record ID is required";
+  // ETP-4942 — surfaced as a 400 validation error instead of letting a null
+  // Invoice.getPriceList() reach UpdatePricesAndAmounts and blow up as an
+  // unguarded 500 further down the native invoice-line-creation pipeline.
+  private static final String ERR_PRICE_LIST_REQUIRED =
+      "No Price List could be resolved for this invoice: select a tariff or configure "
+          + "a default Price List for the Business Partner";
   private static final String KEY_RESPONSE = "response";
 
   /**
@@ -637,7 +643,9 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     // frontend can display the discount % and compute the totals breakdown.
     // The native process already copies unitPrice/listPrice/lineNetAmount, but
     // c_invoiceline has no standard discount column — it lives in the EM_ extension.
-    copyLineDiscountsFromOrder(invoice);
+    // ETP-4780: moved into InvoiceFromOrderSupport so CreatePurchaseInvoiceHandler
+    // can reuse the same behaviour without duplication.
+    getSupport().copyLineDiscountsFromOrder(invoice);
 
     InvoiceLineLinker.linkInvoiceLinesToExistingInouts(invoice.getId());
 
@@ -648,55 +656,6 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     getSupport().propagateOrderRateToInvoice(order, invoice);
 
     return invoice;
-  }
-
-  /**
-   * Copies {@code discount} from each invoice line's source {@link OrderLine} into the
-   * {@code EM_Etgo_Discount} field on the invoice line. Skips lines that have no source
-   * order line, no discount on the source, or already a non-zero value.
-   *
-   * <p>The native {@code CreateInvoiceLinesFromProcess} copies the unit price, list
-   * price and net amount correctly, but {@code C_InvoiceLine} has no standard
-   * {@code discount} column — it lives in the EM_ extension. Without this copy the
-   * frontend reads zero from {@code EM_Etgo_Discount} and renders "0%" alongside an
-   * already-discounted unit price, breaking the totals breakdown displayed in the UI.
-   */
-  protected void copyLineDiscountsFromOrder(Invoice invoice) {
-    boolean dirty = false;
-    for (InvoiceLine il : invoice.getInvoiceLineList()) {
-      BigDecimal srcDiscount = resolveCopyableSourceDiscount(il);
-      if (srcDiscount != null) {
-        il.setEtgoDiscount(srcDiscount);
-        OBDal.getInstance().save(il);
-        dirty = true;
-      }
-    }
-    if (dirty) {
-      OBDal.getInstance().flush();
-    }
-  }
-
-  /**
-   * Returns the source {@link OrderLine#getDiscount()} value that should be copied
-   * into the given invoice line's {@code EM_Etgo_Discount} field, or {@code null}
-   * when the copy should be skipped. The copy is skipped when there is no source
-   * order line, the source carries no discount, or the invoice line already has a
-   * non-zero discount value (set explicitly elsewhere).
-   */
-  private BigDecimal resolveCopyableSourceDiscount(InvoiceLine il) {
-    OrderLine ol = il.getSalesOrderLine();
-    if (ol == null) {
-      return null;
-    }
-    BigDecimal srcDiscount = ol.getDiscount();
-    if (srcDiscount == null || srcDiscount.compareTo(BigDecimal.ZERO) == 0) {
-      return null;
-    }
-    BigDecimal current = il.getEtgoDiscount();
-    if (current != null && current.compareTo(BigDecimal.ZERO) != 0) {
-      return null;
-    }
-    return srcDiscount;
   }
 
   /**
@@ -877,6 +836,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
 
     Invoice invoice = createInvoiceHeaderFromShipment(first, shipments);
     applyPriceListOverride(invoice, priceListId);
+    ensurePriceListResolved(invoice);
     OBDal.getInstance().save(invoice);
     OBDal.getInstance().flush();
     addShipmentLinesToInvoice(invoice, shipments, lineOverrides);
@@ -901,6 +861,21 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     PriceList priceList = OBDal.getInstance().get(PriceList.class, priceListId);
     if (priceList != null) {
       invoice.setPriceList(priceList);
+    }
+  }
+
+  /**
+   * Fails fast with a clear 400 when neither the shipment's linked order, the
+   * Business Partner's default tariff, nor an explicit {@code priceListId} override
+   * resolved a price list (ETP-4942 — a shipment with no linked sales order and a
+   * Business Partner with no default Price List used to reach {@code
+   * UpdatePricesAndAmounts} with a null {@code Invoice.getPriceList()}, which threw an
+   * unguarded NPE surfaced to the caller as a 500). Must run AFTER {@link
+   * #applyPriceListOverride}, which is the last chance to fill it in.
+   */
+  private void ensurePriceListResolved(Invoice invoice) {
+    if (invoice.getPriceList() == null) {
+      throw new OBException(ERR_PRICE_LIST_REQUIRED);
     }
   }
 
@@ -1077,6 +1052,13 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     invoice.setSummedLineAmount(BigDecimal.ZERO);
     invoice.setGrandTotalAmount(BigDecimal.ZERO);
     invoice.setWithholdingamount(BigDecimal.ZERO);
+
+    // ETP-4888: this header is built directly via OBProvider, bypassing the normal NEO CRUD
+    // "new record" HTTP path that would otherwise resolve every declared contract.json
+    // derivation (e.g. SII/SIF fields like etsgDateOperation). Fields already set above are
+    // never overwritten — only properties still blank are filled in.
+    NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity("sales-invoice", "header",
+        invoice, first.getId());
 
     return invoice;
   }

@@ -464,7 +464,7 @@ El `NeoSelectorService` resuelve referencias FK y provee valores de dropdown con
 **Simple selectors (TableDir ref 19, Table ref 18, Search ref 30):**
 - Usan `AD_Ref_Table` para encontrar la entity target
 - Una sola propiedad de display (identifier)
-- Where clause opcional desde `AD_Ref_Table.HQLWhereClause`
+- Where clause opcional desde `AD_Ref_Table.HQLWhereClause`, con fallback a `SQLWhereClause` (traducido a HQL) cuando `HQLWhereClause` esta vacio; un segmento con subquery anidada `(SELECT ...)` se descarta en vez de traducirse mal, via el guard `NESTED_SUBQUERY` compartido con `SelectorValidationResolver` (ETP-4975 -- ver `docs/neo-headless.md` §4.4 para el detalle completo)
 
 **Rich selectors (OBUISEL_Selector):**
 - Grid con multiples columnas configurables
@@ -691,6 +691,30 @@ POST /sws/neo/{specName}/{entityName}/callout
 
 5. **Transformacion de response**: Convierte el resultado nativo del callout (formato inp*) a nombres OBDal property limpios.
 
+### Convencion `inp*` y fallback de alias (ETP-4784)
+
+Los callouts legacy de Etendo (subclases de `SimpleCallout`, ej. `SE_Invoice_Organization`,
+`SE_Order_BPartnerLocation`, `SE_InOut_Warehouse`, `SiiAutoSetSIIKEYByDefault`) leen sus parametros
+via `VariablesBase#getStringParameter`, que siempre busca el nombre HTTP crudo con la convencion
+`lower('inp' + fieldName)` (ej. `inpissotrx` para `isSOTrx`). `CalloutRequestBuilder` mapea la
+mayoria de los parametros de `formState` a esa forma exacta, pero algunas variables de contexto
+historicamente se colocaron directamente con su nombre bare camelCase (ej. `isSOTrx` en vez de
+`inpissotrx` — ver punto 3 arriba). Cuando un callout pedia la variante `inp*` de uno de esos
+parametros, `getParameter` devolvia `null` silenciosamente y cualquier rama de logica que dependiera
+de ese valor (ej. el default de SII en `SiiAutoSetSIIKEYByDefault`) nunca se ejecutaba.
+
+**Fix (a nivel de puente, no por-callout):** `SyntheticHttpServletRequest` mantiene ademas de los
+parametros exactos un indice de alias normalizado (case-insensitive, con el prefijo `inp` opcional
+quitado de ambos lados). `getParameter` / `getParameterValues` primero intentan la clave exacta —
+asi que cualquier parametro que ya resolvia bien sigue resolviendo exactamente igual — y solo si no
+hay match exacto caen al alias. Esto es puramente aditivo y generaliza el fix a **todos** los
+callouts legacy, no solo al caso de SII: si un futuro parametro de contexto se agrega bare (sin
+`inp`), sigue resolviendo sin necesidad de tocar el bridge de nuevo.
+
+Cuando agregues un nuevo parametro de contexto en `CalloutRequestBuilder` o `NeoCalloutService`,
+preferi seguir emitiendolo ya en forma `inp<field>` (consistente con el resto); el alias existe como
+red de seguridad, no como excusa para no normalizar nombres nuevos.
+
 ### Response
 
 ```json
@@ -756,6 +780,10 @@ Para cada campo incluido (IsIncluded=Y) de la entity, resuelve en este orden:
    - Literales sin `@` (ej: `"DR"`, `"N"`, `"0"`)
 
 **Exception — List reference columns (AD_Reference_ID=17):** a literal without `@` on a List column is returned as-is, without going through `Utility.getDefault()`. AD_Ref_List values are opaque codes that are sometimes all-digit strings (e.g. `Invoicegrouping` on `C_BPartner`, a 15-digit binary code like `"000000000000000"`) — `Utility.getDefault()` treats them as numeric candidates and collapses leading zeros/length (`"000000000000000"` -> `"0"`), producing a value that matches no real `AD_Ref_List` entry. For the same reason, `applyResolvedDefault` (post-resolution BigDecimal/Long coercion) and `NeoTypeCoercionHelper.coerceField` (coercion on the create payload) also exclude List columns from their numeric coercion, even though `Property.getPrimitiveObjectType()` reports a numeric type for them (see ETP-4700).
+
+**Caveat conocido — `@OnHandLocatorDefault@` y el almacen de un `M_InOutLine` (ETP-4671 / ETP-4863):** el token raw `@OnHandLocatorDefault@` resuelve "el locator donde el producto ya tiene stock", y solo filtra correctamente por el almacen de la cabecera cuando el tab classic declara el `AD_AuxiliaryInput` que expone `M_Warehouse_ID` — igual que en classic. Cuando el tab no lo declara, o la resolucion headless no coincide 1:1 con la del tab classic, el default cae al valor cacheado en la sesion bridge (columna `#M_Warehouse_ID` de la tabla debajo, "Bridge VariablesSecureApp") del ultimo documento/ventana tocado en esa sesion — un almacen completamente ajeno al de la linea que se esta creando. Confirmar un Albaran de Venta/Devolucion sobre el almacen PRINCIPAL podia terminar generando transacciones de stock en un almacen SECUNDARIO cacheado sin relacion con el documento. Para las 4 ventanas basadas en `M_InOutLine` (Goods Receipt, Goods Shipment, Return to Vendor Shipment, Return Material Receipt) esto no se corrige en el pipeline de defaults sino en el propio handler, de forma incondicional: ver `NeoHandlerUtils.injectDefaultLocatorIfMissing` en `docs/neo-headless.md` §5.3.
+
+Ese pre-hook solo cubre el `POST` de una linea. Los flujos que importan lineas de un documento origen (devoluciones) o proyectan las lineas de un pedido (albaran / recepcion) persisten **directo por DAL** y nunca pasan por el handler, asi que aplican la misma regla via `NeoHandlerUtils.anchorLocatorToWarehouse` — mismo §5.3 de `docs/neo-headless.md`.
 
 ### Bridge VariablesSecureApp
 

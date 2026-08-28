@@ -21,6 +21,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 
 import java.math.BigDecimal;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -31,14 +32,19 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
 import static org.mockito.ArgumentMatchers.any;
@@ -459,6 +465,585 @@ public class ReturnShipmentUtilsTest {
       verify(createDraftInvoiceHandler, never())
           .createShipmentInvoiceLine(any(), any(), any(), anyLong());
       verify(dal, never()).save(any(InvoiceLine.class));
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────────────────
+  // ETP-4863 — the DAL "import from source document" path
+  //
+  // The CRUD path (POST /neo/.../lines) is already guarded by
+  // NeoHandlerUtils.injectDefaultLocatorIfMissing. Return documents never go through it:
+  // their lines are imported from a source shipment/receipt and persisted DIRECTLY by DAL,
+  // so the locator has to be anchored to the RETURN document's own header warehouse here.
+  // Real failure: return header on warehouse PRINCIPAL, source document's lines on
+  // SECONDARY → every stock transaction landed in SECONDARY.
+  // ───────────────────────────────────────────────────────────────────────────────────────
+
+  private static final String WH_PRINCIPAL = LocatorTestSupport.WH_PRINCIPAL;
+  private static final String WH_SECONDARY = LocatorTestSupport.WH_SECONDARY;
+  private static final String LOC_PRINCIPAL_DEFAULT = LocatorTestSupport.LOC_PRINCIPAL_DEFAULT;
+
+  private static void stubDefaultLocatorLookup(OBDal dal, Locator result) {
+    LocatorTestSupport.stubDefaultLocatorLookup(dal, result);
+  }
+
+  private static Warehouse mockWarehouse(String id) {
+    return LocatorTestSupport.mockWarehouse(id);
+  }
+
+  private static Locator mockLocator(String id, Warehouse warehouse) {
+    return LocatorTestSupport.mockLocator(id, warehouse);
+  }
+
+  /**
+   * {@code buildAndSaveReturnLine} copied the SOURCE line's storage bin verbatim. When the
+   * source document lives in another warehouse than the return header, the new line ends up
+   * pointing at a bin of that other warehouse — and the stock transactions follow the bin,
+   * not the header. The bin must be replaced by the header warehouse's default locator.
+   */
+  @Test
+  public void buildAndSaveReturnLine_sourceBinFromAnotherWarehouse_anchorsToHeaderWarehouse() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
+      Locator sourceBin = mockLocator("loc-secondary-A", mockWarehouse(WH_SECONDARY));
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(headerWarehouse);
+      ShipmentInOutLine sourceLine = mock(ShipmentInOutLine.class);
+      when(sourceLine.getStorageBin()).thenReturn(sourceBin);
+
+      ShipmentInOutLine retLine = mock(ShipmentInOutLine.class);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ShipmentInOutLine.class)).thenReturn(retLine);
+
+      Locator headerDefaultBin = mockLocator(LOC_PRINCIPAL_DEFAULT, headerWarehouse);
+      stubDefaultLocatorLookup(dal, headerDefaultBin);
+
+      ReturnShipmentUtils.buildAndSaveReturnLine(doc, sourceLine, 10L, BigDecimal.ONE);
+
+      verify(retLine, never()).setStorageBin(sourceBin);
+      verify(retLine).setStorageBin(headerDefaultBin);
+    }
+  }
+
+  /**
+   * A source bin that ALREADY belongs to the return header's warehouse is a legitimate,
+   * deliberate bin choice and must survive untouched — the guarantee is about the warehouse,
+   * not about collapsing every line onto the warehouse's single default locator (same rule
+   * {@code NeoHandlerUtils.injectDefaultLocatorIfMissing} applies on the CRUD path).
+   */
+  @Test
+  public void buildAndSaveReturnLine_sourceBinInHeaderWarehouse_isKept() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
+      Locator sourceBin = mockLocator("loc-principal-specific", headerWarehouse);
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(headerWarehouse);
+      ShipmentInOutLine sourceLine = mock(ShipmentInOutLine.class);
+      when(sourceLine.getStorageBin()).thenReturn(sourceBin);
+
+      ShipmentInOutLine retLine = mock(ShipmentInOutLine.class);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ShipmentInOutLine.class)).thenReturn(retLine);
+
+      ReturnShipmentUtils.buildAndSaveReturnLine(doc, sourceLine, 10L, BigDecimal.ONE);
+
+      verify(retLine).setStorageBin(sourceBin);
+      verify(dal, never()).createCriteria(Locator.class);
+    }
+  }
+
+  /**
+   * {@code assignBinsToLines} had the precedence INVERTED: it preferred the source document's
+   * bin over the line's own, so it could OVERWRITE an already-correct bin with one from the
+   * source document's warehouse. Both lines below assert the corrected rule:
+   * <ul>
+   *   <li>a line whose own bin is already in the header warehouse is left alone;</li>
+   *   <li>a line with no bin falls back to the header warehouse's default, NOT to the
+   *       source document's bin.</li>
+   * </ul>
+   */
+  @Test
+  public void assignBinsToLines_headerWarehouseWinsOverSourceDocumentBin() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
+      Locator binInSecondary = mockLocator("loc-secondary-A", mockWarehouse(WH_SECONDARY));
+      Locator binInPrincipal = mockLocator("loc-principal-A", headerWarehouse);
+      Locator headerDefaultBin = mockLocator(LOC_PRINCIPAL_DEFAULT, headerWarehouse);
+
+      ShipmentInOutLine origLineA = mock(ShipmentInOutLine.class);
+      when(origLineA.getStorageBin()).thenReturn(binInSecondary);
+      ShipmentInOutLine origLineB = mock(ShipmentInOutLine.class);
+      when(origLineB.getStorageBin()).thenReturn(binInSecondary);
+
+      ShipmentInOutLine lineWithValidOwnBin = mock(ShipmentInOutLine.class);
+      when(lineWithValidOwnBin.getStorageBin()).thenReturn(binInPrincipal);
+      when(lineWithValidOwnBin.getCanceledInoutLine()).thenReturn(origLineA);
+
+      ShipmentInOutLine lineWithoutBin = mock(ShipmentInOutLine.class);
+      when(lineWithoutBin.getStorageBin()).thenReturn(null);
+      when(lineWithoutBin.getCanceledInoutLine()).thenReturn(origLineB);
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(headerWarehouse);
+      when(doc.getMaterialMgmtShipmentInOutLineList())
+          .thenReturn(Arrays.asList(lineWithValidOwnBin, lineWithoutBin));
+
+      stubDefaultLocatorLookup(dal, headerDefaultBin);
+
+      ReturnShipmentUtils.assignBinsToLines(doc);
+
+      verify(lineWithValidOwnBin, never()).setStorageBin(any());
+      verify(lineWithoutBin, never()).setStorageBin(binInSecondary);
+      verify(lineWithoutBin).setStorageBin(headerDefaultBin);
+    }
+  }
+
+  /**
+   * PRODUCTION REPRODUCTION (RFC Receipt 1000057/1000059/1000061/1000063). The user did NOT
+   * import lines from the source document — she added each line BY HAND in the window, so the
+   * line POST went through the NeoHandler and {@code injectDefaultLocatorIfMissing} already set
+   * the header warehouse's bin correctly ({@code AG-0-0-0} of "Almacen GO"). Then the HEADER-level
+   * {@code fillMissingStorageBins} → {@code assignBinsToLines} ran, saw a non-null
+   * {@code canceledInoutLine} (the line still references the source receipt's line even when typed
+   * by hand) and, because the precedence was INVERTED, overwrote that correct bin with the source
+   * document's {@code AS-0-0-0} of "Almacén Secundario". The whole stock movement then landed in
+   * the wrong warehouse.
+   *
+   * <p>The line's own, already-correct bin must win over the source document's, and
+   * {@code setStorageBin} must not be called at all.
+   */
+  @Test
+  public void assignBinsToLines_manuallyTypedLineWithCorrectBin_isNotOverwrittenBySourceDocument() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
+      // AG-0-0-0 — set by the line NeoHandler when the user typed the line by hand.
+      Locator binSetByLineHandler = mockLocator("loc-AG-0-0-0", headerWarehouse);
+      // AS-0-0-0 — the source receipt's bin, in the secondary warehouse.
+      Locator sourceDocumentBin = mockLocator("loc-AS-0-0-0", mockWarehouse(WH_SECONDARY));
+
+      ShipmentInOutLine sourceLine = mock(ShipmentInOutLine.class);
+      when(sourceLine.getStorageBin()).thenReturn(sourceDocumentBin);
+
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getStorageBin()).thenReturn(binSetByLineHandler);
+      when(line.getCanceledInoutLine()).thenReturn(sourceLine);
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(headerWarehouse);
+      when(doc.getMaterialMgmtShipmentInOutLineList())
+          .thenReturn(Collections.singletonList(line));
+
+      ReturnShipmentUtils.assignBinsToLines(doc);
+
+      verify(line, never()).setStorageBin(sourceDocumentBin);
+      verify(line, never()).setStorageBin(any());
+      verify(dal, never()).save(line);
+      // Nothing to correct → no default-locator lookup should be issued either.
+      verify(dal, never()).createCriteria(Locator.class);
+    }
+  }
+
+  /**
+   * Cascade step 4 at this call site: the header warehouse has NO active locator, so the foreign
+   * bin cannot be anchored. It must be written as {@code null} rather than left in place —
+   * skipping the write would keep the line pointing at the wrong warehouse, which is the exact
+   * silent corruption this method exists to prevent. Uniform with
+   * {@code createReturnLineShell} and {@code createAndLinkLine}.
+   */
+  @Test
+  public void assignBinsToLines_headerWarehouseHasNoLocator_clearsForeignBinInsteadOfKeepingIt() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
+      Locator binInSecondary = mockLocator("loc-secondary-A", mockWarehouse(WH_SECONDARY));
+
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getStorageBin()).thenReturn(binInSecondary);
+      when(line.getCanceledInoutLine()).thenReturn(null);
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(headerWarehouse);
+      when(doc.getMaterialMgmtShipmentInOutLineList())
+          .thenReturn(Collections.singletonList(line));
+
+      // No default-flagged bin AND no active bin at all → cascade bottoms out at null.
+      LocatorTestSupport.stubLocatorCascade(dal, null);
+
+      ReturnShipmentUtils.assignBinsToLines(doc);
+
+      verify(line).setStorageBin(null);
+      verify(dal).save(line);
+    }
+  }
+
+  /**
+   * Cascade step 3 at this call site: the header warehouse has bins but none flagged default.
+   * The foreign bin must still be replaced, by the lowest-searchKey active bin.
+   */
+  @Test
+  public void assignBinsToLines_headerWarehouseHasNoDefaultBin_usesAnyActiveBin() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
+      Locator binInSecondary = mockLocator("loc-secondary-A", mockWarehouse(WH_SECONDARY));
+      Locator anyActiveBin = mockLocator("loc-principal-any", headerWarehouse);
+
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getStorageBin()).thenReturn(binInSecondary);
+      when(line.getCanceledInoutLine()).thenReturn(null);
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(headerWarehouse);
+      when(doc.getMaterialMgmtShipmentInOutLineList())
+          .thenReturn(Collections.singletonList(line));
+
+      LocatorTestSupport.stubLocatorCascade(dal, anyActiveBin);
+
+      ReturnShipmentUtils.assignBinsToLines(doc);
+
+      verify(line).setStorageBin(anyActiveBin);
+      verify(line, never()).setStorageBin(binInSecondary);
+    }
+  }
+
+  /**
+   * W1 — the warehouse's fallback bin depends only on the header, so it must be resolved ONCE per
+   * document no matter how many lines need correcting. Hibernate's L1 cache does not deduplicate
+   * criteria queries, so a per-line lookup would issue N queries on a document with N bad lines.
+   */
+  @Test
+  public void assignBinsToLines_resolvesWarehouseFallbackBinOncePerDocument() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
+      Locator binInSecondary = mockLocator("loc-secondary-A", mockWarehouse(WH_SECONDARY));
+      Locator headerDefaultBin = mockLocator(LOC_PRINCIPAL_DEFAULT, headerWarehouse);
+
+      ShipmentInOutLine lineA = mock(ShipmentInOutLine.class);
+      when(lineA.getStorageBin()).thenReturn(binInSecondary);
+      when(lineA.getCanceledInoutLine()).thenReturn(null);
+      ShipmentInOutLine lineB = mock(ShipmentInOutLine.class);
+      when(lineB.getStorageBin()).thenReturn(binInSecondary);
+      when(lineB.getCanceledInoutLine()).thenReturn(null);
+      ShipmentInOutLine lineC = mock(ShipmentInOutLine.class);
+      when(lineC.getStorageBin()).thenReturn(null);
+      when(lineC.getCanceledInoutLine()).thenReturn(null);
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(headerWarehouse);
+      when(doc.getMaterialMgmtShipmentInOutLineList())
+          .thenReturn(Arrays.asList(lineA, lineB, lineC));
+
+      stubDefaultLocatorLookup(dal, headerDefaultBin);
+
+      ReturnShipmentUtils.assignBinsToLines(doc);
+
+      verify(lineA).setStorageBin(headerDefaultBin);
+      verify(lineB).setStorageBin(headerDefaultBin);
+      verify(lineC).setStorageBin(headerDefaultBin);
+      // Three lines corrected, but the warehouse lookup runs exactly once.
+      verify(dal, Mockito.times(1)).createCriteria(Locator.class);
+    }
+  }
+
+  /**
+   * A line whose own bin belongs to a DIFFERENT warehouse than the header must be corrected,
+   * even though it is non-null — the pre-existing "only fill when both are null" guard let
+   * exactly this case through.
+   */
+  @Test
+  public void assignBinsToLines_ownBinFromAnotherWarehouse_isCorrected() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
+      Locator binInSecondary = mockLocator("loc-secondary-A", mockWarehouse(WH_SECONDARY));
+      Locator headerDefaultBin = mockLocator(LOC_PRINCIPAL_DEFAULT, headerWarehouse);
+
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getStorageBin()).thenReturn(binInSecondary);
+      when(line.getCanceledInoutLine()).thenReturn(null);
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(headerWarehouse);
+      when(doc.getMaterialMgmtShipmentInOutLineList())
+          .thenReturn(Collections.singletonList(line));
+
+      stubDefaultLocatorLookup(dal, headerDefaultBin);
+
+      ReturnShipmentUtils.assignBinsToLines(doc);
+
+      verify(line).setStorageBin(headerDefaultBin);
+    }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────────────────
+  // ETP-4863 QA round — additional edge cases not exercised by DEV/REVIEW
+  // ───────────────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * QA edge case: a line's own bin is wrong (another warehouse), but its {@code
+   * canceledInoutLine} happens to carry a bin that IS in the header warehouse — just not the
+   * warehouse's flagged-default one. {@code resolveCandidateBin} only falls back to the source
+   * line when the line's OWN bin is {@code null}; when it is non-null (even if wrong), the
+   * source line's bin is never even read. The line is therefore corrected to the warehouse's
+   * anchor bin, NOT to the source line's (coincidentally valid) bin — the source's
+   * {@code getStorageBin()} must not be consulted at all in this branch.
+   *
+   * <p>This is a real behavior fork from the pre-fix code, which prioritized {@code
+   * canceledInoutLine}'s bin unconditionally: the old code would have read the source's bin
+   * first, found it valid for the header warehouse, and kept that SPECIFIC locator — passing
+   * this same assertion by coincidence. This test pins the NEW precedence at the query level
+   * (own bin wins outright when present, correct or not) rather than only at the value level.
+   */
+  @Test
+  public void assignBinsToLines_ownBinWrongButSourceBinAlreadyCorrect_neverConsultsSourceBin() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
+      Locator ownWrongBin = mockLocator("loc-secondary-A", mockWarehouse(WH_SECONDARY));
+      // Source's bin IS in the header warehouse, but is a specific bin, not the flagged default.
+      Locator sourceCorrectButNonDefaultBin = mockLocator("loc-principal-specific", headerWarehouse);
+      Locator headerDefaultBin = mockLocator(LOC_PRINCIPAL_DEFAULT, headerWarehouse);
+
+      ShipmentInOutLine sourceLine = mock(ShipmentInOutLine.class);
+      when(sourceLine.getStorageBin()).thenReturn(sourceCorrectButNonDefaultBin);
+
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getStorageBin()).thenReturn(ownWrongBin);
+      when(line.getCanceledInoutLine()).thenReturn(sourceLine);
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(headerWarehouse);
+      when(doc.getMaterialMgmtShipmentInOutLineList()).thenReturn(Collections.singletonList(line));
+
+      stubDefaultLocatorLookup(dal, headerDefaultBin);
+
+      ReturnShipmentUtils.assignBinsToLines(doc);
+
+      // Own bin is present (even though wrong) → candidate resolution never reads the source.
+      verify(sourceLine, never()).getStorageBin();
+      verify(line).setStorageBin(headerDefaultBin);
+      verify(line, never()).setStorageBin(sourceCorrectButNonDefaultBin);
+    }
+  }
+
+  /**
+   * QA edge case: reentrancy/idempotency. Calling {@code assignBinsToLines} a second time on a
+   * document whose line was ALREADY corrected on the first pass (simulating a retry of the
+   * document-completion flow) must be a no-op — no second {@code setStorageBin} / {@code save}
+   * call — because the line's own bin now already belongs to the header warehouse.
+   */
+  @Test
+  public void assignBinsToLines_calledTwice_secondPassIsNoOp() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
+      Locator binInSecondary = mockLocator("loc-secondary-A", mockWarehouse(WH_SECONDARY));
+      Locator headerDefaultBin = mockLocator(LOC_PRINCIPAL_DEFAULT, headerWarehouse);
+
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getStorageBin()).thenReturn(binInSecondary);
+      when(line.getCanceledInoutLine()).thenReturn(null);
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(headerWarehouse);
+      when(doc.getMaterialMgmtShipmentInOutLineList()).thenReturn(Collections.singletonList(line));
+
+      stubDefaultLocatorLookup(dal, headerDefaultBin);
+
+      // First pass: line gets corrected.
+      ReturnShipmentUtils.assignBinsToLines(doc);
+      verify(line).setStorageBin(headerDefaultBin);
+      verify(dal, Mockito.times(1)).save(line);
+
+      // Simulate the persisted state: the line now reports the corrected bin.
+      when(line.getStorageBin()).thenReturn(headerDefaultBin);
+
+      // Second pass (e.g. a retried "complete document" action) must not touch the line again.
+      ReturnShipmentUtils.assignBinsToLines(doc);
+      verify(line, Mockito.times(1)).setStorageBin(headerDefaultBin);
+      verify(dal, Mockito.times(1)).save(line);
+    }
+  }
+
+  /**
+   * QA edge case: a document with lines imported from MULTIPLE different source documents,
+   * each in a DIFFERENT (and different-from-each-other) foreign warehouse, all sharing the same
+   * return header. The per-document warehouse-fallback memoization must still resolve to the
+   * SAME header-warehouse anchor bin for every line and must still issue the lookup exactly
+   * once, regardless of how many distinct source warehouses are involved.
+   */
+  @Test
+  public void assignBinsToLines_linesFromDifferentSourceWarehouses_allAnchorToSameHeaderBinWithOneLookup() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Warehouse headerWarehouse = mockWarehouse(WH_PRINCIPAL);
+      Warehouse thirdWarehouse = mockWarehouse("wh-tertiary");
+      Locator binInSecondary = mockLocator("loc-secondary-A", mockWarehouse(WH_SECONDARY));
+      Locator binInTertiary = mockLocator("loc-tertiary-A", thirdWarehouse);
+      Locator headerDefaultBin = mockLocator(LOC_PRINCIPAL_DEFAULT, headerWarehouse);
+
+      // lineA imported from a source document in the SECONDARY warehouse.
+      ShipmentInOutLine origLineA = mock(ShipmentInOutLine.class);
+      when(origLineA.getStorageBin()).thenReturn(binInSecondary);
+      ShipmentInOutLine lineA = mock(ShipmentInOutLine.class);
+      when(lineA.getStorageBin()).thenReturn(null);
+      when(lineA.getCanceledInoutLine()).thenReturn(origLineA);
+
+      // lineB imported from a DIFFERENT source document, in the TERTIARY warehouse.
+      ShipmentInOutLine origLineB = mock(ShipmentInOutLine.class);
+      when(origLineB.getStorageBin()).thenReturn(binInTertiary);
+      ShipmentInOutLine lineB = mock(ShipmentInOutLine.class);
+      when(lineB.getStorageBin()).thenReturn(null);
+      when(lineB.getCanceledInoutLine()).thenReturn(origLineB);
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(headerWarehouse);
+      when(doc.getMaterialMgmtShipmentInOutLineList())
+          .thenReturn(Arrays.asList(lineA, lineB));
+
+      stubDefaultLocatorLookup(dal, headerDefaultBin);
+
+      ReturnShipmentUtils.assignBinsToLines(doc);
+
+      verify(lineA).setStorageBin(headerDefaultBin);
+      verify(lineB).setStorageBin(headerDefaultBin);
+      verify(lineA, never()).setStorageBin(binInSecondary);
+      verify(lineB, never()).setStorageBin(binInTertiary);
+      // Two different foreign warehouses among the source lines, still exactly one lookup.
+      verify(dal, Mockito.times(1)).createCriteria(Locator.class);
+    }
+  }
+
+  /**
+   * QA edge case: the return header itself has NO warehouse at all (e.g. a legacy/malformed
+   * document). {@code assignBinsToLines}' own guard ({@code headerWarehouse == null}) takes the
+   * "keep candidate" branch directly — a line with no own bin falls back to whatever the source
+   * document's bin was, completely unanchored, because there is nothing to anchor against. This
+   * pins the deliberate pass-through (matches {@code NeoHandlerUtils.anchorLocatorToWarehouse}'s
+   * own null-warehouse guard) rather than an accidental null-pointer-safe default.
+   */
+  @Test
+  public void assignBinsToLines_headerHasNoWarehouseAtAll_fallsBackToSourceBinUnanchored() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Locator sourceBin = mockLocator("loc-secondary-A", mockWarehouse(WH_SECONDARY));
+      ShipmentInOutLine origLine = mock(ShipmentInOutLine.class);
+      when(origLine.getStorageBin()).thenReturn(sourceBin);
+
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      when(line.getStorageBin()).thenReturn(null);
+      when(line.getCanceledInoutLine()).thenReturn(origLine);
+
+      ShipmentInOut doc = mock(ShipmentInOut.class);
+      when(doc.getWarehouse()).thenReturn(null);
+      when(doc.getMaterialMgmtShipmentInOutLineList()).thenReturn(Collections.singletonList(line));
+
+      ReturnShipmentUtils.assignBinsToLines(doc);
+
+      verify(line).setStorageBin(sourceBin);
+      // No warehouse to resolve an anchor bin for → no M_Locator lookup at all.
+      verify(dal, never()).createCriteria(Locator.class);
+    }
+  }
+
+  // ── buildReturnInvoiceHeader — declared-defaults background resolution (ETP-4888) ──
+  //
+  // buildReturnInvoiceHeader builds its Invoice header directly via OBProvider (bypassing the
+  // normal NEO CRUD "new record" HTTP path), so it must call
+  // NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity itself to resolve any
+  // contract.json-declared derivation (e.g. SII/SIF fields) — mirrors the same call already
+  // added to NeoCommercialDocumentFactory#createInvoiceFromOrderHeader/
+  // #createInvoiceFromReceiptHeader and CreateDraftInvoiceHandler#createInvoiceHeaderFromShipment.
+  // NeoBackgroundDefaultsService itself is fully mocked out here (a no-op void call) — its own
+  // resolution logic is covered by NeoBackgroundDefaultsServiceTest; this only pins the CALL and
+  // its ARGUMENTS.
+
+  @Test
+  public void buildReturnInvoiceHeader_sales_appliesDeclaredDefaultsWithSalesInvoiceSpecAndShipmentIdAsParent() {
+    ShipmentInOut doc = mock(ShipmentInOut.class);
+    BusinessPartner bp = mock(BusinessPartner.class);
+    when(doc.getBusinessPartner()).thenReturn(bp);
+    when(doc.getId()).thenReturn("shipment-sales-001");
+
+    DocumentType docType = mock(DocumentType.class);
+    Invoice sourceInvoice = mock(Invoice.class);
+    Invoice createdInvoice = mock(Invoice.class);
+
+    try (MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<NeoBackgroundDefaultsService> defaultsMock =
+            Mockito.mockStatic(NeoBackgroundDefaultsService.class)) {
+      OBProvider obProvider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
+      when(obProvider.get(Invoice.class)).thenReturn(createdInvoice);
+
+      Invoice result = ReturnShipmentUtils.buildReturnInvoiceHeader(
+          doc, docType, sourceInvoice, true);
+
+      assertSame(createdInvoice, result);
+      defaultsMock.verify(() -> NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+          "sales-invoice", "header", createdInvoice, "shipment-sales-001"));
+    }
+  }
+
+  @Test
+  public void buildReturnInvoiceHeader_purchase_appliesDeclaredDefaultsWithPurchaseInvoiceSpecAndShipmentIdAsParent() {
+    ShipmentInOut doc = mock(ShipmentInOut.class);
+    BusinessPartner bp = mock(BusinessPartner.class);
+    when(doc.getBusinessPartner()).thenReturn(bp);
+    when(doc.getId()).thenReturn("shipment-purchase-002");
+
+    DocumentType docType = mock(DocumentType.class);
+    Invoice sourceInvoice = mock(Invoice.class);
+    Invoice createdInvoice = mock(Invoice.class);
+
+    try (MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<NeoBackgroundDefaultsService> defaultsMock =
+            Mockito.mockStatic(NeoBackgroundDefaultsService.class)) {
+      OBProvider obProvider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
+      when(obProvider.get(Invoice.class)).thenReturn(createdInvoice);
+
+      Invoice result = ReturnShipmentUtils.buildReturnInvoiceHeader(
+          doc, docType, sourceInvoice, false);
+
+      assertSame(createdInvoice, result);
+      defaultsMock.verify(() -> NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
+          "purchase-invoice", "header", createdInvoice, "shipment-purchase-002"));
     }
   }
 }

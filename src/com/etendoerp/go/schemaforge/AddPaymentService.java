@@ -62,8 +62,12 @@ import org.openbravo.service.json.JsonUtils;
  * <p>Mirrors the sequence of {@code org.openbravo.advpaymentmngt.actionHandler.AddPaymentActionHandler}:
  * create the payment, link the selected invoice payment-schedule details (with optional write-off),
  * add the G/L item lines, register the over-payment as a generated-credit schedule detail, process
- * the payment with action {@code "P"} (which auto-creates the {@code FIN_FinaccTransaction}), and —
- * when the over-payment action is a refund — create and process the refund payment.
+ * the payment (see {@link PaymentRegistrationService#resolveProcessAction}), and — when the
+ * over-payment action is a refund — create and process the refund payment.
+ *
+ * <p>This flow never initiates a PIS handshake (no Salt Edge call, no {@code pisPaymentUrl}), so it
+ * always passes {@code mayDeferToPis=false} — a transfer payment OUT gets action {@code "D"}
+ * unconditionally, connected account or not (ETP-4891).
  */
 final class AddPaymentService {
 
@@ -148,10 +152,10 @@ final class AddPaymentService {
   }
 
   /**
-   * Registers the over-payment as a generated-credit detail, processes the
-   * payment with action {@code "P"} (which auto-creates the bank transaction),
-   * and — when the over-payment action is a refund — creates and processes the
-   * refund payment. Returns the refund payment, or {@code null} when none.
+   * Registers the over-payment as a generated-credit detail, processes the payment (see {@link
+   * PaymentRegistrationService#resolveProcessAction}), and — when the over-payment action is a
+   * refund — creates and processes the refund payment. Returns the refund payment, or {@code null}
+   * when none.
    */
   private static FIN_Payment processAndRefund(FIN_Payment payment, BigDecimal amount,
       String overpaymentAction, Organization org, VariablesSecureApp vars,
@@ -164,7 +168,8 @@ final class AddPaymentService {
     }
     OBDal.getInstance().flush();
 
-    failOnError(FIN_AddPayment.processPayment(vars, conn, "P", payment, ""));
+    failOnError(FIN_AddPayment.processPayment(vars, conn,
+        PaymentRegistrationService.resolveProcessAction(payment, false), payment, ""));
     OBDal.getInstance().flush();
 
     if (!overpaid || !"refund".equals(overpaymentAction)) {
@@ -172,7 +177,8 @@ final class AddPaymentService {
     }
     FIN_Payment refundPayment = FIN_AddPayment.createRefundPayment(conn, vars, payment,
         leftover.negate(), null);
-    failOnError(FIN_AddPayment.processPayment(vars, conn, "P", refundPayment, "",
+    failOnError(FIN_AddPayment.processPayment(vars, conn,
+        PaymentRegistrationService.resolveProcessAction(refundPayment, false), refundPayment, "",
         "(" + payment.getId() + ")"));
     OBDal.getInstance().flush();
     return refundPayment;

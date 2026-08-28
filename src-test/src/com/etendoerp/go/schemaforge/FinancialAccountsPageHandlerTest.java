@@ -47,7 +47,6 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -62,9 +61,11 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.geography.Country;
 
 import com.etendoerp.go.schemaforge.FinancialAccountsPageHandler.AccountRow;
 import com.etendoerp.go.schemaforge.FinancialAccountsPageHandler.Currency;
@@ -73,7 +74,7 @@ import com.etendoerp.go.schemaforge.FinancialAccountsPageHandler.Currency;
  * Mockito-driven unit tests for {@link FinancialAccountsPageHandler}.
  *
  * <p>Strategy: spy the handler and stub the {@code loadAccounts} /
- * {@code loadPendingByAccount} seams so the response builder runs over
+ * {@code loadAccountsWithTransactions} seams so the response builder runs over
  * deterministic in-memory fixtures, without hitting the DB or OBContext.
  * The {@code handle()} HTTP routing path is covered with a {@link NeoContext}
  * mock that only overrides the HTTP method.
@@ -104,7 +105,7 @@ public class FinancialAccountsPageHandlerTest {
   /**
    * Initializes a Mockito spy of the handler before each test so individual
    * methods can stub the DB-bound seams ({@code loadAccounts},
-   * {@code loadPendingByAccount}) without touching the real implementation.
+   * {@code loadAccountsWithTransactions}) without touching the real implementation.
    */
   @Before
   public void setUp() {
@@ -149,39 +150,53 @@ public class FinancialAccountsPageHandlerTest {
   /**
    * Verifies that {@code buildPayload()} wraps the data in the
    * {@code response.data} envelope expected by the UI hook, that
-   * {@code pendingCount} is propagated from the loader map, and that both
-   * loader seams are invoked exactly once with the client/orgs filter.
+   * {@code pendingCount} is propagated from the row's {@code EM_ETGO_Pending_Count}
+   * stored computed column, and that both loader seams are invoked exactly once
+   * with the client/orgs filter.
    *
    * @throws Exception
    *     if the stubbed loaders or JSON envelope inspection fails
    */
   @Test
   public void testBuildPayloadAssemblesEnvelopeAndDelegatesToLoaders() throws Exception {
-    List<AccountRow> accounts = Arrays.asList(
-        account("acc-1", "BBVA", "B", new BigDecimal("1500.00"), "EUR"));
-    Map<String, Integer> pending = new LinkedHashMap<>();
-    pending.put("acc-1", 4);
+    AccountRow bbva = account("acc-1", "BBVA", "B", new BigDecimal("1500.00"), "EUR");
+    // Set on the row, the way loadAccounts() reads it out of the stored computed column,
+    // instead of the loader map buildPayload used to consult.
+    bbva.pendingCount = 4;
+    List<AccountRow> accounts = Arrays.asList(bbva);
     Set<String> withTransactions = Collections.singleton("acc-1");
 
     doReturn(accounts).when(handler).loadAccounts(eq(CLIENT_ID), eq(ORGS));
-    doReturn(pending).when(handler).loadPendingByAccount(eq(CLIENT_ID), eq(ORGS));
     doReturn(withTransactions).when(handler).loadAccountsWithTransactions(eq(CLIENT_ID), eq(ORGS));
 
-    NeoResponse response = handler.buildPayload(CLIENT_ID, ORGS);
+    // ETP-4896: buildPayload also attaches the countryIbanRules catalog, built by
+    // FinancialAccountCountrySupport straight from OBDal (not a spied seam on this handler).
+    FinancialAccountCountrySupport.clearIbanRulesCacheForTests();
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<Country> countryCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Country.class)).thenReturn(countryCriteria);
+      when(countryCriteria.list()).thenReturn(Collections.emptyList());
 
-    assertEquals(200, response.getHttpStatus());
-    JSONObject body = response.getBody();
-    assertNotNull("response envelope must exist", body.optJSONObject("response"));
-    JSONObject data = body.getJSONObject("response").getJSONObject("data");
-    assertEquals(1, data.getJSONArray("accounts").length());
-    assertEquals(4, data.getJSONArray("accounts").getJSONObject(0).getInt("pendingCount"));
-    assertTrue("account with a registered transaction serialises hasTransactions=true",
-        data.getJSONArray("accounts").getJSONObject(0).getBoolean("hasTransactions"));
-    assertNotNull("summary present", data.optJSONObject("summary"));
+      NeoResponse response = handler.buildPayload(CLIENT_ID, ORGS);
 
-    verify(handler).loadAccounts(CLIENT_ID, ORGS);
-    verify(handler).loadPendingByAccount(CLIENT_ID, ORGS);
-    verify(handler).loadAccountsWithTransactions(CLIENT_ID, ORGS);
+      assertEquals(200, response.getHttpStatus());
+      JSONObject body = response.getBody();
+      assertNotNull("response envelope must exist", body.optJSONObject("response"));
+      JSONObject data = body.getJSONObject("response").getJSONObject("data");
+      assertEquals(1, data.getJSONArray("accounts").length());
+      assertEquals(4, data.getJSONArray("accounts").getJSONObject(0).getInt("pendingCount"));
+      assertTrue("account with a registered transaction serialises hasTransactions=true",
+          data.getJSONArray("accounts").getJSONObject(0).getBoolean("hasTransactions"));
+      assertNotNull("summary present", data.optJSONObject("summary"));
+      assertTrue("countryIbanRules is a sibling of accounts/summary, not per-account",
+          data.has("countryIbanRules"));
+
+      verify(handler).loadAccounts(CLIENT_ID, ORGS);
+      verify(handler).loadAccountsWithTransactions(CLIENT_ID, ORGS);
+    }
   }
 
   /**
@@ -199,15 +214,24 @@ public class FinancialAccountsPageHandlerTest {
         account("acc-1", "BBVA", "B", new BigDecimal("1500.00"), "EUR"));
 
     doReturn(accounts).when(handler).loadAccounts(eq(CLIENT_ID), eq(ORGS));
-    doReturn(Collections.emptyMap()).when(handler).loadPendingByAccount(eq(CLIENT_ID), eq(ORGS));
     doReturn(Collections.emptySet()).when(handler)
         .loadAccountsWithTransactions(eq(CLIENT_ID), eq(ORGS));
 
-    NeoResponse response = handler.buildPayload(CLIENT_ID, ORGS);
+    FinancialAccountCountrySupport.clearIbanRulesCacheForTests();
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<Country> countryCriteria = mock(OBCriteria.class);
+      when(dal.createCriteria(Country.class)).thenReturn(countryCriteria);
+      when(countryCriteria.list()).thenReturn(Collections.emptyList());
 
-    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
-    assertFalse("account with no registered transactions serialises hasTransactions=false",
-        data.getJSONArray("accounts").getJSONObject(0).getBoolean("hasTransactions"));
+      NeoResponse response = handler.buildPayload(CLIENT_ID, ORGS);
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      assertFalse("account with no registered transactions serialises hasTransactions=false",
+          data.getJSONArray("accounts").getJSONObject(0).getBoolean("hasTransactions"));
+    }
   }
 
   // ── buildSummary() ───────────────────────────────────────────────────────
@@ -223,7 +247,7 @@ public class FinancialAccountsPageHandlerTest {
    */
   @Test
   public void testEmptyInputProducesZeroedSummary() throws Exception {
-    JSONObject summary = handler.buildSummary(Collections.emptyList(), Collections.emptyMap());
+    JSONObject summary = handler.buildSummary(Collections.emptyList());
 
     assertEquals(0, new BigDecimal(summary.getString("totalBalance")).compareTo(BigDecimal.ZERO));
     assertEquals(0, summary.getJSONArray("byCurrency").length());
@@ -249,7 +273,7 @@ public class FinancialAccountsPageHandlerTest {
         account("acc-2", "Caja Madrid", "C", new BigDecimal("250.50"), "EUR"),
         account("acc-3", "Citibank USD", "B", new BigDecimal("4000.00"), "USD"));
 
-    JSONObject summary = handler.buildSummary(accounts, Collections.emptyMap());
+    JSONObject summary = handler.buildSummary(accounts);
 
     assertEquals(0,
         new BigDecimal("5250.50").compareTo(new BigDecimal(summary.getString("totalBalance"))));
@@ -268,7 +292,7 @@ public class FinancialAccountsPageHandlerTest {
    * Verifies the {@code accountsWithPending} counter: only accounts whose
    * pending-line count is strictly positive contribute, and each contributing
    * account is counted exactly once regardless of how many lines it has.
-   * Accounts that appear in the map with a zero count are ignored.
+   * A row whose stored count is zero is ignored.
    *
    * @throws Exception
    *     if the JSON traversal fails
@@ -280,12 +304,11 @@ public class FinancialAccountsPageHandlerTest {
         account("acc-2", "Caja", "C", new BigDecimal("0"), "EUR"),
         account("acc-3", "Card", "T", new BigDecimal("50"), "USD"));
 
-    Map<String, Integer> pendingByAccount = new HashMap<>();
-    pendingByAccount.put("acc-1", 12);
-    pendingByAccount.put("acc-2", 0);
-    pendingByAccount.put("acc-3", 1);
+    accounts.get(0).pendingCount = 12;
+    accounts.get(1).pendingCount = 0;
+    accounts.get(2).pendingCount = 1;
 
-    JSONObject summary = handler.buildSummary(accounts, pendingByAccount);
+    JSONObject summary = handler.buildSummary(accounts);
     assertEquals(2, summary.getJSONObject("pending").getInt("accountsWithPending"));
   }
 
@@ -303,7 +326,7 @@ public class FinancialAccountsPageHandlerTest {
         account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR"),
         account("acc-2", "Overdraft", "B", new BigDecimal("-250.00"), "EUR"));
 
-    JSONObject summary = handler.buildSummary(accounts, Collections.emptyMap());
+    JSONObject summary = handler.buildSummary(accounts);
     assertEquals(0,
         new BigDecimal("-150.00").compareTo(new BigDecimal(summary.getString("totalBalance"))));
     assertTrue(summary.getJSONArray("byCurrency").length() == 1);
@@ -325,7 +348,7 @@ public class FinancialAccountsPageHandlerTest {
     List<AccountRow> accounts = Arrays.asList(
         account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR"));
 
-    JSONArray arr = handler.buildAccountsArray(accounts, Collections.emptyMap(),
+    JSONArray arr = handler.buildAccountsArray(accounts,
         Collections.emptySet());
     assertEquals(1, arr.length());
     JSONObject row = arr.getJSONObject(0);
@@ -337,6 +360,47 @@ public class FinancialAccountsPageHandlerTest {
     assertFalse(row.getBoolean("isDefault"));
     assertFalse("account absent from the transactions set serialises hasTransactions=false",
         row.getBoolean("hasTransactions"));
+    assertEquals("the account() fixture has no country — serialises as \"\", not \"null\" "
+        + "(ETP-4896)", "", row.getString("countryId"));
+    assertEquals("", row.getString("countryIso"));
+    assertEquals("", row.getString("countryName"));
+  }
+
+  /** A row WITH a country (ETP-4896) serialises countryId/countryIso/countryName from it. */
+  @Test
+  public void testBuildAccountsArrayEmitsCountryWhenRowHasOne() throws Exception {
+    AccountRow withCountry = account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR");
+    withCountry.country = new FinancialAccountsPageHandler.CountryRef("106", "ES", "Spain");
+
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(withCountry),
+        Collections.emptySet());
+
+    JSONObject row = arr.getJSONObject(0);
+    assertEquals("106", row.getString("countryId"));
+    assertEquals("ES", row.getString("countryIso"));
+    assertEquals("Spain", row.getString("countryName"));
+  }
+
+  /**
+   * Verifies that {@code buildAccountsArray()} serialises {@code swiftCode} (ETP-4896 QA
+   * follow-up). The edit modal opened from the account DETAIL page reads its record from this R
+   * spec, so this key is what keeps its BIC/SWIFT field from rendering empty on an account that
+   * has one stored.
+   *
+   * @throws Exception if the JSON traversal fails
+   */
+  @Test
+  public void testBuildAccountsArrayEmitsSwiftCode() throws Exception {
+    AccountRow withSwift = account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR");
+    withSwift.swiftCode = "BBVAESMM";
+    AccountRow withoutSwift = account("acc-2", "Caja", "C", new BigDecimal("0.00"), "EUR");
+
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(withSwift, withoutSwift),
+        Collections.emptySet());
+
+    assertEquals("BBVAESMM", arr.getJSONObject(0).getString("swiftCode"));
+    assertEquals("an account with no BIC serialises as \"\", not the literal \"null\"",
+        "", arr.getJSONObject(1).getString("swiftCode"));
   }
 
   /**
@@ -354,8 +418,7 @@ public class FinancialAccountsPageHandlerTest {
     withLogo.providerLogoUrl = "https://cdn.saltedge.com/bank_icons/bbva.png";
     AccountRow withoutProvider = account("acc-2", "Caja", "C", new BigDecimal("0.00"), "EUR");
 
-    JSONArray arr = handler.buildAccountsArray(Arrays.asList(withLogo, withoutProvider),
-        Collections.emptyMap(), Collections.emptySet());
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(withLogo, withoutProvider), Collections.emptySet());
 
     assertEquals("https://cdn.saltedge.com/bank_icons/bbva.png",
         arr.getJSONObject(0).getString("providerLogoUrl"));
@@ -375,10 +438,11 @@ public class FinancialAccountsPageHandlerTest {
   public void testBuildAccountsArraySerialisesPendingCountWhenAvailable() throws Exception {
     List<AccountRow> accounts = Arrays.asList(
         account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR"));
-    Map<String, Integer> pendingByAccount = new HashMap<>();
-    pendingByAccount.put("acc-1", 7);
+    accounts.get(0).pendingCount = 7;
 
-    JSONArray arr = handler.buildAccountsArray(accounts, pendingByAccount, Collections.emptySet());
+    // The R spec keeps the flat JSON key `pendingCount` even though the column behind it is
+    // EM_ETGO_Pending_Count: the detail view and the funds-transfer picker read that name.
+    JSONArray arr = handler.buildAccountsArray(accounts, Collections.emptySet());
     assertEquals(7, arr.getJSONObject(0).getInt("pendingCount"));
   }
 
@@ -396,7 +460,7 @@ public class FinancialAccountsPageHandlerTest {
         new Currency(currencyId("EUR"), "EUR"), "", false);
     card.maskedPan = "**** **** **** 1234";
 
-    JSONArray arr = handler.buildAccountsArray(Arrays.asList(card), Collections.emptyMap(),
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(card),
         Collections.emptySet());
     JSONObject row = arr.getJSONObject(0);
     assertEquals("CA", row.getString("type"));
@@ -417,8 +481,7 @@ public class FinancialAccountsPageHandlerTest {
     connected.bankConnected = true;
     AccountRow offline = account("acc-2", "Caja manual", "B", new BigDecimal("0.00"), "EUR");
 
-    JSONArray arr = handler.buildAccountsArray(Arrays.asList(connected, offline),
-        Collections.emptyMap(), Collections.emptySet());
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(connected, offline), Collections.emptySet());
 
     assertEquals(2, arr.length());
     assertTrue("connected account serialises bankConnected=true",
@@ -600,8 +663,7 @@ public class FinancialAccountsPageHandlerTest {
     row.glItemDifferenceId = "gli-diff-1";
     row.glItemDifferenceName = "Diferencias de caja";
 
-    JSONArray arr = handler.buildAccountsArray(Collections.singletonList(row),
-        Collections.emptyMap(), Collections.emptySet());
+    JSONArray arr = handler.buildAccountsArray(Collections.singletonList(row), Collections.emptySet());
 
     assertEquals(1, arr.length());
     JSONObject json = arr.getJSONObject(0);
@@ -624,7 +686,7 @@ public class FinancialAccountsPageHandlerTest {
         account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR"),
         inactiveAccount("acc-2", "Santander Cerrada", "B", new BigDecimal("0.00"), "EUR"));
 
-    JSONArray arr = handler.buildAccountsArray(accounts, Collections.emptyMap(),
+    JSONArray arr = handler.buildAccountsArray(accounts,
         Collections.emptySet());
 
     assertEquals(2, arr.length());
@@ -649,13 +711,12 @@ public class FinancialAccountsPageHandlerTest {
         inactiveAccount("acc-2", "Santander Cerrada", "B", new BigDecimal("500.00"), "EUR"),
         inactiveAccount("acc-3", "Citibank Cerrada", "B", new BigDecimal("4000.00"), "USD"));
 
-    Map<String, Integer> pendingByAccount = new HashMap<>();
-    pendingByAccount.put("acc-1", 2);
+    accounts.get(0).pendingCount = 2;
     // Archived accounts carry pending lines too, but they must not be counted.
-    pendingByAccount.put("acc-2", 9);
-    pendingByAccount.put("acc-3", 5);
+    accounts.get(1).pendingCount = 9;
+    accounts.get(2).pendingCount = 5;
 
-    JSONObject summary = handler.buildSummary(accounts, pendingByAccount);
+    JSONObject summary = handler.buildSummary(accounts);
 
     // Only the active EUR account contributes to the total.
     assertEquals(0,
@@ -795,6 +856,19 @@ public class FinancialAccountsPageHandlerTest {
     when(rs.getString(8)).thenReturn("Y", "N");
     // Column 9 (fa.isactive): first row active ("Y"), second archived ("N").
     when(rs.getString(9)).thenReturn("Y", "N");
+    // Columns 19-21 (ETP-4896, appended at the END of the SELECT — see ACCOUNTS_SQL's own
+    // comment on why): first row has a country (a Bank account with an IBAN), second does not
+    // (e.g. a Cash account, or a Bank account never given one).
+    when(rs.getString(19)).thenReturn("106", null);
+    when(rs.getString(20)).thenReturn("ES", null);
+    when(rs.getString(21)).thenReturn("Spain", null);
+    // Column 22: EM_ETGO_Pending_Count, the stored computed column, appended after the
+    // ETP-4896 country block for the same reason — every column here is read BY POSITION.
+    // COALESCEd in the SQL, so getInt never sees a NULL.
+    when(rs.getInt(22)).thenReturn(4, 0);
+    // Column 23: fa.swiftcode (ETP-4896 QA follow-up), appended last for the same positional
+    // reason. First row has a BIC, second has none (a Cash account, or a Bank account without one).
+    when(rs.getString(23)).thenReturn("BBVAESMM", null);
 
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
@@ -813,12 +887,24 @@ public class FinancialAccountsPageHandlerTest {
       assertTrue("first row is default", first.isDefault);
 
       assertTrue("first row maps column 9 'Y' to active", first.active);
+      assertNotNull("first row maps columns 19-21 into a CountryRef", first.country);
+      assertEquals("106", first.country.id);
+      assertEquals("ES", first.country.iso);
+      assertEquals("Spain", first.country.name);
+      assertEquals("first row maps column 22 into pendingCount", 4, first.pendingCount);
+      assertEquals("first row maps column 23 into swiftCode", "BBVAESMM", first.swiftCode);
 
       AccountRow second = rows.get(1);
       assertEquals("acc-2", second.id);
       assertEquals(0, BigDecimal.ZERO.compareTo(second.currentBalance));
       assertFalse("second row is not default", second.isDefault);
       assertFalse("second row maps column 9 'N' to inactive", second.active);
+      assertNull("a null column 19 (no C_Country_ID) leaves row.country null, not a CountryRef "
+          + "full of blanks", second.country);
+      assertEquals("a zero column 22 is a real zero, not a missing value", 0,
+          second.pendingCount);
+      assertEquals("a null column 23 becomes \"\", never the literal \"null\"",
+          "", second.swiftCode);
 
       verify(ps).setString(1, CLIENT_ID);
       verify(ps).setArray(2, orgArray);
@@ -854,150 +940,6 @@ public class FinancialAccountsPageHandlerTest {
     }
   }
 
-  // ── loadPendingByAccount() ───────────────────────────────────────────────
-
-  /**
-   * Verifies that {@code loadPendingByAccount} returns a map keyed by
-   * financial account id with the pending-line count read from column 2.
-   * Multiple rows are aggregated correctly and the SQL bind parameters are
-   * the client id and the org array.
-   *
-   * @throws Exception
-   *     if the mocked JDBC chain fails
-   */
-  @Test
-  public void testLoadPendingByAccountReturnsCountsKeyedByAccountId() throws Exception {
-    Connection conn = mock(Connection.class);
-    PreparedStatement ps = mock(PreparedStatement.class);
-    ResultSet rs = mock(ResultSet.class);
-    Array orgArray = mock(Array.class);
-
-    when(conn.prepareStatement(anyString())).thenReturn(ps);
-    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(orgArray);
-    when(ps.executeQuery()).thenReturn(rs);
-    when(rs.next()).thenReturn(true, true, false);
-    when(rs.getString(1)).thenReturn("acc-1", "acc-2");
-    when(rs.getInt(2)).thenReturn(12, 3);
-
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.getConnection()).thenReturn(conn);
-
-      Map<String, Integer> result = handler.loadPendingByAccount(CLIENT_ID, ORGS);
-
-      assertEquals(2, result.size());
-      assertEquals(Integer.valueOf(12), result.get("acc-1"));
-      assertEquals(Integer.valueOf(3), result.get("acc-2"));
-      verify(ps).setString(1, CLIENT_ID);
-      verify(ps).setArray(2, orgArray);
-    }
-  }
-
-  /**
-   * Verifies that {@code loadPendingByAccount} returns an empty map when there
-   * are no rows to read — accounts with zero pending lines simply do not
-   * appear in the response of the SQL query.
-   *
-   * @throws Exception
-   *     if the mocked JDBC chain fails
-   */
-  @Test
-  public void testLoadPendingByAccountReturnsEmptyMapWhenResultSetEmpty() throws Exception {
-    Connection conn = mock(Connection.class);
-    PreparedStatement ps = mock(PreparedStatement.class);
-    ResultSet rs = mock(ResultSet.class);
-
-    when(conn.prepareStatement(anyString())).thenReturn(ps);
-    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(Array.class));
-    when(ps.executeQuery()).thenReturn(rs);
-    when(rs.next()).thenReturn(false);
-
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.getConnection()).thenReturn(conn);
-
-      Map<String, Integer> result = handler.loadPendingByAccount(CLIENT_ID, ORGS);
-
-      assertTrue("expected empty pending map", result.isEmpty());
-    }
-  }
-
-  /**
-   * Verifies that {@code loadPendingByAccount} binds all four parameters of the two-branch
-   * {@code UNION ALL} query — client + orgs for the bank-statement branch, then client + orgs again
-   * for the cash-movement branch (ETP-4795) — reusing a single {@code java.sql.Array} instance.
-   *
-   * <p>Before the cash branch existed the query took two parameters; binding only those two now
-   * leaves placeholders 3 and 4 unset and the driver throws at execution time.</p>
-   *
-   * @throws Exception
-   *     if the mocked JDBC chain fails
-   */
-  @Test
-  public void testLoadPendingByAccountBindsBothUnionBranches() throws Exception {
-    Connection conn = mock(Connection.class);
-    PreparedStatement ps = mock(PreparedStatement.class);
-    ResultSet rs = mock(ResultSet.class);
-    Array orgArray = mock(Array.class);
-
-    when(conn.prepareStatement(anyString())).thenReturn(ps);
-    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(orgArray);
-    when(ps.executeQuery()).thenReturn(rs);
-    when(rs.next()).thenReturn(false);
-
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.getConnection()).thenReturn(conn);
-
-      handler.loadPendingByAccount(CLIENT_ID, ORGS);
-
-      verify(ps).setString(1, CLIENT_ID);
-      verify(ps).setArray(2, orgArray);
-      verify(ps).setString(3, CLIENT_ID);
-      verify(ps).setArray(4, orgArray);
-      // One array built and bound twice, not two equivalent arrays.
-      verify(conn, times(1)).createArrayOf(eq("varchar"), any());
-    }
-  }
-
-  /**
-   * Verifies that {@code loadPendingByAccount} SUMS the counts when the same account id comes back
-   * from both {@code UNION ALL} branches, instead of letting the second row overwrite the first.
-   *
-   * <p>The branches group independently, so a cash-type account that also has imported bank
-   * statements produces two rows for one account. Its pending badge must show the total.</p>
-   *
-   * @throws Exception
-   *     if the mocked JDBC chain fails
-   */
-  @Test
-  public void testLoadPendingByAccountSumsRowsFromBothBranches() throws Exception {
-    Connection conn = mock(Connection.class);
-    PreparedStatement ps = mock(PreparedStatement.class);
-    ResultSet rs = mock(ResultSet.class);
-
-    when(conn.prepareStatement(anyString())).thenReturn(ps);
-    when(conn.createArrayOf(eq("varchar"), any())).thenReturn(mock(Array.class));
-    when(ps.executeQuery()).thenReturn(rs);
-    when(rs.next()).thenReturn(true, true, false);
-    when(rs.getString(1)).thenReturn("acc-cash", "acc-cash");
-    when(rs.getInt(2)).thenReturn(4, 7);
-
-    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.getConnection()).thenReturn(conn);
-
-      Map<String, Integer> result = handler.loadPendingByAccount(CLIENT_ID, ORGS);
-
-      assertEquals(1, result.size());
-      assertEquals(Integer.valueOf(11), result.get("acc-cash"));
-    }
-  }
-
   // ── Tolerance fields (dateTolerance / amountTolerance) ───────────────────
 
   /**
@@ -1016,7 +958,7 @@ public class FinancialAccountsPageHandlerTest {
     List<AccountRow> accounts = Arrays.asList(
         account("acc-tol", "BBVA", "B", new BigDecimal("100.00"), "EUR"));
 
-    JSONArray arr = handler.buildAccountsArray(accounts, Collections.emptyMap(),
+    JSONArray arr = handler.buildAccountsArray(accounts,
         Collections.emptySet());
 
     JSONObject row = arr.getJSONObject(0);
@@ -1040,7 +982,7 @@ public class FinancialAccountsPageHandlerTest {
     acc.dateTolerance = 7;
     acc.amountTolerance = new BigDecimal("1.50");
 
-    JSONArray arr = handler.buildAccountsArray(Arrays.asList(acc), Collections.emptyMap(),
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(acc),
         Collections.emptySet());
 
     JSONObject row = arr.getJSONObject(0);
@@ -1066,8 +1008,7 @@ public class FinancialAccountsPageHandlerTest {
     AccountRow withoutHistory = account("acc-2", "Caja nueva", "C", new BigDecimal("0.00"), "EUR");
     Set<String> accountsWithTransactions = Collections.singleton("acc-1");
 
-    JSONArray arr = handler.buildAccountsArray(Arrays.asList(withHistory, withoutHistory),
-        Collections.emptyMap(), accountsWithTransactions);
+    JSONArray arr = handler.buildAccountsArray(Arrays.asList(withHistory, withoutHistory), accountsWithTransactions);
 
     assertEquals(2, arr.length());
     assertTrue("account with registered transactions serialises hasTransactions=true",
@@ -1089,7 +1030,7 @@ public class FinancialAccountsPageHandlerTest {
         account("acc-1", "BBVA", "B", new BigDecimal("100.00"), "EUR"),
         account("acc-2", "Caja", "C", new BigDecimal("0.00"), "EUR"));
 
-    JSONArray arr = handler.buildAccountsArray(accounts, Collections.emptyMap(),
+    JSONArray arr = handler.buildAccountsArray(accounts,
         Collections.emptySet());
 
     assertFalse(arr.getJSONObject(0).getBoolean("hasTransactions"));
@@ -1303,9 +1244,8 @@ public class FinancialAccountsPageHandlerTest {
   /**
    * Verifies that all ten {@code UNION ALL} branches of {@code DELETE_BLOCKERS_BY_ACCOUNT_SQL} are
    * bound with (clientId, orgs) — ten {@code setString} + ten {@code setArray} calls reusing a
-   * single {@code java.sql.Array} instance, mirroring {@code loadPendingByAccount}'s own
-   * multi-branch binding test. A missed branch would leave a placeholder unset and the driver
-   * would throw at execution time.
+   * single {@code java.sql.Array} instance. A missed branch would leave a placeholder unset
+   * and the driver would throw at execution time.
    *
    * @throws Exception if the mocked JDBC chain fails
    */

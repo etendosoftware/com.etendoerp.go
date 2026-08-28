@@ -2,6 +2,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.io.BufferedReader;
 import java.io.IOException;
+import java.util.Optional;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -30,7 +31,11 @@ class NeoBuiltInEndpointHandler {
   private static final String METHOD_PATCH = "PATCH";
   private static final String ATTACHMENTS_SEGMENT_FILE = "file";
   private static final String ATTACHMENTS_SEGMENT_ZIP = "zip";
+  private static final String ATTACHMENTS_SEGMENT_MAIN = "main";
   private static final String DESCRIPTION_FIELD = "description";
+  private static final String IS_MAIN_FIELD = "isMain";
+  private static final String MARK_AS_MAIN_PARAM = "markAsMain";
+  private static final String INVALID_JSON_BODY_PREFIX = "Invalid JSON body: ";
 
   private final NeoServlet servlet;
   private final NeoDiscoveryHandler discoveryHandler;
@@ -75,16 +80,16 @@ class NeoBuiltInEndpointHandler {
       handleAttachmentsEndpoint(method, request, response);
       return true;
     }
-    if ("preview-file".equals(pathInfo.specName)) {
-      handlePreviewFileEndpoint(method, request, response);
-      return true;
-    }
     if ("fiscal303".equals(pathInfo.specName)) {
       fiscal303Handler.handle(pathInfo.entityName, method, request, response);
       return true;
     }
     if ("fiscal349".equals(pathInfo.specName)) {
       fiscal349Handler.handle(pathInfo.entityName, method, request, response);
+      return true;
+    }
+    if ("fiscal-models-catalog".equals(pathInfo.specName)) {
+      handleFiscalModelsCatalogEndpoint(method, request, response);
       return true;
     }
     if ("email-contracts".equals(pathInfo.specName)) {
@@ -128,6 +133,34 @@ class NeoBuiltInEndpointHandler {
     return true;
   }
 
+  /**
+   * Handles {@code /sws/neo/fiscal-models-catalog} — the per-Client active/inactive
+   * state of the Fiscal Models catalog (models 303, 349, ...).
+   *
+   * <p>GET returns the persisted active-models JSON object (empty object when nothing
+   * has been saved yet for the current client). PUT replaces it and responds 204,
+   * matching the favorites/filters built-in endpoint convention.
+   */
+  private void handleFiscalModelsCatalogEndpoint(String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (METHOD_GET.equals(method)) {
+      servlet.writeResponse(response, NeoFiscalModelsCatalogService.getActiveModels());
+      return;
+    }
+    if ("PUT".equals(method)) {
+      try {
+        NeoFiscalModelsCatalogService.saveActiveModels(NeoRequestBodyParser.readRequestBody(request));
+        OBDal.getInstance().flush();
+        servlet.writeResponse(response, null);
+      } catch (IllegalArgumentException e) {
+        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+      }
+      return;
+    }
+    servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+        "Fiscal models catalog endpoint only supports GET and PUT");
+  }
+
   private void handleFiltersEndpoint(NeoServlet.NeoPathInfo pathInfo, String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
     if (pathInfo.entityName == null) {
@@ -164,40 +197,6 @@ class NeoBuiltInEndpointHandler {
     }
     servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
         "Filters endpoint only supports GET, PUT and DELETE");
-  }
-
-  private void handlePreviewFileEndpoint(String method, HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
-    if (METHOD_GET.equals(method)) {
-      String specName = request.getParameter("specName");
-      String recordId = request.getParameter("recordId");
-      if (specName == null || recordId == null) {
-        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-            "Required parameters: specName, recordId");
-        return;
-      }
-      servlet.writeResponse(response, NeoPreviewFileService.getPreviewFile(specName, recordId));
-      return;
-    }
-    if (METHOD_POST.equals(method)) {
-      servlet.writeResponse(response,
-          NeoPreviewFileService.savePreviewFile(NeoRequestBodyParser.readRequestBody(request)));
-      return;
-    }
-    if (METHOD_DELETE.equals(method)) {
-      String specName = request.getParameter("specName");
-      String recordId = request.getParameter("recordId");
-      if (specName == null || recordId == null) {
-        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-            "Required parameters: specName, recordId");
-        return;
-      }
-      servlet.writeResponse(response,
-          NeoPreviewFileService.deletePreviewFile(specName, recordId));
-      return;
-    }
-    servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
-        "Preview file endpoint supports GET, POST and DELETE");
   }
 
   private void handleEmailContractsEndpoint(NeoServlet.NeoPathInfo pathInfo, String method,
@@ -268,12 +267,19 @@ class NeoBuiltInEndpointHandler {
    * Dispatches {@code /sws/neo/attachments/*} requests to the cross-cutting
    * {@link NeoAttachmentsHelper}. Supported shapes:
    * <ul>
-   *   <li>{@code GET    /attachments/{tableName}/{recordId}}        — list attachments</li>
-   *   <li>{@code POST   /attachments/{tableName}/{recordId}}        — multipart upload</li>
-   *   <li>{@code GET    /attachments/{tableName}/{recordId}/zip}    — download all as zip</li>
+   *   <li>{@code GET    /attachments/{tableName}/{recordId}}        — list attachments
+   *       (excludes the one marked as "main")</li>
+   *   <li>{@code POST   /attachments/{tableName}/{recordId}}        — multipart upload;
+   *       {@code ?markAsMain=true} marks the uploaded file as main atomically</li>
+   *   <li>{@code GET    /attachments/{tableName}/{recordId}/zip}    — download all as zip
+   *       (excludes the one marked as "main")</li>
+   *   <li>{@code GET    /attachments/{tableName}/{recordId}/main}   — look up the attachment
+   *       marked as this record's main document, or {@code {}} if none</li>
    *   <li>{@code GET    /attachments/file/{attachmentId}}           — download single file</li>
    *   <li>{@code DELETE /attachments/file/{attachmentId}}           — delete attachment</li>
    *   <li>{@code PATCH  /attachments/file/{attachmentId}}           — update description</li>
+   *   <li>{@code PATCH  /attachments/file/{attachmentId}/main}      — {@code {isMain: bool}};
+   *       marking deletes any previously-marked attachment for the same record</li>
    * </ul>
    */
   private void handleAttachmentsEndpoint(String method,
@@ -295,13 +301,14 @@ class NeoBuiltInEndpointHandler {
   }
 
   /**
-   * Handles {@code /attachments/{tableName}/{recordId}[/zip]}.
+   * Handles {@code /attachments/{tableName}/{recordId}[/zip|/main]}.
    */
   private void handleAttachmentsRecordSubresource(String[] segments, String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
     String tableName = segments[0];
     String recordId = segments[1];
     boolean isZip = segments.length >= 3 && ATTACHMENTS_SEGMENT_ZIP.equals(segments[2]);
+    boolean isMain = segments.length >= 3 && ATTACHMENTS_SEGMENT_MAIN.equals(segments[2]);
 
     if (isZip) {
       if (!"GET".equals(method)) {
@@ -313,13 +320,24 @@ class NeoBuiltInEndpointHandler {
       return;
     }
 
+    if (isMain) {
+      if (!"GET".equals(method)) {
+        servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+            "Attachments main endpoint only supports GET");
+        return;
+      }
+      servlet.writeResponse(response, NeoAttachmentsHelper.handleGetMain(tableName, recordId));
+      return;
+    }
+
     if ("GET".equals(method)) {
       servlet.writeResponse(response, NeoAttachmentsHelper.handleList(tableName, recordId));
       return;
     }
     if ("POST".equals(method)) {
+      boolean markAsMain = "true".equalsIgnoreCase(request.getParameter(MARK_AS_MAIN_PARAM));
       servlet.writeResponse(response,
-          NeoAttachmentsHelper.handleUpload(tableName, recordId, request));
+          NeoAttachmentsHelper.handleUpload(tableName, recordId, request, markAsMain));
       return;
     }
     servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
@@ -327,7 +345,8 @@ class NeoBuiltInEndpointHandler {
   }
 
   /**
-   * Handles {@code /attachments/file/{attachmentId}} (download, delete, patch description).
+   * Handles {@code /attachments/file/{attachmentId}[/main]}
+   * (download, delete, patch description, mark/unmark as main).
    */
   private void handleAttachmentsFileSubresource(String[] segments, String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
@@ -337,6 +356,12 @@ class NeoBuiltInEndpointHandler {
       return;
     }
     String attachmentId = segments[1];
+    boolean isMain = segments.length >= 3 && ATTACHMENTS_SEGMENT_MAIN.equals(segments[2]);
+
+    if (isMain) {
+      handleAttachmentsMainPatch(attachmentId, method, request, response);
+      return;
+    }
 
     if ("GET".equals(method)) {
       NeoAttachmentsHelper.handleDownload(attachmentId, response);
@@ -361,6 +386,53 @@ class NeoBuiltInEndpointHandler {
     }
     servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
         "Attachments file endpoint supports GET, DELETE and PATCH");
+  }
+
+  /**
+   * Handles {@code PATCH /attachments/file/{attachmentId}/main} — mark or
+   * unmark an attachment as its record's "main" document.
+   */
+  private void handleAttachmentsMainPatch(String attachmentId, String method,
+      HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (!METHOD_PATCH.equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Attachments main endpoint only supports PATCH");
+      return;
+    }
+    Optional<Boolean> isMainValue = readIsMainFromBody(request, response);
+    if (isMainValue.isEmpty() && response.isCommitted()) {
+      return;
+    }
+    servlet.writeResponse(response,
+        NeoAttachmentsHelper.handleMarkMain(attachmentId, Boolean.TRUE.equals(isMainValue.orElse(null))));
+  }
+
+  /**
+   * Reads the {@code isMain} boolean out of a {@code PATCH .../main} JSON body.
+   * Signals an error via {@code response} and returns {@code Optional.empty()}
+   * with the response already committed if the body is missing or invalid.
+   */
+  private Optional<Boolean> readIsMainFromBody(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String body = readBody(request);
+    if (StringUtils.isBlank(body)) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "Required field: isMain");
+      return Optional.empty();
+    }
+    try {
+      JSONObject json = new JSONObject(body);
+      if (!json.has(IS_MAIN_FIELD) || json.isNull(IS_MAIN_FIELD)) {
+        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+            "Required field: isMain");
+        return Optional.empty();
+      }
+      return Optional.of(json.getBoolean(IS_MAIN_FIELD));
+    } catch (JSONException e) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          INVALID_JSON_BODY_PREFIX + e.getMessage());
+      return Optional.empty();
+    }
   }
 
   /**
@@ -406,7 +478,7 @@ class NeoBuiltInEndpointHandler {
       return json.getString(DESCRIPTION_FIELD);
     } catch (JSONException e) {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Invalid JSON body: " + e.getMessage());
+          INVALID_JSON_BODY_PREFIX + e.getMessage());
       return null;
     }
   }
@@ -448,7 +520,7 @@ class NeoBuiltInEndpointHandler {
       assetId = json.optString("assetId", null);
     } catch (Exception e) {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Invalid JSON body: " + e.getMessage());
+          INVALID_JSON_BODY_PREFIX + e.getMessage());
       return;
     }
     if (assetId == null || assetId.trim().isEmpty()) {

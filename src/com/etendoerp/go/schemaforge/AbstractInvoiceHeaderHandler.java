@@ -22,6 +22,7 @@ import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -30,11 +31,13 @@ import java.util.UUID;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
+import org.codehaus.jettison.json.JSONArray;
 import org.openbravo.advpaymentmngt.ProcessInvoiceUtil;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.provider.OBProvider;
@@ -46,8 +49,11 @@ import org.openbravo.database.ConnectionProvider;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.ReversedInvoice;
+import org.openbravo.module.sii.data.AEATSIIConfig;
+import org.openbravo.module.sii.utils.SIIUtils;
 import org.openbravo.service.db.DalConnectionProvider;
 
 /**
@@ -75,11 +81,22 @@ public abstract class AbstractInvoiceHeaderHandler {
   protected static final String SUBTYPE_RECTIFICATIVA = "RECTIFICATIVA";
 
   protected static final String FIELD_ORIGIN_INVOICE       = "originInvoice";
+  // ETP-4919: plural counterpart of FIELD_ORIGIN_INVOICE — a Factura Rectificativa can be
+  // linked back to MORE THAN ONE source invoice (importing from source invoice A, then later
+  // from source invoice B, must keep BOTH links). FIELD_ORIGIN_INVOICE is kept as a
+  // backward-compatible single-id alias (accepted on input, folded into the id set; emitted on
+  // output as the first linked origin) — see captureOriginInvoice/persistOriginInvoice/
+  // enrichOriginInvoice below.
+  protected static final String FIELD_ORIGIN_INVOICES      = "originInvoices";
   protected static final String FIELD_TRANSACTION_DOCUMENT = "transactionDocument";
   private static final String FIELD_CURRENCY = "currency";
-  private static final String FIELD_VALUE = "value";
+  // Package-private: also used by InvoiceCalloutHelper (S1448 extraction)
+  static final String FIELD_VALUE = "value";
   private static final String FIELD_PROCESSED = "processed";
   private static final String FIELD_TOTAL_DISCOUNT_PCT = "etgoTotalDiscount";
+  static final String FIELD_AEATSII_IS_AUTHORIZATION = "aeatsiiIsauthorization";
+  static final String FIELD_AEATSII_AUTHORIZATION_NO = "aeatsiiAuthorizationno";
+  static final String FIELD_ETVFAC_INV_TYPE = "etvfacInvType";
   protected static final String FIELD_GRAND_TOTAL_AMOUNT = "grandTotalAmount";
   protected static final String FIELD_OUTSTANDING_AMOUNT = "outstandingAmount";
 
@@ -90,8 +107,18 @@ public abstract class AbstractInvoiceHeaderHandler {
   // beans, defaulting to @Dependent scope, and NeoServletSupport#handleWithHooks calls handle()
   // then afterHandle() on the SAME handler instance for a given request, so a plain instance
   // field on this shared base class safely carries state between them.
-  private String pendingOriginInvoiceId;
+  private List<String> pendingOriginInvoiceIds;
   private boolean originInvoiceCaptured;
+
+  // ETP-4783: SII authorization number — same capture/persist pattern as originInvoice.
+  // captureAndValidateSiiAuthorization() (called from handle()) validates the SII config and
+  // stores the resolved authorization number (or ""), then persistSiiAuthorizationno() (called
+  // from afterHandle()) writes it directly via DAL after the CRUD write completes.
+  // This is necessary because aeatsiiAuthorizationno has visibility=readOnly in the contract,
+  // so filterWriteRequest() strips it from the PATCH body before the DB write — it cannot be
+  // injected into the request body in handle() and survive to the DAL layer.
+  private String pendingSiiAuthorizationno;
+  private boolean siiAuthorizationCaptured;
 
   // ---------------------------------------------------------------------------
   // Abstract contract
@@ -234,18 +261,25 @@ public abstract class AbstractInvoiceHeaderHandler {
   // ---------------------------------------------------------------------------
 
   /**
-   * Captures and strips {@code originInvoice} from the raw request body BEFORE the generic
-   * field filter runs, so {@link #persistOriginInvoice} can still use it later in
-   * {@code afterHandle()}. Must be called from each subclass's {@code handle()} (the pre-hook),
-   * e.g. alongside the existing {@code NeoHandlerUtils.mirrorAccountingDate(...)} call.
+   * Captures and strips {@code originInvoice}/{@code originInvoices} from the raw request body
+   * BEFORE the generic field filter runs, so {@link #persistOriginInvoice} can still use them
+   * later in {@code afterHandle()}. Must be called from each subclass's {@code handle()} (the
+   * pre-hook), e.g. alongside the existing {@code NeoHandlerUtils.mirrorAccountingDate(...)}
+   * call.
    *
-   * <p>{@code originInvoice} is not a decisions.json/contract field, so
+   * <p>Neither field is a decisions.json/contract field, so
    * {@code NeoFieldFilter#filterCreateRequest}/{@code filterWriteRequest} would otherwise
-   * silently drop it before {@code afterHandle()} got a chance to read it back from
+   * silently drop them before {@code afterHandle()} got a chance to read them back from
    * {@code context.getRequestBody()} — the link was never actually persisted (confirmed via an
    * empty {@code C_Invoice_Reverse} table) despite {@code persistOriginInvoice} looking correct
    * in isolation. Same reasoning as the {@code parentId} carve-out at the top of
    * {@code NeoCrudHandler#executePostCreate}.
+   *
+   * <p>ETP-4919: {@code originInvoices} (a JSON array of invoice ids) is the current shape sent
+   * by the "Import from Source Invoice" popup — a rectificativa can be linked to more than one
+   * source invoice across separate import runs. {@code originInvoice} (a single id) is kept as a
+   * backward-compatible alias: if present, its id is folded into the same captured set. Both
+   * keys may be present at once; ids are de-duplicated.
    *
    * @param context
    *     the current request context
@@ -255,18 +289,68 @@ public abstract class AbstractInvoiceHeaderHandler {
       return;
     }
     JSONObject body = context.getRequestBody();
-    if (body != null && body.has(FIELD_ORIGIN_INVOICE)) {
-      pendingOriginInvoiceId = body.optString(FIELD_ORIGIN_INVOICE, null);
+    if (body == null) {
+      return;
+    }
+    List<String> ids = new ArrayList<>();
+    boolean captured = collectOriginInvoiceIds(body, ids);
+
+    if (captured) {
+      pendingOriginInvoiceIds = ids;
       originInvoiceCaptured = true;
-      body.remove(FIELD_ORIGIN_INVOICE);
     }
   }
 
   /**
-   * Persists the origin-invoice relationship to {@code C_Invoice_Reverse} after a POST or PUT,
-   * using the value {@link #captureOriginInvoice} captured from the raw request body before the
-   * generic field filter stripped it. Deletes any existing link for this invoice before creating
-   * the new one (or leaves it deleted if {@code originInvoice} was absent/blank).
+   * Reads {@code originInvoices} (array) and/or the legacy singular {@code originInvoice} from
+   * {@code body} into {@code ids} (de-duplicated), removing both keys from {@code body} so the
+   * generic field filter never sees them (see {@link #captureOriginInvoice} javadoc for why).
+   *
+   * @return {@code true} if either key was present in {@code body}
+   */
+  private boolean collectOriginInvoiceIds(JSONObject body, List<String> ids) {
+    boolean captured = false;
+
+    if (body.has(FIELD_ORIGIN_INVOICES)) {
+      captured = true;
+      try {
+        JSONArray arr = body.getJSONArray(FIELD_ORIGIN_INVOICES);
+        for (int i = 0; i < arr.length(); i++) {
+          String id = arr.optString(i, null);
+          if (StringUtils.isNotBlank(id) && !ids.contains(id)) {
+            ids.add(id);
+          }
+        }
+      } catch (Exception e) {
+        log.warn("Could not parse {} array: {}", FIELD_ORIGIN_INVOICES, e.getMessage());
+      }
+      body.remove(FIELD_ORIGIN_INVOICES);
+    }
+
+    if (body.has(FIELD_ORIGIN_INVOICE)) {
+      captured = true;
+      String legacyId = body.optString(FIELD_ORIGIN_INVOICE, null);
+      if (StringUtils.isNotBlank(legacyId) && !ids.contains(legacyId)) {
+        ids.add(legacyId);
+      }
+      body.remove(FIELD_ORIGIN_INVOICE);
+    }
+
+    return captured;
+  }
+
+  /**
+   * Persists the origin-invoice relationship(s) to {@code C_Invoice_Reverse} after a POST or
+   * PUT/PATCH, using the ids {@link #captureOriginInvoice} captured from the raw request body
+   * before the generic field filter stripped them.
+   *
+   * <p>ETP-4919 fix: this NEVER deletes existing links to OTHER origin invoices from prior
+   * import runs — the old delete-then-single-create behavior is exactly why importing from a
+   * second source invoice silently dropped the first link. It only creates a link per captured
+   * id, and only if that exact (invoice, origin) pair doesn't already exist — so re-importing
+   * from the same source invoice twice never produces duplicate rows. When the captured id set
+   * is empty (field absent, or present but blank), this is a no-op: there is no supported way to
+   * unlink an origin invoice through this endpoint.
    *
    * @param context
    *     the current request context
@@ -276,18 +360,20 @@ public abstract class AbstractInvoiceHeaderHandler {
       if (!originInvoiceCaptured) {
         return;
       }
-      String originInvoiceId = pendingOriginInvoiceId;
+      List<String> originInvoiceIds = pendingOriginInvoiceIds;
+      if (originInvoiceIds == null || originInvoiceIds.isEmpty()) {
+        return;
+      }
 
-      String invoiceId = resolveInvoiceIdFromContext(context);
+      String invoiceId = InvoiceCalloutHelper.resolveInvoiceIdFromContext(context);
       if (StringUtils.isBlank(invoiceId)) {
         return;
       }
 
       OBContext.setAdminMode(true);
       try {
-        deleteExistingReverseLinks(invoiceId);
-        if (StringUtils.isNotBlank(originInvoiceId)) {
-          createReverseLink(invoiceId, originInvoiceId);
+        for (String originInvoiceId : originInvoiceIds) {
+          createReverseLinkIfMissing(invoiceId, originInvoiceId);
         }
         OBDal.getInstance().flush();
       } finally {
@@ -298,33 +384,26 @@ public abstract class AbstractInvoiceHeaderHandler {
     }
   }
 
-  private static String resolveInvoiceIdFromContext(NeoContext context) {
-    if (context.getRecordId() != null) {
-      return context.getRecordId();
-    }
-    // POST: extract newly created record ID from the CRUD response
-    return NeoHandlerUtils.extractCreatedIdFromPreviousResult(context);
-  }
-
-  private void deleteExistingReverseLinks(String invoiceId) {
+  /**
+   * Creates a {@code C_Invoice_Reverse} link from {@code invoiceId} to {@code originInvoiceId}
+   * unless one already exists — the dedupe check that replaces the old unconditional
+   * delete-then-create (ETP-4919), so importing from the same source invoice twice never
+   * produces duplicate rows, and importing from a NEW source invoice never removes the link to a
+   * previously-imported one.
+   */
+  private void createReverseLinkIfMissing(String invoiceId, String originInvoiceId) {
     Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
-    if (invoice == null) {
+    Invoice origin = OBDal.getInstance().get(Invoice.class, originInvoiceId);
+    if (invoice == null || origin == null) {
+      log.warn("Cannot create reverse link: invoice={} origin={}", invoiceId, originInvoiceId);
       return;
     }
     List<ReversedInvoice> existing = OBDal.getInstance()
         .createCriteria(ReversedInvoice.class)
         .add(Restrictions.eq(ReversedInvoice.PROPERTY_INVOICE, invoice))
+        .add(Restrictions.eq(ReversedInvoice.PROPERTY_REVERSEDINVOICE, origin))
         .list();
-    for (ReversedInvoice ri : existing) {
-      OBDal.getInstance().remove(ri);
-    }
-  }
-
-  private void createReverseLink(String invoiceId, String originInvoiceId) {
-    Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
-    Invoice origin = OBDal.getInstance().get(Invoice.class, originInvoiceId);
-    if (invoice == null || origin == null) {
-      log.warn("Cannot create reverse link: invoice={} origin={}", invoiceId, originInvoiceId);
+    if (!existing.isEmpty()) {
       return;
     }
     ReversedInvoice link = OBProvider.getInstance().get(ReversedInvoice.class);
@@ -336,12 +415,172 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   // ---------------------------------------------------------------------------
+  // SII authorization (ETP-4783)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Validates and captures the SII authorization number when {@code aeatsiiIsauthorization}
+   * is being set to {@code true} in a write request (ETP-4783).
+   *
+   * <p>Must be called from each subclass's {@code handle()} (the pre-hook). The classic
+   * {@code SiiAuthorizationCallout} does not fire in Go/NEO Headless because the SifTab custom
+   * component fires a direct {@code /header/callout} fetch instead (bypassing the
+   * {@code fireCallout} guard that filters 'Y'/'N' values). This method enforces the same
+   * save-time invariant for every PATCH/PUT/POST.
+   *
+   * <p>{@code aeatsiiAuthorizationno} has {@code visibility=readOnly} in the contract
+   * ({@code isreadonly='Y'} in the DB), so {@code filterWriteRequest} strips it from the PATCH
+   * body before the DAL write. The value resolved here (from {@code AEATSIIConfig}) is stored in
+   * {@link #pendingSiiAuthorizationno} and written by {@link #persistSiiAuthorizationno(NeoContext)}
+   * (called from {@code afterHandle()}) via a direct DAL update on the already-saved record.
+   *
+   * <p>When {@code aeatsiiIsauthorization} is being set to {@code false}, this method returns
+   * {@code null} immediately (no capture, no persist) — preserving the existing DB number for
+   * future re-enabling. Clearing the number on uncheck caused a "2nd cycle" bug where the number
+   * would vanish after uncheck→save→re-check→save.
+   *
+   * @param context the current request context
+   * @return an error {@link NeoResponse} to reject the save (400), or {@code null} to proceed
+   */
+  protected NeoResponse captureAndValidateSiiAuthorization(NeoContext context) {
+    if (!NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
+      return null;
+    }
+    JSONObject body = context.getRequestBody();
+    if (body == null || !body.has(FIELD_AEATSII_IS_AUTHORIZATION)) {
+      return null;
+    }
+    try {
+      Object rawValue = body.opt(FIELD_AEATSII_IS_AUTHORIZATION);
+      // The field is a Boolean in the Invoice entity; the JSON body can carry true/false or "Y"/"N"
+      // depending on the frontend serialization.
+      boolean isAuthorization = Boolean.TRUE.equals(rawValue)
+          || "Y".equalsIgnoreCase(String.valueOf(rawValue))
+          || "true".equalsIgnoreCase(String.valueOf(rawValue));
+
+      if (isAuthorization) {
+        Organization org = OBContext.getOBContext().getCurrentOrganization();
+        if (org == null) {
+          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+              "La organización no tiene configuración de SII o la configuración no tiene número de autorización.");
+        }
+        AEATSIIConfig config = SIIUtils.getSiiConfigFromOrg(org);
+        if (config == null || StringUtils.isBlank(config.getAuthorizationno())) {
+          return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+              "La organización no tiene configuración de SII o la configuración no tiene número de autorización.");
+        }
+        pendingSiiAuthorizationno = config.getAuthorizationno();
+      } else {
+        // ETP-4783: Authorization disabled — do NOT clear the stored number. Wiping it here
+        // (via persistSiiAuthorizationno) would erase the DB value when the user unchecks,
+        // causing the number to vanish on re-check + save. The CRUD write handles
+        // aeatsiiIsauthorization = false normally; the number is preserved for future use.
+        return null;
+      }
+      siiAuthorizationCaptured = true;
+    } catch (Exception e) {
+      log.warn("[ETP-4783] captureAndValidateSiiAuthorization failed (non-fatal): {}", e.getMessage());
+    }
+    return null;
+  }
+
+  /**
+   * Writes {@link #pendingSiiAuthorizationno} (captured in the pre-hook) to the invoice via a
+   * direct DAL update after the main CRUD write completes (ETP-4783).
+   *
+   * <p>Must be called from each subclass's {@code afterHandle()} alongside
+   * {@link #persistOriginInvoice(NeoContext)}.
+   *
+   * @param context the current request context
+   */
+  protected void persistSiiAuthorizationno(NeoContext context) {
+    if (!siiAuthorizationCaptured) {
+      return;
+    }
+    try {
+      String invoiceId = InvoiceCalloutHelper.resolveInvoiceIdFromContext(context);
+      if (StringUtils.isBlank(invoiceId)) {
+        return;
+      }
+      OBContext.setAdminMode(true);
+      try {
+        Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
+        if (invoice == null) {
+          return;
+        }
+        invoice.setAeatsiiAuthorizationno(pendingSiiAuthorizationno);
+        OBDal.getInstance().save(invoice);
+        OBDal.getInstance().flush();
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("[ETP-4783] persistSiiAuthorizationno failed: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Injects {@link #pendingSiiAuthorizationno} into the PATCH/POST response body so the
+   * frontend sees the value that {@link #persistSiiAuthorizationno(NeoContext)} wrote to DB
+   * after the main CRUD write captured its response (ETP-4783).
+   *
+   * <p>The main CRUD handler captures its JSON result in {@code context.getPreviousResult()}
+   * before {@code afterHandle()} runs. {@code persistSiiAuthorizationno()} writes to DB in
+   * {@code afterHandle()}, so the captured PATCH response body does not include the new value.
+   * Without this injection the frontend would display a stale (empty) auth number.
+   *
+   * <p>No-op (returns {@code null}) when {@link #siiAuthorizationCaptured} is {@code false} or
+   * the previous result cannot be parsed — callers fall back to the normal {@code null} return.
+   *
+   * @param context the current request context
+   * @return a {@link NeoResponse} with the patched body, or {@code null} to fall through
+   */
+  protected NeoResponse injectAuthorizationnoIntoSaveResponse(NeoContext context) {
+    if (!siiAuthorizationCaptured) {
+      return null;
+    }
+    try {
+      NeoResponse prev = context.getPreviousResult();
+      if (prev == null || prev.getBody() == null) {
+        return null;
+      }
+      // Defensive copy so we do not mutate the original captured result.
+      JSONObject body = new JSONObject(prev.getBody().toString());
+      // Try the standard JsonDataService wrapper (response → data array) first.
+      JSONObject responseWrapper = body.optJSONObject("response");
+      if (responseWrapper != null) {
+        JSONArray data = responseWrapper.optJSONArray("data");
+        if (data != null && data.length() > 0) {
+          data.getJSONObject(0).put(FIELD_AEATSII_AUTHORIZATION_NO, pendingSiiAuthorizationno);
+          return NeoResponse.ok(body);
+        }
+      }
+      // Flat format fallback: the body itself is the record.
+      body.put(FIELD_AEATSII_AUTHORIZATION_NO, pendingSiiAuthorizationno);
+      return NeoResponse.ok(body);
+    } catch (Exception e) {
+      log.warn("[ETP-4783] injectAuthorizationnoIntoSaveResponse failed (non-fatal): {}", e.getMessage());
+      return null;
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // GET enrichment (virtual fields)
   // ---------------------------------------------------------------------------
 
   /**
-   * Injects {@code originInvoice} and {@code originInvoice$_identifier} into the record by
-   * querying the {@code C_Invoice_Reverse} table for a link where this invoice is the reversed one.
+   * Injects {@code originInvoices} (a JSON array of {@code {id, documentNo}}, one entry per
+   * linked origin invoice) plus the backward-compatible singular {@code originInvoice}/
+   * {@code originInvoice$_identifier} pair (the FIRST linked origin, or {@code null} when none)
+   * into the record, by querying the {@code C_Invoice_Reverse} table for ALL active links where
+   * this invoice is the reversed one.
+   *
+   * <p>ETP-4919 fix: previously this read only the first matching row ({@code rs.next()} called
+   * once) — a rectificativa linked to more than one source invoice (e.g. two separate "Import
+   * from Source Invoice" runs) silently lost every origin but one on the frontend, even on the
+   * rare occasion the backend link itself did survive. Callers that only need "is there at least
+   * one" can keep reading {@code originInvoice}; {@code RelatedDocuments} now reads
+   * {@code originInvoices} to render one chip per linked origin.
    *
    * @param rec
    *     the invoice record JSON object; modified in-place
@@ -355,18 +594,29 @@ public abstract class AbstractInvoiceHeaderHandler {
         "SELECT inv.c_invoice_id, inv.documentno "
         + "FROM c_invoice_reverse r "
         + "JOIN c_invoice inv ON inv.c_invoice_id = r.reversed_c_invoice_id "
-        + "WHERE r.c_invoice_id = ? AND r.isactive = 'Y'";
-    Connection conn = OBDal.getReadOnlyInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        + "WHERE r.c_invoice_id = ? AND r.isactive = 'Y' "
+        + "ORDER BY inv.documentno";
+    try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
       ps.setString(1, invoiceId);
       try (ResultSet rs = ps.executeQuery()) {
-        if (rs.next()) {
-          rec.put(FIELD_ORIGIN_INVOICE, rs.getString(1));
-          rec.put("originInvoice$_identifier", rs.getString(2));
-        } else {
+        JSONArray origins = new JSONArray();
+        boolean first = true;
+        while (rs.next()) {
+          String originId = rs.getString(1);
+          String originDocNo = rs.getString(2);
+          origins.put(new JSONObject().put("id", originId).put("documentNo", originDocNo));
+          if (first) {
+            rec.put(FIELD_ORIGIN_INVOICE, originId);
+            rec.put("originInvoice$_identifier", originDocNo);
+            first = false;
+          }
+        }
+        if (first) {
+          // no rows at all
           rec.put(FIELD_ORIGIN_INVOICE, JSONObject.NULL);
           rec.put("originInvoice$_identifier", JSONObject.NULL);
         }
+        rec.put(FIELD_ORIGIN_INVOICES, origins);
       }
     } catch (Exception e) {
       log.warn("Could not enrich origin invoice for {}: {}", invoiceId, e.getMessage());
@@ -451,7 +701,40 @@ public abstract class AbstractInvoiceHeaderHandler {
    * True when the invoice has one or more records in {@code C_Invoice_Reverse}.
    * Only meaningful in detail view (single record); do not call for list responses.
    */
-  @SuppressWarnings("java:S2077")
+  /**
+   * ETP-4783: Injects the synthetic {@code tbaiConfigActive} field into the GET response
+   * so the header form's {@code displayLogic} for {@code tbaiReverseinvoicecode} can
+   * evaluate it client-side.
+   *
+   * <p>Queries {@code tbai_config} for an active record in the same org as the invoice.
+   * Injects {@code 'Y'} when found, {@code 'N'} otherwise. The backend ignores this
+   * synthetic field in PATCH bodies ({@code NeoFieldFilter} drops unknown fields).
+   */
+  protected void enrichTbaiConfigActive(JSONObject rec) {
+    String value = "N"; // default: TBAI not active
+    try {
+      String orgId = rec.isNull("organization") ? null : rec.optString("organization", null);
+      if (orgId != null && !orgId.isEmpty()) {
+        String sql = "SELECT 1 FROM tbai_config WHERE ad_org_id = ? AND isactive = 'Y' LIMIT 1";
+        Connection conn = OBDal.getReadOnlyInstance().getConnection();
+        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+          ps.setString(1, orgId);
+          try (ResultSet rs = ps.executeQuery()) {
+            value = rs.next() ? "Y" : "N";
+          }
+        }
+      }
+    } catch (Exception e) {
+      log.debug("[ETP-4783] enrichTbaiConfigActive: {}", e.getMessage());
+    }
+    try {
+      rec.put("tbaiConfigActive", value);
+    } catch (Exception ignored) {
+      // best-effort: field stays absent on failure, which displayLogicJs treats as shown (safe default for TBAI orgs)
+    }
+  }
+
+    @SuppressWarnings("java:S2077")
   protected void enrichHasRectifications(JSONObject rec, String invoiceId) throws Exception {
     if (StringUtils.isBlank(invoiceId)) {
       rec.put("hasRectifications", false);
@@ -558,7 +841,7 @@ public abstract class AbstractInvoiceHeaderHandler {
    *     not a completion request (caller should continue to the default dispatch)
    */
   protected static NeoResponse completeInvoiceIfNeeded(NeoContext context) {
-    if (!isInvoiceCompleteAction(context)) {
+    if (!InvoiceCalloutHelper.isInvoiceCompleteAction(context)) {
       return null;
     }
     String invoiceId = context.getRecordId();
@@ -573,6 +856,11 @@ public abstract class AbstractInvoiceHeaderHandler {
       // neither the Verifactu nor the TBAI ProcessInvoiceHook reads RequestContext today, so this
       // is a non-issue in practice. Revisit if a future hook needs request-scoped context.
       ConnectionProvider conn = new DalConnectionProvider(false);
+      // ETP-4783: In Go, the Classic ETVFAC_C_INVOICE_SET_VERIFACTU callout is never triggered.
+      // Copy DocType Verifactu fields to the invoice before completing so GenerateRFAfterProcessingHook
+      // finds em_etvfac_inv_type / em_etvfac_verifac_desc populated (only for AR invoices; AP skipped
+      // by the hook anyway). Also ensures em_etsg_date_operation is set when null.
+      populateVerifactuFieldsFromDocType(invoiceId);
       ProcessInvoiceUtil processInvoiceUtil =
           WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class);
       // Void-date/supplier-reference params are only consulted for the void action (docAction RC).
@@ -595,10 +883,75 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   // ---------------------------------------------------------------------------
+  // Pre-completion Verifactu field population
+  // ---------------------------------------------------------------------------
+
+  /**
+   * ETP-4783: Copies Verifactu fields from the invoice's DocType to the invoice record itself
+   * before the completion hook chain runs, replicating the behaviour of the Classic callout
+   * {@code ETVFAC_C_INVOICE_SET_VERIFACTU} which Go never fires.
+   *
+   * <p>Only touches AR sales invoices where {@code em_etvfac_inv_type} is currently null.
+   * Uses native SQL so the Go module compiles even when the Verifactu module is absent.
+   * After the UPDATE the invoice is evicted from the Hibernate first-level cache so that
+   * {@link ProcessInvoiceUtil} (called immediately after) reads the fresh DB values.
+   *
+   * <p>Fields populated (strictly from DocType — no fallback derivation):
+   * <ul>
+   *   <li>{@code em_etvfac_inv_type} — invoice type (e.g. F1, R1) — must be set on the DocType</li>
+   *   <li>{@code em_etvfac_verifac_desc} — operation description — must be set on the DocType</li>
+   *   <li>{@code em_etvfac_reverseinvtype} — rectification method I/S (DocType, for R-types)</li>
+   *   <li>{@code em_etsg_date_operation} — defaults to {@code dateinvoiced} when null</li>
+   * </ul>
+   *
+   * <p><b>Developer responsibility:</b> any DocType added to Go for AR invoices MUST have
+   * {@code em_etvfac_inv_type} and {@code em_etvfac_verifac_desc} configured in its sampledata
+   * (and {@code em_etvfac_reverseinvtype} for R-types). No automatic derivation is performed —
+   * if those fields are absent the Verifactu hook will reject the invoice at completion.
+   *
+   * @param invoiceId the ID of the invoice being completed
+   */
+  @SuppressWarnings("java:S2077")
+  private static void populateVerifactuFieldsFromDocType(String invoiceId) {
+    String sql =
+        "UPDATE c_invoice i"
+        + "   SET em_etvfac_inv_type       = COALESCE(i.em_etvfac_inv_type,       dt.em_etvfac_inv_type),"
+        + "       em_etvfac_verifac_desc   = COALESCE(i.em_etvfac_verifac_desc,   dt.em_etvfac_verifac_desc),"
+        + "       em_etvfac_reverseinvtype = COALESCE(i.em_etvfac_reverseinvtype, dt.em_etvfac_reverseinvtype),"
+        + "       em_etsg_date_operation   = COALESCE(i.em_etsg_date_operation,   i.dateinvoiced)"
+        + "  FROM c_doctype dt"
+        + " WHERE i.c_invoice_id   = ?"
+        + "   AND dt.c_doctype_id  = i.c_doctypetarget_id"
+        + "   AND i.issotrx        = 'Y'"
+        + "   AND (i.em_etvfac_inv_type IS NULL OR i.em_etsg_date_operation IS NULL)";
+    try {
+      Connection conn = OBDal.getInstance().getConnection();
+      try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        ps.setString(1, invoiceId);
+        int rows = ps.executeUpdate();
+        if (rows > 0) {
+          // Evict from Hibernate first-level cache so ProcessInvoiceUtil sees the updated values
+          Invoice inv = OBDal.getInstance().getSession().get(Invoice.class, invoiceId);
+          if (inv != null) {
+            OBDal.getInstance().getSession().evict(inv);
+          }
+          log.debug("[INVOICE-COMPLETE] Populated Verifactu DocType fields for invoice {}", invoiceId);
+        }
+      }
+    } catch (Exception e) {
+      // Non-fatal: log and continue — if Verifactu is not installed the columns don't exist,
+      // and the hook itself will skip processing (shouldSkipSendingToVerifactu returns true).
+      log.debug("[INVOICE-COMPLETE] Could not populate Verifactu fields for invoice {}: {}",
+          invoiceId, e.getMessage());
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Pre-completion invoice line quantity validation
   // ---------------------------------------------------------------------------
 
-  private static final String FIELD_DOCUMENT_ACTION_INV = "documentAction";
+  // Package-private: also used by InvoiceCalloutHelper (S1448 extraction)
+  static final String FIELD_DOCUMENT_ACTION_INV = "documentAction";
 
   /**
    * Blocks invoice completion when any invoice line would over-invoice a shipment or receipt line.
@@ -614,7 +967,7 @@ public abstract class AbstractInvoiceHeaderHandler {
    */
   @SuppressWarnings("java:S2077")
   static NeoResponse validateLineQtyBeforeComplete(NeoContext context) {
-    if (!isInvoiceCompleteAction(context)) {
+    if (!InvoiceCalloutHelper.isInvoiceCompleteAction(context)) {
       return null;
     }
     String invoiceId = context.getRecordId();
@@ -691,30 +1044,6 @@ public abstract class AbstractInvoiceHeaderHandler {
       }
     }
     return null;
-  }
-
-  private static boolean isInvoiceCompleteAction(NeoContext context) {
-    if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
-      String method = context.getHttpMethod();
-      if (!"PATCH".equals(method) && !"PUT".equals(method)) {
-        return false;
-      }
-      JSONObject body = context.getRequestBody();
-      return body != null && "CO".equals(body.optString(FIELD_DOCUMENT_ACTION_INV, ""));
-    }
-    if (NeoEndpointType.ACTION.equals(context.getEndpointType())
-        && FIELD_DOCUMENT_ACTION_INV.equals(context.getFieldName())) {
-      JSONObject body = context.getRequestBody();
-      if (body == null) {
-        return false;
-      }
-      JSONObject fieldValues = body.optJSONObject("fieldValues");
-      String docAction = fieldValues != null
-          ? fieldValues.optString(FIELD_DOCUMENT_ACTION_INV, "")
-          : body.optString("docAction", body.optString(FIELD_DOCUMENT_ACTION_INV, ""));
-      return "CO".equals(docAction);
-    }
-    return false;
   }
 
   // ---------------------------------------------------------------------------
@@ -816,7 +1145,7 @@ public abstract class AbstractInvoiceHeaderHandler {
     if (!docCurrencyId.isEmpty() && orgCurrencyId != null
         && !docCurrencyId.equals(orgCurrencyId) && !invoiceDate.isEmpty()
         && !NeoExchangeRateService.hasRate(orgCurrencyId, docCurrencyId, invoiceDate)) {
-      appendMessage(body, "WARNING", "noExchangeRateAvailable");
+      InvoiceCalloutHelper.appendMessage(body, "WARNING", "noExchangeRateAvailable");
       log.debug("[ETP-4029] No conversion rate warning added (currency={})", docCurrencyId);
     }
   }
@@ -851,61 +1180,18 @@ public abstract class AbstractInvoiceHeaderHandler {
       }
       blockCalloutCurrencyUpdate(fields.updates(), fields.triggerField());
       checkExchangeRateWarning(fields.body(), fields.requestBody(), fields.formState(), fields.triggerField());
-      String recordId = resolveCalloutRecordId(context, fields.formState());
+      String recordId = InvoiceCalloutHelper.resolveCalloutRecordId(context, fields.formState());
       blockCalloutDocTypeUpdateIfLocked(fields.updates(), fields.triggerField(), recordId);
+      InvoiceCalloutHelper.applySiiAuthorizationCallout(fields.triggerField(), fields.requestBody(), fields.updates());
+      InvoiceCalloutHelper.applyVerifactuInvTypeFromDocType(fields.triggerField(), fields.requestBody(), fields.updates());
+      InvoiceCalloutHelper.applyRectificativeFieldsFromDocType(fields.triggerField(), fields.requestBody(), fields.updates());
+      InvoiceCalloutHelper.realignVerifactuDescWithFormStateDocType(fields.triggerField(), fields.formState(), fields.updates());
     } catch (Exception e) {
       log.warn("[ETP-4029/ETP-4535] afterCallout failed (non-fatal): {}", e.getMessage());
     }
     return null; // mutations applied in-place; dispatcher merges nothing extra
   }
 
-  /**
-   * Resolves the invoice's record id for a callout request.
-   *
-   * <p>Callout URLs carry no record-id path segment — {@code NeoServletSupport.parseSubEndpointPath}
-   * matches the callout route as a literal {@code {specName}/{entityName}/callout} 3-segment path
-   * with the record-id segment hardcoded {@code null}, and {@link NeoCalloutEndpoint#handleCallout}
-   * never calls {@code .recordId(...)} on the {@link NeoContext} builder. So
-   * {@link NeoContext#getRecordId()} is always {@code null} for a real callout, and the currently
-   * loaded record's id must instead be read from the callout's echoed {@code formState.id} — the
-   * same idiom already used by {@code InventoryLineHandler#afterCallout} (formState null-guard +
-   * {@code optString("id", ...)}) and {@code CalloutRequestBuilder#injectParentId}
-   * ({@code formState.has("id")} before reading).
-   *
-   * <p>{@code context.getRecordId()} is checked first as a defensive fallback for any future/other
-   * dispatch path that DOES populate it (e.g. a non-callout invocation of this shared method), but
-   * for the real production callout path it is always blank and {@code formState.id} is what fires.
-   *
-   * @param context   the current NeoContext
-   * @param formState the callout's {@code formState} object; may be {@code null}
-   * @return the resolved invoice record id, or {@code null} if neither source has one
-   */
-  private static String resolveCalloutRecordId(NeoContext context, JSONObject formState) {
-    String recordId = context.getRecordId();
-    if (StringUtils.isNotBlank(recordId)) {
-      return recordId;
-    }
-    if (formState == null) {
-      return null;
-    }
-    return StringUtils.trimToNull(formState.optString("id", null));
-  }
-
-  private static void appendMessage(JSONObject body, String type, String text) {
-    try {
-      org.codehaus.jettison.json.JSONArray messages = body.optJSONArray("messages");
-      if (messages == null) {
-        messages = new org.codehaus.jettison.json.JSONArray();
-        body.put("messages", messages);
-      }
-      JSONObject msg = new JSONObject();
-      msg.put("type", type);
-      msg.put("text", text);
-      messages.put(msg);
-    } catch (Exception e) {
-      log.warn("[ETP-4029] appendMessage failed: {}", e.getMessage());
-    }
-  }
 
   /**
    * Upserts the {@code C_Conversion_Rate_Document} record for an invoice whenever its currency
@@ -921,7 +1207,7 @@ public abstract class AbstractInvoiceHeaderHandler {
    * any other per-save hooks, before their own method-gated (e.g. GET-only) logic.
    *
    * <p>Resolves the invoice ID from the header {@code NeoContext} (via
-   * {@link #resolveInvoiceIdFromContext(NeoContext)}) and delegates to
+   * {@link InvoiceCalloutHelper#resolveInvoiceIdFromContext(NeoContext)}) and delegates to
    * {@link #autoCreateOrUpdateConversionRateDocument(String)}. Handlers that are NOT scoped to
    * the invoice header entity (e.g. {@link InvoiceLineHandler}, whose {@code NeoContext} carries
    * the line's own record ID, not the invoice's) must resolve the parent invoice ID themselves
@@ -935,7 +1221,7 @@ public abstract class AbstractInvoiceHeaderHandler {
     if (!"PATCH".equals(method) && !"PUT".equals(method) && !"POST".equals(method)) {
       return;
     }
-    String invoiceId = resolveInvoiceIdFromContext(context);
+    String invoiceId = InvoiceCalloutHelper.resolveInvoiceIdFromContext(context);
     autoCreateOrUpdateConversionRateDocument(invoiceId);
   }
 

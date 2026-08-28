@@ -20,8 +20,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Constructor;
@@ -29,7 +31,9 @@ import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -39,8 +43,18 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.MockedStatic;
 import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
+import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.model.ad.ui.Tab;
+
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFField;
 
 /**
  * Unit tests for {@link NeoFieldFilter}.
@@ -62,23 +76,31 @@ class NeoFieldFilterTest {
    * Creates a NeoFieldFilter via the private constructor for testing.
    */
   private static NeoFieldFilter createFilter(Set<String> included, Set<String> writable,
-      Map<String, String> apiKeyToProp, Map<String, String> propToApiKey, boolean active)
-      throws Exception {
+      Set<String> rejectableOnCreate, Map<String, String> apiKeyToProp,
+      Map<String, String> propToApiKey, boolean active) throws Exception {
     Constructor<NeoFieldFilter> ctor = NeoFieldFilter.class.getDeclaredConstructor(
-        Set.class, Set.class, Map.class, Map.class, boolean.class);
+        Set.class, Set.class, Set.class, Map.class, Map.class, boolean.class);
     ctor.setAccessible(true);
-    return ctor.newInstance(included, writable, apiKeyToProp, propToApiKey, active);
+    return ctor.newInstance(included, writable, rejectableOnCreate, apiKeyToProp, propToApiKey,
+        active);
   }
 
   private static NeoFieldFilter activeFilter(Set<String> included, Set<String> writable)
       throws Exception {
-    return createFilter(included, writable,
+    return createFilter(included, writable, Collections.emptySet(),
         Collections.emptyMap(), Collections.emptyMap(), true);
   }
 
   private static NeoFieldFilter activeFilterWithMappings(Set<String> included, Set<String> writable,
       Map<String, String> apiKeyToProp, Map<String, String> propToApiKey) throws Exception {
-    return createFilter(included, writable, apiKeyToProp, propToApiKey, true);
+    return createFilter(included, writable, Collections.emptySet(), apiKeyToProp, propToApiKey,
+        true);
+  }
+
+  private static NeoFieldFilter activeFilterWithRejectable(Set<String> included,
+      Set<String> writable, Set<String> rejectableOnCreate) throws Exception {
+    return createFilter(included, writable, rejectableOnCreate,
+        Collections.emptyMap(), Collections.emptyMap(), true);
   }
 
   private static boolean invokeIsMetadataKey(NeoFieldFilter filter, String key) throws Exception {
@@ -118,7 +140,7 @@ class NeoFieldFilterTest {
   class FilterGetResponse {
     @Test
     void inactiveFilterReturnsUnchanged() throws Exception {
-      NeoFieldFilter filter = createFilter(null, null,
+      NeoFieldFilter filter = createFilter(null, null, null,
           Collections.emptyMap(), Collections.emptyMap(), false);
       JSONObject input = new JSONObject().put("someField", "value");
       JSONObject result = filter.filterGetResponse(input);
@@ -191,6 +213,34 @@ class NeoFieldFilterTest {
     }
 
     @Test
+    @DisplayName("keeps 'updated' although no window can declare it (ETP-4787)")
+    void preservesUpdatedAuditKey() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id"));
+      NeoFieldFilter filter = activeFilter(included, included);
+
+      JSONObject row = new JSONObject();
+      row.put("id", "1");
+      row.put("updated", "2026-08-24T12:15:30+02:00");
+      row.put("updatedBy", "100");
+
+      JSONArray data = new JSONArray();
+      data.put(row);
+      JSONObject wrapper = new JSONObject()
+          .put("response", new JSONObject().put("data", data));
+
+      filter.filterGetResponse(wrapper);
+
+      JSONObject filtered = wrapper.getJSONObject("response")
+          .getJSONArray("data").getJSONObject(0);
+      // Rationale: updated is an AD column rather than an AD field, so it can never appear in
+      // the ETGO_SF_FIELD configuration, yet the client needs it to tell a cached rendering of
+      // the record from a stale one.
+      assertEquals("2026-08-24T12:15:30+02:00", filtered.getString("updated"));
+      // Only that one key is exempted, so the rest of the audit block stays filtered out.
+      assertFalse(filtered.has("updatedBy"));
+    }
+
+    @Test
     void renamesPropertiesToApiKeysInGetResponse() throws Exception {
       Set<String> included = new HashSet<>(Set.of("id", "priceActual"));
       Map<String, String> propToApi = new HashMap<>();
@@ -248,7 +298,7 @@ class NeoFieldFilterTest {
   class FilterWriteRequest {
     @Test
     void inactiveFilterReturnsUnchanged() throws Exception {
-      NeoFieldFilter filter = createFilter(null, null,
+      NeoFieldFilter filter = createFilter(null, null, null,
           Collections.emptyMap(), Collections.emptyMap(), false);
       JSONObject body = new JSONObject().put("any", "value");
       assertEquals(body, filter.filterWriteRequest(body));
@@ -271,6 +321,23 @@ class NeoFieldFilterTest {
       assertTrue(result.has("name"));
       assertFalse(result.has("readOnlyField"));
       assertFalse(result.has("unknownField"));
+    }
+
+    @Test
+    @DisplayName("'updated' is readable but never writable")
+    void stripsUpdatedFromWriteBody() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id"));
+      NeoFieldFilter filter = activeFilter(included, included);
+
+      JSONObject body = new JSONObject()
+          .put("id", "1")
+          .put("updated", "1999-01-01T00:00:00+00:00");
+
+      JSONObject result = filter.filterWriteRequest(body);
+      assertTrue(result.has("id"));
+      // The read-path exemption must not leak into the write path: letting a client set its
+      // own 'updated' would let it defeat the very staleness check the exemption exists for.
+      assertFalse(result.has("updated"));
     }
 
     @Test
@@ -368,6 +435,32 @@ class NeoFieldFilterTest {
   }
 
   @Nested
+  @DisplayName("emittableResponseKeys (IMP-18)")
+  class EmittableResponseKeys {
+    @Test
+    @DisplayName("Returns the included properties renamed to their API keys")
+    void returnsApiKeys() throws Exception {
+      Map<String, String> propToApiKey = new HashMap<>();
+      propToApiKey.put("dateAcct", "accountingDate");
+      NeoFieldFilter filter = activeFilterWithMappings(
+          new HashSet<>(Set.of("id", "documentNo", "dateAcct")), Collections.emptySet(),
+          Collections.emptyMap(), propToApiKey);
+
+      // The DAL name "dateAcct" must NOT appear: the caller never sees it, so asking for it is
+      // as wrong as asking for a field that does not exist.
+      assertEquals(Optional.of(Set.of("id", "documentNo", "accountingDate")),
+          filter.emittableResponseKeys());
+    }
+
+    @Test
+    @DisplayName("Returns Optional.empty() for an inactive filter — the response is unfiltered, so "
+        + "the spec cannot answer what is emittable")
+    void inactiveReturnsEmpty() {
+      assertEquals(Optional.empty(), NeoFieldFilter.forEntity(null, "Order").emittableResponseKeys());
+    }
+  }
+
+  @Nested
   @DisplayName("filterCreateRequest")
   class FilterCreateRequest {
     @Test
@@ -385,6 +478,111 @@ class NeoFieldFilterTest {
       JSONObject result = filter.filterCreateRequest(body);
       assertTrue(result.has("readOnlyField"), "Read-only included fields allowed on create");
       assertFalse(result.has("unknownField"));
+    }
+
+    /**
+     * IMP-28 clause 2: an included, read-only field with no configured default and no owning
+     * NeoHandler must be REJECTED (thrown), not silently dropped — that silent drop is the root
+     * cause the ticket describes: the caller gets 200 with the value discarded and no signal.
+     */
+    @Test
+    @DisplayName("rejects a read-only field with no default/handler excuse instead of dropping it")
+    void rejectsUnexcusedReadOnlyField() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "name", "salePrice"));
+      Set<String> writable = new HashSet<>(Set.of("id", "name"));
+      Set<String> rejectableOnCreate = new HashSet<>(Set.of("salePrice"));
+      NeoFieldFilter filter = activeFilterWithRejectable(included, writable, rejectableOnCreate);
+
+      JSONObject body = new JSONObject();
+      body.put("id", "1");
+      body.put("name", "Test");
+      body.put("salePrice", 42.0);
+
+      ReadOnlyFieldRejectedException ex = assertThrows(
+          ReadOnlyFieldRejectedException.class, () -> filter.filterCreateRequest(body));
+      assertEquals("salePrice", ex.getFieldName());
+    }
+
+    @Test
+    @DisplayName("rejection names the API-facing key the caller actually sent, not the DAL name")
+    void rejectionReportsApiKeyNotDalName() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "priceActual"));
+      Set<String> writable = new HashSet<>(Set.of("id"));
+      Set<String> rejectableOnCreate = new HashSet<>(Set.of("priceActual"));
+      Map<String, String> apiKeyToProp = new HashMap<>();
+      apiKeyToProp.put("unitPrice", "priceActual");
+      NeoFieldFilter filter = createFilter(included, writable, rejectableOnCreate,
+          apiKeyToProp, Collections.emptyMap(), true);
+
+      JSONObject body = new JSONObject();
+      body.put("id", "1");
+      body.put("unitPrice", 42.0);
+
+      ReadOnlyFieldRejectedException ex = assertThrows(
+          ReadOnlyFieldRejectedException.class, () -> filter.filterCreateRequest(body));
+      assertEquals("unitPrice", ex.getFieldName(),
+          "the caller sent 'unitPrice' — that is the name they must see, not the DAL 'priceActual'");
+    }
+
+    @Test
+    @DisplayName("a request that omits the rejectable field entirely is not rejected")
+    void doesNotRejectWhenFieldAbsent() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "name", "salePrice"));
+      Set<String> writable = new HashSet<>(Set.of("id", "name"));
+      Set<String> rejectableOnCreate = new HashSet<>(Set.of("salePrice"));
+      NeoFieldFilter filter = activeFilterWithRejectable(included, writable, rejectableOnCreate);
+
+      JSONObject body = new JSONObject();
+      body.put("id", "1");
+      body.put("name", "Test");
+
+      JSONObject result = filter.filterCreateRequest(body);
+      assertFalse(result.has("salePrice"));
+    }
+
+    @Test
+    @DisplayName("rejection also fires when the body arrives wrapped in a data envelope")
+    void rejectsInsideDataEnvelope() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "salePrice"));
+      Set<String> writable = new HashSet<>(Set.of("id"));
+      Set<String> rejectableOnCreate = new HashSet<>(Set.of("salePrice"));
+      NeoFieldFilter filter = activeFilterWithRejectable(included, writable, rejectableOnCreate);
+
+      JSONObject inner = new JSONObject();
+      inner.put("id", "1");
+      inner.put("salePrice", 42.0);
+      JSONObject body = new JSONObject();
+      body.put("data", inner);
+
+      assertThrows(
+          ReadOnlyFieldRejectedException.class, () -> filter.filterCreateRequest(body));
+    }
+
+    /**
+     * IMP-28 clause 2 regression guard: fields whose value is legitimately supplied by their
+     * entity's own NeoHandler pre-hook (e.g. {@code InventoryLineHandler} injecting
+     * {@code bookQuantity}, {@code transactionDocument} on document headers) must keep passing
+     * through unfiltered — they are simply never added to rejectableOnCreateFields in the first
+     * place (see NeoFieldFilter#processFieldMappings), so an empty rejectable set behaves
+     * exactly like the pre-clause-2 passthrough.
+     */
+    @Test
+    @DisplayName("still passes through a handler-supplied read-only field (regression: bookQuantity/transactionDocument)")
+    void passesThroughHandlerSuppliedReadOnlyField() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "bookQuantity", "transactionDocument"));
+      Set<String> writable = new HashSet<>(Set.of("id"));
+      // Empty: these fields were excluded from rejectableOnCreateFields because their entity has
+      // a Java_Qualifier (a NeoHandler may have supplied them) or an AD default is configured.
+      NeoFieldFilter filter = activeFilterWithRejectable(included, writable, Collections.emptySet());
+
+      JSONObject body = new JSONObject();
+      body.put("id", "1");
+      body.put("bookQuantity", 5);
+      body.put("transactionDocument", "some-doc-type-id");
+
+      JSONObject result = filter.filterCreateRequest(body);
+      assertTrue(result.has("bookQuantity"));
+      assertTrue(result.has("transactionDocument"));
     }
   }
 
@@ -545,6 +743,122 @@ class NeoFieldFilterTest {
           apiKeyMap.get("account$_identifier"),
           "apiKeyMap must map qualifier variant to DAL variant");
       assertEquals(1, apiKeyMap.size());
+    }
+  }
+
+  /**
+   * IMP-37 — clause 2 versus the explicit write grants in {@link NeoFieldFilter#forEntity}.
+   *
+   * <p>These two tests deliberately go through {@code forEntity} rather than the private
+   * constructor every other test here uses. The defect they cover lives in how forEntity
+   * COMPOSES its three sets, not in {@code filterCreateRequest} — a test that hands the
+   * constructor a ready-made {@code rejectableOnCreate} cannot observe it at all, which is
+   * exactly the blind spot IMP-30 §4 describes (a green unit test on a method whose real
+   * caller behaves differently).
+   */
+  @Nested
+  @DisplayName("forEntity: clause-2 rejection reconciled with explicit write grants")
+  class ParentColumnExemption {
+
+    private static final String CHILD_ENTITY = "BusinessPartnerBankAccount";
+
+    /** A read-only, included SFField with no AD default — clause 2's exact membership rule. */
+    private SFField readOnlyField(String dbColumn, String propName) {
+      Column col = mock(Column.class);
+      when(col.getDBColumnName()).thenReturn(dbColumn);
+      when(col.getDefaultValue()).thenReturn(null);
+      SFField f = mock(SFField.class);
+      when(f.getADColumn()).thenReturn(col);
+      when(f.isIncluded()).thenReturn(true);
+      when(f.isReadOnly()).thenReturn(true);
+      when(f.getJavaQualifier()).thenReturn(propName);
+      return f;
+    }
+
+    private Property primitiveProp(String name) {
+      Property prop = mock(Property.class);
+      when(prop.getName()).thenReturn(name);
+      when(prop.isPrimitive()).thenReturn(true);
+      return prop;
+    }
+
+    /**
+     * Builds the filter for a child entity with NO Java_Qualifier (so clause 2 is armed) whose
+     * tab table declares C_BPartner_ID as its link-to-parent column. Both C_BPartner_ID and
+     * CreditCardType are curated included + read-only + no default.
+     */
+    private NeoFieldFilter buildChildEntityFilter() {
+      // Built as locals first: stubbing a fresh mock INSIDE a when(...).thenReturn(...)
+      // expression is nested stubbing, which Mockito rejects at runtime.
+      Property parentProp = primitiveProp("businessPartner");
+      Property cardTypeProp = primitiveProp("creditCardType");
+
+      Entity dalEntity = mock(Entity.class);
+      when(dalEntity.getPropertyByColumnName("C_BPartner_ID")).thenReturn(parentProp);
+      when(dalEntity.getPropertyByColumnName("CreditCardType")).thenReturn(cardTypeProp);
+
+      Column parentCol = mock(Column.class);
+      when(parentCol.isActive()).thenReturn(true);
+      when(parentCol.isLinkToParentColumn()).thenReturn(true);
+      when(parentCol.getDBColumnName()).thenReturn("C_BPartner_ID");
+
+      List<Column> tabColumns = List.of(parentCol);
+      Table table = mock(Table.class);
+      when(table.getADColumnList()).thenReturn(tabColumns);
+      Tab tab = mock(Tab.class);
+      when(tab.getTable()).thenReturn(table);
+
+      SFEntity sfEntity = mock(SFEntity.class);
+      when(sfEntity.getId()).thenReturn("ENT-1");
+      when(sfEntity.getName()).thenReturn("bankAccount");
+      when(sfEntity.getJavaQualifier()).thenReturn(null);
+      when(sfEntity.getADTab()).thenReturn(tab);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<SFField> crit = mock(OBCriteria.class);
+      List<SFField> sfFields = List.of(
+          readOnlyField("C_BPartner_ID", "businessPartner"),
+          readOnlyField("CreditCardType", "creditCardType"));
+      when(crit.list()).thenReturn(sfFields);
+      OBDal dal = mock(OBDal.class);
+      when(dal.createCriteria(SFField.class)).thenReturn(crit);
+
+      ModelProvider modelProvider = mock(ModelProvider.class);
+      when(modelProvider.getEntity(CHILD_ENTITY)).thenReturn(dalEntity);
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<ModelProvider> mpMock = mockStatic(ModelProvider.class)) {
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+        mpMock.when(ModelProvider::getInstance).thenReturn(modelProvider);
+        return NeoFieldFilter.forEntity(sfEntity, CHILD_ENTITY);
+      }
+    }
+
+    @Test
+    @DisplayName("a read-only link-to-parent FK is accepted on create, not rejected")
+    void parentFkSurvivesClause2() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("businessPartner", "BP-1");
+
+      JSONObject filtered = buildChildEntityFilter().filterCreateRequest(body);
+
+      assertEquals("BP-1", filtered.optString("businessPartner"),
+          "the parent link must reach persistence: a child row cannot omit it, so rejecting it"
+              + " makes the entity uncreatable by any client");
+    }
+
+    @Test
+    @DisplayName("a read-only NON-parent field on the same entity is still rejected")
+    void nonParentReadOnlyStillRejected() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("creditCardType", "VISA");
+
+      NeoFieldFilter filter = buildChildEntityFilter();
+      ReadOnlyFieldRejectedException ex = assertThrows(ReadOnlyFieldRejectedException.class,
+          () -> filter.filterCreateRequest(body),
+          "the parent-FK exemption must not disarm clause 2 for the rest of the entity —"
+              + " without this the fix would be a silent blanket disable");
+      assertEquals("creditCardType", ex.getFieldName());
     }
   }
 }

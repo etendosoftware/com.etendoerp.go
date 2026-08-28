@@ -17,9 +17,11 @@
 
 package com.etendoerp.go.schemaforge.email.contracts;
 
+import com.etendoerp.go.schemaforge.email.EmailDocumentDetail;
 import com.etendoerp.go.schemaforge.email.EmailDocumentRecord;
 import com.etendoerp.go.schemaforge.email.EmailDocumentRecordResolver;
 
+import java.util.Arrays;
 import java.util.Optional;
 
 import org.apache.commons.lang3.StringUtils;
@@ -53,12 +55,17 @@ final class DalInvoiceEmailDocumentResolver implements EmailDocumentRecordResolv
           businessPartner);
     }
     String recipientName = businessPartner == null ? null : businessPartner.getName();
+    String amount = DalEmailContractDataResolver.formatAmount(invoice.getGrandTotalAmount(),
+        invoice.getCurrency());
     return Optional.of(EmailDocumentRecord.withGeneratedDownloadLink(recipientName,
         recipientEmail,
         invoice.getId(),
         invoice.getDocumentNo(),
-        DalEmailContractDataResolver.formatAmount(invoice.getGrandTotalAmount(),
-            invoice.getCurrency()),
-        invoice.getClient().getId()));
+        amount,
+        invoice.getClient().getId(),
+        Arrays.asList(
+            EmailDocumentDetail.date("document.detail.date", invoice.getInvoiceDate()),
+            EmailDocumentDetail.date("document.detail.dueDate", invoice.getETGODueDate()),
+            EmailDocumentDetail.text("document.detail.total", amount))));
   }
 }

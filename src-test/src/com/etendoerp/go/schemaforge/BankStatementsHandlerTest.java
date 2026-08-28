@@ -81,6 +81,7 @@ public class BankStatementsHandlerTest {
 
   private BankStatementsHandler handler;
   private MockedStatic<BankStatementAggregates> aggMock;
+  private MockedStatic<BankStatementLinePruner> prunerMock;
 
   @Before
   public void setUp() {
@@ -89,6 +90,10 @@ public class BankStatementsHandlerTest {
     // ModelProvider. Stub it globally (no-op) so happy-path tests don't have to
     // wire the aggregate model; dedicated BankStatementAggregatesTest covers it.
     aggMock = mockStatic(BankStatementAggregates.class);
+    // The zero-amount prune reads its lines through OBDal; stub it here so the
+    // import/preview happy paths don't have to wire a criteria each time. The
+    // rule itself is covered by BankStatementLinePrunerTest.
+    prunerMock = mockStatic(BankStatementLinePruner.class);
   }
 
   /**
@@ -102,7 +107,20 @@ public class BankStatementsHandlerTest {
     if (aggMock != null) {
       aggMock.close();
     }
+    if (prunerMock != null) {
+      prunerMock.close();
+    }
     Mockito.framework().clearInlineMocks();
+  }
+
+  /**
+   * Programs the statically-mocked prune for {@code statement}. The prune rule
+   * itself is covered by {@link BankStatementLinePrunerTest}; here we only care
+   * about how the handler reacts to its counts.
+   */
+  private void stubPrune(FIN_BankStatement statement, int kept, int discarded) {
+    prunerMock.when(() -> BankStatementLinePruner.pruneZeroAmountLines(statement))
+        .thenReturn(new BankStatementLinePruner.PruneResult(kept, discarded));
   }
 
   // ── handle() routing ───────────────────────────────────────────────────
@@ -310,6 +328,7 @@ public class BankStatementsHandlerTest {
     doReturn(statement).when(handler).newBankStatement(eq(account), anyString());
     doReturn(7).when(handler).parseC43(any(ByteArrayInputStream.class), eq(statement));
     doNothing().when(handler).processStatement(statement);
+    stubPrune(statement, 7, 0);
 
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
@@ -338,6 +357,7 @@ public class BankStatementsHandlerTest {
     doReturn(statement).when(handler).newBankStatement(eq(account), anyString());
     doReturn(1).when(handler).parseGenericCsv(any(ByteArrayInputStream.class), eq(statement));
     doNothing().when(handler).processStatement(statement);
+    stubPrune(statement, 1, 0);
 
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
@@ -394,6 +414,7 @@ public class BankStatementsHandlerTest {
     l1.put("date", "2026-01-01T00:00:00Z");
     lines.put(l1);
     doReturn(lines).when(handler).readLinesForPreview("stmt-tmp");
+    stubPrune(statement, 3, 0);
 
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
@@ -406,6 +427,157 @@ public class BankStatementsHandlerTest {
       JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data");
       assertEquals(1, data.getInt("lineCount"));
       assertEquals("C43", data.getString("format"));
+    }
+  }
+
+  // ── zero-amount lines / empty files (alignment with Classic) ───────────
+
+  @Test
+  public void importReportsDiscardedZeroAmountLinesAndCountsOnlySurvivors() throws Exception {
+    JSONObject body = body("acc-1", "f.csv", encode(csvHeaderAndOneRow()));
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    when(statement.getId()).thenReturn("stmt-new");
+
+    doReturn(statement).when(handler).newBankStatement(eq(account), anyString());
+    doReturn(10).when(handler).parseGenericCsv(any(ByteArrayInputStream.class), eq(statement));
+    doNothing().when(handler).processStatement(statement);
+    // The parser saved 10 rows; one of them carried no amount at all.
+    stubPrune(statement, 9, 1);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(account);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "import"));
+      assertEquals(201, r.getHttpStatus());
+      JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data");
+      // lineCount reports what was actually persisted, not what was parsed.
+      assertEquals(9, data.getInt("lineCount"));
+      assertEquals(1, data.getInt("discardedLines"));
+    }
+  }
+
+  @Test
+  public void importRejectsAFileWhoseLinesAllLackAnAmount() throws Exception {
+    JSONObject body = body("acc-1", "f.csv", encode(csvHeaderAndOneRow()));
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+
+    doReturn(statement).when(handler).newBankStatement(eq(account), anyString());
+    doReturn(2).when(handler).parseGenericCsv(any(ByteArrayInputStream.class), eq(statement));
+    stubPrune(statement, 0, 2);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(account);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "import"));
+      assertEquals(400, r.getHttpStatus());
+      assertEquals("NO_VALID_LINES", r.getBody().getJSONObject("error").getString("code"));
+      // Nothing is left behind and the statement is never processed.
+      verify(dal).rollbackAndClose();
+      verify(handler, never()).processStatement(any());
+    }
+  }
+
+  @Test
+  public void importRejectsACsvWithOnlyItsHeaderRow() throws Exception {
+    JSONObject body = body("acc-1", "f.csv", encode(csvHeaderOnly()));
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+
+    doReturn(statement).when(handler).newBankStatement(eq(account), anyString());
+    doReturn(0).when(handler).parseGenericCsv(any(ByteArrayInputStream.class), eq(statement));
+    stubPrune(statement, 0, 0);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(account);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "import"));
+      assertEquals(400, r.getHttpStatus());
+      assertEquals("NO_VALID_LINES", r.getBody().getJSONObject("error").getString("code"));
+      verify(handler, never()).processStatement(any());
+    }
+  }
+
+  @Test
+  public void previewRejectsAFileWithNoValidLines() throws Exception {
+    JSONObject body = body("acc-1", "f.csv", encode(csvHeaderOnly()));
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    when(statement.getId()).thenReturn("stmt-tmp");
+
+    doReturn(statement).when(handler).newBankStatement(eq(account), anyString());
+    doReturn(0).when(handler).parseGenericCsv(any(), any());
+    stubPrune(statement, 0, 0);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(account);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "preview"));
+      assertEquals(400, r.getHttpStatus());
+      assertEquals("NO_VALID_LINES", r.getBody().getJSONObject("error").getString("code"));
+      // The user never reaches step 2, so the lines are never read back.
+      verify(handler, never()).readLinesForPreview(anyString());
+    }
+  }
+
+  @Test
+  public void previewSurfacesTheDiscardedLineCount() throws Exception {
+    JSONObject body = body("acc-1", "f.csv", encode(csvHeaderAndOneRow()));
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    when(statement.getId()).thenReturn("stmt-tmp");
+
+    doReturn(statement).when(handler).newBankStatement(eq(account), anyString());
+    doReturn(2).when(handler).parseGenericCsv(any(), any());
+    stubPrune(statement, 1, 1);
+
+    JSONArray lines = new JSONArray();
+    JSONObject l1 = new JSONObject();
+    l1.put("cramount", "100");
+    l1.put("dramount", "0");
+    l1.put("date", "2026-01-01T00:00:00Z");
+    lines.put(l1);
+    doReturn(lines).when(handler).readLinesForPreview("stmt-tmp");
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(account);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "preview"));
+      assertEquals(200, r.getHttpStatus());
+      JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals(1, data.getInt("lineCount"));
+      assertEquals(1, data.getInt("discardedLines"));
     }
   }
 
@@ -580,6 +752,11 @@ public class BankStatementsHandlerTest {
     return sb.toString();
   }
 
+  /** A CSV that carries its header row and nothing else. */
+  private static String csvHeaderOnly() {
+    return "Transaction Date,Reference No.,Business Partner Name,Amount OUT,Amount IN,Description\n";
+  }
+
   private static String csvHeaderAndOneRow() {
     return "Transaction Date,Reference No.,Business Partner Name,Amount OUT,Amount IN,Description\n"
         + "01/02/2026,REF-1,Acme,0,100,Line\n";
@@ -739,6 +916,92 @@ public class BankStatementsHandlerTest {
       verify(line).setBusinessPartner(bp);
       verify(line).setGLItem(gl);
       verify(line).setDescription("Transferencia");
+    }
+  }
+
+  @Test
+  public void handleCreateStoresTwoStarsWhenTheLineHasNoReference() throws Exception {
+    // Reference No is optional in BOTH flows; a blank one becomes "**", the same
+    // value Classic's Utility.createFIN_BankStatementLine writes.
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("name", "Extracto manual");
+    JSONArray lines = new JSONArray();
+    JSONObject noRef = new JSONObject();
+    noRef.put("date", "2026-06-02T00:00:00Z");
+    noRef.put("description", "Transferencia recibida");
+    noRef.put("in", 3500.0);
+    noRef.put("out", 0);
+    lines.put(noRef);
+    body.put("lines", lines);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    when(statement.getId()).thenReturn("stmt-new");
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+
+    doReturn(statement).when(handler).newManualBankStatement(any(), any());
+    doNothing().when(handler).processStatement(any());
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(account);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FIN_BankStatementLine.class)).thenReturn(line);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "create"));
+      assertEquals(201, r.getHttpStatus());
+      verify(line).setReferenceNo("**");
+    }
+  }
+
+  @Test
+  public void handleCreateRejectsALineWithNoAmountOnEitherSide() throws Exception {
+    // The manual flow errors instead of silently dropping the row: unlike a file
+    // import there is a user present who can fix it. Closes the API-level hole
+    // where only the modal validated this.
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("name", "Extracto manual");
+    JSONArray lines = new JSONArray();
+    JSONObject amountLess = new JSONObject();
+    amountLess.put("date", "2026-06-02T00:00:00Z");
+    amountLess.put("reference", "REF-1"); // non-blank → not skipped as an empty row
+    amountLess.put("in", 0);
+    amountLess.put("out", 0);
+    lines.put(amountLess);
+    body.put("lines", lines);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+
+    doReturn(statement).when(handler).newManualBankStatement(any(), any());
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(account);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FIN_BankStatementLine.class)).thenReturn(line);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "create"));
+      assertEquals(400, r.getHttpStatus());
+      assertTrue(r.getBody().getJSONObject("error").getString("message")
+          .contains("amount"));
+      verify(handler, never()).processStatement(any());
+      verify(dal, never()).save(line);
     }
   }
 
