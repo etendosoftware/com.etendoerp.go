@@ -511,10 +511,10 @@ public class SFRolesOverview extends BaseWebhookService {
   }
 
   /**
-   * Counts the distinct users with an active {@code AD_User_Roles} row for {@code role}. Only
-   * valid for a REAL, directly-assignable role (a tenant's own role, or the client-admin role) —
-   * never for a system-level template, which users are never assigned to directly (see the class
-   * javadoc's system-template-fallback section).
+   * The distinct users with an active {@code AD_User_Roles} row for {@code role}. Only valid for a
+   * REAL, directly-assignable role (a tenant's own role, or the client-admin role) — never for a
+   * system-level template, which users are never assigned to directly (see the class javadoc's
+   * system-template-fallback section).
    *
    * <p><b>Cross-client bootstrap user excluded (ETP-5065).</b> Etendo core's standard
    * client-provisioning flow ({@code InitialClientSetup}/{@code InitialOrgSetup} reference-data
@@ -535,24 +535,13 @@ public class SFRolesOverview extends BaseWebhookService {
    * in {@code AD_User_Roles} (unwiring, not deleting, their personal role) — so, unlike the 4
    * fixed-name roles, one or more real users holding a DIRECT {@code AD_User_Roles} row here is
    * always the correct, intended shape, both today and after that feature ships. This fix does
-   * NOT extend to {@code countActiveUsers} calls for an active tenant-owned copy of a fixed-name
-   * role (Finance/Sales/Purchasing/Inventory) composed onto via a personal role's {@code
-   * AD_Role_Inheritance} — see {@link #addTenantRoleCardWithTemplateOverlap} for that separate
-   * fix, folded into the same ETP-5065 ticket after further investigation.</p>
+   * does not extend to the direct-assignee set for an active tenant-owned copy of a fixed-name role
+   * (Finance/Sales/Purchasing/Inventory) composed onto via a personal role's {@code
+   * AD_Role_Inheritance} — see {@link #addTenantRoleCardWithTemplateOverlap} for that separate fix,
+   * folded into the same ETP-5065 ticket after further investigation.</p>
    *
-   * <p>Extracted to {@link #resolveActiveUserIds(Role)} so {@link
-   * #addTenantRoleCardWithTemplateOverlap} can union this method's direct-assignee set with
-   * template-composed users before taking a final size — this method itself is now a thin
-   * wrapper, kept for the client-admin call site in {@link #addTenantRoleCard}.</p>
-   */
-  private int countActiveUsers(Role role) {
-    return resolveActiveUserIds(role).size();
-  }
-
-  /**
-   * The distinct users with an active {@code AD_User_Roles} row for {@code role}, filtered to
-   * users belonging to {@code role}'s own client — see {@link #countActiveUsers(Role)}'s javadoc
-   * for why (excludes the cross-client bootstrap {@code admin}/{@code AD_User_ID='100'} login).
+   * <p>Returns ids instead of a count so {@link #addTenantRoleCardWithTemplateOverlap} can union the
+   * direct-assignee set with template-composed users before taking a final size.</p>
    */
   @SuppressWarnings("unchecked")
   private Set<String> resolveActiveUserIds(Role role) {

@@ -496,7 +496,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     }
 
     /**
-     * The promote/demote admin design (see {@link SFRolesOverview#countActiveUsers(Role)}'s
+     * The promote/demote admin design (see {@link SFRolesOverview#resolveActiveUserIds(Role)}'s
      * javadoc) legitimately assigns the tenant admin role directly, in {@code AD_User_Roles}, to
      * one or more real, same-client users at once. Fix 1's added client-scoping restriction must
      * not accidentally cap or dedupe this down — two DISTINCT same-client users must both count.
