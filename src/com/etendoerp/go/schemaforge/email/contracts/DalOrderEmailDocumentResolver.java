@@ -17,9 +17,12 @@
 
 package com.etendoerp.go.schemaforge.email.contracts;
 
+import com.etendoerp.go.schemaforge.email.EmailDocumentDetail;
 import com.etendoerp.go.schemaforge.email.EmailDocumentRecord;
 import com.etendoerp.go.schemaforge.email.EmailDocumentRecordResolver;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 
 import org.apache.commons.lang3.StringUtils;
@@ -65,13 +68,31 @@ final class DalOrderEmailDocumentResolver implements EmailDocumentRecordResolver
           businessPartner);
     }
     String recipientName = businessPartner == null ? null : businessPartner.getName();
+    String amount = DalEmailContractDataResolver.formatAmount(order.getGrandTotalAmount(),
+        order.getCurrency());
     return Optional.of(EmailDocumentRecord.withGeneratedDownloadLink(recipientName,
         recipientEmail,
         order.getId(),
         order.getDocumentNo(),
-        DalEmailContractDataResolver.formatAmount(order.getGrandTotalAmount(),
-            order.getCurrency()),
-        order.getClient().getId()));
+        amount,
+        order.getClient().getId(),
+        buildDetails(order, amount)));
+  }
+
+  /**
+   * Builds the summary rows for this order.
+   *
+   * <p>A quotation adds its validity date: on a quotation, "valid until" is the line the customer
+   * actually acts on. It is dropped when the order does not carry one.</p>
+   */
+  private List<EmailDocumentDetail> buildDetails(Order order, String amount) {
+    List<EmailDocumentDetail> details = new ArrayList<>();
+    details.add(EmailDocumentDetail.date("document.detail.date", order.getOrderDate()));
+    if (documentFamily == SalesOrderDocumentFamily.SALES_QUOTATION) {
+      details.add(EmailDocumentDetail.date("document.detail.validUntil", order.getValidUntil()));
+    }
+    details.add(EmailDocumentDetail.text("document.detail.total", amount));
+    return details;
   }
 
   boolean acceptsDocumentSubtype(String documentSubtype) {

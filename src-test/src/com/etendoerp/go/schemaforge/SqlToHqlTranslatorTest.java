@@ -224,4 +224,161 @@ class SqlToHqlTranslatorTest {
       assertEquals("e.businessPartner.id", result);
     }
   }
+
+  // -------------------------------------------------------------------------
+  // convertSqlToHql
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("convertSqlToHql")
+  class ConvertSqlToHql {
+
+    @Test
+    @DisplayName("Unknown target entity returns the clause unchanged")
+    void unknownEntityReturnsUnchanged() {
+      try (org.mockito.MockedStatic<org.openbravo.base.model.ModelProvider> modelProviderMock =
+          org.mockito.Mockito.mockStatic(org.openbravo.base.model.ModelProvider.class)) {
+        org.openbravo.base.model.ModelProvider modelProvider =
+            org.mockito.Mockito.mock(org.openbravo.base.model.ModelProvider.class);
+        modelProviderMock.when(org.openbravo.base.model.ModelProvider::getInstance)
+            .thenReturn(modelProvider);
+        org.mockito.Mockito.when(modelProvider.getEntity("Unknown")).thenReturn(null);
+
+        String result = SqlToHqlTranslator.convertSqlToHql("X.Y = 1", "Unknown");
+        assertEquals("X.Y = 1", result);
+      }
+    }
+
+    @Test
+    @DisplayName("Translates a self-referencing FK TABLE.COLUMN clause (C_Tax.Parent_Tax_ID IS NULL)")
+    void translatesSelfReferencingFkClause() {
+      try (org.mockito.MockedStatic<org.openbravo.base.model.ModelProvider> modelProviderMock =
+          org.mockito.Mockito.mockStatic(org.openbravo.base.model.ModelProvider.class)) {
+        org.openbravo.base.model.ModelProvider modelProvider =
+            org.mockito.Mockito.mock(org.openbravo.base.model.ModelProvider.class);
+        modelProviderMock.when(org.openbravo.base.model.ModelProvider::getInstance)
+            .thenReturn(modelProvider);
+
+        org.openbravo.base.model.Entity taxEntity =
+            org.mockito.Mockito.mock(org.openbravo.base.model.Entity.class);
+        org.mockito.Mockito.when(taxEntity.getTableName()).thenReturn("C_Tax");
+        org.openbravo.base.model.Property parentTaxRateProp =
+            org.mockito.Mockito.mock(org.openbravo.base.model.Property.class);
+        org.mockito.Mockito.when(parentTaxRateProp.isPrimitive()).thenReturn(false);
+        org.mockito.Mockito.when(parentTaxRateProp.getTargetEntity()).thenReturn(taxEntity);
+        org.mockito.Mockito.when(parentTaxRateProp.getName()).thenReturn("parentTaxRate");
+        org.mockito.Mockito.when(taxEntity.getPropertyByColumnName("Parent_Tax_ID"))
+            .thenReturn(parentTaxRateProp);
+        org.mockito.Mockito.when(modelProvider.getEntity("FinancialMgmtTaxRate"))
+            .thenReturn(taxEntity);
+
+        String result = SqlToHqlTranslator.convertSqlToHql(
+            "C_Tax.Parent_Tax_ID IS NULL", "FinancialMgmtTaxRate");
+        assertEquals("e.parentTaxRate.id IS NULL", result);
+      }
+    }
+
+    @Test
+    @DisplayName("Preserves an @#Param@ placeholder even when it shares a name with a real FK column")
+    void preservesParamPlaceholderMatchingColumnName() {
+      // Regression for the corruption risk found while wiring convertSqlToHql into
+      // AD_Ref_Table.SQLWhereClause resolution (ETP-4975): "M_Warehouse.AD_Client_ID=@#AD_Client_ID@"
+      // must NOT have the bare "AD_Client_ID" inside the @#...@ marker rewritten too — that would
+      // produce unparsable HQL like "@#e.client.id@" that the later param-substitution step can no
+      // longer recognize as a placeholder.
+      try (org.mockito.MockedStatic<org.openbravo.base.model.ModelProvider> modelProviderMock =
+          org.mockito.Mockito.mockStatic(org.openbravo.base.model.ModelProvider.class)) {
+        org.openbravo.base.model.ModelProvider modelProvider =
+            org.mockito.Mockito.mock(org.openbravo.base.model.ModelProvider.class);
+        modelProviderMock.when(org.openbravo.base.model.ModelProvider::getInstance)
+            .thenReturn(modelProvider);
+
+        org.openbravo.base.model.Entity warehouseEntity =
+            org.mockito.Mockito.mock(org.openbravo.base.model.Entity.class);
+        org.mockito.Mockito.when(warehouseEntity.getTableName()).thenReturn("M_Warehouse");
+
+        org.openbravo.base.model.Entity clientEntity =
+            org.mockito.Mockito.mock(org.openbravo.base.model.Entity.class);
+        org.openbravo.base.model.Property clientProp =
+            org.mockito.Mockito.mock(org.openbravo.base.model.Property.class);
+        org.mockito.Mockito.when(clientProp.isPrimitive()).thenReturn(false);
+        org.mockito.Mockito.when(clientProp.getTargetEntity()).thenReturn(clientEntity);
+        org.mockito.Mockito.when(clientProp.getName()).thenReturn("client");
+        org.mockito.Mockito.when(warehouseEntity.getPropertyByColumnName("AD_Client_ID"))
+            .thenReturn(clientProp);
+
+        org.mockito.Mockito.when(modelProvider.getEntity("Warehouse")).thenReturn(warehouseEntity);
+
+        String result = SqlToHqlTranslator.convertSqlToHql(
+            "M_Warehouse.AD_Client_ID=@#AD_Client_ID@", "Warehouse");
+
+        assertEquals("e.client.id=@#AD_Client_ID@", result);
+      }
+    }
+
+    @Test
+    @DisplayName("Drops a nested-subquery clause entirely, returning null (no filter)")
+    void dropsWholeClauseWhenOnlySegmentHasNestedSubquery() {
+      // If the clause has no surviving segment, convertSqlToHql must signal "no filter" (null)
+      // rather than emit a where-clause built from raw, untranslated SQL.
+      try (org.mockito.MockedStatic<org.openbravo.base.model.ModelProvider> modelProviderMock =
+          org.mockito.Mockito.mockStatic(org.openbravo.base.model.ModelProvider.class)) {
+        org.openbravo.base.model.ModelProvider modelProvider =
+            org.mockito.Mockito.mock(org.openbravo.base.model.ModelProvider.class);
+        modelProviderMock.when(org.openbravo.base.model.ModelProvider::getInstance)
+            .thenReturn(modelProvider);
+
+        org.openbravo.base.model.Entity warehouseEntity =
+            org.mockito.Mockito.mock(org.openbravo.base.model.Entity.class);
+        org.mockito.Mockito.when(modelProvider.getEntity("Warehouse")).thenReturn(warehouseEntity);
+
+        String result = SqlToHqlTranslator.convertSqlToHql(
+            "(select ad.isactive from ad_org ad where ad.ad_org_id = M_Warehouse.AD_Org_ID) = 'Y'",
+            "Warehouse");
+
+        assertNull(result);
+      }
+    }
+
+    @Test
+    @DisplayName("ETP-4975 regression: M_Warehouse_ID's correlated-subquery SQLWhereClause "
+        + "drops only the subquery segment, keeps the client-scoping segment translated")
+    void dropsNestedSubquerySegmentKeepsSurvivingSegment() {
+      // Real AD_Ref_Table.SQLWhereClause for M_Warehouse_ID. Before the NESTED_SUBQUERY guard,
+      // this reached Hibernate as invalid HQL ("ad_org is not mapped") the first time the
+      // Warehouse selector was actually queried — reproduced live by 2 E2E integration tests.
+      try (org.mockito.MockedStatic<org.openbravo.base.model.ModelProvider> modelProviderMock =
+          org.mockito.Mockito.mockStatic(org.openbravo.base.model.ModelProvider.class)) {
+        org.openbravo.base.model.ModelProvider modelProvider =
+            org.mockito.Mockito.mock(org.openbravo.base.model.ModelProvider.class);
+        modelProviderMock.when(org.openbravo.base.model.ModelProvider::getInstance)
+            .thenReturn(modelProvider);
+
+        org.openbravo.base.model.Entity warehouseEntity =
+            org.mockito.Mockito.mock(org.openbravo.base.model.Entity.class);
+        org.mockito.Mockito.when(warehouseEntity.getTableName()).thenReturn("M_Warehouse");
+
+        org.openbravo.base.model.Entity clientEntity =
+            org.mockito.Mockito.mock(org.openbravo.base.model.Entity.class);
+        org.openbravo.base.model.Property clientProp =
+            org.mockito.Mockito.mock(org.openbravo.base.model.Property.class);
+        org.mockito.Mockito.when(clientProp.isPrimitive()).thenReturn(false);
+        org.mockito.Mockito.when(clientProp.getTargetEntity()).thenReturn(clientEntity);
+        org.mockito.Mockito.when(clientProp.getName()).thenReturn("client");
+        org.mockito.Mockito.when(warehouseEntity.getPropertyByColumnName("AD_Client_ID"))
+            .thenReturn(clientProp);
+
+        org.mockito.Mockito.when(modelProvider.getEntity("Warehouse")).thenReturn(warehouseEntity);
+
+        String result = SqlToHqlTranslator.convertSqlToHql(
+            "M_Warehouse.AD_Client_ID=@#AD_Client_ID@ AND (select ad.isactive from ad_org ad "
+                + "where ad.ad_org_id = M_Warehouse.AD_Org_ID) = 'Y'",
+            "Warehouse");
+
+        assertEquals("e.client.id=@#AD_Client_ID@", result);
+        assertFalse(result.contains("ad_org"));
+        assertFalse(result.contains("ad.isactive"));
+      }
+    }
+  }
 }

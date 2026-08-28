@@ -68,7 +68,7 @@ fi
 
 # Resolve base branch dynamically
 BASE_REF=""
-for branch in "origin/epic/ETP-3504" "origin/develop" "origin/main"; do
+for branch in "origin/develop" "origin/main"; do
   if git rev-parse --verify --quiet "$branch" >/dev/null; then
     BASE_REF="$branch"
     break
@@ -292,9 +292,9 @@ junit_test_counts() {
 check_base_conflicts() {
   echo "==> Checking for conflicts with base branch (fetch + merge-tree)..."
 
-  # Fetch the latest base branch (prefer epic/ETP-3504, then develop, then main).
+  # Fetch the latest base branch (prefer develop, then main).
   local base_branch=""
-  for b in "epic/ETP-3504" "develop" "main"; do
+  for b in "develop" "main"; do
     if git fetch --quiet origin "$b" 2>/dev/null; then
       base_branch="$b"
       break

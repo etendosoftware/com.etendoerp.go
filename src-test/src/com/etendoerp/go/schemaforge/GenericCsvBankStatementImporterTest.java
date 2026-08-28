@@ -161,6 +161,35 @@ public class GenericCsvBankStatementImporterTest {
   }
 
   @Test
+  public void loadFileTreatsBlankAmountCellsAsZeroInsteadOfFailing() throws Exception {
+    // Deliberate divergence from Classic: its Utility.stringToBigDecimal("")
+    // throws and aborts the WHOLE import. Here a blank amount is 0, and the
+    // resulting zero/zero line is dropped afterwards by BankStatementLinePruner
+    // — so the outcome matches Classic without failing the file.
+    GenericCsvBankStatementImporter importer = new GenericCsvBankStatementImporter();
+    String csv = "Transaction Date,Reference No.,Business Partner Name,Amount OUT,Amount IN,Description\n"
+        + "01/02/2026,REF-1,Acme,,,Sample\n";
+    int count = runWithMocks(importer, csv);
+    assertEquals(1, count);
+    verify(savedLines.get(0)).setCramount(BigDecimal.ZERO);
+    verify(savedLines.get(0)).setDramount(BigDecimal.ZERO);
+  }
+
+  @Test
+  public void loadFileStillPersistsZeroAmountRowsThePrunerRemovesLater() throws Exception {
+    // The parser is deliberately dumb about business rules; the zero/zero rule
+    // lives above it (BankStatementLinePruner), exactly like in Classic where it
+    // lives in FIN_BankStatementImport rather than in the CSV importer.
+    GenericCsvBankStatementImporter importer = new GenericCsvBankStatementImporter();
+    String csv = "Transaction Date,Reference No.,Business Partner Name,Amount OUT,Amount IN,Description\n"
+        + "05/02/2026,REF-0001,Proveedor Norte,0,0,Pago factura\n"
+        + "08/02/2026,,Acme Holdings,0,\"3500,00\",Transferencia recibida\n";
+    int count = runWithMocks(importer, csv);
+    assertEquals(2, count);
+    assertEquals(2, savedLines.size());
+  }
+
+  @Test
   public void loadFileTruncatesLongStrings() throws Exception {
     GenericCsvBankStatementImporter importer = new GenericCsvBankStatementImporter();
     String longRef = repeat("R", 50);  // truncate to 30
