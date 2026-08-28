@@ -331,7 +331,12 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     BigDecimal ordered  = ol.getOrderedQuantity()  != null ? ol.getOrderedQuantity()  : BigDecimal.ZERO;
     BigDecimal invoiced = ol.getInvoicedQuantity() != null ? ol.getInvoicedQuantity() : BigDecimal.ZERO;
     BigDecimal pending  = ordered.subtract(invoiced);
-    return pending.compareTo(BigDecimal.ZERO) > 0 ? pending : null;
+    // ETP-4567: ordered/invoiced quantities can be NEGATIVE (return-style lines,
+    // since ETP-4567 removed the min:0 constraint on order lines). Only an exact
+    // zero means "nothing left to invoice" — a strictly-positive check silently
+    // dropped every negative-quantity line, so a fully-negative-total PO ended up
+    // with an empty selectedLines and wrongly threw "No pending lines to invoice".
+    return pending.compareTo(BigDecimal.ZERO) != 0 ? pending : null;
   }
 
   // Discard the placeholder doc type ('0' = "** New **", docBasetype="---")
