@@ -128,8 +128,12 @@ public class BankStatementsHandler implements NeoHandler {
   private static final String MSG_NOT_DRAFT = "Only draft (unprocessed) statements can be modified";
   private static final String MSG_NOT_PROCESSED = "Only processed statements can be reactivated";
   private static final String MSG_POSTED = "The statement is posted and cannot be reactivated";
-  private static final String MSG_HAS_RECONCILED =
-      "The statement has reconciled lines; unreconcile them first";
+  // Only ?action=delete guards on this now — ?action=reactivate does not (ETP-4921, see
+  // handleReactivate's javadoc). Deleting the WHOLE statement removes its matched lines along
+  // with it, which core's own APRM_FIN_BNKSTM_LINE_CHECK_TRG trigger never allows regardless of
+  // caller; this check turns that into a clean 400 instead of a raw DB trigger exception.
+  private static final String MSG_HAS_MATCHED_LINES =
+      "The statement has matched lines; unreconcile them before deleting";
   private static final String MSG_LINE_REQUIRED = "At least one line is required";
   private static final String MSG_NO_VALID_LINES =
       "The file contains no valid lines to import";
@@ -549,8 +553,16 @@ public class BankStatementsHandler implements NeoHandler {
    * {@code ?action=reactivate} — returns a processed statement to draft so it can
    * be edited or deleted again, mirroring the core "Reactivate" action of
    * {@code FIN_BankStatementProcess}. Only processed statements qualify; the
-   * statement must not be posted and must have no reconciled lines (reactivating
-   * does NOT reverse reconciliations — the user must unreconcile first).
+   * statement must not be posted. Reactivating does NOT reverse reconciliations,
+   * and it does not need to: a statement with reconciled lines reactivates just
+   * like Classic does (core's {@code FIN_BankStatementProcess} has no
+   * reconciled-lines guard on Reactivate — only {@code APRM_FIN_BNKSTM_LINE_CHECK_TRG}
+   * protects individual matched lines, on any insert/update/delete of THAT line,
+   * independent of the parent statement's Processed flag). {@code update} only
+   * ever rebuilds the unmatched subset (see {@link #deleteLines}), so matched
+   * lines stay untouched and the trigger never has anything to reject
+   * (ETP-4921 — this used to block reactivation of ANY statement with a matched
+   * line at all, which Classic never did).
    * Body: {@code { "id": "..." }}.
    */
   private NeoResponse handleReactivate(NeoContext context) {
@@ -561,9 +573,6 @@ public class BankStatementsHandler implements NeoHandler {
       FIN_BankStatement statement = requireProcessed(body.optString(FIELD_ID, null));
       if ("Y".equals(statement.getPosted())) {
         return NeoResponse.error(400, MSG_POSTED);
-      }
-      if (hasReconciledLines(statement)) {
-        return NeoResponse.error(400, MSG_HAS_RECONCILED);
       }
       reactivateStatement(statement);
       OBDal.getInstance().flush();
@@ -603,15 +612,25 @@ public class BankStatementsHandler implements NeoHandler {
         return NeoResponse.error(400, MSG_MISSING_FIELD + FIELD_NAME);
       }
       JSONArray bodyLines = body.optJSONArray(FIELD_LINES);
-      if (bodyLines == null || bodyLines.length() == 0) {
+      boolean hasBodyLines = bodyLines != null && bodyLines.length() > 0;
+      // ETP-4921 — a reactivated statement can already carry matched lines (never sent in the
+      // body: the frontend excludes them, since they cannot be touched — see deleteUnmatchedLines
+      // below). An empty body is only invalid when there is nothing else keeping the statement
+      // non-empty; a purely header-only edit (name/notes/dates) of an all-matched statement is
+      // legitimate.
+      int matchedLineCount = countMatchedLines(statement);
+      if (!hasBodyLines && matchedLineCount == 0) {
         return NeoResponse.error(400, MSG_LINE_REQUIRED);
       }
 
       applyEditableHeader(statement, body);
       OBDal.getInstance().save(statement);
 
-      deleteLines(statement);
-      int lineCount = createLines(statement, bodyLines);
+      // Matched lines are never deleted-and-recreated — see deleteUnmatchedLines's javadoc for
+      // why that would fail loudly against core's own line-level trigger.
+      deleteUnmatchedLines(statement);
+      int newLineCount = hasBodyLines ? createLines(statement, bodyLines) : 0;
+      int lineCount = newLineCount + matchedLineCount;
 
       boolean process = body.optBoolean(FIELD_PROCESS, false);
       if (process) {
@@ -657,6 +676,13 @@ public class BankStatementsHandler implements NeoHandler {
       // a statement that is about to vanish.
       BankStatementLineAggregateHandler.suppress();
       FIN_BankStatement statement = requireDraft(body.optString(FIELD_ID, null));
+      // A reactivated draft can still carry matched lines (ETP-4921 — reactivation no longer
+      // requires them to be unreconciled first). Deleting the whole statement would delete
+      // those lines too, which the core trigger never allows — reject up front with a clear
+      // reason instead of surfacing whatever the trigger raises mid-delete.
+      if (hasMatchedLines(statement)) {
+        return NeoResponse.error(400, MSG_HAS_MATCHED_LINES);
+      }
       String id = statement.getId();
       deleteLines(statement);
       OBDal.getInstance().remove(statement);
@@ -699,6 +725,47 @@ public class BankStatementsHandler implements NeoHandler {
   }
 
   /**
+   * Whether {@code statement} has at least one active line already matched to a
+   * financial-account transaction. Used only to guard {@code ?action=delete}
+   * (deleting the whole statement would delete those lines with it — see
+   * {@link #MSG_HAS_MATCHED_LINES}); {@code ?action=reactivate} does NOT use
+   * this (ETP-4921). Package-private so it can be stubbed in unit tests.
+   */
+  boolean hasMatchedLines(FIN_BankStatement statement) {
+    OBCriteria<FIN_BankStatementLine> crit =
+        OBDal.getInstance().createCriteria(FIN_BankStatementLine.class);
+    crit.add(org.hibernate.criterion.Restrictions.eq(
+        FIN_BankStatementLine.PROPERTY_BANKSTATEMENT, statement));
+    crit.add(org.hibernate.criterion.Restrictions.eq(
+        FIN_BankStatementLine.PROPERTY_ACTIVE, true));
+    crit.add(org.hibernate.criterion.Restrictions.isNotNull(
+        FIN_BankStatementLine.PROPERTY_FINANCIALACCOUNTTRANSACTION));
+    crit.setFilterOnReadableOrganization(false);
+    crit.setMaxResults(1);
+    return !crit.list().isEmpty();
+  }
+
+  /**
+   * Number of active lines of {@code statement} already matched to a financial-account
+   * transaction. Used by {@code ?action=update} to report an accurate total {@code lineCount}
+   * (matched lines it keeps + the unmatched ones it just rebuilt) without a second flush/query
+   * round-trip — unlike {@link #hasMatchedLines}, this has no early-exit, since the caller needs
+   * the real count, not just whether one exists.
+   */
+  private int countMatchedLines(FIN_BankStatement statement) {
+    OBCriteria<FIN_BankStatementLine> crit =
+        OBDal.getInstance().createCriteria(FIN_BankStatementLine.class);
+    crit.add(org.hibernate.criterion.Restrictions.eq(
+        FIN_BankStatementLine.PROPERTY_BANKSTATEMENT, statement));
+    crit.add(org.hibernate.criterion.Restrictions.eq(
+        FIN_BankStatementLine.PROPERTY_ACTIVE, true));
+    crit.add(org.hibernate.criterion.Restrictions.isNotNull(
+        FIN_BankStatementLine.PROPERTY_FINANCIALACCOUNTTRANSACTION));
+    crit.setFilterOnReadableOrganization(false);
+    return crit.list().size();
+  }
+
+  /**
    * Loads a statement by id and guards that it is processed (the only state that
    * can be reactivated). Throws {@link OBException} (mapped to 400) when the id is
    * blank, the statement does not exist, or it is still a draft.
@@ -715,26 +782,6 @@ public class BankStatementsHandler implements NeoHandler {
       throw new OBException(MSG_NOT_PROCESSED);
     }
     return statement;
-  }
-
-  /**
-   * Whether {@code statement} has at least one active line already reconciled
-   * (linked to a financial-account transaction). Reactivation is blocked in that
-   * case — mirrors the core {@code FIN_BankStatementProcess} guard. Package-private
-   * so it can be stubbed in unit tests.
-   */
-  boolean hasReconciledLines(FIN_BankStatement statement) {
-    OBCriteria<FIN_BankStatementLine> crit =
-        OBDal.getInstance().createCriteria(FIN_BankStatementLine.class);
-    crit.add(org.hibernate.criterion.Restrictions.eq(
-        FIN_BankStatementLine.PROPERTY_BANKSTATEMENT, statement));
-    crit.add(org.hibernate.criterion.Restrictions.eq(
-        FIN_BankStatementLine.PROPERTY_ACTIVE, true));
-    crit.add(org.hibernate.criterion.Restrictions.isNotNull(
-        FIN_BankStatementLine.PROPERTY_FINANCIALACCOUNTTRANSACTION));
-    crit.setFilterOnReadableOrganization(false);
-    crit.setMaxResults(1);
-    return !crit.list().isEmpty();
   }
 
   /**
@@ -758,7 +805,11 @@ public class BankStatementsHandler implements NeoHandler {
     OBDal.getInstance().save(statement);
   }
 
-  /** Removes every line of {@code statement} so {@link #createLines} can rebuild them. */
+  /**
+   * Removes every line of {@code statement}. Used ONLY by {@code ?action=delete}, which the
+   * caller has already guarded with {@link #hasMatchedLines} — every line reaching here is safe
+   * to remove. Do NOT reuse this for {@code ?action=update}; see {@link #deleteUnmatchedLines}.
+   */
   private void deleteLines(FIN_BankStatement statement) {
     OBCriteria<FIN_BankStatementLine> crit =
         OBDal.getInstance().createCriteria(FIN_BankStatementLine.class);
@@ -768,6 +819,47 @@ public class BankStatementsHandler implements NeoHandler {
       OBDal.getInstance().remove(line);
     }
     OBDal.getInstance().flush();
+  }
+
+  /**
+   * Removes only the UNMATCHED lines of {@code statement}, so {@link #createLines} can rebuild
+   * the editable subset — matched lines are left physically untouched. This is what makes
+   * {@code ?action=update} safe to call on a reactivated statement that still has matched lines:
+   * core's {@code APRM_FIN_BNKSTM_LINE_CHECK_TRG} trigger raises on ANY insert/update/delete of a
+   * line whose {@code FIN_FinAcc_Transaction_ID} is set, independent of the parent statement's
+   * Processed flag, so touching one here would fail loudly (and mid-batch, since the removes are
+   * queued and only flushed once at the end of the loop) instead of the matched line simply
+   * never being a candidate for deletion in the first place.
+   */
+  private void deleteUnmatchedLines(FIN_BankStatement statement) {
+    OBCriteria<FIN_BankStatementLine> crit =
+        OBDal.getInstance().createCriteria(FIN_BankStatementLine.class);
+    crit.add(org.hibernate.criterion.Restrictions.eq(
+        FIN_BankStatementLine.PROPERTY_BANKSTATEMENT, statement));
+    crit.add(org.hibernate.criterion.Restrictions.isNull(
+        FIN_BankStatementLine.PROPERTY_FINANCIALACCOUNTTRANSACTION));
+    for (FIN_BankStatementLine line : crit.list()) {
+      OBDal.getInstance().remove(line);
+    }
+    OBDal.getInstance().flush();
+  }
+
+  /**
+   * Highest {@code LineNo} currently attached to {@code statement} (0 when it has none yet).
+   * {@link #createLines} numbers new lines starting after this, so a rebuild that keeps some
+   * matched lines around (see {@link #deleteUnmatchedLines}) never assigns a LineNo one of them
+   * already has. A brand-new statement (handleCreate) or a full rebuild with nothing kept
+   * (handleUpdate with no matched lines) both fall back to the original 10/20/30… sequence.
+   */
+  private long maxExistingLineNo(FIN_BankStatement statement) {
+    OBCriteria<FIN_BankStatementLine> crit =
+        OBDal.getInstance().createCriteria(FIN_BankStatementLine.class);
+    crit.add(org.hibernate.criterion.Restrictions.eq(
+        FIN_BankStatementLine.PROPERTY_BANKSTATEMENT, statement));
+    crit.addOrderBy(FIN_BankStatementLine.PROPERTY_LINENO, false);
+    crit.setMaxResults(1);
+    List<FIN_BankStatementLine> top = crit.list();
+    return top.isEmpty() ? 0L : top.get(0).getLineNo();
   }
 
   /**
@@ -835,7 +927,7 @@ public class BankStatementsHandler implements NeoHandler {
    */
   private int createLines(FIN_BankStatement statement, JSONArray lines) throws Exception {
     int count = 0;
-    long lineNo = 10L;
+    long lineNo = maxExistingLineNo(statement) + 10L;
     for (int i = 0; i < lines.length(); i++) {
       JSONObject l = lines.getJSONObject(i);
       if (isBlankLine(l)) continue;
