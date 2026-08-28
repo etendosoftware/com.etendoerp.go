@@ -310,7 +310,7 @@ public class EtendoGoJwtServletCoverageTest {
 
     try (var ctxMock = mockStatic(OBContext.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("bad-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("bad-token"))
           .thenReturn(null);
 
       servlet.doPost(req, resp.response);
@@ -348,7 +348,7 @@ public class EtendoGoJwtServletCoverageTest {
 
     try (var ctxMock = mockStatic(OBContext.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenThrow(new RuntimeException("db down"));
 
       servlet.doPost(req, resp.response);
@@ -681,7 +681,7 @@ public class EtendoGoJwtServletCoverageTest {
 
     try (var ctxMock = mockStatic(OBContext.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenThrow(new RuntimeException("db down"));
 
       servlet.doPost(req, resp.response);
