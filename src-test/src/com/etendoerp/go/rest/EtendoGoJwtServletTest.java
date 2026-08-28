@@ -340,7 +340,9 @@ public class EtendoGoJwtServletTest {
     // Registration still hands back a session token: the unconfirmed address gates creating the
     // environment, not filling in the form.
     assertNotNull(respBody.getString("token"));
-    verify(emailSender).sendNewAccount(account, null, VERIFY_LINK);
+    // The servlet calls the overload that also carries the link's expiry, which is what lets the
+    // copy state a real validity window; verifying the three-argument one passed nothing.
+    verify(emailSender).sendNewAccount(eq(account), isNull(), eq(VERIFY_LINK), any(Date.class));
   }
 
   @Test
@@ -421,7 +423,8 @@ public class EtendoGoJwtServletTest {
     }
 
     assertEquals(201, resp.status);
-    verify(emailSender).sendNewAccount(account, "es_ES", VERIFY_LINK);
+    verify(emailSender).sendNewAccount(eq(account), eq("es_ES"), eq(VERIFY_LINK),
+        any(Date.class));
   }
 
   @Test
@@ -444,8 +447,10 @@ public class EtendoGoJwtServletTest {
     // ETP-4798: the throw has to target the overload registration actually calls — the one
     // carrying the confirmation link. Aimed at the two-argument overload it never fired, and the
     // test passed while exercising nothing.
+    // ...and it happened again the moment a fourth argument appeared. Aim it at the overload the
+    // servlet actually calls, or this test keeps passing without ever provoking a failure.
     doThrow(new RuntimeException("provider unavailable"))
-        .when(emailSender).sendNewAccount(account, null, VERIFY_LINK);
+        .when(emailSender).sendNewAccount(eq(account), isNull(), eq(VERIFY_LINK), any(Date.class));
 
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoAuthLinkBuilder> linkMock = mockStatic(EtendoGoAuthLinkBuilder.class);
@@ -776,7 +781,7 @@ public class EtendoGoJwtServletTest {
         "{\"email\":\"user@test.com\"}")));
 
     Account account = mock(Account.class);
-    when(emailSender.sendPasswordReset(eq(account), anyString(), anyString()))
+    when(emailSender.sendPasswordReset(eq(account), anyString(), anyString(), any(Date.class)))
         .thenReturn(true);
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
@@ -794,7 +799,14 @@ public class EtendoGoJwtServletTest {
 
     assertEquals(200, resp.status);
     ArgumentCaptor<String> resetLinkCaptor = ArgumentCaptor.forClass(String.class);
-    verify(emailSender).sendPasswordReset(eq(account), anyString(), resetLinkCaptor.capture());
+    ArgumentCaptor<Date> expiryCaptor = ArgumentCaptor.forClass(Date.class);
+    verify(emailSender).sendPasswordReset(eq(account), anyString(), resetLinkCaptor.capture(),
+        expiryCaptor.capture());
+    // The copy interpolates the remaining minutes from this value, so a null or past expiry would
+    // put a wrong duration in front of somebody locked out of their account.
+    assertNotNull("The reset link should carry an expiry", expiryCaptor.getValue());
+    assertTrue("The reset link expiry should be in the future",
+        expiryCaptor.getValue().after(new Date()));
     String resetLink = resetLinkCaptor.getValue();
     assertNotNull("The reset link should not be null", resetLink);
     assertTrue("Reset link does not use the configured app URL: " + resetLink,
@@ -813,7 +825,7 @@ public class EtendoGoJwtServletTest {
         "{\"email\":\"user@test.com\"}")));
 
     Account account = mock(Account.class);
-    when(emailSender.sendPasswordReset(eq(account), anyString(), anyString()))
+    when(emailSender.sendPasswordReset(eq(account), anyString(), anyString(), any(Date.class)))
         .thenReturn(true);
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
@@ -828,7 +840,14 @@ public class EtendoGoJwtServletTest {
 
     assertEquals(200, resp.status);
     ArgumentCaptor<String> resetLinkCaptor = ArgumentCaptor.forClass(String.class);
-    verify(emailSender).sendPasswordReset(eq(account), anyString(), resetLinkCaptor.capture());
+    ArgumentCaptor<Date> expiryCaptor = ArgumentCaptor.forClass(Date.class);
+    verify(emailSender).sendPasswordReset(eq(account), anyString(), resetLinkCaptor.capture(),
+        expiryCaptor.capture());
+    // The copy interpolates the remaining minutes from this value, so a null or past expiry would
+    // put a wrong duration in front of somebody locked out of their account.
+    assertNotNull("The reset link should carry an expiry", expiryCaptor.getValue());
+    assertTrue("The reset link expiry should be in the future",
+        expiryCaptor.getValue().after(new Date()));
     String resetLink = resetLinkCaptor.getValue();
     assertNotNull("The reset link should not be null", resetLink);
     assertTrue("Reset link does not use the configured app URL: " + resetLink,

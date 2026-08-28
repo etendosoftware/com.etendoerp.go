@@ -31,6 +31,7 @@ import org.openbravo.service.db.ImportResult;
 
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
 import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
+import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
@@ -435,6 +436,57 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
   }
 
   @Test
+  public void testEnsureOnboardingDatasetWiresAdminIdentityBeforeBaseline() {
+    CountingBaselineService baselineService = new CountingBaselineService();
+    CountingAdminIdentityService adminIdentityService = new CountingAdminIdentityService();
+    TestServlet servlet = new TestServlet(new SuccessfulImportService(),
+        new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
+        new CountingFiscalDataSetupService(), new CountingDefaultCustomerService(),
+        baselineService);
+    servlet.onboardingAdminIdentityService = adminIdentityService;
+    StringWriter output = new StringWriter();
+
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
+        "USER-1", "ROLE-1", null);
+
+    String ndjson = output.toString();
+    assertTrue(ready);
+    assertEquals(1, adminIdentityService.wireCount);
+    assertEquals("CLIENT-1", adminIdentityService.clientId);
+    assertEquals("ORG-1", adminIdentityService.orgId);
+    assertEquals("USER-1", adminIdentityService.userId);
+    assertEquals("ROLE-1", adminIdentityService.roleId);
+    assertEquals(1, baselineService.registerCount);
+    assertTrue(ndjson.contains("\"step\":\"adminIdentity\""));
+    assertTrue(ndjson.contains("Admin identity wired"));
+    assertTrue(ndjson.indexOf("Admin identity wired")
+        < ndjson.indexOf("Data-fix baseline registered"));
+  }
+
+  @Test
+  public void testEnsureOnboardingDatasetSkipsBaselineWhenAdminIdentityWiringFails() {
+    CountingBaselineService baselineService = new CountingBaselineService();
+    TestServlet servlet = new TestServlet(new SuccessfulImportService(),
+        new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
+        new CountingFiscalDataSetupService(), new CountingDefaultCustomerService(),
+        baselineService);
+    servlet.onboardingAdminIdentityService =
+        new FailingAdminIdentityService("broken admin identity");
+    StringWriter output = new StringWriter();
+
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
+        "USER-1", "ROLE-1", null);
+
+    String ndjson = output.toString();
+    assertFalse(ready);
+    assertEquals(0, baselineService.registerCount);
+    assertTrue(ndjson.contains("\"step\":\"adminIdentity\""));
+    assertTrue(ndjson.contains("\"status\":\"error\""));
+    assertTrue(ndjson.contains("broken admin identity"));
+    assertTrue(ndjson.contains("\"success\":false"));
+  }
+
+  @Test
   public void testEnsureOnboardingDatasetSkipsFiscalDataWhenSequencesFail() {
     CountingFiscalDataSetupService fiscalService = new CountingFiscalDataSetupService();
     TestServlet servlet = new TestServlet(new SuccessfulImportService(),
@@ -503,6 +555,13 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
       // (OnboardingAcctdimCentrallyMaintainedServiceTest); stub it to a no-op here for the same
       // reason as the services above.
       this.onboardingAcctdimCentrallyMaintainedService = new NoOpAcctdimCentrallyMaintainedService();
+      // ETP-4999: wireAdminIdentity also touches the DAL directly (OBDal.getInstance().get(...) on
+      // User/Role/Organization/Client) and is exercised by its own dedicated unit test
+      // (OnboardingAdminIdentityServiceTest); stub it to a no-op here for the same reason as the
+      // services above. Without this, the field defaults to the real service instantiated by
+      // EtendoGoJwtServlet's own field initializer, which throws with no DAL/DB available in this
+      // no-database unit test, making every ensureOnboardingDataset() call return false.
+      this.onboardingAdminIdentityService = new NoOpAdminIdentityService();
     }
   }
 
@@ -602,6 +661,52 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
 
     @Override
     public void forceFlatAccountingDimensionVisibility(String clientId) {
+      throw new OBException(message);
+    }
+  }
+
+  private static class NoOpAdminIdentityService extends OnboardingAdminIdentityService {
+    @Override
+    public void wireAdminIdentity(String clientId, String orgId, String adminUserId,
+        String adminRoleId) {
+      // no-op: DAL wiring is covered by OnboardingAdminIdentityServiceTest
+    }
+  }
+
+  /**
+   * ETP-4999 — counts {@code wireAdminIdentity} invocations and captures its arguments, so the
+   * servlet-level wiring (order relative to the other steps, argument pass-through) can be
+   * asserted without touching the DAL.
+   */
+  private static final class CountingAdminIdentityService extends NoOpAdminIdentityService {
+    private int wireCount;
+    private String clientId;
+    private String orgId;
+    private String userId;
+    private String roleId;
+
+    @Override
+    public void wireAdminIdentity(String clientId, String orgId, String adminUserId,
+        String adminRoleId) {
+      wireCount++;
+      this.clientId = clientId;
+      this.orgId = orgId;
+      this.userId = adminUserId;
+      this.roleId = adminRoleId;
+    }
+  }
+
+  /** ETP-4999 — makes {@code wireAdminIdentity} fail, to test the chain's short-circuit. */
+  private static final class FailingAdminIdentityService extends NoOpAdminIdentityService {
+    private final String message;
+
+    private FailingAdminIdentityService(String message) {
+      this.message = message;
+    }
+
+    @Override
+    public void wireAdminIdentity(String clientId, String orgId, String adminUserId,
+        String adminRoleId) {
       throw new OBException(message);
     }
   }

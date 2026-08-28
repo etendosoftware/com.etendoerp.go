@@ -24,8 +24,11 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.RoleOrganization;
 import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.Warehouse;
+
+import com.etendoerp.go.common.WarehouseLookupHelper;
 
 /**
  * ETP-4830 items #6.1/#6.2 — extracted out of {@link UserRoleCompositionService} (SonarQube
@@ -125,21 +128,12 @@ class PersonalRoleAccessProvisioningService {
     Organization userOrg = user.getOrganization();
     if (userOrg != null) {
       user.setDefaultOrganization(userOrg);
-      Warehouse warehouse = findFirstActiveWarehouse(userOrg);
+      Warehouse warehouse = WarehouseLookupHelper.findFirstActiveWarehouse(user.getClient(), userOrg);
       if (warehouse != null) {
         user.setDefaultWarehouse(warehouse);
       }
     }
     user.setSmfswsDefaultWsRole(role);
     OBDal.getInstance().save(user);
-  }
-
-  @SuppressWarnings("unchecked")
-  private Warehouse findFirstActiveWarehouse(Organization organization) {
-    OBCriteria<Warehouse> criteria = OBDal.getInstance().createCriteria(Warehouse.class);
-    criteria.add(Restrictions.eq(Warehouse.PROPERTY_ORGANIZATION, organization));
-    criteria.add(Restrictions.eq(Warehouse.PROPERTY_ACTIVE, true));
-    criteria.setMaxResults(1);
-    return (Warehouse) criteria.uniqueResult();
   }
 }

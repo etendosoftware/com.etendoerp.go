@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge.email.contracts;
 import com.etendoerp.go.schemaforge.email.EmailContract;
 import com.etendoerp.go.schemaforge.email.EmailContractDataResolver;
 import com.etendoerp.go.schemaforge.email.EmailContractProvider;
+import com.etendoerp.go.schemaforge.email.render.ValidityWindow;
 
 import java.util.Arrays;
 import java.util.Collection;
@@ -32,8 +33,10 @@ import javax.enterprise.context.ApplicationScoped;
 @ApplicationScoped
 public final class CoreEmailContractProvider implements EmailContractProvider {
 
+  /** Catalog key of the "this link expires in N" note, shared by the link contracts. */
+  private static final String NOTE_EXPIRY = "note.expiry";
+
   private final EmailContractDataResolver contractResolver;
-  private static final String PROVIDER_TEMPLATE_CUSTOM = "custom";
   private static final int RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT = 3;
   private static final int NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT = 2;
   private static final int ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT = 2;
@@ -43,9 +46,6 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
   private static final int VERIFY_EMAIL_RECIPIENT_THROTTLE_LIMIT = 4;
   private static final int ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS = 900;
   private static final String DASHBOARD_LINK_PATH = "dashboard";
-  private static final String LANGUAGE_SPANISH = "es_ES";
-  private static final String FIELD_SUBJECT = "subject";
-  private static final String FIELD_BODY = "body";
 
   /**
    * Creates the provider with the default DAL-backed contact resolver.
@@ -66,73 +66,26 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
   @Override
   public Collection<EmailContract> getContracts() {
     return Arrays.asList(
-        new AccountLinkEmailContract("reset-password", "reset-password", contractResolver,
-            RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS),
-        new AccountLinkEmailContract("new-account", PROVIDER_TEMPLATE_CUSTOM, contractResolver,
+        new AccountLinkEmailContract("reset-password", contractResolver,
+            RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
+            NOTE_EXPIRY, "note.ignore"),
+        new AccountLinkEmailContract("new-account", contractResolver,
             NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
-            CoreEmailContractProvider::newAccountContent),
-        new AccountLinkEmailContract("environment-ready", PROVIDER_TEMPLATE_CUSTOM, contractResolver,
+            ValidityWindow.Unit.HOURS, NOTE_EXPIRY),
+        new AccountLinkEmailContract("environment-ready", contractResolver,
             ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS,
-            DASHBOARD_LINK_PATH, CoreEmailContractProvider::environmentReadyContent),
-        new AccountLinkEmailContract("verify-email", PROVIDER_TEMPLATE_CUSTOM, contractResolver,
+            DASHBOARD_LINK_PATH),
+        new AccountLinkEmailContract("verify-email", contractResolver,
             VERIFY_EMAIL_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
-            CoreEmailContractProvider::verifyEmailContent),
-        new AccountNoticeEmailContract("password-changed", PROVIDER_TEMPLATE_CUSTOM,
-            contractResolver, CoreEmailContractProvider::passwordChangedContent),
+            ValidityWindow.Unit.HOURS, NOTE_EXPIRY, "note.ignore"),
+        // An invited operator gets a welcome of its own: its button goes to the dashboard, not to
+        // email verification, because an invitation is itself the proof that somebody meant to
+        // reach this address (ETP-5003).
+        new AccountLinkEmailContract("new-account-invitee", contractResolver,
+            NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS),
+        new AccountNoticeEmailContract("password-changed", contractResolver, "note.warning"),
         new LoginAlertEmailContract(contractResolver),
+        new OrganizationJoinedEmailContract(contractResolver),
         new CompanyInvitationEmailContract());
-  }
-
-  private static void newAccountContent(org.codehaus.jettison.json.JSONObject data,
-      String language, String link) throws org.codehaus.jettison.json.JSONException {
-    if (LANGUAGE_SPANISH.equals(language)) {
-      data.put(FIELD_SUBJECT, "Bienvenido a Etendo Go");
-      data.put(FIELD_BODY, "Tu cuenta de Etendo Go fue creada correctamente. "
-          + "Abre este enlace para confirmar tu correo y continuar: " + link);
-      return;
-    }
-    data.put(FIELD_SUBJECT, "Welcome to Etendo Go");
-    data.put(FIELD_BODY, "Your Etendo Go account was created successfully. "
-        + "Open this link to confirm your email address and continue: " + link);
-  }
-
-  private static void environmentReadyContent(org.codehaus.jettison.json.JSONObject data,
-      String language, String link) throws org.codehaus.jettison.json.JSONException {
-    if (LANGUAGE_SPANISH.equals(language)) {
-      data.put(FIELD_SUBJECT, "Tu entorno de Etendo Go está listo");
-      data.put(FIELD_BODY, "Tu entorno de Etendo Go está listo. "
-          + "Abre este enlace para acceder a tu panel: " + link);
-      return;
-    }
-    data.put(FIELD_SUBJECT, "Your Etendo Go environment is ready");
-    data.put(FIELD_BODY, "Your Etendo Go environment is ready. "
-        + "Open this link to access your dashboard: " + link);
-  }
-
-  private static void verifyEmailContent(org.codehaus.jettison.json.JSONObject data,
-      String language, String link) throws org.codehaus.jettison.json.JSONException {
-    if (LANGUAGE_SPANISH.equals(language)) {
-      data.put(FIELD_SUBJECT, "Confirma tu correo de Etendo Go");
-      data.put(FIELD_BODY, "Para terminar de configurar tu entorno de Etendo Go necesitamos "
-          + "confirmar que este correo es tuyo. Abre este enlace: " + link);
-      return;
-    }
-    data.put(FIELD_SUBJECT, "Confirm your Etendo Go email address");
-    data.put(FIELD_BODY, "To finish setting up your Etendo Go environment we need to confirm this "
-        + "email address belongs to you. Open this link: " + link);
-  }
-
-  private static void passwordChangedContent(org.codehaus.jettison.json.JSONObject data,
-      String language)
-      throws org.codehaus.jettison.json.JSONException {
-    if (LANGUAGE_SPANISH.equals(language)) {
-      data.put(FIELD_SUBJECT, "Tu contraseña de Etendo Go fue modificada");
-      data.put(FIELD_BODY, "Tu contraseña de Etendo Go fue modificada correctamente. "
-          + "Si no realizaste este cambio, contacta a soporte.");
-      return;
-    }
-    data.put(FIELD_SUBJECT, "Your Etendo Go password was changed");
-    data.put(FIELD_BODY, "Your Etendo Go password was changed successfully. "
-        + "If you did not make this change, contact support.");
   }
 }

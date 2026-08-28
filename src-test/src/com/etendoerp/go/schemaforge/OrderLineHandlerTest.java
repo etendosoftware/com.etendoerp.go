@@ -16,6 +16,7 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -25,7 +26,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.sql.Connection;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -141,6 +144,68 @@ class OrderLineHandlerTest {
 
       handler.afterHandle(ctx);
       discountFilterMock.verify(() -> DiscountLineFilter.filterFromResponse(ctx));
+    }
+
+    // ── ETP-4941: productCode enrichment ──────────────────────────────────
+
+    /**
+     * GET on order/purchase-order/quotation lines must inject {@code productCode} (M_Product.Value)
+     * into each line, resolved against {@code c_orderline} — mutates the response body in place
+     * so it's visible regardless of whether DiscountLineFilter later replaces the response.
+     */
+    @Test
+    void getRequestEnrichesProductCodeFromCOrderline() throws Exception {
+      JSONObject line = new JSONObject().put("id", "line-1");
+      JSONArray dataArr = new JSONArray().put(line);
+      JSONObject body = new JSONObject().put("response", new JSONObject().put("data", dataArr));
+
+      NeoContext ctx = NeoContext.builder()
+          .specName("sales-order").entityName("lines")
+          .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+          .previousResult(NeoResponse.ok(body)).build();
+
+      Connection conn = ProductCodeQueryTestSupport.mockSingleRowProductCodeQuery(
+          obDal, "line-1", "SKU-ORDER-1");
+
+      discountFilterMock.when(() -> DiscountLineFilter.filterFromResponse(any()))
+          .thenReturn(null);
+
+      handler.afterHandle(ctx);
+
+      assertEquals("SKU-ORDER-1", line.getString("productCode"));
+
+      org.mockito.ArgumentCaptor<String> sqlCaptor =
+          org.mockito.ArgumentCaptor.forClass(String.class);
+      verify(conn).prepareStatement(sqlCaptor.capture());
+      assertEquals(true, sqlCaptor.getValue().contains("c_orderline"));
+    }
+
+    /**
+     * A line whose product has no SKU (blank {@code M_Product.Value}) must NOT get a
+     * {@code productCode} field written — the frontend's {@code resolveProductCode} then falls
+     * back to "—", per the ETP-4941 acceptance criteria (never the line number).
+     */
+    @Test
+    void getRequestLeavesProductCodeAbsentWhenSkuBlank() throws Exception {
+      JSONObject line = new JSONObject().put("id", "line-no-sku");
+      JSONArray dataArr = new JSONArray().put(line);
+      JSONObject body = new JSONObject().put("response", new JSONObject().put("data", dataArr));
+
+      NeoContext ctx = NeoContext.builder()
+          .specName("sales-order").entityName("lines")
+          .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+          .previousResult(NeoResponse.ok(body)).build();
+
+      // lineId=null: getString(1) is only read once the blank-SKU check passes, so it must not
+      // be stubbed here — a blank getString(2) short-circuits before reaching it.
+      ProductCodeQueryTestSupport.mockSingleRowProductCodeQuery(obDal, null, "");
+
+      discountFilterMock.when(() -> DiscountLineFilter.filterFromResponse(any()))
+          .thenReturn(null);
+
+      handler.afterHandle(ctx);
+
+      assertEquals(false, line.has("productCode"));
     }
 
     @Test
