@@ -27,7 +27,9 @@ import java.util.Set;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.hibernate.Session;
 import org.hibernate.criterion.Restrictions;
+import org.hibernate.query.NativeQuery;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.structure.BaseOBObject;
@@ -962,7 +964,50 @@ public class UserRoleCompositionService {
     if (added > 0) {
       reconcileWindowAccessAfterComposition(personalRole, templates);
     }
+    syncShowAccountingFieldsFlag(personalRole, templates);
     return new int[] { added, removed };
+  }
+
+  /**
+   * ETP-4877 — keeps {@code AD_Role.EM_ETGO_Show_Acct_Fields} (ETP-4520; gates the
+   * {@code showAccountingFields} capability {@code SFWindowAccessMap} exposes) in sync with
+   * whether {@code personalRole} currently inherits from the system Finance template ({@link
+   * SystemRoleTemplates#FINANCE_ROLE_ID}). {@code 'Y'} when {@code templates} — the FULL desired
+   * set this call is reconciling to, not merely what changed — contains the Finance template;
+   * {@code 'N'} otherwise (including when Finance is being removed on this very call).
+   *
+   * <p>This is the "going forward" half of a two-front fix: {@code
+   * SFWindowAccessMap#resolveShowAccountingFields} reads the column as a flat stored value with
+   * no join to {@code AD_Role_Inheritance} at read time, so the column is a DERIVED fact, not an
+   * independent one — whoever last changed a role's template inheritance is responsible for
+   * keeping it in sync, and this was the one gap in that chain: nothing previously wrote this
+   * column when {@link #assignTemplateRoles(String, List)} changed a personal role's templates
+   * (only {@code EnsureSystemRoleTemplatesScript}/R16/R23 ever set it, once, at role-clone time,
+   * for the old per-client-clone model). Called unconditionally at the end of every {@link
+   * #reconcileInheritances(Role, List)} call — including a no-op reconciliation — so this is
+   * self-healing on every {@code assignTemplateRoles} call, not only when something actually
+   * changed. The retroactive half (every PRE-EXISTING personal role, not touched by a live
+   * composition call) is the sibling {@code R26-tenant-owner-and-personal-role-retrofit.sql}
+   * data-fix's Step 8b, in {@code etendo_schema_forge} — same predicate, kept in lockstep; a
+   * change to one must be mirrored in the other.</p>
+   *
+   * <p>Native SQL, not a DAL property — same reasoning {@link OwnerSupport} and {@code
+   * SFWindowAccessMap#resolveShowAccountingFields} document for this exact column: it was added
+   * straight to the physical table (ETP-4520) and is not mapped as a typed entity property.
+   * Guarded to a no-op UPDATE when the value already matches, so a call that changes nothing here
+   * costs one cheap, index-backed statement.</p>
+   */
+  private void syncShowAccountingFieldsFlag(Role personalRole, List<Role> templates) {
+    boolean shouldShowAcctFields = templates.stream()
+        .anyMatch(template -> SystemRoleTemplates.FINANCE_ROLE_ID.equals(template.getId()));
+    String desired = shouldShowAcctFields ? "Y" : "N";
+    Session session = OBDal.getInstance().getSession();
+    NativeQuery<?> update = session.createNativeQuery(
+        "UPDATE ad_role SET em_etgo_show_acct_fields = :desired, updated = now(), updatedby = '0' "
+            + "WHERE ad_role_id = :roleId AND em_etgo_show_acct_fields <> :desired");
+    update.setParameter("desired", desired);
+    update.setParameter("roleId", personalRole.getId());
+    update.executeUpdate();
   }
 
   /**
