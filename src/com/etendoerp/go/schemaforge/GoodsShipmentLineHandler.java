@@ -21,6 +21,7 @@ import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONObject;
 
 /**
  * NeoHandler for the Goods Shipment line entity.
@@ -38,11 +39,21 @@ import org.apache.logging.log4j.Logger;
  * unrelated document. See {@link NeoHandlerUtils#injectDefaultLocatorIfMissing(
  * org.codehaus.jettison.json.JSONObject, Logger)} for the full rationale — the same helper
  * {@link GoodsReceiptLineHandler} (ETP-4671) and {@link ReturnToVendorShipmentLineHandler} use.
+ *
+ * <p>Callout post-hook: strip stock-derived {@code movementQuantity} (ETP-5062). ETP-4671 gave
+ * {@link GoodsReceiptLineHandler} an {@code afterCallout()} override on the reasoning that a
+ * purchase receipt's quantity has nothing to do with what is already on hand, and deliberately
+ * left Goods Shipment untouched — picking from existing stock was considered a helpful default
+ * there. In practice a user can confirm the shipment without noticing the preselected value and
+ * move the entire warehouse stock by accident, so ETP-5062 applies the same strip here: a
+ * manually-added shipment line must always start at the row's own default (0) instead of
+ * silently jumping to the product's on-hand quantity.
  */
 @Named("goodsShipmentLineHandler")
 public class GoodsShipmentLineHandler extends AbstractInOutLineHandler {
 
   private static final Logger log = LogManager.getLogger(GoodsShipmentLineHandler.class);
+  private static final String FIELD_MOVEMENT_QUANTITY = "movementQuantity";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -57,6 +68,30 @@ public class GoodsShipmentLineHandler extends AbstractInOutLineHandler {
       } catch (Exception e) {
         log.warn("[GoodsShipmentLineHandler] Could not default storageBin: {}", e.getMessage(), e);
       }
+    }
+    return null;
+  }
+
+  /**
+   * Strips the stock-derived {@code movementQuantity} update that {@code SL_InOutLine_Product}
+   * returns on product selection (see class Javadoc). Mutates {@code previousResult} in place —
+   * the same convention {@link GoodsReceiptLineHandler#afterCallout} uses — and returns
+   * {@code null} so the dispatcher's additive-only merge never runs.
+   */
+  @Override
+  public NeoResponse afterCallout(NeoContext context) {
+    if (context == null || !NeoEndpointType.CALLOUT.equals(context.getEndpointType())) {
+      return null;
+    }
+    NeoResponse previous = context.getPreviousResult();
+    if (previous == null || previous.getBody() == null) {
+      return null;
+    }
+    JSONObject updates = previous.getBody().optJSONObject("updates");
+    if (updates != null && updates.has(FIELD_MOVEMENT_QUANTITY)) {
+      updates.remove(FIELD_MOVEMENT_QUANTITY);
+      log.debug("[GoodsShipmentLineHandler] Stripped stock-derived movementQuantity from callout "
+          + "response (ETP-5062)");
     }
     return null;
   }
