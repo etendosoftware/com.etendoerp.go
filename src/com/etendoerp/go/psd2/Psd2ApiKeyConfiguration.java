@@ -22,8 +22,9 @@ import com.etendoerp.go.common.GoRuntimeProperties;
 /** Server-side settings for the PSD2 Salt Edge provisioning client. */
 public final class Psd2ApiKeyConfiguration {
 
-  private static final String PROVISIONING_URL =
-      "http://host.docker.internal:8000/internal/provision";
+  private static final String PROXY_URL_PROPERTY = "psd2.salt.edge.proxy.url";
+  private static final String PROXY_URL_ENV = "PSD2_SALT_EDGE_PROXY_URL";
+  private static final String DEFAULT_PROXY_URL = "https://psd2.etendo.cloud";
   private static final String ADMIN_KEY_PROPERTY =
       "etendo.go.psd2.saltedge.proxy.admin.key";
   private static final String ADMIN_KEY_ENV = "ETGO_PSD2_SALTEDGE_PROXY_ADMIN_KEY";
@@ -31,9 +32,15 @@ public final class Psd2ApiKeyConfiguration {
   private Psd2ApiKeyConfiguration() {
   }
 
-  /** @return the temporary hardcoded provisioning endpoint */
+  /** @return the Salt Edge proxy provisioning endpoint */
   public static String provisioningUrl() {
-    return PROVISIONING_URL;
+    return proxyBaseUrl() + "/internal/provision";
+  }
+
+  private static String proxyBaseUrl() {
+    String configured = GoRuntimeProperties.readValue(PROXY_URL_PROPERTY, PROXY_URL_ENV,
+        DEFAULT_PROXY_URL);
+    return configured.replaceAll("/+$", "");
   }
 
   /**
