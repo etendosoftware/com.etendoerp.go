@@ -357,6 +357,24 @@ class WidgetPendingTasksHandlerTest {
     assertTrue(found, "Expected overdueInvoices (singular) task in the response");
   }
 
+  /**
+   * ETP-5012 regression guard: an invoice with a future due date must NOT be
+   * counted as overdue just because it is Completed with an outstanding
+   * balance. Asserts the overdue query filters by etgo_get_due_date(...) —
+   * the same function backing the em_etgo_due_date virtual column the
+   * frontend list filters/displays on — so the counter and the drill-down
+   * list can never disagree again.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testOverdueInvoicesQueryFiltersByDueDate() throws Exception {
+    mockAllQueriesEmpty();
+
+    handler.handle(getContext());
+
+    verify(session).createNativeQuery(contains("etgo_get_due_date"));
+  }
+
   // ── Collections / payments due today ─────────────────────────────────────
 
   /**
