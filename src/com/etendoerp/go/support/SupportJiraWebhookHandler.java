@@ -163,7 +163,8 @@ final class SupportJiraWebhookHandler {
     if (fields != null) {
       JSONObject assignee = fields.optJSONObject("assignee");
       String assigneeEmail = assignee != null ? assignee.optString("emailAddress", "") : "";
-      if (isBotEmail(assigneeEmail)) {
+      String assigneeName = assignee != null ? assignee.optString("displayName", "") : "";
+      if (isBotIdentity(assigneeEmail, assigneeName)) {
         handleAssigneeReset(response, jiraKey);
         return;
       }
@@ -208,7 +209,7 @@ final class SupportJiraWebhookHandler {
     }
     String action = nvl(request.getParameter("action"), "");
     if ("assignee_reset".equals(action)) {
-      if (isBotEmail(authorEmail)) {
+      if (isBotIdentity(authorEmail, authorName)) {
         handleAssigneeReset(response, jiraKey);
       } else {
         SupportConversationsServlet.writeRaw(response, 200, "{\"status\":\"ignored_not_bot\"}");
@@ -233,10 +234,7 @@ final class SupportJiraWebhookHandler {
 
   static void storeJiraWebhookComment(HttpServletResponse response, JiraWebhookComment comment)
       throws IOException, JSONException {
-    JiraConfig config = JiraConfig.fromRuntime();
-    boolean isBotComment = (!config.getBotEmail().isEmpty() && config.getBotEmail().equalsIgnoreCase(comment.authorEmail))
-        || config.getBotName().equalsIgnoreCase(comment.authorName);
-    if (isBotComment) {
+    if (isBotIdentity(comment.authorEmail, comment.authorName)) {
       SupportConversationsServlet.writeJson(response, 200, new JSONObject().put(FIELD_STATUS, "skipped_bot"));
       return;
     }
@@ -397,6 +395,18 @@ final class SupportJiraWebhookHandler {
     JiraConfig config = JiraConfig.fromRuntime();
     return (!config.getBotEmail().isEmpty() && config.getBotEmail().equalsIgnoreCase(email))
         || email.equalsIgnoreCase(config.getUsername());
+  }
+
+  /** True if {@code email} OR {@code displayName} identifies our own Jira integration account
+   * ("Information Etendo"). Needed because that account's Atlassian profile has email
+   * visibility set to private, so Jira Cloud omits {@code emailAddress} from BOTH a comment's
+   * {@code author} object AND an issue's {@code assignee} object — {@link #isBotEmail} alone
+   * never matches it. {@code displayName} isn't subject to that privacy setting, so it's the
+   * only reliable signal for the assignee-reset case (a human reassigning the ticket back to
+   * the bot); for comments this mirrors the existing bot-name fallback in
+   * {@link #storeJiraWebhookComment}. */
+  static boolean isBotIdentity(String email, String displayName) {
+    return isBotEmail(email) || JiraConfig.fromRuntime().getBotName().equalsIgnoreCase(displayName);
   }
 
   // --- Jira ADF (Atlassian Document Format) comment body parsing ---
