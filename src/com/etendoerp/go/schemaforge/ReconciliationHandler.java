@@ -650,6 +650,18 @@ public class ReconciliationHandler implements NeoHandler {
   }
 
   Set<String> suggestedTransactionIds(String accountId, String lineId, int dateTolDays) {
+    return suggestedTransactionIds(accountId, lineId, dateTolDays, new ArrayList<>());
+  }
+
+  /**
+   * Same as above, but honoring {@code excluded} — transactions the caller already consumed for an
+   * earlier line in the same run, so this line's suggestion does not collide with one already
+   * claimed. See {@link AutoMatchSupport#standardMatch} for why this matters: without it, N pending
+   * lines of the identical amount all get offered the SAME transaction by Core, and every line past
+   * the first ends up with no 1:1 suggestion at all.
+   */
+  Set<String> suggestedTransactionIds(String accountId, String lineId, int dateTolDays,
+      List<FIN_FinaccTransaction> excluded) {
     Set<String> ids = new HashSet<>();
     if (StringUtils.isBlank(lineId)) {
       return ids;
@@ -659,22 +671,10 @@ public class ReconciliationHandler implements NeoHandler {
       return ids;
     }
     FIN_FinancialAccount account = loadAccount(accountId);
-    if (account == null || account.getMatchingAlgorithm() == null
-        || StringUtils.isBlank(account.getMatchingAlgorithm().getJavaClassName())) {
-      return ids;
-    }
-    try {
-      FIN_MatchingTransaction matcher =
-          new FIN_MatchingTransaction(account.getMatchingAlgorithm().getJavaClassName());
-      FIN_MatchedTransaction matched = matcher.match(line, new ArrayList<>());
-      if (matched != null && matched.getTransaction() != null
-          && !FIN_MatchedTransaction.NOMATCH.equals(matched.getMatchLevel())
-          && AutoMatchSupport.withinDateWindow(line.getTransactionDate(),
-              matched.getTransaction().getTransactionDate(), dateTolDays)) {
-        ids.add(matched.getTransaction().getId());
-      }
-    } catch (Exception e) {
-      log.debug("Standard matching algorithm failed for line {}: {}", lineId, e.getMessage());
+    FIN_MatchedTransaction matched =
+        AutoMatchSupport.standardMatch(account, line, dateTolDays, excluded);
+    if (matched != null) {
+      ids.add(matched.getTransaction().getId());
     }
     return ids;
   }
@@ -904,22 +904,28 @@ public class ReconciliationHandler implements NeoHandler {
 
     JSONArray groups = new JSONArray();
     Set<String> usedTxnIds = new HashSet<>();
+    // Fed into the standard algorithm for every subsequent line — mirrors Classic's own
+    // runAutoMatchingAlgorithm accumulator, so N pending lines of the same amount each get their
+    // own suggestion in one run instead of all colliding on the same Core-picked transaction.
+    List<FIN_FinaccTransaction> excludedTxns = new ArrayList<>();
     int opsToLink = 0;
     int willCreate = 0;
 
     for (FIN_BankStatementLine line : pendingLines) {
       // Pass 1 (1:1): standard algorithm — uses lazy evaluation so findSignalGroup is not called
       // when a 1:1 match is already found, avoiding an unnecessary DB query.
-      Set<String> suggested = suggestedTransactionIds(accountId, line.getId(), autoDateTolDays);
+      Set<String> suggested =
+          suggestedTransactionIds(accountId, line.getId(), autoDateTolDays, excludedTxns);
       suggested.removeAll(usedTxnIds);
       FIN_FinaccTransaction txn1to1 = suggested.isEmpty() ? null : loadTransaction(suggested.iterator().next());
       if (txn1to1 != null) {
         usedTxnIds.add(txn1to1.getId());
+        excludedTxns.add(txn1to1);
         groups.put(AutoMatchSupport.buildStandardGroup(line, txn1to1, FIN_MatchedTransaction.STRONG));
         opsToLink++;
       } else {
-        int[] delta = AutoMatchSupport.matchFallback(accountId, line, usedTxnIds, rules, groups,
-            autoDateTolDays, autoAmtTolPct);
+        int[] delta = AutoMatchSupport.matchFallback(accountId, line, usedTxnIds, excludedTxns,
+            rules, groups, autoDateTolDays, autoAmtTolPct);
         opsToLink += delta[0];
         willCreate += delta[1];
       }

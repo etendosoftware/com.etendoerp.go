@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
@@ -1224,6 +1225,38 @@ public class ReconciliationHandlerTest {
     }
   }
 
+  /**
+   * The 4-arg {@code suggestedTransactionIds} overload forwards the exact {@code excluded} list
+   * instance into {@code matcher.match(line, excluded)} — the mechanism {@code buildAutoMatch}
+   * relies on to accumulate consumed transactions across pending lines of the same amount.
+   */
+  @Test
+  public void testSuggestedTransactionIdsForwardsExcludedList() throws Exception {
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    MatchingAlgorithm algo = mock(MatchingAlgorithm.class);
+    when(algo.getJavaClassName()).thenReturn("com.example.Algo");
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getMatchingAlgorithm()).thenReturn(algo);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+
+    List<FIN_FinaccTransaction> excluded =
+        new ArrayList<>(Collections.singletonList(mock(FIN_FinaccTransaction.class)));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedConstruction<FIN_MatchingTransaction> mc =
+            mockConstruction(FIN_MatchingTransaction.class, (m, ctx) ->
+                when(m.match(same(line), same(excluded))).thenReturn(null))) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_BankStatementLine.class, LINE_ID)).thenReturn(line);
+
+      Set<String> ids = handler.suggestedTransactionIds(ACC_ID, LINE_ID, 3, excluded);
+
+      assertTrue(ids.isEmpty());
+      verify(mc.constructed().get(0)).match(same(line), same(excluded));
+    }
+  }
+
   // ── buildCandidates: 1:N signal-group pre-marking ─────────────────────────────
 
   /**
@@ -1301,7 +1334,7 @@ public class ReconciliationHandlerTest {
     doReturn(Collections.singletonList(line)).when(handler).loadPendingLines(ACC_ID);
 
     doReturn(new HashSet<>(Arrays.asList("t1"))).when(handler)
-        .suggestedTransactionIds(eq(ACC_ID), eq("l1"), anyInt());
+        .suggestedTransactionIds(eq(ACC_ID), eq("l1"), anyInt(), any());
     FIN_FinaccTransaction t1 = mock(FIN_FinaccTransaction.class);
     when(t1.getId()).thenReturn("t1");
     when(t1.getDepositAmount()).thenReturn(new BigDecimal("100.00"));
@@ -1358,7 +1391,7 @@ public class ReconciliationHandlerTest {
 
     // No 1:1 standard suggestion.
     doReturn(new HashSet<String>()).when(handler)
-        .suggestedTransactionIds(eq(ACC_ID), eq("l1"), anyInt());
+        .suggestedTransactionIds(eq(ACC_ID), eq("l1"), anyInt(), any());
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
         MockedStatic<AutoMatchSupport> ams = mockStatic(AutoMatchSupport.class);
@@ -1370,7 +1403,7 @@ public class ReconciliationHandlerTest {
       when(dal.getConnection()).thenReturn(conn);
       // matchFallback composes the (stubbed) leaf helpers below; run its real body so the
       // orchestration is exercised while findSignalGroup/buildRuleGroup stay stubbed.
-      ams.when(() -> AutoMatchSupport.matchFallback(any(), any(), any(), any(), any(),
+      ams.when(() -> AutoMatchSupport.matchFallback(any(), any(), any(), any(), any(), any(),
               anyInt(), any()))
           .thenCallRealMethod();
       // No 1:N signal group → forces the rule-engine branch.
@@ -1385,6 +1418,272 @@ public class ReconciliationHandlerTest {
       assertEquals(1, data.getJSONArray("groups").length());
       assertEquals(1, data.getJSONObject("kpis").getInt("willCreate"));
       assertEquals(0, data.getJSONObject("kpis").getInt("opsToLink"));
+    }
+  }
+
+  // ── buildAutoMatch: same-amount exhaustion regression (ETP-4971) ──────────────
+
+  private FIN_FinancialAccount accountWithMatchingAlgorithm() {
+    MatchingAlgorithm algo = mock(MatchingAlgorithm.class);
+    when(algo.getJavaClassName()).thenReturn("com.example.Algo");
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getMatchingAlgorithm()).thenReturn(algo);
+    return account;
+  }
+
+  private FIN_BankStatementLine autoMatchLine(String id, String amount) {
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    when(line.getId()).thenReturn(id);
+    when(line.getCramount()).thenReturn(new BigDecimal(amount));
+    when(line.getDramount()).thenReturn(BigDecimal.ZERO);
+    when(line.getDescription()).thenReturn("");
+    when(line.getReferenceNo()).thenReturn("");
+    when(line.getBpartnername()).thenReturn("");
+    when(line.getTransactionDate()).thenReturn(null);
+    return line;
+  }
+
+  private FIN_FinaccTransaction autoMatchTxn(String id, String amount) {
+    FIN_FinaccTransaction t = mock(FIN_FinaccTransaction.class);
+    when(t.getId()).thenReturn(id);
+    when(t.getDepositAmount()).thenReturn(new BigDecimal(amount));
+    when(t.getPaymentAmount()).thenReturn(BigDecimal.ZERO);
+    when(t.getTransactionDate()).thenReturn(null);
+    when(t.getFinPayment()).thenReturn(null);
+    return t;
+  }
+
+  /**
+   * Mocks {@link FIN_MatchingTransaction} construction to mirror Core's real
+   * {@code MatchTransactionDao} semantics: {@code result.removeAll(excluded)} then return the
+   * first remaining same-amount candidate, or NOMATCH once the pool is exhausted. Candidates in
+   * {@code pool} are matched against the constructed call's line by signed amount.
+   */
+  private MockedConstruction<FIN_MatchingTransaction> mockPoolMatching(
+      List<FIN_FinaccTransaction> pool) {
+    return mockConstruction(FIN_MatchingTransaction.class, (m, ctx) ->
+        when(m.match(any(), any())).thenAnswer(invocation -> {
+          FIN_BankStatementLine argLine = invocation.getArgument(0);
+          List<FIN_FinaccTransaction> excluded = invocation.getArgument(1);
+          BigDecimal target = argLine.getCramount().subtract(argLine.getDramount());
+          for (FIN_FinaccTransaction candidate : pool) {
+            BigDecimal candidateAmount =
+                candidate.getDepositAmount().subtract(candidate.getPaymentAmount());
+            if (candidateAmount.compareTo(target) == 0 && !excluded.contains(candidate)) {
+              FIN_MatchedTransaction found = mock(FIN_MatchedTransaction.class);
+              when(found.getTransaction()).thenReturn(candidate);
+              when(found.getMatchLevel()).thenReturn(FIN_MatchedTransaction.STRONG);
+              return found;
+            }
+          }
+          FIN_MatchedTransaction none = mock(FIN_MatchedTransaction.class);
+          when(none.getMatchLevel()).thenReturn(FIN_MatchedTransaction.NOMATCH);
+          return none;
+        }));
+  }
+
+  /**
+   * Regression for ETP-4971: two pending lines of the identical amount must each get their OWN
+   * 1:1 suggestion when two same-amount transactions are available for them — not the same
+   * transaction offered to both. Fails against the pre-fix code, which called Core's matcher with
+   * an EMPTY excluded list for every line, so Core kept returning the same transaction for both
+   * lines and the per-line usedTxnIds filter then just discarded the duplicate, leaving the
+   * second line with no suggestion.
+   */
+  @Test
+  public void testBuildAutoMatchTwoLinesSameAmountProduceTwoGroups() throws Exception {
+    FIN_FinancialAccount account = accountWithMatchingAlgorithm();
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+
+    FIN_BankStatementLine l1 = autoMatchLine("l1", "1.00");
+    FIN_BankStatementLine l2 = autoMatchLine("l2", "1.00");
+    doReturn(Arrays.asList(l1, l2)).when(handler).loadPendingLines(ACC_ID);
+
+    FIN_FinaccTransaction t1 = autoMatchTxn("t1", "1.00");
+    FIN_FinaccTransaction t2 = autoMatchTxn("t2", "1.00");
+    doReturn(t1).when(handler).loadTransaction("t1");
+    doReturn(t2).when(handler).loadTransaction("t2");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationKpiTelemetry> telemetry =
+            mockStatic(ReconciliationKpiTelemetry.class);
+        MockedConstruction<FIN_MatchingTransaction> mc = mockPoolMatching(Arrays.asList(t1, t2))) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(dal.get(FIN_BankStatementLine.class, "l1")).thenReturn(l1);
+      when(dal.get(FIN_BankStatementLine.class, "l2")).thenReturn(l2);
+
+      NeoResponse response = handler.buildAutoMatch(ACC_ID);
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      JSONArray groups = data.getJSONArray("groups");
+      assertEquals(2, groups.length());
+      assertEquals(2, data.getJSONObject("kpis").getInt("opsToLink"));
+      String firstOpId =
+          groups.getJSONObject(0).getJSONArray("operations").getJSONObject(0).getString("id");
+      String secondOpId =
+          groups.getJSONObject(1).getJSONArray("operations").getJSONObject(0).getString("id");
+      assertTrue(Arrays.asList("t1", "t2").containsAll(Arrays.asList(firstOpId, secondOpId)));
+      assertFalse("the two suggestions must not collide on the same transaction",
+          firstOpId.equals(secondOpId));
+    }
+  }
+
+  /** Same regression as above, scaled to three pending lines / three candidates of 50.00. */
+  @Test
+  public void testBuildAutoMatchThreeLinesSameAmountProduceThreeGroups() throws Exception {
+    FIN_FinancialAccount account = accountWithMatchingAlgorithm();
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+
+    FIN_BankStatementLine l1 = autoMatchLine("l1", "50.00");
+    FIN_BankStatementLine l2 = autoMatchLine("l2", "50.00");
+    FIN_BankStatementLine l3 = autoMatchLine("l3", "50.00");
+    doReturn(Arrays.asList(l1, l2, l3)).when(handler).loadPendingLines(ACC_ID);
+
+    FIN_FinaccTransaction t1 = autoMatchTxn("t1", "50.00");
+    FIN_FinaccTransaction t2 = autoMatchTxn("t2", "50.00");
+    FIN_FinaccTransaction t3 = autoMatchTxn("t3", "50.00");
+    doReturn(t1).when(handler).loadTransaction("t1");
+    doReturn(t2).when(handler).loadTransaction("t2");
+    doReturn(t3).when(handler).loadTransaction("t3");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationKpiTelemetry> telemetry =
+            mockStatic(ReconciliationKpiTelemetry.class);
+        MockedConstruction<FIN_MatchingTransaction> mc =
+            mockPoolMatching(Arrays.asList(t1, t2, t3))) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(dal.get(FIN_BankStatementLine.class, "l1")).thenReturn(l1);
+      when(dal.get(FIN_BankStatementLine.class, "l2")).thenReturn(l2);
+      when(dal.get(FIN_BankStatementLine.class, "l3")).thenReturn(l3);
+
+      NeoResponse response = handler.buildAutoMatch(ACC_ID);
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      JSONArray groups = data.getJSONArray("groups");
+      assertEquals(3, groups.length());
+      assertEquals(3, data.getJSONObject("kpis").getInt("opsToLink"));
+      Set<String> opIds = new HashSet<>();
+      for (int i = 0; i < groups.length(); i++) {
+        opIds.add(
+            groups.getJSONObject(i).getJSONArray("operations").getJSONObject(0).getString("id"));
+      }
+      assertEquals(3, opIds.size());
+    }
+  }
+
+  /**
+   * A unique-amount line is unaffected by the exhaustion fix; only the duplicated-amount lines
+   * multiply into distinct groups.
+   */
+  @Test
+  public void testBuildAutoMatchMixedAmountsOnlyDuplicatesMultiply() throws Exception {
+    FIN_FinancialAccount account = accountWithMatchingAlgorithm();
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+
+    FIN_BankStatementLine lUnique = autoMatchLine("lUnique", "30.00");
+    FIN_BankStatementLine lDup1 = autoMatchLine("lDup1", "10.00");
+    FIN_BankStatementLine lDup2 = autoMatchLine("lDup2", "10.00");
+    doReturn(Arrays.asList(lUnique, lDup1, lDup2)).when(handler).loadPendingLines(ACC_ID);
+
+    FIN_FinaccTransaction tUnique = autoMatchTxn("tUnique", "30.00");
+    FIN_FinaccTransaction tDupA = autoMatchTxn("tDupA", "10.00");
+    FIN_FinaccTransaction tDupB = autoMatchTxn("tDupB", "10.00");
+    doReturn(tUnique).when(handler).loadTransaction("tUnique");
+    doReturn(tDupA).when(handler).loadTransaction("tDupA");
+    doReturn(tDupB).when(handler).loadTransaction("tDupB");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationKpiTelemetry> telemetry =
+            mockStatic(ReconciliationKpiTelemetry.class);
+        MockedConstruction<FIN_MatchingTransaction> mc =
+            mockPoolMatching(Arrays.asList(tUnique, tDupA, tDupB))) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(dal.get(FIN_BankStatementLine.class, "lUnique")).thenReturn(lUnique);
+      when(dal.get(FIN_BankStatementLine.class, "lDup1")).thenReturn(lDup1);
+      when(dal.get(FIN_BankStatementLine.class, "lDup2")).thenReturn(lDup2);
+
+      NeoResponse response = handler.buildAutoMatch(ACC_ID);
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      JSONArray groups = data.getJSONArray("groups");
+      assertEquals(3, groups.length());
+      assertEquals(3, data.getJSONObject("kpis").getInt("opsToLink"));
+
+      Set<String> dupOpIds = new HashSet<>();
+      boolean uniqueGroupFound = false;
+      for (int i = 0; i < groups.length(); i++) {
+        String opId =
+            groups.getJSONObject(i).getJSONArray("operations").getJSONObject(0).getString("id");
+        if ("tUnique".equals(opId)) {
+          uniqueGroupFound = true;
+        } else {
+          dupOpIds.add(opId);
+        }
+      }
+      assertTrue(uniqueGroupFound);
+      assertEquals(2, dupOpIds.size());
+    }
+  }
+
+  /**
+   * When fewer same-amount transactions exist than pending lines of that amount, the lines past
+   * the exhausted candidate pool are left WITHOUT a fabricated match — no signal-group or rule
+   * fallback applies here, so the second line simply does not appear in the result.
+   */
+  @Test
+  public void testBuildAutoMatchExhaustedCandidatesLeavesLaterLineUnsuggested() throws Exception {
+    FIN_FinancialAccount account = accountWithMatchingAlgorithm();
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+
+    FIN_BankStatementLine l1 = autoMatchLine("l1", "1.00");
+    FIN_BankStatementLine l2 = autoMatchLine("l2", "1.00");
+    doReturn(Arrays.asList(l1, l2)).when(handler).loadPendingLines(ACC_ID);
+
+    FIN_FinaccTransaction t1 = autoMatchTxn("t1", "1.00");
+    doReturn(t1).when(handler).loadTransaction("t1");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationKpiTelemetry> telemetry =
+            mockStatic(ReconciliationKpiTelemetry.class);
+        MockedConstruction<FIN_MatchingTransaction> mc =
+            mockPoolMatching(Collections.singletonList(t1))) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(dal.get(FIN_BankStatementLine.class, "l1")).thenReturn(l1);
+      when(dal.get(FIN_BankStatementLine.class, "l2")).thenReturn(l2);
+      // findSignalGroup's real DB path (no fallback candidate exists for line 2 either).
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+      @SuppressWarnings("unchecked")
+      org.hibernate.query.Query<FIN_FinaccTransaction> query =
+          mock(org.hibernate.query.Query.class);
+      when(session.createQuery(anyString(), eq(FIN_FinaccTransaction.class))).thenReturn(query);
+      when(query.setParameter(anyString(), any())).thenReturn(query);
+      when(query.list()).thenReturn(Collections.emptyList());
+
+      NeoResponse response = handler.buildAutoMatch(ACC_ID);
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      JSONArray groups = data.getJSONArray("groups");
+      assertEquals(1, groups.length());
+      assertEquals(1, data.getJSONObject("kpis").getInt("opsToLink"));
+      assertEquals("t1",
+          groups.getJSONObject(0).getJSONArray("operations").getJSONObject(0).getString("id"));
     }
   }
 
