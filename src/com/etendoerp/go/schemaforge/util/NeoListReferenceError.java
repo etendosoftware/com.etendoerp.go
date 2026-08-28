@@ -2,6 +2,7 @@ package com.etendoerp.go.schemaforge.util;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -57,21 +58,27 @@ public final class NeoListReferenceError {
    * {@code Property.toString()} ({@code entity + "." + name}) followed by core's literal text. The
    * repetition bounds are explicit rather than open-ended (SonarQube java:S5998 / S5852): the
    * message can carry caller-controlled data, and an unbounded run here would let a crafted value
-   * drive catastrophic backtracking.</p>
+   * drive catastrophic backtracking. The identifier classes use {@code \p{Alpha}} rather than
+   * {@code A-Za-z} because the pattern is case-insensitive, which makes those two ASCII ranges
+   * duplicates of each other (java:S5869).</p>
    */
   private static final Pattern PROPERTY_PATTERN = Pattern.compile(
-      "Property\\s+([A-Za-z_$][\\w$]{0,127})\\.([A-Za-z_$][\\w$]{0,127})\\s*,\\s*value\\s*\\(",
+      "Property\\s+([\\p{Alpha}_$][\\w$]{0,127})\\.([\\p{Alpha}_$][\\w$]{0,127})\\s*,\\s*value\\s*\\(",
       Pattern.CASE_INSENSITIVE);
 
   /**
-   * Captures the allowed-values clause, up to core's trailing {@code but it is value <x>}.
+   * Opening of the allowed-values clause, matched literally rather than by a pattern.
    *
-   * <p>Reluctant and bounded so it stops at the first {@code but it is value}, and cannot run away
-   * on a message that never contains one.</p>
+   * <p>A regex spanning from here to the {@code but it is value} tail needs a reluctant wildcard
+   * sitting between two whitespace runs it can also match, which is precisely the ambiguity
+   * SonarQube reports as a backtracking denial of service (java:S5852) — and this message can
+   * carry caller-controlled data. Two {@link String#indexOf} scans are linear and cannot
+   * backtrack at all.</p>
    */
-  private static final Pattern ALLOWED_VALUES_PATTERN = Pattern.compile(
-      "(it should be one of the following values:\\s*)(.{0,2000}?)(\\s*but it is value\\b)",
-      Pattern.CASE_INSENSITIVE);
+  private static final String VALUES_MARKER = "it should be one of the following values:";
+
+  /** Core's trailing {@code but it is value <x>}, which closes the allowed-values clause. */
+  private static final String TAIL_MARKER = "but it is value";
 
   /**
    * Upper bound on how many values are spelled out. A List reference with more entries than this
@@ -105,12 +112,34 @@ public final class NeoListReferenceError {
    */
   @FunctionalInterface
   interface AllowedValuesResolver {
+    /**
+     * Returns the values {@code entityName.propertyName} accepts, or an empty list when they
+     * cannot be resolved.
+     *
+     * @param entityName   the entity named in the failing message
+     * @param propertyName the property named in the failing message
+     * @return the accepted values, never {@code null}
+     */
     List<String> resolve(String entityName, String propertyName);
   }
 
-  /** @see #enrich(String) */
+  /**
+   * Rewrites {@code message} against an injected resolver instead of the live DAL model.
+   *
+   * @see #enrich(String)
+   */
   static String enrichWith(String message, AllowedValuesResolver resolver) {
-    if (message == null || !ALLOWED_VALUES_PATTERN.matcher(message).find()) {
+    if (message == null) {
+      return message;
+    }
+    String lower = message.toLowerCase(Locale.ROOT);
+    int marker = lower.indexOf(VALUES_MARKER);
+    if (marker < 0) {
+      return message;
+    }
+    int valuesFrom = marker + VALUES_MARKER.length();
+    int tail = tailIndex(lower, valuesFrom);
+    if (tail < 0) {
       return message;
     }
     Matcher property = PROPERTY_PATTERN.matcher(message);
@@ -121,10 +150,33 @@ public final class NeoListReferenceError {
     if (allowed == null || allowed.isEmpty()) {
       return message;
     }
-    Matcher clause = ALLOWED_VALUES_PATTERN.matcher(message);
-    // The rendered values are quoted because `$` and `\` are replacement metacharacters; the
-    // surrounding $1/$3 are real group references and must NOT be quoted.
-    return clause.replaceFirst("$1" + Matcher.quoteReplacement(render(allowed)) + "$3");
+    // Plain concatenation, so a rendered value carrying a replacement metacharacter needs no
+    // quoting: there is no replacement expression left to interpret it.
+    return message.substring(0, valuesFrom) + " " + render(allowed) + " " + message.substring(tail);
+  }
+
+  /**
+   * Index of the {@code but it is value} tail at or after {@code from}, or {@code -1} when the
+   * clause is never closed.
+   *
+   * <p>The marker must be followed by a word boundary, which is what the word-boundary anchor in
+   * the previous pattern bought: {@code but it is valueXYZ} does not close the clause.</p>
+   */
+  private static int tailIndex(String lowerMessage, int from) {
+    int at = lowerMessage.indexOf(TAIL_MARKER, from);
+    while (at >= 0) {
+      int after = at + TAIL_MARKER.length();
+      if (after >= lowerMessage.length() || !isWordChar(lowerMessage.charAt(after))) {
+        return at;
+      }
+      at = lowerMessage.indexOf(TAIL_MARKER, at + 1);
+    }
+    return -1;
+  }
+
+  /** Java's {@code \w}: what a word boundary after {@link #TAIL_MARKER} must not be followed by. */
+  private static boolean isWordChar(char c) {
+    return Character.isLetterOrDigit(c) || c == '_';
   }
 
   /**

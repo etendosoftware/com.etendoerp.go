@@ -212,6 +212,15 @@ class NeoTrlTest {
    * instead of reality, so it happily passed while the production code was silently a no-op for
    * every translated term. Any resolver that reaches for the identifier now fails here.
    */
+  /**
+   * A {@code UOMTrl} row whose base record carries {@code baseName} and whose own name is
+   * {@code translatedName}, with {@code getIdentifier()} stubbed to the translated name the way
+   * Openbravo really returns it under a non-base language.
+   *
+   * <p>Call this BEFORE opening a stubbing: it stubs mocks of its own, so evaluating it inside
+   * {@code when(query.list()).thenReturn(...)} nests one stubbing in another and Mockito throws
+   * {@code UnfinishedStubbingException}.</p>
+   */
   private BaseOBObject trlRowFor(String baseName, String translatedName) {
     BaseOBObject base = mock(BaseOBObject.class);
     when(base.getEntity()).thenReturn(uomBaseEntity);
@@ -231,7 +240,8 @@ class NeoTrlTest {
     // instead lets it match at 100% without changing the matcher itself.
     stubUomModel();
     OBQuery<BaseOBObject> query = stubTrlQuery();
-    when(query.list()).thenReturn(Collections.singletonList(trlRowFor("Unit", "Unidad")));
+    BaseOBObject row = trlRowFor("Unit", "Unidad");
+    when(query.list()).thenReturn(Collections.singletonList(row));
 
     assertEquals("Unit", NeoTrl.baseNameForTranslation("UOM", "Unidad", "es_ES"));
     obContext.verify(() -> OBContext.setAdminMode(true), atLeastOnce());
@@ -243,7 +253,8 @@ class NeoTrlTest {
   void baseNameForTranslationTrims() {
     stubUomModel();
     OBQuery<BaseOBObject> query = stubTrlQuery();
-    when(query.list()).thenReturn(Collections.singletonList(trlRowFor("Unit", "Unidad")));
+    BaseOBObject row = trlRowFor("Unit", "Unidad");
+    when(query.list()).thenReturn(Collections.singletonList(row));
 
     assertEquals("Unit", NeoTrl.baseNameForTranslation("UOM", "  Unidad  ", "es_ES"));
   }
@@ -255,9 +266,9 @@ class NeoTrlTest {
     // so the original term goes to the matcher untouched and the user disambiguates.
     stubUomModel();
     OBQuery<BaseOBObject> query = stubTrlQuery();
-    when(query.list()).thenReturn(Arrays.asList(
-        trlRowFor("Unit", "Unidad"),
-        trlRowFor("Each", "Unidad")));
+    BaseOBObject unit = trlRowFor("Unit", "Unidad");
+    BaseOBObject each = trlRowFor("Each", "Unidad");
+    when(query.list()).thenReturn(Arrays.asList(unit, each));
 
     assertNull(NeoTrl.baseNameForTranslation("UOM", "Unidad", "es_ES"));
   }
@@ -270,7 +281,8 @@ class NeoTrlTest {
     // today rather than round-tripping an identical term.
     stubUomModel();
     OBQuery<BaseOBObject> query = stubTrlQuery();
-    when(query.list()).thenReturn(Collections.singletonList(trlRowFor("Unit", "unit")));
+    BaseOBObject row = trlRowFor("Unit", "unit");
+    when(query.list()).thenReturn(Collections.singletonList(row));
 
     assertNull(NeoTrl.baseNameForTranslation("UOM", "Unit", "en_US"));
   }

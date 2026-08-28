@@ -123,9 +123,10 @@ public class NeoListReferenceErrorTest {
   }
 
   /**
-   * A message with no {@code but it is value} tail must not send the pattern scanning to the end
-   * of a long string. Guards the bounded-repetition choice in the patterns (SonarQube java:S5852):
-   * the message can carry caller-controlled data.
+   * A message with no {@code but it is value} tail must be returned untouched, and cheaply.
+   * Guards the literal-marker scan that replaced the reluctant-wildcard pattern (SonarQube
+   * java:S5852): the message can carry caller-controlled data, so the clause is located by two
+   * linear {@code indexOf} calls that cannot backtrack.
    */
   @Test
   public void enrichWith_unterminatedClause_doesNotHang() {
@@ -136,5 +137,18 @@ public class NeoListReferenceErrorTest {
     long elapsedMs = (System.nanoTime() - start) / 1_000_000;
     assertEquals(message, result);
     assertTrue("enrich took " + elapsedMs + "ms on an unterminated clause", elapsedMs < 1000);
+  }
+
+  /**
+   * The tail marker only closes the clause on a word boundary — the {@code \b} the previous
+   * pattern carried. A longer word starting with it is not the tail, so the scan moves on.
+   */
+  @Test
+  public void enrichWith_tailMarkerInsideALongerWord_isNotTheEndOfTheClause() {
+    String message = "Property Product.productType, value (1) is not allowed, "
+        + "it should be one of the following values: [I, S] but it is valueless "
+        + "but it is value 1";
+    assertTrue(NeoListReferenceError.enrichWith(message, PRODUCT_TYPES)
+        .contains("following values: E, I, O, R, S but it is value 1"));
   }
 }
