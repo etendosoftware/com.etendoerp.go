@@ -89,6 +89,31 @@ class NeoCrudHandler {
    * all the same string.
    */
   private static final String FIELD_UPDATED = "updated";
+
+  /**
+   * Key names of the structured error envelopes this class returns.
+   *
+   * <p>Named because five builders emit the same shape and Sonar counts a literal repeated three
+   * times as duplication (java:S1192) — but the reason to want them named is the one that produced
+   * this ticket twice already: a key spelled by hand in five places is a key that eventually gets
+   * spelled differently in one of them, and the client branches on {@code error} to tell a
+   * concurrency conflict from a duplicate key. A typo there is silent.
+   *
+   * <p>These deliberately mirror {@code McpConstants}' key names without importing them: that class
+   * is package-private in the MCP package and unreachable from here, so the names are duplicated
+   * across packages on purpose and must stay in step by review, not by the compiler.
+   *
+   * <p>{@code KEY_ERROR} serves both shapes in use: the nested {@code {"error":{...}}} wrapper of
+   * the MISSING_REQUIRED_FIELDS body, and the flat discriminator every later envelope carries.
+   * They are the same key name, holding different things.
+   */
+  private static final String KEY_STATUS = "status";
+  private static final String KEY_ERROR = "error";
+  private static final String KEY_MESSAGE = "message";
+  private static final String KEY_DETAIL = "detail";
+  private static final String KEY_FIELD = "field";
+  private static final String KEY_HINT = "hint";
+  private static final String KEY_SEE_ALSO = "seeAlso";
   private static final Set<String> CONTACTS_PRECREATE_BILLING_FIELDS = new HashSet<>(
       Arrays.asList(
           "priceList",
@@ -301,11 +326,11 @@ class NeoCrudHandler {
       }
       JSONObject errorObj = new JSONObject();
       errorObj.put("code", MissingRequiredFieldsException.ERROR_CODE);
-      errorObj.put("status", HttpServletResponse.SC_BAD_REQUEST);
-      errorObj.put("message", "Missing required fields");
+      errorObj.put(KEY_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+      errorObj.put(KEY_MESSAGE, "Missing required fields");
       errorObj.put("fields", fieldsArr);
       JSONObject body = new JSONObject();
-      body.put("error", errorObj);
+      body.put(KEY_ERROR, errorObj);
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
     } catch (Exception fallback) {
       log.warn("Could not build MISSING_REQUIRED_FIELDS body: {}", fallback.getMessage());
@@ -338,16 +363,16 @@ class NeoCrudHandler {
   private NeoResponse buildReadOnlyFieldRejectedResponse(ReadOnlyFieldRejectedException e) {
     try {
       JSONObject errorObj = new JSONObject();
-      errorObj.put("status", STATUS_UNPROCESSABLE);
-      errorObj.put("error", "read_only_field");
-      errorObj.put("detail", "Field '" + e.getFieldName()
+      errorObj.put(KEY_STATUS, STATUS_UNPROCESSABLE);
+      errorObj.put(KEY_ERROR, "read_only_field");
+      errorObj.put(KEY_DETAIL, "Field '" + e.getFieldName()
           + "' is read-only and cannot be set by the caller; its value was rejected, not silently"
           + " dropped, so the write does not answer 200 with the field left unset.");
-      errorObj.put("field", e.getFieldName());
-      errorObj.put("hint", "Remove '" + e.getFieldName() + "' from the request. If this value must "
+      errorObj.put(KEY_FIELD, e.getFieldName());
+      errorObj.put(KEY_HINT, "Remove '" + e.getFieldName() + "' from the request. If this value must "
           + "be set, it is derived automatically (e.g. by a callout or a dedicated write path) — "
           + "check neo_schema's field descriptor for this entity before retrying.");
-      errorObj.put("seeAlso", "docs(topic:\"creating records\")");
+      errorObj.put(KEY_SEE_ALSO, "docs(topic:\"creating records\")");
       return NeoResponse.error(STATUS_UNPROCESSABLE, errorObj);
     } catch (Exception fallback) {
       log.warn("Could not build READ_ONLY_FIELD_REJECTED body: {}", fallback.getMessage());
@@ -635,17 +660,17 @@ class NeoCrudHandler {
   private NeoResponse buildMissingUpdatedResponse() {
     try {
       JSONObject errorObj = new JSONObject();
-      errorObj.put("status", HttpServletResponse.SC_BAD_REQUEST);
-      errorObj.put("error", "missing_updated");
-      errorObj.put("detail", "Updates must carry the '" + FIELD_UPDATED + "' value of the record"
+      errorObj.put(KEY_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+      errorObj.put(KEY_ERROR, "missing_updated");
+      errorObj.put(KEY_DETAIL, "Updates must carry the '" + FIELD_UPDATED + "' value of the record"
           + " as it was read, so the concurrency check can verify nobody else changed it in the"
           + " meantime. The field is absent or null, so this write was refused rather than allowed"
           + " to silently overwrite a concurrent edit.");
-      errorObj.put("field", FIELD_UPDATED);
-      errorObj.put("hint", "Re-read the record (GET the same URL, or neo_get) and send back the"
+      errorObj.put(KEY_FIELD, FIELD_UPDATED);
+      errorObj.put(KEY_HINT, "Re-read the record (GET the same URL, or neo_get) and send back the"
           + " '" + FIELD_UPDATED + "' value it returns, verbatim and unmodified, alongside the"
           + " fields you are changing.");
-      errorObj.put("seeAlso", "docs(topic:\"updating records\")");
+      errorObj.put(KEY_SEE_ALSO, "docs(topic:\"updating records\")");
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, errorObj);
     } catch (Exception fallback) {
       log.warn("Could not build missing_updated body: {}", fallback.getMessage());
@@ -670,14 +695,14 @@ class NeoCrudHandler {
   private NeoResponse buildStaleRecordResponse(String translated) {
     try {
       JSONObject errorObj = new JSONObject();
-      errorObj.put("status", HttpServletResponse.SC_CONFLICT);
-      errorObj.put("error", "stale_record");
-      errorObj.put("message", translated);
-      errorObj.put("detail", "This record was modified by someone else after you read it. Your"
+      errorObj.put(KEY_STATUS, HttpServletResponse.SC_CONFLICT);
+      errorObj.put(KEY_ERROR, "stale_record");
+      errorObj.put(KEY_MESSAGE, translated);
+      errorObj.put(KEY_DETAIL, "This record was modified by someone else after you read it. Your"
           + " write was refused so their change is not lost.");
-      errorObj.put("hint", "Re-read the record to get the current values and the fresh '"
+      errorObj.put(KEY_HINT, "Re-read the record to get the current values and the fresh '"
           + FIELD_UPDATED + "', reapply your changes on top of it, then retry.");
-      errorObj.put("seeAlso", "docs(topic:\"updating records\")");
+      errorObj.put(KEY_SEE_ALSO, "docs(topic:\"updating records\")");
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT, errorObj);
     } catch (Exception fallback) {
       log.warn("Could not build stale_record body: {}", fallback.getMessage());
