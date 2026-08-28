@@ -48,6 +48,7 @@ public class SaltEdgeApiKeyProvider implements Psd2ApiKeyProvider {
   private static final Logger log = LogManager.getLogger(SaltEdgeApiKeyProvider.class);
   private final SaltEdgeProvisioningClient provisioningClient;
 
+  /** Creates a provider backed by the default Salt Edge provisioning client. */
   public SaltEdgeApiKeyProvider() {
     this(new SaltEdgeProvisioningClient());
   }

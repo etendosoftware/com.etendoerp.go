@@ -92,10 +92,9 @@ final class SaltEdgeProvisioningClient {
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       throw new IllegalStateException("Salt Edge provisioning was interrupted", e);
+    } catch (IllegalStateException e) {
+      throw e;
     } catch (Exception e) {
-      if (e instanceof IllegalStateException) {
-        throw (IllegalStateException) e;
-      }
       throw new IllegalStateException("Invalid Salt Edge provisioning response", e);
     }
   }
