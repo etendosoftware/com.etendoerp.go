@@ -684,12 +684,13 @@ public class McpToolRouter {
       return wrapAsErrorContent(McpWriteRequestSupport.buildStaleRecordError().toString(2));
     }
 
-    // ETP-5073 / DOC-04: injected HERE, deliberately last. It must not pass through
-    // coerceFieldTypes above: that pass canonicalizes date/datetime strings, and rewriting this
-    // one by even a second makes every update look like a conflict — the check compares it for
-    // exact equality against the stored timestamp. It is not a field the caller is editing either;
-    // it is a precondition token core reads, compares, and then overwrites with its own stamp on
-    // save. Keeping it out of `fields` is what makes that distinction visible in the tool schema.
+    // ETP-5073 / DOC-04: injected here, deliberately last, so it never passes through the type
+    // coercion pass above. That pass canonicalises date and datetime strings, and rewriting this
+    // value by even a second would make every update look like a conflict, since the check
+    // compares it for exact equality against the stored timestamp. It is also not a field the
+    // caller is editing: core reads it, compares it, and then overwrites the column with its own
+    // stamp on save. Keeping it out of the caller's field map is what makes that distinction
+    // visible in the tool schema.
     filteredBody.put(McpConstants.PARAM_UPDATED, updated);
 
     // Wrap for DefaultJsonDataService with record ID

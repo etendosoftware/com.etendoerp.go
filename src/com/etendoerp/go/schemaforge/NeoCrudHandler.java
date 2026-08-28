@@ -701,17 +701,13 @@ class NeoCrudHandler {
               .optString("message", "Write operation failed")
           : "Write operation failed";
       String translated = OBMessageUtils.messageBD(errMsg);
-      // ETP-5073 / DOC-04: a concurrent-modification conflict, classified BEFORE the generic
-      // buckets below — otherwise it lands in the catch-all and answers 500 with core's prose,
-      // which is what shipped first and what stopped the UI from offering reload-or-cancel.
-      //
-      // Both forms are offered to the check because both are reachable: on a normal request
-      // `JsonUtils.convertExceptionToJson` has already run `Utility.translateError`, so `errMsg`
-      // holds prose and the match is made against the same AD_Message resolved for this language;
-      // on a stateless request translation is skipped and the bare code survives. See
-      // NeoErrorSanitizer#isStaleRecordMessage.
-      if (NeoErrorSanitizer.isStaleRecordMessage(errMsg)
-          || NeoErrorSanitizer.isStaleRecordMessage(translated)) {
+      // ETP-5073 / DOC-04: a concurrent-modification conflict, classified before the generic
+      // buckets below, which would otherwise answer 500 and leave the UI unable to offer
+      // reload-or-cancel. This is only a backstop now: the conflict is normally caught before the
+      // write, by comparing versions. It still fires on a stateless request, the one path where
+      // core skips translation and its bare message code survives intact. Only the untranslated
+      // message is worth inspecting, for that same reason.
+      if (NeoErrorSanitizer.isStaleRecordMessage(errMsg)) {
         return buildStaleRecordResponse(translated);
       }
       // ETP-4793 / IMP-17: a not-null violation means the caller omitted a value the table
@@ -966,11 +962,11 @@ class NeoCrudHandler {
     if (hadAccountingDate) {
       filteredBody.put(fieldFilter.resolveWritablePropName(FIELD_ACCOUNTING_DATE), accountingDateBeforeFilter);
     }
-    // Unconditional: validateUpdateRequest already refused the request when `updated` was absent
-    // or null, so by here it is always present. No resolveWritablePropName call — `updated` has no
-    // API alias to resolve (see FIELD_UPDATED). The value is passed through byte-for-byte because
-    // core parses it with the same XSD format DataToJsonConverter used to emit it on the read;
-    // reformatting it here would make every write look stale.
+    // Unconditional: an update with no version was already refused during validation, so by here
+    // the value is always present. No name resolution is needed either, since this audit column
+    // has no API alias. The value is passed through byte for byte because core parses it with the
+    // same XSD format it used to emit the value on the read; reformatting it here would make every
+    // write look stale.
     filteredBody.put(FIELD_UPDATED, updatedBeforeFilter);
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
     return jsonService.update(params, wrappedBody);
