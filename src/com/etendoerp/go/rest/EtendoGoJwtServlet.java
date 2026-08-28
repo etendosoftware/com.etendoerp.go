@@ -1950,6 +1950,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Override it with the full name entered during onboarding so the app shows
     // the person's name instead of their email. No-op when fullName is blank.
     EtendoGoJwtSupport.applyClientAdminDisplayName(clientUser, requestData.fullName);
+    // ETP-5019 — InitialClientSetup's underlying insertUser() never sets AD_User.Email at all
+    // (only Name/Description/Username), so the owner's "Correo electrónico" field renders empty
+    // in the Users window. Backfill it from the real account email (not clientUser, which may
+    // carry a client-name suffix) right after creation, same best-effort pattern as the display
+    // name override above.
+    EtendoGoJwtSupport.applyClientAdminEmail(clientUser, accountEmail);
     return EtendoGoJwtSupport.findClientIdByName(requestData.clientName);
   }
 

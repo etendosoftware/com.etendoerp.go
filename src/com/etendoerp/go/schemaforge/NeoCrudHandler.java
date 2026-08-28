@@ -56,10 +56,11 @@ import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.NeoDistinctFetchSupport;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
-import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
+import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
 import com.etendoerp.go.schemaforge.util.NeoLocatorIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
+import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 
 /**
@@ -412,7 +413,8 @@ class NeoCrudHandler {
     // Nothing to highlight, so the stripped message is the only actionable content left. Returned
     // instead of an empty `fields` list on its own, which would tell the caller nothing at all.
     return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-        NeoErrorSanitizer.stripRowDump(NeoErrorSanitizer.redactObjectReferences(translated)));
+        NeoErrorSanitizer.stripRowDump(NeoErrorSanitizer.redactObjectReferences(
+            NeoListReferenceError.enrich(translated))));
   }
 
   /**
@@ -762,7 +764,8 @@ class NeoCrudHandler {
       // Postgres `Failing row contains (…)` detail, which is both an internals leak and, for an MCP
       // agent that has to read it, a real context cost (ETP-4793 / IMP-17).
       return NeoResponse.error(httpStatus,
-          NeoErrorSanitizer.stripRowDump(NeoErrorSanitizer.redactObjectReferences(translated)));
+          NeoErrorSanitizer.stripRowDump(NeoErrorSanitizer.redactObjectReferences(
+            NeoListReferenceError.enrich(translated))));
     }
     if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
