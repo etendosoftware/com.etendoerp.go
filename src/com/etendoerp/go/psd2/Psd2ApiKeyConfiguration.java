@@ -23,7 +23,7 @@ import com.etendoerp.go.common.GoRuntimeProperties;
 public final class Psd2ApiKeyConfiguration {
 
   private static final String PROVISIONING_URL =
-      "https://psd2.etendo.cloud/internal/provision";
+      "http://host.docker.internal:8000/internal/provision";
   private static final String ADMIN_KEY_PROPERTY =
       "etendo.go.psd2.saltedge.proxy.admin.key";
   private static final String ADMIN_KEY_ENV = "ETGO_PSD2_SALTEDGE_PROXY_ADMIN_KEY";

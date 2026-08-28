@@ -102,6 +102,7 @@ public class SaltEdgeApiKeyProvider implements Psd2ApiKeyProvider {
       return apiKey;
     } catch (Exception e) {
       rollback(connectionProvider, connection);
+      connection = null;
       Psd2ApiKeyAuditService.record(client.getId(), "PROVISION_FAILED", "ERROR",
           UUID.randomUUID().toString(), null, "PROVISIONING_ERROR", e, 0L, "GO");
       log.error("PSD2 API key provisioning failed for client {}", client.getId(), e);
