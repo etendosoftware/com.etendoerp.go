@@ -989,9 +989,15 @@ class NeoCrudHandler {
     }
     // Unconditional: an update with no version was already refused during validation, so by here
     // the value is always present. No name resolution is needed either, since this audit column
-    // has no API alias. The value is passed through byte for byte because core parses it with the
-    // same XSD format it used to emit the value on the read; reformatting it here would make every
-    // write look stale.
+    // has no API alias.
+    //
+    // Re-injected as received, but NOT delivered byte for byte: wrapForSmartclient runs
+    // NeoTypeCoercionHelper.coerceTypes right after this, and `updated` is a Datetime property, so
+    // it goes through NeoDateFormat.toCanonical. That is safe in both of its outcomes, and neither
+    // is an approximation: a zero offset is dropped ("...T20:14:10+00:00" -> "...T20:14:10"), which
+    // core reads back as UTC anyway (see NeoDateFormat#isZeroOffset), and any other shape yields
+    // null and is passed through unchanged. Either way core still compares the instant the client
+    // read, so its own concurrency check stays effective behind our pre-check.
     filteredBody.put(FIELD_UPDATED, updatedBeforeFilter);
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
     return jsonService.update(params, wrappedBody);
