@@ -56,6 +56,7 @@ import com.etendoerp.go.schemaforge.telemetry.NeoTelemetryService;
 import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.NeoDistinctFetchSupport;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
+import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.util.NeoListIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoLocatorIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
@@ -514,6 +515,15 @@ class NeoCrudHandler {
         if (earlyError != null) {
           return earlyError;
         }
+        // ETP-5073 / DOC-04: the conflict is detected BEFORE the write rather than read off
+        // core's refusal afterwards. Core does check, but its outcome arrives as translated prose
+        // with no code and no exception type (see NeoRecordVersion for the two failed attempts at
+        // classifying that string). Comparing here is deterministic and language-proof; core's
+        // own check stays as defence in depth for anything not routed through this handler.
+        NeoResponse conflict = detectStaleRecord(context, dalEntityName);
+        if (conflict != null) {
+          return conflict;
+        }
         result = executeUpdate(context, dalEntityName, fieldFilter, jsonService, params);
         break;
       }
@@ -574,6 +584,43 @@ class NeoCrudHandler {
     }
     return null;
   }
+
+  /**
+   * ETP-5073 / DOC-04: the 409 for a write whose {@code updated} no longer matches the stored
+   * row, or {@code null} when the write may proceed.
+   *
+   * <p>The message handed to the response is core's own translated wording for this condition,
+   * resolved from {@code AD_Message} — so a human reading the body still gets Etendo's sentence
+   * while the machine-readable {@code error} discriminator carries the meaning.
+   */
+  private NeoResponse detectStaleRecord(NeoContext context, String dalEntityName) {
+    JSONObject body = context.getRequestBody();
+    String clientValue = body == null ? null : body.optString(FIELD_UPDATED, null);
+    if (!NeoRecordVersion.isStale(dalEntityName, context.getRecordId(), clientValue)) {
+      return null;
+    }
+    return buildStaleRecordResponse(STALE_RECORD_MESSAGE);
+  }
+
+  /**
+   * Human-readable wording for the conflict, written here rather than resolved from
+   * {@code AD_Message}.
+   *
+   * <p>It WAS resolved with {@code OBMessageUtils.messageBD("OBJSON_StaleDate")}, and that shipped
+   * the literal string {@code "OBJSON_StaleDate"} to the client: the row exists in
+   * {@code AD_Message} (verified in the database) yet {@code messageBD} does not resolve it in this
+   * request context and echoes the code back. It surfaced in the lines sidebar, which renders the
+   * server's message verbatim; the main form never showed it because the React client uses its own
+   * translated string.
+   *
+   * <p>The same non-resolution is why the earlier message-matching detection could never fire.
+   * Once is a bug; twice is a signal — nothing on this path depends on {@code AD_Message} any
+   * more. Machine-readable meaning lives in {@code error}, the remedy in {@code hint}, and the
+   * user-facing wording belongs to the client's own locale files, which is where it is already
+   * translated.
+   */
+  private static final String STALE_RECORD_MESSAGE =
+      "This record was modified by someone else after you read it. Your changes were not saved.";
 
   /**
    * ETP-5073 / DOC-04: the structured 400 returned when an update omits {@code updated}.
@@ -655,9 +702,16 @@ class NeoCrudHandler {
           : "Write operation failed";
       String translated = OBMessageUtils.messageBD(errMsg);
       // ETP-5073 / DOC-04: a concurrent-modification conflict, classified BEFORE the generic
-      // buckets below. Matched on the raw `errMsg`, not on `translated` — the discriminator is
-      // core's untranslated message code, and matching prose would break on any server locale.
-      if (NeoErrorSanitizer.isStaleRecordMessage(errMsg)) {
+      // buckets below — otherwise it lands in the catch-all and answers 500 with core's prose,
+      // which is what shipped first and what stopped the UI from offering reload-or-cancel.
+      //
+      // Both forms are offered to the check because both are reachable: on a normal request
+      // `JsonUtils.convertExceptionToJson` has already run `Utility.translateError`, so `errMsg`
+      // holds prose and the match is made against the same AD_Message resolved for this language;
+      // on a stateless request translation is skipped and the bare code survives. See
+      // NeoErrorSanitizer#isStaleRecordMessage.
+      if (NeoErrorSanitizer.isStaleRecordMessage(errMsg)
+          || NeoErrorSanitizer.isStaleRecordMessage(translated)) {
         return buildStaleRecordResponse(translated);
       }
       // ETP-4793 / IMP-17: a not-null violation means the caller omitted a value the table

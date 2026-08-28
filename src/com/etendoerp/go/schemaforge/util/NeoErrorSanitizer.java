@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge.util;
 
+
 /**
  * Sanitizes exception messages before they are sent in HTTP responses.
  *
@@ -225,26 +226,33 @@ public final class NeoErrorSanitizer {
    *
    * <p>{@code JsonToDataConverter.setData} compares the {@code updated} value carried in the
    * write payload against the one the record holds in the database and, when they differ, throws
-   * {@code OBStaleObjectException("@OBJSON_StaleDate@")}. That exception is not returned to us as
-   * a {@link Throwable}: {@code DefaultJsonDataService.update} catches every {@code Throwable} and
-   * funnels it through {@code JsonUtils.convertExceptionToJson}, so by the time
-   * {@code NeoCrudHandler} classifies the outcome all that survives is an ordinary RPC failure
-   * body carrying this code as its message — the same reason
-   * {@link #isDuplicateKeyMessage} exists alongside {@link #isDuplicateKeyViolation(Throwable)}.
+   * {@code OBStaleObjectException("@OBJSON_StaleDate@")}.
    */
   private static final String STALE_RECORD_MESSAGE_CODE = "OBJSON_StaleDate";
 
   /**
-   * Returns {@code true} if {@code message} is core's optimistic-locking (stale record) failure.
+   * Returns {@code true} if {@code message} carries core's optimistic-locking message CODE.
    *
-   * <p>Matches on the <b>untranslated</b> message code, so this must be called with the raw
-   * message read off the RPC failure body, BEFORE {@code OBMessageUtils.messageBD} replaces it
-   * with a locale-dependent sentence. Matching translated prose would silently stop working the
-   * moment the server's language changes — the failure mode this whole check exists to prevent
-   * (ETP-5073 / DOC-04).
+   * <p>Narrow on purpose. Two richer versions were tried and both failed against a live server:
    *
-   * @param message the raw, untranslated error message; may be {@code null}
-   * @return whether the message describes a concurrent-modification conflict
+   * <ol>
+   *   <li>matching the code in the failure body — but {@code JsonUtils.convertExceptionToJson}
+   *       runs {@code Utility.translateError} before building it, so on a normal request the code
+   *       is already gone;</li>
+   *   <li>resolving the code through {@code AD_Message} and comparing the texts — but
+   *       {@code OBMessageUtils.messageBD("OBJSON_StaleDate")} does not resolve in this request
+   *       context and echoes the code straight back, even though the row exists in the database.
+   *       That was later proved by the code leaking to a client as the response message.</li>
+   * </ol>
+   *
+   * <p>So the detection that matters no longer looks at messages at all: {@code NeoRecordVersion}
+   * compares the caller's token against the stored row before the write. This method survives as a
+   * narrow backstop for the one path where the code really does arrive intact — a stateless
+   * request, where {@code convertExceptionToJson} skips translation and passes
+   * {@code throwable.getMessage()} through untouched.
+   *
+   * @param message the error message off the RPC failure body; may be {@code null}
+   * @return whether the message carries the stale-record code
    */
   public static boolean isStaleRecordMessage(String message) {
     return message != null && message.contains(STALE_RECORD_MESSAGE_CODE);

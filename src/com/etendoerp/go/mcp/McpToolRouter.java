@@ -48,6 +48,7 @@ import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
+import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoCommercialLinePolicy;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
@@ -674,6 +675,13 @@ public class McpToolRouter {
     JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
     if (preHookResult != null) {
       return preHookResult;
+    }
+
+    // ETP-5073 / DOC-04: the conflict is detected before the write, for the same reason the REST
+    // path does it there — core's refusal reaches us as translated prose with nothing stable to
+    // key on. See NeoRecordVersion.
+    if (NeoRecordVersion.isStale(dalEntityName, recordId, updated)) {
+      return wrapAsErrorContent(McpWriteRequestSupport.buildStaleRecordError().toString(2));
     }
 
     // ETP-5073 / DOC-04: injected HERE, deliberately last. It must not pass through

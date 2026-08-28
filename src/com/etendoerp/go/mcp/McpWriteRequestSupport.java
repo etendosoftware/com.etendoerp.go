@@ -384,24 +384,20 @@ final class McpWriteRequestSupport {
     boolean write = McpConstants.SEE_ALSO_WRITING.equals(seeAlso);
     JSONObject envelope = new JSONObject();
     // ETP-5073 / DOC-04: core's optimistic-locking refusal, classified first because its remedy is
-    // the opposite of every branch below (re-read, do not correct-and-retry). The raw message here
-    // is the bare AD code `@OBJSON_StaleDate@` — this path never calls messageBD, so core's own
-    // wording is not available and would be an unresolved token if passed through. That is why
-    // this branch replaces `detail` outright instead of decorating it: an opaque code is worse for
-    // an agent than a fixed English sentence, and this is not a translation (the class stance
-    // documented above still holds — we substitute a description, we do not localize a message).
+    // the opposite of every branch below (re-read, do not correct-and-retry).
+    //
+    // `detail` arrives as prose, not as the AD code: DefaultJsonDataService funnels the exception
+    // through JsonUtils.convertExceptionToJson, which translates it before building the body. The
+    // match therefore goes through NeoErrorSanitizer, which resolves the code against AD_Message
+    // for the current language rather than comparing hardcoded text.
+    //
+    // The detail is still replaced rather than passed through, for a reason that is about the
+    // consumer and not about the code being opaque: this envelope is read by an agent, and a
+    // sentence whose wording depends on the session language is harder to act on than a stable one
+    // whose remedy lives in `hint`. The class stance above still holds — we substitute a
+    // description, we do not localize a message.
     if (NeoErrorSanitizer.isStaleRecordMessage(detail)) {
-      envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_CONFLICT);
-      envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_STALE_RECORD);
-      envelope.put(McpConstants.KEY_DETAIL, "This record was modified by someone else after the "
-          + "'" + McpConstants.PARAM_UPDATED + "' value you sent was read. The write was refused so "
-          + "their change is not lost; nothing was written.");
-      envelope.put(McpConstants.KEY_HINT, "Re-read the record with neo_get, reapply your changes on "
-          + "top of the values it returns, and retry with the fresh '"
-          + McpConstants.PARAM_UPDATED + "'. Retrying the same payload unchanged will fail "
-          + "identically.");
-      envelope.put(McpConstants.KEY_SEE_ALSO, seeAlso);
-      return envelope;
+      return buildStaleRecordError();
     }
     if (NeoErrorSanitizer.isDuplicateKeyMessage(detail)) {
       envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_CONFLICT);
@@ -459,6 +455,35 @@ final class McpWriteRequestSupport {
           + "allowed values of every field sent.");
     }
     envelope.put(McpConstants.KEY_SEE_ALSO, seeAlso);
+    return envelope;
+  }
+
+  /**
+   * ETP-5073 / DOC-04: the 409 envelope for a concurrent-modification conflict.
+   *
+   * <p>Public to the package because two callers need the identical body: {@code handleUpdate},
+   * which now detects the conflict itself before writing (see {@code NeoRecordVersion} for why
+   * reading core's refusal proved unworkable), and {@link #buildDalFailureEnvelope}, which keeps
+   * the message-based branch as a backstop for the stateless path where the untranslated code
+   * does survive.
+   *
+   * <p>The detail is written here rather than forwarded from core, and that is about the consumer:
+   * this envelope is read by an agent, and a sentence whose wording depends on the session
+   * language is harder to act on than a stable one whose remedy lives in {@code hint}. It is not a
+   * translation — a description is substituted, a message is not localized.
+   */
+  static JSONObject buildStaleRecordError() throws JSONException {
+    JSONObject envelope = new JSONObject();
+    envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_CONFLICT);
+    envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_STALE_RECORD);
+    envelope.put(McpConstants.KEY_DETAIL, "This record was modified by someone else after the '"
+        + McpConstants.PARAM_UPDATED + "' value you sent was read. The write was refused so their "
+        + "change is not lost; nothing was written.");
+    envelope.put(McpConstants.KEY_HINT, "Re-read the record with neo_get, reapply your changes on "
+        + "top of the values it returns, and retry with the fresh '"
+        + McpConstants.PARAM_UPDATED + "'. Retrying the same payload unchanged will fail "
+        + "identically.");
+    envelope.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
     return envelope;
   }
 }
