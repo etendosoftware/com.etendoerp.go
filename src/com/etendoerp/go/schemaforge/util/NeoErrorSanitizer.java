@@ -221,6 +221,36 @@ public final class NeoErrorSanitizer {
   }
 
   /**
+   * AD message code core raises when its optimistic-locking check fails.
+   *
+   * <p>{@code JsonToDataConverter.setData} compares the {@code updated} value carried in the
+   * write payload against the one the record holds in the database and, when they differ, throws
+   * {@code OBStaleObjectException("@OBJSON_StaleDate@")}. That exception is not returned to us as
+   * a {@link Throwable}: {@code DefaultJsonDataService.update} catches every {@code Throwable} and
+   * funnels it through {@code JsonUtils.convertExceptionToJson}, so by the time
+   * {@code NeoCrudHandler} classifies the outcome all that survives is an ordinary RPC failure
+   * body carrying this code as its message — the same reason
+   * {@link #isDuplicateKeyMessage} exists alongside {@link #isDuplicateKeyViolation(Throwable)}.
+   */
+  private static final String STALE_RECORD_MESSAGE_CODE = "OBJSON_StaleDate";
+
+  /**
+   * Returns {@code true} if {@code message} is core's optimistic-locking (stale record) failure.
+   *
+   * <p>Matches on the <b>untranslated</b> message code, so this must be called with the raw
+   * message read off the RPC failure body, BEFORE {@code OBMessageUtils.messageBD} replaces it
+   * with a locale-dependent sentence. Matching translated prose would silently stop working the
+   * moment the server's language changes — the failure mode this whole check exists to prevent
+   * (ETP-5073 / DOC-04).
+   *
+   * @param message the raw, untranslated error message; may be {@code null}
+   * @return whether the message describes a concurrent-modification conflict
+   */
+  public static boolean isStaleRecordMessage(String message) {
+    return message != null && message.contains(STALE_RECORD_MESSAGE_CODE);
+  }
+
+  /**
    * Returns {@code true} if {@code t} or any exception in its cause chain is a not-null constraint
    * violation (Postgres SQLState 23502). Mirrors {@link #isDuplicateKeyViolation(Throwable)} and
    * exists for the same reason: a caller who omitted a required value sent a bad request, so the

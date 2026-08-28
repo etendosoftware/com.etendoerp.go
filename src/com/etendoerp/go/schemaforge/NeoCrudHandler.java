@@ -78,6 +78,16 @@ class NeoCrudHandler {
   private static final String CRITERIA_PARAM = "criteria";
   private static final String HQL_AND_OPERATOR = " and ";
   private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
+  /**
+   * The audit column core's optimistic-locking check reads (ETP-5073 / DOC-04).
+   *
+   * <p>Deliberately the DAL property name, not an API alias: {@code updated} is an AD
+   * <i>column</i> on every table but not an AD <i>field</i>, so {@code ETGO_SF_FIELD} carries no
+   * row for it and {@code NeoFieldFilter} has no {@code java_qualifier} remapping to apply. The
+   * name the client sends, the name the filter would look up and the name the DAL persists are
+   * all the same string.
+   */
+  private static final String FIELD_UPDATED = "updated";
   private static final Set<String> CONTACTS_PRECREATE_BILLING_FIELDS = new HashSet<>(
       Arrays.asList(
           "priceList",
@@ -547,7 +557,85 @@ class NeoCrudHandler {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           context.getHttpMethod() + " requires a record ID in the URL");
     }
+    // ETP-5073 / DOC-04: `updated` is MANDATORY on every update. Core implements optimistic
+    // concurrency by comparing the `updated` the caller read against the one the row holds now
+    // (JsonToDataConverter#setData), but that comparison is guarded by `jsonObject.has("updated")`
+    // — omit the key and the check does not run, it does NOT fail open loudly. Before this ticket
+    // NeoFieldFilter#filterWriteRequest stripped `updated` from every write, so the check never
+    // evaluated for any entity and the last writer silently overwrote the first.
+    //
+    // Rejecting the omission (rather than writing without a check, as the strict-propagation
+    // variant would) is the deliberate choice: a caller that cannot produce `updated` has not
+    // read the record it is overwriting, and that is exactly the caller we must stop.
+    JSONObject body = context.getRequestBody();
+    String updated = body == null ? null : body.optString(FIELD_UPDATED, null);
+    if (StringUtils.isBlank(updated) || "null".equals(updated)) {
+      return buildMissingUpdatedResponse();
+    }
     return null;
+  }
+
+  /**
+   * ETP-5073 / DOC-04: the structured 400 returned when an update omits {@code updated}.
+   *
+   * <p>Uses the flat IMP-5 shape (status/error/detail/hint/seeAlso) that
+   * {@link #buildReadOnlyFieldRejectedResponse} also emits, so an MCP agent and the React client
+   * branch on the same {@code error} discriminator rather than on prose. 400 rather than 428
+   * ("Precondition Required", which describes this literally) to stay inside the status set every
+   * existing caller and error-mapping layer already handles — the machine-readable code, not the
+   * number, is what tells this apart from other 400s.
+   */
+  private NeoResponse buildMissingUpdatedResponse() {
+    try {
+      JSONObject errorObj = new JSONObject();
+      errorObj.put("status", HttpServletResponse.SC_BAD_REQUEST);
+      errorObj.put("error", "missing_updated");
+      errorObj.put("detail", "Updates must carry the '" + FIELD_UPDATED + "' value of the record"
+          + " as it was read, so the concurrency check can verify nobody else changed it in the"
+          + " meantime. The field is absent or null, so this write was refused rather than allowed"
+          + " to silently overwrite a concurrent edit.");
+      errorObj.put("field", FIELD_UPDATED);
+      errorObj.put("hint", "Re-read the record (GET the same URL, or neo_get) and send back the"
+          + " '" + FIELD_UPDATED + "' value it returns, verbatim and unmodified, alongside the"
+          + " fields you are changing.");
+      errorObj.put("seeAlso", "docs(topic:\"updating records\")");
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, errorObj);
+    } catch (Exception fallback) {
+      log.warn("Could not build missing_updated body: {}", fallback.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Updates require the '" + FIELD_UPDATED + "' value of the record as it was read");
+    }
+  }
+
+  /**
+   * ETP-5073 / DOC-04: the structured 409 returned when core's optimistic-locking check fails —
+   * somebody else saved this record between our read and our write.
+   *
+   * <p>A distinguishable code matters more than usual here: {@link #checkJsonServiceResponse}
+   * already answers 409 for a duplicate-key conflict, and the two need opposite remedies (change
+   * your data vs. re-read and reapply). The client keys the reload-and-reapply offer required by
+   * the ticket's first acceptance criterion off {@code error == "stale_record"}, never off status
+   * alone.
+   *
+   * @param translated core's already-translated conflict message, kept as {@code message} so a
+   *                   human reading the response still gets Etendo's own wording
+   */
+  private NeoResponse buildStaleRecordResponse(String translated) {
+    try {
+      JSONObject errorObj = new JSONObject();
+      errorObj.put("status", HttpServletResponse.SC_CONFLICT);
+      errorObj.put("error", "stale_record");
+      errorObj.put("message", translated);
+      errorObj.put("detail", "This record was modified by someone else after you read it. Your"
+          + " write was refused so their change is not lost.");
+      errorObj.put("hint", "Re-read the record to get the current values and the fresh '"
+          + FIELD_UPDATED + "', reapply your changes on top of it, then retry.");
+      errorObj.put("seeAlso", "docs(topic:\"updating records\")");
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, errorObj);
+    } catch (Exception fallback) {
+      log.warn("Could not build stale_record body: {}", fallback.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, translated);
+    }
   }
 
   /**
@@ -566,6 +654,12 @@ class NeoCrudHandler {
               .optString("message", "Write operation failed")
           : "Write operation failed";
       String translated = OBMessageUtils.messageBD(errMsg);
+      // ETP-5073 / DOC-04: a concurrent-modification conflict, classified BEFORE the generic
+      // buckets below. Matched on the raw `errMsg`, not on `translated` — the discriminator is
+      // core's untranslated message code, and matching prose would break on any server locale.
+      if (NeoErrorSanitizer.isStaleRecordMessage(errMsg)) {
+        return buildStaleRecordResponse(translated);
+      }
       // ETP-4793 / IMP-17: a not-null violation means the caller omitted a value the table
       // requires — their request to fix, so it is a 400 naming the field, never a 500. It reaches
       // here rather than the catch-all below because DefaultJsonDataService swallows the constraint
@@ -790,6 +884,15 @@ class NeoCrudHandler {
     // pre-filter value first, while it still exists.
     Object accountingDateBeforeFilter = rawBody != null ? rawBody.opt(FIELD_ACCOUNTING_DATE) : null;
     boolean hadAccountingDate = rawBody != null && rawBody.has(FIELD_ACCOUNTING_DATE);
+    // ETP-5073 / DOC-04: same capture-before-filter dance, same reason, for `updated`.
+    // filterWriteRequest drops it because it is not in `writableFields` (it cannot be: it is not
+    // an AD field, so push-to-neo registers no row for it, and NeoFieldFilter deliberately keeps
+    // ALWAYS_READABLE_KEYS out of the writable set so a client can never author its own audit
+    // stamp). Dropping it silently disabled core's concurrency check for every entity. Re-injected
+    // after filtering so the check evaluates — the value is a token the client echoes back from
+    // its read, never data we persist: core reads it, compares it, and overwrites the column with
+    // its own timestamp on save.
+    Object updatedBeforeFilter = rawBody != null ? rawBody.opt(FIELD_UPDATED) : null;
     JSONObject filteredBody = fieldFilter.filterWriteRequest(rawBody);
     // Inject lineNetAmount when absent from filteredBody (stripped by readOnly filter).
     // The frontend sends invoicedQuantity and unitPrice as editable fields, so both are
@@ -809,6 +912,12 @@ class NeoCrudHandler {
     if (hadAccountingDate) {
       filteredBody.put(fieldFilter.resolveWritablePropName(FIELD_ACCOUNTING_DATE), accountingDateBeforeFilter);
     }
+    // Unconditional: validateUpdateRequest already refused the request when `updated` was absent
+    // or null, so by here it is always present. No resolveWritablePropName call — `updated` has no
+    // API alias to resolve (see FIELD_UPDATED). The value is passed through byte-for-byte because
+    // core parses it with the same XSD format DataToJsonConverter used to emit it on the read;
+    // reformatting it here would make every write look stale.
+    filteredBody.put(FIELD_UPDATED, updatedBeforeFilter);
     String wrappedBody = wrapForSmartclient(filteredBody, dalEntityName, context.getRecordId());
     return jsonService.update(params, wrappedBody);
   }

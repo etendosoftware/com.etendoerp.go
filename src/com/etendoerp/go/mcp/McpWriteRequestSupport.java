@@ -383,6 +383,26 @@ final class McpWriteRequestSupport {
         NeoErrorSanitizer.redactObjectReferences(rawMessage));
     boolean write = McpConstants.SEE_ALSO_WRITING.equals(seeAlso);
     JSONObject envelope = new JSONObject();
+    // ETP-5073 / DOC-04: core's optimistic-locking refusal, classified first because its remedy is
+    // the opposite of every branch below (re-read, do not correct-and-retry). The raw message here
+    // is the bare AD code `@OBJSON_StaleDate@` — this path never calls messageBD, so core's own
+    // wording is not available and would be an unresolved token if passed through. That is why
+    // this branch replaces `detail` outright instead of decorating it: an opaque code is worse for
+    // an agent than a fixed English sentence, and this is not a translation (the class stance
+    // documented above still holds — we substitute a description, we do not localize a message).
+    if (NeoErrorSanitizer.isStaleRecordMessage(detail)) {
+      envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_CONFLICT);
+      envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_STALE_RECORD);
+      envelope.put(McpConstants.KEY_DETAIL, "This record was modified by someone else after the "
+          + "'" + McpConstants.PARAM_UPDATED + "' value you sent was read. The write was refused so "
+          + "their change is not lost; nothing was written.");
+      envelope.put(McpConstants.KEY_HINT, "Re-read the record with neo_get, reapply your changes on "
+          + "top of the values it returns, and retry with the fresh '"
+          + McpConstants.PARAM_UPDATED + "'. Retrying the same payload unchanged will fail "
+          + "identically.");
+      envelope.put(McpConstants.KEY_SEE_ALSO, seeAlso);
+      return envelope;
+    }
     if (NeoErrorSanitizer.isDuplicateKeyMessage(detail)) {
       envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_CONFLICT);
       envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_CONFLICT);
