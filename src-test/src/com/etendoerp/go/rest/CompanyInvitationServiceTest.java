@@ -400,11 +400,9 @@ class CompanyInvitationServiceTest {
           .thenReturn(invitation);
       jwtHelperMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("invitee@example.com"))
           .thenReturn(platformAccount);
-      jwtHelperMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("session-token"))
-          .thenReturn(platformAccount);
 
       CompanyInvitationService service = new CompanyInvitationService();
-      JSONObject response = service.acceptExistingAccount("invitation-token", "session-token");
+      JSONObject response = service.acceptExistingAccount("invitation-token", platformAccount);
 
       assertFalse(response.optBoolean("error"));
       assertEquals("Acme", response.getString("clientName"));
@@ -449,11 +447,9 @@ class CompanyInvitationServiceTest {
           .thenReturn(invitation);
       jwtHelperMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("invitee@example.com"))
           .thenReturn(platformAccount);
-      jwtHelperMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("session-token"))
-          .thenReturn(platformAccount);
 
       CompanyInvitationService service = new CompanyInvitationService();
-      JSONObject response = service.acceptExistingAccount("invitation-token", "session-token");
+      JSONObject response = service.acceptExistingAccount("invitation-token", platformAccount);
 
       assertTrue(response.optBoolean("error"));
       assertEquals("INVITATION_USER_CONFIGURATION_INVALID", response.optString("code"));
@@ -480,11 +476,9 @@ class CompanyInvitationServiceTest {
             mockStatic(EtendoGoJwtDalHelper.class)) {
       dalHelperMock.when(() -> CompanyInvitationDalHelper.findInvitationByTokenHash(anyString()))
           .thenReturn(invitation);
-      jwtHelperMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("session-token"))
-          .thenReturn(otherAccount);
 
       CompanyInvitationService service = new CompanyInvitationService();
-      JSONObject response = service.acceptExistingAccount("invitation-token", "session-token");
+      JSONObject response = service.acceptExistingAccount("invitation-token", otherAccount);
 
       assertTrue(response.optBoolean("error"));
       assertEquals("INVITATION_ACCOUNT_MISMATCH", response.optString("code"));
