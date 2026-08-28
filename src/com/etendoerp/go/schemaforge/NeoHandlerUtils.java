@@ -50,6 +50,7 @@ import org.openbravo.service.db.DalConnectionProvider;
 final class NeoHandlerUtils {
 
   private static final String FIELD_STORAGE_BIN = "storageBin";
+  private static final String FIELD_MOVEMENT_QUANTITY = "movementQuantity";
   private static final String PARAM_PARENT_ID = "parentId";
   // Matches an unresolved raw AD default literal such as "@OnHandLocatorDefault@". See
   // injectDefaultLocatorIfMissing's javadoc for why this must be treated as absent.
@@ -482,6 +483,38 @@ final class NeoHandlerUtils {
       log.debug("Defaulted storageBin={} to header warehouse={}", locatorId, headerWarehouseId);
     }
     body.put(FIELD_STORAGE_BIN, locatorId);
+  }
+
+  /**
+   * Strips the stock-derived {@code movementQuantity} update that the classic
+   * {@code SL_InOutLine_Product} callout (shared by every {@code M_InOutLine}-based window)
+   * echoes back on product selection whenever a line is not created from an order/invoice
+   * import. Shared by {@link GoodsReceiptLineHandler} (ETP-4671, purchase receipts) and
+   * {@link GoodsShipmentLineHandler} (ETP-5062, sales shipments) — for both, a manually-added
+   * line must always start at its own default (0) instead of silently jumping to the product's
+   * on-hand quantity, which risks moving an entire warehouse's stock by accident.
+   *
+   * <p>Mutates {@code context.getPreviousResult()} in place and returns nothing: the dispatcher
+   * (see {@link NeoHandler#afterCallout}) merges a returned {@code NeoResponse} additively only,
+   * so overriding an already-present {@code updates} key requires mutating the shared JSONObject
+   * directly rather than returning a new response.
+   *
+   * @param context the callout context; a no-op for anything other than a CALLOUT endpoint
+   * @param log     the caller's logger, used for a debug message when a value is stripped
+   */
+  static void stripStockDerivedMovementQuantity(NeoContext context, Logger log) {
+    if (context == null || !NeoEndpointType.CALLOUT.equals(context.getEndpointType())) {
+      return;
+    }
+    NeoResponse previous = context.getPreviousResult();
+    if (previous == null || previous.getBody() == null) {
+      return;
+    }
+    JSONObject updates = previous.getBody().optJSONObject("updates");
+    if (updates != null && updates.has(FIELD_MOVEMENT_QUANTITY)) {
+      updates.remove(FIELD_MOVEMENT_QUANTITY);
+      log.debug("Stripped stock-derived movementQuantity from callout response");
+    }
   }
 
   /**

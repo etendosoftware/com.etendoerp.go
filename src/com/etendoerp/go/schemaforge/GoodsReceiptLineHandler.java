@@ -21,7 +21,6 @@ import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONObject;
 
 /**
  * NeoHandler for the Goods Receipt line entity ({@code goodsReceiptLine}).
@@ -59,7 +58,6 @@ import org.codehaus.jettison.json.JSONObject;
 public class GoodsReceiptLineHandler extends AbstractInOutLineHandler {
 
   private static final Logger log = LogManager.getLogger(GoodsReceiptLineHandler.class);
-  private static final String FIELD_MOVEMENT_QUANTITY = "movementQuantity";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -80,25 +78,12 @@ public class GoodsReceiptLineHandler extends AbstractInOutLineHandler {
 
   /**
    * Strips the stock-derived {@code movementQuantity} update that {@code SL_InOutLine_Product}
-   * returns on product selection (see class Javadoc). Mutates {@code previousResult} in place —
-   * the same convention {@link InventoryLineHandler#afterCallout} uses to override values — and
-   * returns {@code null} so the dispatcher's additive-only merge never runs.
+   * returns on product selection (see class Javadoc), via the helper shared with
+   * {@link GoodsShipmentLineHandler#afterCallout} (ETP-5062).
    */
   @Override
   public NeoResponse afterCallout(NeoContext context) {
-    if (context == null || !NeoEndpointType.CALLOUT.equals(context.getEndpointType())) {
-      return null;
-    }
-    NeoResponse previous = context.getPreviousResult();
-    if (previous == null || previous.getBody() == null) {
-      return null;
-    }
-    JSONObject updates = previous.getBody().optJSONObject("updates");
-    if (updates != null && updates.has(FIELD_MOVEMENT_QUANTITY)) {
-      updates.remove(FIELD_MOVEMENT_QUANTITY);
-      log.debug("[GoodsReceiptLineHandler] Stripped stock-derived movementQuantity from callout "
-          + "response (ETP-4671)");
-    }
+    NeoHandlerUtils.stripStockDerivedMovementQuantity(context, log);
     return null;
   }
 }
