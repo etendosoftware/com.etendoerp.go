@@ -68,6 +68,36 @@ trigger and this service's own initial SQL (ETP-4720). See
 `etendo_schema_forge/docs/etendo-ad/onboarding-and-datafixes-map.md` for the
 full root-cause writeup.
 
+`wire()`'s internal step order is: wire the org's general ledger →
+`ensureOrganizationAcctSchema` → `wireAccountElementTree` →
+`rebrandImportedChartNames` → **`provisionGlItemsForImportedChart`
+(ETP-5020)** → `provisionEntityPostingAccounts`. The GL Item step runs AFTER
+the chart names are rebranded (a GL Item minted against the dataset's generic
+"GOClient" names would immediately diverge from the tenant's real subaccount
+name — exactly the divergence ETP-5020 exists to prevent) and BEFORE the
+unrelated per-entity posting-account provisioning.
+
+`provisionGlItemsForImportedChart` iterates every leaf (`elementLevel = 'S'`)
+`ElementValue` of the tenant's freshly-imported chart and calls
+`GlItemProvisioningSupport#ensureGlItemForSubaccount` for each — the SAME
+support class `ChartOfAccountsHandler.afterHandle`'s live subaccount-create
+hook uses, so the bulk onboarding path and the live per-subaccount path can
+never drift into different behavior. For every active `AcctSchema`, it looks
+up (never creates) the natural `C_ValidCombination` the `C_ELEMENTVALUE_TRG`
+native trigger — or, for the bulk chart, the dataset's own bundled
+`C_VALIDCOMBINATION.xml` rows (see "Dataset Included Tables" below) — already
+produced for that leaf, and wires it as both the debit and credit account of
+one auto-created (invisible) `C_Glitem`/`C_Glitem_Acct` pair. A summary/
+heading account has no such combination and is silently skipped (no GL Item
+is ever created for it). Idempotent and best-effort: re-running onboarding
+never duplicates a GL Item, and a provisioning failure for one leaf never
+blocks the rest of the chart or the onboarding chain. See
+`GlItemProvisioningSupport`'s class javadoc
+(`src/com/etendoerp/go/schemaforge/handlers/GlItemProvisioningSupport.java`)
+for the full design rationale, and
+`etendo_schema_forge/docs/plans/santo_ETP-5020-gl-item-auto-management.md`
+for the original ticket analysis.
+
 ### `OnboardingPeriodControlService`
 Step 3. Opens the initial fiscal calendar / period control for the new
 client/org so documents can be posted from day one.
