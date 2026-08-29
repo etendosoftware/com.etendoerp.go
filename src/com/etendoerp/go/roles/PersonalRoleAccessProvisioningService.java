@@ -72,6 +72,25 @@ class PersonalRoleAccessProvisioningService {
     return name;
   }
 
+  /**
+   * Deterministic BASE name for a user's personal role, WITHOUT the collision-avoidance suffix
+   * {@link #buildPersonalRoleName(User)} applies. Used only by the demote-restore lookup
+   * ({@code UserRoleCompositionService#findDormantPersonalRoleByName}), where the dormant role
+   * (if one exists) is expected to already occupy this exact base name — calling
+   * {@link #buildPersonalRoleName(User)} there would incorrectly suffix it away, since the name
+   * is "taken" by the very role being looked up.
+   */
+  String personalRoleBaseName(User user) {
+    String base = StringUtils.trimToNull(user.getName());
+    if (base == null) {
+      base = StringUtils.trimToNull(user.getUsername());
+    }
+    if (base == null) {
+      base = user.getId();
+    }
+    return truncate(PERSONAL_ROLE_NAME_PREFIX + base, 60);
+  }
+
   private boolean roleNameExists(User user, String name) {
     OBCriteria<Role> criteria = OBDal.getInstance().createCriteria(Role.class);
     criteria.add(Restrictions.eq(Role.PROPERTY_CLIENT + ".id", user.getClient().getId()));
