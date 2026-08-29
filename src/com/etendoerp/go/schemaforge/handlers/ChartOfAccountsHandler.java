@@ -398,8 +398,8 @@ public class ChartOfAccountsHandler implements NeoHandler {
     entry.put("name", row[2]);
     entry.put("description", row[3] != null ? row[3] : JSONObject.NULL);
     entry.put("accountType", row[4] != null ? row[4] : JSONObject.NULL);
-    entry.put("summaryLevel", "Y".equals(row[5]));
-    entry.put("active", "Y".equals(row[6]));
+    entry.put("summaryLevel", "Y".equals(String.valueOf(row[5])));
+    entry.put("active", "Y".equals(String.valueOf(row[6])));
     entry.put("protectedParentLikeSubaccount", isProtectedParentLikeSubaccount(String.valueOf(row[1])) ? "Y" : "N");
     return entry;
   }
