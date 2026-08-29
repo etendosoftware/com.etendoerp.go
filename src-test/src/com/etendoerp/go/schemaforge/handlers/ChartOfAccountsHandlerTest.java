@@ -26,6 +26,8 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Method;
@@ -45,11 +47,17 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.MockedStatic;
 import org.mockito.junit.MockitoJUnitRunner;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
+import org.openbravo.model.financialmgmt.gl.GLItem;
+import org.openbravo.model.financialmgmt.gl.GLItemAccounts;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
@@ -1137,6 +1145,152 @@ public class ChartOfAccountsHandlerTest {
     JSONObject entry = invokeToAccountJson(rowWith(Character.valueOf('N'), Character.valueOf('N')));
     assertFalse(entry.getBoolean("summaryLevel"));
     assertFalse(entry.getBoolean("active"));
+  }
+
+  // ── afterHandle() CRUD POST — ETP-5020 GL Item auto-provisioning (F) ───────
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void afterHandlePostProvisionsGlItemForNewSubaccount() throws Exception {
+    JSONArray dataArray = new JSONArray().put(new JSONObject().put("id", "EV-NEW"));
+    JSONObject responseJson = new JSONObject().put("data", dataArray);
+    JSONObject body = new JSONObject().put("response", responseJson);
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    ElementValue subaccount = mock(ElementValue.class);
+    Client client = mock(Client.class);
+    when(subaccount.getClient()).thenReturn(client);
+
+    AcctSchema schema = mock(AcctSchema.class);
+    AccountingCombination combo = mock(AccountingCombination.class);
+    GLItem glItem = mock(GLItem.class);
+    GLItemAccounts link = mock(GLItemAccounts.class);
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(ElementValue.class, "EV-NEW")).thenReturn(subaccount);
+
+    OBCriteria<AcctSchema> schemaCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AcctSchema.class)).thenReturn(schemaCrit);
+    when(schemaCrit.list()).thenReturn(Collections.singletonList(schema));
+
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(combo);
+    when(comboCrit.list()).thenReturn(Collections.emptyList());
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(null);
+
+    OBProvider obProviderInstance = mock(OBProvider.class);
+    when(obProviderInstance.get(GLItem.class)).thenReturn(glItem);
+    when(obProviderInstance.get(GLItemAccounts.class)).thenReturn(link);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class);
+        MockedStatic<OBProvider> obProviderStatic = mockStatic(OBProvider.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dal);
+      obProviderStatic.when(OBProvider::getInstance).thenReturn(obProviderInstance);
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNull("afterHandle keeps the original POST response (returns null)", result);
+      verify(dal).save(glItem);
+      verify(link).setGlitemDebitAcct(combo);
+      verify(link).setGlitemCreditAcct(combo);
+      verify(dal).save(link);
+      verify(dal).flush();
+    }
+  }
+
+  @Test
+  public void afterHandlePostSkipsWhenNoCreatedRecordId() {
+    JSONObject body = new JSONObject(); // no "response.data" at all
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    // No OBDal/OBContext mocking at all — if the handler tried to touch either without a
+    // resolvable created record id, this test would blow up with a real (unmocked) static call.
+    NeoResponse result = handler.afterHandle(ctx);
+    assertNull(result);
+  }
+
+  // ── afterHandle() CRUD PATCH/PUT — ETP-5020 GL Item active-state sync (G) ──
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void afterHandlePatchSyncsGlItemActiveStateWhenBodyTouchesActive() throws Exception {
+    JSONObject requestBody = new JSONObject().put("active", false);
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+    when(ctx.getRecordId()).thenReturn("EV-1");
+
+    ElementValue subaccount = mock(ElementValue.class);
+    Client client = mock(Client.class);
+    when(subaccount.getClient()).thenReturn(client);
+    when(subaccount.isActive()).thenReturn(false); // already-saved new state
+
+    AcctSchema schema = mock(AcctSchema.class);
+    AccountingCombination combo = mock(AccountingCombination.class);
+    GLItemAccounts link = mock(GLItemAccounts.class);
+    when(link.isActive()).thenReturn(true); // was active — must flip to false
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(ElementValue.class, "EV-1")).thenReturn(subaccount);
+
+    OBCriteria<AcctSchema> schemaCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AcctSchema.class)).thenReturn(schemaCrit);
+    when(schemaCrit.list()).thenReturn(Collections.singletonList(schema));
+
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(combo);
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(link);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNull(result);
+      verify(link).setActive(false);
+      verify(dal).save(link);
+      verify(dal).flush();
+    }
+  }
+
+  @Test
+  public void afterHandlePatchDoesNotTouchOBContextWhenBodyOmitsActive() {
+    JSONObject requestBody = new JSONObject(); // does not touch "active" at all
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+
+    try (MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      NeoResponse result = handler.afterHandle(ctx);
+      assertNull(result);
+      obCtxStatic.verify(() -> OBContext.setAdminMode(true), never());
+    }
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────
