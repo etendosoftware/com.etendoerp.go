@@ -117,6 +117,9 @@ public class ChartOfAccountsHandler implements NeoHandler {
   /** Query param name for the parent account on new-record defaults calls. */
   private static final String PARAM_PARENT_ACCOUNT_ID = "parentAccountId";
 
+  /** API/body field name for the record's active flag. */
+  private static final String FIELD_ACTIVE = "active";
+
   /** Number of leading digits that form the PGC prefix (immutable for leaf accounts). */
   private static final int PGC_PREFIX_LENGTH = 4;
 
@@ -369,7 +372,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
    */
   private void syncGlItemActiveState(NeoContext context) {
     JSONObject body = context.getRequestBody();
-    if (body == null || !body.has("active") || body.isNull("active")) {
+    if (body == null || !body.has(FIELD_ACTIVE) || body.isNull(FIELD_ACTIVE)) {
       return;
     }
     String recordId = context.getRecordId();
@@ -502,7 +505,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
     entry.put("description", row[3] != null ? row[3] : JSONObject.NULL);
     entry.put("accountType", row[4] != null ? row[4] : JSONObject.NULL);
     entry.put("summaryLevel", "Y".equals(String.valueOf(row[5])));
-    entry.put("active", "Y".equals(String.valueOf(row[6])));
+    entry.put(FIELD_ACTIVE, "Y".equals(String.valueOf(row[6])));
     entry.put("protectedParentLikeSubaccount", isProtectedParentLikeSubaccount(String.valueOf(row[1])) ? "Y" : "N");
     return entry;
   }
