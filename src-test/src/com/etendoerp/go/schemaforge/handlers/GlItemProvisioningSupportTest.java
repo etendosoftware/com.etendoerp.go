@@ -424,6 +424,92 @@ public class GlItemProvisioningSupportTest {
     assertEquals(2, testableSupport.calls);
   }
 
+  /**
+   * Closes the coverage gap flagged in Alex's last review round: {@code
+   * ensureGlItemForSubaccountContinuesAfterOneSchemaFails} above overrides {@code
+   * ensureGlItemForSchema} entirely, so it never exercises the REAL {@code reusableGlItem}
+   * threading through {@link GlItemProvisioningSupport#doEnsureGlItemForSubaccount}'s loop. This
+   * test runs the actual (unoverridden) production logic for 3 schemas, with the middle schema
+   * failing for a real reason (a DB-lookup exception, not a test double), and asserts that the
+   * GL Item minted for schema 1 is still correctly reused for schema 3 — i.e. a schema-2 failure
+   * does not corrupt or reset the {@code reusableGlItem} the loop threads across iterations.
+   */
+  @Test
+  public void ensureGlItemForSubaccountThreadsReusableGlItemAcrossARealMidLoopFailure() {
+    ElementValue subaccount = mock(ElementValue.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(subaccount.getClient()).thenReturn(client);
+    when(subaccount.getOrganization()).thenReturn(org);
+    when(subaccount.getName()).thenReturn("Caja Euros");
+
+    AcctSchema schema1 = mock(AcctSchema.class);
+    AcctSchema failingSchema2 = mock(AcctSchema.class);
+    AcctSchema schema3 = mock(AcctSchema.class);
+    AccountingCombination combo1 = mock(AccountingCombination.class);
+    AccountingCombination combo3 = mock(AccountingCombination.class);
+
+    OBDal dal = mock(OBDal.class);
+
+    // dal.createCriteria(AccountingCombination.class) is called 4 times across the whole run:
+    //   #1 schema1 resolveNaturalCombination -> comboCrit
+    //   #2 schema1 findGlItemLinkedToAnyCombinationOf fallback (reusableGlItem still null)
+    //   #3 failingSchema2 resolveNaturalCombination -> throws a REAL exception (simulated DB
+    //      failure), never reaching the reusableGlItem parameter at all
+    //   #4 schema3 resolveNaturalCombination -> comboCrit (no fallback call: reusableGlItem
+    //      carried over from schema1 is already non-null, so findGlItemLinkedToAnyCombinationOf
+    //      is never invoked for schema3)
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    RuntimeException simulatedFailure = new RuntimeException("simulated schema-2 DB failure");
+    when(dal.createCriteria(AccountingCombination.class))
+        .thenReturn(comboCrit, comboCrit)
+        .thenThrow(simulatedFailure)
+        .thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(combo1, combo3);
+    when(comboCrit.list()).thenReturn(Collections.emptyList()); // schema1's fallback: nothing else linked yet
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(null, null); // neither schema1 nor schema3 provisioned yet
+
+    GLItem glItem = mock(GLItem.class);
+    when(glItem.getClient()).thenReturn(client);
+    when(glItem.getOrganization()).thenReturn(org);
+    GLItemAccounts link1 = mock(GLItemAccounts.class);
+    GLItemAccounts link3 = mock(GLItemAccounts.class);
+
+    OBProvider obProviderInstance = mock(OBProvider.class);
+    when(obProviderInstance.get(GLItem.class)).thenReturn(glItem);
+    when(obProviderInstance.get(GLItemAccounts.class)).thenReturn(link1, link3);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obProvider.when(OBProvider::getInstance).thenReturn(obProviderInstance);
+
+      // Real production code path — no method overrides, no test double.
+      support.ensureGlItemForSubaccount(subaccount,
+          Arrays.asList(schema1, failingSchema2, schema3));
+
+      // Exactly one GL Item minted for the whole run: schema1 created it, schema3 reused the
+      // SAME instance despite schema2 throwing in between — the reusableGlItem thread survived.
+      verify(obProviderInstance, times(1)).get(GLItem.class);
+      verify(obProviderInstance, times(2)).get(GLItemAccounts.class);
+
+      verify(link1).setGLItem(glItem);
+      verify(link1).setAccountingSchema(schema1);
+      verify(link1).setGlitemDebitAcct(combo1);
+
+      verify(link3).setGLItem(glItem);
+      verify(link3).setAccountingSchema(schema3);
+      verify(link3).setGlitemDebitAcct(combo3);
+
+      // Exactly 2 GLItemAccounts rows were saved for the whole run (schema1 + schema3) — nothing
+      // was ever created for the failing schema in between.
+      verify(dal, times(2)).save(any(GLItemAccounts.class));
+    }
+  }
+
   // ── setGlItemAccountsActiveForSubaccount — deactivate / reactivate ─────────
 
   @Test
@@ -582,5 +668,19 @@ public class GlItemProvisioningSupportTest {
   public void setGlItemAccountsActiveNoOpsWhenSubaccountNull() {
     support.setGlItemAccountsActiveForSubaccount(null, Collections.singletonList(mock(AcctSchema.class)),
         true);
+  }
+
+  @Test
+  public void setGlItemAccountsActiveNoOpsWhenSchemasNull() {
+    // Symmetric guard to ensureGlItemForSubaccountNoOpsWhenSchemasNull — no exception, no static
+    // OBDal touch — nothing to assert beyond "did not throw".
+    support.setGlItemAccountsActiveForSubaccount(mock(ElementValue.class), null, true);
+  }
+
+  @Test
+  public void setGlItemAccountsActiveNoOpsWhenSchemasEmpty() {
+    // Symmetric guard to ensureGlItemForSubaccountNoOpsWhenSchemasEmpty.
+    support.setGlItemAccountsActiveForSubaccount(mock(ElementValue.class), Collections.emptyList(),
+        false);
   }
 }
