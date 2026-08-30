@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -81,7 +82,7 @@ public class GlItemProvisioningSupportTest {
   // ── resolveNaturalCombination — predicate shape ────────────────────────────
 
   @Test
-  public void resolveNaturalCombinationAppliesAllNineDimensionRestrictions() {
+  public void resolveNaturalCombinationAppliesAllElevenDimensionRestrictions() {
     ElementValue subaccount = mock(ElementValue.class);
     AcctSchema schema = mock(AcctSchema.class);
 
@@ -96,10 +97,17 @@ public class GlItemProvisioningSupportTest {
       support.resolveNaturalCombination(subaccount, schema);
     }
 
-    // account + schema (2 eq) + the 9 dimension-IS-NULL checks mirrored from
-    // C_ELEMENTVALUE_TRG.xml (product, businessPartner, trxOrganization, salesRegion, project,
-    // salesCampaign, activity, stDimension, ndDimension) = 11 total restrictions.
-    assertEquals(11, captor.getAllValues().size());
+    // account + schema (2 eq) + the 11 dimension-IS-NULL checks mirrored from
+    // C_ELEMENTVALUE_TRG.xml (product, businessPartner, trxOrganization, locationFromAddress,
+    // locationToAddress, salesRegion, project, salesCampaign, activity, stDimension, ndDimension)
+    // = 13 total restrictions.
+    assertEquals(13, captor.getAllValues().size());
+    assertTrue(captor.getAllValues().stream()
+        .anyMatch(c -> c.toString().contains(AccountingCombination.PROPERTY_LOCATIONFROMADDRESS)));
+    assertTrue(captor.getAllValues().stream()
+        .anyMatch(c -> c.toString().contains(AccountingCombination.PROPERTY_LOCATIONTOADDRESS)));
+    verify(crit).addOrderBy(AccountingCombination.PROPERTY_ID, true);
+    verify(crit).setMaxResults(1);
   }
 
   // ── ensureGlItemForSubaccount — guards ─────────────────────────────────────
@@ -386,6 +394,36 @@ public class GlItemProvisioningSupportTest {
     }
   }
 
+  @Test
+  public void ensureGlItemForSubaccountContinuesAfterOneSchemaFails() {
+    ElementValue subaccount = mock(ElementValue.class);
+    AcctSchema failingSchema = mock(AcctSchema.class);
+    when(failingSchema.getId()).thenReturn("SCHEMA-FAIL");
+    AcctSchema succeedingSchema = mock(AcctSchema.class);
+    GLItem glItem = mock(GLItem.class);
+
+    class TestableSupport extends GlItemProvisioningSupport {
+      private int calls;
+
+      @Override
+      protected GLItem ensureGlItemForSchema(ElementValue subaccount, AcctSchema schema,
+          GLItem reusableGlItem) {
+        calls++;
+        if (schema == failingSchema) {
+          throw new RuntimeException("schema-specific failure");
+        }
+        return glItem;
+      }
+    }
+
+    TestableSupport testableSupport = new TestableSupport();
+
+    testableSupport.ensureGlItemForSubaccount(subaccount,
+        Arrays.asList(failingSchema, succeedingSchema));
+
+    assertEquals(2, testableSupport.calls);
+  }
+
   // ── setGlItemAccountsActiveForSubaccount — deactivate / reactivate ─────────
 
   @Test
@@ -510,6 +548,34 @@ public class GlItemProvisioningSupportTest {
       support.setGlItemAccountsActiveForSubaccount(subaccount, Collections.singletonList(schema),
           true);
     }
+  }
+
+  @Test
+  public void setGlItemAccountsActiveContinuesAfterOneSchemaFails() {
+    ElementValue subaccount = mock(ElementValue.class);
+    AcctSchema failingSchema = mock(AcctSchema.class);
+    when(failingSchema.getId()).thenReturn("SCHEMA-FAIL");
+    AcctSchema succeedingSchema = mock(AcctSchema.class);
+
+    class TestableSupport extends GlItemProvisioningSupport {
+      private int calls;
+
+      @Override
+      protected void setGlItemAccountsActiveForSchema(ElementValue subaccount, AcctSchema schema,
+          boolean active) {
+        calls++;
+        if (schema == failingSchema) {
+          throw new RuntimeException("schema-specific failure");
+        }
+      }
+    }
+
+    TestableSupport testableSupport = new TestableSupport();
+
+    testableSupport.setGlItemAccountsActiveForSubaccount(subaccount,
+        Arrays.asList(failingSchema, succeedingSchema), false);
+
+    assertEquals(2, testableSupport.calls);
   }
 
   @Test

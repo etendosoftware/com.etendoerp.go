@@ -87,11 +87,7 @@ up (never creates) the natural `C_ValidCombination` the `C_ELEMENTVALUE_TRG`
 native trigger — or, for the bulk chart, the dataset's own bundled
 `C_VALIDCOMBINATION.xml` rows (see "Dataset Included Tables" below) — already
 produced for that leaf, and wires it as both the debit and credit account of
-one auto-created (invisible) `C_Glitem`/`C_Glitem_Acct` pair. A summary/
-heading account has no such combination and is silently skipped (no GL Item
-is ever created for it). Idempotent and best-effort: re-running onboarding
-never duplicates a GL Item, and a provisioning failure for one leaf never
-blocks the rest of the chart or the onboarding chain. See
+one auto-created (invisible) `C_Glitem`/`C_Glitem_Acct` pair. A summary/heading account has no such combination and is silently skipped (no GL Item is ever created for it). Idempotent and best-effort: re-running onboarding never duplicates a GL Item, and a provisioning failure for one schema or one leaf never blocks remaining schemas, the rest of the chart, or the onboarding chain. See
 `GlItemProvisioningSupport`'s class javadoc
 (`src/com/etendoerp/go/schemaforge/handlers/GlItemProvisioningSupport.java`)
 for the full design rationale, and

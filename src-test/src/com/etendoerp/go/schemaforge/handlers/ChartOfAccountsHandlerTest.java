@@ -1231,11 +1231,22 @@ public class ChartOfAccountsHandlerTest {
   @SuppressWarnings("unchecked")
   @Test
   public void afterHandlePatchSyncsGlItemActiveStateWhenBodyTouchesActive() throws Exception {
+    assertAfterHandleSyncsGlItemActiveStateWhenBodyTouchesActive("PATCH");
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void afterHandlePutSyncsGlItemActiveStateWhenBodyTouchesActive() throws Exception {
+    assertAfterHandleSyncsGlItemActiveStateWhenBodyTouchesActive("PUT");
+  }
+
+  private void assertAfterHandleSyncsGlItemActiveStateWhenBodyTouchesActive(String httpMethod)
+      throws Exception {
     JSONObject requestBody = new JSONObject().put("active", false);
 
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
-    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getHttpMethod()).thenReturn(httpMethod);
     when(ctx.getRequestBody()).thenReturn(requestBody);
     when(ctx.getRecordId()).thenReturn("EV-1");
 

@@ -51,9 +51,9 @@ import org.openbravo.model.financialmgmt.gl.GLItemAccounts;
  * {@link AcctSchema}, at {@code C_ElementValue} insert time (live app-level saves) or via the bulk
  * {@code C_VALIDCOMBINATION} dataset import (onboarding's bulk chart-of-accounts provisioning —
  * see {@code OnboardingDatasetDefinition#getIncludedTables}). {@link #resolveNaturalCombination}
- * only ever LOOKS UP that row, mirroring the exact 9-dimension predicate
- * {@code C_ELEMENTVALUE_TRG}'s own reactivate {@code UPDATE} uses
- * (see {@code src-db/database/model/triggers/C_ELEMENTVALUE_TRG.xml:166-174}). When the lookup
+ * only ever LOOKS UP that row, mirroring the exact 11-dimension shape
+ * {@code C_ELEMENTVALUE_TRG} inserts (see
+ * {@code src-db/database/model/triggers/C_ELEMENTVALUE_TRG.xml:64-75}). When the lookup
  * returns nothing — a summary/heading account (any {@code elementlevel != 'S'}) never got one —
  * that {@code null} IS the "no accounting use" filter (Case 3): no separate
  * {@code elementLevel}/{@code accountType} check is needed or added.
@@ -168,26 +168,41 @@ public class GlItemProvisioningSupport {
   protected void doEnsureGlItemForSubaccount(ElementValue subaccount, List<AcctSchema> activeSchemas) {
     GLItem glItem = null;
     for (AcctSchema schema : activeSchemas) {
-      AccountingCombination combo = resolveNaturalCombination(subaccount, schema);
-      if (combo == null) {
-        continue; // Case 3 — no accounting use for this schema (summary/heading account)
+      try {
+        glItem = ensureGlItemForSchema(subaccount, schema, glItem);
+      } catch (Exception e) {
+        log.warn("GlItemProvisioningSupport skipped GL Item provisioning for subaccount {} "
+            + "and schema {}: {}", subaccount.getId(), schema.getId(), e.getMessage(), e);
       }
-      GLItemAccounts existingLink = findGlItemAccountsByCombination(combo);
-      if (existingLink != null) {
-        // Idempotent re-run: already provisioned for this schema. Still resync the name in case
-        // the subaccount was renamed since the link was created (see class javadoc).
-        glItem = existingLink.getGLItem();
-        syncGlItemName(glItem, subaccount);
-        continue;
-      }
-      if (glItem == null) {
-        glItem = findGlItemLinkedToAnyCombinationOf(subaccount);
-      }
-      if (glItem == null) {
-        glItem = createGlItem(subaccount);
-      }
-      createGlItemAccounts(glItem, schema, combo);
     }
+  }
+
+  /**
+   * Provisions one schema for {@code subaccount}. Returns the GL Item that should be reused by
+   * later schemas in the same call.
+   */
+  protected GLItem ensureGlItemForSchema(ElementValue subaccount, AcctSchema schema, GLItem reusableGlItem) {
+    AccountingCombination combo = resolveNaturalCombination(subaccount, schema);
+    if (combo == null) {
+      return reusableGlItem; // Case 3 — no accounting use for this schema (summary/heading account)
+    }
+    GLItemAccounts existingLink = findGlItemAccountsByCombination(combo);
+    if (existingLink != null) {
+      // Idempotent re-run: already provisioned for this schema. Still resync the name in case
+      // the subaccount was renamed since the link was created (see class javadoc).
+      GLItem glItem = existingLink.getGLItem();
+      syncGlItemName(glItem, subaccount);
+      return glItem;
+    }
+    GLItem glItem = reusableGlItem;
+    if (glItem == null) {
+      glItem = findGlItemLinkedToAnyCombinationOf(subaccount);
+    }
+    if (glItem == null) {
+      glItem = createGlItem(subaccount);
+    }
+    createGlItemAccounts(glItem, schema, combo);
+    return glItem;
   }
 
   /**
@@ -196,27 +211,38 @@ public class GlItemProvisioningSupport {
   protected void doSetGlItemAccountsActive(ElementValue subaccount, List<AcctSchema> activeSchemas,
       boolean active) {
     for (AcctSchema schema : activeSchemas) {
-      AccountingCombination combo = resolveNaturalCombination(subaccount, schema);
-      if (combo == null) {
-        continue;
+      try {
+        setGlItemAccountsActiveForSchema(subaccount, schema, active);
+      } catch (Exception e) {
+        log.warn("GlItemProvisioningSupport skipped GL Item active-state sync for subaccount {} "
+            + "and schema {}: {}", subaccount.getId(), schema.getId(), e.getMessage(), e);
       }
-      GLItemAccounts link = findGlItemAccountsByCombination(combo);
-      if (link == null) {
-        continue; // nothing provisioned yet for this schema — no-op
-      }
-      if (!Boolean.valueOf(active).equals(link.isActive())) {
-        link.setActive(active);
-        OBDal.getInstance().save(link);
-      }
+    }
+  }
+
+  /** Mirrors one schema's already-provisioned GL Item account link to {@code active}. */
+  protected void setGlItemAccountsActiveForSchema(ElementValue subaccount, AcctSchema schema,
+      boolean active) {
+    AccountingCombination combo = resolveNaturalCombination(subaccount, schema);
+    if (combo == null) {
+      return;
+    }
+    GLItemAccounts link = findGlItemAccountsByCombination(combo);
+    if (link == null) {
+      return; // nothing provisioned yet for this schema — no-op
+    }
+    if (!Boolean.valueOf(active).equals(link.isActive())) {
+      link.setActive(active);
+      OBDal.getInstance().save(link);
     }
   }
 
   /**
    * Looks up (never creates) the natural {@link AccountingCombination} for {@code subaccount} +
    * {@code schema}: {@code Account_ID = subaccount}, {@code C_AcctSchema_ID = schema}, every other
-   * dimension {@code NULL}. Mirrors the exact predicate {@code C_ELEMENTVALUE_TRG}'s own reactivate
-   * {@code UPDATE} statement uses (see {@code C_ELEMENTVALUE_TRG.xml:166-174}). Returns {@code null}
-   * for a summary/heading account, which never gets one — see class javadoc, Case 3.
+   * dimension {@code NULL}. Mirrors the exact dimension shape {@code C_ELEMENTVALUE_TRG} inserts
+   * (see {@code C_ELEMENTVALUE_TRG.xml:64-75}). Returns {@code null} for a summary/heading account,
+   * which never gets one — see class javadoc, Case 3.
    */
   protected AccountingCombination resolveNaturalCombination(ElementValue subaccount, AcctSchema schema) {
     OBCriteria<AccountingCombination> criteria =
@@ -228,12 +254,15 @@ public class GlItemProvisioningSupport {
     criteria.add(Restrictions.isNull(AccountingCombination.PROPERTY_PRODUCT));
     criteria.add(Restrictions.isNull(AccountingCombination.PROPERTY_BUSINESSPARTNER));
     criteria.add(Restrictions.isNull(AccountingCombination.PROPERTY_TRXORGANIZATION));
+    criteria.add(Restrictions.isNull(AccountingCombination.PROPERTY_LOCATIONFROMADDRESS));
+    criteria.add(Restrictions.isNull(AccountingCombination.PROPERTY_LOCATIONTOADDRESS));
     criteria.add(Restrictions.isNull(AccountingCombination.PROPERTY_SALESREGION));
     criteria.add(Restrictions.isNull(AccountingCombination.PROPERTY_PROJECT));
     criteria.add(Restrictions.isNull(AccountingCombination.PROPERTY_SALESCAMPAIGN));
     criteria.add(Restrictions.isNull(AccountingCombination.PROPERTY_ACTIVITY));
     criteria.add(Restrictions.isNull(AccountingCombination.PROPERTY_STDIMENSION));
     criteria.add(Restrictions.isNull(AccountingCombination.PROPERTY_NDDIMENSION));
+    criteria.addOrderBy(AccountingCombination.PROPERTY_ID, true);
     criteria.setMaxResults(1);
     return (AccountingCombination) criteria.uniqueResult();
   }
