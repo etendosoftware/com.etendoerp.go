@@ -108,11 +108,16 @@ public class YearCloseHandler implements NeoHandler {
   private static final String STATUS_CLOSED = "C";
   private static final String STATUS_PERMANENTLY_CLOSED = "P";
 
+  private final FiscalYearPeriodsHandler fiscalYearPeriodsHandler = new FiscalYearPeriodsHandler();
+
   @Override
   public NeoResponse handle(NeoContext context) {
     NeoResponse createResponse = validateAndEnrichFiscalCalendarCreate(context);
     if (createResponse != null || isFiscalCalendarCreate(context)) {
       return createResponse;
+    }
+    if (fiscalYearPeriodsHandler.handles(context)) {
+      return fiscalYearPeriodsHandler.handle(context);
     }
     if (context.getEndpointType() != NeoEndpointType.ACTION) {
       return null;
