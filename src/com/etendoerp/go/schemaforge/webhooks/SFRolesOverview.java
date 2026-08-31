@@ -52,8 +52,9 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * Webhook that returns, for an admin caller, an aggregate overview of the CALLING TENANT's 5
  * fixed roles (ETP-4513 — "Configuración &gt; Roles"): each role's display name, raw AD
  * description, count of assigned users, and the list of Etendo GO windows it can reach ({@code
- * AD_Window_Access}, intersected with the windows Etendo GO actually exposes today — see {@link
- * #resolveActiveEtendoGoWindowsById()}) — plus (ETP-4907) an explicit {@code windowCount} per
+ * AD_Window_Access}, intersected with the windows Etendo GO actually exposes today, minus those it
+ * serves over NEO/MCP but never shows in its UI — see {@link #resolveActiveEtendoGoWindowsById()}
+ * and {@link #UI_EXCLUDED_WINDOW_IDS}) — plus (ETP-4907) an explicit {@code windowCount} per
  * role and a full window × role permission {@code matrix}, grouped by top-level menu category.
  *
  * <p>Unlike {@code SFWindowAccessMap}, which answers "what can the CURRENT caller's own role
@@ -201,6 +202,32 @@ public class SFRolesOverview extends BaseWebhookService {
 
   /** {@code ETGO_SF_SPEC.SPEC_TYPE} value identifying a window/CRUD spec. */
   private static final String SPEC_TYPE_WINDOW = "W";
+
+  /**
+   * AD windows Etendo GO deliberately does NOT surface anywhere in its own UI, even though they
+   * still have an active {@code SPEC_TYPE = 'W'} {@code ETGO_SF_SPEC} because NEO/MCP keeps
+   * serving them read-only.
+   *
+   * <p>Filtered out in {@link #resolveActiveEtendoGoWindowsById()}, which is the single source
+   * every downstream structure derives from — each role's {@code windows} array, its {@code
+   * windowCount}, and the {@code matrix} — so ONE entry here removes the window from
+   * "Configuración &gt; Roles" AND from "Usuario &gt; Roles" (whose React tab intersects {@code
+   * SFListMenu}'s raw AD tree against the union of these {@code windows} arrays — see
+   * {@code UserRolesTab.jsx}'s {@code activeWindowIds}).
+   *
+   * <p>ETP-5068 — "Conversion Rate Downloader Log"
+   * ({@code 6FEBA130CDE24CC09041FFA6117ADFA9}): an internal log of the conversion-rate
+   * downloader job, dropped from the Etendo Go menu because it adds no value to the end user.
+   * Administrators read it in Etendo classic, so the GO template roles deliberately KEEP their
+   * {@code AD_Window_Access} grant (see {@code TemplateRoleWindowAccess}) — which is precisely
+   * why the window cannot be hidden by revoking access, and why the exclusion lives here and
+   * not in {@code SFListMenu}, whose tree must keep reporting the native AD menu as-is for its
+   * other consumers.
+   *
+   * <p>Note {@code Set.of(...)} rejects {@code contains(null)} with an NPE rather than returning
+   * {@code false}, so callers must guard the id before probing this set.
+   */
+  private static final Set<String> UI_EXCLUDED_WINDOW_IDS = Set.of("6FEBA130CDE24CC09041FFA6117ADFA9");
 
   /** JSON key for the full window × role permission matrix (ETP-4907). */
   private static final String MATRIX = "matrix";
@@ -535,9 +562,11 @@ public class SFRolesOverview extends BaseWebhookService {
   /**
    * Resolves every distinct {@code AD_Window} backing an active, {@code SPEC_TYPE = 'W'}
    * {@code ETGO_SF_SPEC} — i.e. every window Etendo GO actually exposes today, keyed by id for
-   * O(1) lookups while building both the per-role {@code windows} arrays and the {@code matrix}.
+   * O(1) lookups while building both the per-role {@code windows} arrays and the {@code matrix}
+   * — minus the windows Etendo GO serves over NEO/MCP but never shows in its UI
+   * ({@link #UI_EXCLUDED_WINDOW_IDS}).
    *
-   * @return the distinct windows, keyed by id (insertion order)
+   * @return the distinct UI-exposed windows, keyed by id (insertion order)
    */
   @SuppressWarnings("unchecked")
   private Map<String, Window> resolveActiveEtendoGoWindowsById() {
@@ -550,8 +579,9 @@ public class SFRolesOverview extends BaseWebhookService {
     Map<String, Window> windowsById = new LinkedHashMap<>();
     for (SFSpec spec : (List<SFSpec>) criteria.list()) {
       Window window = spec.getADWindow();
-      if (window != null) {
-        windowsById.put(window.getId(), window);
+      String windowId = window == null ? null : window.getId();
+      if (windowId != null && !UI_EXCLUDED_WINDOW_IDS.contains(windowId)) {
+        windowsById.put(windowId, window);
       }
     }
     return windowsById;
