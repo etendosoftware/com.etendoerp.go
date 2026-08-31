@@ -1081,7 +1081,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
                 new Object[] { "win-visible", "Settings" },
                 new Object[] { "6FEBA130CDE24CC09041FFA6117ADFA9", "Settings" }));
 
-        webhook.get(parameters, responseVars);
+        invokeWebhookWithNoTemplateComposition();
 
         assertNull(responseVars.get(ERROR));
         String rawResult = responseVars.get(RESULT);
@@ -1119,7 +1119,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         when(categoryQuery.getResultList()).thenReturn(
                 Collections.singletonList(new Object[] { "116", "Settings" }));
 
-        webhook.get(parameters, responseVars);
+        invokeWebhookWithNoTemplateComposition();
 
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
