@@ -1207,21 +1207,37 @@ public class BankStatementsHandlerTest {
     }
   }
 
+  /**
+   * ETP-4921 — reactivation used to be refused outright for a statement carrying even ONE matched
+   * line, which Classic never did: core's FIN_BankStatementProcess has no such guard on
+   * Reactivate, and only APRM_FIN_BNKSTM_LINE_CHECK_TRG protects individual matched LINES (on any
+   * insert/update/delete of that line, independent of the parent's Processed flag). The partially
+   * reconciled case is precisely the one users need — reactivate, then fix the unmatched lines.
+   */
   @Test
-  public void handleReactivateRejectsReconciledLines() throws Exception {
+  public void handleReactivateAllowsStatementWithMatchedLines() throws Exception {
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
     FIN_BankStatement processed = processedStatement("st-1");
     when(processed.getPosted()).thenReturn("N");
-    doReturn(true).when(handler).hasReconciledLines(processed);
+    doNothing().when(handler).reactivateStatement(processed);
+    FIN_BankStatementLine matched = mock(FIN_BankStatementLine.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<FIN_BankStatementLine> crit = mock(OBCriteria.class);
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(processed);
+      // Every line query this statement could run reports a matched line present — reactivation
+      // must go through anyway.
+      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.list()).thenReturn(Collections.singletonList(matched));
+
       NeoResponse r = handler.handle(postCtx(ctx, "reactivate"));
-      assertEquals(400, r.getHttpStatus());
-      verify(handler, never()).reactivateStatement(any());
+      assertEquals(200, r.getHttpStatus());
+      verify(handler).reactivateStatement(processed);
     }
   }
 
@@ -1231,7 +1247,6 @@ public class BankStatementsHandlerTest {
     when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
     FIN_BankStatement processed = processedStatement("st-1");
     when(processed.getPosted()).thenReturn("N");
-    doReturn(false).when(handler).hasReconciledLines(processed);
     doNothing().when(handler).reactivateStatement(processed);
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
@@ -1348,6 +1363,8 @@ public class BankStatementsHandlerTest {
     FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
     @SuppressWarnings("unchecked")
     OBCriteria<FIN_BankStatementLine> crit = mock(OBCriteria.class);
+    // No matched line stands in the way — the interesting case is the test below.
+    doReturn(false).when(handler).hasMatchedLines(draft);
 
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
          MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
@@ -1362,6 +1379,147 @@ public class BankStatementsHandlerTest {
       assertEquals(200, r.getHttpStatus());
       verify(dal).remove(line);     // the line is removed first
       verify(dal).remove(draft);    // then the statement
+    }
+  }
+
+  /**
+   * ETP-4921 — since reactivation no longer requires the matched lines to be unreconciled first,
+   * a DRAFT statement can now legitimately carry them. Deleting the statement would take those
+   * lines with it, which core's APRM_FIN_BNKSTM_LINE_CHECK_TRG never allows for any caller; the
+   * guard turns that into a clean 400 rather than a raw trigger exception mid-delete.
+   */
+  @Test
+  public void handleDeleteRejectsDraftWithMatchedLines() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement draft = draftStatement("st-1");
+    doReturn(true).when(handler).hasMatchedLines(draft);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "delete"));
+      assertEquals(400, r.getHttpStatus());
+      assertTrue(r.getBody().getJSONObject("error").getString("message").contains("matched"));
+      verify(dal, never()).remove(any());
+    }
+  }
+
+  /**
+   * ETP-4921 — update must rebuild ONLY the unmatched lines. The criteria it issues therefore
+   * carries an extra isNull(financialAccountTransaction) restriction compared to the old
+   * delete-everything path, and the matched lines it leaves behind still count towards the
+   * reported lineCount.
+   */
+  @Test
+  public void handleUpdateKeepsMatchedLinesAndCountsThem() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = idBody("st-1");
+    body.put("name", "Editado");
+    body.put("transactionDate", "2026-06-04T00:00:00Z");
+    JSONArray lines = new JSONArray();
+    lines.put(createLine("2026-06-02T00:00:00Z", "X", "Y", 10, 0));
+    body.put("lines", lines);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_BankStatement draft = draftStatement("st-1");
+    when(draft.getName()).thenReturn("Editado");
+    FIN_BankStatementLine matched = mock(FIN_BankStatementLine.class);
+    when(matched.getLineNo()).thenReturn(20L);
+    FIN_BankStatementLine created = mock(FIN_BankStatementLine.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<FIN_BankStatementLine> crit = mock(OBCriteria.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
+      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      // Every line query sees the one matched line: countMatchedLines → 1, maxExistingLineNo →
+      // 20, and deleteUnmatchedLines' own query (which in production would NOT return it).
+      when(crit.list()).thenReturn(Collections.singletonList(matched));
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FIN_BankStatementLine.class)).thenReturn(created);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "update"));
+      assertEquals(200, r.getHttpStatus());
+      // 1 rebuilt from the body + 1 matched left in place.
+      JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data")
+          .getJSONObject("statement");
+      assertEquals(2, data.getInt("lineCount"));
+      // Numbering continues after the highest existing LineNo so it cannot collide with the
+      // matched line that was kept.
+      verify(created).setLineNo(30L);
+    }
+  }
+
+  /**
+   * ETP-4921 — a header-only edit (name / notes / dates) of a statement whose every line is
+   * matched sends no lines at all. That used to be rejected as "At least one line is required";
+   * it is now valid, because the statement is not actually left empty.
+   */
+  @Test
+  public void handleUpdateAcceptsEmptyLinesWhenMatchedLinesRemain() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = idBody("st-1");
+    body.put("name", "Solo cabecera");
+    body.put("lines", new JSONArray());
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_BankStatement draft = draftStatement("st-1");
+    when(draft.getName()).thenReturn("Solo cabecera");
+    FIN_BankStatementLine matched = mock(FIN_BankStatementLine.class);
+    @SuppressWarnings("unchecked")
+    OBCriteria<FIN_BankStatementLine> crit = mock(OBCriteria.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
+      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.list()).thenReturn(Collections.singletonList(matched));
+
+      NeoResponse r = handler.handle(postCtx(ctx, "update"));
+      assertEquals(200, r.getHttpStatus());
+      JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data")
+          .getJSONObject("statement");
+      assertEquals(1, data.getInt("lineCount"));
+    }
+  }
+
+  /** With no lines in the body AND no matched lines to keep, the statement would be left empty. */
+  @Test
+  public void handleUpdateStillRejectsEmptyLinesWhenNothingWouldRemain() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = idBody("st-1");
+    body.put("name", "Vacio");
+    body.put("lines", new JSONArray());
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_BankStatement draft = draftStatement("st-1");
+    @SuppressWarnings("unchecked")
+    OBCriteria<FIN_BankStatementLine> crit = mock(OBCriteria.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
+      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.list()).thenReturn(Collections.emptyList());
+
+      NeoResponse r = handler.handle(postCtx(ctx, "update"));
+      assertEquals(400, r.getHttpStatus());
     }
   }
 }

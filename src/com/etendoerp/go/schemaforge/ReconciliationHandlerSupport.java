@@ -289,6 +289,34 @@ final class ReconciliationHandlerSupport {
   // ---------------------------------------------------------------------------
 
   /**
+   * How much of a statement line is already reconciled, in the same sign convention as its
+   * amount: {@code 0} for a fully pending line, the whole amount for a fully reconciled one,
+   * something in between for a partial group.
+   *
+   * <p>MAGNITUDES first, then re-sign. {@code amount} is SIGNED — a withdrawal is negative — while
+   * {@code pending} is the unsigned {@code |cramount - dramount|} that
+   * {@code BankStatementLinePendingAmountHandler} stores (and that
+   * {@code BankStatementsSupport.mergeMatchGroups} sums across a split group's sub-lines). The
+   * plain {@code amount - pending} this replaces only held when both happened to share a sign:
+   * for a fully pending withdrawal it gave {@code -0.50 - 0.50 = -1.00} instead of {@code 0}, so
+   * the UI's {@code ProgressCell} — which draws a bar whenever {@code reconciledAmount != 0} —
+   * put a solid "100% reconciled" bar (200%, clamped) on a line with nothing reconciled, right
+   * under its "Pendiente" badge. Deposits were correct only by coincidence (ETP-4921).
+   *
+   * <p>Clamped at zero: {@code pending > |amount|} is a data anomaly, and reporting "nothing
+   * reconciled" is the honest reading of it — the alternative flips the sign and draws a bar
+   * pointing the wrong way.
+   *
+   * @param amount  the line's signed amount
+   * @param pending the unsigned amount still pending to reconcile
+   * @return the reconciled portion, signed like {@code amount}
+   */
+  static BigDecimal signedReconciledAmount(BigDecimal amount, BigDecimal pending) {
+    BigDecimal magnitude = amount.abs().subtract(pending.abs()).max(BigDecimal.ZERO);
+    return amount.signum() < 0 ? magnitude.negate() : magnitude;
+  }
+
+  /**
    * Derives per-line reconciled amounts / progress and the fine-grained {@code state}, accumulates
    * the running total and the per-state counts, and builds the {@code pendingLines} data envelope
    * body. Extracted verbatim from {@code ReconciliationHandler.buildPendingLines}.
@@ -310,7 +338,7 @@ final class ReconciliationHandlerSupport {
       total = total.add(amount);
       // Reconciled/pending amounts + progress % for the left "Progreso" bar and the right block.
       BigDecimal pending = nullSafe(new BigDecimal(row.optString("pendingAmount", "0")));
-      BigDecimal reconciled = amount.subtract(pending);
+      BigDecimal reconciled = signedReconciledAmount(amount, pending);
       row.put("reconciledAmount", reconciled);
       int pct = amount.signum() == 0 ? 0
           : (int) Math.round(reconciled.abs().doubleValue() / amount.abs().doubleValue() * 100.0);
