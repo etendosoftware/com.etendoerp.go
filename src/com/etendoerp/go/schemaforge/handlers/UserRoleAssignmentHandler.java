@@ -18,6 +18,7 @@ package com.etendoerp.go.schemaforge.handlers;
 
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
@@ -47,6 +48,7 @@ import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
 
@@ -205,7 +207,9 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * Pre-hook dispatch: on a {@code user} {@code POST} (create), derives a unique {@code
    * username}; on a {@code user} {@code PUT}/{@code PATCH} (update), guards against the
    * email-immutability and self/last-admin-lockout writes described in the class javadoc's
-   * ETP-4830 write-path-guards concern. No-op for every other method/endpoint.
+   * ETP-4830 write-path-guards concern; on a {@code user} list {@code GET}, excludes
+   * contact-only rows (see {@link #excludeContactOnlyUsers}, ETP-5019). No-op for every other
+   * method/endpoint.
    */
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -219,7 +223,47 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     if (METHOD_PUT.equalsIgnoreCase(method) || METHOD_PATCH.equalsIgnoreCase(method)) {
       return validateUpdate(context);
     }
+    if (METHOD_GET.equalsIgnoreCase(method) && context.getRecordId() == null) {
+      excludeContactOnlyUsers(context);
+    }
     return null;
+  }
+
+  /**
+   * ETP-5019 — a {@code Business Partner Contact} created from the BP window's "Contacts" tab
+   * auto-creates its own {@code AD_User} row purely to carry contact info (e.g. "Default
+   * Customer Contact"), never meant to log in or hold roles. These rows kept leaking into the
+   * Users window's list ("Default Customer Contact" rows for every client, plus assorted named
+   * BP-contact rows) even though they are not real application users.
+   *
+   * <p>Structural signal, confirmed by direct DB query rather than a name match on "Contact":
+   * EVERY genuinely login-capable {@code AD_User} — admin-created via this window's own {@link
+   * #handleCreate}, or provisioned by {@code InitialSetupUtility#insertUser} at client onboarding
+   * — always gets a non-blank {@code username} (this handler itself derives one from {@code
+   * email} on every create, see the class javadoc's concern (3)). A BP-contact-only row never
+   * has one. This holds even for a real user with zero roles assigned yet (confirmed: 42 of 185
+   * real users in this sandbox have zero {@code AD_User_Roles} rows but all 185 have a
+   * non-blank {@code username}) — so filtering on role count, unlike {@code username}, would
+   * wrongly hide legitimate not-yet-assigned users.
+   *
+   * <p>Injects the exclusion as a {@code _neoWhere} HQL predicate (see {@link
+   * NeoCrudHelper#NEO_WHERE_PARAM}) BEFORE the default CRUD list fetch runs, rather than
+   * post-filtering the response rows the way {@link #hideBootstrapUsers} does — the bootstrap
+   * list is 2 fixed IDs system-wide, but a client can have dozens of BP-contact rows, and
+   * post-filtering after the DB-level {@code LIMIT}/{@code OFFSET} already applied would corrupt
+   * pagination (a page could come back with fewer rows than requested, or empty, even though
+   * more real users exist beyond it). Filtering in the HQL keeps {@code totalRows} and paging
+   * correct for free.
+   */
+  private void excludeContactOnlyUsers(NeoContext context) {
+    Map<String, String> queryParams = context.getQueryParams();
+    if (queryParams == null) {
+      return;
+    }
+    String predicate = "e.username is not null and e.username <> ''";
+    String existing = queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM);
+    queryParams.put(NeoCrudHelper.NEO_WHERE_PARAM,
+        StringUtils.isBlank(existing) ? predicate : "(" + existing + ") and (" + predicate + ")");
   }
 
   /**

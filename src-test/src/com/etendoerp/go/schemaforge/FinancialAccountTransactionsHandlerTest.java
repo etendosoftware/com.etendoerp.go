@@ -29,6 +29,7 @@ import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -52,6 +53,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
@@ -60,6 +62,8 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+
+import com.etendoerp.payment.removal.util.TransactionRemovalUtil;
 
 /**
  * Mockito-driven unit tests for {@link FinancialAccountTransactionsHandler}.
@@ -815,6 +819,97 @@ public class FinancialAccountTransactionsHandlerTest {
     when(ctx.getQueryParams()).thenReturn(qp);
     when(ctx.getRequestBody()).thenReturn(body);
     return ctx;
+  }
+
+  /** Builds a {@link NeoContext} mock for POST /sws/neo/...?action=reactivate. */
+  private static NeoContext reactivateCtx(JSONObject body) {
+    NeoContext ctx = mock(NeoContext.class);
+    Map<String, String> qp = new HashMap<>();
+    qp.put("action", "reactivate");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getQueryParams()).thenReturn(qp);
+    when(ctx.getRequestBody()).thenReturn(body);
+    return ctx;
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // handleReactivate() — the Movimientos-tab kebab "Reactivar" for a single transaction
+  // (ETP-4951): captures the transaction's linked FIN_BankStatementLine BEFORE calling
+  // TransactionRemovalUtil.reactivate, then (only when a line was linked) calls
+  // new ReconciliationHandler().normalizeReactivatedMatchGroup(line) to re-collapse a
+  // physically-split 1:N bank-statement line. Since `new ReconciliationHandler()` is a plain
+  // instantiation (no CDI wiring), Mockito's mockConstruction intercepts it.
+  // ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * When the reactivated transaction is linked to a {@code FIN_BankStatementLine} (it was part of a
+   * bank-matched, possibly ETGO-split, statement line), {@code normalizeReactivatedMatchGroup} must
+   * be called on that line after {@code TransactionRemovalUtil.reactivate}.
+   */
+  @Test
+  public void testHandleReactivateNormalizesMatchGroupWhenLineLinked() throws Exception {
+    JSONObject body = new JSONObject().put("id", "TRX-1");
+    NeoContext ctx = reactivateCtx(body);
+
+    org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction trx =
+        mock(org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction.class);
+    when(trx.getId()).thenReturn("TRX-1");
+    when(trx.getStatus()).thenReturn("RPAP");
+    org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine line =
+        mock(org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine.class);
+    when(trx.getFINBankStatementLineList()).thenReturn(java.util.Collections.singletonList(line));
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<TransactionRemovalUtil> trxUtil = mockStatic(TransactionRemovalUtil.class);
+        MockedConstruction<ReconciliationHandler> reconHandlerCtor =
+            mockConstruction(ReconciliationHandler.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction.class, "TRX-1"))
+          .thenReturn(trx);
+      trxUtil.when(() -> TransactionRemovalUtil.reactivate(trx)).thenReturn(true);
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(200, response.getHttpStatus());
+      assertEquals(1, reconHandlerCtor.constructed().size());
+      verify(reconHandlerCtor.constructed().get(0)).normalizeReactivatedMatchGroup(line);
+    }
+  }
+
+  /**
+   * When the reactivated transaction has NO linked {@code FIN_BankStatementLine} (e.g. a manual
+   * G/L movement, never bank-matched), {@code ReconciliationHandler} must never be constructed and
+   * {@code normalizeReactivatedMatchGroup} must never run — avoiding a wasted call / NPE risk.
+   */
+  @Test
+  public void testHandleReactivateSkipsNormalizeWhenNoLinkedLine() throws Exception {
+    JSONObject body = new JSONObject().put("id", "TRX-2");
+    NeoContext ctx = reactivateCtx(body);
+
+    org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction trx =
+        mock(org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction.class);
+    when(trx.getId()).thenReturn("TRX-2");
+    when(trx.getStatus()).thenReturn("RPAP");
+    when(trx.getFINBankStatementLineList()).thenReturn(java.util.Collections.emptyList());
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<TransactionRemovalUtil> trxUtil = mockStatic(TransactionRemovalUtil.class);
+        MockedConstruction<ReconciliationHandler> reconHandlerCtor =
+            mockConstruction(ReconciliationHandler.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction.class, "TRX-2"))
+          .thenReturn(trx);
+      trxUtil.when(() -> TransactionRemovalUtil.reactivate(trx)).thenReturn(true);
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(200, response.getHttpStatus());
+      assertTrue(reconHandlerCtor.constructed().isEmpty());
+    }
   }
 
   /** Minimal request body that passes every validation in handleCreate. */
