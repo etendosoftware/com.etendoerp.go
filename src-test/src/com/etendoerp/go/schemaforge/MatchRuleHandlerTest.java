@@ -319,8 +319,10 @@ public class MatchRuleHandlerTest {
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getSpecName()).thenReturn("match-rule");
     when(ctx.getHttpMethod()).thenReturn("POST");
-    // Blank name fails in validateContent before the priority/DAL check is reached.
-    when(ctx.getRequestBody()).thenReturn(body("name", "", "textCondition", "C", "textPattern", "p"));
+    // A valid priority is supplied so the rejection can only come from the blank name in
+    // validateContent (validatePriority runs first and would otherwise short-circuit).
+    when(ctx.getRequestBody()).thenReturn(
+        body("name", "", "textCondition", "C", "textPattern", "p", "priority", 10));
 
     assertStatus(BAD_REQUEST, spyHandler.handle(ctx));
     verify(spyHandler).enterAdminMode();
@@ -717,7 +719,7 @@ public class MatchRuleHandlerTest {
   @Test
   public void testValidateWriteStripsInactiveDimensionsBeforeValidating() throws Exception {
     JSONObject b = body("name", "Bank fee", "textCondition", "C", "textPattern", "COMM",
-        "accountingConcept", "GL-001", F_PROJECT, "PJ-1", F_COST_CENTER, "CC-1");
+        "accountingConcept", "GL-001", "priority", 10, F_PROJECT, "PJ-1", F_COST_CENTER, "CC-1");
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getHttpMethod()).thenReturn("POST");
 
@@ -760,7 +762,8 @@ public class MatchRuleHandlerTest {
    */
   @Test
   public void testValidateWriteStillRejectsInvalidContentAfterStripping() throws Exception {
-    JSONObject b = body("name", "", "textCondition", "C", "textPattern", "COMM", F_PROJECT, "PJ-1");
+    JSONObject b = body("name", "", "textCondition", "C", "textPattern", "COMM",
+        "priority", 10, F_PROJECT, "PJ-1");
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getHttpMethod()).thenReturn("POST");
 
@@ -768,9 +771,388 @@ public class MatchRuleHandlerTest {
              mockStatic(AccountingDimensionsSupport.class)) {
       stubActive(mocked, Collections.emptySet());
 
-      assertStatus(BAD_REQUEST, handler.validateWrite(ctx, b));
+      // A valid priority is supplied on purpose, so the 400 can only come from the blank
+      // name — otherwise validatePriority would reject first and this test would pass
+      // without ever exercising the content check.
+      assertRejected("Name is required", handler.validateWrite(ctx, b));
       assertFalse(b.has(F_PROJECT));
     }
+  }
+
+  // ── validatePriority (ETP-4950 follow-up) ────────────────────────────────────
+
+  /**
+   * The exact wording {@code validatePriority} emits. These are asserted literally, not
+   * loosely, because the frontend maps backend errors by exact string in
+   * {@code tools/app-shell/src/lib/backendErrors.js} → {@code BACKEND_ERROR_MAP}. A silent
+   * re-word here would drop the Spanish translation with nothing visibly breaking, so the
+   * wording is part of the contract and these constants are its test-side mirror.
+   */
+  private static final String MSG_PRIORITY_REQUIRED = "Priority is required";
+  private static final String MSG_PRIORITY_NOT_INTEGER = "Priority must be a whole number";
+  private static final String MSG_PRIORITY_TOO_LOW = "Priority must be 1 or greater";
+  private static final String MSG_PRIORITY_TOO_LARGE = "Priority is too large";
+
+  /** Highest value {@code ETGO_MATCH_RULE.PRIORITY} — a {@code DECIMAL(10,0)} — can hold. */
+  private static final String PRIORITY_MAX = "9999999999";
+
+  /** Unwraps the plain-text message of an error response ({@code {error:{message,status}}}). */
+  private static String messageOf(NeoResponse response) throws Exception {
+    assertNotNull("expected a rejection response, got null (accepted)", response);
+    return response.getBody().getJSONObject("error").getString("message");
+  }
+
+  /** Asserts a rejection carrying HTTP 400 <b>and</b> the exact expected wording. */
+  private static void assertRejected(String expectedMessage, NeoResponse response)
+      throws Exception {
+    assertStatus(BAD_REQUEST, response);
+    assertEquals("wording is part of the frontend contract (BACKEND_ERROR_MAP)",
+        expectedMessage, messageOf(response));
+  }
+
+  /**
+   * The documented minimum, {@code 1}, is accepted on a create.
+   *
+   * @throws Exception if building the JSON body fails
+   */
+  @Test
+  public void testValidatePriorityAcceptsOne() throws Exception {
+    assertNull(handler.validatePriority(body("priority", "1"), false));
+  }
+
+  /**
+   * A high but in-range priority is accepted — the rule form suggests {@code max + 10}, so
+   * values climb over time and nothing between 1 and the column ceiling may be rejected.
+   *
+   * @throws Exception if building the JSON body fails
+   */
+  @Test
+  public void testValidatePriorityAcceptsAHighInRangeValue() throws Exception {
+    assertNull(handler.validatePriority(body("priority", "123456"), false));
+  }
+
+  /**
+   * {@code "10.00"} is accepted: it denotes the integer 10, which is exactly what a
+   * {@code DECIMAL(10,0)} column stores. Only a REAL fractional part is a problem.
+   *
+   * @throws Exception if building the JSON body fails
+   */
+  @Test
+  public void testValidatePriorityAcceptsATrailingZeroDecimal() throws Exception {
+    assertNull(handler.validatePriority(body("priority", "10.00"), false));
+  }
+
+  /**
+   * The upper bound itself, {@code 9999999999}, is inclusive — it fits the ten integer
+   * digits of {@code DECIMAL(10,0)}.
+   *
+   * @throws Exception if building the JSON body fails
+   */
+  @Test
+  public void testValidatePriorityAcceptsTheUpperBound() throws Exception {
+    assertNull(handler.validatePriority(body("priority", PRIORITY_MAX), false));
+  }
+
+  /**
+   * One past the upper bound overflows the column and is rejected with HTTP 400.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidatePriorityRejectsAboveTheUpperBound() throws Exception {
+    assertRejected(MSG_PRIORITY_TOO_LARGE,
+        handler.validatePriority(body("priority", "10000000000"), false));
+  }
+
+  /**
+   * Zero is below the documented minimum and is rejected with HTTP 400.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidatePriorityRejectsZero() throws Exception {
+    assertRejected(MSG_PRIORITY_TOO_LOW, handler.validatePriority(body("priority", "0"), false));
+  }
+
+  /**
+   * The reported ticket case: a negative priority used to be persisted unvalidated. It is
+   * now rejected with HTTP 400.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidatePriorityRejectsMinusOne() throws Exception {
+    assertRejected(MSG_PRIORITY_TOO_LOW, handler.validatePriority(body("priority", "-1"), false));
+  }
+
+  /**
+   * A large negative value is rejected as too low, NOT as too large — the range check
+   * order must not misreport a negative that also exceeds the magnitude of the ceiling.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidatePriorityRejectsALargeNegativeAsTooLow() throws Exception {
+    assertRejected(MSG_PRIORITY_TOO_LOW,
+        handler.validatePriority(body("priority", "-10000000000"), false));
+  }
+
+  /**
+   * A real fractional part is rejected: {@code DECIMAL(10,0)} would have silently
+   * truncated {@code "10.5"} to 10, which is the original defect.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidatePriorityRejectsARealDecimal() throws Exception {
+    assertRejected(MSG_PRIORITY_NOT_INTEGER,
+        handler.validatePriority(body("priority", "10.5"), false));
+  }
+
+  /**
+   * Non-numeric text is rejected as "not a whole number" rather than reaching the DAL.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidatePriorityRejectsNonNumericText() throws Exception {
+    assertRejected(MSG_PRIORITY_NOT_INTEGER,
+        handler.validatePriority(body("priority", "abc"), false));
+  }
+
+  /**
+   * A numeric-looking but unparseable value (a stray sign) is rejected the same way.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidatePriorityRejectsAMalformedNumber() throws Exception {
+    assertRejected(MSG_PRIORITY_NOT_INTEGER,
+        handler.validatePriority(body("priority", "1-0"), false));
+  }
+
+  /**
+   * An absent priority on a create (POST / PUT) is an error — the rule needs a rank.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidatePriorityRejectsAnAbsentValueOnCreate() throws Exception {
+    assertRejected(MSG_PRIORITY_REQUIRED, handler.validatePriority(body(), false));
+  }
+
+  /**
+   * A blank (whitespace-only) priority is treated as absent, so on a create it is the
+   * "required" error and not a parse error.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidatePriorityRejectsABlankValueOnCreate() throws Exception {
+    assertRejected(MSG_PRIORITY_REQUIRED, handler.validatePriority(body("priority", "   "), false));
+  }
+
+  /**
+   * A JSON {@code null} priority is treated as absent on a create → "required".
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidatePriorityRejectsAJsonNullOnCreate() throws Exception {
+    assertRejected(MSG_PRIORITY_REQUIRED,
+        handler.validatePriority(body("priority", JSONObject.NULL), false));
+  }
+
+  /**
+   * On a partial PATCH an absent priority means "unchanged", not an error — the inline
+   * edit of another column (e.g. {@code active}) must not be forced to resend the rank.
+   *
+   * @throws Exception if building the JSON body fails
+   */
+  @Test
+  public void testValidatePriorityAcceptsAnAbsentValueOnPatch() throws Exception {
+    assertNull(handler.validatePriority(body(), true));
+  }
+
+  /**
+   * Same on a PATCH carrying an unrelated field: no priority in the body, no complaint.
+   *
+   * @throws Exception if building the JSON body fails
+   */
+  @Test
+  public void testValidatePriorityAcceptsAPatchWithoutPriority() throws Exception {
+    assertNull(handler.validatePriority(body("active", false), true));
+  }
+
+  /**
+   * A blank / JSON-null priority on a PATCH is also "unchanged" rather than an error.
+   *
+   * @throws Exception if building the JSON body fails
+   */
+  @Test
+  public void testValidatePriorityAcceptsABlankOrNullValueOnPatch() throws Exception {
+    assertNull(handler.validatePriority(body("priority", "  "), true));
+    assertNull(handler.validatePriority(body("priority", JSONObject.NULL), true));
+  }
+
+  /**
+   * A PATCH that DOES carry a priority is still validated — "unchanged" only covers
+   * absence, never a present-but-invalid value.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidatePriorityStillValidatesAPresentValueOnPatch() throws Exception {
+    assertRejected(MSG_PRIORITY_TOO_LOW, handler.validatePriority(body("priority", "-1"), true));
+  }
+
+  /**
+   * The wire value may be a JSON number rather than a string (the grid's inline editor
+   * sends one), so the reader must handle both representations identically.
+   *
+   * @throws Exception if building the JSON body fails
+   */
+  @Test
+  public void testValidatePriorityAcceptsANumericJsonValue() throws Exception {
+    assertNull(handler.validatePriority(body("priority", 10), false));
+    assertNull(handler.validatePriority(body("priority", 1), false));
+  }
+
+  /**
+   * A JSON number is validated exactly like the equivalent string: a numeric {@code -1}
+   * is the ticket case sent by the inline editor and must be rejected too.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidatePriorityRejectsANegativeNumericJsonValue() throws Exception {
+    assertRejected(MSG_PRIORITY_TOO_LOW, handler.validatePriority(body("priority", -1), false));
+    assertRejected(MSG_PRIORITY_TOO_LOW, handler.validatePriority(body("priority", 0), false));
+  }
+
+  /**
+   * A fractional JSON number is rejected as not a whole number, like its string form.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidatePriorityRejectsAFractionalNumericJsonValue() throws Exception {
+    assertRejected(MSG_PRIORITY_NOT_INTEGER,
+        handler.validatePriority(body("priority", 10.5), false));
+  }
+
+  // ── validatePriority through validateWrite ───────────────────────────────────
+
+  /**
+   * The integration case the content gate would miss: {@code priority} has
+   * {@code inlineEdit} in the contract, so a PATCH can carry it and nothing else.
+   * {@code hasContentFields} (name / textCondition / textPattern) is false for such a
+   * body, so priority MUST be validated outside that gate — otherwise the ticket's
+   * negative value slips straight through the grid's inline editor.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidateWriteRejectsAPriorityOnlyPatchWithANegativeValue() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+
+    assertRejected(MSG_PRIORITY_TOO_LOW, handler.validateWrite(ctx, body("priority", -1)));
+  }
+
+  /**
+   * Same body shape, valid value: a priority-only PATCH passes through to the generic CRUD.
+   *
+   * @throws Exception if building the JSON body fails
+   */
+  @Test
+  public void testValidateWriteAcceptsAPriorityOnlyPatchWithAValidValue() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+
+    assertNull(handler.validateWrite(ctx, body("priority", 20)));
+  }
+
+  /**
+   * A PATCH carrying only {@code active} must NOT be rejected for a missing priority —
+   * the inline toggle sends no rank and the record already has one.
+   *
+   * @throws Exception if building the JSON body fails
+   */
+  @Test
+  public void testValidateWriteAcceptsAnActiveOnlyPatch() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+
+    assertNull(handler.validateWrite(ctx, body("active", false)));
+  }
+
+  /**
+   * On a create the priority is mandatory, so an otherwise-valid POST without one is
+   * rejected with the "required" wording.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidateWriteRejectsACreateWithoutPriority() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+
+    assertRejected(MSG_PRIORITY_REQUIRED, handler.validateWrite(ctx, body("name", "Bank fee",
+        "textCondition", "C", "textPattern", "COMM", "accountingConcept", "GL-001")));
+  }
+
+  /**
+   * Ordering pin: priority is validated BEFORE the content gate, so a body that is bad on
+   * both counts reports the priority problem first. This is the wiring that keeps a
+   * priority-only PATCH validated at all — if the two were swapped, this test would
+   * report the name error instead.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidateWriteValidatesPriorityBeforeTheContentGate() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+
+    assertRejected(MSG_PRIORITY_TOO_LOW, handler.validateWrite(ctx,
+        body("name", "", "textCondition", "C", "textPattern", "COMM", "priority", -1)));
+  }
+
+  /**
+   * A valid priority never masks a content problem: the content validation still runs and
+   * still reports its own error.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidateWriteStillValidatesContentWhenThePriorityIsValid() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+
+    assertRejected("Name is required", handler.validateWrite(ctx,
+        body("name", "", "textCondition", "C", "textPattern", "COMM", "priority", 10)));
+  }
+
+  /**
+   * End to end through {@code handle()}: the grid's inline patch of a negative priority is
+   * rejected with HTTP 400 and the admin-mode seams still run.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testHandleRejectsAnInlinePatchWithANegativePriority() throws Exception {
+    MatchRuleHandler spyHandler = quietSpy();
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRecordId()).thenReturn("RULE-1");
+    when(ctx.getRequestBody()).thenReturn(body("priority", -1));
+
+    assertRejected(MSG_PRIORITY_TOO_LOW, spyHandler.handle(ctx));
+    verify(spyHandler).enterAdminMode();
+    verify(spyHandler).exitAdminMode();
   }
 
   private static String repeat(String s, int n) {

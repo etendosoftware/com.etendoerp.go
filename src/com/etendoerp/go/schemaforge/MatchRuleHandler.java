@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -75,6 +76,7 @@ public class MatchRuleHandler extends AbstractNeoHandler {
   private static final String F_TEXT_CONDITION = "textCondition";
   private static final String F_TEXT_PATTERN = "textPattern";
   private static final String F_ACCOUNTING_CONCEPT = "accountingConcept";
+  private static final String F_PRIORITY = "priority";
 
   private static final String METHOD_GET = "GET";
   private static final String PARAM_ACTION = "action";
@@ -101,6 +103,16 @@ public class MatchRuleHandler extends AbstractNeoHandler {
 
   private static final int NAME_MAX_LENGTH = 60;
   private static final int PATTERN_MAX_LENGTH = 255;
+
+  /**
+   * Priority is a whole number, 1 or greater. Rules are evaluated {@code ORDER BY priority ASC}
+   * (lower value = higher precedence) and ties are allowed on purpose, so nothing technically broke
+   * with a zero or a negative — but the field had NO validation at all, and
+   * {@code ETGO_MATCH_RULE.PRIORITY} is {@code DECIMAL(10,0)}, so a decimal was silently truncated
+   * on the way in. The upper bound is what those ten integer digits can hold.
+   */
+  private static final BigDecimal PRIORITY_MIN = BigDecimal.ONE;
+  private static final BigDecimal PRIORITY_MAX = new BigDecimal("9999999999");
 
   /** Allowed values for the closed lists (mirror of the AD list references). */
   private static final Set<String> TEXT_CONDITIONS = new HashSet<>(Arrays.asList("C", "S", "R"));
@@ -169,6 +181,13 @@ public class MatchRuleHandler extends AbstractNeoHandler {
 
     stripInactiveDimensions(body);
 
+    // Priority is validated on its own, independently of the content gate below: it has
+    // `inlineEdit` in the contract, so a PATCH can carry priority and nothing else.
+    NeoResponse invalidPriority = validatePriority(body, isPatch);
+    if (invalidPriority != null) {
+      return invalidPriority;
+    }
+
     // Full validation only applies when the relevant content fields are present. A PATCH
     // may carry a single field (inline toggle of `active`); fields absent from the body
     // are not validated here. Priority is NOT required to be unique — per the functional
@@ -179,6 +198,43 @@ public class MatchRuleHandler extends AbstractNeoHandler {
       if (invalid != null) {
         return invalid;
       }
+    }
+    return null;
+  }
+
+  /**
+   * Validates {@code priority}: a whole number from {@code 1} up to what {@code DECIMAL(10,0)}
+   * holds. Absent is an error on create/update and a no-op on a partial patch.
+   *
+   * @param body    the request body
+   * @param isPatch {@code true} for a PATCH, where an absent priority simply means "unchanged"
+   * @return {@code null} when valid, or the HTTP 400 to reject the write with
+   */
+  NeoResponse validatePriority(JSONObject body, boolean isPatch) {
+    String raw = optTrimmed(body, F_PRIORITY);
+    if (raw == null) {
+      return isPatch ? null
+          : NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Priority is required");
+    }
+    BigDecimal priority;
+    try {
+      priority = new BigDecimal(raw);
+    } catch (NumberFormatException e) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Priority must be a whole number");
+    }
+    // stripTrailingZeros so "10.00" is accepted as the integer 10 the column would have stored,
+    // while "10.5" — which DECIMAL(10,0) would have silently truncated — is rejected.
+    if (priority.stripTrailingZeros().scale() > 0) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Priority must be a whole number");
+    }
+    if (priority.compareTo(PRIORITY_MIN) < 0) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Priority must be 1 or greater");
+    }
+    if (priority.compareTo(PRIORITY_MAX) > 0) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Priority is too large");
     }
     return null;
   }
