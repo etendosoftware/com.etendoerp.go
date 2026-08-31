@@ -18,9 +18,11 @@
 package com.etendoerp.go.schemaforge;
 
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.nullSafe;
+import static com.etendoerp.go.schemaforge.ReconciliationSupport.readOperationIds;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.signedAmount;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Function;
 
@@ -31,6 +33,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
@@ -201,10 +204,9 @@ final class ReconciliationFlowSupport {
       FIN_BankStatementLine line, Function<String, FIN_FinaccTransaction> transactionLoader,
       BigDecimal tolerance) {
     BigDecimal opSum = BigDecimal.ZERO;
-    String ownDraftId = ownDraftIdOf(line);
     for (String opId : operationIds) {
       FIN_FinaccTransaction trx = transactionLoader.apply(opId);
-      NeoResponse opError = validateOperation(trx, opId, accountId, ownDraftId);
+      NeoResponse opError = validateOperation(trx, opId, accountId);
       if (opError != null) {
         return opError;
       }
@@ -224,24 +226,12 @@ final class ReconciliationFlowSupport {
   }
 
   /**
-   * The id of the line's OWN unprocessed ("Reactivar"-ed) reconciliation, or {@code null} when the
-   * line is unmatched or its reconciliation is already processed. Those transactions legitimately
-   * still carry that reconciliation — re-confirming them is the whole point of that action.
-   */
-  private static String ownDraftIdOf(FIN_BankStatementLine line) {
-    FIN_Reconciliation ownDraft = line != null && line.getFinancialAccountTransaction() != null
-        ? line.getFinancialAccountTransaction().getReconciliation()
-        : null;
-    return ownDraft != null && !ownDraft.isProcessed() ? ownDraft.getId() : null;
-  }
-
-  /**
    * Per-operation guards: it must exist, belong to {@code accountId}, and be free — i.e. carry no
-   * reconciliation other than the line's own draft ({@code ownDraftId}). Returns the verbatim error
-   * response, or {@code null} when the operation is valid.
+   * reconciliation at all. Returns the verbatim error response, or {@code null} when the operation
+   * is valid.
    */
   private static NeoResponse validateOperation(FIN_FinaccTransaction trx, String opId,
-      String accountId, String ownDraftId) {
+      String accountId) {
     if (trx == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Operation not found: " + opId);
     }
@@ -249,13 +239,100 @@ final class ReconciliationFlowSupport {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "Operation does not belong to the financial account: " + opId);
     }
-    // Compared from ownDraftId outwards so a reconciliation with a null id (defensive: never in a
-    // real DB, but reachable via mocks) still rejects instead of throwing.
-    FIN_Reconciliation trxRec = trx.getReconciliation();
-    if (trxRec != null && (ownDraftId == null || !ownDraftId.equals(trxRec.getId()))) {
+    if (trx.getReconciliation() != null) {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           "Operation is already reconciled: " + opId);
     }
+    return null;
+  }
+
+  /**
+   * Composes the standard Etendo reconciliation services for a 1:N manual match: creates a fresh
+   * draft reconciliation, matches into it, and processes it. Never reimplements the matching logic.
+   * Extracted verbatim from {@code ReconciliationHandler.compose} so that class stays under the
+   * Sonar per-class method-count limit (java:S1448); every DAL/Classic seam still runs on the
+   * caller's {@code handler} instance, so behavior — and test stubbing — is unchanged.
+   */
+  static NeoResponse compose(ReconciliationHandler handler, FIN_FinancialAccount account,
+      FIN_BankStatementLine line, List<String> operationIds) throws Exception {
+    FIN_Reconciliation rec = handler.addNewDraftReconciliation(account);
+    handler.matchInto(line, operationIds, rec);
+    OBError result = handler.processReconciliation(rec);
+    if (result != null && "Error".equalsIgnoreCase(result.getType())) {
+      handler.doRollbackAndClose();
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, result.getMessage());
+    }
+
+    JSONObject data = new JSONObject();
+    data.put("reconciliationId", rec.getId());
+    JSONArray lineIds = new JSONArray();
+    lineIds.put(line.getId());
+    data.put("lineIds", lineIds);
+    data.put(ReconciliationHandler.KEY_UPDATED_BALANCE, nullSafe(rec.getEndingBalance()));
+    return NeoResponse.createdWithData(data);
+  }
+
+  /**
+   * Validates one {@code applySuggestions} group and, on success, appends a
+   * {@link ReconciliationHandler.PreparedGroup} to {@code out} (the resolved line + final operation
+   * ids, invoice/rule payments already created). Returns the verbatim error response on the first
+   * failed guard, or {@code null} on success. Deliberately does NOT match or touch any
+   * {@code FIN_Reconciliation} — that happens once the caller has a single shared document for the
+   * whole batch.
+   *
+   * <p>Extracted verbatim from {@code ReconciliationHandler.prepareGroup} so that class stays under
+   * the Sonar per-class method-count limit (java:S1448); every DAL seam still runs on the caller's
+   * {@code handler} instance, so behavior — and test stubbing — is unchanged.
+   */
+  static NeoResponse prepareGroup(ReconciliationHandler handler, FIN_FinancialAccount account,
+      JSONObject groupEntry, List<ReconciliationHandler.PreparedGroup> out) throws Exception {
+    String statementLineId = groupEntry.optString(ReconciliationHandler.KEY_STATEMENT_LINE_ID, null);
+    if (StringUtils.isBlank(statementLineId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "statementLineId is required");
+    }
+
+    FIN_BankStatementLine line = handler.loadLine(statementLineId);
+    if (line == null) {
+      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
+          ReconciliationHandler.MSG_STATEMENT_LINE_NOT_FOUND + statementLineId);
+    }
+    if (line.getFinancialAccountTransaction() != null) {
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          "Statement line is already reconciled: " + statementLineId);
+    }
+
+    List<String> operationIds = readOperationIds(groupEntry);
+
+    // When a rule group requires creating a new transaction, do that first.
+    JSONObject createPaymentSpec = groupEntry.optJSONObject("createPayment");
+    if (createPaymentSpec != null && StringUtils.isNotBlank(createPaymentSpec.optString("glItemId", null))) {
+      String newTxnId = handler.createTransactionForRule(account, line, createPaymentSpec);
+      if (StringUtils.isNotBlank(newTxnId)) {
+        operationIds = new ArrayList<>(operationIds);
+        operationIds.add(newTxnId);
+        // Increment the rule's matchCount.
+        String ruleId = createPaymentSpec.optString("ruleId", null);
+        if (StringUtils.isNotBlank(ruleId)) {
+          AutoMatchSupport.incrementMatchCount(ruleId);
+        }
+      }
+    }
+
+    if (operationIds.isEmpty()) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "At least one operation is required for line: " + statementLineId);
+    }
+
+    // Operations (including any just-created rule transaction) may match part of the line but must
+    // not EXCEED it — the same over-reconciliation guard the manual reconcileGroup path applies.
+    NeoResponse opError = validateOperations(
+        operationIds, account.getId(), line, handler::loadTransaction,
+        ReconciliationHandler.TOLERANCE);
+    if (opError != null) {
+      return opError;
+    }
+
+    out.add(new ReconciliationHandler.PreparedGroup(line, operationIds));
     return null;
   }
 }

@@ -26,6 +26,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
@@ -98,6 +99,9 @@ final class PisPaymentBridge {
    */
   private static final String PIS_RETURN_SERVLET_PATH = "/sws/pis-return";
 
+  private static final String HEADER_FORWARDED_PROTO = "X-Forwarded-Proto";
+  private static final String HEADER_FORWARDED_HOST = "X-Forwarded-Host";
+
   private PisPaymentBridge() {
   }
 
@@ -149,7 +153,7 @@ final class PisPaymentBridge {
 
     // Reuse Classic's exact payload/validation/persistence via its now-public processPayment.
     BankIntegrationPISUtils.PISCreatePaymentResult result = new GenerateBankPayment()
-        .processPayment(payment, params, apiKey, request, resolveBackendReturnUrl());
+        .processPayment(payment, params, apiKey, request, resolveBackendReturnUrl(request));
     persistAppReturnUrl(result.getPaymentId(), appReturnUrl);
     return result;
   }
@@ -190,18 +194,123 @@ final class PisPaymentBridge {
 
     String appReturnUrl = resolveGoReturnUrl(request);
     BankIntegrationPISUtils.PISCreatePaymentResult result = new GenerateBankPayment()
-        .processPayment(context, params, apiKey, request, resolveBackendReturnUrl());
+        .processPayment(context, params, apiKey, request, resolveBackendReturnUrl(request));
     persistAppReturnUrl(result.getPaymentId(), appReturnUrl);
     return result;
   }
 
   /**
-   * Absolute URL of {@link PisReturnCallbackServlet}, built from the instance's own configured base
-   * URL — the same {@link BankIntegrationUrlUtils#buildBaseUrl()} PSD2 uses for its own default
-   * {@code /pisPaymentCallback}, so both callbacks resolve identically in every environment.
+   * Absolute URL of {@link PisReturnCallbackServlet}, the address Salt Edge sends the browser back
+   * to after SCA.
+   *
+   * <p>Taken from the request that is initiating the payment, because that request already carries
+   * the address the browser is actually reaching this server at: the deployed context path comes
+   * from Tomcat itself, so it cannot be doubled, and the host is whatever the proxy is publishing.
+   *
+   * <p><b>Why not the configured base URL alone.</b> {@link BankIntegrationUrlUtils#buildBaseUrl()}
+   * composes {@code context.url} with {@code context.name}. That holds for PSD2's own convention
+   * ({@code context.url} = bare server, as its README documents), but Etendo's own
+   * {@code Openbravo.properties.template} ships {@code context.url} WITH the context path — and on
+   * a server configured that way the result repeats it, so Salt Edge was sent to
+   * {@code https://host/etendo/etendo/sws/pis-return}. That path matches no servlet mapping and the
+   * user landed on Etendo's generic error page after paying (ETP-4895). PSD2's helper is shared
+   * with Classic and keeps its convention untouched; the collapse below is applied on this side.
+   *
+   * <p>The configured base URL is still the fallback, for a request that cannot say where it is
+   * publicly reachable — behind a proxy that forwards no {@code X-Forwarded-*}, Tomcat sees its own
+   * internal address, which is useless to a bank redirecting a browser.
    */
-  private static String resolveBackendReturnUrl() {
-    return StringUtils.removeEnd(BankIntegrationUrlUtils.buildBaseUrl(), "/") + PIS_RETURN_SERVLET_PATH;
+  private static String resolveBackendReturnUrl(HttpServletRequest request) {
+    String fromRequest = publicBaseFromRequest(request);
+    String base = fromRequest != null ? fromRequest
+        : collapseRepeatedContext(BankIntegrationUrlUtils.buildBaseUrl());
+    String returnUrl = StringUtils.removeEnd(base, "/") + PIS_RETURN_SERVLET_PATH;
+    // One line per initiated transfer (a handful a day), and the only way to tell from a server's
+    // logs which of the two branches produced the address the bank was given.
+    log.info("PIS return URL: {} (from {}; X-Forwarded-Proto={}, X-Forwarded-Host={}, Host={})",
+        returnUrl, fromRequest != null ? "request" : "context.url",
+        header(request, HEADER_FORWARDED_PROTO), header(request, HEADER_FORWARDED_HOST),
+        header(request, "Host"));
+    return returnUrl;
+  }
+
+  /**
+   * Where this server is publicly reachable, according to the request being served, or {@code null}
+   * when that cannot be established.
+   *
+   * <p>{@code X-Forwarded-Proto} / {@code X-Forwarded-Host} win when the proxy sets them (each may
+   * carry a comma-separated chain — the first entry is the original client-facing hop). Otherwise
+   * the request's own scheme and host are used, which is correct for a directly exposed Tomcat and
+   * wrong behind a silent proxy — hence the reachability check: an address a bank cannot redirect a
+   * browser to is worse than falling back to the configured one.
+   */
+  private static String publicBaseFromRequest(HttpServletRequest request) {
+    if (request == null) {
+      return null;
+    }
+    String proto = firstHop(header(request, HEADER_FORWARDED_PROTO));
+    String host = firstHop(header(request, HEADER_FORWARDED_HOST));
+    if (proto == null) {
+      proto = request.getScheme();
+    }
+    if (host == null) {
+      host = request.getServerName() + defaultPortSuffix(request);
+    }
+    if (!isPubliclyAddressable(host)) {
+      return null;
+    }
+    return proto + "://" + host + StringUtils.trimToEmpty(request.getContextPath());
+  }
+
+  /** The first entry of a possibly comma-separated proxy header chain, or {@code null}. */
+  private static String firstHop(String headerValue) {
+    return StringUtils.trimToNull(StringUtils.substringBefore(StringUtils.trimToEmpty(headerValue), ","));
+  }
+
+  private static String header(HttpServletRequest request, String name) {
+    return request != null ? request.getHeader(name) : null;
+  }
+
+  /** {@code :port} unless it is the default for the scheme, which browsers omit. */
+  private static String defaultPortSuffix(HttpServletRequest request) {
+    int port = request.getServerPort();
+    boolean isDefault = ("http".equals(request.getScheme()) && port == 80)
+        || ("https".equals(request.getScheme()) && port == 443);
+    return isDefault || port <= 0 ? "" : ":" + port;
+  }
+
+  /**
+   * Whether a bank could redirect a browser to this host. Loopback and single-label names (a
+   * container or service name) are only reachable from inside the deployment.
+   */
+  private static boolean isPubliclyAddressable(String host) {
+    String name = StringUtils.substringBefore(StringUtils.trimToEmpty(host), ":");
+    if (StringUtils.isBlank(name) || StringUtils.equalsAnyIgnoreCase(name, "localhost", "127.0.0.1",
+        "::1", "0.0.0.0")) {
+      return false;
+    }
+    return StringUtils.contains(name, ".");
+  }
+
+  /**
+   * Undoes the context path {@link BankIntegrationUrlUtils#buildBaseUrl()} repeats when
+   * {@code context.url} already ends with {@code context.name}.
+   *
+   * <p>Deliberately narrow: it collapses only a base ending in exactly
+   * {@code /<context.name>/<context.name>}, the one shape that composition can produce. Anything
+   * else is passed through untouched, so a deployment that genuinely nests a path is not mangled.
+   */
+  private static String collapseRepeatedContext(String baseUrl) {
+    String name = StringUtils.trimToNull(
+        OBPropertiesProvider.getInstance().getOpenbravoProperties().getProperty("context.name"));
+    if (name == null || baseUrl == null) {
+      return baseUrl;
+    }
+    String bare = StringUtils.stripStart(name, "/");
+    String doubled = "/" + bare + "/" + bare;
+    return StringUtils.endsWith(baseUrl, doubled)
+        ? StringUtils.removeEnd(baseUrl, "/" + bare)
+        : baseUrl;
   }
 
   /**
