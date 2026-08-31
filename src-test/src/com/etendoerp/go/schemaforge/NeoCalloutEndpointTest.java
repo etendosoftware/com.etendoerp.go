@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -27,7 +28,12 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -41,6 +47,7 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.NeoServlet.NeoPathInfo;
@@ -599,6 +606,122 @@ class NeoCalloutEndpointTest {
           "Hook exception must not change HTTP status");
       assertEquals("200", response.getBody().getJSONObject("updates").getString("total"),
           "Original response must be preserved");
+    }
+  }
+
+  // ── ETP-4917: strips read-only-on-create fields from the final response ──
+
+  @Nested
+  @DisplayName("ETP-4917: read-only-on-create field stripping")
+  class ReadOnlyOnCreateStripping {
+
+    /**
+     * Builds a {@link NeoFieldFilter} via the same reflective constructor
+     * {@code NeoFieldFilterTest} uses, so this test does not need a live DAL/DB to exercise
+     * {@code forEntity}. Mirrors the exact ETP-4917 config: {@code debit}/{@code credit} are
+     * included + read-only, no default, no handler -> rejectable on create.
+     */
+    private NeoFieldFilter buildRejectableFilter(Set<String> rejectableOnCreate) throws Exception {
+      Constructor<NeoFieldFilter> ctor = NeoFieldFilter.class.getDeclaredConstructor(
+          Set.class, Set.class, Set.class, Map.class, Map.class, boolean.class);
+      ctor.setAccessible(true);
+      Set<String> included = new HashSet<>(rejectableOnCreate);
+      included.add("id");
+      included.add("foreignCurrencyDebit");
+      Set<String> writable = Set.of("id", "foreignCurrencyDebit");
+      return ctor.newInstance(included, writable, rejectableOnCreate,
+          Collections.emptyMap(), Collections.emptyMap(), true);
+    }
+
+    /**
+     * Reproduces the ETP-4917 bug end to end through {@code handleCallout}: the legacy callout
+     * for a G/L journal line answers with the user-edited field ({@code foreignCurrencyDebit})
+     * plus the derived accounted-amount fields ({@code debit}/{@code credit}), which are
+     * read-only-on-create with no handler/default for this entity. Before the fix, both leaked
+     * into the response the frontend merges into local state and later spreads into a create
+     * request, causing NeoCrudHandler's IMP-28 clause 2 to reject the create with a 422. After
+     * the fix, {@code debit}/{@code credit} must be gone from the response while
+     * {@code foreignCurrencyDebit} survives untouched.
+     */
+    @Test
+    @DisplayName("debit/credit are stripped from the callout response, foreignCurrencyDebit survives")
+    void stripsDebitCreditFromGLJournalLineCallout() throws Exception {
+      Table table = mock(Table.class);
+      when(table.getName()).thenReturn("FIN_Gl_Journal_Line");
+      Tab tab = mock(Tab.class);
+      when(tab.getTable()).thenReturn(table);
+      SFEntity sfEntity = mockEntityWithTab(tab);
+
+      JSONObject requestBody = new JSONObject();
+      requestBody.put("field", "foreignCurrencyDebit");
+      requestBody.put("value", "100.00");
+      requestBody.put("formState", new JSONObject());
+      stubBodyParser(requestBody.toString(), requestBody);
+
+      JSONObject updates = new JSONObject();
+      updates.put("foreignCurrencyDebit", new JSONObject().put("value", "100.00"));
+      updates.put("debit", new JSONObject().put("value", "100.00"));
+      updates.put("credit", new JSONObject().put("value", "0.00"));
+      JSONObject responseBody = new JSONObject();
+      responseBody.put("updates", updates);
+      responseBody.put("combos", new JSONObject());
+      NeoResponse calloutResult = NeoResponse.ok(responseBody);
+
+      calloutServiceMock.when(() -> NeoCalloutService.executeCallout(any(), any()))
+          .thenReturn(calloutResult);
+      stubCascadeNoResults();
+
+      NeoFieldFilter filter = buildRejectableFilter(new HashSet<>(Set.of("debit", "credit")));
+
+      try (MockedStatic<NeoFieldFilter> fieldFilterMock = mockStatic(NeoFieldFilter.class)) {
+        fieldFilterMock.when(() -> NeoFieldFilter.forEntity(sfEntity, "FIN_Gl_Journal_Line"))
+            .thenReturn(filter);
+
+        HttpServletRequest request = mock(HttpServletRequest.class);
+        NeoResponse response = endpoint.handleCallout(spec, pathInfo, request);
+
+        assertEquals(200, response.getHttpStatus());
+        JSONObject resultUpdates = response.getBody().getJSONObject("updates");
+        assertTrue(resultUpdates.has("foreignCurrencyDebit"),
+            "the field the user is editing must survive");
+        assertFalse(resultUpdates.has("debit"),
+            "read-only-on-create field must be stripped from the callout response");
+        assertFalse(resultUpdates.has("credit"),
+            "read-only-on-create field must be stripped from the callout response");
+      }
+    }
+
+    @Test
+    @DisplayName("no NeoFieldFilter config (inactive) leaves the response untouched")
+    void inactiveFilterLeavesResponseUntouched() throws Exception {
+      Table table = mock(Table.class);
+      when(table.getName()).thenReturn("SomeTable");
+      Tab tab = mock(Tab.class);
+      when(tab.getTable()).thenReturn(table);
+      SFEntity sfEntity = mockEntityWithTab(tab);
+
+      JSONObject requestBody = new JSONObject();
+      requestBody.put("field", "amount");
+      requestBody.put("formState", new JSONObject());
+      stubBodyParser(requestBody.toString(), requestBody);
+
+      JSONObject updates = new JSONObject().put("amount", new JSONObject().put("value", "5"));
+      JSONObject responseBody = new JSONObject().put("updates", updates);
+      NeoResponse calloutResult = NeoResponse.ok(responseBody);
+
+      calloutServiceMock.when(() -> NeoCalloutService.executeCallout(any(), any()))
+          .thenReturn(calloutResult);
+      stubCascadeNoResults();
+
+      HttpServletRequest request = mock(HttpServletRequest.class);
+      // No NeoFieldFilter mocking here: the real forEntity(...) runs, fails to resolve a DAL
+      // entity for "SomeTable" outside a live OBDal/ModelProvider context, and falls back to
+      // an inactive filter — exercising the same no-op path a genuinely unconfigured entity hits.
+      NeoResponse response = endpoint.handleCallout(spec, pathInfo, request);
+
+      assertEquals(200, response.getHttpStatus());
+      assertEquals("5",
+          response.getBody().getJSONObject("updates").getJSONObject("amount").getString("value"));
     }
   }
 
