@@ -58,6 +58,7 @@ public class WidgetPendingTasksHandler implements NeoHandler {
   private static final String FILTER_OVERDUE = "overdue";
   private static final String FILTER_COLLECTIONS_DUE_TODAY = "collectionsDueToday";
   private static final String FILTER_PAYMENTS_DUE_TODAY = "paymentsDueToday";
+  private static final String FILTER_PAYMENTS_DUE = "paymentsDue";
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!"GET".equals(context.getHttpMethod())) {
@@ -72,7 +73,7 @@ public class WidgetPendingTasksHandler implements NeoHandler {
 
         addOverdueInvoices(data, clientId);
         addCollectionsDueToday(data, clientId);
-        addPaymentsDueToday(data, clientId);
+        addPaymentsDue(data, clientId);
         addPendingReceptions(data);
         addPendingSalesDeliveries(data);
         addLowStockAlerts(data, clientId);
@@ -142,12 +143,54 @@ public class WidgetPendingTasksHandler implements NeoHandler {
   }
 
   /**
-   * Payments due today: purchase invoices with a payment schedule entry due today or earlier with outstanding > 0.
+   * Payments due: unpaid purchase invoices whose due date has already arrived — both already
+   * overdue and due exactly today (ETP-5017). Before this, only "due today" was reported, so the
+   * card vanished the day after the due date even though the payment was still outstanding.
+   *
+   * <p>The reported count is the combined total; the badge state is communicated through the
+   * taskKey, with "overdue" taking precedence over "due today" as the more critical state.
+   *
+   * <p>Both states drill down into the same {@code paymentsDue} list filter so the list always
+   * shows exactly the rows this card counts.
+   *
+   * <p>Due dates come from {@code etgo_get_due_date()} — the function backing the
+   * {@code em_etgo_due_date} virtual column the frontend list filters on — so the counter and the
+   * drill-down can never disagree. It resolves to the earliest unpaid installment, which also
+   * means a multi-installment invoice with one overdue and one due-today installment is correctly
+   * reported as overdue.
    */
-  private void addPaymentsDueToday(JSONArray data, String clientId) throws Exception {
-    addDueTodayInvoicesTask(data, clientId, "N", "payment", "purchase-invoice",
-        FILTER_PAYMENTS_DUE_TODAY,
-        "/purchase-invoice?filter=" + FILTER_PAYMENTS_DUE_TODAY, FILTER_PAYMENTS_DUE_TODAY);
+  private void addPaymentsDue(JSONArray data, String clientId) throws Exception {
+    // Single query for both counts: two queries could straddle midnight and disagree.
+    String sql = "SELECT COUNT(*),"
+        + "   COALESCE(SUM(CASE WHEN etgo_get_due_date(ci.c_invoice_id) < CURRENT_DATE"
+        + "                     THEN 1 ELSE 0 END), 0)"
+        + " FROM c_invoice ci"
+        + " WHERE ci.issotrx = 'N'"
+        + "   AND ci.docstatus = 'CO'"
+        + "   AND ci.outstandingamt > 0"
+        + "   AND ci.ad_client_id = :clientId"
+        + "   AND etgo_get_due_date(ci.c_invoice_id) <= CURRENT_DATE";
+
+    NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(sql);
+    query.setParameter(PARAM_CLIENT_ID, clientId);
+    Object[] row = query.uniqueResult();
+
+    long count = ((Number) row[0]).longValue();
+    if (count == 0) {
+      return;
+    }
+    long overdueCount = ((Number) row[1]).longValue();
+
+    String taskKeyBase = overdueCount > 0 ? "paymentsOverdue" : FILTER_PAYMENTS_DUE_TODAY;
+    String state = overdueCount > 0 ? " overdue" : " due today";
+
+    data.put(buildTask(TYPE_WARNING,
+        count + " payment" + (count != 1 ? "s" : "") + state,
+        "purchase-invoice",
+        FILTER_PAYMENTS_DUE,
+        "/purchase-invoice?filter=" + FILTER_PAYMENTS_DUE,
+        count,
+        count > 1 ? taskKeyBase + "_plural" : taskKeyBase));
   }
 
   private void addDueTodayInvoicesTask(JSONArray data, String clientId, String isSalesTransaction,
