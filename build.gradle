@@ -65,6 +65,7 @@ dependencies {
     implementation('com.etendoerp:webhookevents:[3.0.0,)')
     implementation('com.etendoerp:copilot.extensions:[4.0.0,)')
     implementation('com.etendoerp:copilot.toolpack:[3.3.0,)')
+    implementation('com.etendoerp:db.extended:[1.3.7,)')
     implementation('com.etendoerp:localization.spain.extensions:[4.0.0,)')
     implementation('com.etendoerp:go.localization.es.data:[1.0.0,)')
     implementation('com.etendoerp:bulk.posting.es_es:1.4.0')
@@ -123,7 +124,9 @@ dependencies {
  * <p>The fix isolates the affected class into its own {@code Test} task with {@code forkEvery = 1},
  * so it always gets a pristine JVM. It is wired as {@code finalizedBy} the root {@code test} task
  * rather than as a separate CI step, so it keeps running in Jenkins without touching the pipeline
- * definition, and its failures still fail the build. JaCoCo coverage is preserved: the root
+ * definition, and its failures still fail the build. A focused test run whose command-line filter
+ * cannot select any of these Go tests skips this unrelated finalizer; an unfiltered run or a
+ * filter that reaches a Go isolated test still executes it. JaCoCo coverage is preserved: the root
  * {@code jacocoRootReport} globs {@code build/jacoco/ ** /*.exec}, which picks up the new task's
  * execution data automatically.</p>
  *
@@ -141,6 +144,24 @@ def isolatedDalTests = [
         '**/CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest.class',
         '**/AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest.class',
 ]
+
+def isolatedDalTestClasses = [
+        'com.etendoerp.go.schemaforge.handlers.ReactivatePaymentHandlerRemoveIntegrationTest',
+        'com.etendoerp.go.schemaforge.CreateDraftInvoiceHandlerNegativeQuantityIntegrationTest',
+        'com.etendoerp.go.schemaforge.CreateDraftInvoiceHandlerPriceListRequiredIntegrationTest',
+        'com.etendoerp.go.schemaforge.CreateGoodsReceiptHandlerNegativeQuantityIntegrationTest',
+        'com.etendoerp.go.schemaforge.CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest',
+        'com.etendoerp.go.schemaforge.AbstractInvoiceHeaderHandlerOriginInvoiceIntegrationTest',
+]
+
+def commandLineFilterReachesIsolatedGoTest = { requestedTestPatterns ->
+    requestedTestPatterns.isEmpty() || requestedTestPatterns.any { pattern ->
+        String regex = '^' + pattern.replace('.', '\\.').replace('*', '.*') + '$'
+        isolatedDalTestClasses.any { className ->
+            className ==~ regex || pattern.startsWith(className + '.')
+        }
+    }
+}
 
 rootProject.afterEvaluate { rootProj ->
     def rootTest = rootProj.tasks.findByName('test')
@@ -177,6 +198,12 @@ rootProject.afterEvaluate { rootProj ->
             t.workingDir = rootTest.workingDir
             t.environment(rootTest.environment)
         }
+    }
+
+    // Command-line --tests patterns are applied to the root Test task after project configuration.
+    // Inspect them at execution time: run the finalizer only when its own Go tests are eligible.
+    isolated.onlyIf {
+        commandLineFilterReachesIsolatedGoTest(rootTest.filter.commandLineIncludePatterns)
     }
 
     rootTest.finalizedBy isolated
