@@ -78,7 +78,7 @@ abstract class AbstractFiscalHandler {
           "Unknown " + getModelKey() + " entity: " + entityName);
       return;
     }
-    boolean methodOk = "GET".equals(method)
+    boolean methodOk = ("GET".equals(method) && allowsGet(entityName))
         || ("POST".equals(method) && allowsPost(entityName));
     if (!methodOk) {
       servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
