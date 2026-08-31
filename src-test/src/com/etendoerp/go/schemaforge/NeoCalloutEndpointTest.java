@@ -698,7 +698,7 @@ class NeoCalloutEndpointTest {
       when(table.getName()).thenReturn("SomeTable");
       Tab tab = mock(Tab.class);
       when(tab.getTable()).thenReturn(table);
-      SFEntity sfEntity = mockEntityWithTab(tab);
+      mockEntityWithTab(tab);
 
       JSONObject requestBody = new JSONObject();
       requestBody.put("field", "amount");
