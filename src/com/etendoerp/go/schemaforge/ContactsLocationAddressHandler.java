@@ -282,7 +282,10 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       return result;
     }
     String region = geoLoc.getRegion() != null ? nullIfEmpty(geoLoc.getRegion().getName()) : null;
-    String country = geoLoc.getCountry() != null ? nullIfEmpty(geoLoc.getCountry().getName()) : null;
+    // ETP-5022: getIdentifier() translates, getName() does not — see the note on
+    // country$_identifier below. Safe here because this name is computed for the response
+    // only and never written back to the record.
+    String country = geoLoc.getCountry() != null ? nullIfEmpty(geoLoc.getCountry().getIdentifier()) : null;
     return joinNonNull(region, country);
   }
 
@@ -336,7 +339,15 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
     if (geoLoc.getCountry() != null) {
       locationJson.put(FIELD_COUNTRY,          geoLoc.getCountry().getId());
-      locationJson.put("country$_identifier",  geoLoc.getCountry().getName());
+      // ETP-5022: getIdentifier(), NOT getName(). getName() is the plain Hibernate getter —
+      // it calls get(prop) with no language, so it never consults C_Country_Trl and returns
+      // the base-language name ("Spain") even when the request carries Accept-Language: es_ES.
+      // getIdentifier() goes through IdentifierProvider, which passes the record id and so
+      // resolves the translation. Country's identifier is a single column (Name), so the text
+      // shown is unchanged apart from being translated.
+      // Region is deliberately left on getName(): C_Region has no _Trl table, so there is
+      // nothing to translate and the two calls would be equivalent.
+      locationJson.put("country$_identifier",  geoLoc.getCountry().getIdentifier());
     } else {
       locationJson.put(FIELD_COUNTRY,          JSONObject.NULL);
       locationJson.put("country$_identifier",  JSONObject.NULL);

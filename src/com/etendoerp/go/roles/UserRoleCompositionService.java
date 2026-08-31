@@ -27,7 +27,9 @@ import java.util.Set;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.hibernate.Session;
 import org.hibernate.criterion.Restrictions;
+import org.hibernate.query.NativeQuery;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.structure.BaseOBObject;
@@ -132,14 +134,14 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  * later, at the CALLER's own flush, by which point that inner bypass has already been restored.
  * </p>
  *
- * <p>{@link #reconcileInheritances(Role, List)} therefore does two things beyond core's own
- * mechanism, both scoped to {@code WindowAccess} only (the reported access type — not a generic
- * fix for every {@code AccessTypeInjector}): (1) {@link
+ * <p>{@code RoleInheritanceReconciliationService#reconcileInheritances(Role, List)} therefore
+ * does two things beyond core's own mechanism, both scoped to {@code WindowAccess} only (the
+ * reported access type — not a generic fix for every {@code AccessTypeInjector}): (1) {@code
  * #preventWindowAccessOverlapCorruption(Role, Role)}, called right before a new template's
  * {@code AD_Role_Inheritance} is saved, removes the personal role's existing active {@code
  * WindowAccess} row for every window the about-to-be-added template also grants — so core's
  * propagation finds no existing row and takes the safe CREATE path for every one of that
- * template's windows, overlapping or not; (2) {@link #reconcileWindowAccessAfterComposition(Role,
+ * template's windows, overlapping or not; (2) {@code #reconcileWindowAccessAfterComposition(Role,
  * List)}, run once after the whole add/remove loop, pins {@code client}/{@code organization} on
  * every inherited row back to the personal role's OWN values (belt-and-braces — defends the
  * CREATE path too, even though it has not been observed to corrupt it) and resolves the
@@ -177,8 +179,7 @@ public class UserRoleCompositionService {
   /** {@code AD_Role.UserLevel} shared by every fixed role in this fleet (client + org). */
   private static final String FIXED_ROLE_USER_LEVEL = SystemRoleTemplates.FIXED_ROLE_USER_LEVEL;
 
-  /** Increment used when minting a fresh {@code AD_Role_Inheritance.Seqno}. */
-  private static final long SEQNO_STEP = 10L;
+  private static final String USER_NOT_FOUND = "User not found: ";
 
   /**
    * Naming/org-access/user-defaults finishing steps for a freshly-minted personal role — see its
@@ -187,6 +188,15 @@ public class UserRoleCompositionService {
    */
   private final PersonalRoleAccessProvisioningService personalRoleAccessProvisioningService =
       new PersonalRoleAccessProvisioningService();
+
+  /**
+   * {@code AD_Role_Inheritance}/{@code AD_Window_Access} reconciliation for composing a personal
+   * role from templates — see its own class javadoc for why this is a separate collaborator
+   * (Sonar S1448, extracted from this class). Stateless, so a single shared instance is safe to
+   * reuse across every call.
+   */
+  private final RoleInheritanceReconciliationService roleInheritanceReconciliationService =
+      new RoleInheritanceReconciliationService();
 
   /**
    * The literal System Administrator {@code AD_Role_ID} — the ONLY role id that bypasses
@@ -253,12 +263,13 @@ public class UserRoleCompositionService {
   }
 
   /**
-   * Same as {@link #assignTemplateRoles(String, List, Role)}, but also enforces the ETP-4830
-   * owner-protection rule against {@code userId} — see {@link #enforceOwnerProtection(User,
-   * String)}. Real webhook callers (e.g. {@code SFAssignUserRoles}) MUST use this overload,
-   * passing the caller's own {@code AD_User_ID}. A {@code null} {@code callerUserId} skips the
-   * check entirely, mirroring this class's existing {@code callerRole=null} convention — kept for
-   * plain unit tests and any other caller with no per-request identity to check against.
+   * Same as {@link #assignTemplateRoles(String, List, Role)}, but also enforces the ETP-4830/
+   * ETP-5019 owner/admin-role protection rule against {@code userId} — see {@link
+   * #enforceOwnerProtection(User, String)}. Real webhook callers (e.g. {@code
+   * SFAssignUserRoles}) MUST use this overload, passing the caller's own {@code AD_User_ID}. A
+   * {@code null} {@code callerUserId} skips the check entirely, mirroring this class's existing
+   * {@code callerRole=null} convention — kept for plain unit tests and any other caller with no
+   * per-request identity to check against.
    *
    * @param userId the {@code AD_User_ID} to compose roles for
    * @param templateRoleIds the desired FULL set of template role ids — see {@link
@@ -271,7 +282,9 @@ public class UserRoleCompositionService {
    * @throws OBException if {@code userId} is missing/unresolvable, {@code templateRoleIds} is
    *     {@code null}, any requested id is not an active, non-admin template role, {@code
    *     callerRole} is a non-system role whose client differs from {@code userId}'s, or {@code
-   *     userId} is flagged as its client's owner and {@code callerUserId} is not that same user
+   *     userId} is flagged as its client's owner or currently holds the client-admin role
+   *     (ETP-5019 — unconditional, including the owner/admin targeting themselves) and {@code
+   *     callerUserId} is non-null
    */
   public AssignmentResult assignTemplateRoles(String userId, List<String> templateRoleIds,
       Role callerRole, String callerUserId) {
@@ -283,7 +296,7 @@ public class UserRoleCompositionService {
     }
     User user = OBDal.getInstance().get(User.class, userId);
     if (user == null) {
-      throw new OBException("User not found: " + userId);
+      throw new OBException(USER_NOT_FOUND + userId);
     }
     enforceCallerClientBoundary(user, callerRole);
     enforceOwnerProtection(user, callerUserId);
@@ -294,7 +307,7 @@ public class UserRoleCompositionService {
     try {
       Role personalRole = resolveOrCreatePersonalRole(user);
       personalRole = discardStaleSessionState(personalRole);
-      int[] counters = reconcileInheritances(personalRole, templates);
+      int[] counters = roleInheritanceReconciliationService.reconcileInheritances(personalRole, templates);
 
       user.setDefaultRole(personalRole);
       OBDal.getInstance().save(user);
@@ -406,38 +419,55 @@ public class UserRoleCompositionService {
   }
 
   /**
-   * Rejects reassigning the OWNER's role composition from anyone other than the owner
-   * themselves (ETP-4830) — the role-assignment-endpoint counterpart to {@code
-   * UserRoleAssignmentHandler#rejectNonOwnerEditingOwner}'s generic {@code AD_User} PUT/PATCH
-   * guard. Both must independently cover the owner protection: an admin reassigning the owner's
-   * role through THIS endpoint never goes through {@code UserRoleAssignmentHandler}'s write path
-   * at all, so that guard alone would not close this gap.
+   * Rejects composing template roles onto the tenant owner/admin — the role-assignment-endpoint
+   * counterpart to {@code UserRoleAssignmentHandler#rejectNonOwnerEditingOwner}'s generic
+   * {@code AD_User} PUT/PATCH guard. Both must independently cover the owner protection: this
+   * write path never goes through {@code UserRoleAssignmentHandler}'s write path at all, so that
+   * guard alone would not close this gap.
+   *
+   * <p><b>ETP-5019 fix — unconditional, no self-service exception.</b> This guard originally
+   * (ETP-4830) allowed the owner to recompose their OWN roles ({@code callerUserId.equals(
+   * user.getId())} was a no-op), on the theory that only a DIFFERENT caller reassigning the
+   * owner was the risk. That theory was wrong: the owner's default role is the client-admin
+   * "Admin" role, which {@link #isReusablePersonalRole(User, Role)} explicitly refuses to treat
+   * as a reusable personal role ({@code isClientAdmin()} check) — so composing even ONE template
+   * role for the owner, self-service or not, made {@link #resolveOrCreatePersonalRole(User)}
+   * mint a brand-new personal role and {@code user.setDefaultRole(personalRole)} SILENTLY
+   * REPLACED the owner's Admin role with it. The owner/admin already has full access by
+   * construction — composing template roles for it is never meaningful, whoever asks. This
+   * method now rejects unconditionally (still gated on non-null {@code callerUserId} below, the
+   * same "skip when no caller identity was supplied" convention {@link
+   * #enforceCallerClientBoundary} uses for a {@code null} {@code callerRole} — kept for plain
+   * unit tests and any other caller with no per-request identity to check).</p>
+   *
+   * <p>Also rejects any user CURRENTLY holding the client-admin role even when {@code
+   * OwnerSupport.isOwner} reads {@code false} — e.g. a second user manually granted the classic
+   * "Admin" role via the core UI, not (or not yet) flagged as the ETP-4830 owner. The underlying
+   * mechanism bug (a client-admin role can never be reused as a personal role) applies to any
+   * client-admin holder, not only the one flagged owner, so the guard checks both signals.</p>
    *
    * <p>A no-op — same "nothing to enforce" convention {@link #enforceCallerClientBoundary} uses
    * for a {@code null} {@code callerRole} — when {@code callerUserId} is {@code null} (no caller
-   * identity supplied), or when {@code user} is not flagged as owner at all (every pre-existing
-   * user until a separate, human-reviewed backfill data-fix runs). When {@code user} IS the owner
-   * and {@code callerUserId} is that same user (the owner recomposing their own access), this is
-   * also a no-op — only a DIFFERENT caller targeting the owner is rejected.</p>
+   * identity supplied), or when {@code user} is neither flagged as owner nor currently holding
+   * the client-admin role.</p>
    *
    * @param user the already-resolved target user
    * @param callerUserId the {@code AD_User_ID} making this request, or {@code null} to skip
-   * @throws OBException if {@code user} is flagged as owner and {@code callerUserId} is not that
-   *     same user
+   * @throws OBException if {@code user} is flagged as owner or currently holds the client-admin
+   *     role, and {@code callerUserId} is non-null (i.e. a real caller identity was supplied)
    */
   private void enforceOwnerProtection(User user, String callerUserId) {
     if (callerUserId == null) {
       return;
     }
-    if (!OwnerSupport.isOwner(user.getId())) {
-      return;
-    }
-    if (callerUserId.equals(user.getId())) {
+    Role currentRole = user.getDefaultRole();
+    boolean holdsAdminRole = currentRole != null && Boolean.TRUE.equals(currentRole.isClientAdmin());
+    if (!OwnerSupport.isOwner(user.getId()) && !holdsAdminRole) {
       return;
     }
     throw new OBException(
-        "This user is the tenant owner — only the owner can reassign their own roles: "
-            + user.getId());
+        "This user is the tenant owner/admin — it already has full access by construction and "
+            + "can never compose additional template roles: " + user.getId());
   }
 
   /**
@@ -514,7 +544,7 @@ public class UserRoleCompositionService {
     }
     User user = OBDal.getInstance().get(User.class, userId);
     if (user == null) {
-      throw new OBException("User not found: " + userId);
+      throw new OBException(USER_NOT_FOUND + userId);
     }
     enforceCallerClientBoundary(user, callerRole);
 
@@ -524,7 +554,8 @@ public class UserRoleCompositionService {
       if (personalRole == null) {
         return new ArrayList<>();
       }
-      return activeTemplateIds(findExistingInheritances(personalRole));
+      return roleInheritanceReconciliationService.activeTemplateIds(
+          roleInheritanceReconciliationService.findExistingInheritances(personalRole));
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -724,7 +755,8 @@ public class UserRoleCompositionService {
    * {@link #isInheritFromTargetOfAnyInheritance(Role)}; W1, REVIEW cycle 1, ETP-4852): a role
    * can be "exclusively assigned to user U" via {@code AD_User_Roles} AND STILL be a parent
    * some OTHER role's {@code AD_Role_Inheritance} points at — repurposing it as U's personal
-   * role would then let {@link #reconcileInheritances} mutate an inheritance set that isn't
+   * role would then let {@code RoleInheritanceReconciliationService#reconcileInheritances}
+   * mutate an inheritance set that isn't
    * only U's, silently changing access for whatever inherits from it.</p>
    */
   private Role resolveOrCreatePersonalRole(User user) {
@@ -749,7 +781,8 @@ public class UserRoleCompositionService {
    * fresh per-HTTP-request session gets for free.
    *
    * <p><b>Why this is needed:</b> core's {@code WindowAccessInjector#setParent} (invoked while
-   * propagating a template's {@code AD_Window_Access} during {@link #reconcileInheritances}'s
+   * propagating a template's {@code AD_Window_Access} during {@code
+   * RoleInheritanceReconciliationService#reconcileInheritances}'s
    * ADD step) explicitly does {@code role.getADWindowAccessList().add(newAccess)} — it maintains
    * BOTH sides of the association by hand. Its sibling {@code TabAccessInjector} does the same
    * for {@code WindowAccess.getADTabAccessList()} AND correctly overrides {@code
@@ -862,289 +895,6 @@ public class UserRoleCompositionService {
   }
 
   /**
-   * Reconciles {@code personalRole}'s {@code AD_Role_Inheritance} rows to match {@code
-   * templates} exactly — adds missing ones, removes no-longer-requested ones. Every add/remove
-   * goes through a real {@code OBDal.save}/{@code OBDal.remove} (never native SQL) specifically
-   * so core's {@code RoleInheritanceEventHandler} fires and propagates/retracts the template's
-   * accesses — see the class javadoc.
-   *
-   * <p><b>Deliberately queries fresh via {@code OBCriteria} instead of {@code
-   * personalRole.getADRoleInheritanceList()}.</b> The entity's own collection property is NOT
-   * reliably refreshed by a sibling {@code OBDal.save(newInheritance)} within the same session —
-   * a brand-new {@link Role} starts with the plain default {@code ArrayList} its constructor set
-   * ({@code setDefaultValue(PROPERTY_ADROLEINHERITANCELIST, new ArrayList&lt;&gt;())}), and
-   * nothing re-fetches or appends to it after an insert, so a second call against the SAME
-   * in-session {@code Role} instance would see a stale, empty list and try to re-insert a row
-   * that already exists — hitting {@code ad_role_inheritance_role_un}'s
-   * {@code UNIQUE(ad_role_id, inherit_from)} constraint. A fresh criteria query has no such
-   * staleness. This mirrors core's own {@code RoleInheritanceManager#getRoleInheritancesList},
-   * which also always queries fresh rather than trusting {@code role.getADRoleInheritanceList()}.
-   * </p>
-   *
-   * @return {@code {addedCount, removedCount}}
-   */
-  private int[] reconcileInheritances(Role personalRole, List<Role> templates) {
-    Set<String> desiredIds = new LinkedHashSet<>();
-    for (Role template : templates) {
-      desiredIds.add(template.getId());
-    }
-
-    List<RoleInheritance> existing = findExistingInheritances(personalRole);
-    Set<String> existingIds = new LinkedHashSet<>();
-    long maxSeqno = 0L;
-    for (RoleInheritance inheritance : existing) {
-      existingIds.add(inheritance.getInheritFrom().getId());
-      if (inheritance.getSequenceNumber() != null
-          && inheritance.getSequenceNumber() > maxSeqno) {
-        maxSeqno = inheritance.getSequenceNumber();
-      }
-    }
-
-    int removed = 0;
-    for (RoleInheritance inheritance : existing) {
-      if (!desiredIds.contains(inheritance.getInheritFrom().getId())) {
-        OBDal.getInstance().remove(inheritance);
-        // Same core RoleInheritanceEventHandler fan-out as the ADD loop below (see its own
-        // comment) — deleting this row triggers RoleInheritanceManager#applyRemoveInheritance,
-        // which retracts every AccessTypeInjector's propagated rows (window, tab, field, process,
-        // OBUIAPP process, ...) for this role. Core's own deleteRoleAccess wraps ITS internal
-        // remove() calls in an admin-mode bypass, but that bypass is popped before THIS flush
-        // runs, so a still-client-"0" child row (from a system-level template) fails the same
-        // ClientList check the ADD loop already guards against.
-        OBContext.setAdminMode(false);
-        try {
-          OBDal.getInstance().flush();
-        } finally {
-          OBContext.restorePreviousMode();
-        }
-        removed++;
-      }
-    }
-
-    int added = 0;
-    for (Role template : templates) {
-      if (existingIds.contains(template.getId())) {
-        continue;
-      }
-      preventWindowAccessOverlapCorruption(personalRole, template);
-      maxSeqno += SEQNO_STEP;
-      RoleInheritance inheritance = OBProvider.getInstance().get(RoleInheritance.class);
-      inheritance.setNewOBObject(true);
-      inheritance.setClient(personalRole.getClient());
-      inheritance.setOrganization(personalRole.getOrganization());
-      inheritance.setActive(true);
-      inheritance.setRole(personalRole);
-      inheritance.setInheritFrom(template);
-      inheritance.setSequenceNumber(maxSeqno);
-      OBDal.getInstance().save(inheritance);
-      // Saving this AD_Role_Inheritance row fires core's RoleInheritanceEventHandler, which
-      // fans out through EVERY registered AccessTypeInjector (window, tab, field, process,
-      // OBUIAPP process, ...) to copy the template's accesses onto personalRole. Each injector's
-      // own copyRoleAccess() bypasses the client/org check while it saves (OBContext.setAdminMode
-      // (false)), but that bypass is popped again before this flush runs, so anything it left
-      // dirty/pending gets re-checked HERE under the caller's normal context. That's harmless for
-      // window access (reconcileWindowAccessAfterComposition below re-pins its client/org right
-      // after), but a system-level template (AD_Client_ID = '0', see
-      // EnsureSystemRoleTemplatesScript) that also grants process/report access has nothing
-      // equivalent for those rows, so the copy — still carrying the template's client "0" — fails
-      // this flush with OBSecurityException as soon as a template actually has any (ETP-4830's
-      // own EnsureSystemRoleTemplatesScript#reconcileProcessAccess started seeding those rows).
-      // Same bypass RoleInheritanceManager's own internal saves use, scoped to just this flush.
-      OBContext.setAdminMode(false);
-      try {
-        OBDal.getInstance().flush();
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-      added++;
-    }
-
-    if (added > 0) {
-      reconcileWindowAccessAfterComposition(personalRole, templates);
-    }
-    return new int[] { added, removed };
-  }
-
-  /**
-   * Removes {@code personalRole}'s existing active {@code AD_Window_Access} row for every window
-   * {@code template} also grants, BEFORE the caller saves the new {@code AD_Role_Inheritance} —
-   * see the class javadoc for why this avoids core's corrupting UPDATE path entirely (it forces
-   * every one of {@code template}'s windows through the safe CREATE path instead). A no-op when
-   * {@code template} grants no windows the personal role doesn't already have from elsewhere.
-   *
-   * <p>Uses the SAME {@code OBContext.setAdminMode(false)} bypass core's own {@code
-   * deleteRoleAccess} uses for removing a cross-client-owned inherited access row — scoped to
-   * just this removal, not the whole method.</p>
-   */
-  private void preventWindowAccessOverlapCorruption(Role personalRole, Role template) {
-    Set<String> templateWindowIds = activeWindowIdsFor(template);
-    if (templateWindowIds.isEmpty()) {
-      return;
-    }
-    List<WindowAccess> overlapping = new ArrayList<>();
-    for (WindowAccess access : findActiveWindowAccess(personalRole)) {
-      if (templateWindowIds.contains(access.getWindow().getId())) {
-        overlapping.add(access);
-      }
-    }
-    if (overlapping.isEmpty()) {
-      return;
-    }
-    OBContext.setAdminMode(false);
-    try {
-      for (WindowAccess access : overlapping) {
-        // Core's own InheritedAccessEnabledEventHandler#doAction rejects deleting a row whose
-        // inheritedFrom is still set ("NotDeleteInheritedAccess") — mirrors the exact sequence
-        // core's own deleteRoleAccess/propagateDeletedAccess use: null the field on the in-memory
-        // object FIRST, so the interceptor's delete-time check sees it already cleared.
-        access.setInheritedFrom(null);
-        OBDal.getInstance().remove(access);
-      }
-      OBDal.getInstance().flush();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  /**
-   * Final pass over {@code personalRole}'s inherited {@code AD_Window_Access} rows, run once
-   * after the whole add/remove loop in {@link #reconcileInheritances(Role, List)} — see the class
-   * javadoc for the full rationale. For every row whose {@code inheritedFrom} is set (i.e.
-   * template-derived, never a manually-granted one): (1) pins {@code client}/{@code
-   * organization} back to {@code personalRole}'s own values if they differ; (2) widens it to full
-   * ("✓") access if {@code templates} contains ANY role that grants that window full access,
-   * even if the row core's propagation happens to have left behind reflects only a read-only
-   * ("R") template — the most-permissive-wins union the ticket requires. Never narrows a row from
-   * full to read-only (a full grant, once resolved, always wins).
-   */
-  private void reconcileWindowAccessAfterComposition(Role personalRole, List<Role> templates) {
-    Map<String, Boolean> mostPermissiveByWindowId = mostPermissiveWindowAccess(templates);
-    if (mostPermissiveByWindowId.isEmpty()) {
-      return;
-    }
-    List<WindowAccess> corrected = new ArrayList<>();
-    for (WindowAccess access : findActiveWindowAccess(personalRole)) {
-      if (access.getInheritedFrom() == null) {
-        continue;
-      }
-      boolean changed = false;
-      if (!sameId(access.getClient(), personalRole.getClient())) {
-        access.setClient(personalRole.getClient());
-        changed = true;
-      }
-      if (!sameId(access.getOrganization(), personalRole.getOrganization())) {
-        access.setOrganization(personalRole.getOrganization());
-        changed = true;
-      }
-      Boolean shouldBeFull = mostPermissiveByWindowId.get(access.getWindow().getId());
-      if (Boolean.TRUE.equals(shouldBeFull) && !Boolean.TRUE.equals(access.isEditableField())) {
-        access.setEditableField(true);
-        changed = true;
-      }
-      if (changed) {
-        corrected.add(access);
-      }
-    }
-    if (corrected.isEmpty()) {
-      return;
-    }
-    OBContext.setAdminMode(false);
-    try {
-      for (WindowAccess access : corrected) {
-        OBDal.getInstance().save(access);
-      }
-      OBDal.getInstance().flush();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  /**
-   * Computes, per window id, whether ANY of {@code templates} grants that window full ("✓")
-   * access — the independent source of truth {@link #reconcileWindowAccessAfterComposition} uses
-   * to resolve the most-permissive-wins union, deliberately computed from the templates' OWN
-   * current {@code AD_Window_Access} rows rather than trusting whatever single row core's
-   * per-window propagation happened to leave on the personal role.
-   */
-  private Map<String, Boolean> mostPermissiveWindowAccess(List<Role> templates) {
-    Map<String, Boolean> result = new LinkedHashMap<>();
-    for (Role template : templates) {
-      for (WindowAccess access : findActiveWindowAccess(template)) {
-        String windowId = access.getWindow().getId();
-        boolean full = Boolean.TRUE.equals(access.isEditableField());
-        result.merge(windowId, full, (a, b) -> a || b);
-      }
-    }
-    return result;
-  }
-
-  private Set<String> activeWindowIdsFor(Role role) {
-    Set<String> windowIds = new LinkedHashSet<>();
-    for (WindowAccess access : findActiveWindowAccess(role)) {
-      windowIds.add(access.getWindow().getId());
-    }
-    return windowIds;
-  }
-
-  /**
-   * Queries {@code AD_Window_Access} fresh for {@code role} — deliberately NOT {@code
-   * role.getADWindowAccessList()}, for the same staleness reason {@link
-   * #findExistingInheritances(Role)} queries {@code AD_Role_Inheritance} fresh instead of
-   * trusting the entity's own collection property (see that method's javadoc, and {@link
-   * #discardStaleSessionState(Role)}).
-   */
-  @SuppressWarnings("unchecked")
-  private List<WindowAccess> findActiveWindowAccess(Role role) {
-    OBCriteria<WindowAccess> criteria = OBDal.getInstance().createCriteria(WindowAccess.class);
-    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ROLE, role));
-    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ACTIVE, true));
-    return criteria.list();
-  }
-
-  private static boolean sameId(BaseOBObject a, BaseOBObject b) {
-    String idA = a == null ? null : (String) a.getId();
-    String idB = b == null ? null : (String) b.getId();
-    return idA != null && idA.equals(idB);
-  }
-
-  /**
-   * Queries {@code AD_Role_Inheritance} fresh for {@code personalRole}, ordered by {@code
-   * Seqno} ascending — deliberately NOT {@code personalRole.getADRoleInheritanceList()}; see
-   * the javadoc on {@link #reconcileInheritances(Role, List)} for why. Mirrors core's own
-   * {@code RoleInheritanceManager#getRoleInheritancesList(Role, Role, boolean)}.
-   */
-  @SuppressWarnings("unchecked")
-  private List<RoleInheritance> findExistingInheritances(Role personalRole) {
-    OBCriteria<RoleInheritance> criteria = OBDal.getInstance()
-        .createCriteria(RoleInheritance.class);
-    criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_ROLE, personalRole));
-    criteria.addOrderBy(RoleInheritance.PROPERTY_SEQUENCENUMBER, true);
-    return criteria.list();
-  }
-
-  /**
-   * ETP-4906 — filters {@code inheritances} down to the {@code InheritFrom} ids that are
-   * themselves still active templates, in {@code Seqno} order. Shared by {@link
-   * #getAppliedTemplateRoleIds(String, Role)} and (in its bulk form, {@link
-   * #findActiveTemplateIdsByPersonalRoleId(Set)}) {@link #getAppliedTemplateRoleIdsForClient
-   * (String)} — a personal role can retain a stale {@code AD_Role_Inheritance} row pointing at a
-   * template that was later deactivated or un-templated (the trigger documented in this class's
-   * own javadoc only blocks deactivation WHILE an inheritance depends on it, not un-linking the
-   * inheritance itself first), so this is not a redundant check.
-   */
-  private List<String> activeTemplateIds(List<RoleInheritance> inheritances) {
-    List<String> ids = new ArrayList<>();
-    for (RoleInheritance inheritance : inheritances) {
-      Role template = inheritance.getInheritFrom();
-      if (template != null && Boolean.TRUE.equals(template.isActive())
-          && Boolean.TRUE.equals(template.isTemplate())) {
-        ids.add(template.getId());
-      }
-    }
-    return ids;
-  }
-
-  /**
    * Queries every {@code AD_User} of {@code clientId} — used only by {@link
    * #getAppliedTemplateRoleIdsForClient(String)} (ETP-4906) to seed a "every user gets an entry"
    * result map before any personal-role resolution.
@@ -1244,8 +994,9 @@ public class UserRoleCompositionService {
   }
 
   /**
-   * Bulk form of {@link #activeTemplateIds(List)}: for every confirmed personal role in {@code
-   * personalRoleIds}, its active-template {@code InheritFrom} ids, in {@code Seqno} order.
+   * Bulk form of {@code RoleInheritanceReconciliationService#activeTemplateIds(List)}: for every
+   * confirmed personal role in {@code personalRoleIds}, its active-template {@code InheritFrom}
+   * ids, in {@code Seqno} order.
    */
   @SuppressWarnings("unchecked")
   private Map<String, List<String>> findActiveTemplateIdsByPersonalRoleId(
@@ -1267,5 +1018,191 @@ public class UserRoleCompositionService {
           .add(template.getId());
     }
     return byPersonalRoleId;
+  }
+
+  /**
+   * ETP-5019 — finds the client's single Admin {@code AD_Role} row ({@code is_client_admin =
+   * 'Y'}), scoped to {@code clientId}. Same "resolve by is_client_admin, scoped to :client_id"
+   * approach {@link com.etendoerp.go.schemaforge.webhooks.SFRolesOverview#resolveTenantRoles}
+   * already uses.
+   *
+   * @param clientId the {@code AD_Client_ID} to scope the search to
+   * @return the active client-admin role, or {@code null} if none exists for this client
+   */
+  @SuppressWarnings("unchecked")
+  private Role findClientAdminRole(String clientId) {
+    OBCriteria<Role> criteria = OBDal.getInstance().createCriteria(Role.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    criteria.add(Restrictions.eq(Role.PROPERTY_CLIENT + ".id", clientId));
+    criteria.add(Restrictions.eq(Role.PROPERTY_ACTIVE, true));
+    criteria.add(Restrictions.eq(Role.PROPERTY_CLIENTADMIN, true));
+    criteria.setMaxResults(1);
+    List<Role> roles = (List<Role>) criteria.list();
+    return roles.isEmpty() ? null : roles.get(0);
+  }
+
+  /**
+   * ETP-5019 — is {@code callerUserId} allowed to promote/demote another user? True when the
+   * caller is the owner, or currently holds the client-admin role themselves. Same signal
+   * {@link #enforceOwnerProtection(User, String)} already uses, just the opposite polarity
+   * (require it here, reject it there).
+   */
+  private boolean callerIsOwnerOrAdmin(String callerUserId) {
+    if (callerUserId == null) {
+      return false;
+    }
+    if (OwnerSupport.isOwner(callerUserId)) {
+      return true;
+    }
+    User caller = OBDal.getInstance().get(User.class, callerUserId);
+    Role callerCurrentRole = caller != null ? caller.getDefaultRole() : null;
+    return callerCurrentRole != null && Boolean.TRUE.equals(callerCurrentRole.isClientAdmin());
+  }
+
+  /**
+   * ETP-5019 — promotes {@code targetUserId} to the client's Admin role, replacing whatever
+   * role they currently hold (typically a personal composed role). The personal role's own
+   * {@code AD_Role} row and {@code AD_Role_Inheritance} composition are NEVER deleted here —
+   * only unassigned (via {@link UserRoleSyncSupport#syncSingleActiveUserRole(User, Role)}, which
+   * replaces the user's single active {@code AD_User_Roles} row) — so {@link
+   * #demoteFromAdmin(String, Role, String)} can find and restore it later by name.
+   *
+   * @param callerUserId the {@code AD_User_ID} making this request
+   * @param callerRole the caller's currently resolved role, for {@link
+   *     #enforceCallerClientBoundary(User, Role)}'s tenant-boundary check
+   * @param targetUserId the {@code AD_User_ID} to promote
+   * @return an {@link AssignmentResult} whose {@code personalRoleId} is actually the newly
+   *     assigned Admin role's id (field reused, not renamed, to avoid touching {@code
+   *     SFAssignUserRoles}'s response shape for the unrelated composition endpoint)
+   * @throws OBException if the caller is not owner/admin, the target is already owner or
+   *     already client-admin, or no Admin role exists for the target's client
+   */
+  public AssignmentResult promoteToAdmin(String callerUserId, Role callerRole,
+      String targetUserId) {
+    if (StringUtils.isBlank(targetUserId)) {
+      throw new OBException("Missing user id for admin promotion");
+    }
+    if (!callerIsOwnerOrAdmin(callerUserId)) {
+      throw new OBException("Not authorized to promote users to Admin: " + callerUserId);
+    }
+    User target = OBDal.getInstance().get(User.class, targetUserId);
+    if (target == null) {
+      throw new OBException(USER_NOT_FOUND + targetUserId);
+    }
+    enforceCallerClientBoundary(target, callerRole);
+    if (OwnerSupport.isOwner(targetUserId)) {
+      throw new OBException("The owner already has the Admin role: " + targetUserId);
+    }
+    Role currentRole = target.getDefaultRole();
+    if (currentRole != null && Boolean.TRUE.equals(currentRole.isClientAdmin())) {
+      throw new OBException("User is already an Admin: " + targetUserId);
+    }
+
+    OBContext.setAdminMode(true);
+    try {
+      Role adminRole = findClientAdminRole(target.getClient().getId());
+      if (adminRole == null) {
+        throw new OBException("No Admin role found for client: " + target.getClient().getId());
+      }
+      target.setDefaultRole(adminRole);
+      target.setSmfswsDefaultWsRole(adminRole);
+      OBDal.getInstance().save(target);
+      OBDal.getInstance().flush();
+      UserRoleSyncSupport.syncSingleActiveUserRole(target, adminRole);
+      log.info("Promoted user {} to Admin role {}", targetUserId, adminRole.getId());
+      return new AssignmentResult(targetUserId, adminRole.getId(), Collections.emptyList(), 0, 0);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * ETP-5019 — finds the given user's dormant personal role by its deterministic name (see
+   * {@link PersonalRoleAccessProvisioningService#personalRoleBaseName(User)}), scoped to the
+   * user's client. Unlike {@link #findExistingPersonalRole(User)}, this does NOT consult {@code
+   * user.getDefaultRole()} — that field currently points at the Admin role being demoted FROM,
+   * not at the dormant personal role being restored TO. {@link
+   * #isReusablePersonalRole(User, Role)}'s other checks (active, non-template, non-client-admin,
+   * same client, not the target of any inheritance, exclusively assigned to this user or
+   * unassigned) are still applied defensively before trusting the name match.
+   *
+   * @return the user's dormant personal role if one is found and still valid to reuse, otherwise
+   *     {@code null}
+   */
+  @SuppressWarnings("unchecked")
+  private Role findDormantPersonalRoleByName(User user) {
+    String expectedName = personalRoleAccessProvisioningService.personalRoleBaseName(user);
+    OBCriteria<Role> criteria = OBDal.getInstance().createCriteria(Role.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    criteria.add(Restrictions.eq(Role.PROPERTY_CLIENT + ".id", user.getClient().getId()));
+    criteria.add(Restrictions.eq(Role.PROPERTY_NAME, expectedName));
+    criteria.add(Restrictions.eq(Role.PROPERTY_ACTIVE, true));
+    criteria.setMaxResults(1);
+    List<Role> roles = (List<Role>) criteria.list();
+    if (roles.isEmpty()) {
+      return null;
+    }
+    Role candidate = roles.get(0);
+    return isReusablePersonalRole(user, candidate) ? candidate : null;
+  }
+
+  /**
+   * ETP-5019 — demotes {@code targetUserId} from the client's Admin role back to a personal
+   * role: their prior one (found by name via {@link
+   * PersonalRoleAccessProvisioningService#personalRoleBaseName(User)}, composition intact — see
+   * {@link #findDormantPersonalRoleByName(User)}) if one exists, otherwise a fresh empty one
+   * (same fallback {@link #resolveOrCreatePersonalRole(User)}'s "create" half already uses).
+   *
+   * @param callerUserId the {@code AD_User_ID} making this request
+   * @param callerRole the caller's currently resolved role, for {@link
+   *     #enforceCallerClientBoundary(User, Role)}'s tenant-boundary check
+   * @param targetUserId the {@code AD_User_ID} to demote
+   * @return an {@link AssignmentResult} whose {@code personalRoleId} is the restored (or
+   *     freshly created) personal role's id (field reused, not renamed, to avoid touching
+   *     {@code SFAssignUserRoles}'s response shape for the unrelated composition endpoint)
+   * @throws OBException if the caller is not owner/admin, the target is the owner (never
+   *     demotable, by anyone), or the target does not currently hold the client-admin role
+   */
+  public AssignmentResult demoteFromAdmin(String callerUserId, Role callerRole,
+      String targetUserId) {
+    if (StringUtils.isBlank(targetUserId)) {
+      throw new OBException("Missing user id for admin demotion");
+    }
+    if (!callerIsOwnerOrAdmin(callerUserId)) {
+      throw new OBException("Not authorized to demote an Admin: " + callerUserId);
+    }
+    User target = OBDal.getInstance().get(User.class, targetUserId);
+    if (target == null) {
+      throw new OBException(USER_NOT_FOUND + targetUserId);
+    }
+    enforceCallerClientBoundary(target, callerRole);
+    if (OwnerSupport.isOwner(targetUserId)) {
+      throw new OBException("The owner can never be demoted: " + targetUserId);
+    }
+    Role currentRole = target.getDefaultRole();
+    if (currentRole == null || !Boolean.TRUE.equals(currentRole.isClientAdmin())) {
+      throw new OBException("User does not currently hold the Admin role: " + targetUserId);
+    }
+
+    OBContext.setAdminMode(true);
+    try {
+      Role restoredRole = findDormantPersonalRoleByName(target);
+      if (restoredRole == null) {
+        restoredRole = createPersonalRole(target);
+      }
+      target.setDefaultRole(restoredRole);
+      target.setSmfswsDefaultWsRole(restoredRole);
+      OBDal.getInstance().save(target);
+      OBDal.getInstance().flush();
+      UserRoleSyncSupport.syncSingleActiveUserRole(target, restoredRole);
+      log.info("Demoted user {} from Admin to personal role {}", targetUserId,
+          restoredRole.getId());
+      return new AssignmentResult(targetUserId, restoredRole.getId(), Collections.emptyList(), 0,
+          0);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 }

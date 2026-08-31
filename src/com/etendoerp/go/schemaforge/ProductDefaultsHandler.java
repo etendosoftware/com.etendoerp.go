@@ -61,6 +61,15 @@ import org.openbravo.model.financialmgmt.tax.TaxCategory;
  * <p>ETP-4967: also hides any product classified under a category flagged
  * {@code em_etgo_issystemcategory = 'Y'} from GET responses — see
  * {@link #hideSystemCategoryProducts}.
+ *
+ * <p>ETP-4943: also forces {@code stocked}/{@code returnable} to {@code false} whenever a
+ * request declares {@code productType = "S"} (Service) — see
+ * {@link #enforceServiceProductNotStockable}. Runs on both POST and PATCH, unlike the
+ * uOM/taxCategory defaulting above (POST-only): the frontend's own auto-correction
+ * (`ProductAdditionalInfoPanel.jsx`) only fires while the "Additional Info" tab is mounted, so a
+ * user who sets the type to Service on the "General" tab and saves immediately never triggers
+ * it. This is the authoritative enforcement; the frontend one is a same-session UX nicety, not
+ * the guarantee.
  */
 @Named("productDefaultsHandler")
 public class ProductDefaultsHandler implements NeoHandler {
@@ -69,10 +78,15 @@ public class ProductDefaultsHandler implements NeoHandler {
 
   private static final String SPEC = "product";
   private static final String METHOD_POST = "POST";
+  private static final String METHOD_PATCH = "PATCH";
   private static final String METHOD_GET = "GET";
   private static final String FIELD_UOM = "uOM";
   private static final String FIELD_TAX_CATEGORY = "taxCategory";
   private static final String FIELD_PRODUCT_CATEGORY = "productCategory";
+  private static final String FIELD_PRODUCT_TYPE = "productType";
+  private static final String FIELD_STOCKED = "stocked";
+  private static final String FIELD_RETURNABLE = "returnable";
+  private static final String PRODUCT_TYPE_SERVICE = "S";
   private static final String FIELD_TOTAL_ROWS = "totalRows";
   private static final String FIELD_END_ROW = "endRow";
   private static final String SYSTEM_CLIENT_ID = "0";
@@ -82,7 +96,10 @@ public class ProductDefaultsHandler implements NeoHandler {
     if (context == null || !SPEC.equals(context.getSpecName())) {
       return null;
     }
-    if (!METHOD_POST.equals(context.getHttpMethod())) {
+    String method = context.getHttpMethod();
+    boolean isCreate = METHOD_POST.equals(method);
+    boolean isUpdate = METHOD_PATCH.equals(method);
+    if (!isCreate && !isUpdate) {
       return null;
     }
     JSONObject body = context.getRequestBody();
@@ -90,16 +107,41 @@ public class ProductDefaultsHandler implements NeoHandler {
       return null;
     }
     try {
-      String clientId = resolveClientId(context);
-      injectIfMissing(body, FIELD_UOM, UOM.class, clientId);
-      injectIfMissing(body, FIELD_TAX_CATEGORY, TaxCategory.class, clientId);
+      enforceServiceProductNotStockable(body);
     } catch (Exception e) {
-      log.error("product pre-hook: failed to inject uOM/taxCategory default", e);
+      log.error("product pre-hook: failed to enforce Service product stock flags", e);
     }
-    // Never short-circuits: the generic CRUD create still runs, now with the two fields
-    // already present in the body (so the generic "first combo option" fallback never fires
-    // for them).
+    if (isCreate) {
+      try {
+        String clientId = resolveClientId(context);
+        injectIfMissing(body, FIELD_UOM, UOM.class, clientId);
+        injectIfMissing(body, FIELD_TAX_CATEGORY, TaxCategory.class, clientId);
+      } catch (Exception e) {
+        log.error("product pre-hook: failed to inject uOM/taxCategory default", e);
+      }
+    }
+    // Never short-circuits: the generic CRUD create/update still runs, now with the request
+    // body already corrected (so the generic "first combo option" fallback never fires for
+    // uOM/taxCategory, and a Service product can never persist as stocked/returnable).
     return null;
+  }
+
+  /**
+   * ETP-4943: a Service product has no physical existence, so it can never be stocked or
+   * returnable. Forces both flags to {@code false} whenever the request itself declares
+   * {@code productType = "S"} — whether or not the caller sent a value for them, so an omitted
+   * flag can't silently resolve to {@code true} downstream. Deliberately scoped to requests that
+   * mention {@code productType}: a PATCH that edits something else on an already-Service product
+   * (e.g. weight) and never touches the type is left alone — resolving the persisted type would
+   * need a DB lookup, out of scope for this ticket's reported cases (all of which change
+   * {@code productType} in the same request).
+   */
+  private static void enforceServiceProductNotStockable(JSONObject body) throws JSONException {
+    if (!PRODUCT_TYPE_SERVICE.equals(body.optString(FIELD_PRODUCT_TYPE, null))) {
+      return;
+    }
+    body.put(FIELD_STOCKED, false);
+    body.put(FIELD_RETURNABLE, false);
   }
 
   @Override

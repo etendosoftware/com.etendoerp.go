@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
@@ -69,6 +70,7 @@ import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
+import org.openbravo.advpaymentmngt.dao.TransactionsDao;
 import org.openbravo.advpaymentmngt.process.FIN_TransactionProcess;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchedTransaction;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchingTransaction;
@@ -511,13 +513,11 @@ public class ReconciliationHandlerTest {
 
       handler.buildCandidates(ACC_ID, LINE_ID, "payments", null, null);
 
-      // The draft-reconciliation id is now bound FIRST (NULL for a normal line — the SQL's
-      // "OR ft.fin_reconciliation_id = ?" branch then matches nothing), which shifts everything
-      // after it by one: account(2), the optional date-range binds(3-6, NULL here), then the
-      // docType flag(7) = 'N'.
-      verify(ps).setString(1, null);
-      verify(ps).setString(2, ACC_ID);
-      verify(ps).setString(7, "N");
+      // The account id is the first bound parameter these days, followed by the four
+      // date-range bounds and then the docType flag. There is no leading reconciliation id
+      // parameter any more, since the old draftRec branch of the candidates query is gone.
+      verify(ps).setString(1, ACC_ID);
+      verify(ps).setString(6, "N");
     }
   }
 
@@ -616,6 +616,11 @@ public class ReconciliationHandlerTest {
 
   private void stubReconciliationCompose(FIN_Reconciliation rec, String type) throws Exception {
     doReturn(rec).when(handler).addNewDraftReconciliation(any());
+    // applySuggestions shares ONE reconciliation across the whole batch via
+    // getOrCreateDraftReconciliation (T1 batch-header refactor) instead of calling
+    // addNewDraftReconciliation directly per group; stub both seams so this helper still covers
+    // both the manual reconcileGroup→compose path and the applySuggestions→batch path.
+    doReturn(rec).when(handler).getOrCreateDraftReconciliation(any());
     doNothing().when(handler).matchBankStatementLine(any(), any(), any());
     OBError result = mock(OBError.class);
     when(result.getType()).thenReturn(type);
@@ -1220,6 +1225,38 @@ public class ReconciliationHandlerTest {
     }
   }
 
+  /**
+   * The 4-arg {@code suggestedTransactionIds} overload forwards the exact {@code excluded} list
+   * instance into {@code matcher.match(line, excluded)} — the mechanism {@code buildAutoMatch}
+   * relies on to accumulate consumed transactions across pending lines of the same amount.
+   */
+  @Test
+  public void testSuggestedTransactionIdsForwardsExcludedList() throws Exception {
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    MatchingAlgorithm algo = mock(MatchingAlgorithm.class);
+    when(algo.getJavaClassName()).thenReturn("com.example.Algo");
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getMatchingAlgorithm()).thenReturn(algo);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+
+    List<FIN_FinaccTransaction> excluded =
+        new ArrayList<>(Collections.singletonList(mock(FIN_FinaccTransaction.class)));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedConstruction<FIN_MatchingTransaction> mc =
+            mockConstruction(FIN_MatchingTransaction.class, (m, ctx) ->
+                when(m.match(same(line), same(excluded))).thenReturn(null))) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_BankStatementLine.class, LINE_ID)).thenReturn(line);
+
+      Set<String> ids = handler.suggestedTransactionIds(ACC_ID, LINE_ID, 3, excluded);
+
+      assertTrue(ids.isEmpty());
+      verify(mc.constructed().get(0)).match(same(line), same(excluded));
+    }
+  }
+
   // ── buildCandidates: 1:N signal-group pre-marking ─────────────────────────────
 
   /**
@@ -1297,7 +1334,7 @@ public class ReconciliationHandlerTest {
     doReturn(Collections.singletonList(line)).when(handler).loadPendingLines(ACC_ID);
 
     doReturn(new HashSet<>(Arrays.asList("t1"))).when(handler)
-        .suggestedTransactionIds(eq(ACC_ID), eq("l1"), anyInt());
+        .suggestedTransactionIds(eq(ACC_ID), eq("l1"), anyInt(), any());
     FIN_FinaccTransaction t1 = mock(FIN_FinaccTransaction.class);
     when(t1.getId()).thenReturn("t1");
     when(t1.getDepositAmount()).thenReturn(new BigDecimal("100.00"));
@@ -1354,7 +1391,7 @@ public class ReconciliationHandlerTest {
 
     // No 1:1 standard suggestion.
     doReturn(new HashSet<String>()).when(handler)
-        .suggestedTransactionIds(eq(ACC_ID), eq("l1"), anyInt());
+        .suggestedTransactionIds(eq(ACC_ID), eq("l1"), anyInt(), any());
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
         MockedStatic<AutoMatchSupport> ams = mockStatic(AutoMatchSupport.class);
@@ -1366,7 +1403,7 @@ public class ReconciliationHandlerTest {
       when(dal.getConnection()).thenReturn(conn);
       // matchFallback composes the (stubbed) leaf helpers below; run its real body so the
       // orchestration is exercised while findSignalGroup/buildRuleGroup stay stubbed.
-      ams.when(() -> AutoMatchSupport.matchFallback(any(), any(), any(), any(), any(),
+      ams.when(() -> AutoMatchSupport.matchFallback(any(), any(), any(), any(), any(), any(),
               anyInt(), any()))
           .thenCallRealMethod();
       // No 1:N signal group → forces the rule-engine branch.
@@ -1381,6 +1418,272 @@ public class ReconciliationHandlerTest {
       assertEquals(1, data.getJSONArray("groups").length());
       assertEquals(1, data.getJSONObject("kpis").getInt("willCreate"));
       assertEquals(0, data.getJSONObject("kpis").getInt("opsToLink"));
+    }
+  }
+
+  // ── buildAutoMatch: same-amount exhaustion regression (ETP-4971) ──────────────
+
+  private FIN_FinancialAccount accountWithMatchingAlgorithm() {
+    MatchingAlgorithm algo = mock(MatchingAlgorithm.class);
+    when(algo.getJavaClassName()).thenReturn("com.example.Algo");
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getMatchingAlgorithm()).thenReturn(algo);
+    return account;
+  }
+
+  private FIN_BankStatementLine autoMatchLine(String id, String amount) {
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    when(line.getId()).thenReturn(id);
+    when(line.getCramount()).thenReturn(new BigDecimal(amount));
+    when(line.getDramount()).thenReturn(BigDecimal.ZERO);
+    when(line.getDescription()).thenReturn("");
+    when(line.getReferenceNo()).thenReturn("");
+    when(line.getBpartnername()).thenReturn("");
+    when(line.getTransactionDate()).thenReturn(null);
+    return line;
+  }
+
+  private FIN_FinaccTransaction autoMatchTxn(String id, String amount) {
+    FIN_FinaccTransaction t = mock(FIN_FinaccTransaction.class);
+    when(t.getId()).thenReturn(id);
+    when(t.getDepositAmount()).thenReturn(new BigDecimal(amount));
+    when(t.getPaymentAmount()).thenReturn(BigDecimal.ZERO);
+    when(t.getTransactionDate()).thenReturn(null);
+    when(t.getFinPayment()).thenReturn(null);
+    return t;
+  }
+
+  /**
+   * Mocks {@link FIN_MatchingTransaction} construction to mirror Core's real
+   * {@code MatchTransactionDao} semantics: {@code result.removeAll(excluded)} then return the
+   * first remaining same-amount candidate, or NOMATCH once the pool is exhausted. Candidates in
+   * {@code pool} are matched against the constructed call's line by signed amount.
+   */
+  private MockedConstruction<FIN_MatchingTransaction> mockPoolMatching(
+      List<FIN_FinaccTransaction> pool) {
+    return mockConstruction(FIN_MatchingTransaction.class, (m, ctx) ->
+        when(m.match(any(), any())).thenAnswer(invocation -> {
+          FIN_BankStatementLine argLine = invocation.getArgument(0);
+          List<FIN_FinaccTransaction> excluded = invocation.getArgument(1);
+          BigDecimal target = argLine.getCramount().subtract(argLine.getDramount());
+          for (FIN_FinaccTransaction candidate : pool) {
+            BigDecimal candidateAmount =
+                candidate.getDepositAmount().subtract(candidate.getPaymentAmount());
+            if (candidateAmount.compareTo(target) == 0 && !excluded.contains(candidate)) {
+              FIN_MatchedTransaction found = mock(FIN_MatchedTransaction.class);
+              when(found.getTransaction()).thenReturn(candidate);
+              when(found.getMatchLevel()).thenReturn(FIN_MatchedTransaction.STRONG);
+              return found;
+            }
+          }
+          FIN_MatchedTransaction none = mock(FIN_MatchedTransaction.class);
+          when(none.getMatchLevel()).thenReturn(FIN_MatchedTransaction.NOMATCH);
+          return none;
+        }));
+  }
+
+  /**
+   * Regression for ETP-4971: two pending lines of the identical amount must each get their OWN
+   * 1:1 suggestion when two same-amount transactions are available for them — not the same
+   * transaction offered to both. Fails against the pre-fix code, which called Core's matcher with
+   * an EMPTY excluded list for every line, so Core kept returning the same transaction for both
+   * lines and the per-line usedTxnIds filter then just discarded the duplicate, leaving the
+   * second line with no suggestion.
+   */
+  @Test
+  public void testBuildAutoMatchTwoLinesSameAmountProduceTwoGroups() throws Exception {
+    FIN_FinancialAccount account = accountWithMatchingAlgorithm();
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+
+    FIN_BankStatementLine l1 = autoMatchLine("l1", "1.00");
+    FIN_BankStatementLine l2 = autoMatchLine("l2", "1.00");
+    doReturn(Arrays.asList(l1, l2)).when(handler).loadPendingLines(ACC_ID);
+
+    FIN_FinaccTransaction t1 = autoMatchTxn("t1", "1.00");
+    FIN_FinaccTransaction t2 = autoMatchTxn("t2", "1.00");
+    doReturn(t1).when(handler).loadTransaction("t1");
+    doReturn(t2).when(handler).loadTransaction("t2");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationKpiTelemetry> telemetry =
+            mockStatic(ReconciliationKpiTelemetry.class);
+        MockedConstruction<FIN_MatchingTransaction> mc = mockPoolMatching(Arrays.asList(t1, t2))) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(dal.get(FIN_BankStatementLine.class, "l1")).thenReturn(l1);
+      when(dal.get(FIN_BankStatementLine.class, "l2")).thenReturn(l2);
+
+      NeoResponse response = handler.buildAutoMatch(ACC_ID);
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      JSONArray groups = data.getJSONArray("groups");
+      assertEquals(2, groups.length());
+      assertEquals(2, data.getJSONObject("kpis").getInt("opsToLink"));
+      String firstOpId =
+          groups.getJSONObject(0).getJSONArray("operations").getJSONObject(0).getString("id");
+      String secondOpId =
+          groups.getJSONObject(1).getJSONArray("operations").getJSONObject(0).getString("id");
+      assertTrue(Arrays.asList("t1", "t2").containsAll(Arrays.asList(firstOpId, secondOpId)));
+      assertFalse("the two suggestions must not collide on the same transaction",
+          firstOpId.equals(secondOpId));
+    }
+  }
+
+  /** Same regression as above, scaled to three pending lines / three candidates of 50.00. */
+  @Test
+  public void testBuildAutoMatchThreeLinesSameAmountProduceThreeGroups() throws Exception {
+    FIN_FinancialAccount account = accountWithMatchingAlgorithm();
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+
+    FIN_BankStatementLine l1 = autoMatchLine("l1", "50.00");
+    FIN_BankStatementLine l2 = autoMatchLine("l2", "50.00");
+    FIN_BankStatementLine l3 = autoMatchLine("l3", "50.00");
+    doReturn(Arrays.asList(l1, l2, l3)).when(handler).loadPendingLines(ACC_ID);
+
+    FIN_FinaccTransaction t1 = autoMatchTxn("t1", "50.00");
+    FIN_FinaccTransaction t2 = autoMatchTxn("t2", "50.00");
+    FIN_FinaccTransaction t3 = autoMatchTxn("t3", "50.00");
+    doReturn(t1).when(handler).loadTransaction("t1");
+    doReturn(t2).when(handler).loadTransaction("t2");
+    doReturn(t3).when(handler).loadTransaction("t3");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationKpiTelemetry> telemetry =
+            mockStatic(ReconciliationKpiTelemetry.class);
+        MockedConstruction<FIN_MatchingTransaction> mc =
+            mockPoolMatching(Arrays.asList(t1, t2, t3))) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(dal.get(FIN_BankStatementLine.class, "l1")).thenReturn(l1);
+      when(dal.get(FIN_BankStatementLine.class, "l2")).thenReturn(l2);
+      when(dal.get(FIN_BankStatementLine.class, "l3")).thenReturn(l3);
+
+      NeoResponse response = handler.buildAutoMatch(ACC_ID);
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      JSONArray groups = data.getJSONArray("groups");
+      assertEquals(3, groups.length());
+      assertEquals(3, data.getJSONObject("kpis").getInt("opsToLink"));
+      Set<String> opIds = new HashSet<>();
+      for (int i = 0; i < groups.length(); i++) {
+        opIds.add(
+            groups.getJSONObject(i).getJSONArray("operations").getJSONObject(0).getString("id"));
+      }
+      assertEquals(3, opIds.size());
+    }
+  }
+
+  /**
+   * A unique-amount line is unaffected by the exhaustion fix; only the duplicated-amount lines
+   * multiply into distinct groups.
+   */
+  @Test
+  public void testBuildAutoMatchMixedAmountsOnlyDuplicatesMultiply() throws Exception {
+    FIN_FinancialAccount account = accountWithMatchingAlgorithm();
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+
+    FIN_BankStatementLine lUnique = autoMatchLine("lUnique", "30.00");
+    FIN_BankStatementLine lDup1 = autoMatchLine("lDup1", "10.00");
+    FIN_BankStatementLine lDup2 = autoMatchLine("lDup2", "10.00");
+    doReturn(Arrays.asList(lUnique, lDup1, lDup2)).when(handler).loadPendingLines(ACC_ID);
+
+    FIN_FinaccTransaction tUnique = autoMatchTxn("tUnique", "30.00");
+    FIN_FinaccTransaction tDupA = autoMatchTxn("tDupA", "10.00");
+    FIN_FinaccTransaction tDupB = autoMatchTxn("tDupB", "10.00");
+    doReturn(tUnique).when(handler).loadTransaction("tUnique");
+    doReturn(tDupA).when(handler).loadTransaction("tDupA");
+    doReturn(tDupB).when(handler).loadTransaction("tDupB");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationKpiTelemetry> telemetry =
+            mockStatic(ReconciliationKpiTelemetry.class);
+        MockedConstruction<FIN_MatchingTransaction> mc =
+            mockPoolMatching(Arrays.asList(tUnique, tDupA, tDupB))) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(dal.get(FIN_BankStatementLine.class, "lUnique")).thenReturn(lUnique);
+      when(dal.get(FIN_BankStatementLine.class, "lDup1")).thenReturn(lDup1);
+      when(dal.get(FIN_BankStatementLine.class, "lDup2")).thenReturn(lDup2);
+
+      NeoResponse response = handler.buildAutoMatch(ACC_ID);
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      JSONArray groups = data.getJSONArray("groups");
+      assertEquals(3, groups.length());
+      assertEquals(3, data.getJSONObject("kpis").getInt("opsToLink"));
+
+      Set<String> dupOpIds = new HashSet<>();
+      boolean uniqueGroupFound = false;
+      for (int i = 0; i < groups.length(); i++) {
+        String opId =
+            groups.getJSONObject(i).getJSONArray("operations").getJSONObject(0).getString("id");
+        if ("tUnique".equals(opId)) {
+          uniqueGroupFound = true;
+        } else {
+          dupOpIds.add(opId);
+        }
+      }
+      assertTrue(uniqueGroupFound);
+      assertEquals(2, dupOpIds.size());
+    }
+  }
+
+  /**
+   * When fewer same-amount transactions exist than pending lines of that amount, the lines past
+   * the exhausted candidate pool are left WITHOUT a fabricated match — no signal-group or rule
+   * fallback applies here, so the second line simply does not appear in the result.
+   */
+  @Test
+  public void testBuildAutoMatchExhaustedCandidatesLeavesLaterLineUnsuggested() throws Exception {
+    FIN_FinancialAccount account = accountWithMatchingAlgorithm();
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+
+    FIN_BankStatementLine l1 = autoMatchLine("l1", "1.00");
+    FIN_BankStatementLine l2 = autoMatchLine("l2", "1.00");
+    doReturn(Arrays.asList(l1, l2)).when(handler).loadPendingLines(ACC_ID);
+
+    FIN_FinaccTransaction t1 = autoMatchTxn("t1", "1.00");
+    doReturn(t1).when(handler).loadTransaction("t1");
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationKpiTelemetry> telemetry =
+            mockStatic(ReconciliationKpiTelemetry.class);
+        MockedConstruction<FIN_MatchingTransaction> mc =
+            mockPoolMatching(Collections.singletonList(t1))) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(dal.get(FIN_BankStatementLine.class, "l1")).thenReturn(l1);
+      when(dal.get(FIN_BankStatementLine.class, "l2")).thenReturn(l2);
+      // findSignalGroup's real DB path (no fallback candidate exists for line 2 either).
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+      @SuppressWarnings("unchecked")
+      org.hibernate.query.Query<FIN_FinaccTransaction> query =
+          mock(org.hibernate.query.Query.class);
+      when(session.createQuery(anyString(), eq(FIN_FinaccTransaction.class))).thenReturn(query);
+      when(query.setParameter(anyString(), any())).thenReturn(query);
+      when(query.list()).thenReturn(Collections.emptyList());
+
+      NeoResponse response = handler.buildAutoMatch(ACC_ID);
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      JSONArray groups = data.getJSONArray("groups");
+      assertEquals(1, groups.length());
+      assertEquals(1, data.getJSONObject("kpis").getInt("opsToLink"));
+      assertEquals("t1",
+          groups.getJSONObject(0).getJSONArray("operations").getJSONObject(0).getString("id"));
     }
   }
 
@@ -1970,6 +2273,213 @@ public class ReconciliationHandlerTest {
         .contains("exceed the statement line amount"));
     // The over-reconciling group is never reconciled.
     verify(handler, never()).addNewDraftReconciliation(any());
+    verify(handler, never()).getOrCreateDraftReconciliation(any());
+  }
+
+  // ── getOrCreateDraftReconciliation: reuse-or-create the batch's shared header ────
+
+  /**
+   * When the account already has an open draft reconciliation, it is reused as-is —
+   * {@code addNewDraftReconciliation} must never run.
+   */
+  @Test
+  public void testGetOrCreateDraftReconciliationReusesExistingDraft() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_Reconciliation existingDraft = mock(FIN_Reconciliation.class);
+
+    try (MockedStatic<TransactionsDao> dao = mockStatic(TransactionsDao.class)) {
+      dao.when(() -> TransactionsDao.getLastReconciliation(account, "N")).thenReturn(existingDraft);
+
+      FIN_Reconciliation result = handler.getOrCreateDraftReconciliation(account);
+
+      assertEquals(existingDraft, result);
+      verify(handler, never()).addNewDraftReconciliation(any());
+    }
+  }
+
+  /**
+   * When the account has no open draft, a fresh one is created via
+   * {@code addNewDraftReconciliation} and returned.
+   */
+  @Test
+  public void testGetOrCreateDraftReconciliationCreatesWhenNoneOpen() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_Reconciliation fresh = mock(FIN_Reconciliation.class);
+    doReturn(fresh).when(handler).addNewDraftReconciliation(account);
+
+    try (MockedStatic<TransactionsDao> dao = mockStatic(TransactionsDao.class)) {
+      dao.when(() -> TransactionsDao.getLastReconciliation(account, "N")).thenReturn(null);
+
+      FIN_Reconciliation result = handler.getOrCreateDraftReconciliation(account);
+
+      assertEquals(fresh, result);
+      verify(handler).addNewDraftReconciliation(account);
+    }
+  }
+
+  // ── applySuggestions: ONE shared reconciliation for the whole batch (T1) ────────
+
+  /**
+   * The core regression test for the batch-header refactor: TWO valid groups (different statement
+   * lines) in one {@code applySuggestions} call must share a SINGLE {@link FIN_Reconciliation} —
+   * {@code getOrCreateDraftReconciliation}/{@code addNewDraftReconciliation} runs only ONCE for the
+   * whole batch (not once per group, as the old per-group {@code compose()} used to), {@code
+   * matchBankStatementLine} runs once per group, {@code processReconciliation} runs only ONCE at the
+   * end, and every success entry in {@code results[]} carries the SAME {@code reconciliationId}.
+   */
+  @Test
+  public void testApplySuggestionsTwoValidGroupsShareOneReconciliation() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
+    FIN_BankStatementLine line1 = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    FIN_BankStatementLine line2 = lineFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, null);
+    FIN_FinaccTransaction t1 = trxFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    FIN_FinaccTransaction t2 = trxFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, null);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-shared");
+
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line1).when(handler).loadLine("line-1a");
+    doReturn(line2).when(handler).loadLine("line-1b");
+    doReturn(t1).when(handler).loadTransaction("t1");
+    doReturn(t2).when(handler).loadTransaction("t2");
+    doNothing().when(handler).tagMatchGroup(any());
+
+    try (MockedStatic<TransactionsDao> dao = mockStatic(TransactionsDao.class)) {
+      dao.when(() -> TransactionsDao.getLastReconciliation(account, "N")).thenReturn(null);
+      doReturn(rec).when(handler).addNewDraftReconciliation(account);
+      doNothing().when(handler).matchBankStatementLine(any(), any(), any());
+      OBError ok = mock(OBError.class);
+      when(ok.getType()).thenReturn("Success");
+      doReturn(ok).when(handler).processReconciliation(rec);
+
+      JSONObject group1 = new JSONObject()
+          .put("statementLineId", "line-1a")
+          .put("operationIds", new JSONArray().put("t1"));
+      JSONObject group2 = new JSONObject()
+          .put("statementLineId", "line-1b")
+          .put("operationIds", new JSONArray().put("t2"));
+      JSONObject body = new JSONObject()
+          .put("financialAccountId", ACC_ID)
+          .put("groups", new JSONArray().put(group1).put(group2));
+
+      NeoResponse response = handler.applySuggestions(body);
+
+      assertEquals(201, response.getHttpStatus());
+      // Shared header created exactly once for the whole batch, not once per group.
+      verify(handler, times(1)).getOrCreateDraftReconciliation(account);
+      verify(handler, times(1)).addNewDraftReconciliation(account);
+      verify(handler, times(1)).matchBankStatementLine(eq(line1), any(), eq(rec));
+      verify(handler, times(1)).matchBankStatementLine(eq(line2), any(), eq(rec));
+      verify(handler, times(1)).processReconciliation(rec);
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals(2, data.getInt("applied"));
+      JSONArray results = data.getJSONArray("results");
+      assertEquals("rec-shared", results.getJSONObject(0).getString("reconciliationId"));
+      assertEquals("rec-shared", results.getJSONObject(1).getString("reconciliationId"));
+    }
+  }
+
+  /**
+   * One invalid group (missing {@code statementLineId}) mixed with one valid group in the same
+   * batch: the invalid entry's error lands in {@code results[]} without ever touching the shared
+   * reconciliation, and the valid one still succeeds normally against it.
+   */
+  @Test
+  public void testApplySuggestionsMixedValidAndInvalidGroupBatch() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    FIN_FinaccTransaction t1 = trxFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-mixed");
+
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    doReturn(t1).when(handler).loadTransaction("t1");
+    doNothing().when(handler).tagMatchGroup(any());
+    stubReconciliationCompose(rec, "Success");
+
+    // Invalid: no statementLineId at all.
+    JSONObject invalidGroup = new JSONObject().put("operationIds", new JSONArray().put("t1"));
+    JSONObject validGroup = new JSONObject()
+        .put("statementLineId", LINE_ID)
+        .put("operationIds", new JSONArray().put("t1"));
+    JSONObject body = new JSONObject()
+        .put("financialAccountId", ACC_ID)
+        .put("groups", new JSONArray().put(invalidGroup).put(validGroup));
+
+    NeoResponse response = handler.applySuggestions(body);
+
+    assertEquals(201, response.getHttpStatus());
+    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+    JSONArray results = data.getJSONArray("results");
+    assertEquals(2, results.length());
+    assertTrue(results.getJSONObject(0).getJSONObject("error").getString("message")
+        .contains("statementLineId"));
+    assertEquals("rec-mixed", results.getJSONObject(1).getString("reconciliationId"));
+    // The shared reconciliation is created exactly once — the invalid group never reaches it.
+    verify(handler, times(1)).getOrCreateDraftReconciliation(account);
+    verify(handler, times(1)).matchBankStatementLine(eq(line), any(), eq(rec));
+  }
+
+  /**
+   * {@code matchInto} (via {@code matchBankStatementLine}) throws for ONE group mid-batch while a
+   * second group succeeds: the failure is captured as an error entry in {@code results[]} instead of
+   * propagating out of {@code applySuggestions}, and the shared document is still processed once at
+   * the end (the batch is not aborted).
+   */
+  @Test
+  public void testApplySuggestionsOneGroupThrowsMidBatchStillProcessesTheRest() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
+    FIN_BankStatementLine failingLine =
+        lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    when(failingLine.getId()).thenReturn("line-fail");
+    FIN_BankStatementLine okLine = lineFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, null);
+    FIN_FinaccTransaction t1 = trxFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    FIN_FinaccTransaction t2 = trxFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, null);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-partial");
+
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(failingLine).when(handler).loadLine("line-fail");
+    doReturn(okLine).when(handler).loadLine("line-ok");
+    doReturn(t1).when(handler).loadTransaction("t1");
+    doReturn(t2).when(handler).loadTransaction("t2");
+    doNothing().when(handler).tagMatchGroup(any());
+    doReturn(rec).when(handler).getOrCreateDraftReconciliation(account);
+    // matchBankStatementLine throws only for the failing line; succeeds for the other.
+    doThrow(new RuntimeException("Core matching blew up"))
+        .when(handler).matchBankStatementLine(eq(failingLine), any(), eq(rec));
+    doNothing().when(handler).matchBankStatementLine(eq(okLine), any(), eq(rec));
+    OBError ok = mock(OBError.class);
+    when(ok.getType()).thenReturn("Success");
+    doReturn(ok).when(handler).processReconciliation(rec);
+
+    JSONObject failGroup = new JSONObject()
+        .put("statementLineId", "line-fail")
+        .put("operationIds", new JSONArray().put("t1"));
+    JSONObject okGroup = new JSONObject()
+        .put("statementLineId", "line-ok")
+        .put("operationIds", new JSONArray().put("t2"));
+    JSONObject body = new JSONObject()
+        .put("financialAccountId", ACC_ID)
+        .put("groups", new JSONArray().put(failGroup).put(okGroup));
+
+    NeoResponse response = handler.applySuggestions(body);
+
+    // No exception propagates out of applySuggestions.
+    assertEquals(201, response.getHttpStatus());
+    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+    JSONArray results = data.getJSONArray("results");
+    assertEquals(2, results.length());
+    assertTrue(results.getJSONObject(0).getJSONObject("error").getString("message")
+        .contains("line-fail"));
+    assertEquals("rec-partial", results.getJSONObject(1).getString("reconciliationId"));
+    // The shared document is still processed once at the end — the batch is not aborted.
+    verify(handler, times(1)).processReconciliation(rec);
   }
 
   // ── reactivate (un-reconcile a single statement line, T8 part 1) ──────────────
@@ -2054,6 +2564,143 @@ public class ReconciliationHandlerTest {
     inOrder.verify(handler).undoReconciliation(any(), any(), any());
     inOrder.verify(handler).normalizeReactivatedMatchGroup(any());
     verify(handler, never()).doRollbackAndClose();
+  }
+
+  /**
+   * A shared-header batch (see {@link ReconciliationHandler#applySuggestions}) can hold
+   * transactions from OTHER statement lines too. Reactivating ONE line whose reconciliation also
+   * holds a transaction belonging to a DIFFERENT line must scope the undo to just the clicked
+   * line's own transaction — {@code ReconciliationHandlerSupport#detachSelected} (partial path),
+   * NEVER {@code undoReconciliation} — leaving the other line's transaction still reconciled.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testReactivatePartialCoverageDetachesOnlyClickedLineTransactions() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-shared");
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(ORG_ID);
+    when(rec.getClient()).thenReturn(client);
+    when(rec.getOrganization()).thenReturn(org);
+    when(rec.getTransactionDate()).thenReturn(null);
+    Entity entity = mock(Entity.class);
+    when(entity.getTableId()).thenReturn("TBL-1");
+    when(rec.getEntity()).thenReturn(entity);
+
+    // Two transactions share ONE reconciliation, each backing a DIFFERENT statement line.
+    FIN_FinaccTransaction ownTrx = txnWithId("T-OWN");
+    when(ownTrx.getReconciliation()).thenReturn(rec);
+    FIN_FinaccTransaction otherLineTrx = txnWithId("T-OTHER");
+    when(otherLineTrx.getReconciliation()).thenReturn(rec);
+    when(rec.getFINFinaccTransactionList()).thenReturn(Arrays.asList(ownTrx, otherLineTrx));
+
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, ownTrx);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    doNothing().when(handler).checkPeriod(any(), any(), any(), any());
+    doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
+    doReturn(false).when(handler).isAutoCreated(ownTrx);
+
+    NeoResponse response;
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationRemovalUtil> recUtil =
+            mockStatic(ReconciliationRemovalUtil.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_FinaccTransaction.class, "T-OWN")).thenReturn(ownTrx);
+      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
+          .thenReturn(Collections.emptyList());
+
+      response = handler.reactivate(reactivateBody(ACC_ID, LINE_ID));
+
+      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(ownTrx));
+      recUtil.verify(
+          () -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(otherLineTrx),
+          never());
+    }
+
+    assertEquals(200, response.getHttpStatus());
+    // The whole-reconciliation delete path is never taken — only the clicked line's own
+    // transaction is detached, the other line's transaction is left reconciled.
+    verify(handler, never()).undoReconciliation(any(), any(), any());
+    verify(handler).normalizeReactivatedMatchGroup(line);
+  }
+
+  // ── transactionsOfLineIn: the clicked line's own transactions within a shared rec ──
+
+  /** No match group: a line's own transaction on {@code rec} is returned as the sole result. */
+  @Test
+  public void testTransactionsOfLineInNoGroupReturnsOwnTransaction() {
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-1");
+    FIN_FinaccTransaction trx = txnWithId("T1");
+    when(trx.getReconciliation()).thenReturn(rec);
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, trx);
+
+    List<FIN_FinaccTransaction> result = handler.transactionsOfLineIn(line, rec);
+
+    assertEquals(1, result.size());
+    assertEquals(trx, result.get(0));
+  }
+
+  /**
+   * Match-group siblings: only the transactions that actually belong to {@code rec} are returned —
+   * a sibling whose own transaction hangs off a DIFFERENT reconciliation is excluded.
+   */
+  @Test
+  public void testTransactionsOfLineInSiblingsOnlyOwnRecIncluded() {
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-1");
+    FIN_Reconciliation otherRec = mock(FIN_Reconciliation.class);
+    when(otherRec.getId()).thenReturn("rec-other");
+
+    FIN_FinaccTransaction ownTrx = txnWithId("T1");
+    when(ownTrx.getReconciliation()).thenReturn(rec);
+    FIN_BankStatementLine anchor = groupedLine("L1", statement, "GRP-1",
+        new BigDecimal("25.00"), BigDecimal.ZERO, ownTrx);
+
+    FIN_FinaccTransaction siblingSameRec = txnWithId("T2");
+    when(siblingSameRec.getReconciliation()).thenReturn(rec);
+    FIN_BankStatementLine sibling1 = groupedLine("L2", statement, "GRP-1",
+        new BigDecimal("25.00"), BigDecimal.ZERO, siblingSameRec);
+
+    FIN_FinaccTransaction siblingOtherRec = txnWithId("T3");
+    when(siblingOtherRec.getReconciliation()).thenReturn(otherRec);
+    FIN_BankStatementLine sibling2 = groupedLine("L3", statement, "GRP-1",
+        new BigDecimal("25.00"), BigDecimal.ZERO, siblingOtherRec);
+
+    doReturn(Arrays.asList(anchor, sibling1, sibling2))
+        .when(handler).loadMatchGroupLines(statement, "GRP-1");
+
+    try (MockedStatic<ModelProvider> mp = mockMatchGroupProperty()) {
+      List<FIN_FinaccTransaction> result = handler.transactionsOfLineIn(anchor, rec);
+
+      assertEquals(2, result.size());
+      assertTrue(result.contains(ownTrx));
+      assertTrue(result.contains(siblingSameRec));
+      assertFalse(result.contains(siblingOtherRec));
+    }
+  }
+
+  /** The line's OWN transaction belongs to a DIFFERENT reconciliation than {@code rec}: excluded. */
+  @Test
+  public void testTransactionsOfLineInOwnTransactionOnDifferentRecExcluded() {
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-1");
+    FIN_Reconciliation otherRec = mock(FIN_Reconciliation.class);
+    when(otherRec.getId()).thenReturn("rec-other");
+    FIN_FinaccTransaction trx = txnWithId("T1");
+    when(trx.getReconciliation()).thenReturn(otherRec);
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, trx);
+
+    List<FIN_FinaccTransaction> result = handler.transactionsOfLineIn(line, rec);
+
+    assertTrue(result.isEmpty());
   }
 
   /** A line with no linked transaction (not reconciled) is rejected with a 409, no undo. */
@@ -2959,42 +3606,40 @@ public class ReconciliationHandlerTest {
     verify(handler, never()).loadAccount(any());
   }
 
-  // ── reactivateSelected ("Reactivar": keep the reconciliation as a DRAFT) ───────
-  // The lighter sibling of removeOperation: instead of deleting the reconciliation, Core's PLAIN
-  // reactivate sets it back to draft, leaving EVERY link intact (line→transaction and
-  // transaction→reconciliation both survive). Only auto-created payments in the selection are still
-  // deleted — there is nothing worth preserving in a draft for a payment that only existed to back
-  // this reconciliation. Post-check ground truth is therefore "the reconciliation is no longer
-  // processed" ({@code rec.isProcessed() == false}), NOT "the transaction lost its reconciliation".
-
-  /** Marks the reconciliation as back-to-draft, i.e. the reactivate succeeded. */
-  private void markReactivated(FIN_Reconciliation rec) {
-    when(rec.isProcessed()).thenReturn(false);
-  }
+  // ── reactivateSelected ("Reactivar": same detach/undo mechanics as removeOperation) ──
+  // Rewritten for the batch-header refactor (T1): a shared reconciliation can hold OTHER lines'
+  // transactions too, so there is no longer a reconciliation-wide DRAFT state to hand back to the
+  // user. reactivateSelected now delegates to the EXACT SAME helper "Desconciliar" uses —
+  // ReconciliationHandlerSupport#removeSelectedFromReconciliations — reactivate the reconciliation,
+  // detach just the selected transactions, and re-confirm it immediately (the document stays
+  // Completed, never left in draft), then calls normalizeReactivatedMatchGroup. The response no
+  // longer carries an "autoConfirmedDrafts" field, and the success/failure ground truth is the same
+  // one removeOperation already uses: {@code trx.getReconciliation() == null} per requested id.
 
   /**
-   * All-pre-existing selection: nothing is deleted, the reconciliation is simply reactivated to
-   * draft via Core's PLAIN {@code reactivate} — never {@code reactivateAndRemoveReconciliation}
-   * (which would delete it) and never the per-transaction detach.
+   * Full coverage (every transaction of the reconciliation is selected) → the whole-reconciliation
+   * undo ({@code undoReconciliation}), never the per-transaction detach or Core's plain
+   * {@code reactivate} (that mechanism no longer exists).
    *
    * @throws Exception if building the body or stubbing the seams fails
    */
   @Test
-  public void testReactivateSelectedAllPreExistingReactivatesToDraft() throws Exception {
+  public void testReactivateSelectedAllCoveredDelegatesToUndo() throws Exception {
     FIN_FinaccTransaction t1 = txnWithId("T1");
     FIN_FinaccTransaction t2 = txnWithId("T2");
     FIN_Reconciliation rec = recWith("rec-1", t1, t2);
-    markReactivated(rec);
+    List<FIN_FinaccTransaction> snapshot = rec.getFINFinaccTransactionList();
     wireLoads(t1, t2);
+    RemovalState state = new RemovalState();
+    state.linkedUntilFreed(t1, rec);
+    state.linkedUntilFreed(t2, rec);
     doNothing().when(handler).checkPeriod(any(), any(), any(), any());
-    doReturn(false).when(handler).isAutoCreated(t1);
-    doReturn(false).when(handler).isAutoCreated(t2);
+    freeOnUndo(state);
+    doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
 
     NeoResponse response;
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class);
-        MockedStatic<PaymentRemovalUtil> payUtil = mockStatic(PaymentRemovalUtil.class)) {
-      // reactivateToDraft re-fetches the reconciliation fresh by id before calling Core.
+        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec);
@@ -3003,11 +3648,7 @@ public class ReconciliationHandlerTest {
 
       response = handler.reactivateSelected(removeBody(ACC_ID, LINE_ID, "T1", "T2"));
 
-      // Core's PLAIN reactivate — the reconciliation is KEPT, only set back to draft.
-      recUtil.verify(() -> ReconciliationRemovalUtil.reactivate(rec));
-      recUtil.verify(() -> ReconciliationRemovalUtil.reactivateAndRemoveReconciliation(any()), never());
       recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(any()), never());
-      payUtil.verify(() -> PaymentRemovalUtil.reactivateAndRemove(any()), never());
     }
 
     assertEquals(200, response.getHttpStatus());
@@ -3015,113 +3656,86 @@ public class ReconciliationHandlerTest {
     assertTrue(data.getBoolean("reactivated"));
     assertEquals(2, data.getJSONArray("transactionIds").length());
     assertEquals(0, data.getJSONArray("failedTransactionIds").length());
-    // No pre-existing draft was open on the account (getDraftReconciliation → empty), so nothing
-    // was silently confirmed to make room and the UI shows the plain success toast.
-    assertEquals(0, data.getInt("autoConfirmedDrafts"));
-    // The whole-reconciliation delete path is never taken.
-    verify(handler, never()).undoReconciliation(any(), any(), any());
+    // "autoConfirmedDrafts" no longer exists in the response at all.
+    assertFalse(data.has("autoConfirmedDrafts"));
+    verify(handler).undoReconciliation(any(), eq(rec), eq(snapshot));
+    verify(handler).normalizeReactivatedMatchGroup(any());
   }
 
   /**
-   * Core allows only ONE editable reconciliation per account, so reactivating one has to confirm
-   * whichever drafts were already open — silently re-reconciling a line the user had left pending by
-   * an earlier "Reactivar". Those drafts are counted and surfaced as {@code autoConfirmedDrafts} so
-   * the UI can warn instead of letting it happen silently.
+   * A subset selection (mixed auto-created + pre-existing, a third transaction left untouched):
+   * per-transaction detach loop — the auto-created one's payment is reversed, the pre-existing one
+   * is only detached, the un-selected transaction stays reconciled. The whole-reconciliation undo
+   * never runs.
    *
    * @throws Exception if building the body or stubbing the seams fails
    */
   @Test
-  public void testReactivateSelectedCountsAutoConfirmedPreExistingDrafts() throws Exception {
-    FIN_FinaccTransaction t1 = txnWithId("T1");
-    FIN_Reconciliation rec = recWith("rec-1", t1);
-    markReactivated(rec);
-    wireLoads(t1);
+  public void testReactivateSelectedSubsetDetachesOnlySelected() throws Exception {
+    FIN_FinaccTransaction auto = txnWithId("T-AUTO"); // selected, auto-created
+    FIN_FinaccTransaction kept = txnWithId("T-KEPT"); // selected, pre-existing
+    FIN_FinaccTransaction untouched = txnWithId("T-UNTOUCHED"); // NOT selected
+    FIN_Reconciliation rec = recWith("rec-1", auto, kept, untouched);
+    FIN_Payment payment = mock(FIN_Payment.class);
+    when(auto.getFinPayment()).thenReturn(payment);
+    wireLoads(auto, kept, untouched);
+    RemovalState state = new RemovalState();
+    state.linkedUntilFreed(auto, rec);
+    state.linkedUntilFreed(kept, rec);
     doNothing().when(handler).checkPeriod(any(), any(), any(), any());
-    doReturn(false).when(handler).isAutoCreated(t1);
-    // Two drafts were already open on the account before this reactivate.
-    List<FIN_Reconciliation> preExistingDrafts =
-        Arrays.asList(mock(FIN_Reconciliation.class), mock(FIN_Reconciliation.class));
+    doReturn(true).when(handler).isAutoCreated(auto);
+    doReturn(false).when(handler).isAutoCreated(kept);
+    doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
 
     NeoResponse response;
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
+        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class);
+        MockedStatic<PaymentRemovalUtil> payUtil = mockStatic(PaymentRemovalUtil.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_FinaccTransaction.class, "T-AUTO")).thenReturn(auto);
+      when(dal.get(FIN_FinaccTransaction.class, "T-KEPT")).thenReturn(kept);
       when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec);
       recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
-          .thenReturn(preExistingDrafts);
+          .thenReturn(Collections.emptyList());
+      freeOnDetach(state, recUtil);
 
-      response = handler.reactivateSelected(removeBody(ACC_ID, LINE_ID, "T1"));
+      response = handler.reactivateSelected(removeBody(ACC_ID, LINE_ID, "T-AUTO", "T-KEPT"));
 
-      // Those drafts are the ones Core forces us to confirm to free the single editable slot.
-      recUtil.verify(() -> ReconciliationRemovalUtil.processAllReconciliationInDraft(preExistingDrafts));
-      recUtil.verify(() -> ReconciliationRemovalUtil.reactivate(rec));
+      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(auto));
+      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(kept));
+      recUtil.verify(
+          () -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(untouched), never());
+      payUtil.verify(() -> PaymentRemovalUtil.reactivateAndRemove(payment));
     }
 
     assertEquals(200, response.getHttpStatus());
     JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
     assertTrue(data.getBoolean("reactivated"));
-    // The count the UI turns into its "another reconciliation was confirmed" warning.
-    assertEquals(2, data.getInt("autoConfirmedDrafts"));
+    assertEquals(2, data.getJSONArray("transactionIds").length());
+    assertEquals(0, data.getJSONArray("failedTransactionIds").length());
+    verify(handler, never()).undoReconciliation(any(), any(), any());
+    verify(handler).normalizeReactivatedMatchGroup(any());
   }
 
   /**
-   * The count is only correct if the draft list is READ BEFORE it is processed — once
-   * {@code processAllReconciliationInDraft} runs, those reconciliations are no longer drafts, so a
-   * later read would report 0. Pins that ordering, and that Core's plain {@code reactivate} runs
-   * after both (it needs the editable slot freed first).
+   * A selected auto-created (rule-origin) transaction with NO backing payment is reversed via
+   * {@code TransactionRemovalUtil.reactivateAndRemove}, not {@code PaymentRemovalUtil} — same branch
+   * {@code removeOperation}/{@code detachSelected} already covers.
    *
    * @throws Exception if building the body or stubbing the seams fails
    */
   @Test
-  public void testReactivateSelectedReadsDraftsBeforeProcessingThem() throws Exception {
-    FIN_FinaccTransaction t1 = txnWithId("T1");
-    FIN_Reconciliation rec = recWith("rec-1", t1);
-    markReactivated(rec);
-    wireLoads(t1);
-    doNothing().when(handler).checkPeriod(any(), any(), any(), any());
-    doReturn(false).when(handler).isAutoCreated(t1);
-    List<FIN_Reconciliation> preExistingDrafts =
-        Arrays.asList(mock(FIN_Reconciliation.class));
-
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec);
-      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
-          .thenReturn(preExistingDrafts);
-
-      handler.reactivateSelected(removeBody(ACC_ID, LINE_ID, "T1"));
-
-      // read → process → reactivate, in that order. (For a static mock, the ordering "mock" identity
-      // is the class itself; InOrder#verify(MockedStatic, Verification) does the ordered check.)
-      InOrder inOrder = Mockito.inOrder(ReconciliationRemovalUtil.class);
-      inOrder.verify(recUtil, () -> ReconciliationRemovalUtil.getDraftReconciliation(any()));
-      inOrder.verify(recUtil,
-          () -> ReconciliationRemovalUtil.processAllReconciliationInDraft(preExistingDrafts));
-      inOrder.verify(recUtil, () -> ReconciliationRemovalUtil.reactivate(rec));
-    }
-  }
-
-  /**
-   * Mixed selection: the auto-created transaction's payment is deleted (nothing to preserve for it),
-   * the pre-existing one is kept, and the reconciliation is still reactivated to draft once.
-   *
-   * @throws Exception if building the body or stubbing the seams fails
-   */
-  @Test
-  public void testReactivateSelectedMixedDeletesAutoCreatedAndStillReactivates() throws Exception {
-    FIN_FinaccTransaction auto = txnWithId("T-AUTO");
-    FIN_FinaccTransaction kept = txnWithId("T-KEPT");
-    FIN_Reconciliation rec = recWith("rec-1", auto, kept);
-    markReactivated(rec);
-    FIN_Payment payment = mock(FIN_Payment.class);
-    when(auto.getFinPayment()).thenReturn(payment);
-    wireLoads(auto, kept);
+  public void testReactivateSelectedAutoCreatedWithoutPaymentReversesTransaction() throws Exception {
+    FIN_FinaccTransaction auto = txnWithId("T1"); // selected, auto-created, no payment
+    FIN_FinaccTransaction untouched = txnWithId("T2"); // NOT selected → does not cover the rec
+    FIN_Reconciliation rec = recWith("rec-1", auto, untouched);
+    wireLoads(auto, untouched);
+    RemovalState state = new RemovalState();
+    state.linkedUntilFreed(auto, rec);
     doNothing().when(handler).checkPeriod(any(), any(), any(), any());
     doReturn(true).when(handler).isAutoCreated(auto);
-    doReturn(false).when(handler).isAutoCreated(kept);
+    doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
 
     NeoResponse response;
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
@@ -3130,104 +3744,15 @@ public class ReconciliationHandlerTest {
         MockedStatic<TransactionRemovalUtil> trxUtil = mockStatic(TransactionRemovalUtil.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      // detachSelected re-fetches each auto-created transaction fresh by id.
-      when(dal.get(FIN_FinaccTransaction.class, "T-AUTO")).thenReturn(auto);
+      when(dal.get(FIN_FinaccTransaction.class, "T1")).thenReturn(auto);
       when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec);
       recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
           .thenReturn(Collections.emptyList());
-
-      response = handler.reactivateSelected(removeBody(ACC_ID, LINE_ID, "T-AUTO", "T-KEPT"));
-
-      // Only the auto-created one is detached + its payment reversed...
-      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(auto));
-      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(kept), never());
-      payUtil.verify(() -> PaymentRemovalUtil.reactivateAndRemove(payment));
-      trxUtil.verify(() -> TransactionRemovalUtil.reactivateAndRemove(anyString()), never());
-      // ...and the reconciliation is still reactivated (kept) exactly once, never deleted.
-      recUtil.verify(() -> ReconciliationRemovalUtil.reactivate(rec));
-      recUtil.verify(() -> ReconciliationRemovalUtil.reactivateAndRemoveReconciliation(any()), never());
-    }
-
-    assertEquals(200, response.getHttpStatus());
-    JSONObject mixedData = response.getBody().getJSONObject("response").getJSONObject("data");
-    assertTrue(mixedData.getBoolean("reactivated"));
-    assertEquals(0, mixedData.getInt("autoConfirmedDrafts"));
-    verify(handler, never()).undoReconciliation(any(), any(), any());
-  }
-
-  /**
-   * An all-auto-created selection covering the WHOLE reconciliation has nothing pre-existing to
-   * preserve as a draft, so it degrades to the "Desconciliar" end state: the whole-reconciliation
-   * undo. Core's plain {@code reactivate} is never called.
-   *
-   * @throws Exception if building the body or stubbing the seams fails
-   */
-  @Test
-  public void testReactivateSelectedAllAutoCreatedCoveringFallsBackToUndo() throws Exception {
-    FIN_FinaccTransaction t1 = txnWithId("T1");
-    FIN_FinaccTransaction t2 = txnWithId("T2");
-    FIN_Reconciliation rec = recWith("rec-1", t1, t2);
-    List<FIN_FinaccTransaction> snapshot = rec.getFINFinaccTransactionList();
-    markReactivated(rec);
-    wireLoads(t1, t2);
-    doNothing().when(handler).checkPeriod(any(), any(), any(), any());
-    doReturn(true).when(handler).isAutoCreated(t1);
-    doReturn(true).when(handler).isAutoCreated(t2);
-    doNothing().when(handler).undoReconciliation(any(), any(), any());
-
-    NeoResponse response;
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      // The !anyKept branch re-fetches the reconciliation for the coversReconciliation check.
-      when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec);
-      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
-          .thenReturn(Collections.emptyList());
-
-      response = handler.reactivateSelected(removeBody(ACC_ID, LINE_ID, "T1", "T2"));
-
-      // Nothing to keep → delete semantics, so the draft-preserving reactivate never runs.
-      recUtil.verify(() -> ReconciliationRemovalUtil.reactivate(any()), never());
-    }
-
-    assertEquals(200, response.getHttpStatus());
-    verify(handler).undoReconciliation(any(), eq(rec), eq(snapshot));
-  }
-
-  /**
-   * An all-auto-created selection that does NOT cover the reconciliation detaches just those
-   * transactions (the rest stay reconciled); the draft-preserving reactivate never runs.
-   *
-   * @throws Exception if building the body or stubbing the seams fails
-   */
-  @Test
-  public void testReactivateSelectedAllAutoCreatedSubsetDetachesOnly() throws Exception {
-    FIN_FinaccTransaction t1 = txnWithId("T1"); // selected, auto-created
-    FIN_FinaccTransaction t2 = txnWithId("T2"); // NOT selected → does not cover the rec
-    FIN_Reconciliation rec = recWith("rec-1", t1, t2);
-    markReactivated(rec);
-    wireLoads(t1, t2);
-    doNothing().when(handler).checkPeriod(any(), any(), any(), any());
-    doReturn(true).when(handler).isAutoCreated(t1);
-
-    NeoResponse response;
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class);
-        MockedStatic<PaymentRemovalUtil> payUtil = mockStatic(PaymentRemovalUtil.class);
-        MockedStatic<TransactionRemovalUtil> trxUtil = mockStatic(TransactionRemovalUtil.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(FIN_FinaccTransaction.class, "T1")).thenReturn(t1);
-      when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec);
-      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
-          .thenReturn(Collections.emptyList());
+      freeOnDetach(state, recUtil);
 
       response = handler.reactivateSelected(removeBody(ACC_ID, LINE_ID, "T1"));
 
-      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(t1));
-      recUtil.verify(() -> ReconciliationRemovalUtil.reactivate(any()), never());
-      // Auto-created with no payment → the transaction itself is reversed.
+      recUtil.verify(() -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(auto));
       trxUtil.verify(() -> TransactionRemovalUtil.reactivateAndRemove("T1"));
       payUtil.verify(() -> PaymentRemovalUtil.reactivateAndRemove(any()), never());
     }
@@ -3237,10 +3762,44 @@ public class ReconciliationHandlerTest {
   }
 
   /**
-   * Partial-outcome reporting: a reconciliation whose reactivate did not take effect (it still
-   * reports {@code isProcessed() == true}, e.g. Core refused because another draft already exists on
-   * the account) is reported per-transaction — HTTP stays 200, {@code reactivated} is false, and the
-   * ids are split across {@code transactionIds} / {@code failedTransactionIds}.
+   * Reused as-is from {@code removeOperation}: {@code reactivateSelected} now calls
+   * {@code normalizeReactivatedMatchGroup(line)} at the end of every success path — it did NOT do
+   * this before the refactor (the reconciliation used to stay linked-but-draft, so there was nothing
+   * to collapse back).
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testReactivateSelectedNormalizesMatchGroupOnSuccess() throws Exception {
+    FIN_FinaccTransaction t1 = txnWithId("T1");
+    FIN_Reconciliation rec = recWith("rec-1", t1);
+    wireLoads(t1);
+    RemovalState state = new RemovalState();
+    state.linkedUntilFreed(t1, rec);
+    doNothing().when(handler).checkPeriod(any(), any(), any(), any());
+    doReturn(false).when(handler).isAutoCreated(t1);
+    doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec);
+      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
+          .thenReturn(Collections.emptyList());
+      freeOnUndo(state);
+
+      handler.reactivateSelected(removeBody(ACC_ID, LINE_ID, "T1"));
+    }
+
+    verify(handler).normalizeReactivatedMatchGroup(any());
+  }
+
+  /**
+   * Regression pinning the same "never report total failure when part of the batch actually
+   * succeeded" contract {@code removeOperation} already has: ground truth is the real post-state
+   * ({@code trx.getReconciliation() == null}), not any {@code isProcessed()} read on the
+   * reconciliation.
    *
    * @throws Exception if building the body or stubbing the seams fails
    */
@@ -3248,24 +3807,31 @@ public class ReconciliationHandlerTest {
   public void testReactivateSelectedReportsPerTransactionFailure() throws Exception {
     FIN_FinaccTransaction okTxn = txnWithId("T-OK");
     FIN_FinaccTransaction badTxn = txnWithId("T-BAD");
-    FIN_Reconciliation recOk = recWith("rec-ok", okTxn);
-    FIN_Reconciliation recBad = recWith("rec-bad", badTxn);
-    when(recOk.isProcessed()).thenReturn(false);  // reactivate took effect
-    when(recBad.isProcessed()).thenReturn(true);  // still processed → reported as failed
-    wireLoads(okTxn, badTxn);
+    FIN_FinaccTransaction untouched = txnWithId("T-UNTOUCHED");
+    FIN_Reconciliation rec = recWith("rec-1", okTxn, badTxn, untouched);
+    wireLoads(okTxn, badTxn, untouched);
     doNothing().when(handler).checkPeriod(any(), any(), any(), any());
     doReturn(false).when(handler).isAutoCreated(okTxn);
     doReturn(false).when(handler).isAutoCreated(badTxn);
+    doReturn(mock(FIN_BankStatementLine.class)).when(handler).normalizeReactivatedMatchGroup(any());
+    // OK detaches for real; BAD stays linked (Core logged-and-swallowed an internal error) — same
+    // TRANSITION modelling removeOperation's equivalent regression test uses.
+    RemovalState state = new RemovalState();
+    state.linkedUntilFreed(okTxn, rec);
+    state.staysLinked(badTxn);
 
     NeoResponse response;
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
+        MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class);
+        MockedStatic<PaymentRemovalUtil> payUtil = mockStatic(PaymentRemovalUtil.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(FIN_Reconciliation.class, "rec-ok")).thenReturn(recOk);
-      when(dal.get(FIN_Reconciliation.class, "rec-bad")).thenReturn(recBad);
+      when(dal.get(FIN_FinaccTransaction.class, "T-OK")).thenReturn(okTxn);
+      when(dal.get(FIN_FinaccTransaction.class, "T-BAD")).thenReturn(badTxn);
+      when(dal.get(FIN_Reconciliation.class, "rec-1")).thenReturn(rec);
       recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
           .thenReturn(Collections.emptyList());
+      freeOnDetach(state, recUtil);
 
       response = handler.reactivateSelected(removeBody(ACC_ID, LINE_ID, "T-OK", "T-BAD"));
     }
@@ -3304,7 +3870,8 @@ public class ReconciliationHandlerTest {
     NeoResponse response;
     try (MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
       response = handler.reactivateSelected(removeBody(ACC_ID, LINE_ID, "T1"));
-      recUtil.verify(() -> ReconciliationRemovalUtil.reactivate(any()), never());
+      recUtil.verify(
+          () -> ReconciliationRemovalUtil.removeTransactionFromReconciliation(any()), never());
     }
 
     assertEquals(409, response.getHttpStatus());
@@ -3312,277 +3879,74 @@ public class ReconciliationHandlerTest {
         .contains("period is closed"));
   }
 
-  // ── draftReconciliationOf: the single "is this line in Reactivar state?" detector ──
-
-  /** A line whose transaction's reconciliation is UNPROCESSED is in "Reactivar" (draft) state. */
-  @Test
-  public void testDraftReconciliationOfReturnsUnprocessedRec() {
-    FIN_FinaccTransaction trx = txnWithId("T1");
-    FIN_Reconciliation rec = recWith("rec-1", trx);
-    when(rec.isProcessed()).thenReturn(false);
-    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, trx);
-
-    assertEquals(rec, handler.draftReconciliationOf(line));
-  }
-
-  /** A PROCESSED reconciliation means the line is genuinely reconciled, not awaiting re-confirm. */
-  @Test
-  public void testDraftReconciliationOfNullWhenRecProcessed() {
-    FIN_FinaccTransaction trx = txnWithId("T1");
-    FIN_Reconciliation rec = recWith("rec-1", trx);
-    when(rec.isProcessed()).thenReturn(true);
-    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, trx);
-
-    assertNull(handler.draftReconciliationOf(line));
-  }
-
-  /** A line with no linked transaction is plainly pending — no draft involved. */
-  @Test
-  public void testDraftReconciliationOfNullWhenLineHasNoTransaction() {
-    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
-    assertNull(handler.draftReconciliationOf(line));
-    assertNull(handler.draftReconciliationOf(null));
-  }
-
-  /** A transaction with no reconciliation at all yields no draft. */
-  @Test
-  public void testDraftReconciliationOfNullWhenTransactionHasNoRec() {
-    FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
-    when(trx.getReconciliation()).thenReturn(null);
-    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, trx);
-
-    assertNull(handler.draftReconciliationOf(line));
-  }
-
-  // ── reprocessDraftIfAlreadyMatched: re-confirming a Reactivar-ed line ──────────
+  // ── buildCandidates on ANY linked line: unconditionally read-only ────────────
+  // The old "Reactivar leaves the reconciliation in draft, the line stays editable with its own
+  // transactions pre-selected" branch is gone: buildCandidates no longer has a draftRec-aware SQL
+  // path or CANDIDATES_SQL OR-clause at all. A line with ANY linked transaction — draft or
+  // processed reconciliation, it no longer matters — goes straight to the read-only
+  // CandidatesSupport.buildLinkedTransactions(lineId) shortcut.
 
   /**
-   * A line NOT in "Reactivar" state short-circuits to {@code null}, so {@code compose} continues
-   * down its normal build-a-fresh-reconciliation path. (That normal path is already asserted
-   * end-to-end by the {@code reconcileGroup} happy-path tests, which verify
-   * {@code addNewDraftReconciliation} runs.)
+   * A line whose transaction is linked routes to the read-only linked-transactions path
+   * unconditionally — never the SQL/suggested-candidates path — regardless of whether that
+   * transaction's reconciliation is processed or still draft.
    *
    * @throws Exception if the seams fail
    */
   @Test
-  public void testReprocessDraftIfAlreadyMatchedReturnsNullForNonDraftLine() throws Exception {
-    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
-
-    assertNull(handler.reprocessDraftIfAlreadyMatched(line, Arrays.asList("T1")));
-    verify(handler, never()).processReconciliation(any());
-  }
-
-  /**
-   * Re-confirming the SAME set the draft already holds must PROCESS that same document — no
-   * re-linking, no new reconciliation, no re-match — and echo the draft's own id.
-   *
-   * @throws Exception if the seams fail
-   */
-  @Test
-  public void testReprocessDraftIfAlreadyMatchedSameSelectionProcessesSameDraft() throws Exception {
-    FIN_FinaccTransaction t1 = txnWithId("T1");
-    FIN_FinaccTransaction t2 = txnWithId("T2");
-    FIN_Reconciliation draft = recWith("rec-draft", t1, t2);
-    when(draft.isProcessed()).thenReturn(false);
-    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, t1);
-    when(line.getId()).thenReturn(LINE_ID);
-    OBError ok = mock(OBError.class);
-    when(ok.getType()).thenReturn("Success");
-    doReturn(ok).when(handler).processReconciliation(draft);
-
-    NeoResponse response;
-    try (MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
-      response = handler.reprocessDraftIfAlreadyMatched(line, Arrays.asList("T1", "T2"));
-      // The draft is reused, never discarded.
-      recUtil.verify(() -> ReconciliationRemovalUtil.reactivateAndRemoveReconciliation(any()), never());
-    }
-
-    assertEquals(201, response.getHttpStatus());
-    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
-    assertEquals("rec-draft", data.getString("reconciliationId"));
-    assertEquals(LINE_ID, data.getJSONArray("lineIds").getString(0));
-    // The SAME draft is processed; no fresh reconciliation and no re-matching happen.
-    verify(handler).processReconciliation(draft);
-    verify(handler, never()).addNewDraftReconciliation(any());
-    verify(handler, never()).matchBankStatementLine(any(), any(), any());
-  }
-
-  /**
-   * A CHANGED selection cannot reuse the draft: it is properly discarded
-   * ({@code reactivateAndRemoveReconciliation}) and {@code null} is returned so the caller composes
-   * a fresh reconciliation.
-   *
-   * @throws Exception if the seams fail
-   */
-  @Test
-  public void testReprocessDraftIfAlreadyMatchedDifferentSelectionDiscardsDraft() throws Exception {
-    FIN_FinaccTransaction t1 = txnWithId("T1");
-    FIN_Reconciliation draft = recWith("rec-draft", t1);
-    when(draft.isProcessed()).thenReturn(false);
-    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, t1);
-
-    NeoResponse response;
-    try (MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
-      // Selection now also includes T2 → differs from the draft's {T1}.
-      response = handler.reprocessDraftIfAlreadyMatched(line, Arrays.asList("T1", "T2"));
-      recUtil.verify(() -> ReconciliationRemovalUtil.reactivateAndRemoveReconciliation(draft));
-    }
-
-    // null → the caller falls through to the normal compose path.
-    assertNull(response);
-    verify(handler, never()).processReconciliation(any());
-  }
-
-  /**
-   * When processing the reused draft fails, the transaction is rolled back and the Core message is
-   * surfaced as a 400 (same contract as {@code compose}'s own error branch).
-   *
-   * @throws Exception if the seams fail
-   */
-  @Test
-  public void testReprocessDraftIfAlreadyMatchedProcessErrorRollsBack() throws Exception {
-    FIN_FinaccTransaction t1 = txnWithId("T1");
-    FIN_Reconciliation draft = recWith("rec-draft", t1);
-    when(draft.isProcessed()).thenReturn(false);
-    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, t1);
-    OBError err = mock(OBError.class);
-    when(err.getType()).thenReturn("Error");
-    when(err.getMessage()).thenReturn("@APRM_DraftReconciliationExists@");
-    doReturn(err).when(handler).processReconciliation(draft);
-
-    NeoResponse response = handler.reprocessDraftIfAlreadyMatched(line, Arrays.asList("T1"));
-
-    assertEquals(400, response.getHttpStatus());
-    assertTrue(response.getBody().getJSONObject("error").getString("message")
-        .contains("APRM_DraftReconciliationExists"));
-    verify(handler).doRollbackAndClose();
-  }
-
-  // ── buildCandidates on a Reactivar-ed line: editable list, own txns pre-selected ──
-
-  /**
-   * A "Reactivar"-ed line keeps its transaction link, but it is NOT reconciled — so
-   * {@code buildCandidates} must NOT take the read-only linked-movements shortcut (which is what a
-   * genuinely reconciled line gets). It runs the normal SQL path instead, and force-adds the draft's
-   * own transaction ids to the suggested set so they come back pre-selected.
-   *
-   * <p>Asserted via the observable branch decision: the SQL path is reached (the mocked
-   * {@link PreparedStatement} is executed and its rows are returned) and the draft's transaction is
-   * flagged {@code suggested} even though {@code suggestedTransactionIds} returned nothing.
-   *
-   * @throws Exception if the mocked JDBC interaction fails
-   */
-  @Test
-  public void testCandidatesForReactivatedLineIsEditableAndPreSelectsDraftTxns() throws Exception {
-    FIN_FinaccTransaction draftTxn = txnWithId("t1");
-    FIN_Reconciliation draft = recWith("rec-draft", draftTxn);
-    when(draft.isProcessed()).thenReturn(false);
-    // The line still points at its transaction (Core's reactivate leaves every link intact).
-    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, draftTxn);
+  public void testCandidatesLineWithAnyLinkedTransactionTakesReadOnlyPath() throws Exception {
+    FIN_FinaccTransaction linkedTxn = txnWithId("t1");
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, linkedTxn);
     doReturn(line).when(handler).loadLine(LINE_ID);
-    // Nothing suggested by the standard algorithm — any `suggested` flag must come from the draft.
-    doReturn(new HashSet<String>()).when(handler)
-        .suggestedTransactionIds(eq(ACC_ID), eq(LINE_ID), anyInt());
 
-    PreparedStatement ps = mock(PreparedStatement.class);
-    ResultSet rs = mock(ResultSet.class);
-    when(rs.next()).thenReturn(true, false);
-    when(rs.getString("fin_finacc_transaction_id")).thenReturn("t1");
-    when(rs.getTimestamp("statementdate")).thenReturn(null);
-    when(rs.getString("document_no")).thenReturn("PAY-1");
-    when(rs.getBigDecimal("amount")).thenReturn(new BigDecimal("50.00"));
-
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-        MockedStatic<AutoMatchSupport> ams = mockStatic(AutoMatchSupport.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      stubConnection(dal, ps, rs);
-      // A non-null selected line makes buildCandidates consult the signal-group matcher; keep it
-      // inert so the only `suggested` flag can come from the draft (same stub style as
-      // testBuildCandidatesPreMarksSignalGroup).
-      ams.when(() -> AutoMatchSupport.findSignalGroup(eq(ACC_ID), eq(line), any(), any(), anyInt()))
-          .thenReturn(Collections.emptyList());
+    NeoResponse expected = NeoResponse.ok(new JSONObject());
+    try (MockedStatic<CandidatesSupport> cs = mockStatic(CandidatesSupport.class)) {
+      cs.when(() -> CandidatesSupport.buildLinkedTransactions(LINE_ID)).thenReturn(expected);
 
       NeoResponse response = handler.buildCandidates(ACC_ID, LINE_ID, null, null, null);
 
-      JSONArray candidates = response.getBody().getJSONObject("response").getJSONObject("data")
-          .getJSONArray("candidates");
-      // The read-only path returns linked movements WITHOUT running this SQL; getting a row back
-      // proves the editable SQL path was taken.
-      assertEquals(1, candidates.length());
-      assertEquals("t1", candidates.getJSONObject(0).getString(ReconciliationHandler.KEY_ID));
-      // Pre-selected purely because it belongs to the draft.
-      assertTrue(candidates.getJSONObject(0).getBoolean("suggested"));
-      // The draft's reconciliation id is bound FIRST so the SQL's OR-branch exposes its (still
-      // linked, still RPPC) transactions; the account moves to the second slot.
-      verify(ps).setString(1, "rec-draft");
-      verify(ps).setString(2, ACC_ID);
+      // Reaching this line without an NPE/exception from an unmocked OBDal SQL path already proves
+      // the SQL branch was never taken; the explicit verify pins the actual dispatch.
+      assertNotNull(response);
+      cs.verify(() -> CandidatesSupport.buildLinkedTransactions(LINE_ID));
     }
   }
 
-  // ── Re-confirming a "Reactivar"-ed line end-to-end, and the 3 widened guards ───
-  // Core's reactivate keeps every link intact, so three guards used to read "has a link" as "is
-  // reconciled" and rejected a reactivated line with a 409. Each now additionally requires the
-  // reconciliation to be a PROCESSED one. These tests pin both halves: the reactivated line now
-  // flows through, and a genuinely reconciled one is still refused.
+  // ── reconcileGroup / applySuggestions: the simplified "already reconciled" guards ──
+  // The "Reactivar leaves the reconciliation in DRAFT with the link intact" exemption these guards
+  // used to carry is gone entirely — that state can no longer occur (see above). Each guard is back
+  // to its plain form: any linked transaction (draft or processed, doesn't matter) is rejected.
 
   /**
-   * Builds a line in "Reactivar" state: still matched to {@code txnId}, whose reconciliation
-   * {@code recId} is an UNPROCESSED draft holding exactly that one transaction. Wires
-   * {@code loadAccount}/{@code loadLine}/{@code loadTransaction} so {@code reconcileGroup} can run
-   * end-to-end, and returns the draft.
-   */
-  private FIN_Reconciliation reactivatedLineSetup(String recId, String txnId, BigDecimal amount) {
-    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
-    FIN_Reconciliation draft = mock(FIN_Reconciliation.class);
-    when(draft.getId()).thenReturn(recId);
-    when(draft.isProcessed()).thenReturn(false);
-    FIN_FinaccTransaction draftTxn = trxFor(ACC_ID, amount, BigDecimal.ZERO, draft);
-    when(draftTxn.getId()).thenReturn(txnId);
-    when(draft.getFINFinaccTransactionList()).thenReturn(Arrays.asList(draftTxn));
-    FIN_BankStatementLine line = lineFor(ACC_ID, amount, BigDecimal.ZERO, draftTxn);
-    // lineFor does not stub getId(), which the reprocess path echoes back in `lineIds`.
-    when(line.getId()).thenReturn(LINE_ID);
-
-    doReturn(account).when(handler).loadAccount(ACC_ID);
-    doReturn(line).when(handler).loadLine(LINE_ID);
-    doReturn(draftTxn).when(handler).loadTransaction(txnId);
-    return draft;
-  }
-
-  /**
-   * END-TO-END: {@code reconcileGroup} on a "Reactivar"-ed line, re-confirming the SAME selection.
-   * It must NOT 409 at any of the three guards, and must take
-   * {@code reprocessDraftIfAlreadyMatched}'s same-selection path — processing THAT draft instead of
-   * composing a new reconciliation (Core would refuse the transactions, which are not free, and the
-   * draft would be orphaned).
+   * A line whose transaction hangs off an UNPROCESSED (draft) reconciliation is rejected with the
+   * SAME plain 409 as one hanging off a processed one — {@code reconcileGroup}'s guard is simply
+   * {@code line.getFinancialAccountTransaction() != null}, unconditional on {@code isProcessed()}.
    *
    * @throws Exception if building the body or stubbing the seams fails
    */
   @Test
-  public void testReconcileGroupOnReactivatedLineReprocessesSameDraft() throws Exception {
-    FIN_Reconciliation draft = reactivatedLineSetup("rec-draft", "t1", new BigDecimal("100.00"));
-    OBError ok = mock(OBError.class);
-    when(ok.getType()).thenReturn("Success");
-    doReturn(ok).when(handler).processReconciliation(draft);
+  public void testReconcileGroupStillRejectsUnprocessedDraftLinkedLineWith409() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_Reconciliation draft = mock(FIN_Reconciliation.class);
+    when(draft.isProcessed()).thenReturn(false);
+    FIN_FinaccTransaction matched = mock(FIN_FinaccTransaction.class);
+    when(matched.getReconciliation()).thenReturn(draft);
+    FIN_BankStatementLine line =
+        lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, matched);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
 
     NeoResponse response = handler.reconcileGroup(reconcileBody(ACC_ID, LINE_ID, "t1"));
 
-    // Not rejected: neither the line guard nor validateOperations treats the draft as reconciled.
-    assertEquals(201, response.getHttpStatus());
-    JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
-    // The SAME draft is confirmed — not a freshly composed reconciliation.
-    assertEquals("rec-draft", data.getString("reconciliationId"));
-    assertEquals(1, data.getJSONArray("lineIds").length());
-    assertEquals(LINE_ID, data.getJSONArray("lineIds").getString(0));
-    verify(handler).processReconciliation(draft);
+    assertEquals(409, response.getHttpStatus());
+    assertTrue(response.getBody().getJSONObject("error").getString("message")
+        .contains("already reconciled"));
     verify(handler, never()).addNewDraftReconciliation(any());
-    verify(handler, never()).matchBankStatementLine(any(), any(), any());
   }
 
   /**
-   * Guard 1 regression ({@code reconcileGroup}): a genuinely reconciled line — its reconciliation is
-   * PROCESSED — is still refused with a 409. Proves the draft exemption did not blow the guard open.
+   * Guard regression ({@code reconcileGroup}): a genuinely reconciled line — its reconciliation is
+   * PROCESSED — is still refused with a 409.
    *
    * @throws Exception if building the body or stubbing the seams fails
    */
@@ -3607,9 +3971,10 @@ public class ReconciliationHandlerTest {
   }
 
   /**
-   * Guard 2 regression ({@code applyGroup}): the same processed-reconciliation case, recorded as a
-   * per-group error in the {@code results} array (applySuggestions reports per group rather than
-   * failing the whole request).
+   * Guard regression ({@code prepareGroup}, the per-group validation {@code applySuggestions} now
+   * folds into — there is no standalone {@code applyGroup} method any more): the same
+   * processed-reconciliation case, recorded as a per-group error in the {@code results} array
+   * (applySuggestions reports per group rather than failing the whole request).
    *
    * @throws Exception if building the body or stubbing the seams fails
    */
@@ -3641,18 +4006,22 @@ public class ReconciliationHandlerTest {
   }
 
   /**
-   * Guard 3 regression ({@code ReconciliationFlowSupport.validateOperations}): the exemption is
-   * scoped to the line's OWN draft. An operation hanging off a DIFFERENT reconciliation is still a
-   * 409 conflict, even though the line itself is legitimately in "Reactivar" state (so guard 1 lets
-   * it through and validateOperations is actually reached).
+   * {@code ReconciliationFlowSupport}'s per-operation guard: {@code ownDraftId}/{@code ownDraftIdOf}
+   * are gone entirely (deleted along with the "Reactivar leaves it linked-but-draft" mechanism), so
+   * the check is now simply {@code trx.getReconciliation() != null}. An operation hanging off ANY
+   * other reconciliation is still a 409 conflict, even though the line itself is genuinely
+   * UNRECONCILED (guard 1 lets it through, so {@code validateOperations} is actually reached).
    *
    * @throws Exception if building the body or stubbing the seams fails
    */
   @Test
   public void testReconcileGroupStillRejectsOperationOnAnotherReconciliation() throws Exception {
-    // The line is in Reactivar state on its own draft "rec-draft" (holding "t1").
-    reactivatedLineSetup("rec-draft", "t1", new BigDecimal("100.00"));
-    // ...but the requested operation belongs to a DIFFERENT reconciliation.
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+
+    // The requested operation belongs to a DIFFERENT reconciliation.
     FIN_Reconciliation otherRec = mock(FIN_Reconciliation.class);
     when(otherRec.getId()).thenReturn("rec-other");
     FIN_FinaccTransaction foreignTxn =
