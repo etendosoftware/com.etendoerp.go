@@ -48,8 +48,8 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  *
  * <p>Injects {@code sourceReceiptDocNo}, {@code sourceReceipts}, {@code returnInvoices},
  * {@code linesCount} and {@code invoiceStatus} into every GET response via {@code afterHandle}.
- * {@code issuerOrg} is additionally injected on detail GETs only (ETP-4939), mirroring
- * {@link GoodsShipmentHeaderHandler#enrichIssuerOrg}.
+ * {@code issuerOrg} is additionally injected on detail GETs only (ETP-4939), via the shared
+ * {@link NeoHandlerUtils#enrichIssuerOrg}, also used by {@link GoodsShipmentHeaderHandler}.
  */
 @Named("returnToVendorShipmentHeaderHandler")
 public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
@@ -378,32 +378,13 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
         // ETP-4939: only enrich issuerOrg on a detail GET (single record), never on a
         // grid load — otherwise this fires one extra query per row (N+1).
         if (id != null && context.getRecordId() != null) {
-          enrichIssuerOrg(rec, id);
+          NeoHandlerUtils.enrichIssuerOrg(rec, id);
         }
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error enriching return-to-vendor-shipment header", e);
       return null;
-    }
-  }
-
-  private void enrichIssuerOrg(JSONObject shipmentRec, String recordId) {
-    try {
-      OBContext.setAdminMode(true);
-      ShipmentInOut shipment = OBDal.getReadOnlyInstance().get(ShipmentInOut.class, recordId);
-      if (shipment == null) {
-        return;
-      }
-      String orgId = shipment.getOrganization().getId();
-      JSONObject orgInfo = NeoSessionService.resolveOrganization(orgId);
-      if (orgInfo != null) {
-        shipmentRec.put("issuerOrg", orgInfo);
-      }
-    } catch (Exception e) {
-      log.warn("Could not enrich issuer org for shipment {}: {}", recordId, e.getMessage());
-    } finally {
-      OBContext.restorePreviousMode();
     }
   }
 
