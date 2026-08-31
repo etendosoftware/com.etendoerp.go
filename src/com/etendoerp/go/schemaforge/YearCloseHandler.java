@@ -33,6 +33,8 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.ad_actionButton.CreateRegFactAcct;
 import org.openbravo.erpCommon.ad_actionButton.DropRegFactAcct;
 import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.financialmgmt.calendar.Calendar;
 import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.model.financialmgmt.calendar.Year;
 import org.openbravo.service.db.DalConnectionProvider;
@@ -95,11 +97,23 @@ public class YearCloseHandler implements NeoHandler {
   static final String ACTION_CLOSE_YEAR = "closeYear";
   static final String ACTION_UNDO_CLOSE_YEAR = "undoCloseYear";
 
+  private static final String SPEC_FISCAL_CALENDAR = "fiscal-calendar";
+  private static final String ENTITY_YEAR = "year";
+  private static final String METHOD_POST = "POST";
+  private static final String FIELD_FISCAL_YEAR = "fiscalYear";
+  private static final String FIELD_CALENDAR = "calendar";
+  private static final int MIN_FISCAL_YEAR = 1900;
+  private static final int MAX_FISCAL_YEAR = 2999;
+
   private static final String STATUS_CLOSED = "C";
   private static final String STATUS_PERMANENTLY_CLOSED = "P";
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoResponse createResponse = validateAndEnrichFiscalCalendarCreate(context);
+    if (createResponse != null || isFiscalCalendarCreate(context)) {
+      return createResponse;
+    }
     if (context.getEndpointType() != NeoEndpointType.ACTION) {
       return null;
     }
@@ -138,6 +152,56 @@ public class YearCloseHandler implements NeoHandler {
       log.error("Error executing {} for year {}", action, yearId, e);
       return NeoResponse.error(500, action + " failed: " + e.getMessage());
     }
+  }
+
+  /**
+   * Fiscal Calendar exposes C_Year directly although it is a child AD tab of C_Calendar. The
+   * generic create route consequently has no parentId from which the mandatory-default service
+   * can resolve C_Calendar_ID. Derive it from the current organization instead of falling back to
+   * the first readable calendar, which can be the global organization calendar.
+   */
+  private NeoResponse validateAndEnrichFiscalCalendarCreate(NeoContext context) {
+    if (!isFiscalCalendarCreate(context)) {
+      return null;
+    }
+    org.codehaus.jettison.json.JSONObject body = context.getRequestBody();
+    if (body == null) {
+      return NeoResponse.error(400, "Missing request body");
+    }
+    String fiscalYear = body.optString(FIELD_FISCAL_YEAR, "").trim();
+    if (!isValidFiscalYear(fiscalYear)) {
+      return NeoResponse.error(400, "Fiscal Year must be a four-digit year between 1900 and 2999");
+    }
+    Organization organization = OBContext.getOBContext().getCurrentOrganization();
+    Calendar calendar = organization != null ? organization.getCalendar() : null;
+    if (calendar == null || calendar.getId() == null) {
+      return NeoResponse.error(400, "The current organization has no fiscal calendar");
+    }
+    try {
+      // C_Calendar_ID is a system field, so never honor a caller-provided calendar from this route.
+      body.put(FIELD_CALENDAR, calendar.getId());
+      return null;
+    } catch (org.codehaus.jettison.json.JSONException e) {
+      log.error("Could not set fiscal calendar for organization {}", organization.getId(), e);
+      return NeoResponse.error(500, "Could not set the organization fiscal calendar");
+    }
+  }
+
+  private boolean isFiscalCalendarCreate(NeoContext context) {
+    return context != null
+        && NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && METHOD_POST.equals(context.getHttpMethod())
+        && context.getRecordId() == null
+        && SPEC_FISCAL_CALENDAR.equals(context.getSpecName())
+        && ENTITY_YEAR.equals(context.getEntityName());
+  }
+
+  private boolean isValidFiscalYear(String value) {
+    if (!value.matches("\\d{4}")) {
+      return false;
+    }
+    int year = Integer.parseInt(value);
+    return year >= MIN_FISCAL_YEAR && year <= MAX_FISCAL_YEAR;
   }
 
   /**
