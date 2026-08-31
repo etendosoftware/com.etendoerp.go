@@ -37,6 +37,7 @@ import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
 import org.openbravo.service.json.JsonConstants;
 
@@ -84,6 +85,16 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *         <li>Rejects prefix changes on leaf accounts (first 4 digits are immutable).</li>
  *       </ol>
  *   </li>
+ *   <li><b>F — GL Item auto-provisioning</b> (afterHandle, CRUD POST — ETP-5020): after a
+ *       successful subaccount create, ensures an invisible {@code GLItem}/{@code GLItemAccounts}
+ *       pair exists behind it for every active {@code AcctSchema}, via
+ *       {@link GlItemProvisioningSupport#ensureGlItemForSubaccount}. Best-effort — never blocks or
+ *       rolls back the subaccount save.</li>
+ *   <li><b>G — GL Item active-state sync</b> (afterHandle, CRUD PATCH/PUT — ETP-5020): when a
+ *       request flips {@code active} on a subaccount (the ETP-4884 deactivate/reactivate toggle),
+ *       mirrors the new state onto its {@code GLItemAccounts} row(s) via
+ *       {@link GlItemProvisioningSupport#setGlItemAccountsActiveForSubaccount}, so the invisible
+ *       GL Item can never silently diverge from its subaccount's active state.</li>
  * </ul>
  *
  * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern.
@@ -92,6 +103,9 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 public class ChartOfAccountsHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(ChartOfAccountsHandler.class);
+
+  /** ETP-5020 — GL Item auto-provisioning behind subaccounts. See class javadoc F/G. */
+  private final GlItemProvisioningSupport glItemProvisioning = new GlItemProvisioningSupport();
 
   /** API field name for the account code (mapped from DB column {@code Value}). */
   static final String FIELD_SEARCH_KEY = "searchKey";
@@ -102,6 +116,9 @@ public class ChartOfAccountsHandler implements NeoHandler {
 
   /** Query param name for the parent account on new-record defaults calls. */
   private static final String PARAM_PARENT_ACCOUNT_ID = "parentAccountId";
+
+  /** API/body field name for the record's active flag. */
+  private static final String FIELD_ACTIVE = "active";
 
   /** Number of leading digits that form the PGC prefix (immutable for leaf accounts). */
   private static final int PGC_PREFIX_LENGTH = 4;
@@ -274,9 +291,20 @@ public class ChartOfAccountsHandler implements NeoHandler {
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     try {
-      if (context.getEndpointType() == NeoEndpointType.CRUD
-          && "GET".equals(context.getHttpMethod())) {
-        return enrichGetResponse(context);
+      if (context.getEndpointType() == NeoEndpointType.CRUD) {
+        String method = context.getHttpMethod();
+        if ("GET".equals(method)) {
+          return enrichGetResponse(context);
+        }
+        if ("POST".equals(method)) {
+          provisionGlItemAfterCreate(context);
+          return null;
+        }
+        if ("PATCH".equals(method) || "PUT".equals(method)) {
+          syncGlItemActiveState(context);
+          return null;
+        }
+        return null;
       }
       if (context.getEndpointType() == NeoEndpointType.DEFAULTS) {
         return injectCodePrefix(context);
@@ -285,6 +313,84 @@ public class ChartOfAccountsHandler implements NeoHandler {
     } catch (Exception e) {
       log.warn("ChartOfAccountsHandler.afterHandle error: {}", e.getMessage(), e);
       return null;
+    }
+  }
+
+  // ── F. GL Item auto-provisioning + G. active-state sync (ETP-5020) ─────────
+
+  /**
+   * F — after a successful subaccount POST, ensures its invisible GL Item exists (see class
+   * javadoc). {@link NeoContext#getRecordId()} is never populated for {@code POST} (same gap
+   * {@code UserRoleAssignmentHandler} documents for {@code user} creation), so the created
+   * record's id is read from {@code previousResult.body.response.data[0].id} instead. Best-effort:
+   * {@link GlItemProvisioningSupport#ensureGlItemForSubaccount} already swallows its own failures,
+   * and any failure resolving the id/entity here is caught by {@link #afterHandle}'s own try/catch
+   * — either way, nothing here can block or roll back the primary subaccount save.
+   */
+  private void provisionGlItemAfterCreate(NeoContext context) {
+    String subaccountId = extractCreatedRecordId(context);
+    if (subaccountId == null) {
+      return;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      ElementValue subaccount = OBDal.getInstance().get(ElementValue.class, subaccountId);
+      if (subaccount == null) {
+        return;
+      }
+      List<AcctSchema> schemas = glItemProvisioning.resolveActiveSchemas(subaccount.getClient());
+      glItemProvisioning.ensureGlItemForSubaccount(subaccount, schemas);
+      OBDal.getInstance().flush();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Reads the just-created record's {@code id} out of {@code previousResult.body.response.data[0]}
+   * — confirmed (see {@code UserRoleAssignmentHandler.inviteNewlyCreatedUser}'s javadoc) to always
+   * be a {@code JSONArray} of exactly one element for a single-record create response.
+   */
+  private static String extractCreatedRecordId(NeoContext context) {
+    NeoResponse previous = context.getPreviousResult();
+    JSONObject body = previous != null ? previous.getBody() : null;
+    JSONObject response = body != null ? body.optJSONObject(RESP_RESPONSE) : null;
+    JSONArray data = response != null ? response.optJSONArray("data") : null;
+    JSONObject first = data != null && data.length() > 0 ? data.optJSONObject(0) : null;
+    String id = first != null ? first.optString("id", null) : null;
+    return (id == null || id.isEmpty()) ? null : id;
+  }
+
+  /**
+   * G — when a PATCH/PUT touches {@code active} on a subaccount (the ETP-4884 deactivate/reactivate
+   * toggle), mirrors the subaccount's new active state onto its {@code GLItemAccounts} row(s). The
+   * actual new state is read back from the freshly-saved {@link ElementValue} entity rather than
+   * trusting the request body's encoding of the boolean (mirrors
+   * {@code UserRoleAssignmentHandler.syncRoleAfterUpdate}'s same "re-read the saved entity, don't
+   * trust the wire payload" pattern) — the body is consulted only as a cheap early-exit so this
+   * never runs for a PATCH that does not touch {@code active} at all.
+   */
+  private void syncGlItemActiveState(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null || !body.has(FIELD_ACTIVE) || body.isNull(FIELD_ACTIVE)) {
+      return;
+    }
+    String recordId = context.getRecordId();
+    if (recordId == null) {
+      return;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      ElementValue subaccount = OBDal.getInstance().get(ElementValue.class, recordId);
+      if (subaccount == null) {
+        return;
+      }
+      List<AcctSchema> schemas = glItemProvisioning.resolveActiveSchemas(subaccount.getClient());
+      boolean active = Boolean.TRUE.equals(subaccount.isActive());
+      glItemProvisioning.setGlItemAccountsActiveForSubaccount(subaccount, schemas, active);
+      OBDal.getInstance().flush();
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 
@@ -399,7 +505,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
     entry.put("description", row[3] != null ? row[3] : JSONObject.NULL);
     entry.put("accountType", row[4] != null ? row[4] : JSONObject.NULL);
     entry.put("summaryLevel", "Y".equals(String.valueOf(row[5])));
-    entry.put("active", "Y".equals(String.valueOf(row[6])));
+    entry.put(FIELD_ACTIVE, "Y".equals(String.valueOf(row[6])));
     entry.put("protectedParentLikeSubaccount", isProtectedParentLikeSubaccount(String.valueOf(row[1])) ? "Y" : "N");
     return entry;
   }
