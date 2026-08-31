@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.attachOptional;
+
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -24,15 +26,24 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.DimensionDisplayUtility;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.financialmgmt.accounting.Costcenter;
+import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.project.Project;
 
 /**
  * Single source of truth for "which accounting dimensions are active right now".
@@ -188,6 +199,73 @@ final class AccountingDimensionsSupport {
   /** The current tenant's header dimensions for {@code docBaseType}. */
   static Set<String> activeHeaderDimensionsForCurrentClient(String docBaseType) throws Exception {
     return activeHeaderDimensions(currentClient(), docBaseType);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Serialization
+  // ---------------------------------------------------------------------------
+
+  /** Serializes a dimension-key set in the canonical display order. */
+  static JSONArray toOrderedArray(Set<String> keys) {
+    JSONArray arr = new JSONArray();
+    for (String key : DIM_ORDER) {
+      if (keys.contains(key)) {
+        arr.put(key);
+      }
+    }
+    return arr;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Applying dimensions to a transaction
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Copies the accounting dimensions carried by a {@code createTransactionForRule} spec (project,
+   * cost center, product) onto the transaction Automatch generates, skipping any dimension that is
+   * not in {@code allowed}.
+   *
+   * <p>Before ETP-4950 nothing read those three keys, so a matching rule that declared them
+   * produced a movement without them. A value whose dimension was later switched off in the
+   * Accounting Schema is deliberately <b>ignored</b> rather than cleared: the movement is generated
+   * without it, and the rule starts applying it again if the dimension is re-enabled.
+   *
+   * <p>{@code allowedSupplier} is only invoked when the spec actually asks for a dimension. That
+   * laziness is load-bearing, not an optimization: resolving the configuration runs SQL whose
+   * {@code while (rs.next())} loop must not be entered for the callers that never carry a dimension
+   * (a rule with none, and the difference postings in {@code ReconciliationDifferenceSupport}).
+   *
+   * @param trx             the transaction being built
+   * @param spec            the {@code createPayment} spec, source of the dimension ids
+   * @param allowedSupplier resolves the dimensions assignable for this account, lazily
+   */
+  static void applyRuleDimensions(FIN_FinaccTransaction trx, JSONObject spec,
+      Supplier<Set<String>> allowedSupplier) {
+    if (!requestsAnyDimension(spec)) {
+      return;
+    }
+    Set<String> allowed = allowedSupplier.get();
+    attachDimension(spec, AutoMatchSupport.KEY_PROJECT_ID, allowed, DIM_PROJECT,
+        Project.class, trx::setProject);
+    attachDimension(spec, AutoMatchSupport.KEY_COSTCENTER_ID, allowed, DIM_COSTCENTER,
+        Costcenter.class, trx::setCostCenter);
+    attachDimension(spec, AutoMatchSupport.KEY_PRODUCT_ID, allowed, DIM_PRODUCT,
+        Product.class, trx::setProduct);
+  }
+
+  /** True when the spec carries a non-blank id for at least one accounting dimension. */
+  static boolean requestsAnyDimension(JSONObject spec) {
+    return StringUtils.isNotBlank(spec.optString(AutoMatchSupport.KEY_PROJECT_ID, null))
+        || StringUtils.isNotBlank(spec.optString(AutoMatchSupport.KEY_COSTCENTER_ID, null))
+        || StringUtils.isNotBlank(spec.optString(AutoMatchSupport.KEY_PRODUCT_ID, null));
+  }
+
+  private static <T extends BaseOBObject> void attachDimension(JSONObject spec, String specKey,
+      Set<String> allowed, String dimensionKey, Class<T> entityClass, Consumer<T> setter) {
+    if (!allowed.contains(dimensionKey)) {
+      return;
+    }
+    attachOptional(spec.optString(specKey, null), entityClass, setter);
   }
 
   // ---------------------------------------------------------------------------

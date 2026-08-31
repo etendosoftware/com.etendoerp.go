@@ -22,12 +22,9 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -35,10 +32,9 @@ import static org.mockito.Mockito.when;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.util.Arrays;
 import java.util.Collections;
-import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
@@ -48,33 +44,32 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.common.plm.Product;
-import org.openbravo.model.financialmgmt.accounting.Costcenter;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
-import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
-import org.openbravo.model.project.Project;
 
 /**
- * Unit tests for the accounting-dimension step of {@link ReconciliationHandler} (ETP-4950):
- * {@code applyRuleDimensions} — which copies a matching rule's project / cost center / product onto
- * the {@code FIN_FinaccTransaction} Automatch generates — and {@code headerDimensionsOf}, the
- * per-instance memo of the account's active header dimensions.
+ * Unit tests for {@link ReconciliationHandler}'s share of the accounting-dimension step introduced
+ * by ETP-4950: {@code headerDimensionsOf}, the per-instance memo of a financial account's active
+ * header dimensions, which is what the handler feeds to
+ * {@code AccountingDimensionsSupport.applyRuleDimensions} as its lazy dimension supplier.
  *
- * <p>Both are package-private seams, so they are driven directly instead of through the whole
- * {@code createTransactionForRule} path (which also needs {@code OBProvider}, the line-number query
- * and Classic's transaction process). The interesting behaviours are:
+ * <p>The assignment behaviour itself (which dimension is copied onto the generated
+ * {@code FIN_FinaccTransaction}, and the laziness of the supplier) lives with the code, in
+ * {@code AccountingDimensionsSupportTest}. What remains handler-specific, and is covered here:
  *
  * <ul>
- *   <li>an ACTIVE dimension declared by the rule is assigned;</li>
- *   <li>an INACTIVE dimension is silently skipped — the ticket's functional requirement — and its
- *       entity is not even loaded;</li>
- *   <li>the configuration is resolved once per account, not once per line;</li>
+ *   <li>the configuration is resolved once per account, not once per reconciled line;</li>
+ *   <li>distinct accounts are memoized independently;</li>
  *   <li>a configuration-lookup failure fails OPEN (no dimensions, no exception) so the whole
- *       reconciliation does not die with it.</li>
- *   <li>the configuration is resolved LAZILY — a spec that asks for no dimension (the shape every
- *       rule without dimensions produces, and the one the difference postings use) must not run a
- *       single configuration query.</li>
+ *       reconciliation does not die with it — and that failure is memoized too;</li>
+ *   <li>the memo is scoped to the handler instance, so a configuration change is picked up by the
+ *       next request;</li>
+ *   <li>the end-to-end non-regression for the suite hang: wiring the REAL memo behind the lazy
+ *       supplier must still not touch JDBC for a dimensionless spec.</li>
  * </ul>
+ *
+ * <p>{@code headerDimensionsOf} is a package-private seam, so it is driven directly instead of
+ * through the whole {@code createTransactionForRule} path (which also needs {@code OBProvider}, the
+ * line-number query and Classic's transaction process).
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class ReconciliationHandlerRuleDimensionsTest {
@@ -83,9 +78,6 @@ public class ReconciliationHandlerRuleDimensionsTest {
 
   private static final String ACCOUNT_ID = "ACC-1";
   private static final String OTHER_ACCOUNT_ID = "ACC-2";
-  private static final String PROJECT_ID = "PJ-1";
-  private static final String COSTCENTER_ID = "CC-1";
-  private static final String PRODUCT_ID = "PR-1";
 
   /**
    * Releases the inline mock-maker references created during the test, so they do not accumulate
@@ -94,197 +86,6 @@ public class ReconciliationHandlerRuleDimensionsTest {
   @After
   public void clearMocks() {
     Mockito.framework().clearInlineMocks();
-  }
-
-  // ── fixtures ───────────────────────────────────────────────────────────────
-
-  private static FIN_FinancialAccount account() {
-    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
-    when(account.getId()).thenReturn(ACCOUNT_ID);
-    return account;
-  }
-
-  /** The {@code createPayment} spec shape {@code AutoMatchSupport.putRuleDimensions} emits. */
-  private static JSONObject spec(String projectId, String costcenterId, String productId)
-      throws Exception {
-    return new JSONObject()
-        .put(AutoMatchSupport.KEY_PROJECT_ID, projectId)
-        .put(AutoMatchSupport.KEY_COSTCENTER_ID, costcenterId)
-        .put(AutoMatchSupport.KEY_PRODUCT_ID, productId);
-  }
-
-  private static Set<String> dims(String... keys) {
-    return new HashSet<>(Arrays.asList(keys));
-  }
-
-  private static Set<String> allThreeDimensions() {
-    return dims(AccountingDimensionsSupport.DIM_PROJECT,
-        AccountingDimensionsSupport.DIM_COSTCENTER,
-        AccountingDimensionsSupport.DIM_PRODUCT);
-  }
-
-  /** A handler whose dimension resolution is pinned to {@code allowed} for {@link #ACCOUNT_ID}. */
-  private static ReconciliationHandler handlerAllowing(Set<String> allowed) {
-    ReconciliationHandler handler = spy(new ReconciliationHandler());
-    doReturn(allowed).when(handler).headerDimensionsOf(ACCOUNT_ID);
-    return handler;
-  }
-
-  // ── applyRuleDimensions ───────────────────────────────────────────────────
-
-  /**
-   * REGRESSION (ETP-4950): with all three dimensions active, the rule's project, cost center and
-   * product are resolved and set on the generated transaction. Before the fix nothing read these
-   * three keys, so the movement came out without them.
-   *
-   * @throws Exception if the JSON plumbing fails
-   */
-  @Test
-  public void testApplyRuleDimensionsAssignsEveryActiveDimension() throws Exception {
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      Project project = mock(Project.class);
-      Costcenter costcenter = mock(Costcenter.class);
-      Product product = mock(Product.class);
-      when(dal.get(eq(Project.class), eq(PROJECT_ID))).thenReturn(project);
-      when(dal.get(eq(Costcenter.class), eq(COSTCENTER_ID))).thenReturn(costcenter);
-      when(dal.get(eq(Product.class), eq(PRODUCT_ID))).thenReturn(product);
-
-      FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
-      handlerAllowing(allThreeDimensions()).applyRuleDimensions(trx, account(),
-          spec(PROJECT_ID, COSTCENTER_ID, PRODUCT_ID));
-
-      verify(trx).setProject(project);
-      verify(trx).setCostCenter(costcenter);
-      verify(trx).setProduct(product);
-    }
-  }
-
-  /**
-   * THE TICKET'S FUNCTIONAL REQUIREMENT: a dimension that is not active for the tenant is skipped
-   * while the remaining ones are still applied — and the inactive dimension's entity is never even
-   * loaded, so an id left on a rule after the dimension was switched off costs nothing.
-   *
-   * @throws Exception if the JSON plumbing fails
-   */
-  @Test
-  public void testApplyRuleDimensionsSkipsTheDimensionThatIsNotActive() throws Exception {
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      Costcenter costcenter = mock(Costcenter.class);
-      Product product = mock(Product.class);
-      when(dal.get(eq(Costcenter.class), eq(COSTCENTER_ID))).thenReturn(costcenter);
-      when(dal.get(eq(Product.class), eq(PRODUCT_ID))).thenReturn(product);
-
-      FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
-      // Project switched off in the Accounting Schema; cost center and product still active.
-      handlerAllowing(dims(AccountingDimensionsSupport.DIM_COSTCENTER,
-          AccountingDimensionsSupport.DIM_PRODUCT))
-          .applyRuleDimensions(trx, account(), spec(PROJECT_ID, COSTCENTER_ID, PRODUCT_ID));
-
-      verify(trx, never()).setProject(any());
-      verify(dal, never()).get(eq(Project.class), anyString());
-      verify(trx).setCostCenter(costcenter);
-      verify(trx).setProduct(product);
-    }
-  }
-
-  /**
-   * With no dimension active, nothing is assigned and no entity is loaded — the transaction keeps
-   * exactly the pre-ETP-4950 shape.
-   *
-   * @throws Exception if the JSON plumbing fails
-   */
-  @Test
-  public void testApplyRuleDimensionsAssignsNothingWhenNoDimensionIsActive() throws Exception {
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-
-      FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
-      handlerAllowing(Collections.emptySet()).applyRuleDimensions(trx, account(),
-          spec(PROJECT_ID, COSTCENTER_ID, PRODUCT_ID));
-
-      verify(trx, never()).setProject(any());
-      verify(trx, never()).setCostCenter(any());
-      verify(trx, never()).setProduct(any());
-      verify(dal, never()).get(eq(Project.class), anyString());
-      verify(dal, never()).get(eq(Costcenter.class), anyString());
-      verify(dal, never()).get(eq(Product.class), anyString());
-    }
-  }
-
-  /**
-   * An active dimension the rule leaves blank (the empty string
-   * {@code AutoMatchSupport.putRuleDimensions} emits) is not assigned, and does not trip a lookup
-   * for a blank id.
-   *
-   * @throws Exception if the JSON plumbing fails
-   */
-  @Test
-  public void testApplyRuleDimensionsIgnoresBlankIdsOnActiveDimensions() throws Exception {
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      Product product = mock(Product.class);
-      when(dal.get(eq(Product.class), eq(PRODUCT_ID))).thenReturn(product);
-
-      FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
-      handlerAllowing(allThreeDimensions()).applyRuleDimensions(trx, account(),
-          spec("", "   ", PRODUCT_ID));
-
-      verify(trx, never()).setProject(any());
-      verify(trx, never()).setCostCenter(any());
-      verify(dal, never()).get(eq(Project.class), anyString());
-      verify(dal, never()).get(eq(Costcenter.class), anyString());
-      verify(trx).setProduct(product);
-    }
-  }
-
-  /**
-   * A spec that omits the dimension keys entirely (an older suggestion payload replayed) is handled
-   * without a null being pushed onto the transaction.
-   *
-   * @throws Exception if the JSON plumbing fails
-   */
-  @Test
-  public void testApplyRuleDimensionsToleratesASpecWithoutDimensionKeys() throws Exception {
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-
-      FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
-      handlerAllowing(allThreeDimensions()).applyRuleDimensions(trx, account(),
-          new JSONObject().put("glItemId", "GL-1"));
-
-      verify(trx, never()).setProject(any());
-      verify(trx, never()).setCostCenter(any());
-      verify(trx, never()).setProduct(any());
-    }
-  }
-
-  /**
-   * An active dimension whose referenced record no longer exists leaves the transaction untouched
-   * rather than clearing it with a null.
-   *
-   * @throws Exception if the JSON plumbing fails
-   */
-  @Test
-  public void testApplyRuleDimensionsSkipsADimensionWhoseRecordIsGone() throws Exception {
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(eq(Project.class), eq(PROJECT_ID))).thenReturn(null);
-
-      FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
-      handlerAllowing(Collections.singleton(AccountingDimensionsSupport.DIM_PROJECT))
-          .applyRuleDimensions(trx, account(), spec(PROJECT_ID, COSTCENTER_ID, PRODUCT_ID));
-
-      verify(dal).get(eq(Project.class), eq(PROJECT_ID));
-      verify(trx, never()).setProject(any());
-    }
   }
 
   // ── headerDimensionsOf ────────────────────────────────────────────────────
@@ -394,91 +195,13 @@ public class ReconciliationHandlerRuleDimensionsTest {
     }
   }
 
-  // ── applyRuleDimensions: lazy configuration resolution ────────────────────
+  // ── the handler's real supplier behind the lazy guard ─────────────────────
 
   /**
-   * A spec that asks for no dimension must not resolve the account's configuration at all: the
-   * guard returns before {@code headerDimensionsOf}, so the difference postings built by
-   * {@code ReconciliationDifferenceSupport} — which never carry a dimension — pay nothing for a
-   * feature they do not use.
-   *
-   * @throws Exception if the JSON plumbing fails
-   */
-  @Test
-  public void testApplyRuleDimensionsDoesNotResolveConfigWhenSpecHasNoDimensionKeys()
-      throws Exception {
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-
-      FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
-      ReconciliationHandler handler = handlerAllowing(allThreeDimensions());
-      handler.applyRuleDimensions(trx, account(), new JSONObject().put("glItemId", "GL-1"));
-
-      verify(handler, never()).headerDimensionsOf(anyString());
-      verify(trx, never()).setProject(any());
-      verify(trx, never()).setCostCenter(any());
-      verify(trx, never()).setProduct(any());
-    }
-  }
-
-  /**
-   * THE REAL-WORLD CASE: every matching rule emits all three dimension keys, blank ones as the
-   * empty string ({@code AutoMatchSupport.putRuleDimensions} uses
-   * {@code defaultIfBlank(id, "")}, never null). So a rule without dimensions arrives here with
-   * three present-but-empty keys, and that shape must still skip the configuration lookup —
-   * checking key presence instead of key emptiness would resolve the configuration for every
-   * single rule match.
-   *
-   * @throws Exception if the JSON plumbing fails
-   */
-  @Test
-  public void testApplyRuleDimensionsDoesNotResolveConfigWhenEveryDimensionIsBlank()
-      throws Exception {
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-
-      FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
-      ReconciliationHandler handler = handlerAllowing(allThreeDimensions());
-      // Exactly what AutoMatchSupport.putRuleDimensions emits for a rule with no dimensions.
-      handler.applyRuleDimensions(trx, account(), spec("", "", ""));
-
-      verify(handler, never()).headerDimensionsOf(anyString());
-      verify(trx, never()).setProject(any());
-      verify(trx, never()).setCostCenter(any());
-      verify(trx, never()).setProduct(any());
-    }
-  }
-
-  /**
-   * The guard is a short-circuit, not a switch-off: a single non-blank dimension is enough to
-   * resolve the configuration (once) and to assign that dimension.
-   *
-   * @throws Exception if the JSON plumbing fails
-   */
-  @Test
-  public void testApplyRuleDimensionsResolvesConfigWhenASingleDimensionIsRequested()
-      throws Exception {
-    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      Product product = mock(Product.class);
-      when(dal.get(eq(Product.class), eq(PRODUCT_ID))).thenReturn(product);
-
-      FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
-      ReconciliationHandler handler = handlerAllowing(allThreeDimensions());
-      handler.applyRuleDimensions(trx, account(), spec("", "", PRODUCT_ID));
-
-      verify(handler, times(1)).headerDimensionsOf(ACCOUNT_ID);
-      verify(trx).setProduct(product);
-      verify(trx, never()).setProject(any());
-      verify(trx, never()).setCostCenter(any());
-    }
-  }
-
-  /**
-   * NON-REGRESSION (suite hang): the no-dimension path must not touch the JDBC connection.
+   * NON-REGRESSION (suite hang): the no-dimension path must not touch the JDBC connection, wired
+   * exactly as {@code createTransactionForRule} wires it —
+   * {@code applyRuleDimensions(trx, spec, () -> headerDimensionsOf(account.getId()))} — with the
+   * REAL memo behind the supplier instead of a stub.
    *
    * <p>The configuration queries in {@code AccountingDimensionsSupport} iterate with
    * {@code while (rs.next())}, and many tests across this module stub {@code rs.next()} with an
@@ -489,10 +212,11 @@ public class ReconciliationHandlerRuleDimensionsTest {
    * {@code ReconciliationHandlerTest} suite hung instead of failing.
    *
    * <p>So this test reproduces exactly that stub — {@code when(rs.next()).thenReturn(true)} with no
-   * terminating {@code false} — and drives {@code applyRuleDimensions} with the real (unstubbed)
-   * {@code headerDimensionsOf}. The {@code timeout} is the assertion that matters: if the guard is
-   * ever removed, this test FAILS by timeout rather than hanging the build, and the failure message
-   * points straight at the cause.
+   * terminating {@code false} — and drives {@code applyRuleDimensions} through a supplier that
+   * really calls {@code headerDimensionsOf}, so removing the guard would genuinely enter the SQL.
+   * The {@code timeout} IS THE ASSERTION that matters: if the guard is ever removed, this test
+   * FAILS by timeout rather than hanging the build, and the failure message points straight at the
+   * cause.
    *
    * @throws Exception if the JSON or JDBC plumbing fails
    */
@@ -512,12 +236,22 @@ public class ReconciliationHandlerRuleDimensionsTest {
       when(rs.next()).thenReturn(true);
 
       FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
-      // A spy WITHOUT headerDimensionsOf stubbed, so the real resolution (and its JDBC queries)
-      // would run if the guard were gone.
-      ReconciliationHandler handler = spy(new ReconciliationHandler());
-      handler.applyRuleDimensions(trx, account(), spec("", "", ""));
+      // The real (unstubbed) memo behind the supplier, so the real resolution — and its JDBC
+      // queries — would run if the guard were gone.
+      ReconciliationHandler handler = new ReconciliationHandler();
+      AtomicInteger resolutions = new AtomicInteger();
+      // Exactly what AutoMatchSupport.putRuleDimensions emits for a rule with no dimensions.
+      JSONObject spec = new JSONObject()
+          .put(AutoMatchSupport.KEY_PROJECT_ID, "")
+          .put(AutoMatchSupport.KEY_COSTCENTER_ID, "")
+          .put(AutoMatchSupport.KEY_PRODUCT_ID, "");
 
-      verify(handler, never()).headerDimensionsOf(anyString());
+      AccountingDimensionsSupport.applyRuleDimensions(trx, spec, () -> {
+        resolutions.incrementAndGet();
+        return handler.headerDimensionsOf(ACCOUNT_ID);
+      });
+
+      assertEquals("the dimension configuration must not be resolved", 0, resolutions.get());
       verify(dal, never()).getConnection();
       verify(conn, never()).prepareStatement(anyString());
       verify(trx, never()).setProject(any());

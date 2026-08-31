@@ -35,7 +35,6 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.Date;
-import java.util.List;
 import java.util.Set;
 
 import javax.inject.Named;
@@ -431,9 +430,6 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     return arr;
   }
 
-  /** Stable display order for the "more info" dimension panel. */
-  private static final List<String> DIM_ORDER = AccountingDimensionsSupport.DIM_ORDER;
-
   /**
    * Navigable accounting dimensions active in the client's chart of accounts. This is the coarse,
    * informational set surfaced as {@code enabledDimensions}; anything that decides whether a
@@ -445,7 +441,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   }
 
   JSONArray loadEnabledDimensions(String accountId) throws Exception {
-    return toOrderedArray(loadActiveDimensionSet(accountId));
+    return AccountingDimensionsSupport.toOrderedArray(loadActiveDimensionSet(accountId));
   }
 
   /**
@@ -456,19 +452,8 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    * {@code C_AcctSchema_Element} directly is wrong for centrally-maintained tenants.
    */
   JSONArray loadHeaderDimensions(String accountId) throws Exception {
-    return toOrderedArray(
+    return AccountingDimensionsSupport.toOrderedArray(
         AccountingDimensionsSupport.activeHeaderDimensionsForAccount(accountId, DOCBASETYPE_FAT));
-  }
-
-  /** Serializes a dimension-key set in the stable display order. */
-  private static JSONArray toOrderedArray(Set<String> keys) {
-    JSONArray arr = new JSONArray();
-    for (String key : DIM_ORDER) {
-      if (keys.contains(key)) {
-        arr.put(key);
-      }
-    }
-    return arr;
   }
 
   /** Active transaction types (BPD/BPW/BF) from the AD reference list, localized. */
