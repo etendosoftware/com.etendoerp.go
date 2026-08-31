@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.AdditionalMatchers.and;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
@@ -93,6 +94,10 @@ class WidgetPendingTasksHandlerTest {
   @SuppressWarnings("rawtypes")
   private NativeQuery stockQuery;
 
+  @Mock
+  @SuppressWarnings("rawtypes")
+  private NativeQuery paymentsQuery;
+
   @SuppressWarnings("rawtypes")
   private OBCriteria inoutCriteria;
 
@@ -132,6 +137,11 @@ class WidgetPendingTasksHandlerTest {
     when(session.createNativeQuery(contains("fin_payment_schedule"))).thenReturn(scheduleQuery);
     when(scheduleQuery.setParameter(anyString(), any())).thenReturn(scheduleQuery);
     when(scheduleQuery.uniqueResult()).thenReturn(0L);
+
+    // ETP-5017: addPaymentsDue's combined count/overdue-count query on c_invoice.
+    when(session.createNativeQuery(contains("issotrx = 'N'"))).thenReturn(paymentsQuery);
+    when(paymentsQuery.setParameter(anyString(), any())).thenReturn(paymentsQuery);
+    when(paymentsQuery.uniqueResult()).thenReturn(new Object[]{ 0L, 0L });
 
     when(session.createNativeQuery(contains("m_storage_detail"))).thenReturn(stockQuery);
     when(stockQuery.setParameter(anyString(), any())).thenReturn(stockQuery);
@@ -336,7 +346,7 @@ class WidgetPendingTasksHandlerTest {
   /**
    * Verifies that the singular taskKey {@code "overdueInvoices"} is used
    * when exactly one overdue invoice exists.
-   */
+   */ 
   @Test
   @SuppressWarnings("unchecked")
   void testOverdueInvoicesSingularKeyWhenCountIsOne() throws Exception {
@@ -364,6 +374,10 @@ class WidgetPendingTasksHandlerTest {
    * the same function backing the em_etgo_due_date virtual column the
    * frontend list filters/displays on — so the counter and the drill-down
    * list can never disagree again.
+   *
+   * <p>Matched together with {@code issotrx = 'Y'} to pin the assertion to the
+   * sales overdue query: since ETP-5017 the purchase payments query calls the
+   * same function, so matching on the function alone is ambiguous.
    */
   @Test
   @SuppressWarnings("unchecked")
@@ -372,7 +386,8 @@ class WidgetPendingTasksHandlerTest {
 
     handler.handle(getContext());
 
-    verify(session).createNativeQuery(contains("etgo_get_due_date"));
+    verify(session).createNativeQuery(
+        and(contains("etgo_get_due_date"), contains("ci.issotrx = 'Y'")));
   }
 
   // ── Collections / payments due today ─────────────────────────────────────
@@ -402,29 +417,130 @@ class WidgetPendingTasksHandlerTest {
     assertTrue(found, "Expected a collectionsDueToday task in the response");
   }
 
+  // ── Payments due (ETP-5017) ───────────────────────────────────────────────
+  //
+  // Before ETP-5017, addPaymentsDueToday only reported purchase invoices whose
+  // fin_payment_schedule.duedate matched CURRENT_DATE exactly (reused the same
+  // helper as collectionsDueToday). The card vanished the day after the due
+  // date even though the invoice was still unpaid. It was replaced by
+  // addPaymentsDue, a single query against c_invoice that reports the combined
+  // count of "due today or overdue" plus a separate overdue-only subcount, so
+  // the taskKey/badge can reflect the more critical state.
+
   /**
-   * Verifies that a paymentsDueToday task appears in the response
-   * when the payment schedule query returns a non-zero count for purchase invoices.
+   * ETP-5017 regression guard: the payments-due query must select unpaid
+   * purchase invoices whose due date has already arrived using
+   * {@code etgo_get_due_date(...) <= CURRENT_DATE} — not an exact-date match
+   * against {@code fin_payment_schedule.duedate}. An exact match is what
+   * caused the card to disappear the day after the due date.
    */
   @Test
   @SuppressWarnings("unchecked")
-  void testPaymentsDueTodayAppearsInResponseWhenNonZero() throws Exception {
+  void testPaymentsDueQueryUsesLessOrEqualCurrentDate() throws Exception {
     mockAllQueriesEmpty();
-    when(scheduleQuery.uniqueResult()).thenReturn(2L);
+
+    handler.handle(getContext());
+
+    verify(session).createNativeQuery(contains("etgo_get_due_date(ci.c_invoice_id) <= CURRENT_DATE"));
+  }
+
+  /**
+   * ETP-5017: the payments-due query must scope to purchase invoices
+   * ({@code issotrx = 'N'}) — the sales-side equivalent is
+   * {@code addCollectionsDueToday}, which must not be affected by this change.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testPaymentsDueQueryFiltersPurchaseInvoicesOnly() throws Exception {
+    mockAllQueriesEmpty();
+
+    handler.handle(getContext());
+
+    verify(session).createNativeQuery(contains("issotrx = 'N'"));
+  }
+
+  /**
+   * ETP-5017: when the combined query reports at least one overdue
+   * installment, the card must switch to the "overdue" (more critical) state
+   * — taskKey "paymentsOverdue*" — even though the reported count includes
+   * rows due today as well. The count must be the combined total, not just
+   * the overdue subset (ticket case 5).
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testPaymentsOverdueEmittedWhenOverdueCountPositive() throws Exception {
+    mockAllQueriesEmpty();
+    when(paymentsQuery.uniqueResult()).thenReturn(new Object[]{ 5L, 1L });
+
+    NeoResponse response = handler.handle(getContext());
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+    JSONObject task = findTaskByKey(data, "paymentsOverdue_plural");
+
+    assertEquals(5, task.getInt("count"), "count must be the combined total, not just the overdue subset");
+    assertEquals("/purchase-invoice?filter=paymentsDue", task.getString("link"));
+    assertTrue(task.getString("text").contains("overdue"), "text must mention 'overdue' when any installment is overdue");
+  }
+
+  /**
+   * ETP-5017: with exactly one payment overdue, the singular taskKey
+   * {@code "paymentsOverdue"} (no {@code _plural} suffix) must be used.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testPaymentsOverdueSingularKeyWhenCountIsOne() throws Exception {
+    mockAllQueriesEmpty();
+    when(paymentsQuery.uniqueResult()).thenReturn(new Object[]{ 1L, 1L });
+
+    NeoResponse response = handler.handle(getContext());
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+    JSONObject task = findTaskByKey(data, "paymentsOverdue");
+
+    assertEquals(1, task.getInt("count"));
+  }
+
+  /**
+   * ETP-5017: when nothing is overdue but at least one payment is due exactly
+   * today, the "due today" state must still be reported (this preserves the
+   * original behavior for the non-overdue case) and it must drill down into
+   * the same {@code paymentsDue} filter used by the overdue state, so the
+   * list always matches whatever the card counts.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testPaymentsDueTodayEmittedWhenNoOverdueInvoices() throws Exception {
+    mockAllQueriesEmpty();
+    when(paymentsQuery.uniqueResult()).thenReturn(new Object[]{ 2L, 0L });
+
+    NeoResponse response = handler.handle(getContext());
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+    JSONObject task = findTaskByKey(data, "paymentsDueToday_plural");
+
+    assertEquals(2, task.getInt("count"));
+    assertEquals("/purchase-invoice?filter=paymentsDue", task.getString("link"));
+    assertTrue(task.getString("text").contains("due today"));
+  }
+
+  /**
+   * ETP-5017 regression guard for the reported bug: a payments-due card must
+   * NOT be emitted only when the combined count (overdue + due today) is
+   * genuinely zero. This is what previously broke — an invoice one day past
+   * its due date was silently dropped even though it was neither zero nor
+   * paid; that case is covered by {@link #testPaymentsOverdueEmittedWhenOverdueCountPositive}
+   * above, which proves the "day after" case now still produces a task.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testPaymentsDueZeroCountProducesNoTask() throws Exception {
+    mockAllQueriesEmpty();
+    // paymentsQuery already returns {0L, 0L} by default from mockAllQueriesEmpty.
 
     NeoResponse response = handler.handle(getContext());
     JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
 
-    boolean found = false;
     for (int i = 0; i < data.length(); i++) {
-      JSONObject task = data.getJSONObject(i);
-      if (task.optString("taskKey", "").startsWith("paymentsDueToday")) {
-        found = true;
-        assertTrue(task.optString("link", "").contains("paymentsDueToday"),
-            "Link must use paymentsDueToday filter, not overdue");
-      }
+      assertFalse(data.getJSONObject(i).optString("taskKey", "").startsWith("payments"),
+          "No payments task should be emitted when the combined count is 0");
     }
-    assertTrue(found, "Expected a paymentsDueToday task in the response");
   }
 
   // ── Low stock alerts ──────────────────────────────────────────────────────
