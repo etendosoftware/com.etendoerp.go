@@ -20,6 +20,8 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -32,11 +34,14 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -62,6 +67,9 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Location;
 import org.openbravo.model.common.geography.Region;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.service.OBQuery;
 
 /**
  * Unit tests for {@link ContactsLocationAddressHandler}.
@@ -1356,5 +1364,135 @@ class ContactsLocationAddressHandlerTest {
     JSONObject wrapper = new JSONObject();
     wrapper.put("response", responseData);
     return NeoResponse.ok(wrapper);
+  }
+
+  // ── resolveRegionByName (ETP-4997) ──────────────────────────────────────
+
+  /**
+   * The province used to be resolved in the browser and then dropped in silence: scoping the
+   * candidates by country required fetching each one's country from
+   * {@code /sws/neo/contacts/region}, which no NEO spec exposes, so every candidate was
+   * discarded and the descriptor skipped the field without an error. These tests pin the
+   * server-side replacement, whose two hard cases are the seed data's System-plus-tenant
+   * duplicate of every Spanish province and a hand-typed name missing its accent.
+   */
+  @Test
+  void testResolveRegionPrefersTheTenantsOwnRowOverTheSystemCopy() throws Exception {
+    // Exactly the shipped data: 'MADRID' at System level and 'MADRID ' (trailing space) for the
+    // tenant, both active, both readable. Name matching alone finds two; the client decides.
+    Region systemRow = mockRegion("MADRID", "0");
+    Region tenantRow = mockRegion("MADRID ", "T1");
+    stubRegionsOfCountry(Arrays.asList(systemRow, tenantRow));
+    stubCurrentClient("T1");
+
+    assertSame(tenantRow, invokeResolveRegionByName("Madrid", mockCountry("Spain")));
+  }
+
+  @Test
+  void testResolveRegionFallsBackToTheSystemRowWhenTheTenantHasNoneOfItsOwn() throws Exception {
+    Region systemRow = mockRegion("MADRID", "0");
+    stubRegionsOfCountry(Collections.singletonList(systemRow));
+    stubCurrentClient("T1");
+
+    // preferOwnClient must not narrow to nothing — a tenant that never got its own copy still
+    // has to be able to import an address.
+    assertSame(systemRow, invokeResolveRegionByName("madrid", mockCountry("Spain")));
+  }
+
+  @Test
+  void testResolveRegionIgnoresAccentsAndCase() throws Exception {
+    // The fuzzy search this replaced absorbed a missing accent; an exact comparison would not,
+    // and "Alava"/"A Coruna" is what a human actually types.
+    Region alava = mockRegion("ÁLAVA", "0");
+    stubRegionsOfCountry(Collections.singletonList(alava));
+    stubCurrentClient("T1");
+
+    assertSame(alava, invokeResolveRegionByName("alava", mockCountry("Spain")));
+  }
+
+  @Test
+  void testResolveRegionReturnsNullForABlankValueWithoutQuerying() throws Exception {
+    assertNull(invokeResolveRegionByName("   ", mockCountry("Spain")));
+    verify(obDal, org.mockito.Mockito.never()).createQuery(eq(Region.class), anyString());
+  }
+
+  @Test
+  void testResolveRegionRefusesAnUnknownNameAndNamesItAndTheCountry() throws Exception {
+    stubRegionsOfCountry(Collections.singletonList(mockRegion("MADRID", "0")));
+    stubCurrentClient("T1");
+
+    OBException thrown = assertThrows(OBException.class,
+        () -> invokeResolveRegionByName("Nowhereland", mockCountry("Spain")));
+    // The message is what the import shows on the failing row, so both halves have to be in it
+    // or the user cannot tell a typo from a missing master record.
+    assertTrue(thrown.getMessage().contains("Nowhereland"));
+    assertTrue(thrown.getMessage().contains("Spain"));
+  }
+
+  @Test
+  void testResolveRegionRefusesWhenThereIsNoCountryToScopeBy() throws Exception {
+    OBException thrown = assertThrows(OBException.class,
+        () -> invokeResolveRegionByName("Córdoba", null));
+    assertTrue(thrown.getMessage().contains("country"));
+  }
+
+  @Test
+  void testResolveRegionRefusesAGenuineAmbiguityInsideOneClient() throws Exception {
+    // Two rows of the SAME client cannot be told apart by any rule, so this must fail rather
+    // than pick one and write the wrong province.
+    stubRegionsOfCountry(Arrays.asList(mockRegion("MADRID", "T1"), mockRegion("Madrid ", "T1")));
+    stubCurrentClient("T1");
+
+    OBException thrown = assertThrows(OBException.class,
+        () -> invokeResolveRegionByName("Madrid", mockCountry("Spain")));
+    assertTrue(thrown.getMessage().contains("ambiguous"));
+  }
+
+  private Region mockRegion(String name, String clientId) {
+    Region region = mock(Region.class);
+    when(region.getName()).thenReturn(name);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(clientId);
+    when(region.getClient()).thenReturn(client);
+    return region;
+  }
+
+  private Country mockCountry(String name) {
+    Country country = mock(Country.class);
+    when(country.getId()).thenReturn("C-" + name);
+    when(country.getName()).thenReturn(name);
+    return country;
+  }
+
+  private void stubRegionsOfCountry(List<Region> regions) {
+    @SuppressWarnings("unchecked")
+    OBQuery<Region> query = mock(OBQuery.class);
+    when(obDal.createQuery(eq(Region.class), anyString())).thenReturn(query);
+    when(query.setNamedParameter(anyString(), any())).thenReturn(query);
+    when(query.list()).thenReturn(regions);
+  }
+
+  private void stubCurrentClient(String clientId) {
+    OBContext context = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(clientId);
+    when(context.getCurrentClient()).thenReturn(client);
+    obContextMock.when(OBContext::getOBContext).thenReturn(context);
+  }
+
+  /** Invokes the private static resolver, unwrapping reflection's exception wrapper. */
+  private Region invokeResolveRegionByName(String rawName, Country country) throws Exception {
+    Method method = ContactsLocationAddressHandler.class
+        .getDeclaredMethod("resolveRegionByName", String.class, Country.class);
+    method.setAccessible(true);
+    try {
+      return (Region) method.invoke(null, rawName, country);
+    } catch (InvocationTargetException e) {
+      Throwable cause = e.getCause();
+      if (cause instanceof RuntimeException) {
+        throw (RuntimeException) cause;
+      }
+      throw (Exception) cause;
+    }
   }
 }

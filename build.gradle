@@ -82,6 +82,13 @@ dependencies {
     implementation('dev.openfeature:sdk:1.20.1')
     compileOnly 'io.swagger.core.v3:swagger-models:2.1.13'
     compileOnly 'org.apache.commons:commons-lang3:3.12.0'
+    // ETP-4997 — xlsx export (NeoXlsxExportWriter). compileOnly, not implementation: POI is
+    // already part of the Etendo core deployment (declared in artifacts.list.COMPILATION.gradle
+    // under "Office and Document Processing", and poi/poi-ooxml/poi-ooxml-lite 5.4.0 ship in
+    // WebContent/WEB-INF/lib), so bundling it again would risk two copies on the classpath.
+    // Same pattern as commons-lang3 above. Version pinned to the deployed one — a compileOnly
+    // that drifts ahead of the runtime jar compiles fine and fails with NoSuchMethodError.
+    compileOnly 'org.apache.poi:poi-ooxml:5.4.0'
     testImplementation 'junit:junit:4.13.2'
     compileOnly 'com.fasterxml.jackson.core:jackson-databind:2.15.3'
     testImplementation 'org.junit.jupiter:junit-jupiter-api:5.9.2'

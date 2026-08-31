@@ -238,18 +238,40 @@ Both PUT and PATCH are delegated to DataSourceServlet's PUT handler internally. 
 
 Delegated to DataSourceServlet's DELETE handler.
 
-**CSV export (generic)** -- `GET /{...}?export=csv`
+**File export (generic)** -- `GET /{...}?export=csv|xlsx`
 
-Any list GET (generic CRUD entity *or* a custom `NeoHandler`) can stream its result as a CSV download instead of JSON by adding `export=csv`. The servlet runs the handler exactly as usual and, before writing the JSON envelope, hands the produced rows to `NeoCsvExportService`, which serializes them and streams the file (`Content-Type: text/csv`, `Content-Disposition: attachment`). No per-window code is needed — it operates on the standard `{response:{data:{<key>:[...]}}}` envelope.
+Any list GET (generic CRUD entity *or* a custom `NeoHandler`) can stream its result as a file download instead of JSON by adding `export=csv` or `export=xlsx`. The servlet runs the handler exactly as usual and, before writing the JSON envelope, hands the produced rows to `NeoCsvExportService`, which serializes them and streams the file (`Content-Disposition: attachment`, and `Content-Type: text/csv` or the OOXML spreadsheet type). An unrecognized `export` value declines rather than guessing, so the caller writes JSON as if the param were absent. No per-window code is needed — it operates on the JSON envelope any list GET returns, in **both** of its shapes: `{response:{data:[...]}}` for a generic CRUD list (the standard Openbravo envelope from `DefaultJsonDataService`) and `{response:{data:{<key>:[...]}}}` for a custom handler that nests named collections.
+
+> **ETP-4997.** Only the nested shape used to be recognized, so every *generic* list export silently fell through to the JSON response: `tryExport` declined and the client saved a `.csv` file containing the raw JSON envelope. The failure was invisible because a missing rows array is a legitimate "not an exportable response" answer for a non-list GET, so the service can only warn and decline. `useCsvExport` on the client now also rejects a response whose `Content-Type` is not a CSV, so a future decline surfaces as an error instead of a corrupt file.
 
 Optional query params (all but `export` are optional):
 
 | Param | Purpose |
 |-------|---------|
-| `export=csv` | Opt into CSV streaming. |
+| `export=csv` \| `export=xlsx` | Opt into file streaming, and pick the format. Case-insensitive. |
 | `ids=a,b,c` | Keep only rows whose `id` is in the set. The client sends the already-filtered ids so a server-side export honors the on-screen (client-side) filters without re-implementing them. |
 | `columns=key:Label:type\|key2:Label2` | Ordered column spec. `key` may be a dotted path into nested values (e.g. `txns.0.documentNo`). `type=date` reformats an ISO date to `dd-MM-yyyy`. Omitted → every key of the first row is used. |
-| `filename=Name` | Download filename (`.csv` appended if missing). |
+| `filename=Name` | Download filename. The extension always follows the **format**, not the request: `filename=contacts-export.csv` with `export=xlsx` streams `contacts-export.xlsx`. The client deliberately sends one name for both formats, since the format is chosen at click time. |
+| `valueMaps={"col":{"raw":"Label"}}` | Per-column value translation, applied after the value is read and formatted. Lets a caller export an AD-coded column as the word a human reads — and re-types on an import round trip — instead of its stored code (`etgoIsperson` `false` → `Empresa`, `oBTIKTaxIDKey` `6` → `Otro documento probatorio`). A value with no entry is written unchanged; a **blank cell is never translated** (empty means "this row says nothing about the field", which is how the import reads it back); malformed JSON degrades to raw codes rather than failing the export. |
+
+**xlsx specifics (ETP-4997).** `export=xlsx` is served by `NeoXlsxExportWriter` (`SXSSFWorkbook`, sliding row window, so a 5000-row export never materializes in the JVM). Three properties a caller can rely on, and a maintainer must not break:
+
+- **Every cell is a string cell.** Measured against the reader the import uses: a text cell round-trips byte-exactly (`08018` keeps its leading zero, `1.234,56` its separators, a date the exact `dd-MM-yyyy` the CSV writes), while a typed cell does not — written as a number, `08018` comes back as `8018`, unrecoverably. The export exists to feed a re-import, so typed cells would trade that guarantee for nicer sorting in Excel.
+- **The CSV formula-injection apostrophe is NOT applied.** A workbook string cell is inert — a formula is a different cell type — so `=SUM(A1)` stored as a string is just text, and the prefix would be a literal character in the user's spreadsheet. Escaping is per-format and stays with each writer.
+- **Both formats share one cell projection** (`NeoExportTable`: column spec, dotted paths, `type=date` reformatting, `valueMaps`, the `ids` filter). Two writers resolving cells independently would be two chances to disagree, and a disagreement surfaces as a re-import that maps a column differently depending on which format the user picked.
+
+The xlsx branch writes to `response.getOutputStream()`; the CSV branch keeps `getWriter()`. Those are mutually exclusive on one `HttpServletResponse` — touching both throws `IllegalStateException` at runtime, not at compile time — so only one branch may ever run per request. Apache POI needed no new runtime dependency: it is already declared in the Etendo core compile classpath and deployed in `WEB-INF/lib`, so the module pins it `compileOnly` at the deployed version (a `compileOnly` that drifts ahead of the runtime jar compiles fine and fails with `NoSuchMethodError`).
+
+**Child records a list row does not carry** — `includeChildData=1`
+
+A CSV export feeds a file the user edits and re-imports, so it needs whatever the import writes, including records on other tables. A list row has no way to express those, and the `fields` projection cannot expand a child collection (§4.12.5 — it is a flat whitelist over the entity's own keys). The export therefore sends `includeChildData=1` on every list GET, as a standing request: *a handler that can supply its child records should.* Handlers that cannot simply ignore it, exactly as they ignore `export`/`columns`.
+
+`BusinessPartnerHandler` implements it for Contacts (`attachChildData`): on a list GET it attaches each partner's primary contact person (`AD_User`) and primary address (`C_BPartner_Location` + `C_Location`) under a nested `etgoChildData` object, which the export addresses by dotted path (`columns=etgoChildData.city:ciudad`). Conventions worth copying in a new implementation:
+
+- **Nest, do not flatten.** A nested object cannot collide with a present or future DAL property name, and the `columns` spec already understands dotted paths.
+- **Reuse the ranking the UI already shows.** The address ranking is copied from `ETGO_GET_LOCATION` (the function behind the `eTGOLocation` column) — bill-to, then ship-to, then newest — so the list and the exported file cannot disagree. The contact is the oldest active one, the same one the `etgoEmail` fallback picks.
+- **One statement per child set.** A window function over `c_bpartner_id = ANY(?)` keeps a 5000-row export at two queries instead of ten thousand.
+- **Opt-in, and non-fatal.** The normal grid does not need the data and should not pay for it; a failed enrichment declines (leaving the default result) so the user gets empty columns, never a failed export.
 
 The export is intercepted at the two points where list responses are written: `NeoCrudHandler.handleWindowEntityCrud` (generic CRUD + entity-qualifier handlers) and `NeoRequestRouter.handleReportSpecRequest` (single-segment custom handlers such as `bank-statements`). Output is built fully in server memory from the rows the handler already returns, so large lists are streamed by the server rather than assembled in the browser.
 
