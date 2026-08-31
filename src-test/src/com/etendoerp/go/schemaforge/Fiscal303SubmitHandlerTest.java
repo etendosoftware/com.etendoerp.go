@@ -223,6 +223,57 @@ public class Fiscal303SubmitHandlerTest {
     assertFalse(handler.allowsPost("modified"));
   }
 
+  /**
+   * ETP-5027 (QA F7): {@code submit} was known and POST-accepted, but {@code allowsGet} was never
+   * overridden, so the base default of {@code true} let a GET through the method check and
+   * straight into a real AEAT filing. The other three entities are reads and must keep GET.
+   */
+  @Test
+  public void testAllowsGet_submitIsPostOnly() {
+    assertFalse(handler.allowsGet("submit"));
+    assertTrue(handler.allowsGet("boxes"));
+    assertTrue(handler.allowsGet("generate"));
+    assertTrue(handler.allowsGet("modified"));
+  }
+
+  /**
+   * The end-to-end consequence: a GET on {@code /fiscal303/submit} is answered 405 and never
+   * reaches {@code dispatch}. Asserted through {@code handle} rather than only through
+   * {@code allowsGet} so the method gate itself is covered — no year/period is supplied, so if
+   * the request got past the gate it would fail with a 400 instead.
+   */
+  @Test
+  public void testGetSubmitReturns405AndNeverDispatches() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse res = mock(HttpServletResponse.class);
+
+    h.handle("submit", "GET", req, res);
+
+    verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED), anyString());
+    verify(servlet, never())
+        .sendError(eq(res), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+  }
+
+  /** The reads are unaffected: a GET on them passes the method gate and reaches validation. */
+  @Test
+  public void testGetOnReadEntitiesPassesTheMethodGate() throws Exception {
+    for (String entity : Arrays.asList("boxes", "generate", "modified")) {
+      NeoServlet servlet = mock(NeoServlet.class);
+      Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+      HttpServletRequest req = mock(HttpServletRequest.class);
+      HttpServletResponse res = mock(HttpServletResponse.class);
+
+      h.handle(entity, "GET", req, res);
+
+      // Past the method gate: it fails on the missing year/period instead.
+      verify(servlet, never()).sendError(eq(res),
+          eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED), anyString());
+      verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+    }
+  }
+
   // ── declarationDataJson ───────────────────────────────────────────────────
 
   @Test
