@@ -1404,6 +1404,14 @@ A requested `$_identifier` companion is normalised to its base property, for bot
 the validation — `fields:["businessPartner$_identifier"]` returns the FK *and* its label (it used to
 return only `id`) and is never mislabelled as unknown.
 
+The always-readable audit keys are known too (ETP-5073). `updated` is an AD *column* on every table
+but not an AD *field*, so no `ETGO_SF_FIELD` row exists for it and no window can opt in; the read
+path serves it anyway (`NeoFieldFilter.ALWAYS_READABLE_KEYS`, ETP-4787). Until ETP-5073 the emittable
+set omitted it, so `fields:["name","updated"]` returned `updated` in `data` **and** listed it in
+`unknownFields` — a response contradicting itself, which for an agent consumer is worse than no
+signal at all. The set is now unioned into `emittableResponseKeys()` only: `updated` stays
+unwritable, and a client that sends it on a create is still filtered/rejected exactly as before.
+
 ---
 
 ## 5. Configuration
