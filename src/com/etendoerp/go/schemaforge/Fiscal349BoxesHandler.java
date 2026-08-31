@@ -58,6 +58,16 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
   private static final String OPERATORS = "operators";
   private static final String GENERATE  = "generate";
 
+  /** AEAT349 tributary keys, in the order the summary object exposes them. */
+  private static final List<String> SUMMARY_KEYS = Arrays.asList("E", "S", "A", "I");
+
+  /**
+   * Marks an operator row that comes from a corrective (rectificative) invoice — AEAT
+   * "registro tipo 2". See {@link #computeOperators} for why these rows are kept out of the
+   * regular {@code summary}.
+   */
+  private static final String RECTIFICATIVE = "rectificative";
+
   Fiscal349BoxesHandler(NeoServlet servlet) {
     super(servlet);
   }
@@ -133,19 +143,30 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     Set<Map<String, Object>> salesBP =
         dao349.getTaxBaseAmountPerBusinessPartner(sales, taxesSales,    false, taxReport);
 
-    Map<String, BigDecimal> summaryByKey = new LinkedHashMap<>();
-    for (String k : Arrays.asList("E", "S", "A", "I")) summaryByKey.put(k, BigDecimal.ZERO);
+    // ETP-5027: correctives are excluded from purch/sales above, so a second per-BP aggregation
+    // pass is what makes them visible in Operadores at all. They are deliberately aggregated
+    // separately — never merged into purchaseBP/salesBP — so the regular summary stays exactly
+    // what it was and the rows can be badged in the UI. Reported as a SIGNED DELTA against the
+    // originally declared base: see correctiveDeltaRows.
+    Map<String, BigDecimal> summaryByKey       = emptyKeyTotals();
+    Map<String, BigDecimal> rectificativeByKey = emptyKeyTotals();
 
     List<Map<String, Object>> all = new ArrayList<>(purchaseBP);
     all.addAll(salesBP);
 
-    Map<String, BusinessPartner> bpMap        = loadBpMap(all);
-    JSONArray                    operatorsArr = buildOperatorsArray(all, bpMap, summaryByKey);
+    List<Map<String, Object>> allRectificative =
+        correctiveDeltaRows(dao349, corrPurch, taxesPurchase, true,  taxReport);
+    allRectificative.addAll(
+        correctiveDeltaRows(dao349, corrSales, taxesSales,    false, taxReport));
 
-    JSONObject summary = new JSONObject();
-    for (Map.Entry<String, BigDecimal> e : summaryByKey.entrySet()) {
-      summary.put("total" + e.getKey(), e.getValue().setScale(2, RoundingMode.HALF_UP).toString());
-    }
+    List<Map<String, Object>> everyBpRow = new ArrayList<>(all);
+    everyBpRow.addAll(allRectificative);
+
+    Map<String, BusinessPartner> bpMap        = loadBpMap(everyBpRow);
+    JSONArray                    operatorsArr = buildOperatorsArray(all, bpMap, summaryByKey);
+    appendOperators(operatorsArr, allRectificative, bpMap, rectificativeByKey, true);
+
+    JSONObject summary = buildKeyTotals(summaryByKey);
 
     // Per-invoice AEAT349 key (E/S/A/I), resolved separately for purchase/sales invoices
     // against their respective tax rate sets, then merged — purch/sales invoice ids never
@@ -162,6 +183,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     JSONObject root = new JSONObject();
     root.put(OPERATORS, operatorsArr);
     root.put("summary",  summary);
+    root.put("rectificativeSummary", buildKeyTotals(rectificativeByKey));
     root.put("invoices", invoicesArr);
     root.put("rectifications", rectifArr);
     root.put("orgNif",   orgNif != null ? orgNif : "");
@@ -269,9 +291,50 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
         .collect(Collectors.toMap(BusinessPartner::getId, bp -> bp));
   }
 
+  /**
+   * Builds the regular (non-corrective) operator rows and accumulates their bases into
+   * {@code summaryByKey}. Kept as the original 3-arg signature so the ordinary path reads
+   * unchanged; corrective rows are appended afterwards via {@link #appendOperators}.
+   */
   JSONArray buildOperatorsArray(List<Map<String, Object>> rows,
       Map<String, BusinessPartner> bpMap, Map<String, BigDecimal> summaryByKey) throws Exception {
-    JSONArray arr = new JSONArray();
+    return appendOperators(new JSONArray(), rows, bpMap, summaryByKey, false);
+  }
+
+  /**
+   * Appends one operator row per non-zero per-business-partner aggregation in {@code rows} to
+   * {@code arr}, accumulating each base into {@code totalsByKey} (only for the four known
+   * AEAT349 keys — anything else is emitted as a row but contributes to no total).
+   *
+   * <p>Every row carries a {@code rectificative} flag. Corrective rows land in the SAME array
+   * as the regular ones — so the frontend's existing key filter and search pick them up for
+   * free — but are passed a DIFFERENT {@code totalsByKey} map by the caller, which is what
+   * keeps their amounts out of the regular {@code summary}. The AEAT treats correctives as a
+   * separate record type (registro tipo 2), so mixing the two subtotals would misstate the
+   * declaration.
+   *
+   * <p>A corrective base is a SIGNED delta (see {@link #toSignedDeltaRows}) and is legitimately
+   * negative, so nothing here may clamp or {@code abs()} it. The zero-base skip below is a
+   * {@code compareTo(ZERO) == 0} test precisely so it drops only no-op corrections and never a
+   * negative one; the accumulation into {@code totalsByKey} is a plain signed {@code add}.
+   *
+   * <p>ETP-5027 (QA F4): rows also carry {@code declaredYear}/{@code declaredPeriod} whenever the
+   * source row has them. The DAO groups corrective rows by
+   * {@code (BPId, TaxKey, Year, Period)} — correcting the same partner's 2025/T1 and 2025/T2
+   * sales of goods in one declaration legitimately produces TWO rows with the same
+   * {@code (bpId, key, rectificative)} triple — so without the year/period the frontend cannot
+   * tell them apart, which collided its React keys and its row selection. Regular rows come from
+   * {@code getTaxBaseAmountPerBusinessPartner}, which groups by {@code (BPId, TaxKey)} only and
+   * carries no {@code Year}/{@code Period}; the two keys are therefore emitted only when present,
+   * and regular rows keep exactly the shape they had. The names match the ones
+   * {@link #collectRectifications} already uses for the same concept.
+   *
+   * @param rectificative
+   *          value of the {@code rectificative} flag written on every row produced here
+   */
+  JSONArray appendOperators(JSONArray arr, List<Map<String, Object>> rows,
+      Map<String, BusinessPartner> bpMap, Map<String, BigDecimal> totalsByKey,
+      boolean rectificative) throws Exception {
     for (Map<String, Object> row : rows) {
       String     bpId = (String)     row.get("BPId");
       BigDecimal base = (BigDecimal) row.get("BPTaxBaseAmount");
@@ -287,12 +350,104 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       op.put("key",  key != null ? key : "");
       op.put("base", base.setScale(2, RoundingMode.HALF_UP).toString());
       op.put("vies", mapViesStatus(bp));
+      op.put(RECTIFICATIVE, rectificative);
+      putIfNotBlank(op, "declaredYear",   row.get("Year"));
+      putIfNotBlank(op, "declaredPeriod", row.get("Period"));
       arr.put(op);
-      if (key != null && summaryByKey.containsKey(key)) {
-        summaryByKey.put(key, summaryByKey.get(key).add(base));
+      if (key != null && totalsByKey.containsKey(key)) {
+        totalsByKey.put(key, totalsByKey.get(key).add(base));
       }
     }
     return arr;
+  }
+
+  /**
+   * Writes {@code key} only when the value is present and non-blank, so a row that has no such
+   * column keeps exactly the JSON shape it had before the column existed.
+   */
+  private static void putIfNotBlank(JSONObject json, String key, Object value) throws Exception {
+    String text = str(value);
+    if (StringUtils.isNotBlank(text)) {
+      json.put(key, text);
+    }
+  }
+
+  /** A zeroed E/S/A/I accumulator, one per subtotal being computed. */
+  private static Map<String, BigDecimal> emptyKeyTotals() {
+    Map<String, BigDecimal> totals = new LinkedHashMap<>();
+    for (String k : SUMMARY_KEYS) {
+      totals.put(k, BigDecimal.ZERO);
+    }
+    return totals;
+  }
+
+  /**
+   * Renders an E/S/A/I accumulator as the {@code totalE}/{@code totalS}/{@code totalA}/
+   * {@code totalI} JSON object — the shape used by BOTH {@code summary} and
+   * {@code rectificativeSummary}.
+   *
+   * <p>ETP-5027: deliberately emits NO grand total. E and S are <i>entregas</i> (sales) while
+   * A and I are <i>adquisiciones</i> (purchases); the AEAT never nets one against the other,
+   * so {@code E + S + A + I} is not a quantity that means anything. An earlier revision emitted
+   * such a {@code total} on the rectificative subtotal and it produced figures like
+   * {@code -32.00 + -5.00 = -37.00} — and would render {@code 0,00} for a -30 sales correction
+   * offset by a +30 purchase correction. The four per-key rows already carry the information.
+   */
+  static JSONObject buildKeyTotals(Map<String, BigDecimal> totalsByKey) throws Exception {
+    JSONObject json = new JSONObject();
+    for (Map.Entry<String, BigDecimal> e : totalsByKey.entrySet()) {
+      json.put("total" + e.getKey(), scaled(e.getValue()));
+    }
+    return json;
+  }
+
+  /**
+   * Per-business-partner rows for the corrective (rectificative) invoices of the period, with
+   * {@code BPTaxBaseAmount} rewritten as the SIGNED DELTA against the originally declared base —
+   * a rectification that removes 3 units of a 10.00 product reports {@code -30.00}.
+   *
+   * <p>Returns an empty list when there is nothing to query: the DAO's HQL filters with
+   * {@code it.invoice in :correctiveInvoices}, which is not valid SQL for an empty collection,
+   * and a period with no corrective invoices is the common case.
+   */
+  private static List<Map<String, Object>> correctiveDeltaRows(AEAT3492010ReportDao dao349,
+      Set<Invoice> invoices, List<TaxRate> taxRates, boolean isPurchase, TaxReport taxReport) {
+    if (invoices == null || invoices.isEmpty() || taxRates == null || taxRates.isEmpty()) {
+      return new ArrayList<>();
+    }
+    return toSignedDeltaRows(dao349.getCorrectiveTaxBaseAmountPerBusinessPartner(
+        invoices, taxRates, isPurchase, taxReport));
+  }
+
+  /**
+   * Converts {@code AEAT3492010ReportDao#getCorrectiveTaxBaseAmountPerBusinessPartner} rows from
+   * the AEAT's unsigned correction magnitude to the signed delta the Operadores view shows.
+   *
+   * <p><b>Why a negation.</b> That DAO computes {@code BPTaxBaseAmount} as
+   * {@code sum(it.taxableAmount * -1)} over the corrective invoice's own tax lines, so a credit
+   * note carrying {@code -30} becomes {@code +30}: an unsigned magnitude of the correction, not a
+   * delta. {@code AEAT3492010Report.generateLine2_Corrections} confirms the semantics — the
+   * registro tipo 2 record writes {@code BPFormerAmount - BPTaxBaseAmount} as the corrected base
+   * and {@code BPFormerAmount} as the previously declared one. Hence
+   * {@code corrected - former == -BPTaxBaseAmount}, which is the delta, and it holds in both
+   * directions: an upward correction yields a negative {@code BPTaxBaseAmount} and therefore a
+   * positive delta.
+   *
+   * <p>Rows are copied rather than mutated so the DAO's own maps are left untouched, and a null
+   * amount is passed through as null for {@link #appendOperators} to skip.
+   */
+  static List<Map<String, Object>> toSignedDeltaRows(List<Map<String, Object>> correctiveRows) {
+    List<Map<String, Object>> signed = new ArrayList<>();
+    if (correctiveRows == null) {
+      return signed;
+    }
+    for (Map<String, Object> row : correctiveRows) {
+      Map<String, Object> copy = new HashMap<>(row);
+      BigDecimal magnitude = (BigDecimal) row.get("BPTaxBaseAmount");
+      copy.put("BPTaxBaseAmount", magnitude == null ? null : magnitude.negate());
+      signed.add(copy);
+    }
+    return signed;
   }
 
   JSONArray collectInvoices(Set<Invoice> purch, Set<Invoice> sales,
