@@ -158,8 +158,9 @@ class FinancialAccountAccountingDefaultsSupportTest {
     }
   }
 
+  /** Named mock so a failed {@code verify()} prints which combination was expected, not a generic mock id. */
   private AccountingCombination combo(String id) {
-    return mock(AccountingCombination.class);
+    return mock(AccountingCombination.class, id);
   }
 
   // ── no-op guards ─────────────────────────────────────────────────────────────

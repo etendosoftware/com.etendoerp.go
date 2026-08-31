@@ -107,6 +107,8 @@ public final class FinancialAccountAccountingDefaultsSupport {
    * A field whose default code does not resolve to an active {@link AccountingCombination} on this
    * tenant's ledger (e.g. a non-PGC-España chart) is simply left {@code null} — this must never
    * throw or otherwise interrupt account creation.
+   *
+   * @param account the newly created (or updated) financial account to default; {@code null} is a no-op
    */
   public static void applyDefaultAccountingConfiguration(FIN_FinancialAccount account) {
     if (account == null) {
