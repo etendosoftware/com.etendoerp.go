@@ -4806,4 +4806,97 @@ public class NeoDefaultsServiceTest {
           metadata.has("notes"));
     }
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // tryInjectFromParentValues — ETP-4948 Issue 1: true master-detail parent-FK columns
+  // (AD_Column.ISPARENT = 'Y') must resolve from the parent record's own id even when
+  // AD_Column.DefaultValue carries no classic "@VarName@" expression.
+  //
+  // Root cause: C_Year.C_Calendar_ID is ISPARENT='Y' but DefaultValue is NULL. Before this
+  // fix, tryInjectFromParentValues only matched a "@VarName@" DefaultValue pattern, so this
+  // column always fell through to the org-blind resolveFirstComboOption fallback, which picks
+  // the alphabetically-first readable C_Calendar row — silently attaching a new Year to the
+  // wrong Calendar whenever a client has more than one (confirmed live on the GOClient tenant).
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  public void testTryInjectFromParentValuesInjectsOwnIdForIsParentColumnWithNoDefaultExpression()
+      throws Exception {
+    JSONObject body = new JSONObject();
+    Entity dalEntity = mock(Entity.class);
+    Column col = mockColumn("C_Calendar_ID", true, false, true);
+    when(col.isLinkToParentColumn()).thenReturn(true);
+    // AD_Column.DefaultValue is NULL for C_Year.C_Calendar_ID — confirmed via DB. The old
+    // "@VarName@"-only match made this column unresolvable through this path.
+    when(col.getDefaultValue()).thenReturn(null);
+    Property prop = mock(Property.class);
+    when(prop.isPrimitive()).thenReturn(false);
+
+    Map<String, Object> parentValues = new HashMap<>();
+    // Simulates a client with TWO C_Calendar records: NeoParentValuesLoader keys the parent
+    // record's own id by its DB column name, regardless of how many candidate calendars exist —
+    // this must win over whatever an org-blind alphabetical-first selector would have picked.
+    parentValues.put("C_CALENDAR_ID", "CALENDAR-CORRECT-ID");
+
+    boolean injected = (Boolean) invokePrivate(NeoMandatoryDefaultsService.class,
+        "tryInjectFromParentValues",
+        new Class<?>[]{ JSONObject.class, Entity.class, String.class, Column.class, Map.class,
+            Property.class },
+        body, dalEntity, "calendar", col, parentValues, prop);
+
+    assertTrue("Should inject the parent's own id for a true ISPARENT column", injected);
+    assertEquals("CALENDAR-CORRECT-ID", body.getString("calendar"));
+  }
+
+  @Test
+  public void testTryInjectFromParentValuesIsParentColumnFallsBackToVarNameExprWhenOwnKeyMissing()
+      throws Exception {
+    // Defense in depth: if parentValues somehow lacks the parent's own key (e.g. a null
+    // property value upstream) but the column DOES carry a classic "@VarName@" default, the
+    // pre-existing resolution path must still work — no regression on the legacy behavior.
+    JSONObject body = new JSONObject();
+    Entity dalEntity = mock(Entity.class);
+    Column col = mockColumn("Some_Other_ID", true, false, true);
+    when(col.isLinkToParentColumn()).thenReturn(true);
+    when(col.getDefaultValue()).thenReturn("@REF_COL@");
+    Property prop = mock(Property.class);
+    when(prop.isPrimitive()).thenReturn(false);
+
+    Map<String, Object> parentValues = new HashMap<>();
+    parentValues.put("REF_COL", "LEGACY-VALUE");
+
+    boolean injected = (Boolean) invokePrivate(NeoMandatoryDefaultsService.class,
+        "tryInjectFromParentValues",
+        new Class<?>[]{ JSONObject.class, Entity.class, String.class, Column.class, Map.class,
+            Property.class },
+        body, dalEntity, "someOther", col, parentValues, prop);
+
+    assertTrue(injected);
+    assertEquals("LEGACY-VALUE", body.getString("someOther"));
+  }
+
+  @Test
+  public void testTryInjectFromParentValuesNonParentColumnWithoutMatchingDefaultReturnsFalse()
+      throws Exception {
+    // A plain (non-ISPARENT) column with no "@VarName@" default must still resolve to nothing
+    // from this path — the new ISPARENT branch must not widen resolution for unrelated columns.
+    JSONObject body = new JSONObject();
+    Entity dalEntity = mock(Entity.class);
+    Column col = mockColumn("Description", false, false, true);
+    when(col.isLinkToParentColumn()).thenReturn(false);
+    when(col.getDefaultValue()).thenReturn(null);
+    Property prop = mock(Property.class);
+
+    Map<String, Object> parentValues = new HashMap<>();
+    parentValues.put("C_CALENDAR_ID", "CALENDAR-CORRECT-ID");
+
+    boolean injected = (Boolean) invokePrivate(NeoMandatoryDefaultsService.class,
+        "tryInjectFromParentValues",
+        new Class<?>[]{ JSONObject.class, Entity.class, String.class, Column.class, Map.class,
+            Property.class },
+        body, dalEntity, "description", col, parentValues, prop);
+
+    assertFalse(injected);
+    assertFalse(body.has("description"));
+  }
 }
