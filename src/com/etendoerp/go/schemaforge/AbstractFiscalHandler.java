@@ -25,6 +25,7 @@ import java.util.List;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Order;
@@ -39,6 +40,8 @@ import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.calendar.Period;
 
+import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
+
 abstract class AbstractFiscalHandler {
 
   protected static final Logger log = Logger.getLogger(AbstractFiscalHandler.class);
@@ -49,6 +52,12 @@ abstract class AbstractFiscalHandler {
   protected static final String PERIOD_KEY   = "period";
   protected static final String SINCE_KEY    = "since";
   protected static final String JSON_CT      = "application/json;charset=UTF-8";
+
+  /**
+   * Last-resort text for a 500 that has nothing better to say. {@link #userMessage} falls back to
+   * it so the browser is never handed a message-less error object (ETP-5027, QA F6).
+   */
+  protected static final String GENERIC_ERROR_MESSAGE = "An internal error occurred.";
 
   protected final NeoServlet servlet;
   private   final FiscalDeclCrudHandler declHandler;
@@ -101,11 +110,11 @@ abstract class AbstractFiscalHandler {
       dispatch(entityName, orgId, year, period, request, response);
     } catch (FiscalHandlerException e) {
       log.error("Error in /" + getModelKey() + "/" + entityName, e);
-      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, userMessage(e));
     } catch (Exception e) {
       log.error("Unexpected error in /" + getModelKey() + "/" + entityName, e);
       servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "An internal error occurred.");
+          GENERIC_ERROR_MESSAGE);
     }
   }
 
@@ -125,14 +134,74 @@ abstract class AbstractFiscalHandler {
       }
     } catch (Exception e) {
       log.error("Error in /" + getModelKey() + "/" + entityName, e);
-      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, userMessage(e));
     }
+  }
+
+  /**
+   * Builds the message sent to the browser for a failed fiscal request.
+   *
+   * <p>Two transformations, both required for the text to be readable:
+   * <ol>
+   *   <li><b>Unwrap.</b> {@link FiscalHandlerException} carries no message of its own — it is
+   *       built as {@code super(cause)}, so its {@code getMessage()} is the cause's
+   *       {@code toString()} and therefore prefixed with the cause's fully-qualified class name.
+   *       Reading the cause's own message drops that prefix. Only our own wrapper is unwrapped;
+   *       any other exception keeps its message as-is.</li>
+   *   <li><b>Translate.</b> Etendo business logic raises errors carrying a raw AD_Message key
+   *       (e.g. {@code @AEAT349_Phone_Contact_Mandatory@} thrown by {@code AEAT3492010Report}).
+   *       Forwarding that verbatim shows the literal key to the user, so it goes through
+   *       {@link NeoMessageTranslator#safeParseTranslation}. This covers every AEAT message
+   *       raised under both /fiscal349 and /fiscal303, which share this dispatch path.</li>
+   * </ol>
+   *
+   * <p>Falls back to the original message whenever unwrapping would yield nothing, so an
+   * exception with a message-less cause never degrades into a blank error.
+   *
+   * <p>ETP-5027 (QA F6): and falls back once more to {@link #GENERIC_ERROR_MESSAGE} when there is
+   * no message at all. {@code getMessage()} is legitimately null for e.g. a
+   * {@code NullPointerException}, {@code safeParseTranslation} passes null straight through, and
+   * {@code NeoResponse.error} then puts a null that jettison's jettison drops — leaving the
+   * browser a message-less {@code {"error":{"status":500}}} with nothing to show the user. This
+   * method is the single funnel for every fiscal error message, so the floor belongs here.
+   */
+  protected String userMessage(Throwable t) {
+    String message = t.getMessage();
+    if (t instanceof FiscalHandlerException && t.getCause() != null
+        && t.getCause().getMessage() != null && !t.getCause().getMessage().isEmpty()) {
+      message = t.getCause().getMessage();
+    }
+    String translated = NeoMessageTranslator.safeParseTranslation(message);
+    return StringUtils.isBlank(translated) ? GENERIC_ERROR_MESSAGE : translated;
   }
 
   protected abstract boolean isKnownEntity(String entityName);
 
   @SuppressWarnings("java:S1172")
   protected boolean allowsPost(String entityName) { return false; }
+
+  /**
+   * Whether {@code entityName} may be reached with GET. Defaults to {@code true} because every
+   * fiscal entity is a read. Mutating entities MUST override this to return {@code false} for
+   * themselves — {@code /fiscal349/validate-vies}, which writes VIES statuses, and
+   * {@code /fiscal303/submit}, which files a declaration with the AEAT.
+   *
+   * <p><b>This is not a drive-by or CSRF defence, and must not be described as one.</b> NEO
+   * authenticates with a Bearer token in the {@code Authorization} header (every call in
+   * {@code fiscalModelsUtils.js} sets it), so a link, an address bar, an {@code <img>} prefetch
+   * or a cross-site form carries no credential and gets a 401 whatever the method. The real
+   * reasons are narrower, and all three are enough on their own:
+   * <ul>
+   *   <li>A GET with side effects lands in browser history, proxy caches and access logs.</li>
+   *   <li>Many HTTP clients and proxies <b>auto-retry GETs</b> but not POSTs, so a retry can
+   *       re-fire the side effect. Guards like {@code ALREADY_SUBMITTED} limit the consequence;
+   *       they do not remove it.</li>
+   *   <li>Plain HTTP semantics: GET must be safe and idempotent. Filing a declaration, or
+   *       writing back VIES statuses, is neither.</li>
+   * </ul>
+   */
+  @SuppressWarnings("java:S1172")
+  protected boolean allowsGet(String entityName) { return true; }
 
   protected abstract void dispatch(String entityName, String orgId, int year, String period,
       HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException;

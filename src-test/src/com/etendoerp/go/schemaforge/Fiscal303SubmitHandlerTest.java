@@ -56,6 +56,7 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.client.application.attachment.AttachImplementationManager;
@@ -63,6 +64,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
@@ -106,6 +108,15 @@ public class Fiscal303SubmitHandlerTest {
    */
   private static final String SAMPLE_303_CONTENT = "<T30301000>" + "O" + "B12345678"
       + StringUtils.rightPad("ACME SA", 80) + "2026" + "2T";
+
+  /**
+   * AD_Message key/translation pair used by the {@code Fiscal303SubmissionSupport} translation
+   * regression tests below (ETP-5027) — the same real key/text used by
+   * {@code NeoMessageTranslatorTest}/{@code AbstractFiscalHandlerTest}.
+   */
+  private static final String AD_MESSAGE_KEY = "@AEAT303_Bad_Bankruptcy_Statement_Date_Format@";
+  private static final String TRANSLATED_MESSAGE =
+      "Formato incorrecto para Fecha declaración del concurso (DDMMYYYY)";
 
   private Fiscal303BoxesHandler handler;
 
@@ -562,20 +573,25 @@ public class Fiscal303SubmitHandlerTest {
   }
 
   /**
-   * GAP (Sentinel QA, ETP-4456): {@code handleSubmit}'s own try/catch around
+   * PARTIALLY FIXED (ETP-5027). {@code handleSubmit}'s own try/catch around
    * {@code submitProduction}/{@code submitValidation} only catches {@link OBException} — the
    * documented AEAT-specific failure type. A genuinely unexpected {@link RuntimeException} (a bug
    * in the reflective call, a {@code ClassCastException}, a {@code NullPointerException} from an
-   * AEAT response shape the parser wasn't built for, ...) is NOT caught there. It propagates
-   * through {@code dispatch()}'s generic catch, gets wrapped in a
-   * {@code FiscalHandlerException(cause)} — whose {@code getMessage()} returns
-   * {@code cause.toString()}, e.g. {@code "java.lang.NullPointerException: boom"} — and
-   * {@code AbstractFiscalHandler.handle()}'s first catch block forwards that raw string verbatim
-   * to the client via {@code servlet.sendError(...)}.
+   * AEAT response shape the parser wasn't built for, ...) is still NOT caught there: it
+   * propagates through {@code dispatch()}'s generic catch and is wrapped in a
+   * {@code FiscalHandlerException(cause)}.
    *
-   * <p>This documents the current (undesirable) behavior: the client's internal exception class
-   * name and raw message leak into the response, AND — separately — the response arrives in a
-   * completely different JSON shape ({@code {"error":{"message":...,"status":...}}}, from {@link
+   * <p>What ETP-5027 changed is the message that reaches the client.
+   * {@code FiscalHandlerException} is built as {@code super(cause)}, so its {@code getMessage()}
+   * is {@code cause.toString()} — previously forwarded verbatim, leaking the internal exception
+   * CLASS NAME (e.g. {@code "java.lang.NullPointerException: boom"}). {@code
+   * AbstractFiscalHandler.userMessage()} now unwraps that wrapper and reports the cause's own
+   * message, and runs it through {@code NeoMessageTranslator} so AD_Message keys are resolved.
+   * The full exception, class name and stack trace included, is still written to the server log
+   * by the same catch block — diagnosability is unchanged, only the browser-facing text is.</p>
+   *
+   * <p>Still open, and deliberately out of ETP-5027's scope: the response arrives in a completely
+   * different JSON shape ({@code {"error":{"message":...,"status":...}}}, from {@link
    * NeoResponse#error}) than every other submit-flow outcome ({@code
    * {"status":"ERROR","errorCode":...}}, from {@code buildFailureJson}/{@code
    * buildSubmissionResultJson}). The frontend (`AeatSubmitFlow.jsx`) has no top-level {@code
@@ -585,7 +601,7 @@ public class Fiscal303SubmitHandlerTest {
    */
   @SuppressWarnings("unchecked")
   @Test
-  public void testHandleSubmit_unexpectedRuntimeExceptionFromAeatService_leaksRawExceptionMessage()
+  public void testHandleSubmit_unexpectedRuntimeExceptionFromAeatService_reportsUnwrappedCause()
       throws Exception {
     NeoServlet servlet = mock(NeoServlet.class);
     Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
@@ -610,10 +626,98 @@ public class Fiscal303SubmitHandlerTest {
       h.handle("submit", "POST", req, res);
     }
 
+    // ETP-5027: the cause's own message, with the FiscalHandlerException wrapper's
+    // class-name prefix stripped — no internal type names reach the browser.
     verify(servlet).sendError(eq(res), eq(HttpServletResponse.SC_INTERNAL_SERVER_ERROR),
-        argThat(msg -> msg != null && msg.contains("NullPointerException")));
+        argThat(msg -> "boom".equals(msg)));
     // The crash path must not also corrupt persisted state.
     verify(decl, never()).setDeclarationStatus(anyString());
+  }
+
+  /**
+   * ETP-5027: {@code Fiscal303SubmissionSupport}'s AEAT submission failure branch (site 2) — the
+   * documented {@link OBException} catch, distinct from the unexpected-{@code RuntimeException}
+   * path exercised just above — must also run {@code e.getMessage()} through
+   * {@code NeoMessageTranslator} so a real AEAT-raised {@code @AD_Message_Key@} comes back
+   * translated instead of as the literal key.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_aeatOBExceptionCarriesAdMessageKey_returnsTranslatedMessage()
+      throws Exception {
+    StringWriter capturedBody = new StringWriter();
+    HttpServletResponse res = responseCapturing(capturedBody);
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    HttpServletRequest req = requestFor("2026", "T2", "decl-1",
+        "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
+    FiscalDecl decl = matchingDecl("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class);
+        MockedConstruction<AEAT303SubmissionService> serviceMock =
+            mockConstruction(AEAT303SubmissionService.class, (mockService, ctx) -> {
+              when(mockService.hasOrgCertificate(any())).thenReturn(true);
+              when(mockService.submitProduction(any())).thenThrow(new OBException(AD_MESSAGE_KEY));
+            })) {
+      msgMock.when(() -> OBMessageUtils.parseTranslation(AD_MESSAGE_KEY))
+          .thenReturn(TRANSLATED_MESSAGE);
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
+      when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
+      stubFileGeneration(obDal);
+
+      h.handle("submit", "POST", req, res);
+
+      JSONObject body = new JSONObject(capturedBody.toString());
+      assertEquals("SUBMISSION_FAILED", body.getString("errorCode"));
+      assertEquals(TRANSLATED_MESSAGE, body.getJSONArray("errors").getString(0));
+    }
+    verify(decl, never()).setDeclarationStatus(anyString());
+  }
+
+  /**
+   * ETP-5027: same AEAT-failure branch (site 2), but without a live OBContext — translation
+   * cannot run, so the raw {@code @AD_Message_Key@} text must be returned unchanged rather than
+   * throwing or blanking the error out (mirrors {@code NeoMessageTranslator}'s own fallback
+   * contract).
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_aeatOBExceptionCarriesAdMessageKey_fallsBackWhenNoContext()
+      throws Exception {
+    StringWriter capturedBody = new StringWriter();
+    HttpServletResponse res = responseCapturing(capturedBody);
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    HttpServletRequest req = requestFor("2026", "T2", "decl-1",
+        "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
+    FiscalDecl decl = matchingDecl("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class);
+        MockedConstruction<AEAT303SubmissionService> serviceMock =
+            mockConstruction(AEAT303SubmissionService.class, (mockService, ctx) -> {
+              when(mockService.hasOrgCertificate(any())).thenReturn(true);
+              when(mockService.submitProduction(any())).thenThrow(new OBException(AD_MESSAGE_KEY));
+            })) {
+      msgMock.when(() -> OBMessageUtils.parseTranslation(AD_MESSAGE_KEY))
+          .thenThrow(new NullPointerException("no OBContext"));
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
+      when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
+      stubFileGeneration(obDal);
+
+      h.handle("submit", "POST", req, res);
+
+      JSONObject body = new JSONObject(capturedBody.toString());
+      assertEquals("SUBMISSION_FAILED", body.getString("errorCode"));
+      assertEquals(AD_MESSAGE_KEY, body.getJSONArray("errors").getString(0));
+    }
   }
 
   /**
@@ -755,6 +859,85 @@ public class Fiscal303SubmitHandlerTest {
     }
 
     verify(res).setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+  }
+
+  /**
+   * ETP-5027: {@code Fiscal303SubmissionSupport}'s file-generation failure branch (site 1) must
+   * run {@code e.getMessage()} through {@code NeoMessageTranslator} before it reaches the
+   * response — a raw {@code @AD_Message_Key@} token must never leak to the browser the way
+   * {@code @AEAT303_Bad_Bankruptcy_Statement_Date_Format@} did before this fix.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_fileGenerationThrowsAdMessageKey_returnsTranslatedMessage()
+      throws Exception {
+    StringWriter capturedBody = new StringWriter();
+    HttpServletResponse res = responseCapturing(capturedBody);
+    HttpServletRequest req = requestFor("2026", "T2", "decl-1",
+        "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    FiscalDecl decl = matchingDecl("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class);
+        MockedConstruction<AEAT303SubmissionService> serviceMock =
+            mockConstruction(AEAT303SubmissionService.class, (mockService, ctx) ->
+                when(mockService.hasOrgCertificate(any())).thenReturn(true))) {
+      msgMock.when(() -> OBMessageUtils.parseTranslation(AD_MESSAGE_KEY))
+          .thenReturn(TRANSLATED_MESSAGE);
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
+      when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
+      stubFileGeneration(obDal, KeyThrowingTaxReportGenerator.class);
+
+      h.handle("submit", "POST", req, res);
+
+      JSONObject body = new JSONObject(capturedBody.toString());
+      assertEquals("SUBMISSION_FAILED", body.getString("errorCode"));
+      assertEquals(TRANSLATED_MESSAGE, body.getJSONArray("errors").getString(0));
+    }
+  }
+
+  /**
+   * ETP-5027: without a live OBContext (translation cannot run — the everyday unit-test
+   * situation), the file-generation failure branch must degrade to the raw message unchanged
+   * rather than throwing or blanking the error out.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_fileGenerationThrowsAdMessageKey_fallsBackWhenNoContext()
+      throws Exception {
+    StringWriter capturedBody = new StringWriter();
+    HttpServletResponse res = responseCapturing(capturedBody);
+    HttpServletRequest req = requestFor("2026", "T2", "decl-1",
+        "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    FiscalDecl decl = matchingDecl("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class);
+        MockedConstruction<AEAT303SubmissionService> serviceMock =
+            mockConstruction(AEAT303SubmissionService.class, (mockService, ctx) ->
+                when(mockService.hasOrgCertificate(any())).thenReturn(true))) {
+      msgMock.when(() -> OBMessageUtils.parseTranslation(AD_MESSAGE_KEY))
+          .thenThrow(new NullPointerException("no OBContext"));
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
+      when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
+      stubFileGeneration(obDal, KeyThrowingTaxReportGenerator.class);
+
+      h.handle("submit", "POST", req, res);
+
+      JSONObject body = new JSONObject(capturedBody.toString());
+      assertEquals("SUBMISSION_FAILED", body.getString("errorCode"));
+      assertEquals(AD_MESSAGE_KEY, body.getJSONArray("errors").getString(0));
+    }
   }
 
   // ── handleSubmit — Justificante attachment behavior (test-mode attach follow-up, ETP-4456) ──
@@ -1682,6 +1865,23 @@ public class Fiscal303SubmitHandlerTest {
         String strAcctSchemaId, String strYearId, String strPeriodId,
         Map<String, String> inputParams) {
       throw new IllegalStateException("Malformed accounting data — cannot generate file");
+    }
+  }
+
+  /**
+   * {@link OBTL_TaxReport_I} test double that throws an {@link OBException} carrying a raw
+   * {@code @AD_Message_Key@} token (mirroring what {@code AEAT303Report2023#isValidDate} actually
+   * raises via {@code OBTL_Exception}, e.g. {@code AD_MESSAGE_KEY}) — used by the ETP-5027
+   * translation regression tests below to verify {@code handleSubmit}'s file-generation catch
+   * block ({@code Fiscal303SubmissionSupport} site 1) runs the message through
+   * {@code NeoMessageTranslator} before it reaches {@code buildFailureJson}.
+   */
+  public static final class KeyThrowingTaxReportGenerator implements OBTL_TaxReport_I {
+    @Override
+    public HashMap<String, Object> generateElectronicFile(String strOrgId, String strReportId,
+        String strAcctSchemaId, String strYearId, String strPeriodId,
+        Map<String, String> inputParams) {
+      throw new OBException(AD_MESSAGE_KEY);
     }
   }
 
