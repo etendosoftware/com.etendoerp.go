@@ -1,0 +1,686 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright © 2021–2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+
+package com.etendoerp.go.schemaforge.handlers;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+
+import org.hibernate.criterion.Criterion;
+import org.junit.Test;
+import org.mockito.ArgumentCaptor;
+import org.mockito.MockedStatic;
+import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
+import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
+import org.openbravo.model.financialmgmt.gl.GLItem;
+import org.openbravo.model.financialmgmt.gl.GLItemAccounts;
+
+/**
+ * Unit tests for {@link GlItemProvisioningSupport} (ETP-5020).
+ *
+ * <p>Every DB-touching method is a {@code protected} seam; these tests exercise the class through
+ * {@code OBDal}/{@code OBProvider} static mocks, following the same convention as
+ * {@code OnboardingAccountingWiringServiceTest} and this package's own
+ * {@code ChartOfAccountsHandlerTest}. No live database is required.
+ */
+@SuppressWarnings("unchecked")
+public class GlItemProvisioningSupportTest {
+
+  private final GlItemProvisioningSupport support = new GlItemProvisioningSupport();
+
+  // ── resolveActiveSchemas ────────────────────────────────────────────────────
+
+  @Test
+  public void resolveActiveSchemasReturnsCriteriaListResult() {
+    Client client = mock(Client.class);
+    AcctSchema s1 = mock(AcctSchema.class);
+    AcctSchema s2 = mock(AcctSchema.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AcctSchema> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(AcctSchema.class)).thenReturn(crit);
+    when(crit.list()).thenReturn(Arrays.asList(s1, s2));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      List<AcctSchema> result = support.resolveActiveSchemas(client);
+      assertEquals(Arrays.asList(s1, s2), result);
+    }
+  }
+
+  // ── resolveNaturalCombination — predicate shape ────────────────────────────
+
+  @Test
+  public void resolveNaturalCombinationAppliesAllElevenDimensionRestrictions() {
+    ElementValue subaccount = mock(ElementValue.class);
+    AcctSchema schema = mock(AcctSchema.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AccountingCombination> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(crit);
+    ArgumentCaptor<Criterion> captor = ArgumentCaptor.forClass(Criterion.class);
+    when(crit.add(captor.capture())).thenReturn(crit);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      support.resolveNaturalCombination(subaccount, schema);
+    }
+
+    // account + schema (2 eq) + the 11 dimension-IS-NULL checks mirrored from
+    // C_ELEMENTVALUE_TRG.xml (product, businessPartner, trxOrganization, locationFromAddress,
+    // locationToAddress, salesRegion, project, salesCampaign, activity, stDimension, ndDimension)
+    // = 13 total restrictions.
+    assertEquals(13, captor.getAllValues().size());
+    assertTrue(captor.getAllValues().stream()
+        .anyMatch(c -> c.toString().contains(AccountingCombination.PROPERTY_LOCATIONFROMADDRESS)));
+    assertTrue(captor.getAllValues().stream()
+        .anyMatch(c -> c.toString().contains(AccountingCombination.PROPERTY_LOCATIONTOADDRESS)));
+    verify(crit).addOrderBy(AccountingCombination.PROPERTY_ID, true);
+    verify(crit).setMaxResults(1);
+  }
+
+  // ── ensureGlItemForSubaccount — guards ─────────────────────────────────────
+
+  @Test
+  public void ensureGlItemForSubaccountNoOpsWhenSubaccountNull() {
+    support.ensureGlItemForSubaccount(null, Collections.singletonList(mock(AcctSchema.class)));
+    // no exception, no static OBDal/OBProvider touch — nothing to assert beyond "did not throw"
+  }
+
+  @Test
+  public void ensureGlItemForSubaccountNoOpsWhenSchemasEmpty() {
+    support.ensureGlItemForSubaccount(mock(ElementValue.class), Collections.emptyList());
+  }
+
+  @Test
+  public void ensureGlItemForSubaccountNoOpsWhenSchemasNull() {
+    support.ensureGlItemForSubaccount(mock(ElementValue.class), null);
+  }
+
+  // ── ensureGlItemForSubaccount — Case 3: no natural combination ─────────────
+
+  @Test
+  public void ensureGlItemForSubaccountSkipsSchemaWithNoNaturalCombination() {
+    ElementValue subaccount = mock(ElementValue.class);
+    AcctSchema schema = mock(AcctSchema.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(null); // summary/heading account — no combination
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      support.ensureGlItemForSubaccount(subaccount, Collections.singletonList(schema));
+
+      obProvider.verify(OBProvider::getInstance, never());
+      verify(dal, never()).createCriteria(GLItemAccounts.class);
+    }
+  }
+
+  // ── ensureGlItemForSubaccount — fresh creation ─────────────────────────────
+
+  @Test
+  public void ensureGlItemForSubaccountCreatesGlItemAndAccountsWhenNoneExist() {
+    ElementValue subaccount = mock(ElementValue.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(subaccount.getClient()).thenReturn(client);
+    when(subaccount.getOrganization()).thenReturn(org);
+    when(subaccount.getName()).thenReturn("Caja Euros");
+
+    AcctSchema schema = mock(AcctSchema.class);
+    AccountingCombination combo = mock(AccountingCombination.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(combo);
+    when(comboCrit.list()).thenReturn(Collections.emptyList()); // no other combos linked yet
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(null); // no existing GLItemAccounts row
+
+    GLItem glItem = mock(GLItem.class);
+    when(glItem.getClient()).thenReturn(client);
+    when(glItem.getOrganization()).thenReturn(org);
+    GLItemAccounts link = mock(GLItemAccounts.class);
+
+    OBProvider obProviderInstance = mock(OBProvider.class);
+    when(obProviderInstance.get(GLItem.class)).thenReturn(glItem);
+    when(obProviderInstance.get(GLItemAccounts.class)).thenReturn(link);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obProvider.when(OBProvider::getInstance).thenReturn(obProviderInstance);
+
+      support.ensureGlItemForSubaccount(subaccount, Collections.singletonList(schema));
+
+      verify(glItem).setNewOBObject(true);
+      verify(glItem).setClient(client);
+      verify(glItem).setOrganization(org);
+      verify(glItem).setName("Caja Euros");
+      verify(glItem).setActive(true);
+      verify(dal).save(glItem);
+
+      verify(link).setNewOBObject(true);
+      verify(link).setClient(client);
+      verify(link).setOrganization(org);
+      verify(link).setGLItem(glItem);
+      verify(link).setAccountingSchema(schema);
+      verify(link).setGlitemDebitAcct(combo);
+      verify(link).setGlitemCreditAcct(combo);
+      verify(link).setActive(true);
+      verify(dal).save(link);
+    }
+  }
+
+  // ── ensureGlItemForSubaccount — idempotency ────────────────────────────────
+
+  @Test
+  public void ensureGlItemForSubaccountReusesExistingLinkAndSyncsRenamedName() {
+    ElementValue subaccount = mock(ElementValue.class);
+    when(subaccount.getName()).thenReturn("New Name");
+
+    AcctSchema schema = mock(AcctSchema.class);
+    AccountingCombination combo = mock(AccountingCombination.class);
+    GLItem existingGlItem = mock(GLItem.class);
+    when(existingGlItem.getName()).thenReturn("Old Name");
+    GLItemAccounts existingLink = mock(GLItemAccounts.class);
+    when(existingLink.getGLItem()).thenReturn(existingGlItem);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(combo);
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(existingLink);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      support.ensureGlItemForSubaccount(subaccount, Collections.singletonList(schema));
+
+      // Idempotent: no new GLItem/GLItemAccounts minted.
+      obProvider.verify(OBProvider::getInstance, never());
+      // Rename propagated onto the already-linked GL Item.
+      verify(existingGlItem).setName("New Name");
+      verify(dal).save(existingGlItem);
+    }
+  }
+
+  @Test
+  public void ensureGlItemForSubaccountDoesNotResaveWhenNameAlreadyMatches() {
+    ElementValue subaccount = mock(ElementValue.class);
+    when(subaccount.getName()).thenReturn("Same Name");
+
+    AcctSchema schema = mock(AcctSchema.class);
+    AccountingCombination combo = mock(AccountingCombination.class);
+    GLItem existingGlItem = mock(GLItem.class);
+    when(existingGlItem.getName()).thenReturn("Same Name");
+    GLItemAccounts existingLink = mock(GLItemAccounts.class);
+    when(existingLink.getGLItem()).thenReturn(existingGlItem);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(combo);
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(existingLink);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      support.ensureGlItemForSubaccount(subaccount, Collections.singletonList(schema));
+
+      verify(existingGlItem, never()).setName(any());
+      verify(dal, never()).save(existingGlItem);
+    }
+  }
+
+  // ── ensureGlItemForSubaccount — multi-schema (2+ active AcctSchema) ────────
+
+  @Test
+  public void ensureGlItemForSubaccountCreatesOneAccountsRowPerSchemaReusingSameGlItem() {
+    ElementValue subaccount = mock(ElementValue.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(subaccount.getClient()).thenReturn(client);
+    when(subaccount.getOrganization()).thenReturn(org);
+    when(subaccount.getName()).thenReturn("Caja Euros");
+
+    AcctSchema schema1 = mock(AcctSchema.class);
+    AcctSchema schema2 = mock(AcctSchema.class);
+    AccountingCombination combo1 = mock(AccountingCombination.class);
+    AccountingCombination combo2 = mock(AccountingCombination.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(combo1, combo2); // one call per schema
+    when(comboCrit.list()).thenReturn(Collections.emptyList()); // fallback lookup, schema1 only
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(null, null); // neither schema provisioned yet
+
+    GLItem glItem = mock(GLItem.class);
+    when(glItem.getClient()).thenReturn(client);
+    when(glItem.getOrganization()).thenReturn(org);
+    GLItemAccounts link1 = mock(GLItemAccounts.class);
+    GLItemAccounts link2 = mock(GLItemAccounts.class);
+
+    OBProvider obProviderInstance = mock(OBProvider.class);
+    when(obProviderInstance.get(GLItem.class)).thenReturn(glItem);
+    when(obProviderInstance.get(GLItemAccounts.class)).thenReturn(link1, link2);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obProvider.when(OBProvider::getInstance).thenReturn(obProviderInstance);
+
+      support.ensureGlItemForSubaccount(subaccount, Arrays.asList(schema1, schema2));
+
+      verify(obProviderInstance, times(1)).get(GLItem.class); // one GL Item for both schemas
+      verify(obProviderInstance, times(2)).get(GLItemAccounts.class);
+      verify(link1).setGLItem(glItem);
+      verify(link1).setAccountingSchema(schema1);
+      verify(link1).setGlitemDebitAcct(combo1);
+      verify(link2).setGLItem(glItem);
+      verify(link2).setAccountingSchema(schema2);
+      verify(link2).setGlitemDebitAcct(combo2);
+    }
+  }
+
+  @Test
+  public void ensureGlItemForSubaccountReusesGlItemFoundViaOtherSchemaCombination() {
+    // Simulates a schema becoming active AFTER the subaccount already has a GL Item from an
+    // earlier schema — the multi-schema idempotency fallback (findGlItemLinkedToAnyCombinationOf).
+    ElementValue subaccount = mock(ElementValue.class);
+    when(subaccount.getName()).thenReturn("Caja Euros");
+
+    AcctSchema newSchema = mock(AcctSchema.class);
+    AccountingCombination comboForNewSchema = mock(AccountingCombination.class);
+    AccountingCombination otherSchemaCombo = mock(AccountingCombination.class);
+    GLItem existingGlItem = mock(GLItem.class);
+    GLItemAccounts existingOtherLink = mock(GLItemAccounts.class);
+    when(existingOtherLink.getGLItem()).thenReturn(existingGlItem);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(comboForNewSchema);
+    when(comboCrit.list()).thenReturn(Collections.singletonList(otherSchemaCombo));
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    // 1st call: findGlItemAccountsByCombination(comboForNewSchema) -> null (not provisioned yet)
+    // 2nd call: findGlItemAccountsByCombination(otherSchemaCombo) inside the fallback -> found
+    when(linkCrit.uniqueResult()).thenReturn(null, existingOtherLink);
+
+    GLItemAccounts newLink = mock(GLItemAccounts.class);
+    OBProvider obProviderInstance = mock(OBProvider.class);
+    when(obProviderInstance.get(GLItemAccounts.class)).thenReturn(newLink);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obProvider.when(OBProvider::getInstance).thenReturn(obProviderInstance);
+
+      support.ensureGlItemForSubaccount(subaccount, Collections.singletonList(newSchema));
+
+      verify(obProviderInstance, never()).get(GLItem.class); // reused, not created
+      verify(newLink).setGLItem(existingGlItem);
+      verify(newLink).setAccountingSchema(newSchema);
+      verify(newLink).setGlitemDebitAcct(comboForNewSchema);
+    }
+  }
+
+  // ── ensureGlItemForSubaccount — failure isolation ──────────────────────────
+
+  @Test
+  public void ensureGlItemForSubaccountSwallowsExceptionsAndNeverPropagates() {
+    ElementValue subaccount = mock(ElementValue.class);
+    AcctSchema schema = mock(AcctSchema.class);
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.createCriteria(AccountingCombination.class))
+        .thenThrow(new RuntimeException("simulated DB failure"));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      // Must not throw — a GL Item provisioning defect can never block the caller's save.
+      support.ensureGlItemForSubaccount(subaccount, Collections.singletonList(schema));
+    }
+  }
+
+  @Test
+  public void ensureGlItemForSubaccountContinuesAfterOneSchemaFails() {
+    ElementValue subaccount = mock(ElementValue.class);
+    AcctSchema failingSchema = mock(AcctSchema.class);
+    when(failingSchema.getId()).thenReturn("SCHEMA-FAIL");
+    AcctSchema succeedingSchema = mock(AcctSchema.class);
+    GLItem glItem = mock(GLItem.class);
+
+    class TestableSupport extends GlItemProvisioningSupport {
+      private int calls;
+
+      @Override
+      protected GLItem ensureGlItemForSchema(ElementValue subaccount, AcctSchema schema,
+          GLItem reusableGlItem) {
+        calls++;
+        if (schema == failingSchema) {
+          throw new RuntimeException("schema-specific failure");
+        }
+        return glItem;
+      }
+    }
+
+    TestableSupport testableSupport = new TestableSupport();
+
+    testableSupport.ensureGlItemForSubaccount(subaccount,
+        Arrays.asList(failingSchema, succeedingSchema));
+
+    assertEquals(2, testableSupport.calls);
+  }
+
+  /**
+   * Closes the coverage gap flagged in Alex's last review round: {@code
+   * ensureGlItemForSubaccountContinuesAfterOneSchemaFails} above overrides {@code
+   * ensureGlItemForSchema} entirely, so it never exercises the REAL {@code reusableGlItem}
+   * threading through {@link GlItemProvisioningSupport#doEnsureGlItemForSubaccount}'s loop. This
+   * test runs the actual (unoverridden) production logic for 3 schemas, with the middle schema
+   * failing for a real reason (a DB-lookup exception, not a test double), and asserts that the
+   * GL Item minted for schema 1 is still correctly reused for schema 3 — i.e. a schema-2 failure
+   * does not corrupt or reset the {@code reusableGlItem} the loop threads across iterations.
+   */
+  @Test
+  public void ensureGlItemForSubaccountThreadsReusableGlItemAcrossARealMidLoopFailure() {
+    ElementValue subaccount = mock(ElementValue.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(subaccount.getClient()).thenReturn(client);
+    when(subaccount.getOrganization()).thenReturn(org);
+    when(subaccount.getName()).thenReturn("Caja Euros");
+
+    AcctSchema schema1 = mock(AcctSchema.class);
+    AcctSchema failingSchema2 = mock(AcctSchema.class);
+    AcctSchema schema3 = mock(AcctSchema.class);
+    AccountingCombination combo1 = mock(AccountingCombination.class);
+    AccountingCombination combo3 = mock(AccountingCombination.class);
+
+    OBDal dal = mock(OBDal.class);
+
+    // dal.createCriteria(AccountingCombination.class) is called 4 times across the whole run:
+    //   #1 schema1 resolveNaturalCombination -> comboCrit
+    //   #2 schema1 findGlItemLinkedToAnyCombinationOf fallback (reusableGlItem still null)
+    //   #3 failingSchema2 resolveNaturalCombination -> throws a REAL exception (simulated DB
+    //      failure), never reaching the reusableGlItem parameter at all
+    //   #4 schema3 resolveNaturalCombination -> comboCrit (no fallback call: reusableGlItem
+    //      carried over from schema1 is already non-null, so findGlItemLinkedToAnyCombinationOf
+    //      is never invoked for schema3)
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    RuntimeException simulatedFailure = new RuntimeException("simulated schema-2 DB failure");
+    when(dal.createCriteria(AccountingCombination.class))
+        .thenReturn(comboCrit, comboCrit)
+        .thenThrow(simulatedFailure)
+        .thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(combo1, combo3);
+    when(comboCrit.list()).thenReturn(Collections.emptyList()); // schema1's fallback: nothing else linked yet
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(null, null); // neither schema1 nor schema3 provisioned yet
+
+    GLItem glItem = mock(GLItem.class);
+    when(glItem.getClient()).thenReturn(client);
+    when(glItem.getOrganization()).thenReturn(org);
+    GLItemAccounts link1 = mock(GLItemAccounts.class);
+    GLItemAccounts link3 = mock(GLItemAccounts.class);
+
+    OBProvider obProviderInstance = mock(OBProvider.class);
+    when(obProviderInstance.get(GLItem.class)).thenReturn(glItem);
+    when(obProviderInstance.get(GLItemAccounts.class)).thenReturn(link1, link3);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obProvider.when(OBProvider::getInstance).thenReturn(obProviderInstance);
+
+      // Real production code path — no method overrides, no test double.
+      support.ensureGlItemForSubaccount(subaccount,
+          Arrays.asList(schema1, failingSchema2, schema3));
+
+      // Exactly one GL Item minted for the whole run: schema1 created it, schema3 reused the
+      // SAME instance despite schema2 throwing in between — the reusableGlItem thread survived.
+      verify(obProviderInstance, times(1)).get(GLItem.class);
+      verify(obProviderInstance, times(2)).get(GLItemAccounts.class);
+
+      verify(link1).setGLItem(glItem);
+      verify(link1).setAccountingSchema(schema1);
+      verify(link1).setGlitemDebitAcct(combo1);
+
+      verify(link3).setGLItem(glItem);
+      verify(link3).setAccountingSchema(schema3);
+      verify(link3).setGlitemDebitAcct(combo3);
+
+      // Exactly 2 GLItemAccounts rows were saved for the whole run (schema1 + schema3) — nothing
+      // was ever created for the failing schema in between.
+      verify(dal, times(2)).save(any(GLItemAccounts.class));
+    }
+  }
+
+  // ── setGlItemAccountsActiveForSubaccount — deactivate / reactivate ─────────
+
+  @Test
+  public void setGlItemAccountsActiveDeactivatesExistingLink() {
+    ElementValue subaccount = mock(ElementValue.class);
+    AcctSchema schema = mock(AcctSchema.class);
+    AccountingCombination combo = mock(AccountingCombination.class);
+    GLItemAccounts link = mock(GLItemAccounts.class);
+    when(link.isActive()).thenReturn(true);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(combo);
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(link);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      support.setGlItemAccountsActiveForSubaccount(subaccount, Collections.singletonList(schema),
+          false);
+
+      verify(link).setActive(false);
+      verify(dal).save(link);
+    }
+  }
+
+  @Test
+  public void setGlItemAccountsActiveReactivatesExistingLink() {
+    ElementValue subaccount = mock(ElementValue.class);
+    AcctSchema schema = mock(AcctSchema.class);
+    AccountingCombination combo = mock(AccountingCombination.class);
+    GLItemAccounts link = mock(GLItemAccounts.class);
+    when(link.isActive()).thenReturn(false);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(combo);
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(link);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      support.setGlItemAccountsActiveForSubaccount(subaccount, Collections.singletonList(schema),
+          true);
+
+      verify(link).setActive(true);
+      verify(dal).save(link);
+    }
+  }
+
+  @Test
+  public void setGlItemAccountsActiveIsNoOpWhenAlreadyInDesiredState() {
+    ElementValue subaccount = mock(ElementValue.class);
+    AcctSchema schema = mock(AcctSchema.class);
+    AccountingCombination combo = mock(AccountingCombination.class);
+    GLItemAccounts link = mock(GLItemAccounts.class);
+    when(link.isActive()).thenReturn(true);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(combo);
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(link);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      support.setGlItemAccountsActiveForSubaccount(subaccount, Collections.singletonList(schema),
+          true);
+
+      verify(link, never()).setActive(any(Boolean.class));
+      verify(dal, never()).save(link);
+    }
+  }
+
+  @Test
+  public void setGlItemAccountsActiveNoOpsWhenNothingProvisionedYet() {
+    ElementValue subaccount = mock(ElementValue.class);
+    AcctSchema schema = mock(AcctSchema.class);
+    AccountingCombination combo = mock(AccountingCombination.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(combo);
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(null); // never provisioned (e.g. pre-ETP-5020 data)
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      // Must not throw even though there is nothing to (de)activate.
+      support.setGlItemAccountsActiveForSubaccount(subaccount, Collections.singletonList(schema),
+          false);
+    }
+  }
+
+  @Test
+  public void setGlItemAccountsActiveSwallowsExceptions() {
+    ElementValue subaccount = mock(ElementValue.class);
+    AcctSchema schema = mock(AcctSchema.class);
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.createCriteria(AccountingCombination.class))
+        .thenThrow(new RuntimeException("simulated DB failure"));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      support.setGlItemAccountsActiveForSubaccount(subaccount, Collections.singletonList(schema),
+          true);
+    }
+  }
+
+  @Test
+  public void setGlItemAccountsActiveContinuesAfterOneSchemaFails() {
+    ElementValue subaccount = mock(ElementValue.class);
+    AcctSchema failingSchema = mock(AcctSchema.class);
+    when(failingSchema.getId()).thenReturn("SCHEMA-FAIL");
+    AcctSchema succeedingSchema = mock(AcctSchema.class);
+
+    class TestableSupport extends GlItemProvisioningSupport {
+      private int calls;
+
+      @Override
+      protected void setGlItemAccountsActiveForSchema(ElementValue subaccount, AcctSchema schema,
+          boolean active) {
+        calls++;
+        if (schema == failingSchema) {
+          throw new RuntimeException("schema-specific failure");
+        }
+      }
+    }
+
+    TestableSupport testableSupport = new TestableSupport();
+
+    testableSupport.setGlItemAccountsActiveForSubaccount(subaccount,
+        Arrays.asList(failingSchema, succeedingSchema), false);
+
+    assertEquals(2, testableSupport.calls);
+  }
+
+  @Test
+  public void setGlItemAccountsActiveNoOpsWhenSubaccountNull() {
+    support.setGlItemAccountsActiveForSubaccount(null, Collections.singletonList(mock(AcctSchema.class)),
+        true);
+  }
+
+  @Test
+  public void setGlItemAccountsActiveNoOpsWhenSchemasNull() {
+    // Symmetric guard to ensureGlItemForSubaccountNoOpsWhenSchemasNull — no exception, no static
+    // OBDal touch — nothing to assert beyond "did not throw".
+    support.setGlItemAccountsActiveForSubaccount(mock(ElementValue.class), null, true);
+  }
+
+  @Test
+  public void setGlItemAccountsActiveNoOpsWhenSchemasEmpty() {
+    // Symmetric guard to ensureGlItemForSubaccountNoOpsWhenSchemasEmpty.
+    support.setGlItemAccountsActiveForSubaccount(mock(ElementValue.class), Collections.emptyList(),
+        false);
+  }
+}

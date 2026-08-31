@@ -86,7 +86,7 @@ public class OnboardingBaselineService {
    * Use the exact UTC timestamp prefix of the last incorporated .sql file, e.g.:
    * {@code "20260617T120000Z"} matches {@code 20260617T120000Z__R7-tax-accounts.sql}.</p>
    *
-   * Current watermark: R26 admin-identity-real-org (2026-08-26).
+   * Current watermark: R29 acctschema-allownegative-revert (2026-08-28).
    *
    * <p><b>Note (2026-08-26, ETP-4999):</b> gap M1 — the self-registration provisioning chain
    * ({@code InitialClientSetup} then, separately and later, {@code
@@ -183,8 +183,17 @@ public class OnboardingBaselineService {
    * {@code C_AcctSchema_Default}, is itself NULL fleet-wide (an R11-adjacent gap, out of this
    * ticket's scope); R21's own {@code @check} already no-ops on them today and will self-heal once
    * that separate gap closes, with no onboarding change needed here.</p>
+   *
+   * <p><b>2026-08-28 (ETP-4947, R29):</b> reverted {@code C_ACCTSCHEMA.AllowNegative} back to
+   * {@code N} (unchecked) in {@code C_ACCTSCHEMA.xml} — ETP-4245/A3's {@code Y} default (justified
+   * at the time by Confluence Test Plan case TC-38) is superseded; TC-38 itself is being
+   * retired/superseded in Confluence by the ticket owner. {@code IsCentrallyMaintained} and the
+   * CC/User1/User2 accounting-dimension rows that A3/R10 also introduced are explicitly OUT of
+   * scope and remain {@code Y} / present, untouched. Corrective twin:
+   * {@code 20260828T140000Z__R29-acctschema-allownegative-revert.sql}. Bumped to R29's own
+   * timestamp, {@code 2026-08-28T14:00:00Z}.</p>
    */
-  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-26T12:00:00Z");
+  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-28T14:00:00Z");
 
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("
