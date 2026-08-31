@@ -28,6 +28,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.HashMap;
@@ -66,6 +67,7 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * {@link ChartOfAccountsHandler#applyIsLeaf applyIsLeaf},
  * {@link ChartOfAccountsHandler#applyYtdBalances applyYtdBalances},
  * {@link ChartOfAccountsHandler#collectIds collectIds},
+ * {@code toAccountJson} (via reflection — private static, see ETP-4884 regression tests),
  * and handler routing / annotation contracts.
  *
  * <p>Methods that require OBDal ({@code loadTreeData}, {@code computeYtdBalances},
@@ -1071,6 +1073,71 @@ public class ChartOfAccountsHandlerTest {
 
   // NOTE: countChildren requires OBDal.getInstance().getSession() which is unavailable
   // in unit tests. It is covered by integration tests in the full Etendo test suite.
+
+  // ── toAccountJson — ETP-4884: NativeQuery bpchar(1) columns are not always plain String ──
+
+  /**
+   * Regression coverage for ETP-4884.
+   *
+   * <p>Live evidence: for a real tenant, ALL 657 leaf accounts returned by
+   * {@code fetchElementValuesDirectly} came back with {@code "active": false} in the JSON
+   * response — with ZERO exceptions — while a direct DB query confirmed every one of those
+   * rows has {@code isactive = 'Y'} in Postgres. A 100%-always-false pattern with no
+   * correlation to any real data condition is the signature of {@code "Y".equals(row[6])}
+   * structurally never succeeding: Hibernate's native query ({@code NativeQuery<Object>},
+   * unnamed/generic result mapping) does not always hand back a plain {@code java.lang.String}
+   * for {@code bpchar(1)} columns like {@code isactive}/{@code issummary} — it may hand back a
+   * {@code Character} or another JDBC-driver-specific wrapper, against which
+   * {@code String.equals("Y")} is structurally always {@code false}.
+   *
+   * <p>{@code toAccountJson} already applied the correct defensive pattern
+   * ({@code String.valueOf(row[1])}) two lines below for
+   * {@code protectedParentLikeSubaccount} — these tests prove {@code summaryLevel} and
+   * {@code active} now get the same treatment.
+   */
+  private static Object[] rowWith(Object issummary, Object isactive) {
+    return new Object[]{"EV1", "10000001", "Test Account", null, null, issummary, isactive};
+  }
+
+  private static JSONObject invokeToAccountJson(Object[] row) throws Exception {
+    Method method = ChartOfAccountsHandler.class.getDeclaredMethod("toAccountJson", Object[].class);
+    method.setAccessible(true);
+    return (JSONObject) method.invoke(null, (Object) row);
+  }
+
+  @Test
+  public void toAccountJsonHandlesPlainStringYValues() throws Exception {
+    JSONObject entry = invokeToAccountJson(rowWith("Y", "Y"));
+    assertTrue("summaryLevel must be true for a plain String \"Y\"", entry.getBoolean("summaryLevel"));
+    assertTrue("active must be true for a plain String \"Y\"", entry.getBoolean("active"));
+  }
+
+  @Test
+  public void toAccountJsonHandlesPlainStringNValues() throws Exception {
+    JSONObject entry = invokeToAccountJson(rowWith("N", "N"));
+    assertFalse(entry.getBoolean("summaryLevel"));
+    assertFalse(entry.getBoolean("active"));
+  }
+
+  @Test
+  public void toAccountJsonHandlesNonStringYValueViaCharacter() throws Exception {
+    // Reproduces the exact defect: row[5]/row[6] handed back as Character('Y') instead of
+    // String("Y") — a raw "Y".equals(row[N]) is structurally always false against this,
+    // regardless of the real isactive/issummary value in the database. String.valueOf(...)
+    // must correctly stringify it to "Y" so the comparison succeeds.
+    JSONObject entry = invokeToAccountJson(rowWith(Character.valueOf('Y'), Character.valueOf('Y')));
+    assertTrue("summaryLevel must be true when row[5] is a Character('Y'), not a String",
+        entry.getBoolean("summaryLevel"));
+    assertTrue("active must be true when row[6] is a Character('Y'), not a String",
+        entry.getBoolean("active"));
+  }
+
+  @Test
+  public void toAccountJsonHandlesNonStringNValueViaCharacter() throws Exception {
+    JSONObject entry = invokeToAccountJson(rowWith(Character.valueOf('N'), Character.valueOf('N')));
+    assertFalse(entry.getBoolean("summaryLevel"));
+    assertFalse(entry.getBoolean("active"));
+  }
 
   // ── helpers ───────────────────────────────────────────────────────────────
 
