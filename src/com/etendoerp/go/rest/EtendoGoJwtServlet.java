@@ -65,6 +65,7 @@ import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.CheckoutPaymentRegistry;
 import com.etendoerp.go.payment.CheckoutWebhookVerifier;
 import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
+import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
@@ -162,6 +163,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   // onboarding/errorMessages.js so it translates by code and never shows this English text.
   private static final String CODE_EMAIL_NOT_VERIFIED = "EMAIL_NOT_VERIFIED";
   private static final String CODE_EMAIL_VERIFY_INVALID = "EMAIL_VERIFY_INVALID";
+  // AUTH-07 / ETP-5022 — change-password failures. Stable codes so the web client translates
+  // by code; the English text below is a developer-facing fallback, never end-user copy.
+  private static final String CODE_MISSING_CREDENTIALS = "CHANGE_PASSWORD_MISSING_CREDENTIALS";
+  private static final String CODE_NO_LOCAL_PASSWORD = "NO_LOCAL_PASSWORD";
+  private static final String CODE_INVALID_CURRENT_PASSWORD = "INVALID_CURRENT_PASSWORD";
   private static final String PROGRESS_IN_PROGRESS = "in_progress";
   private static final String PROGRESS_CLIENT = "client";
   private static final String PROGRESS_ERROR = "error";
@@ -178,6 +184,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_BANK_CONNECTION_SYNC = "bankConnectionSync";
   private static final String PROGRESS_BP_GROUP_ACCT_PATCH = "bpGroupAcctPatch";
   private static final String PROGRESS_ACCTDIM_VISIBILITY = "acctdimVisibility";
+  private static final String PROGRESS_ADMIN_IDENTITY = "adminIdentity";
   private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
   // Stable codes for provisioning failures whose underlying message is an unresolved AD message
   // key. Mirrored by the frontend's onboarding/errorMessages.js (ETP-4665).
@@ -233,6 +240,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingDefaultCustomerService();
   OnboardingAcctdimCentrallyMaintainedService onboardingAcctdimCentrallyMaintainedService =
       new OnboardingAcctdimCentrallyMaintainedService();
+  OnboardingAdminIdentityService onboardingAdminIdentityService =
+      new OnboardingAdminIdentityService();
   OnboardingBaselineService onboardingBaselineService =
       new OnboardingBaselineService();
   OnboardingBankConnectionSyncService onboardingBankConnectionSyncService =
@@ -939,6 +948,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
       EtendoGoJwtDalHelper.consumePasswordReset(account, hashPassword(password), new Date());
+      // ETP-5003 — the security notice belongs to every password change, not only the one made
+      // from inside the app. This is the path an attacker with a stolen reset link would take, so
+      // it is the one where the owner most needs to be told.
+      sendAuthEmailBestEffort("password-changed",
+          () -> authEmailSender.sendPasswordChanged(account));
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
@@ -1079,13 +1093,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       currentPassword = body.getString("currentPassword");
       newPassword = body.getString("newPassword");
     } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Missing required fields: currentPassword, newPassword");
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
+          "changePassword: request body lacks currentPassword and/or newPassword",
+          "The current and new password are both required.");
       return;
     }
     if (currentPassword.isEmpty() || newPassword.isEmpty()) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Fields currentPassword and newPassword must not be empty");
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
+          "changePassword: currentPassword and/or newPassword is empty",
+          "The current and new password are both required.");
       return;
     }
     if (!PasswordPolicy.isStrong(newPassword)) {
@@ -1102,12 +1118,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
       if (!EtendoGoJwtDalHelper.hasLocalPassword(account)) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST,
-            "Local password is not configured for this account");
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_NO_LOCAL_PASSWORD,
+            "changePassword: account has no local password (external identity provider)",
+            "This account signs in through an external provider, so it has no password to change.");
         return;
       }
       if (!verifyPassword(currentPassword, account.getPasswordHash())) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Current password is invalid");
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, CODE_INVALID_CURRENT_PASSWORD,
+            "changePassword: current password did not verify",
+            "The current password is not correct.");
         return;
       }
       String sessionToken = generateToken();
@@ -1931,6 +1950,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Override it with the full name entered during onboarding so the app shows
     // the person's name instead of their email. No-op when fullName is blank.
     EtendoGoJwtSupport.applyClientAdminDisplayName(clientUser, requestData.fullName);
+    // ETP-5019 — InitialClientSetup's underlying insertUser() never sets AD_User.Email at all
+    // (only Name/Description/Username), so the owner's "Correo electrónico" field renders empty
+    // in the Users window. Backfill it from the real account email (not clientUser, which may
+    // carry a client-name suffix) right after creation, same best-effort pattern as the display
+    // name override above.
+    EtendoGoJwtSupport.applyClientAdminEmail(clientUser, accountEmail);
     return EtendoGoJwtSupport.findClientIdByName(requestData.clientName);
   }
 
@@ -2161,6 +2186,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!forceFlatAccountingDimensionVisibility(writer, clientId)) {
       return false;
     }
+    // ETP-4999 (gap M1): wire the onboarding admin's own session defaults to the REAL business
+    // org, not the root/wildcard '0' InitialClientSetup left them at. Runs AFTER the org and its
+    // warehouse both exist (step 1) and BEFORE the baseline stamp — see
+    // OnboardingAdminIdentityService for the full root-cause explanation (including why this does
+    // NOT touch AD_User_Roles) and its lockstep corrective twin (R26-admin-identity-real-org.sql).
+    if (!wireAdminIdentity(writer, clientId, orgId, adminUserId, adminRoleId)) {
+      return false;
+    }
     // Final action before commitDalChanges: stamp the tenant's data-fix baseline so it lands in the
     // same atomic onboarding commit. A genuine SQL error propagates (not caught here) so the outer
     // handleOnboarding catch rolls back cleanly; the expected ON CONFLICT->0-rows case is benign.
@@ -2381,6 +2414,29 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * Wires the onboarding admin's session defaults to the real business organization (ETP-4999,
+   * gap M1) — see {@link OnboardingAdminIdentityService} for the full explanation and its
+   * corrective twin ({@code R26-admin-identity-real-org.sql}).
+   */
+  boolean wireAdminIdentity(PrintWriter writer, String clientId, String orgId,
+      String adminUserId, String adminRoleId) {
+    sendProgress(writer, PROGRESS_ADMIN_IDENTITY, PROGRESS_IN_PROGRESS,
+        "Wiring admin identity to organization...");
+    try {
+      onboardingAdminIdentityService.wireAdminIdentity(clientId, orgId, adminUserId, adminRoleId);
+      sendProgress(writer, PROGRESS_ADMIN_IDENTITY, "done", "Admin identity wired");
+      return true;
+    } catch (Exception e) {
+      EtendoGoDalHelper.rollbackDalChanges("onboarding admin-identity wiring", e, log);
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Admin identity wiring failed";
+      sendProgress(writer, PROGRESS_ADMIN_IDENTITY, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
+  /**
    * Registers the tenant's data-fix baseline row (the LIVE preventive counterpart of the corrective
    * runner's DETECTED sweep) as the final onboarding action before the commit.
    *
@@ -2551,7 +2607,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       log.warn("Auth email reset-password skipped because the public app base URL is not configured");
     } else {
       try {
-        emailSent = authEmailSender.sendPasswordReset(account, resetTokenHash, resetLink);
+        emailSent = authEmailSender.sendPasswordReset(account, resetTokenHash, resetLink,
+            expiresAt);
       } catch (RuntimeException e) {
         log.warn("Auth email reset-password failed after token storage", e);
       }
@@ -2599,13 +2656,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
-      EmailVerificationDalHelper.storeEmailVerifyToken(account, verifyTokenHash,
-          Date.from(Instant.now().plusSeconds(EMAIL_VERIFICATION_TTL_SECONDS)));
+      // ETP-5003 — the same expiry the token is stored with is handed to the email, so the copy
+      // states the window the server actually grants instead of repeating a constant.
+      Date verifyExpiresAt = Date.from(Instant.now().plusSeconds(EMAIL_VERIFICATION_TTL_SECONDS));
+      EmailVerificationDalHelper.storeEmailVerifyToken(account, verifyTokenHash, verifyExpiresAt);
       tokenStored = true;
 
       boolean emailSent = welcome
-          ? authEmailSender.sendNewAccount(account, language, verifyLink)
-          : authEmailSender.sendVerifyEmail(account, verifyTokenHash, verifyLink, language);
+          ? authEmailSender.sendNewAccount(account, language, verifyLink, verifyExpiresAt)
+          : authEmailSender.sendVerifyEmail(account, verifyTokenHash, verifyLink, language,
+              verifyExpiresAt);
       if (emailSent) {
         return;
       }

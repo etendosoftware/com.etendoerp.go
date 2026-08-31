@@ -86,7 +86,22 @@ public class OnboardingBaselineService {
    * Use the exact UTC timestamp prefix of the last incorporated .sql file, e.g.:
    * {@code "20260617T120000Z"} matches {@code 20260617T120000Z__R7-tax-accounts.sql}.</p>
    *
-   * Current watermark: R23 acctdim-centrally-maintained (2026-08-11).
+   * Current watermark: R26 admin-identity-real-org (2026-08-26).
+   *
+   * <p><b>Note (2026-08-26, ETP-4999):</b> gap M1 — the self-registration provisioning chain
+   * ({@code InitialClientSetup} then, separately and later, {@code
+   * EtendoGoJwtServlet#createOrganization}) left the onboarding admin's {@code
+   * Default_Ad_Client_ID}/{@code Default_Ad_Org_ID}/{@code Default_M_Warehouse_ID}/{@code
+   * EM_SMFSWS_Default_WS_Role_ID} all {@code NULL} and their sole {@code AD_User_Roles} row
+   * stuck at the root org {@code '0'} — confirmed live on dozens of self-registered tenants,
+   * zero exceptions. The first breaks SWS login/environment-switch warehouse resolution ({@code
+   * SecureWebServicesUtils.generateToken()} → {@code SMFSWS_OrgHasNoRole}); the second breaks a
+   * self-registered admin inviting themselves into their own real org ({@code
+   * CompanyInvitationDalHelper#hasActiveRoleForOrganization}'s exact-org match against {@code
+   * AD_User_Roles}). Closed by {@code OnboardingAdminIdentityService}, wired as the new step
+   * right before this baseline stamp (after the accounting-wiring steps grant the admin role
+   * {@code AD_Role_OrgAccess} for the real org). Bumped to R26's own timestamp, {@code
+   * 2026-08-26T12:00:00Z}.</p>
    *
    * <p><b>Note (2026-08-11, ETP-4854):</b> gap K1 — {@code AD_Client.Acctdim_Centrally_Maintained}
    * was hardcoded to {@code true} for every new client by classic {@code InitialSetupUtility},
@@ -169,7 +184,7 @@ public class OnboardingBaselineService {
    * ticket's scope); R21's own {@code @check} already no-ops on them today and will self-heal once
    * that separate gap closes, with no onboarding change needed here.</p>
    */
-  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-11T12:00:00Z");
+  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-26T12:00:00Z");
 
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("

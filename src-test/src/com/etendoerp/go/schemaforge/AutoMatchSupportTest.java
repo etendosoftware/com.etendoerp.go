@@ -24,6 +24,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
@@ -41,6 +42,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Function;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -328,6 +330,91 @@ public class AutoMatchSupportTest {
       String state = AutoMatchSupport.classifyPendingLine(
           account, line, Collections.emptyList());
       assertEquals(AutoMatchSupport.STATE_PENDING, state);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // standardMatch — excluded-list forwarding (ETP-4971)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * standardMatch passes the EXACT {@code excluded} list instance into the constructed matcher's
+   * {@code match(line, excluded)} call — the mechanism {@code buildAutoMatch} relies on to
+   * accumulate consumed transactions across pending lines of the same amount.
+   */
+  @Test
+  public void testStandardMatchForwardsExcludedListInstance() throws Exception {
+    FIN_FinancialAccount account = accountWithAlgorithm("com.example.DummyAlgo");
+    FIN_BankStatementLine line = pendingLine("Transfer ACME", "", "");
+    List<FIN_FinaccTransaction> excluded = new java.util.ArrayList<>();
+
+    FIN_MatchedTransaction matched = mock(FIN_MatchedTransaction.class);
+    when(matched.getTransaction()).thenReturn(mock(FIN_FinaccTransaction.class));
+    when(matched.getMatchLevel()).thenReturn(FIN_MatchedTransaction.STRONG);
+
+    try (MockedConstruction<FIN_MatchingTransaction> mc =
+        mockConstruction(FIN_MatchingTransaction.class, (m, ctx) ->
+            when(m.match(same(line), same(excluded))).thenReturn(matched))) {
+      FIN_MatchedTransaction result = AutoMatchSupport.standardMatch(
+          account, line, AutoMatchSupport.DEFAULT_DATE_TOL_DAYS, excluded);
+
+      assertEquals(matched, result);
+      verify(mc.constructed().get(0)).match(same(line), same(excluded));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // classifyPendingLine (7-arg, shared usedTxnIds/excludedTxns accumulator)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Two calls to the 7-arg classifyPendingLine sharing the SAME usedTxnIds/excludedTxns
+   * accumulators: the first line claims transaction T1 (state {@code suggested}, both
+   * accumulators updated with it); the second line of the identical amount — because T1 is now in
+   * excludedTxns — gets no standard match at all, mirroring the exhaustion buildAutoMatch itself
+   * applies across pending lines sharing an amount.
+   */
+  @Test
+  public void testClassifyPendingLineSharedAccumulatorExhaustsCandidate() {
+    FIN_FinancialAccount account = accountWithAlgorithm("com.example.DummyAlgo");
+    FIN_BankStatementLine line1 = bslLine("L1", "50.00", "0.00");
+    FIN_BankStatementLine line2 = bslLine("L2", "50.00", "0.00");
+
+    FIN_FinaccTransaction t1 = mock(FIN_FinaccTransaction.class);
+    lenient().when(t1.getId()).thenReturn("T1");
+    lenient().when(t1.getDepositAmount()).thenReturn(new BigDecimal("50.00"));
+    lenient().when(t1.getPaymentAmount()).thenReturn(BigDecimal.ZERO);
+    lenient().when(t1.getTransactionDate()).thenReturn(null);
+
+    Set<String> usedTxnIds = new HashSet<>();
+    List<FIN_FinaccTransaction> excludedTxns = new java.util.ArrayList<>();
+
+    try (MockedConstruction<FIN_MatchingTransaction> mc =
+        mockConstruction(FIN_MatchingTransaction.class, (m, ctx) ->
+            when(m.match(any(), any())).thenAnswer(invocation -> {
+              List<FIN_FinaccTransaction> excluded = invocation.getArgument(1);
+              FIN_MatchedTransaction result = mock(FIN_MatchedTransaction.class);
+              if (!excluded.contains(t1)) {
+                lenient().when(result.getTransaction()).thenReturn(t1);
+                lenient().when(result.getMatchLevel()).thenReturn(FIN_MatchedTransaction.STRONG);
+              } else {
+                lenient().when(result.getMatchLevel()).thenReturn(FIN_MatchedTransaction.NOMATCH);
+              }
+              return result;
+            }))) {
+      String firstState = AutoMatchSupport.classifyPendingLine(account, line1,
+          Collections.emptyList(), AutoMatchSupport.DEFAULT_DATE_TOL_DAYS, BigDecimal.ZERO,
+          usedTxnIds, excludedTxns);
+
+      assertEquals(AutoMatchSupport.STATE_SUGGESTED, firstState);
+      assertTrue(usedTxnIds.contains("T1"));
+      assertTrue(excludedTxns.contains(t1));
+
+      String secondState = AutoMatchSupport.classifyPendingLine(account, line2,
+          Collections.emptyList(), AutoMatchSupport.DEFAULT_DATE_TOL_DAYS, BigDecimal.ZERO,
+          usedTxnIds, excludedTxns);
+
+      assertEquals(AutoMatchSupport.STATE_PENDING, secondState);
     }
   }
 
@@ -1027,6 +1114,53 @@ public class AutoMatchSupportTest {
           AutoMatchSupport.findSignalGroup("ACC-1", line, new HashSet<>(Arrays.asList("T1")), TOL);
 
       assertTrue(result.isEmpty());
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // matchFallback — excludedTxns accumulation (ETP-4971)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * matchFallback appends the resolved signal-group transactions to the {@code excludedTxns}
+   * accumulator too, not only {@code usedTxnIds} — so a later pending line of the same amount
+   * cannot be offered one of these same transactions again by the standard 1:1 algorithm either.
+   */
+  @Test
+  public void testMatchFallbackAppendsSignalGroupToExcludedTxns() throws Exception {
+    FIN_BankStatementLine line = bslLine("L1", "150.00", "0.00");
+
+    BusinessPartner bp = mock(BusinessPartner.class);
+    lenient().when(bp.getId()).thenReturn("BP-1");
+    FIN_FinaccTransaction t1 = txnWithPartner("T1", "100.00", bp);
+    FIN_FinaccTransaction t2 = txnWithPartner("T2", "50.00", bp);
+
+    Set<String> usedTxnIds = new HashSet<>();
+    List<FIN_FinaccTransaction> excludedTxns = new java.util.ArrayList<>();
+    JSONArray groups = new JSONArray();
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+      @SuppressWarnings("unchecked")
+      org.hibernate.query.Query<FIN_FinaccTransaction> query = mock(org.hibernate.query.Query.class);
+      when(session.createQuery(anyString(), eq(FIN_FinaccTransaction.class))).thenReturn(query);
+      when(query.setParameter(anyString(), any())).thenReturn(query);
+      when(query.list()).thenReturn(Arrays.asList(t1, t2));
+
+      int[] delta = AutoMatchSupport.matchFallback("ACC-1", line, usedTxnIds, excludedTxns,
+          Collections.emptyList(), groups, AutoMatchSupport.DEFAULT_DATE_TOL_DAYS,
+          BigDecimal.ZERO);
+
+      assertEquals(2, delta[0]);
+      assertEquals(0, delta[1]);
+      assertTrue(usedTxnIds.contains("T1"));
+      assertTrue(usedTxnIds.contains("T2"));
+      assertTrue(excludedTxns.contains(t1));
+      assertTrue(excludedTxns.contains(t2));
+      assertEquals(1, groups.length());
     }
   }
 
