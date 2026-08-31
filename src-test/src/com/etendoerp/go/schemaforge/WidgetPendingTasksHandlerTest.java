@@ -53,6 +53,9 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+import org.openbravo.model.ad.access.Role;
+
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Unit tests for {@link WidgetPendingTasksHandler}.
@@ -99,9 +102,20 @@ class WidgetPendingTasksHandlerTest {
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBContext> obContextMock;
 
+  // ETP-5088 — every widget now resolves the caller's role and gates on AD_Window_Access before
+  // querying. These suites cover the widget's own behaviour, so they grant access and let the
+  // real WidgetAccessPolicy run on top of a mocked NeoAccessHelper; the gate itself is covered by
+  // WidgetAccessPolicyTest and by the per-role denial case at the end of this file.
+  @Mock private Role role;
+  private MockedStatic<NeoAccessHelper> accessHelperMock;
+
   @BeforeEach
   void setUp() {
     handler = new WidgetPendingTasksHandler();
+    accessHelperMock = mockStatic(NeoAccessHelper.class);
+    accessHelperMock.when(NeoAccessHelper::resolveCurrentRole).thenReturn(role);
+    accessHelperMock.when(() -> NeoAccessHelper.hasWindowAccess(any(Role.class), anyString(), anyString()))
+        .thenReturn(true);
     obDalMock = mockStatic(OBDal.class);
     obContextMock = mockStatic(OBContext.class);
 
@@ -114,6 +128,7 @@ class WidgetPendingTasksHandlerTest {
 
   @AfterEach
   void tearDown() {
+    accessHelperMock.close();
     obDalMock.close();
     obContextMock.close();
   }

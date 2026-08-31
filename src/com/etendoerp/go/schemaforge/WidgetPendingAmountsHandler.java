@@ -27,6 +27,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.Role;
 
 /**
  * NeoHandler that returns pending amounts to collect and to pay
@@ -50,17 +51,29 @@ public class WidgetPendingAmountsHandler implements NeoHandler {
       return NeoResponse.error(405, "Method not allowed");
     }
 
+    // ETP-5088 — gated PER HALF: the role matrix gives Sales the collect side only (sales
+    // invoices) and Purchasing the pay side only (purchase invoices), Finance/Admin both.
+    // Resolved before admin mode; a hidden half is neither queried nor emitted, and the frontend
+    // reads a missing half as zero.
+    Role role = WidgetAccessPolicy.currentRole();
+    boolean showToCollect = WidgetAccessPolicy.canRead(role, WidgetAccessPolicy.WINDOW_SALES_INVOICE);
+    boolean showToPay = WidgetAccessPolicy.canRead(role, WidgetAccessPolicy.WINDOW_PURCHASE_INVOICE);
+    if (!showToCollect && !showToPay) {
+      return WidgetQueryHelper.buildEmptyDataResponse();
+    }
+
     try {
       OBContext.setAdminMode(true);
       try {
         String clientId = OBContext.getOBContext().getCurrentClient().getId();
 
-        JSONObject toCollect = queryPending(clientId, "Y");
-        JSONObject toPay = queryPending(clientId, "N");
-
         JSONObject data = new JSONObject();
-        data.put("toCollect", toCollect);
-        data.put("toPay", toPay);
+        if (showToCollect) {
+          data.put("toCollect", queryPending(clientId, "Y"));
+        }
+        if (showToPay) {
+          data.put("toPay", queryPending(clientId, "N"));
+        }
 
         JSONObject responseData = new JSONObject();
         responseData.put("data", data);
