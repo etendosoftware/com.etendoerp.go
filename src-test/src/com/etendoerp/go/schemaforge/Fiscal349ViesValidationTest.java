@@ -188,20 +188,20 @@ class Fiscal349ViesValidationTest {
         "bp-3", "invalid",
         "bp-4", "pending");
 
-    assertEquals(Arrays.asList("bp-1", "bp-4"), Fiscal349BoxesHandler.pendingBpIds(arr));
+    assertEquals(Arrays.asList("bp-1", "bp-4"), Fiscal349ViesSupport.pendingBpIds(arr));
   }
 
   /** A null/empty operators array yields no work rather than an exception. */
   @Test
   void testPendingBpIdsHandlesNullAndBlankIds() throws Exception {
-    assertTrue(Fiscal349BoxesHandler.pendingBpIds(null).isEmpty());
+    assertTrue(Fiscal349ViesSupport.pendingBpIds(null).isEmpty());
 
     JSONArray arr = new JSONArray();
     JSONObject blank = new JSONObject();
     blank.put("bpId", "");
     blank.put("vies", "pending");
     arr.put(blank);
-    assertTrue(Fiscal349BoxesHandler.pendingBpIds(arr).isEmpty());
+    assertTrue(Fiscal349ViesSupport.pendingBpIds(arr).isEmpty());
   }
 
   // ── eligibility gate (must match ViesStatusObserver exactly) ──────
@@ -213,8 +213,8 @@ class Fiscal349ViesValidationTest {
         new String[] { "FR12345678901", "IT15667431009", "", "DE111111111" },
         new String[] { "2",             "1",             "2", null });
 
-    Fiscal349BoxesHandler.ViesGateResult gate =
-        handler.loadViesCandidates(Arrays.asList("bp-noi", "bp-key1", "bp-blank", "bp-nokey"));
+    Fiscal349ViesSupport.ViesGateResult gate =
+        handler.viesSupport.loadViesCandidates(Arrays.asList("bp-noi", "bp-key1", "bp-blank", "bp-nokey"));
 
     assertEquals(1, gate.eligible.size());
     assertEquals("bp-noi", gate.eligible.get(0).bpId);
@@ -232,7 +232,7 @@ class Fiscal349ViesValidationTest {
     stubCandidateRows(new String[] { "ESB12345678" }, new String[] { "1" });
 
     try (MockedStatic<ViesService> vies = mockStatic(ViesService.class)) {
-      JSONObject out = handler.validatePendingVies(Collections.singletonList("bp-key1"));
+      JSONObject out = handler.viesSupport.validatePendingVies(handler, Collections.singletonList("bp-key1"));
 
       verify(handler, never()).checkVat(anyString());
       vies.verify(() -> ViesService.checkVat(anyString()), never());
@@ -260,7 +260,7 @@ class Fiscal349ViesValidationTest {
     doReturn("I").when(handler).checkVat("IT22222222222");
     doReturn("P").when(handler).checkVat("DE333333333");
 
-    JSONObject out = handler.validatePendingVies(
+    JSONObject out = handler.viesSupport.validatePendingVies(handler,
         Arrays.asList("bp-v", "bp-i", "bp-p", "bp-gated"));
 
     assertEquals(4, out.getInt("validated"));
@@ -279,7 +279,7 @@ class Fiscal349ViesValidationTest {
         new String[] { "FR11111111111", "FR22222222222" },
         new String[] { "2", "2" });
 
-    JSONObject out = handler.validatePendingVies(Arrays.asList("bp-1", "bp-2"));
+    JSONObject out = handler.viesSupport.validatePendingVies(handler, Arrays.asList("bp-1", "bp-2"));
 
     assertEquals(2, out.getInt("validated"));
     assertEquals(0, out.getInt("valid"));
@@ -293,7 +293,7 @@ class Fiscal349ViesValidationTest {
   /** The emitted JSON carries exactly the six contract keys. */
   @Test
   void testResponseShapeHasOnlyContractKeys() throws Exception {
-    JSONObject out = handler.validatePendingVies(Collections.emptyList());
+    JSONObject out = handler.viesSupport.validatePendingVies(handler, Collections.emptyList());
 
     List<String> keys = new ArrayList<>();
     out.keys().forEachRemaining(k -> keys.add(String.valueOf(k)));
@@ -315,7 +315,7 @@ class Fiscal349ViesValidationTest {
     statuses.put("bp-i", "I");
 
     assertEquals(new LinkedHashSet<>(Arrays.asList("bp-v", "bp-i")),
-        handler.persistViesStatuses(statuses));
+        handler.viesSupport.persistViesStatuses(statuses));
 
     verify(connMock).prepareStatement(
         "UPDATE c_bpartner SET em_obtik_viesstatus = ? WHERE c_bpartner_id = ?");
@@ -330,7 +330,7 @@ class Fiscal349ViesValidationTest {
   /** An all-pending status map performs no DB write at all. */
   @Test
   void testPendingOnlyMapPerformsNoUpdate() throws Exception {
-    assertTrue(handler.persistViesStatuses(Collections.singletonMap("bp-p", "P")).isEmpty());
+    assertTrue(handler.viesSupport.persistViesStatuses(Collections.singletonMap("bp-p", "P")).isEmpty());
     verify(connMock, never()).prepareStatement(startsWith(UPDATE_SQL));
   }
 
@@ -348,7 +348,7 @@ class Fiscal349ViesValidationTest {
     stubCandidateRows(new String[] { "FR11111111111" }, new String[] { "2" });
     doReturn("V").when(handler).checkVat(anyString());
 
-    handler.validatePendingVies(Collections.singletonList("bp-1"));
+    handler.viesSupport.validatePendingVies(handler, Collections.singletonList("bp-1"));
 
     InOrder order = inOrder(connMock, handler);
     order.verify(connMock).prepareStatement(startsWith(SELECT_SQL)); // gate: DB work
@@ -380,12 +380,12 @@ class Fiscal349ViesValidationTest {
   // ── batch cap ─────────────────────────────────────────────────────
 
   /**
-   * At most {@link Fiscal349BoxesHandler#VIES_BATCH_CAP} partners are looked up and sent to
+   * At most {@link Fiscal349ViesSupport#VIES_BATCH_CAP} partners are looked up and sent to
    * VIES per call; the overflow is reported as still-pending so the next click picks it up.
    */
   @Test
   void testBatchCapIsHonoured() throws Exception {
-    int pendingCount = Fiscal349BoxesHandler.VIES_BATCH_CAP + 7;
+    int pendingCount = Fiscal349ViesSupport.VIES_BATCH_CAP + 7;
     List<String> ids = new ArrayList<>();
     String[] taxIds = new String[pendingCount];
     String[] keys = new String[pendingCount];
@@ -398,15 +398,15 @@ class Fiscal349ViesValidationTest {
 
     doReturn("V").when(handler).checkVat(anyString());
 
-    JSONObject out = handler.validatePendingVies(ids);
+    JSONObject out = handler.viesSupport.validatePendingVies(handler, ids);
 
     // Only the capped slice was queried, checked and persisted.
-    verify(selectPs, times(Fiscal349BoxesHandler.VIES_BATCH_CAP)).executeQuery();
-    verify(handler, times(Fiscal349BoxesHandler.VIES_BATCH_CAP)).checkVat(anyString());
-    verify(updatePs, times(Fiscal349BoxesHandler.VIES_BATCH_CAP)).executeUpdate();
+    verify(selectPs, times(Fiscal349ViesSupport.VIES_BATCH_CAP)).executeQuery();
+    verify(handler, times(Fiscal349ViesSupport.VIES_BATCH_CAP)).checkVat(anyString());
+    verify(updatePs, times(Fiscal349ViesSupport.VIES_BATCH_CAP)).executeUpdate();
 
     assertEquals(pendingCount, out.getInt("validated"));
-    assertEquals(Fiscal349BoxesHandler.VIES_BATCH_CAP, out.getInt("valid"));
+    assertEquals(Fiscal349ViesSupport.VIES_BATCH_CAP, out.getInt("valid"));
     assertEquals(0, out.getInt("invalid"));
     assertEquals(0, out.getInt("notEligible"));
     assertEquals(0, out.getInt("failed"));
@@ -418,7 +418,7 @@ class Fiscal349ViesValidationTest {
   @Test
   void testEmptyPendingSetDoesNothing() throws Exception {
     try (MockedStatic<ViesService> vies = mockStatic(ViesService.class)) {
-      JSONObject out = handler.validatePendingVies(null);
+      JSONObject out = handler.viesSupport.validatePendingVies(handler, null);
 
       verify(handler, never()).checkVat(anyString());
       vies.verify(() -> ViesService.checkVat(anyString()), never());
@@ -433,8 +433,8 @@ class Fiscal349ViesValidationTest {
   void testMissingBusinessPartnerRowIsSkipped() throws Exception {
     when(selectRs.next()).thenReturn(false);
 
-    Fiscal349BoxesHandler.ViesGateResult gate =
-        handler.loadViesCandidates(Collections.singletonList("bp-gone"));
+    Fiscal349ViesSupport.ViesGateResult gate =
+        handler.viesSupport.loadViesCandidates(Collections.singletonList("bp-gone"));
 
     assertTrue(gate.eligible.isEmpty());
     assertEquals(1, gate.notEligible);
@@ -453,7 +453,7 @@ class Fiscal349ViesValidationTest {
     doReturn("V").when(handler).checkVat(anyString());
     when(updatePs.executeUpdate()).thenThrow(new SQLException("connection reset"));
 
-    JSONObject out = handler.validatePendingVies(Collections.singletonList("bp-1"));
+    JSONObject out = handler.viesSupport.validatePendingVies(handler, Collections.singletonList("bp-1"));
 
     assertEquals(1, out.getInt("validated"));
     assertEquals(0, out.getInt("valid"));
@@ -470,7 +470,7 @@ class Fiscal349ViesValidationTest {
     doReturn("I").when(handler).checkVat(anyString());
     when(updatePs.executeUpdate()).thenReturn(0);
 
-    JSONObject out = handler.validatePendingVies(Collections.singletonList("bp-1"));
+    JSONObject out = handler.viesSupport.validatePendingVies(handler, Collections.singletonList("bp-1"));
 
     assertEquals(0, out.getInt("invalid"));
     assertEquals(1, out.getInt("failed"));
@@ -487,7 +487,7 @@ class Fiscal349ViesValidationTest {
     when(updatePs.executeUpdate())
         .thenReturn(1).thenThrow(new SQLException("deadlock")).thenReturn(1);
 
-    JSONObject out = handler.validatePendingVies(Arrays.asList("bp-1", "bp-2", "bp-3"));
+    JSONObject out = handler.viesSupport.validatePendingVies(handler, Arrays.asList("bp-1", "bp-2", "bp-3"));
 
     assertEquals(2, out.getInt("valid"));
     assertEquals(1, out.getInt("failed"));
@@ -509,8 +509,8 @@ class Fiscal349ViesValidationTest {
     when(selectRs.getString("taxid")).thenReturn("FR11111111111", "DE333333333");
     when(selectRs.getString("em_obtik_tax_id_key")).thenReturn("2", "2");
 
-    Fiscal349BoxesHandler.ViesGateResult gate =
-        handler.loadViesCandidates(Arrays.asList("bp-1", "bp-bad", "bp-3"));
+    Fiscal349ViesSupport.ViesGateResult gate =
+        handler.viesSupport.loadViesCandidates(Arrays.asList("bp-1", "bp-bad", "bp-3"));
 
     assertEquals(2, gate.eligible.size());
     assertEquals("bp-1", gate.eligible.get(0).bpId);
