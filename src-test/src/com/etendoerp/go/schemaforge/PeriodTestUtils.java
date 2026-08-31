@@ -98,14 +98,36 @@ public final class PeriodTestUtils {
       return null;
     }
 
+    // Compare CALENDAR DAYS, not instants. C_PERIOD.startdate/enddate are stored at midnight,
+    // while callers pass `new Date()` — an instant with a time-of-day. Matching the raw instant
+    // makes `enddate >= date` false for the whole LAST DAY of every period (2026-08-31 00:00 is
+    // not >= 2026-08-31 11:52), so every accounting-document test failed on month-end days and
+    // passed on any other, reported as the misleading "No fiscal period covers ... extend the
+    // reference calendar data" below. Truncating to local midnight makes the bounds inclusive.
+    Date day = atStartOfDay(date);
     OBCriteria<Period> periodCriteria = OBDal.getInstance().createCriteria(Period.class);
     periodCriteria.setFilterOnReadableClients(false);
     periodCriteria.setFilterOnReadableOrganization(false);
     periodCriteria.add(Restrictions.in(Period.PROPERTY_YEAR, years));
-    periodCriteria.add(Restrictions.le(Period.PROPERTY_STARTINGDATE, date));
-    periodCriteria.add(Restrictions.ge(Period.PROPERTY_ENDINGDATE, date));
+    periodCriteria.add(Restrictions.le(Period.PROPERTY_STARTINGDATE, day));
+    periodCriteria.add(Restrictions.ge(Period.PROPERTY_ENDINGDATE, day));
     periodCriteria.setMaxResults(1);
     return (Period) periodCriteria.uniqueResult();
+  }
+
+  /**
+   * Truncates {@code date} to local midnight, so a period's inclusive {@code startdate} /
+   * {@code enddate} bounds (both stored at midnight) also match the first and last day of the
+   * period when the caller hands in a timestamped {@code new Date()}.
+   */
+  private static Date atStartOfDay(Date date) {
+    java.util.Calendar cal = java.util.Calendar.getInstance();
+    cal.setTime(date);
+    cal.set(java.util.Calendar.HOUR_OF_DAY, 0);
+    cal.set(java.util.Calendar.MINUTE, 0);
+    cal.set(java.util.Calendar.SECOND, 0);
+    cal.set(java.util.Calendar.MILLISECOND, 0);
+    return cal.getTime();
   }
 
   private static void openPeriod(Period period) {
