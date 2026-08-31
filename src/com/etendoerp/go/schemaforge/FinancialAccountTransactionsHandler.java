@@ -35,9 +35,7 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.Date;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 
 import javax.inject.Named;
@@ -141,7 +139,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final String FIELD_COSTCENTER_ID = "costcenterId";
   private static final String FIELD_PRODUCT_ID = "productId";
   /** Document base type of finacc transactions — used to resolve header dimensions. */
-  private static final String DOCBASETYPE_FAT = "FAT";
+  private static final String DOCBASETYPE_FAT = AccountingDimensionsSupport.DOCBASETYPE_FAT;
   /** AD reference backing FIN_Finacc_Transaction.Trxtype (core list: BPD/BPW/BF). */
   private static final String TRXTYPE_REFERENCE_ID = "4EFC9773F30B4ACE97D225BD13CFF8CB";
   private static final DateTimeFormatter ISO_UTC = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
@@ -155,17 +153,20 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final String FIELD_DEPOSIT_AMOUNT = "depositAmount";
   private static final String FIELD_AMOUNT = "amount";
 
-  /** Accounting-dimension UI keys, reused across marshalling, mapping and ordering. */
-  static final String DIM_ORGANIZATION = "organization";
-  static final String DIM_BPARTNER = "bpartner";
-  static final String DIM_PROJECT = "project";
-  static final String DIM_COSTCENTER = "costcenter";
-  static final String DIM_PRODUCT = "product";
-  static final String DIM_ACTIVITY = "activity";
-  static final String DIM_CAMPAIGN = "campaign";
-  static final String DIM_SALESREGION = "salesregion";
-  static final String DIM_USER1 = "user1";
-  static final String DIM_USER2 = "user2";
+  /**
+   * Accounting-dimension UI keys, reused across marshalling, mapping and ordering. Aliases of
+   * {@link AccountingDimensionsSupport}, which owns the canonical set and the element mapping.
+   */
+  static final String DIM_ORGANIZATION = AccountingDimensionsSupport.DIM_ORGANIZATION;
+  static final String DIM_BPARTNER = AccountingDimensionsSupport.DIM_BPARTNER;
+  static final String DIM_PROJECT = AccountingDimensionsSupport.DIM_PROJECT;
+  static final String DIM_COSTCENTER = AccountingDimensionsSupport.DIM_COSTCENTER;
+  static final String DIM_PRODUCT = AccountingDimensionsSupport.DIM_PRODUCT;
+  static final String DIM_ACTIVITY = AccountingDimensionsSupport.DIM_ACTIVITY;
+  static final String DIM_CAMPAIGN = AccountingDimensionsSupport.DIM_CAMPAIGN;
+  static final String DIM_SALESREGION = AccountingDimensionsSupport.DIM_SALESREGION;
+  static final String DIM_USER1 = AccountingDimensionsSupport.DIM_USER1;
+  static final String DIM_USER2 = AccountingDimensionsSupport.DIM_USER2;
 
   /** Rolling window for inflow/outflow KPIs, in days. */
   private static final int KPI_WINDOW_DAYS = 30;
@@ -430,82 +431,40 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     return arr;
   }
 
-  /** Active accounting elements (dimensions) of the client's chart of accounts. */
-  private static final String ENABLED_DIM_SQL =
-      "SELECT DISTINCT e.elementtype"
-          + "  FROM c_acctschema_element e"
-          + "  JOIN c_acctschema s ON s.c_acctschema_id = e.c_acctschema_id"
-          + " WHERE s.isactive = 'Y' AND e.isactive = 'Y'"
-          + "   AND s.ad_client_id = (SELECT ad_client_id FROM fin_financial_account"
-          + "                          WHERE fin_financial_account_id = ?)";
-
-  /** AcctSchema element type → UI dimension key (AC = account, not a navigable dimension). */
-  private static final Map<String, String> DIM_BY_ELEMENT = Map.of(
-      "OO", DIM_ORGANIZATION, "BP", DIM_BPARTNER, "PR", DIM_PRODUCT, "PJ", DIM_PROJECT,
-      "CC", DIM_COSTCENTER, "AY", DIM_ACTIVITY, "MC", DIM_CAMPAIGN,
-      "SR", DIM_SALESREGION, "U1", DIM_USER1, "U2", DIM_USER2);
-
   /** Stable display order for the "more info" dimension panel. */
-  private static final List<String> DIM_ORDER = List.of(
-      DIM_ORGANIZATION, DIM_BPARTNER, DIM_PROJECT, DIM_COSTCENTER, DIM_PRODUCT,
-      DIM_ACTIVITY, DIM_CAMPAIGN, DIM_SALESREGION, DIM_USER1, DIM_USER2);
+  private static final List<String> DIM_ORDER = AccountingDimensionsSupport.DIM_ORDER;
 
-  /** Navigable accounting dimensions active in the client's chart of accounts. */
+  /**
+   * Navigable accounting dimensions active in the client's chart of accounts. This is the coarse,
+   * informational set surfaced as {@code enabledDimensions}; anything that decides whether a
+   * dimension may be <b>edited on a movement header</b> must use {@link #loadHeaderDimensions}
+   * instead, which honours {@code AD_Client.Acctdim_Centrally_Maintained}.
+   */
   Set<String> loadActiveDimensionSet(String accountId) throws Exception {
-    Set<String> enabled = new HashSet<>();
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(ENABLED_DIM_SQL)) {
-      ps.setString(1, accountId);
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          String key = DIM_BY_ELEMENT.get(StringUtils.trimToEmpty(rs.getString("elementtype")));
-          if (key != null) enabled.add(key);
-        }
-      }
-    }
-    return enabled;
+    return AccountingDimensionsSupport.flatActiveDimensionsForAccount(accountId);
   }
 
   JSONArray loadEnabledDimensions(String accountId) throws Exception {
-    Set<String> enabled = loadActiveDimensionSet(accountId);
-    JSONArray arr = new JSONArray();
-    for (String key : DIM_ORDER) {
-      if (enabled.contains(key)) arr.put(key);
-    }
-    return arr;
+    return toOrderedArray(loadActiveDimensionSet(accountId));
   }
 
   /**
-   * Dimensions explicitly hidden from the finacc transaction header (docbasetype
-   * FAT) via {@code ad_client_acctdimension.show_in_header = 'N'}. Header
-   * dimensions default to visible when there is no override row (matching
-   * Classic), so we compute the header set as "active dimensions minus the ones
-   * explicitly hidden here" rather than only the rows flagged to show.
+   * Dimensions available at the finacc transaction header (docbasetype {@code FAT}) — the set the
+   * New Movement wizard renders and the automatch rule engine propagates. Delegated to
+   * {@link AccountingDimensionsSupport}, which picks the right source of truth depending on
+   * {@code AD_Client.Acctdim_Centrally_Maintained} (see gap K1 / ETP-4854): reading
+   * {@code C_AcctSchema_Element} directly is wrong for centrally-maintained tenants.
    */
-  private static final String HEADER_DIM_HIDDEN_SQL =
-      "SELECT DISTINCT d.dimension"
-          + "  FROM ad_client_acctdimension d"
-          + " WHERE d.isactive = 'Y' AND d.show_in_header = 'N' AND d.docbasetype = ?"
-          + "   AND d.ad_client_id = (SELECT ad_client_id FROM fin_financial_account"
-          + "                          WHERE fin_financial_account_id = ?)";
-
   JSONArray loadHeaderDimensions(String accountId) throws Exception {
-    Set<String> active = loadActiveDimensionSet(accountId);
-    Set<String> hidden = new HashSet<>();
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(HEADER_DIM_HIDDEN_SQL)) {
-      ps.setString(1, DOCBASETYPE_FAT);
-      ps.setString(2, accountId);
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          String key = DIM_BY_ELEMENT.get(StringUtils.trimToEmpty(rs.getString("dimension")));
-          if (key != null) hidden.add(key);
-        }
-      }
-    }
+    return toOrderedArray(
+        AccountingDimensionsSupport.activeHeaderDimensionsForAccount(accountId, DOCBASETYPE_FAT));
+  }
+
+  /** Serializes a dimension-key set in the stable display order. */
+  private static JSONArray toOrderedArray(Set<String> keys) {
     JSONArray arr = new JSONArray();
     for (String key : DIM_ORDER) {
-      if (active.contains(key) && !hidden.contains(key)) {
+      if (keys.contains(key)) {
         arr.put(key);
       }
     }

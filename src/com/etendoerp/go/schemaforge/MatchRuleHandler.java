@@ -19,6 +19,8 @@ package com.etendoerp.go.schemaforge;
 
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
@@ -35,6 +37,7 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 
 /**
@@ -73,6 +76,29 @@ public class MatchRuleHandler extends AbstractNeoHandler {
   private static final String F_TEXT_PATTERN = "textPattern";
   private static final String F_ACCOUNTING_CONCEPT = "accountingConcept";
 
+  private static final String METHOD_GET = "GET";
+  private static final String PARAM_ACTION = "action";
+  /** Read-only action exposing which accounting dimensions the rule form may offer. */
+  private static final String ACTION_ACTIVE_DIMENSIONS = "activeDimensions";
+  private static final String KEY_RESPONSE = "response";
+  private static final String KEY_DATA = "data";
+  private static final String KEY_DIMENSIONS = "dimensions";
+
+  /**
+   * Rule fields that are accounting dimensions: wire field name → dimension key. A rule may only
+   * carry a dimension that is active for the tenant at the {@code FAT} header level, because that
+   * is exactly what the transaction Automatch generates out of the rule can hold.
+   */
+  private static final Map<String, String> DIMENSION_FIELDS = dimensionFields();
+
+  private static Map<String, String> dimensionFields() {
+    Map<String, String> fields = new LinkedHashMap<>();
+    fields.put("project", AccountingDimensionsSupport.DIM_PROJECT);
+    fields.put("costCenter", AccountingDimensionsSupport.DIM_COSTCENTER);
+    fields.put("product", AccountingDimensionsSupport.DIM_PRODUCT);
+    return fields;
+  }
+
   private static final int NAME_MAX_LENGTH = 60;
   private static final int PATTERN_MAX_LENGTH = 255;
 
@@ -87,7 +113,50 @@ public class MatchRuleHandler extends AbstractNeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    if (SPEC.equals(context.getSpecName()) && METHOD_GET.equals(context.getHttpMethod())
+        && ACTION_ACTIVE_DIMENSIONS.equals(queryParam(context, PARAM_ACTION))) {
+      return buildActiveDimensions();
+    }
     return runWriteHook(context, SPEC, log, body -> validateWrite(context, body));
+  }
+
+  private static String queryParam(NeoContext context, String key) {
+    Map<String, String> params = context.getQueryParams();
+    return params != null ? params.get(key) : null;
+  }
+
+  /**
+   * {@code GET ?action=activeDimensions} — the accounting dimensions available at the header of a
+   * {@code FAT} document for the current tenant, in the canonical display order. The rule form
+   * renders a dimension selector only when its dimension is listed here, so a dimension switched
+   * off in the Accounting Schema disappears from the rule the same way it disappears from the New
+   * Movement wizard.
+   */
+  NeoResponse buildActiveDimensions() {
+    try {
+      enterAdminMode();
+      Set<String> active = AccountingDimensionsSupport.activeHeaderDimensionsForCurrentClient(
+          AccountingDimensionsSupport.DOCBASETYPE_FAT);
+      JSONArray arr = new JSONArray();
+      for (String key : AccountingDimensionsSupport.DIM_ORDER) {
+        if (active.contains(key)) {
+          arr.put(key);
+        }
+      }
+      JSONObject data = new JSONObject();
+      data.put(KEY_DIMENSIONS, arr);
+      JSONObject payload = new JSONObject();
+      payload.put(KEY_DATA, data);
+      JSONObject envelope = new JSONObject();
+      envelope.put(KEY_RESPONSE, payload);
+      return NeoResponse.ok(envelope);
+    } catch (Exception e) {
+      log.error("{} activeDimensions error", SPEC, e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Internal Server Error");
+    } finally {
+      exitAdminMode();
+    }
   }
 
   /**
@@ -97,6 +166,8 @@ public class MatchRuleHandler extends AbstractNeoHandler {
    */
   NeoResponse validateWrite(NeoContext context, JSONObject body) {
     final boolean isPatch = METHOD_PATCH.equals(context.getHttpMethod());
+
+    stripInactiveDimensions(body);
 
     // Full validation only applies when the relevant content fields are present. A PATCH
     // may carry a single field (inline toggle of `active`); fields absent from the body
@@ -110,6 +181,34 @@ public class MatchRuleHandler extends AbstractNeoHandler {
       }
     }
     return null;
+  }
+
+  /**
+   * Removes any accounting-dimension field whose dimension is not active for the tenant, so a rule
+   * never persists a dimension the generated movement could not carry. The value is dropped from
+   * the request, NOT cleared on the record: an existing value survives an unrelated save and starts
+   * applying again if the dimension is re-enabled in the Accounting Schema (ETP-4950). Dropping
+   * silently rather than rejecting matters because the clone and edit flows pre-fill the form from
+   * a stored row, which may still hold a now-inactive dimension.
+   */
+  void stripInactiveDimensions(JSONObject body) {
+    if (DIMENSION_FIELDS.keySet().stream().noneMatch(body::has)) {
+      return;
+    }
+    Set<String> active;
+    try {
+      active = AccountingDimensionsSupport.activeHeaderDimensionsForCurrentClient(
+          AccountingDimensionsSupport.DOCBASETYPE_FAT);
+    } catch (Exception e) {
+      // Fail open: an unreadable accounting configuration must not block saving a rule.
+      log.warn("Could not resolve active accounting dimensions; keeping the body as sent", e);
+      return;
+    }
+    for (Map.Entry<String, String> field : DIMENSION_FIELDS.entrySet()) {
+      if (body.has(field.getKey()) && !active.contains(field.getValue())) {
+        body.remove(field.getKey());
+      }
+    }
   }
 
   /** True when the body carries any of the content fields that require full validation. */

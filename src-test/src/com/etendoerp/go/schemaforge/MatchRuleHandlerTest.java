@@ -18,23 +18,34 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+
 import javax.servlet.http.HttpServletResponse;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 
@@ -58,6 +69,15 @@ import org.mockito.junit.MockitoJUnitRunner;
 public class MatchRuleHandlerTest {
 
   private static final int BAD_REQUEST = HttpServletResponse.SC_BAD_REQUEST;   // 400
+  private static final int SERVER_ERROR = HttpServletResponse.SC_INTERNAL_SERVER_ERROR; // 500
+
+  private static final String SPEC = "match-rule";
+  private static final String FAT = AccountingDimensionsSupport.DOCBASETYPE_FAT;
+
+  /** Wire field names of the three accounting dimensions a rule can carry. */
+  private static final String F_PROJECT = "project";
+  private static final String F_COST_CENTER = "costCenter";
+  private static final String F_PRODUCT = "product";
 
   private MatchRuleHandler handler;
 
@@ -402,6 +422,355 @@ public class MatchRuleHandlerTest {
 
     // Expect null (valid — passes to CRUD).
     assertNull(spyHandler.handle(ctx));
+  }
+
+  // ── accounting dimensions (ETP-4950) ─────────────────────────────────────────
+
+  /** A handler spy whose admin-mode seams are inert, so {@code OBContext} is never touched. */
+  private static MatchRuleHandler quietSpy() {
+    MatchRuleHandler spyHandler = spy(new MatchRuleHandler());
+    doNothing().when(spyHandler).enterAdminMode();
+    doNothing().when(spyHandler).exitAdminMode();
+    return spyHandler;
+  }
+
+  /** A {@code match-rule} GET context carrying {@code ?action=<action>} (null → no action). */
+  private static NeoContext getActionCtx(String action) {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getSpecName()).thenReturn(SPEC);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    Map<String, String> qp = new HashMap<>();
+    if (action != null) {
+      qp.put("action", action);
+    }
+    when(ctx.getQueryParams()).thenReturn(qp);
+    return ctx;
+  }
+
+  private static Set<String> dims(String... keys) {
+    return new HashSet<>(Arrays.asList(keys));
+  }
+
+  /** Pins the tenant's active FAT header dimensions for the duration of the mocked static. */
+  private static void stubActive(MockedStatic<AccountingDimensionsSupport> mocked,
+      Set<String> active) {
+    mocked.when(() -> AccountingDimensionsSupport.activeHeaderDimensionsForCurrentClient(FAT))
+        .thenReturn(active);
+  }
+
+  /** Unwraps {@code {response:{data:{dimensions:[...]}}}}. */
+  private static JSONArray dimensionsOf(NeoResponse response) throws Exception {
+    assertNotNull("expected a response, got null", response);
+    return response.getBody().getJSONObject("response").getJSONObject("data")
+        .getJSONArray("dimensions");
+  }
+
+  /**
+   * {@code GET ?action=activeDimensions} lists the active dimensions in the canonical
+   * {@code DIM_ORDER}, not in the (unordered) set's iteration order — the rule form renders its
+   * selectors straight off this array.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testBuildActiveDimensionsListsActiveKeysInCanonicalOrder() throws Exception {
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      stubActive(mocked, dims(AccountingDimensionsSupport.DIM_PRODUCT,
+          AccountingDimensionsSupport.DIM_PROJECT,
+          AccountingDimensionsSupport.DIM_ORGANIZATION));
+
+      MatchRuleHandler spyHandler = quietSpy();
+      NeoResponse response = spyHandler.buildActiveDimensions();
+
+      assertEquals(200, response.getHttpStatus());
+      JSONArray arr = dimensionsOf(response);
+      assertEquals(3, arr.length());
+      assertEquals(AccountingDimensionsSupport.DIM_ORGANIZATION, arr.getString(0));
+      assertEquals(AccountingDimensionsSupport.DIM_PROJECT, arr.getString(1));
+      assertEquals(AccountingDimensionsSupport.DIM_PRODUCT, arr.getString(2));
+      verify(spyHandler).enterAdminMode();
+      verify(spyHandler).exitAdminMode();
+    }
+  }
+
+  /**
+   * A dimension switched off for the tenant is absent from the payload, so the rule form stops
+   * offering it (the same way the New Movement wizard does).
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testBuildActiveDimensionsOmitsInactiveDimensions() throws Exception {
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      stubActive(mocked, Collections.singleton(AccountingDimensionsSupport.DIM_COSTCENTER));
+
+      JSONArray arr = dimensionsOf(quietSpy().buildActiveDimensions());
+
+      assertEquals(1, arr.length());
+      assertEquals(AccountingDimensionsSupport.DIM_COSTCENTER, arr.getString(0));
+    }
+  }
+
+  /**
+   * With no dimension active the envelope is still well-formed, carrying an empty array rather than
+   * a missing key.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testBuildActiveDimensionsReturnsAnEmptyArrayWhenNothingIsActive() throws Exception {
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      stubActive(mocked, Collections.emptySet());
+
+      assertEquals(0, dimensionsOf(quietSpy().buildActiveDimensions()).length());
+    }
+  }
+
+  /** An unreadable accounting configuration surfaces as a 500, with admin mode still released. */
+  @Test
+  public void testBuildActiveDimensionsReturns500WhenResolutionThrows() {
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      mocked.when(() -> AccountingDimensionsSupport.activeHeaderDimensionsForCurrentClient(FAT))
+          .thenThrow(new IllegalStateException("no accounting schema"));
+
+      MatchRuleHandler spyHandler = quietSpy();
+      assertStatus(SERVER_ERROR, spyHandler.buildActiveDimensions());
+      verify(spyHandler).exitAdminMode();
+    }
+  }
+
+  /**
+   * {@code handle()} routes {@code GET ?action=activeDimensions} to the read action instead of
+   * letting it fall through to the generic CRUD list.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testHandleRoutesTheActiveDimensionsAction() throws Exception {
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      stubActive(mocked, Collections.singleton(AccountingDimensionsSupport.DIM_PROJECT));
+
+      NeoResponse response = quietSpy().handle(getActionCtx("activeDimensions"));
+
+      assertNotNull(response);
+      assertEquals(200, response.getHttpStatus());
+      assertEquals(AccountingDimensionsSupport.DIM_PROJECT, dimensionsOf(response).getString(0));
+    }
+  }
+
+  /** A GET carrying some other action still falls through to the generic CRUD (null). */
+  @Test
+  public void testHandleIgnoresUnknownGetActions() {
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      assertNull(quietSpy().handle(getActionCtx("somethingElse")));
+      mocked.verifyNoInteractions();
+    }
+  }
+
+  /** A GET with no action at all falls through to the generic CRUD list (null). */
+  @Test
+  public void testHandleIgnoresGetWithoutAction() {
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      assertNull(quietSpy().handle(getActionCtx(null)));
+      mocked.verifyNoInteractions();
+    }
+  }
+
+  /** The activeDimensions action belongs to the match-rule spec only. */
+  @Test
+  public void testHandleIgnoresActiveDimensionsForAnotherSpec() {
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      NeoContext ctx = getActionCtx("activeDimensions");
+      when(ctx.getSpecName()).thenReturn("financial-account");
+
+      assertNull(quietSpy().handle(ctx));
+      mocked.verifyNoInteractions();
+    }
+  }
+
+  // ── stripInactiveDimensions ──────────────────────────────────────────────────
+
+  /**
+   * THE TICKET'S WRITE-SIDE REQUIREMENT: a dimension field whose dimension is not active is
+   * REMOVED from the request body (never rejected, never cleared on the record), while the active
+   * ones and every unrelated field are left exactly as sent.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testStripInactiveDimensionsDropsOnlyTheInactiveFields() throws Exception {
+    JSONObject b = body(F_PROJECT, "PJ-1", F_COST_CENTER, "CC-1", F_PRODUCT, "PR-1",
+        "name", "Bank fee");
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      stubActive(mocked, dims(AccountingDimensionsSupport.DIM_COSTCENTER,
+          AccountingDimensionsSupport.DIM_PRODUCT));
+
+      handler.stripInactiveDimensions(b);
+
+      assertFalse("an inactive dimension must be dropped from the body", b.has(F_PROJECT));
+      assertEquals("CC-1", b.getString(F_COST_CENTER));
+      assertEquals("PR-1", b.getString(F_PRODUCT));
+      assertEquals("Bank fee", b.getString("name"));
+    }
+  }
+
+  /**
+   * With no dimension active, all three fields are dropped and nothing else is touched.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testStripInactiveDimensionsDropsAllThreeWhenNoneIsActive() throws Exception {
+    JSONObject b = body(F_PROJECT, "PJ-1", F_COST_CENTER, "CC-1", F_PRODUCT, "PR-1",
+        "textPattern", "COMM");
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      stubActive(mocked, Collections.emptySet());
+
+      handler.stripInactiveDimensions(b);
+
+      assertFalse(b.has(F_PROJECT));
+      assertFalse(b.has(F_COST_CENTER));
+      assertFalse(b.has(F_PRODUCT));
+      assertEquals("COMM", b.getString("textPattern"));
+    }
+  }
+
+  /**
+   * A body that carries none of the three dimension fields must not trigger the accounting-
+   * configuration lookup at all — an inline {@code active} PATCH costs no extra query.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testStripInactiveDimensionsSkipsResolutionWhenNoDimensionFieldIsPresent()
+      throws Exception {
+    JSONObject b = body("name", "Bank fee", "active", Boolean.FALSE);
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      handler.stripInactiveDimensions(b);
+
+      mocked.verifyNoInteractions();
+      assertEquals("Bank fee", b.getString("name"));
+    }
+  }
+
+  /**
+   * Fail OPEN: an unreadable accounting configuration must not block saving a rule, so the body is
+   * kept exactly as sent.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testStripInactiveDimensionsFailsOpenAndKeepsTheBodyIntact() throws Exception {
+    JSONObject b = body(F_PROJECT, "PJ-1", F_COST_CENTER, "CC-1", F_PRODUCT, "PR-1");
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      mocked.when(() -> AccountingDimensionsSupport.activeHeaderDimensionsForCurrentClient(FAT))
+          .thenThrow(new IllegalStateException("no accounting schema"));
+
+      handler.stripInactiveDimensions(b);
+
+      assertEquals("PJ-1", b.getString(F_PROJECT));
+      assertEquals("CC-1", b.getString(F_COST_CENTER));
+      assertEquals("PR-1", b.getString(F_PRODUCT));
+    }
+  }
+
+  /**
+   * A dimension present in the body with a blank value is dropped too when its dimension is
+   * inactive: the strip is decided by the dimension, not by the value.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testStripInactiveDimensionsDropsAnInactiveFieldEvenWhenBlank() throws Exception {
+    JSONObject b = body(F_PROJECT, "");
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      stubActive(mocked, Collections.singleton(AccountingDimensionsSupport.DIM_PRODUCT));
+
+      handler.stripInactiveDimensions(b);
+
+      assertFalse(b.has(F_PROJECT));
+    }
+  }
+
+  // ── validateWrite wiring ─────────────────────────────────────────────────────
+
+  /**
+   * {@code validateWrite} strips the inactive dimensions BEFORE validating the content, so a
+   * clone/edit form pre-filled from a row that still holds a now-inactive dimension saves cleanly
+   * instead of being rejected.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidateWriteStripsInactiveDimensionsBeforeValidating() throws Exception {
+    JSONObject b = body("name", "Bank fee", "textCondition", "C", "textPattern", "COMM",
+        "accountingConcept", "GL-001", F_PROJECT, "PJ-1", F_COST_CENTER, "CC-1");
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      stubActive(mocked, Collections.singleton(AccountingDimensionsSupport.DIM_COSTCENTER));
+
+      assertNull(handler.validateWrite(ctx, b));
+      assertFalse(b.has(F_PROJECT));
+      assertEquals("CC-1", b.getString(F_COST_CENTER));
+    }
+  }
+
+  /**
+   * A PATCH carrying ONLY an inactive dimension is stripped and then passes through: with no
+   * content fields left to check, {@code validateWrite} must not manufacture a validation error.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidateWriteStripsInactiveDimensionOnPartialPatch() throws Exception {
+    JSONObject b = body(F_PROJECT, "PJ-1");
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      stubActive(mocked, Collections.emptySet());
+
+      assertNull(handler.validateWrite(ctx, b));
+      assertFalse(b.has(F_PROJECT));
+    }
+  }
+
+  /**
+   * Stripping a dimension never masks a content problem: an invalid body is still rejected with
+   * HTTP 400 after the strip.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testValidateWriteStillRejectsInvalidContentAfterStripping() throws Exception {
+    JSONObject b = body("name", "", "textCondition", "C", "textPattern", "COMM", F_PROJECT, "PJ-1");
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      stubActive(mocked, Collections.emptySet());
+
+      assertStatus(BAD_REQUEST, handler.validateWrite(ctx, b));
+      assertFalse(b.has(F_PROJECT));
+    }
   }
 
   private static String repeat(String s, int n) {
