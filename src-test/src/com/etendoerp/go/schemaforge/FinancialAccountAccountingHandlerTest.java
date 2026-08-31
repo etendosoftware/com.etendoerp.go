@@ -82,6 +82,11 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  *   <li>a field omitted from the body leaves the stored value untouched (PATCH-like semantics)</li>
  *   <li>a field present-but-blank in the body clears the stored value</li>
  *   <li>cross-ledger {@link AccountingCombination} validation (rejects a combo from another ledger)</li>
+*   <li>mixed-ledger request (one valid field + one cross-ledger field in the same body): the
+*       earlier-in-call-order valid field's setter still fires before the later field's failure
+*       aborts the method — never persisted (obDal.save/flush unreached), but not fully
+*       object-level atomic either (ETP-4872 QA)</li>
+*   <li>a garbage/non-existent combination id degrades to 400 "not found", never a raw 500</li>
  *   <li>{@code enablebankstatement} is forced to {@code true} on every successful save</li>
  *   <li>catalog-building from active {@link AccountingCombination}s</li>
  *   <li>{@code @Named} qualifier sanity (no competing CDI scope annotation)</li>
@@ -500,6 +505,72 @@ class FinancialAccountAccountingHandlerTest {
     assertEquals(400, response.getHttpStatus());
     assertTrue(response.getBody().getJSONObject("error").getString("message")
         .contains("does not belong to the account's ledger"));
+  }
+
+  @Test
+  @DisplayName("Mixed-ledger request: an earlier valid field's setter fires before a later field's"
+      + " cross-ledger failure aborts the save — the row mutates in-memory but is never persisted"
+      + " (obDal.save/flush are never reached)")
+  void saveMixedLedgerFieldsAppliesEarlierValidFieldButNeverPersists() throws Exception {
+    wireAccountWithLedger();
+    // findOrCreateRow runs once, before any field is resolved — the row it returns is the one
+    // both applyCombination calls below mutate (or attempt to mutate).
+    FIN_FinancialAccountAccounting existingRow = mock(FIN_FinancialAccountAccounting.class);
+    wireFindRowCriteria(existingRow);
+
+    // depositAccount (5th in handleSave's fixed call order) resolves fine, on the account's ledger.
+    AccountingCombination validDeposit = combinationOnLedger("deposit-ok", "57200000", "Bancos");
+
+    // withdrawalAccount (8th, i.e. later) belongs to a DIFFERENT ledger — must be rejected.
+    AcctSchema otherLedger = mock(AcctSchema.class);
+    when(otherLedger.getId()).thenReturn("other-ledger");
+    AccountingCombination badWithdrawal = mock(AccountingCombination.class);
+    when(badWithdrawal.getId()).thenReturn("withdrawal-bad");
+    when(badWithdrawal.getAccountingSchema()).thenReturn(otherLedger);
+    when(obDal.get(AccountingCombination.class, "withdrawal-bad")).thenReturn(badWithdrawal);
+
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put(F_DEPOSIT, "deposit-ok")
+        .put(F_WITHDRAWAL, "withdrawal-bad");
+
+    NeoResponse response = handler.handle(saveCtx("POST", body));
+
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(response.getBody().getJSONObject("error").getString("message")
+        .contains("does not belong to the account's ledger"));
+    // The whole request is rejected (400, nothing persisted) — but the earlier field in call
+    // order already mutated the in-memory row before the later field's failure aborted the
+    // method. This is NOT full object-level atomicity: only "never explicitly persisted".
+    verify(existingRow).setDepositAccount(validDeposit);
+    verify(existingRow, never()).setWithdrawalAccount(any());
+    verify(existingRow, never()).setEnablebankstatement(any(Boolean.class));
+    verify(obDal, never()).save(any());
+    verify(obDal, never()).flush();
+  }
+
+  @Test
+  @DisplayName("A garbage/non-existent combination id degrades to 400 'not found' (OBException),"
+      + " never a raw 500")
+  void saveGarbageNonExistentCombinationIdReturns400NotFound() throws Exception {
+    wireAccountWithLedger();
+    FIN_FinancialAccountAccounting existingRow = mock(FIN_FinancialAccountAccounting.class);
+    wireFindRowCriteria(existingRow);
+    // obDal.get(...) for an id that doesn't correspond to any real record returns null —
+    // no stubbing needed beyond the default Mockito null return.
+
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put(F_DEPOSIT, "not-a-real-id-xyz");
+
+    NeoResponse response = handler.handle(saveCtx("POST", body));
+
+    assertEquals(400, response.getHttpStatus());
+    assertTrue(response.getBody().getJSONObject("error").getString("message")
+        .contains("Accounting combination not found: not-a-real-id-xyz"));
+    verify(existingRow, never()).setDepositAccount(any());
+    verify(obDal, never()).save(any());
+    verify(obDal, never()).flush();
   }
 
   // ── save — find-or-create ────────────────────────────────────────────────────

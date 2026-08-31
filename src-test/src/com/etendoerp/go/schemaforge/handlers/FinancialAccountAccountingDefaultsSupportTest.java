@@ -19,9 +19,11 @@ package com.etendoerp.go.schemaforge.handlers;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -275,6 +277,77 @@ class FinancialAccountAccountingDefaultsSupportTest {
 
     verify(obDal).save(row);
     verify(obDal).flush();
+  }
+
+  @Test
+  @DisplayName("An unrecognized/raw account type (bypassing normalizeType's known B/C/CA set)"
+      + " silently defaults to Bank's 7-field set — never throws, never no-ops")
+  void unrecognizedRawAccountTypeDefaultsToBankBehavior() {
+    // "X" is not TYPE_BANK/TYPE_CASH/TYPE_CARD — normalizeType() falls through to TYPE_BANK for
+    // any unrecognized value (mirrors FinancialAccountHandler#normalizeType's own default).
+    wireAccountWithLedger("X");
+    FIN_FinancialAccountAccounting row = wireExistingRow();
+
+    AccountingCombination gain = combo("gain");
+    AccountingCombination loss = combo("loss");
+    AccountingCombination fee = combo("fee");
+    AccountingCombination inTransitIn = combo("in-transit-in");
+    AccountingCombination inTransitOut = combo("in-transit-out");
+    AccountingCombination deposit = combo("deposit");
+    AccountingCombination withdrawal = combo("withdrawal");
+    wireResolveCombinationByCode(gain, loss, fee, inTransitIn, inTransitOut, deposit, withdrawal);
+
+    Assertions.assertDoesNotThrow(
+        () -> FinancialAccountAccountingDefaultsSupport.applyDefaultAccountingConfiguration(account));
+
+    // Same call pattern as the confirmed Bank-type test: an unrecognized type is silently treated
+    // as Bank, not rejected and not left unconfigured.
+    verify(row).setFINBankrevaluationgainAcct(gain);
+    verify(row).setFINBankrevaluationlossAcct(loss);
+    verify(row).setFINBankfeeAcct(fee);
+    verify(row).setDepositAccount(deposit);
+    verify(row).setWithdrawalAccount(withdrawal);
+    verify(obDal).save(row);
+    verify(obDal).flush();
+  }
+
+  @Test
+  @DisplayName("A null account type (e.g. a record mid-creation with no type set yet) also"
+      + " defaults to Bank behavior, same as any other unrecognized value")
+  void nullAccountTypeDefaultsToBankBehavior() {
+    wireAccountWithLedger(null);
+    FIN_FinancialAccountAccounting row = wireExistingRow();
+    wireResolveCombinationByCode();
+
+    Assertions.assertDoesNotThrow(
+        () -> FinancialAccountAccountingDefaultsSupport.applyDefaultAccountingConfiguration(account));
+
+    // Reaching resolveCombinationByCode 7 times (Bank's field count) — not 4 (Cash/Card) —
+    // is itself proof null was normalized to Bank, not silently skipped.
+    verify(obDal, times(7)).createCriteria(AccountingCombination.class);
+    verify(obDal).save(row);
+    verify(obDal).flush();
+  }
+
+  // ── deterministic code resolution ────────────────────────────────────────────
+
+  @Test
+  @DisplayName("resolveCombinationByCode always caps the query at 1 result (setMaxResults(1)) so a"
+      + " data anomaly — two active combinations matching the same code on the same ledger — can"
+      + " never throw a Hibernate NonUniqueResultException; it deterministically picks one")
+  void resolveCombinationByCodeAlwaysCapsResultsAtOne() {
+    wireAccountWithLedger(TYPE_BANK);
+    wireExistingRow();
+
+    AccountingCombination gain = combo("gain");
+    wireResolveCombinationByCode(gain);
+
+    FinancialAccountAccountingDefaultsSupport.applyDefaultAccountingConfiguration(account);
+
+    // Regression guard: if this call is ever dropped, a duplicate-code data anomaly on a real
+    // Hibernate session would throw NonUniqueResultException instead of degrading cleanly.
+    verify(obDal.createCriteria(AccountingCombination.class), atLeastOnce())
+        .setMaxResults(1);
   }
 
   // ── soft-degrade / robustness ────────────────────────────────────────────────
