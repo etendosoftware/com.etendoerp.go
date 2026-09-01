@@ -743,12 +743,11 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
       finAcc.setPsd2Provider(provider);
       OBDal.getInstance().save(finAcc);
     }
-    // ETP-4503: a Bank account with a bank connection must have multicurrency OFF on its
-    // bank-transfer payment-method link (exception to the "multicurrency ON by default" rule).
-    // Shared by both the create-and-link and link-existing paths — linkAccount is the single choke
-    // point where the bank connection has just been established. The Bank-type gate is in the helper, so
-    // this is safe to call unconditionally (Card accounts and non-transfer links are no-ops).
-    FinancialAccountSupport.disableMulticurrencyForBankTransfer(finAcc);
+    // ETP-5084: connecting an account to its bank no longer clears multicurrency on the
+    // bank-transfer link. The ETP-4503 exception assumed a transfer could only ever be instructed in
+    // the account's currency and therefore could not settle a foreign invoice; PIS now converts the
+    // amount to the account currency before instructing the bank, so the transfer link stays
+    // multicurrency like every other payment method.
     return warning;
   }
 

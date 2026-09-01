@@ -498,6 +498,60 @@ public class NeoFieldFilter {
     }
   }
 
+  /**
+   * Strips fields from a callout response that {@link #filterCreateRequest} would reject as
+   * read-only-on-create for this entity (see {@link #rejectableOnCreateFields}, IMP-28,
+   * ETP-4917).
+   *
+   * <p>A legacy Etendo callout answers with every field it recomputed, not just the one the
+   * client changed — e.g. {@code SL_JournalLineAmt} answers both the foreign-currency amount the
+   * user typed AND the derived accounted-amount columns ({@code AmtAcctDr}/{@code AmtAcctCr},
+   * whose DAL property names happen to literally be {@code debit}/{@code credit}). The frontend
+   * merges the whole callout response into local form state and later spreads that state into a
+   * create request, so an echoed read-only field silently becomes a client-supplied value on the
+   * next POST — which {@link #filterCreateRequest} then rejects with a 422 (ETP-4917).
+   *
+   * <p>Safe to apply unconditionally, whether the callout precedes a POST (create) or a
+   * PUT/PATCH (update) of an already-existing record: {@link #rejectableOnCreateFields} is by
+   * construction disjoint from {@link #writableFields} (see its javadoc and the IMP-37
+   * subtraction at the end of {@link #forEntity}), so every key this method removes is one
+   * {@link #filterWriteRequest} would have silently dropped anyway on an update. There is no
+   * separate "reject on update" set to consult instead — this is the correct rejection set for
+   * both write paths that can follow a callout.
+   *
+   * <p>Does not touch the callout's own server-side computation — {@link NeoCalloutService} has
+   * already computed and cached whatever it needed before this runs; only the JSON handed back
+   * to the client is affected.
+   *
+   * @param calloutBody
+   *     the callout response body ({@code updates}/{@code combos}/{@code messages}), modified
+   *     in place
+   * @return the same object, for chaining
+   */
+  public JSONObject filterCalloutResponse(JSONObject calloutBody) {
+    if (!active || calloutBody == null || rejectableOnCreateFields == null
+        || rejectableOnCreateFields.isEmpty()) {
+      return calloutBody;
+    }
+    stripRejectableKeys(calloutBody.optJSONObject("updates"));
+    stripRejectableKeys(calloutBody.optJSONObject("combos"));
+    return calloutBody;
+  }
+
+  /**
+   * Removes every key in {@link #rejectableOnCreateFields} from the given callout response
+   * section ({@code updates} or {@code combos}), if present.
+   */
+  @SuppressWarnings("unchecked")
+  private void stripRejectableKeys(JSONObject section) {
+    if (section == null) {
+      return;
+    }
+    for (String field : rejectableOnCreateFields) {
+      section.remove(field);
+    }
+  }
+
   private JSONObject filterBody(JSONObject requestBody, Set<String> allowedFields) {
     if (!active || requestBody == null) {
       return requestBody;

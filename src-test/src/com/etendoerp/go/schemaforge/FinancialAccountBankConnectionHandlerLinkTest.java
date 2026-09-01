@@ -940,12 +940,14 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
   }
 
   /**
-   * Stubs {@code dal.createCriteria(FinAccPaymentMethod.class)} so the payment-method sweep at the
-   * end of {@code linkAccount} ({@code disableMulticurrencyForBankTransfer}, ETP-4503) returns the
-   * given rows instead of hitting a real Hibernate session.
+   * Stubs {@code dal.createCriteria(FinAccPaymentMethod.class)} so any payment-method sweep reached
+   * from {@code linkAccount} returns the given rows instead of hitting a real Hibernate session.
    * Every test that reaches {@code linkAccount} must call this (with an empty list when the
    * behavior is not under test), otherwise the unstubbed {@code OBDal.getInstance()} call blows up
    * and the handler's catch-all turns it into a 500.
+   *
+   * <p>Kept after ETP-5084 removed the multicurrency sweep that originally needed it: the stub is
+   * cheap, and it is what would catch a reintroduced sweep instead of letting it NPE.
    */
   @SuppressWarnings("unchecked")
   private static OBCriteria<FinAccPaymentMethod> stubFinAccPaymentMethods(OBDal dal,
