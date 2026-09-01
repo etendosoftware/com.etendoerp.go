@@ -57,6 +57,15 @@ public final class AccountingDocumentTypeSupport {
   }
 
   /**
+   * {@code AD_Table_ID} of {@code FIN_Payment}. Pulled out as a named constant because it is
+   * referenced from both vocabularies covered by this class: it is one of the
+   * {@link #APRM_DISABLED_TABLE_IDS} (posted='D' ~99.9%, APRM) and the backing table for two
+   * different {@code DocBaseType} codes in {@link #DOC_BASE_TYPE_TO_TABLE_ID} ({@code APP} and
+   * {@code ARR}).
+   */
+  private static final String TABLE_ID_FIN_PAYMENT = "D1A97202E832470285C9B1EB026D54E2";
+
+  /**
    * {@code AD_Table_ID}s excluded from every accounting-relevant document view, regardless of
    * {@code c_acctschema_table} state. These tables exist in the accounting schema, but either
    * APRM structurally disables direct bulk-posting on them ({@code POSTED = 'D'} on all
@@ -70,7 +79,7 @@ public final class AccountingDocumentTypeSupport {
    */
   private static final Set<String> APRM_DISABLED_TABLE_IDS = new HashSet<>(Arrays.asList(
       "D4C23A17190649E7B78F55A05AF3438C", // FIN_BankStatement  — posted='D' ~99.9% (APRM)
-      "D1A97202E832470285C9B1EB026D54E2", // FIN_Payment        — posted='D' ~99.9% (APRM)
+      TABLE_ID_FIN_PAYMENT,                // FIN_Payment        — posted='D' ~99.9% (APRM)
       "B1B7075C46934F0A9FD4C4D0F1457B42", // FIN_Reconciliation — posted='D' ~89% (APRM)
       "325",                               // M_Production       — globally excluded, ETP-4452
       "30721072789F410E9606D2235CB2A226", // FIN_Doubtful_Debt  — globally excluded, ETP-4452
@@ -98,12 +107,12 @@ public final class AccountingDocumentTypeSupport {
     DOC_BASE_TYPE_TO_TABLE_ID.put("AMZ",    "800060");                               // A_Amortization
     DOC_BASE_TYPE_TO_TABLE_ID.put("APC",    "318");                                   // C_Invoice
     DOC_BASE_TYPE_TO_TABLE_ID.put("API",    "318");                                   // C_Invoice
-    DOC_BASE_TYPE_TO_TABLE_ID.put("APP",    "D1A97202E832470285C9B1EB026D54E2");      // FIN_Payment
+    DOC_BASE_TYPE_TO_TABLE_ID.put("APP",    TABLE_ID_FIN_PAYMENT);                   // FIN_Payment
     DOC_BASE_TYPE_TO_TABLE_ID.put("APPP",   "B9437A72163445C59A0A585209C8ECE5");      // FIN_Payment_Proposal
     DOC_BASE_TYPE_TO_TABLE_ID.put("ARC",    "318");                                   // C_Invoice
     DOC_BASE_TYPE_TO_TABLE_ID.put("ARI",    "318");                                   // C_Invoice
     DOC_BASE_TYPE_TO_TABLE_ID.put("ARI_RM", "318");                                   // C_Invoice
-    DOC_BASE_TYPE_TO_TABLE_ID.put("ARR",    "D1A97202E832470285C9B1EB026D54E2");      // FIN_Payment
+    DOC_BASE_TYPE_TO_TABLE_ID.put("ARR",    TABLE_ID_FIN_PAYMENT);                   // FIN_Payment
     DOC_BASE_TYPE_TO_TABLE_ID.put("BSF",    "D4C23A17190649E7B78F55A05AF3438C");      // FIN_BankStatement
     DOC_BASE_TYPE_TO_TABLE_ID.put("CAD",    "D022B92163074E5E82449C8E0B5AFDF6");      // M_CostAdjustment
     DOC_BASE_TYPE_TO_TABLE_ID.put("CMB",    "392");                                   // C_BankStatement
@@ -135,6 +144,9 @@ public final class AccountingDocumentTypeSupport {
    * Returns the set of {@code AD_Table_ID} values that have at least one active accounting
    * schema entry ({@code c_acctschema_table.isactive = 'Y'}). Callers filtering many rows in one
    * request should call this ONCE and reuse the result — never per row.
+   *
+   * @return the distinct {@code AD_Table_ID}s with at least one active {@code c_acctschema_table}
+   *         row; never {@code null}, empty when none are configured
    */
   @SuppressWarnings("unchecked")
   public static Set<String> loadTablesWithActiveAccounting() {
@@ -151,8 +163,14 @@ public final class AccountingDocumentTypeSupport {
     return ids;
   }
 
-  /** True when {@code tableId} is one of the tables structurally excluded regardless of
-   *  accounting-schema configuration (see {@link #APRM_DISABLED_TABLE_IDS}). Null-safe. */
+  /**
+   * True when {@code tableId} is one of the tables structurally excluded regardless of
+   * accounting-schema configuration (see {@link #APRM_DISABLED_TABLE_IDS}). Null-safe.
+   *
+   * @param tableId the {@code AD_Table_ID} to check; {@code null} resolves to {@code false}
+   * @return {@code true} if {@code tableId} is in {@link #APRM_DISABLED_TABLE_IDS}, {@code false}
+   *         otherwise (including when {@code tableId} is {@code null})
+   */
   public static boolean isAprmDisabledTable(String tableId) {
     return tableId != null && APRM_DISABLED_TABLE_IDS.contains(tableId);
   }
@@ -161,6 +179,12 @@ public final class AccountingDocumentTypeSupport {
    * True when {@code tableId} is both actively registered in {@code c_acctschema_table}
    * ({@code accountedTableIds}, from {@link #loadTablesWithActiveAccounting()}) and not
    * APRM-disabled. Null-safe on {@code tableId}.
+   *
+   * @param tableId the {@code AD_Table_ID} to check; {@code null} resolves to {@code false}
+   * @param accountedTableIds the result of {@link #loadTablesWithActiveAccounting()}, loaded ONCE
+   *                          by the caller and reused across every row in the same request
+   * @return {@code true} if {@code tableId} is in {@code accountedTableIds} and not APRM-disabled,
+   *         {@code false} otherwise (including when {@code tableId} is {@code null})
    */
   public static boolean isTableAccountingRelevant(String tableId, Set<String> accountedTableIds) {
     return tableId != null && accountedTableIds.contains(tableId) && !isAprmDisabledTable(tableId);
@@ -174,6 +198,9 @@ public final class AccountingDocumentTypeSupport {
    * @param docBaseTypeCode the DocBaseType code to check; {@code null} resolves to not-relevant
    * @param accountedTableIds the result of {@link #loadTablesWithActiveAccounting()}, loaded ONCE
    *                          by the caller and reused across every row in the same request
+   * @return {@code true} if {@code docBaseTypeCode} maps to a table that is accounting-relevant,
+   *         {@code false} otherwise (including when {@code docBaseTypeCode} is {@code null} or
+   *         unmapped)
    */
   public static boolean isAccountingRelevant(String docBaseTypeCode, Set<String> accountedTableIds) {
     return isTableAccountingRelevant(DOC_BASE_TYPE_TO_TABLE_ID.get(docBaseTypeCode), accountedTableIds);
