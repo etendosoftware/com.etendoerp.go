@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -40,6 +41,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -61,6 +63,7 @@ import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
@@ -224,6 +227,32 @@ public class ReconciliationDifferenceSupportTest {
   }
 
   /**
+   * {@link #runAction(JSONObject, DalSetup)} for the scenarios that actually reach the write.
+   *
+   * <p>Since ETP-4965 the difference movement is created WITH a description, so
+   * {@code reconcileDifference} resolves one through the AD_Message dictionary on its way to
+   * {@code createTransactionForRule}. The real {@code messageBD} dereferences an {@code OBContext}
+   * that is null under plain Mockito, so every path reaching that far has to stub the lookup —
+   * exactly the treatment the {@code applyInlineDifference} tests already give it.
+   *
+   * @param requestBody the action payload
+   * @param extra extra stubbing on the mocked {@link OBDal}, or {@code null}
+   * @return the action's response
+   * @throws Exception if the mocked interaction fails
+   */
+  private NeoResponse runActionReachingTheWrite(JSONObject requestBody, DalSetup extra)
+      throws Exception {
+    try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubDifferenceMessage(msgMock, DICTIONARY_TEXT);
+      return runAction(requestBody, extra);
+    }
+  }
+
+  private NeoResponse runActionReachingTheWrite(JSONObject requestBody) throws Exception {
+    return runActionReachingTheWrite(requestBody, null);
+  }
+
+  /**
    * Wires the standard PARTIAL group — one matched head plus one pending remainder — and stubs the
    * write seams so a happy path can complete.
    */
@@ -272,7 +301,7 @@ public class ReconciliationDifferenceSupportTest {
 
   /**
    * A zero / negative / unset percentage disables the action (limit 0) — the deliberate divergence
-   * from {@code AutoMatchSupport.computeAmountTolerance}, which reads the same column as "one cent".
+   * from {@code AutoMatchSupport.signalGroupTolerance}, which reads the same column as "one cent".
    */
   @Test
   public void testDifferenceLimitZeroWhenPercentageUnsetOrNonPositive() {
@@ -669,7 +698,7 @@ public class ReconciliationDifferenceSupportTest {
   public void testNegativeRemainderPostsSignedAmount() throws Exception {
     stubPartialGroup(null, "12.00", null, "0.50");
 
-    NeoResponse response = runAction(body(ACC_ID, REM_ID));
+    NeoResponse response = runActionReachingTheWrite(body(ACC_ID, REM_ID));
 
     assertEquals(201, response.getHttpStatus());
     verify(handler).createTransactionForRule(eq(account), any(),
@@ -843,7 +872,8 @@ public class ReconciliationDifferenceSupportTest {
   public void testPayloadGlItemOverridesAccountDefault() throws Exception {
     stubPartialGroup("12.00", null, "0.50", null);
 
-    NeoResponse response = runAction(body(ACC_ID, REM_ID).put(KEY_GL_ITEM_ID, GL_PAYLOAD),
+    NeoResponse response = runActionReachingTheWrite(
+        body(ACC_ID, REM_ID).put(KEY_GL_ITEM_ID, GL_PAYLOAD),
         dal -> when(dal.get(GLItem.class, GL_PAYLOAD)).thenReturn(mock(GLItem.class)));
 
     assertEquals(201, response.getHttpStatus());
@@ -863,7 +893,7 @@ public class ReconciliationDifferenceSupportTest {
     doReturn(NeoResponse.error(400, "amounts do not match"))
         .when(handler).reconcileGroup(any());
 
-    NeoResponse response = runAction(body(ACC_ID, REM_ID));
+    NeoResponse response = runActionReachingTheWrite(body(ACC_ID, REM_ID));
 
     assertEquals(400, response.getHttpStatus());
     assertEquals("amounts do not match", errorMessage(response));
@@ -880,7 +910,7 @@ public class ReconciliationDifferenceSupportTest {
     stubPartialGroup("12.00", null, "0.50", null);
     doReturn(null).when(handler).reconcileGroup(any());
 
-    NeoResponse response = runAction(body(ACC_ID, REM_ID));
+    NeoResponse response = runActionReachingTheWrite(body(ACC_ID, REM_ID));
 
     assertEquals(500, response.getHttpStatus());
     verify(handler).doRollbackAndClose();
@@ -971,5 +1001,721 @@ public class ReconciliationDifferenceSupportTest {
     // Guards against the old 409 wording coming back for this case.
     assertFalse(errorMessage(response).contains("more than one pending portion"));
     assertNoWrite();
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-4965 — applyInlineDifference: posting a within-tolerance gap during the
+  // ordinary "Conciliar", with no extra step for the user.
+  //
+  // Called from BOTH reconcileGroup and prepareGroup, right after validateOperations and before
+  // the line is matched. It returns null to mean "carry on" and a NeoResponse to mean "stop and
+  // return this verbatim".
+  //
+  //   gap = signedLineAmount(line) − Σ signedAmount(operations)
+  //
+  //   |gap| < 0.005              → null, nothing posted  (the date-only deviation case)
+  //   gap sign opposite the line → null, over-coverage stays validateOperations' business
+  //   tolerance null / |gap| >   → null, the existing partial-split behaviour is untouched
+  //
+  // A null tolerance (0%) disables POSTING only. Detection is governed by the date tolerance too
+  // and lives in NearMatchSupport.findNearMatch; a date-only difference reaches this helper with a
+  // zero gap and is waved through without any concept at all.
+  //   within tolerance, no concept → 400 GL_ITEM_REQUIRED, NO write
+  //   within tolerance, concept   → one transaction, its id appended to operationIds, null
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private static final String LINE_ID = "line-inline";
+  private static final String OP_ID = "op-1";
+  private static final String CODE_GL_ITEM_REQUIRED = "GL_ITEM_REQUIRED";
+  private static final String KEY_CODE = "code";
+  private static final String KEY_DIFFERENCE_AMOUNT = "differenceAmount";
+
+  /** A plain unreconciled statement line of this account (no match group involved). */
+  private FIN_BankStatementLine inlineLine(String credit, String debit) {
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    when(line.getId()).thenReturn(LINE_ID);
+    when(line.getBankStatement()).thenReturn(statement);
+    when(line.getCramount()).thenReturn(bd(credit));
+    when(line.getDramount()).thenReturn(bd(debit));
+    when(line.isActive()).thenReturn(true);
+    when(line.getFinancialAccountTransaction()).thenReturn(null);
+    return line;
+  }
+
+  /** A processed, unreconciled transaction of this account. */
+  private FIN_FinaccTransaction opTxn(String id, String deposit, String payment) {
+    FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
+    when(trx.getId()).thenReturn(id);
+    when(trx.getAccount()).thenReturn(account);
+    when(trx.getDepositAmount()).thenReturn(bd(deposit));
+    when(trx.getPaymentAmount()).thenReturn(bd(payment));
+    when(trx.getReconciliation()).thenReturn(null);
+    return trx;
+  }
+
+  /** Strips the account's configured difference concept, i.e. "no GL item anywhere". */
+  private void withoutConfiguredGlItem() {
+    when(account.getAprmGlitemDiff()).thenReturn(null);
+  }
+
+  /** The single JSONObject handed to {@code createTransactionForRule}, captured. */
+  private JSONObject capturedSpec() throws Exception {
+    ArgumentCaptor<JSONObject> spec = ArgumentCaptor.forClass(JSONObject.class);
+    verify(handler).createTransactionForRule(eq(account), any(), spec.capture());
+    return spec.getValue();
+  }
+
+  /**
+   * The reference case: a 27.00 line reconciled against a 26.62 movement leaves a 0.38 gap, inside
+   * the account's 5% tolerance (1.35). One transaction is created for exactly that gap, against the
+   * account's configured concept, and its id joins {@code operationIds} so the caller matches BOTH
+   * movements into the line — which is what leaves the line RECONCILED instead of split and stuck.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testApplyInlineDifferenceWithinTolerancePostsTheGap() throws Exception {
+    FIN_BankStatementLine line = inlineLine("27.00", "0.00");
+    doReturn(opTxn(OP_ID, "26.62", "0.00")).when(handler).loadTransaction(OP_ID);
+    doReturn(TRX_ID).when(handler).createTransactionForRule(any(), any(), any());
+    List<String> operationIds = new ArrayList<>(Collections.singletonList(OP_ID));
+
+    // The spec now carries a resolved description (see defaultDifferenceDescription below), so
+    // every test that reaches the write has to stub the AD_Message lookup it goes through.
+    NeoResponse response;
+    try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubDifferenceMessage(msgMock, DICTIONARY_TEXT);
+      response = ReconciliationDifferenceSupport.applyInlineDifference(
+          handler, account, line, operationIds, new JSONObject(), false);
+    }
+
+    assertNull("a posted difference lets the caller proceed", response);
+    JSONObject spec = capturedSpec();
+    assertEquals(GL_ACCOUNT_DEFAULT, spec.getString(KEY_GL_ITEM_ID));
+    assertEquals(0, new BigDecimal("0.38").compareTo(bd(spec.getString(KEY_AMOUNT))));
+    assertEquals(Arrays.asList(OP_ID, TRX_ID), operationIds);
+  }
+
+  /**
+   * <b>The sign test — an automatic accounting entry posted backwards is the worst outcome this
+   * feature can produce.</b> The gap keeps the LINE's own sign, because that is what
+   * {@code createTransactionForRule} reads to derive Cobro (BPD, deposit) vs Pago (BPW, payment).
+   * An inflow line short by 0.38 must post a POSITIVE 0.38.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testApplyInlineDifferenceInflowGapKeepsPositiveSign() throws Exception {
+    FIN_BankStatementLine line = inlineLine("27.00", "0.00");
+    doReturn(opTxn(OP_ID, "26.62", "0.00")).when(handler).loadTransaction(OP_ID);
+    doReturn(TRX_ID).when(handler).createTransactionForRule(any(), any(), any());
+
+    // Reaching the write means reaching the dictionary — see defaultDifferenceDescription below.
+    try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubDifferenceMessage(msgMock, DICTIONARY_TEXT);
+      assertNull(ReconciliationDifferenceSupport.applyInlineDifference(handler, account, line,
+          new ArrayList<>(Collections.singletonList(OP_ID)), new JSONObject(), false));
+    }
+
+    BigDecimal posted = bd(capturedSpec().getString(KEY_AMOUNT));
+    assertEquals("an inflow shortfall must post a DEPOSIT (positive)", 1, posted.signum());
+    assertEquals(0, new BigDecimal("0.38").compareTo(posted));
+  }
+
+  /**
+   * The outflow twin of the test above: a −27.00 payment line settled by a −26.62 movement is short
+   * by −0.38 and must post a NEGATIVE amount, so the derived transaction is a Pago (BPW). Reading
+   * the abs() value here would silently invert the accounting entry.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testApplyInlineDifferenceOutflowGapKeepsNegativeSign() throws Exception {
+    FIN_BankStatementLine line = inlineLine("0.00", "27.00");
+    doReturn(opTxn(OP_ID, "0.00", "26.62")).when(handler).loadTransaction(OP_ID);
+    doReturn(TRX_ID).when(handler).createTransactionForRule(any(), any(), any());
+
+    // Reaching the write means reaching the dictionary — see defaultDifferenceDescription below.
+    try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubDifferenceMessage(msgMock, DICTIONARY_TEXT);
+      assertNull(ReconciliationDifferenceSupport.applyInlineDifference(handler, account, line,
+          new ArrayList<>(Collections.singletonList(OP_ID)), new JSONObject(), false));
+    }
+
+    BigDecimal posted = bd(capturedSpec().getString(KEY_AMOUNT));
+    assertEquals("an outflow shortfall must post a WITHDRAWAL (negative)", -1, posted.signum());
+    assertEquals(0, new BigDecimal("-0.38").compareTo(posted));
+  }
+
+  /**
+   * A gap within tolerance with NO concept available — neither in the body nor on the account — is
+   * a 400 carrying the machine-readable {@code GL_ITEM_REQUIRED} code and the amount, so the client
+   * can open its concept picker and retry. Nothing is written: a returned error COMMITS, so the
+   * check has to come before the write, not after it.
+   *
+   * <p>The body shape follows the {@code alreadyReconciled} precedent in the same class: the error
+   * text stays nested under {@code error.message} and the code/amount ride alongside at the top
+   * level.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testApplyInlineDifferenceWithoutGlItemReturns400AndWritesNothing() throws Exception {
+    withoutConfiguredGlItem();
+    FIN_BankStatementLine line = inlineLine("27.00", "0.00");
+    doReturn(opTxn(OP_ID, "26.62", "0.00")).when(handler).loadTransaction(OP_ID);
+    List<String> operationIds = new ArrayList<>(Collections.singletonList(OP_ID));
+
+    NeoResponse response = ReconciliationDifferenceSupport.applyInlineDifference(
+        handler, account, line, operationIds, new JSONObject(), false);
+
+    assertNotNull(response);
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(CODE_GL_ITEM_REQUIRED, response.getBody().getString(KEY_CODE));
+    assertEquals(0, new BigDecimal("0.38")
+        .compareTo(bd(response.getBody().getString(KEY_DIFFERENCE_AMOUNT))));
+    verify(handler, never()).createTransactionForRule(any(), any(), any());
+    assertEquals("operationIds must be untouched when nothing was posted",
+        Collections.singletonList(OP_ID), operationIds);
+  }
+
+  /**
+   * A concept supplied in the body wins over the account's own — the same
+   * {@code effectiveGlItemId} precedence the standalone difference action already uses. This is the
+   * retry the client performs after a {@code GL_ITEM_REQUIRED}.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testApplyInlineDifferenceUsesTheBodyGlItemOverTheAccountDefault() throws Exception {
+    FIN_BankStatementLine line = inlineLine("27.00", "0.00");
+    doReturn(opTxn(OP_ID, "26.62", "0.00")).when(handler).loadTransaction(OP_ID);
+    doReturn(TRX_ID).when(handler).createTransactionForRule(any(), any(), any());
+
+    // OBDal is mocked (with the requested concept resolving) so this test passes whether or not
+    // the implementation adds the same client-supplied-id existence check `checkGlItem` performs.
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(GLItem.class, GL_PAYLOAD)).thenReturn(mock(GLItem.class));
+      stubDifferenceMessage(msgMock, DICTIONARY_TEXT);
+
+      assertNull(ReconciliationDifferenceSupport.applyInlineDifference(handler, account, line,
+          new ArrayList<>(Collections.singletonList(OP_ID)),
+          new JSONObject().put(KEY_GL_ITEM_ID, GL_PAYLOAD), false));
+    }
+
+    assertEquals(GL_PAYLOAD, capturedSpec().getString(KEY_GL_ITEM_ID));
+  }
+
+  /**
+   * <b>The date-only deviation.</b> The amounts balance exactly, so the gap is zero: the line
+   * reconciles the ordinary way, no transaction is created and the account needs NO configured
+   * concept. Only an AMOUNT deviation is ever posted; a date deviation affects classification and
+   * the automatch proposal, never the accounting.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testApplyInlineDifferenceNegligibleGapPostsNothing() throws Exception {
+    withoutConfiguredGlItem();
+    FIN_BankStatementLine line = inlineLine("27.00", "0.00");
+    doReturn(opTxn(OP_ID, "27.00", "0.00")).when(handler).loadTransaction(OP_ID);
+    List<String> operationIds = new ArrayList<>(Collections.singletonList(OP_ID));
+
+    assertNull(ReconciliationDifferenceSupport.applyInlineDifference(
+        handler, account, line, operationIds, new JSONObject(), false));
+
+    verify(handler, never()).createTransactionForRule(any(), any(), any());
+    assertEquals(Collections.singletonList(OP_ID), operationIds);
+  }
+
+  /**
+   * A gap of 7.00 on a 27.00 line is 25.9%, far outside the 5% tolerance (1.35). The existing
+   * partial-split behaviour is untouched: no posting, no error — the caller reconciles what it can
+   * and Core leaves a pending remainder, exactly as before this ticket.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testApplyInlineDifferenceOutsideTolerancePostsNothing() throws Exception {
+    FIN_BankStatementLine line = inlineLine("27.00", "0.00");
+    doReturn(opTxn(OP_ID, "20.00", "0.00")).when(handler).loadTransaction(OP_ID);
+    List<String> operationIds = new ArrayList<>(Collections.singletonList(OP_ID));
+
+    assertNull(ReconciliationDifferenceSupport.applyInlineDifference(
+        handler, account, line, operationIds, new JSONObject(), false));
+
+    verify(handler, never()).createTransactionForRule(any(), any(), any());
+    assertEquals(Collections.singletonList(OP_ID), operationIds);
+  }
+
+  /**
+   * A 0% amount tolerance means the inline POSTING is disabled, not "one cent of slack" — the
+   * deliberate divergence between {@code differenceTolerance} and {@code signalGroupTolerance}. A
+   * 0.38 gap that would post at 5% posts nothing at 0%.
+   *
+   * <p>Note what this does and does not say. Posting stays gated on a non-null
+   * {@code NearMatchSupport.differenceTolerance}, so 0% still guarantees no unconfigured account
+   * ever gets an automatic accounting entry. DETECTION is a separate dimension and is NOT gated the
+   * same way — see the date-only case below, plus
+   * {@code NearMatchSupportTest#testZeroAmountToleranceStillDetectsADateOnlyDeviation} (the search
+   * keeps running at 0%) and
+   * {@code AutoMatchSupportTest#testZeroAmountToleranceStillDetectsADateOnlyDeviation} (the line is
+   * classified as a difference anyway).
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testApplyInlineDifferenceZeroToleranceDisablesPosting() throws Exception {
+    doReturn(new BigDecimal[]{BigDecimal.valueOf(3), BigDecimal.ZERO})
+        .when(handler).loadTolerances(any());
+    FIN_BankStatementLine line = inlineLine("27.00", "0.00");
+    doReturn(opTxn(OP_ID, "26.62", "0.00")).when(handler).loadTransaction(OP_ID);
+
+    assertNull(ReconciliationDifferenceSupport.applyInlineDifference(handler, account, line,
+        new ArrayList<>(Collections.singletonList(OP_ID)), new JSONObject(), false));
+
+    verify(handler, never()).createTransactionForRule(any(), any(), any());
+  }
+
+  /**
+   * <b>Detection is not posting — the 0% account, reconciled.</b> The canonical §5.2 case reaches
+   * this helper: a 100.00 line of the 28th matched against a 100.00 movement of the 26th, on an
+   * account at 0% amount tolerance with no difference concept configured at all. The date deviation
+   * is what made the line show up as "Con diferencia"; the AMOUNTS balance, so the gap is zero and
+   * this helper stays inert — no {@code GL_ITEM_REQUIRED}, no transaction, no accounting entry.
+   *
+   * <p>That is the whole point of letting {@code NearMatchSupport.findNearMatch} keep searching at
+   * 0%: the proposal
+   * a date-only deviation produces can always be applied, because there is nothing to post. If this
+   * ever returned a 400 instead, every account on the instance (all of them ship with a 3-day date
+   * tolerance) would start refusing perfectly fundable reconciliations.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testApplyInlineDifferenceZeroToleranceStillReconcilesADateOnlyDifference()
+      throws Exception {
+    doReturn(new BigDecimal[]{BigDecimal.valueOf(3), BigDecimal.ZERO})
+        .when(handler).loadTolerances(any());
+    withoutConfiguredGlItem();
+    FIN_BankStatementLine line = inlineLine("100.00", "0.00");
+    doReturn(opTxn(OP_ID, "100.00", "0.00")).when(handler).loadTransaction(OP_ID);
+    List<String> operationIds = new ArrayList<>(Collections.singletonList(OP_ID));
+
+    NeoResponse response = ReconciliationDifferenceSupport.applyInlineDifference(
+        handler, account, line, operationIds, new JSONObject(), false);
+
+    assertNull("a date-only difference has nothing to post, so nothing may block it", response);
+    verify(handler, never()).createTransactionForRule(any(), any(), any());
+    assertEquals("operationIds must be untouched when nothing was posted",
+        Collections.singletonList(OP_ID), operationIds);
+  }
+
+  /**
+   * Over-coverage (the movement is BIGGER than the statement line) is explicitly out of scope: the
+   * gap runs opposite to the line's sign, so this helper stays inert and the existing
+   * {@code validateOperations} rejection — which runs first in both callers — remains the only
+   * answer. Posting a "negative difference" here would silently invent money.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testApplyInlineDifferenceOverCoverageIsOutOfScope() throws Exception {
+    FIN_BankStatementLine line = inlineLine("27.00", "0.00");
+    doReturn(opTxn(OP_ID, "27.20", "0.00")).when(handler).loadTransaction(OP_ID);
+    List<String> operationIds = new ArrayList<>(Collections.singletonList(OP_ID));
+
+    assertNull(ReconciliationDifferenceSupport.applyInlineDifference(
+        handler, account, line, operationIds, new JSONObject(), false));
+
+    verify(handler, never()).createTransactionForRule(any(), any(), any());
+    assertEquals(Collections.singletonList(OP_ID), operationIds);
+  }
+
+  /**
+   * <b>The invoice path must roll back before it answers 400.</b> {@code payInvoices} runs BEFORE
+   * the gap is even computed, so by the time the missing concept is discovered a payment and its
+   * transaction are already written — and a returned {@code NeoResponse.error(...)} COMMITS them
+   * (see the class javadoc). {@code doRollbackAndClose()} therefore has to be called before
+   * returning, or a rejected request leaves a stray payment behind.
+   *
+   * <p>The caller signals this with {@code rollbackOnReject}: {@code reconcileGroup} passes its own
+   * {@code hasInvoices}, so the rollback happens exactly when there IS uncommitted upstream work.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testApplyInlineDifferenceRollsBackTheInvoicePathBeforeThe400() throws Exception {
+    withoutConfiguredGlItem();
+    FIN_BankStatementLine line = inlineLine("27.00", "0.00");
+    // The operation is the transaction payInvoices just auto-created for the invoice payment.
+    doReturn(opTxn(OP_ID, "26.62", "0.00")).when(handler).loadTransaction(OP_ID);
+    JSONObject invoiceBody = new JSONObject().put("invoices",
+        new JSONArray().put(new JSONObject().put("invoiceId", "INV-1").put("scheduleId", "PS-1")));
+
+    NeoResponse response = ReconciliationDifferenceSupport.applyInlineDifference(handler, account,
+        line, new ArrayList<>(Collections.singletonList(OP_ID)), invoiceBody, true);
+
+    assertNotNull(response);
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(CODE_GL_ITEM_REQUIRED, response.getBody().getString(KEY_CODE));
+    verify(handler).doRollbackAndClose();
+    verify(handler, never()).createTransactionForRule(any(), any(), any());
+  }
+
+  /**
+   * The complement of the test above. {@code rollbackOnReject == false} is BOTH the plain
+   * operations path (nothing written yet, so a rollback would gratuitously discard unrelated work
+   * already flushed in the same DAL transaction) AND — crucially — the automatch batch, where a
+   * per-group rejection must never roll back: sibling groups have already been prepared and closing
+   * the session would break the rest of the loop.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testApplyInlineDifferenceDoesNotRollBackWhenTheCallerHasNothingToUndo()
+      throws Exception {
+    withoutConfiguredGlItem();
+    FIN_BankStatementLine line = inlineLine("27.00", "0.00");
+    doReturn(opTxn(OP_ID, "26.62", "0.00")).when(handler).loadTransaction(OP_ID);
+
+    NeoResponse response = ReconciliationDifferenceSupport.applyInlineDifference(handler, account,
+        line, new ArrayList<>(Collections.singletonList(OP_ID)), new JSONObject(), false);
+
+    assertEquals(400, response.getHttpStatus());
+    verify(handler, never()).doRollbackAndClose();
+  }
+
+  /**
+   * An empty (or zero-sum) selection is not a "difference" to post. Without this guard the gap would
+   * equal the WHOLE statement line, and a tolerance of 100% or more would authorise posting an
+   * entire line to the difference concept — the same reasoning behind {@code reconcileDifference}'s
+   * own "nothing reconciled against it yet" rejection.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testApplyInlineDifferenceIgnoresAnEmptySelection() throws Exception {
+    doReturn(new BigDecimal[]{BigDecimal.valueOf(3), new BigDecimal("100")})
+        .when(handler).loadTolerances(any());
+    FIN_BankStatementLine line = inlineLine("27.00", "0.00");
+    List<String> operationIds = new ArrayList<>();
+
+    assertNull(ReconciliationDifferenceSupport.applyInlineDifference(
+        handler, account, line, operationIds, new JSONObject(), false));
+
+    verify(handler, never()).createTransactionForRule(any(), any(), any());
+    assertTrue(operationIds.isEmpty());
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-4965 — defaultDifferenceDescription: the auto-created movement must be
+  // recognisable in the Movements list.
+  //
+  // createTransactionForRule falls back to the STATEMENT LINE's own description when the spec
+  // carries none, and an imported line very often has none — which is how the difference movement
+  // landed in the list as a bare amount with description = '' (confirmed in the database).
+  //
+  //   requested non-blank              → returned verbatim (the manual ETP-4796 flow always wins)
+  //   dictionary message installed     → the translated text, in the user's language
+  //   messageBD echoes the key back    → the GL item's own name. This is the LIVE behaviour today:
+  //                                      ETGO_ReconciliationDifference is not installed yet, and
+  //                                      the raw key must never reach the user.
+  //   messageBD blank                  → the GL item's own name
+  //   no usable text and no GL item    → null, and differenceSpec then omits the key entirely
+  //
+  // BOTH callers must go through it: applyInlineDifference (the ordinary "Conciliar") AND
+  // reconcileDifference (the standalone ETP-4796 banner action, whose modal leaves the description
+  // field optional). Wiring it into one of the two leaves the defect alive on the other.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /** The AD_Message search key the description is resolved from. */
+  private static final String DIFFERENCE_MESSAGE_KEY = "ETGO_ReconciliationDifference";
+  private static final String DICTIONARY_TEXT = "Reconciliation difference";
+  private static final String GL_ITEM_NAME = "Reconciliation differences";
+  private static final String MANUAL_DESCRIPTION = "Bank fee agreed with the customer";
+  private static final String KEY_DESCRIPTION = "description";
+  private static final String UNKNOWN_GL_ITEM = "GL-DELETED";
+
+  /** Stubs the AD_Message dictionary lookup for the difference-description key. */
+  private void stubDifferenceMessage(MockedStatic<OBMessageUtils> msgMock, String text) {
+    msgMock.when(() -> OBMessageUtils.messageBD(DIFFERENCE_MESSAGE_KEY)).thenReturn(text);
+  }
+
+  /** Points the mocked {@link OBDal} at a GL item named {@code name} for {@code id}. */
+  private void stubGlItemNamed(MockedStatic<OBDal> obDal, String id, String name) {
+    OBDal dal = mock(OBDal.class);
+    obDal.when(OBDal::getInstance).thenReturn(dal);
+    stubGlItemNamed(dal, id, name);
+  }
+
+  /**
+   * The same, against an {@link OBDal} instance mock that is already bound — which is what
+   * {@link #runAction(JSONObject, DalSetup)} hands to its {@link DalSetup}, since that helper owns
+   * the static mock itself.
+   */
+  private void stubGlItemNamed(OBDal dal, String id, String name) {
+    GLItem item = mock(GLItem.class);
+    when(item.getName()).thenReturn(name);
+    when(dal.get(GLItem.class, id)).thenReturn(item);
+  }
+
+  /**
+   * A description the caller asked for wins outright — the manual difference flow lets the user
+   * type one and it must survive untouched. The dictionary is not even consulted, so a future
+   * translated default can never overwrite what the user wrote.
+   */
+  @Test
+  public void testDefaultDifferenceDescriptionKeepsTheRequestedText() {
+    try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      // Wired so that a regression to "the default always wins" is observable here rather than
+      // silently yielding the same string.
+      stubDifferenceMessage(msgMock, DICTIONARY_TEXT);
+
+      assertEquals(MANUAL_DESCRIPTION, ReconciliationDifferenceSupport
+          .defaultDifferenceDescription(MANUAL_DESCRIPTION, GL_ACCOUNT_DEFAULT));
+
+      msgMock.verify(() -> OBMessageUtils.messageBD(anyString()), never());
+      obDal.verify(OBDal::getInstance, never());
+    }
+  }
+
+  /**
+   * With nothing requested — null, empty, or whitespace, since a trimmed-to-nothing string is not a
+   * description — the installed dictionary message is used, so the text arrives in the user's
+   * language instead of a hardcoded English constant. The GL item is not read at all.
+   */
+  @Test
+  public void testDefaultDifferenceDescriptionUsesTheInstalledDictionaryText() {
+    for (String requested : new String[] { null, "", "   " }) {
+      try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class);
+          MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+        stubDifferenceMessage(msgMock, DICTIONARY_TEXT);
+
+        assertEquals("a blank requested description must fall through to the dictionary",
+            DICTIONARY_TEXT, ReconciliationDifferenceSupport
+                .defaultDifferenceDescription(requested, GL_ACCOUNT_DEFAULT));
+
+        obDal.verify(OBDal::getInstance, never());
+      }
+    }
+  }
+
+  /**
+   * <b>The branch that keeps a raw dictionary key out of the user's Movements list.</b> The real
+   * {@code messageBD} echoes the search key back when the message is not installed — which is
+   * precisely the state of the instance today, since {@code ETGO_ReconciliationDifference} has not
+   * been added to the dictionary yet. Returning that echo would put the literal string
+   * {@code ETGO_ReconciliationDifference} on an accounting movement, so the value has to degrade to
+   * the accounting concept's own name, which is meaningful and already localized.
+   */
+  @Test
+  public void testDefaultDifferenceDescriptionNeverReturnsTheEchoedMessageKey() {
+    try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubDifferenceMessage(msgMock, DIFFERENCE_MESSAGE_KEY);
+      stubGlItemNamed(obDal, GL_ACCOUNT_DEFAULT, GL_ITEM_NAME);
+
+      String description = ReconciliationDifferenceSupport
+          .defaultDifferenceDescription(null, GL_ACCOUNT_DEFAULT);
+
+      assertEquals(GL_ITEM_NAME, description);
+      assertNotEquals("a raw message key must never reach a user-visible description",
+          DIFFERENCE_MESSAGE_KEY, description);
+    }
+  }
+
+  /**
+   * The other way the dictionary can come back unusable: a message that exists but is empty, and
+   * {@code messageBD}'s own {@code ""} default. Both are treated exactly like the echoed key.
+   */
+  @Test
+  public void testDefaultDifferenceDescriptionFallsBackToTheGlItemWhenTheMessageIsBlank() {
+    for (String dictionaryText : new String[] { null, "", "   " }) {
+      try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class);
+          MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+        stubDifferenceMessage(msgMock, dictionaryText);
+        stubGlItemNamed(obDal, GL_ACCOUNT_DEFAULT, GL_ITEM_NAME);
+
+        assertEquals("a blank dictionary answer must degrade to the concept name",
+            GL_ITEM_NAME, ReconciliationDifferenceSupport
+                .defaultDifferenceDescription(null, GL_ACCOUNT_DEFAULT));
+      }
+    }
+  }
+
+  /**
+   * No usable dictionary text AND no concept id: there is nothing to describe the movement with, so
+   * the helper answers {@code null} and {@code differenceSpec} omits the key rather than emitting a
+   * blank one. The DAL is never touched — looking up a blank id would be a pointless query and, in
+   * the reconcileDifference path, is reached before the GL-item guard has run.
+   */
+  @Test
+  public void testDefaultDifferenceDescriptionIsNullWithoutADictionaryTextOrAGlItem() {
+    for (String glItemId : new String[] { null, "", "   " }) {
+      try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class);
+          MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+        stubDifferenceMessage(msgMock, DIFFERENCE_MESSAGE_KEY);
+
+        assertNull(ReconciliationDifferenceSupport.defaultDifferenceDescription(null, glItemId));
+
+        obDal.verify(OBDal::getInstance, never());
+      }
+    }
+  }
+
+  /** A concept id that resolves to nothing degrades to {@code null} instead of throwing. */
+  @Test
+  public void testDefaultDifferenceDescriptionIsNullWhenTheGlItemDoesNotResolve() {
+    try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubDifferenceMessage(msgMock, DIFFERENCE_MESSAGE_KEY);
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(GLItem.class, UNKNOWN_GL_ITEM)).thenReturn(null);
+
+      assertNull(ReconciliationDifferenceSupport
+          .defaultDifferenceDescription(null, UNKNOWN_GL_ITEM));
+    }
+  }
+
+  /**
+   * <b>The regression test for the reported defect.</b> The reference scenario, end to end through
+   * {@code applyInlineDifference}: an IMPORTED statement line with no description of its own, and a
+   * body that carries no description either (the ordinary "Conciliar", where the user is never
+   * asked for one), plus the account's configured concept. The spec handed to
+   * {@code createTransactionForRule} must still carry a non-blank description, because that
+   * builder's only other source is the line's own — the empty one — and the movement then shows up
+   * in the Movements list as a bare amount, indistinguishable from a real operation.
+   *
+   * <p>The dictionary is stubbed to echo the key back, i.e. the instance's ACTUAL state today, so
+   * this asserts the behaviour that ships rather than the one that will ship once the message is
+   * installed.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testApplyInlineDifferenceAlwaysDescribesTheMovementItCreates() throws Exception {
+    FIN_BankStatementLine line = inlineLine("27.00", "0.00");
+    // The premise of the defect: the imported line has no text of its own to inherit.
+    when(line.getDescription()).thenReturn(null);
+    doReturn(opTxn(OP_ID, "26.62", "0.00")).when(handler).loadTransaction(OP_ID);
+    doReturn(TRX_ID).when(handler).createTransactionForRule(any(), any(), any());
+
+    try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubDifferenceMessage(msgMock, DIFFERENCE_MESSAGE_KEY);
+      stubGlItemNamed(obDal, GL_ACCOUNT_DEFAULT, GL_ITEM_NAME);
+
+      assertNull(ReconciliationDifferenceSupport.applyInlineDifference(handler, account, line,
+          new ArrayList<>(Collections.singletonList(OP_ID)), new JSONObject(), false));
+    }
+
+    // optString yields "" when the key is absent, which is exactly the shipped defect: no
+    // description key at all in the spec.
+    String description = capturedSpec().optString(KEY_DESCRIPTION);
+    assertNotNull(description);
+    assertFalse("the auto-created difference movement must never reach the Movements list "
+        + "without a description", description.trim().isEmpty());
+    assertEquals(GL_ITEM_NAME, description);
+    assertNotEquals(DIFFERENCE_MESSAGE_KEY, description);
+  }
+
+  /**
+   * The complement of the test above, through the same entry point: a description supplied in the
+   * request body is what the movement is created with. Neither the dictionary nor the concept name
+   * may override it.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testApplyInlineDifferenceKeepsADescriptionSuppliedInTheBody() throws Exception {
+    FIN_BankStatementLine line = inlineLine("27.00", "0.00");
+    doReturn(opTxn(OP_ID, "26.62", "0.00")).when(handler).loadTransaction(OP_ID);
+    doReturn(TRX_ID).when(handler).createTransactionForRule(any(), any(), any());
+
+    try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubDifferenceMessage(msgMock, DICTIONARY_TEXT);
+
+      assertNull(ReconciliationDifferenceSupport.applyInlineDifference(handler, account, line,
+          new ArrayList<>(Collections.singletonList(OP_ID)),
+          new JSONObject().put(KEY_DESCRIPTION, MANUAL_DESCRIPTION), false));
+
+      msgMock.verify(() -> OBMessageUtils.messageBD(anyString()), never());
+    }
+
+    assertEquals(MANUAL_DESCRIPTION, capturedSpec().getString(KEY_DESCRIPTION));
+  }
+
+  /**
+   * <b>The same defect, through the OTHER entry point.</b> {@code reconcileDifference} is the
+   * standalone manual action behind the ETP-4796 difference banner, and its modal's description
+   * field is OPTIONAL. Leaving it blank used to hand {@code createTransactionForRule} a spec with
+   * no description at all — the builder then fell back to the statement line's own, which an
+   * imported line does not have, producing exactly the nameless movement
+   * {@code applyInlineDifference} was fixed for. Wiring the default into only one of the two
+   * callers fixes the defect on only one of the two flows.
+   *
+   * <p>The dictionary is stubbed to echo the key back, i.e. the instance's ACTUAL state today
+   * ({@code ETGO_ReconciliationDifference} is not installed), so the assertion lands on the
+   * GL-item-name fallback and also proves the raw key never reaches a user-visible field.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testReconcileDifferenceAlwaysDescribesTheMovementItCreates() throws Exception {
+    // A partially reconciled imported line: 12.00 already matched, 0.50 pending, and no description
+    // of its own for createTransactionForRule to inherit.
+    stubPartialGroup("12.00", null, "0.50", null);
+
+    NeoResponse response;
+    try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubDifferenceMessage(msgMock, DIFFERENCE_MESSAGE_KEY);
+      // The body deliberately carries NO description — the modal's field is optional.
+      response = runAction(body(ACC_ID, REM_ID),
+          dal -> stubGlItemNamed(dal, GL_ACCOUNT_DEFAULT, GL_ITEM_NAME));
+    }
+
+    assertEquals(201, response.getHttpStatus());
+
+    // optString yields "" when the key is absent, which is exactly the shipped defect: no
+    // description key at all in the spec.
+    String description = capturedSpec().optString(KEY_DESCRIPTION);
+    assertNotNull(description);
+    assertFalse("the manual difference action must never create a movement without a description",
+        description.trim().isEmpty());
+    assertEquals(GL_ITEM_NAME, description);
+    assertNotEquals("a raw message key must never reach a user-visible description",
+        DIFFERENCE_MESSAGE_KEY, description);
+  }
+
+  /**
+   * The complement of the test above, through the same entry point: a description typed into the
+   * manual modal reaches the movement verbatim, and the dictionary is not consulted at all — so a
+   * future translated default can never overwrite what the user wrote.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testReconcileDifferenceKeepsADescriptionSuppliedInTheBody() throws Exception {
+    stubPartialGroup("12.00", null, "0.50", null);
+
+    NeoResponse response;
+    try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      // Wired so a regression to "the default always wins" is observable here rather than silently
+      // yielding an equally plausible string.
+      stubDifferenceMessage(msgMock, DICTIONARY_TEXT);
+
+      response = runAction(body(ACC_ID, REM_ID).put(KEY_DESCRIPTION, MANUAL_DESCRIPTION));
+
+      msgMock.verify(() -> OBMessageUtils.messageBD(anyString()), never());
+    }
+
+    assertEquals(201, response.getHttpStatus());
+    assertEquals(MANUAL_DESCRIPTION, capturedSpec().getString(KEY_DESCRIPTION));
   }
 }
