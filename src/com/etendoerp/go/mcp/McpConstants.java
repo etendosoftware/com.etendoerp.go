@@ -79,6 +79,22 @@ final class McpConstants {
   static final String ERROR_CONFLICT = "conflict";
   /** HTTP-style status for a duplicate-key conflict (ETP-4793 / IMP-17). */
   static final int STATUS_CONFLICT = 409;
+  /**
+   * Machine-detectable error code for a write refused because the record changed underneath the
+   * caller — core's optimistic-locking check (ETP-5073 / DOC-04).
+   *
+   * <p>Deliberately NOT {@link #ERROR_CONFLICT}, even though both answer 409: the two demand
+   * opposite remedies. A duplicate key means "your data collides with an existing record, send
+   * different values or target that record". A stale record means "your values are fine, your
+   * baseline is not — re-read and reapply". An agent that cannot tell them apart retries the wrong
+   * one, and on this branch retrying unchanged is an infinite loop.
+   */
+  static final String ERROR_STALE_RECORD = "stale_record";
+  /**
+   * The audit value {@code neo_update} requires so core's concurrency check can run
+   * (ETP-5073 / DOC-04). Read from {@code neo_get}/{@code neo_list} and echoed back verbatim.
+   */
+  static final String PARAM_UPDATED = "updated";
   /** HTTP-style status for a failure the caller cannot fix (ETP-4793 / IMP-17). */
   static final int STATUS_SERVER_ERROR = 500;
   /** HTTP-style status for a verb the entity does not enable (ETP-4793 / IMP-17). */
