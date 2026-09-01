@@ -27,6 +27,8 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
 import com.etendoerp.copilot.toolpack.webhooks.SimSearch;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
+import com.etendoerp.go.schemaforge.util.NeoTrl;
 import com.smf.securewebservices.utils.WSResult;
 
 /**
@@ -84,7 +86,8 @@ class NeoSimSearchEndpoint {
         if (StringUtils.isBlank(searchTerm)) {
           continue;
         }
-        WSResult result = SimSearch.handleSimSearch(searchTerm, entityName, qtyResults, minSimPercent);
+        String baseTerm = toBaseLanguageTerm(entityName, searchTerm);
+        WSResult result = SimSearch.handleSimSearch(baseTerm, entityName, qtyResults, minSimPercent);
         results.put(ITEM_LABEL_PREFIX + i, result.getJSONResponse());
       }
       return NeoResponse.ok(results);
@@ -96,6 +99,32 @@ class NeoSimSearchEndpoint {
       log.error("Error processing simsearch request", e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
     }
+  }
+
+  /**
+   * Rewrite a term the user typed in the session language into the base-language name
+   * {@link SimSearch} can actually match.
+   *
+   * <p>{@code SimSearch} compares trigrams against the <em>base</em> row only — translated text
+   * lives in a sibling {@code *_Trl} table it never reads. So a Spanish session searching
+   * {@code "España"} scores 0.083 against {@code "Spain"} and resolves nothing, which is exactly
+   * what made translated country and unit-of-measure cells fail on CSV import. Translating here,
+   * at our own boundary, keeps {@code SimSearch} as the matcher and needs no per-language code:
+   * {@link NeoTrl} discovers the {@code *_Trl} sibling by convention, so every translatable
+   * entity and every loaded language is covered by the same call.
+   *
+   * <p>Falls through to the original term whenever the rewrite is not unambiguous — a term with
+   * no translation, an entity with no {@code *_Trl} sibling, or a translation shared by several
+   * base rows. Those requests behave exactly as they did before this method existed.
+   */
+  private static String toBaseLanguageTerm(String entityName, String searchTerm) {
+    String baseTerm = NeoTrl.baseNameForTranslation(entityName, searchTerm, NeoLanguage.currentCode());
+    if (baseTerm == null) {
+      return searchTerm;
+    }
+    log.debug("simsearch: translated '{}' to base-language '{}' for entity '{}'", searchTerm,
+        baseTerm, entityName);
+    return baseTerm;
   }
 
   private static String coalesce(String value, String fallback) {

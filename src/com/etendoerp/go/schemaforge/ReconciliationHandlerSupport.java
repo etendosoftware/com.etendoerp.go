@@ -23,10 +23,13 @@ import static com.etendoerp.go.schemaforge.ReconciliationSupport.nullSafe;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -39,6 +42,9 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
+import org.openbravo.financial.ResetAccounting;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
@@ -288,6 +294,34 @@ final class ReconciliationHandlerSupport {
   // ---------------------------------------------------------------------------
 
   /**
+   * How much of a statement line is already reconciled, in the same sign convention as its
+   * amount: {@code 0} for a fully pending line, the whole amount for a fully reconciled one,
+   * something in between for a partial group.
+   *
+   * <p>MAGNITUDES first, then re-sign. {@code amount} is SIGNED — a withdrawal is negative — while
+   * {@code pending} is the unsigned {@code |cramount - dramount|} that
+   * {@code BankStatementLinePendingAmountHandler} stores (and that
+   * {@code BankStatementsSupport.mergeMatchGroups} sums across a split group's sub-lines). The
+   * plain {@code amount - pending} this replaces only held when both happened to share a sign:
+   * for a fully pending withdrawal it gave {@code -0.50 - 0.50 = -1.00} instead of {@code 0}, so
+   * the UI's {@code ProgressCell} — which draws a bar whenever {@code reconciledAmount != 0} —
+   * put a solid "100% reconciled" bar (200%, clamped) on a line with nothing reconciled, right
+   * under its "Pendiente" badge. Deposits were correct only by coincidence (ETP-4921).
+   *
+   * <p>Clamped at zero: {@code pending > |amount|} is a data anomaly, and reporting "nothing
+   * reconciled" is the honest reading of it — the alternative flips the sign and draws a bar
+   * pointing the wrong way.
+   *
+   * @param amount  the line's signed amount
+   * @param pending the unsigned amount still pending to reconcile
+   * @return the reconciled portion, signed like {@code amount}
+   */
+  static BigDecimal signedReconciledAmount(BigDecimal amount, BigDecimal pending) {
+    BigDecimal magnitude = amount.abs().subtract(pending.abs()).max(BigDecimal.ZERO);
+    return amount.signum() < 0 ? magnitude.negate() : magnitude;
+  }
+
+  /**
    * Derives per-line reconciled amounts / progress and the fine-grained {@code state}, accumulates
    * the running total and the per-state counts, and builds the {@code pendingLines} data envelope
    * body. Extracted verbatim from {@code ReconciliationHandler.buildPendingLines}.
@@ -297,6 +331,11 @@ final class ReconciliationHandlerSupport {
       throws JSONException {
     BigDecimal total = BigDecimal.ZERO;
     Map<String, Integer> counts = AutoMatchSupport.newCounts();
+    // Shared across every PENDING row below (same rows/order as ReconciliationHandler.buildAutoMatch
+    // iterates), so a transaction already claimed by an earlier line does not also count as
+    // "suggested" for a later line of the same amount — see AutoMatchSupport.classifyPendingLine.
+    Set<String> usedTxnIds = new HashSet<>();
+    List<FIN_FinaccTransaction> excludedTxns = new ArrayList<>();
     for (int i = 0; i < lines.length(); i++) {
       JSONObject row = lines.getJSONObject(i);
       BigDecimal amount =
@@ -304,7 +343,7 @@ final class ReconciliationHandlerSupport {
       total = total.add(amount);
       // Reconciled/pending amounts + progress % for the left "Progreso" bar and the right block.
       BigDecimal pending = nullSafe(new BigDecimal(row.optString("pendingAmount", "0")));
-      BigDecimal reconciled = amount.subtract(pending);
+      BigDecimal reconciled = signedReconciledAmount(amount, pending);
       row.put("reconciledAmount", reconciled);
       int pct = amount.signum() == 0 ? 0
           : (int) Math.round(reconciled.abs().doubleValue() / amount.abs().doubleValue() * 100.0);
@@ -324,7 +363,7 @@ final class ReconciliationHandlerSupport {
       } else {
         state = AutoMatchSupport.classifyPendingLine(account,
             row.optString(ReconciliationHandler.KEY_ID), rules, pendingDateTolDays,
-            pendingAmtTolPct);
+            pendingAmtTolPct, usedTxnIds, excludedTxns);
         row.put(ReconciliationHandler.KEY_STATUS, ReconciliationHandler.STATUS_PENDING);
       }
       row.put("state", state);
@@ -492,20 +531,185 @@ final class ReconciliationHandlerSupport {
    */
   static void removeSelectedFromReconciliations(ReconciliationHandler handler,
       FIN_FinancialAccount account, Map<String, FIN_Reconciliation> recById,
-      Map<String, List<FIN_FinaccTransaction>> selectedByRec) {
+      Map<String, List<FIN_FinaccTransaction>> selectedByRec,
+      Map<String, String> failureReasons) {
+    // Unpost EVERY affected document first, in its own pass. ResetAccounting runs native SQL and
+    // flushes/clears the Hibernate session, so doing this inside the removal loop below would leave
+    // the instances that loop had just captured detached — the reconciliation reports "no current
+    // state in the database" and the first transaction Core reloads collides with the stale copy
+    // (NonUniqueObjectException). Same hazard this class already documents for its own iterations.
+    Set<String> unpostFailed = new HashSet<>();
     for (String recId : recById.keySet()) {
+      try {
+        unpostBeforeUndo(recId);
+      } catch (Exception e) {
+        log.error("Could not unpost reconciliation {} before undoing it.", recId, e);
+        recordFailure(refetch(selectedByRec.get(recId)), failureReasons, e);
+        unpostFailed.add(recId);
+      }
+    }
+    for (String recId : recById.keySet()) {
+      // Skip what could not be unposted: the removal would fail too, and its (misleading) message
+      // would overwrite the accurate reason recorded above.
+      if (unpostFailed.contains(recId)) {
+        continue;
+      }
       FIN_Reconciliation r = OBDal.getInstance().get(FIN_Reconciliation.class, recId);
-      List<FIN_FinaccTransaction> selForRec = selectedByRec.get(recId);
+      List<FIN_FinaccTransaction> selForRec = refetch(selectedByRec.get(recId));
       if (coversReconciliation(r, selForRec)) {
-        undoWholeReconciliation(handler, account, r);
+        undoWholeReconciliation(handler, account, r, selForRec, failureReasons);
       } else {
-        detachSelected(handler, selForRec);
+        detachSelected(handler, selForRec, failureReasons);
       }
     }
   }
 
+  /**
+   * Reloads each transaction by id, so the caller never hands Core an instance captured before the
+   * unposting pass churned the session.
+   */
+  private static List<FIN_FinaccTransaction> refetch(List<FIN_FinaccTransaction> txns) {
+    List<FIN_FinaccTransaction> fresh = new ArrayList<>();
+    if (txns == null) {
+      return fresh;
+    }
+    for (FIN_FinaccTransaction t : txns) {
+      FIN_FinaccTransaction reloaded =
+          OBDal.getInstance().get(FIN_FinaccTransaction.class, t.getId());
+      if (reloaded != null) {
+        fresh.add(reloaded);
+      }
+    }
+    return fresh;
+  }
+
+  /**
+   * Removes the reconciliation's accounting entries BEFORE anything tries to reactivate it.
+   *
+   * <p><b>Why this exists.</b> {@code com.etendoerp.payment.removal}'s
+   * {@code Utilities.unPostReconciliation} resets accounting passing the RECONCILIATION's own date
+   * as both ends of the range, but Core dates a reconciliation's {@code Fact_Acct} rows with the
+   * TRANSACTION's accounting date. Those differ whenever the statement line is older than the day it
+   * was reconciled — the normal case. The range then matches nothing, zero entries are deleted, and
+   * {@code ResetAccounting} falls into its catch-all {@code throw}, whose only wording is
+   * {@code @PeriodClosedForUnPosting@}. The user is told to open a period that was never closed.
+   *
+   * <p>Resetting first with an OPEN range — exactly what Classic's own unpost button does, and what
+   * {@code DocumentPostingService.unpost} already does in this module — leaves the document with no
+   * entries, so that narrow-range reset becomes a harmless no-op: {@code ResetAccounting} takes its
+   * "record exists but has no facts" branch and returns cleanly instead of throwing. The
+   * {@code recordId} argument already scopes the deletion to this one document, so an open range
+   * removes nothing extra.
+   *
+   * <p>A genuinely closed period still fails, and now says so accurately, because the reset it
+   * reports on is the one that actually went looking for the entries.
+   *
+   * <p>This compensates for a defect in another module instead of fixing it there, deliberately:
+   * that module is outside this ticket's two repos. The same date-narrowing exists in its
+   * {@code unPostPayment}. See the un-reconcile section of
+   * {@code docs/generated-custom-windows/financial-account.md}.
+   */
+  static void unpostBeforeUndo(String reconciliationId) {
+    if (StringUtils.isBlank(reconciliationId)) {
+      return;
+    }
+    FIN_Reconciliation rec =
+        OBDal.getInstance().get(FIN_Reconciliation.class, reconciliationId);
+    if (rec == null || !"Y".equals(rec.getPosted())) {
+      return;
+    }
+    String clientId = rec.getClient().getId();
+    String orgId = rec.getOrganization().getId();
+    String tableId = rec.getEntity().getTableId();
+    ResetAccounting.delete(clientId, orgId, tableId, reconciliationId, "", "");
+    // ResetAccounting issues native SQL and flushes/clears the session, so the instance read above
+    // is detached by now. Saving THAT one is what made OBInterceptor report a record with no current
+    // state in the database. Re-read before touching the flag.
+    FIN_Reconciliation fresh =
+        OBDal.getInstance().get(FIN_Reconciliation.class, reconciliationId);
+    if (fresh != null && !"N".equals(fresh.getPosted())) {
+      fresh.setPosted("N");
+      OBDal.getInstance().save(fresh);
+      OBDal.getInstance().flush();
+    }
+  }
+
+  /**
+   * Records why {@code ids} could not be un-reconciled, keyed by transaction id.
+   *
+   * <p>Without this the reason only ever reached the server log: the caller correctly reported WHICH
+   * transactions were still reconciled, but had nothing to say about WHY, so the UI could only show a
+   * generic error. A closed accounting period — by far the most common cause, and the one the user
+   * can actually act on — was indistinguishable from any other failure.
+   */
+  private static void recordFailure(List<FIN_FinaccTransaction> affected,
+      Map<String, String> failureReasons, Exception cause) {
+    String reason = userFacingReason(StringUtils.defaultIfBlank(cause.getMessage(), ""));
+    for (FIN_FinaccTransaction t : affected) {
+      if (t != null) {
+        failureReasons.put(t.getId(), StringUtils.trimToEmpty(reason));
+      }
+    }
+  }
+
+  /** Matches an Etendo message key placeholder, e.g. {@code @PeriodClosedForUnPosting@}. */
+  private static final Pattern MESSAGE_KEY = Pattern.compile("@(\\w+)@");
+
+  /**
+   * Reduces a Core exception chain to the one sentence a user can act on.
+   *
+   * <p>Core wraps each cause in untranslated English prose and concatenates the chain with no
+   * separators, so the raw message arrives as
+   * {@code "Error when removing the transaction from reconciliation.Error when reactivating
+   * reconciliation@PeriodClosedForUnPosting@"}. Translating that whole string leaves the English
+   * fragments glued to the front of the Spanish text — and this product is used in Spanish by real
+   * clients, so shipping those fragments into a toast is a bug, not a cosmetic issue.
+   *
+   * <p>The only user-facing, translatable part is the {@code @KEY@} placeholder, so that is what
+   * gets resolved — the LAST one, since the innermost cause is the specific one. A message with no
+   * placeholder (a plain Java error, a database message) has nothing to extract and is translated
+   * whole, as before.
+   */
+  static String userFacingReason(String rawMessage) {
+    // Null-tolerant on its own: the only caller normalises the message first, but this is
+    // package-private and reusable, so it must not depend on a caller's invariant.
+    String raw = StringUtils.defaultString(rawMessage);
+    Matcher m = MESSAGE_KEY.matcher(raw);
+    String key = null;
+    while (m.find()) {
+      key = m.group(1);
+    }
+    if (key != null) {
+      String translated = OBMessageUtils.messageBD(key);
+      // messageBD echoes the key back when the message is not in the dictionary; that is worse than
+      // useless in a toast, so fall through to the full translation in that case.
+      if (StringUtils.isNotBlank(translated) && !StringUtils.equals(translated, key)) {
+        return translated;
+      }
+    }
+    return OBMessageUtils.translateError(raw).getMessage();
+  }
+
+  /**
+   * The reason recorded for the first id in {@code failedIds} that has one, or {@code null}.
+   *
+   * <p>Iterates the FAILED ids rather than the reason map so the message always belongs to a
+   * transaction the caller actually reported as failed — a helper may have recorded a reason for a
+   * transaction that Core then managed to free anyway, and quoting that one would explain a failure
+   * that did not happen.
+   */
+  static String firstFailureReason(List<String> failedIds, Map<String, String> failureReasons) {
+    for (String id : failedIds) {
+      String reason = failureReasons.get(id);
+      if (StringUtils.isNotBlank(reason)) {
+        return reason;
+      }
+    }
+    return null;
+  }
+
   /** True when {@code selForRec} contains every transaction currently in the reconciliation. */
-  private static boolean coversReconciliation(FIN_Reconciliation r,
+  static boolean coversReconciliation(FIN_Reconciliation r,
       List<FIN_FinaccTransaction> selForRec) {
     Set<String> selIds = new HashSet<>();
     for (FIN_FinaccTransaction t : selForRec) {
@@ -520,12 +724,16 @@ final class ReconciliationHandlerSupport {
    * for why: the caller re-checks the real outcome afterward rather than relying on this throwing.
    */
   private static void undoWholeReconciliation(ReconciliationHandler handler,
-      FIN_FinancialAccount account, FIN_Reconciliation r) {
+      FIN_FinancialAccount account, FIN_Reconciliation r,
+      List<FIN_FinaccTransaction> selForRec, Map<String, String> failureReasons) {
     try {
       handler.undoReconciliation(account, r, new ArrayList<>(r.getFINFinaccTransactionList()));
     } catch (Exception e) {
       log.error("Failed to undo reconciliation {}; some of its transactions may remain "
           + "reconciled — the caller reports the actual per-transaction outcome.", r.getId(), e);
+      // The undo is a single Core call for the whole document, so its failure applies to every
+      // transaction the caller asked about in this reconciliation.
+      recordFailure(selForRec, failureReasons, e);
     }
   }
 
@@ -543,8 +751,8 @@ final class ReconciliationHandlerSupport {
    * <p>A failure on one id is logged and swallowed rather than propagated, so the remaining ids in
    * {@code selForRec} still get attempted — see {@link #removeSelectedFromReconciliations} for why.
    */
-  private static void detachSelected(ReconciliationHandler handler,
-      List<FIN_FinaccTransaction> selForRec) {
+  static void detachSelected(ReconciliationHandler handler,
+      List<FIN_FinaccTransaction> selForRec, Map<String, String> failureReasons) {
     List<String> ids = new ArrayList<>();
     for (FIN_FinaccTransaction t : selForRec) {
       ids.add(t.getId());
@@ -552,6 +760,10 @@ final class ReconciliationHandlerSupport {
     for (String id : ids) {
       try {
         FIN_FinaccTransaction trx = OBDal.getInstance().get(FIN_FinaccTransaction.class, id);
+        // No unposting here: detaching reactivates the whole reconciliation and so meets the same
+        // date-narrowed reset, but running it mid-loop would detach the instance just loaded above.
+        // Every caller unposts beforehand instead — see removeSelectedFromReconciliations and
+        // ReconciliationHandler.reactivate.
         boolean auto = handler.isAutoCreated(trx);
         FIN_Payment payment = auto ? trx.getFinPayment() : null;
         ReconciliationRemovalUtil.removeTransactionFromReconciliation(trx);
@@ -564,93 +776,72 @@ final class ReconciliationHandlerSupport {
         log.error("Failed to detach transaction {} from its reconciliation; earlier detaches in "
             + "this batch are not rolled back (Core commits mid-flow) — continuing with the rest.",
             id, e);
+        recordFailure(Collections.singletonList(
+            OBDal.getInstance().get(FIN_FinaccTransaction.class, id)), failureReasons, e);
       }
     }
   }
 
   // ---------------------------------------------------------------------------
-  // reactivateSelected helpers ("Reactivar" — the lightweight un-reconcile)
+  // applySuggestions helpers ("T1" batch-header refactor)
   // ---------------------------------------------------------------------------
 
   /**
-   * Per reconciliation: the lightweight un-reconcile. Where {@link
-   * #removeSelectedFromReconciliations} always ends up DELETING the {@code FIN_Reconciliation}, this
-   * returns it to DRAFT and keeps it — Core's plain {@code reactivate} (action {@code "R"}) only sets
-   * {@code processed = false} / {@code DR} and touches nothing else, so the statement line keeps its
-   * transaction and the transaction keeps its reconciliation. Nothing has to be un-linked or
-   * remembered: the line simply reads as pending (its reconciliation is unprocessed) with its own
-   * transactions pre-selected, and confirming re-processes that same document.
+   * Matches every prepared group into ONE shared reconciliation and processes it once. Extracted
+   * from {@code ReconciliationHandler.applySuggestions} to keep that method's cognitive complexity
+   * under the Sonar limit (java:S3776) — every seam below still runs on the SAME {@code handler}
+   * instance the caller passes in, so its behavior (and what its unit tests observe/verify) is
+   * unchanged.
    *
-   * <p>Auto-created movements in the checked set are still fully deleted first (same {@code
-   * com.etendoerp.payment.removal} utilities as {@code removeOperation}) — a payment that only existed
-   * to back this reconciliation has nothing worth preserving in a draft. When the WHOLE selection is
-   * auto-created there is nothing left to keep either, so it falls back to the delete behavior.
+   * <p>Not atomic across groups: Core's matching services commit mid-flow, so a failure matching
+   * group <em>k</em> does not roll back groups {@code 1..k-1} already matched into the same
+   * document — it is captured as an error entry in {@code results} and the rest of the batch still
+   * proceeds.
    *
-   * <p>Same non-aborting resilience as {@link #removeSelectedFromReconciliations}: Core commits
-   * mid-flow, so one unit's failure is logged and the batch continues; the caller re-checks the real
-   * post-state per transaction.
+   * @param successfulGroups single-element output array; entry 0 is incremented once per group that
+   *     matched successfully (the caller needs the final count for its telemetry emit)
+   * @return the verbatim error response when the final {@code processReconciliation} call fails
+   *     (the batch is aborted at that point), or {@code null} on success
    */
-  static int reactivateSelectedFromReconciliations(ReconciliationHandler handler,
-      FIN_FinancialAccount account, Map<String, FIN_Reconciliation> recById,
-      Map<String, List<FIN_FinaccTransaction>> selectedByRec) {
-    int autoConfirmed = 0;
-    for (String recId : recById.keySet()) {
-      List<FIN_FinaccTransaction> selForRec = selectedByRec.get(recId);
-      List<FIN_FinaccTransaction> autoCreated = new ArrayList<>();
-      boolean anyKept = false;
-      for (FIN_FinaccTransaction t : selForRec) {
-        if (handler.isAutoCreated(t)) {
-          autoCreated.add(t);
-        } else {
-          anyKept = true;
-        }
+  static NeoResponse matchAndProcessBatch(ReconciliationHandler handler,
+      FIN_FinancialAccount account, List<ReconciliationHandler.PreparedGroup> prepared,
+      JSONArray results, int[] successfulGroups) throws Exception {
+    FIN_Reconciliation rec = handler.getOrCreateDraftReconciliation(account);
+    for (ReconciliationHandler.PreparedGroup p : prepared) {
+      try {
+        handler.matchInto(p.line, p.operationIds, rec);
+        successfulGroups[0]++;
+        JSONObject ok = new JSONObject();
+        ok.put("reconciliationId", rec.getId());
+        ok.put(ReconciliationHandler.KEY_STATEMENT_LINE_ID, p.line.getId());
+        results.put(ok);
+      } catch (Exception e) {
+        log.error("Failed to match statement line {} into batch reconciliation {}",
+            p.line.getId(), rec.getId(), e);
+        results.put(NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+            "Could not match statement line " + p.line.getId() + ": " + e.getMessage()).getBody());
       }
-      // Nothing pre-existing to preserve as a draft → same end state as "Desconciliar".
-      if (!anyKept) {
-        FIN_Reconciliation fresh = OBDal.getInstance().get(FIN_Reconciliation.class, recId);
-        if (coversReconciliation(fresh, selForRec)) {
-          undoWholeReconciliation(handler, account, fresh);
-        } else {
-          detachSelected(handler, selForRec);
-        }
-        continue;
-      }
-      detachSelected(handler, autoCreated);
-      autoConfirmed += reactivateToDraft(account, recId);
     }
-    return autoConfirmed;
+    OBError result = handler.processReconciliation(rec);
+    if (result != null && "Error".equalsIgnoreCase(result.getType())) {
+      handler.doRollbackAndClose();
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, result.getMessage());
+    }
+    return null;
   }
 
   /**
-   * Core's plain reactivate — reactivate WITHOUT the delete that {@code
-   * reactivateAndRemoveReconciliation} chains onto it. Leaves the {@code FIN_Reconciliation} row in
-   * place, un-processed, with its transactions and their statement lines still linked.
-   *
-   * <p>Core only lets ONE reconciliation be editable per account: its reactivate action rejects with
-   * "Draft Reconciliation already exists…" when the account already has an unprocessed one. So any
-   * pre-existing draft is processed first — the same ordering pre-step {@code undoReconciliation}
-   * already performs for exactly this reason, and what the {@code payment.removal} module's own
-   * Classic "Reactivate Reconciliation" button does too.
-   *
-   * @return how many pre-existing drafts had to be confirmed to make room. Non-zero means a line the
-   *     user had left pending by an EARLIER "Reactivar" on this account is now reconciled again — an
-   *     unavoidable consequence of Core's one-editable-reconciliation rule, which the caller surfaces
-   *     in the response so the UI can warn about it instead of letting it happen silently.
+   * True when {@code candidateLine}'s own transaction belongs to {@code rec}; when so, it is added
+   * to {@code out} (de-duplicated via {@code seenIds}). Extracted from {@code
+   * ReconciliationHandler.transactionsOfLineIn}, which calls this once for the line itself and once
+   * per ETGO match-group sibling.
    */
-  private static int reactivateToDraft(FIN_FinancialAccount account, String recId) {
-    try {
-      List<FIN_Reconciliation> drafts = ReconciliationRemovalUtil.getDraftReconciliation(account);
-      int confirmed = drafts != null ? drafts.size() : 0;
-      ReconciliationRemovalUtil.processAllReconciliationInDraft(drafts);
-      FIN_Reconciliation fresh = OBDal.getInstance().get(FIN_Reconciliation.class, recId);
-      if (fresh != null) {
-        ReconciliationRemovalUtil.reactivate(fresh);
-      }
-      return confirmed;
-    } catch (Exception e) {
-      log.error("Failed to reactivate reconciliation {} to draft; it stays processed, so its lines "
-          + "still read as reconciled — the caller reports it as failed.", recId, e);
-      return 0;
+  static void addTransactionOwnedByRec(FIN_BankStatementLine candidateLine,
+      FIN_Reconciliation rec, List<FIN_FinaccTransaction> out, Set<String> seenIds) {
+    FIN_FinaccTransaction t = candidateLine.getFinancialAccountTransaction();
+    if (t != null && t.getReconciliation() != null
+        && rec.getId().equals(t.getReconciliation().getId()) && seenIds.add(t.getId())) {
+      out.add(t);
     }
   }
 }

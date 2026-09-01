@@ -37,6 +37,7 @@ import org.mockito.ArgumentCaptor;
 import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
+import com.etendoerp.go.schemaforge.webhooks.SFPromoteUserRole;
 import com.etendoerp.go.schemaforge.webhooks.SFResendInvitation;
 import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
 import com.etendoerp.go.schemaforge.webhooks.SFSystemRoleTemplates;
@@ -309,6 +310,34 @@ public class NeoPseudoSpecDispatcherTest {
     assertTrue(handled);
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         eq("Systemroletemplates endpoint only supports GET"));
+    verify(goWebhookBridge, never()).handle(any(), any());
+  }
+
+  // -------------------------------------------------------------------------
+  // promoteuserrole (ETP-5019) — promote/demote a user's Admin role
+  // -------------------------------------------------------------------------
+
+  @Test
+  public void promoteUserRoleGetDispatchesThroughBridgeWithSFPromoteUserRole() throws Exception {
+    NeoResponse payload = NeoResponse.ok(new JSONObject());
+    when(goWebhookBridge.handle(eq(request), any(BaseWebhookService.class))).thenReturn(payload);
+
+    boolean handled = dispatcher.handle(pathInfo("promoteuserrole"), "GET", request, response);
+
+    assertTrue(handled);
+    ArgumentCaptor<BaseWebhookService> webhookCaptor = ArgumentCaptor.forClass(BaseWebhookService.class);
+    verify(goWebhookBridge).handle(eq(request), webhookCaptor.capture());
+    assertTrue(webhookCaptor.getValue() instanceof SFPromoteUserRole);
+    verify(servlet).writeResponse(response, payload);
+  }
+
+  @Test
+  public void promoteUserRoleRejectsNonGetMethod() throws Exception {
+    boolean handled = dispatcher.handle(pathInfo("promoteuserrole"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Promoteuserrole endpoint only supports GET"));
     verify(goWebhookBridge, never()).handle(any(), any());
   }
 

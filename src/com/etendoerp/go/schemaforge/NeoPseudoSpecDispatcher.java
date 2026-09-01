@@ -25,6 +25,7 @@ import com.etendoerp.go.common.GoRuntimeProperties;
 import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
+import com.etendoerp.go.schemaforge.webhooks.SFPromoteUserRole;
 import com.etendoerp.go.schemaforge.webhooks.SFResendInvitation;
 import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
 import com.etendoerp.go.schemaforge.webhooks.SFSystemRoleTemplates;
@@ -129,6 +130,13 @@ class NeoPseudoSpecDispatcher {
     if ("systemroletemplates".equals(pathInfo.specName)) {
       return dispatchGoWebhook("Systemroletemplates", method, request, response,
           new SFSystemRoleTemplates());
+    }
+    // ETP-5019: promote an invited user to the client's Admin role, or demote an Admin back
+    // to their personal role. See SFPromoteUserRole's class javadoc for the full mechanism
+    // and response shape.
+    if ("promoteuserrole".equals(pathInfo.specName)) {
+      return dispatchGoWebhook("Promoteuserrole", method, request, response,
+          new SFPromoteUserRole());
     }
     // ETP-4830 (item #4) — dev/QA-only endpoint to force-accept an invitation or force an
     // ETGO_INVITATION.STATUS value, so the invite-email flow and the frontend's status pill can

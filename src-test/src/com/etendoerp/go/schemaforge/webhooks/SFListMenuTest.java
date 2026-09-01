@@ -207,6 +207,47 @@ class SFListMenuTest {
         assertEquals(0, result.getJSONArray("tree").length());
     }
 
+    @Test
+    @DisplayName("Build tree includes the viewer's own role id and client-admin flag")
+    void testBuildMenuTreeIncludesViewerRole() throws Exception {
+        stubNativeQuery(new ArrayList<>());
+        when(adminRole.getId()).thenReturn("role-viewer-1");
+        when(adminRole.isClientAdmin()).thenReturn(true);
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals("role-viewer-1", result.getString("viewerRoleId"));
+        assertTrue(result.getBoolean("viewerIsClientAdmin"));
+    }
+
+    @Test
+    @DisplayName("Build tree with a non-admin viewer role reports viewerIsClientAdmin=false")
+    void testBuildMenuTreeNonAdminViewerRole() throws Exception {
+        stubNativeQuery(new ArrayList<>());
+        when(adminRole.getId()).thenReturn("role-viewer-2");
+        when(adminRole.isClientAdmin()).thenReturn(false);
+
+        webhook.get(parameters, responseVars);
+
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertEquals("role-viewer-2", result.getString("viewerRoleId"));
+        assertFalse(result.getBoolean("viewerIsClientAdmin"));
+    }
+
+    @Test
+    @DisplayName("No role assigned: response has no viewer-role keys at all")
+    void testNoRoleOmitsViewerRoleKeys() throws Exception {
+        givenNoRole();
+
+        webhook.get(parameters, responseVars);
+
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        assertFalse(result.has("viewerRoleId"));
+        assertFalse(result.has("viewerIsClientAdmin"));
+    }
+
     /** Verifies tree with root folder and child window node. */
     @Test
     @DisplayName("Build tree with folder and child window")
