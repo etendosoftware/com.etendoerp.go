@@ -119,16 +119,19 @@ class NeoVectorSearchEndpoint {
 
   /** Executes a namespace-scoped vector search and returns its JSON response. */
   interface SearchGateway {
+    /** Executes the search for the requested namespaces. */
     String search(List<String> namespaces, String query, int topK,
       String metadataFilter, double minScore, double maxScore); }
 
   /** Executes a target-scoped vector search and returns its JSON response. */
   interface TargetSearchGateway {
+    /** Executes the search for the requested entity targets. */
     String search(List<String> targets, String query, int topK,
       double minScore, double maxScore); }
 
   /** Checks whether the current user can read all requested namespaces. */
   interface NamespaceAuthorizer {
+    /** Returns whether the current user can access every namespace. */
     boolean isAuthorized(List<String> namespaces);
   }
   private static final class ScoreRange {
