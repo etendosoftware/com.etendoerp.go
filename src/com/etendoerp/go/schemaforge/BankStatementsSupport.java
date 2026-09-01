@@ -239,8 +239,10 @@ public final class BankStatementsSupport {
     }
   }
 
+  // No `.withZone(...)`: this formats a `LocalDateTime` (no zone concept), and the quoted
+  // `'Z'` is a literal character, not the zone-offset pattern letter — see `formatDate`.
   private static final DateTimeFormatter ISO_UTC =
-      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
+      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'");
 
   private BankStatementsSupport() {
     // utility class — no instances
@@ -289,14 +291,32 @@ public final class BankStatementsSupport {
   }
 
   /**
-   * Formats a timestamp as an ISO-8601 UTC instant.
+   * Formats a timestamp as an ISO-ish string carrying the SAME calendar day/time-of-day
+   * literal that is stored in the (timezone-naive) database column — a trailing {@code Z} is
+   * appended by convention (frontend consumers only read the {@code yyyy-MM-dd} prefix via
+   * {@code parseCalendarDate}, e.g. {@code ManualStatementModal.jsx}), it is NOT a claim that
+   * this instant is actually UTC.
+   *
+   * <p>{@code datetrx}/{@code statementdate}/{@code importdate} and friends are all
+   * {@code timestamp without time zone} columns — {@code rs.getTimestamp(...)} (via the JDBC
+   * driver, with no explicit {@link java.util.Calendar}) reads that naive literal back into a
+   * {@link Timestamp} by interpreting it in the JVM's default timezone, exactly mirroring how
+   * Hibernate wrote it in the first place (also via the JVM default). {@link Timestamp#toLocalDateTime()}
+   * reverses that SAME conversion, so the default-timezone dependency introduced on write is
+   * exactly cancelled out on read, regardless of what that default timezone actually is.
+   *
+   * <p>The previous implementation instead read {@code ts.getTime()} (the raw epoch millis)
+   * and labelled it as UTC unconditionally — correct only when the JVM's default timezone
+   * happens to BE UTC, and off by up to a day (ETP-4924) on any other server, e.g. one whose
+   * default timezone has a positive UTC offset (`ISO_UTC` would have printed the previous
+   * calendar day for anything before that offset past local midnight).
    *
    * @param ts the timestamp to format (may be {@code null})
-   * @return the ISO-8601 UTC string (e.g. {@code 2026-06-04T10:00:00Z}), or {@code ""} when {@code ts} is {@code null}
+   * @return the formatted string (e.g. {@code 2026-06-04T10:00:00Z}), or {@code ""} when {@code ts} is {@code null}
    */
   public static String formatDate(Timestamp ts) {
     if (ts == null) return "";
-    return ISO_UTC.format(Instant.ofEpochMilli(ts.getTime()));
+    return ISO_UTC.format(ts.toLocalDateTime());
   }
 
   /**
