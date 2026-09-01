@@ -29,6 +29,7 @@ import javax.inject.Named;
 
 import org.openbravo.module.bptaxidkey.ViesService;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -329,12 +330,19 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     // An explicit id still wins — every existing caller (the Contacts address form, which picks
     // from a selector) sends one and is untouched. `regionName` is the import's entry point.
     String regionId = nullIfEmpty(body.optString(FIELD_REGION, null));
-    String regionName = nullIfEmpty(body.optString(FIELD_REGION_NAME, null));
+    // trimToNull, not nullIfEmpty: a `regionName` of "   " is visually empty to whoever typed
+    // it in a spreadsheet, and nullIfEmpty only rejects "". Left untrimmed it reached
+    // resolveRegionByName, which answered null for a blank name, and the region was CLEARED —
+    // so a whitespace cell in a re-imported file would erase a province already on the record.
+    String regionName = StringUtils.trimToNull(nullIfEmpty(body.optString(FIELD_REGION_NAME, null)));
     if (regionId != null) {
       geoLoc.setRegion(OBDal.getInstance().get(Region.class, regionId));
     } else if (regionName != null) {
       geoLoc.setRegion(resolveRegionByName(regionName, geoLoc.getCountry()));
-    } else if (body.has(FIELD_REGION) || body.has(FIELD_REGION_NAME)) {
+    } else if (body.has(FIELD_REGION)) {
+      // Only the id field clears. `regionName` is set-if-provided: a blank one means "this file
+      // says nothing about the province", never "erase it". Clearing stays an explicit
+      // `region: null`, which is what the Location modal's selector sends.
       geoLoc.setRegion(null);
     }
   }

@@ -1448,6 +1448,59 @@ class ContactsLocationAddressHandlerTest {
     assertTrue(thrown.getMessage().contains("ambiguous"));
   }
 
+  /**
+   * A whitespace-only {@code regionName} must be indistinguishable from an absent one. It was
+   * not: {@code nullIfEmpty} only rejects "", so "   " reached the resolver, which answers null
+   * for a blank name, and the region was CLEARED — a whitespace cell in a re-imported file
+   * erasing a province already on the record. Found in PR review.
+   */
+  @Test
+  void testWhitespaceOnlyRegionNameLeavesTheRegionUntouched() throws Exception {
+    Region existing = mockRegion("MADRID", "T1");
+    // Built BEFORE the stubbing: mockCountry() stubs its own mock, and Mockito rejects a
+    // stubbing started inside another one's argument (UnfinishedStubbingException).
+    Country country = mockCountry("Spain");
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getRegion()).thenReturn(existing);
+    when(geoLoc.getCountry()).thenReturn(country);
+
+    JSONObject body = new JSONObject();
+    body.put("regionName", "   ");
+    invokeApplyGeoLocFields(body, geoLoc);
+
+    // Neither set to something else NOR cleared: the field is simply not mentioned.
+    verify(geoLoc, org.mockito.Mockito.never()).setRegion(any());
+  }
+
+  @Test
+  void testAnExplicitRegionIdOfBlankStillClears() throws Exception {
+    // Clearing stays the id field's job — that is what the Location modal's selector sends.
+    Country country = mockCountry("Spain");
+    Location geoLoc = mock(Location.class);
+    when(geoLoc.getCountry()).thenReturn(country);
+
+    JSONObject body = new JSONObject();
+    body.put("region", "");
+    invokeApplyGeoLocFields(body, geoLoc);
+
+    verify(geoLoc).setRegion(null);
+  }
+
+  private void invokeApplyGeoLocFields(JSONObject body, Location geoLoc) throws Exception {
+    Method method = ContactsLocationAddressHandler.class
+        .getDeclaredMethod("applyGeoLocFields", JSONObject.class, Location.class);
+    method.setAccessible(true);
+    try {
+      method.invoke(null, body, geoLoc);
+    } catch (InvocationTargetException e) {
+      Throwable cause = e.getCause();
+      if (cause instanceof RuntimeException) {
+        throw (RuntimeException) cause;
+      }
+      throw (Exception) cause;
+    }
+  }
+
   private Region mockRegion(String name, String clientId) {
     Region region = mock(Region.class);
     when(region.getName()).thenReturn(name);
