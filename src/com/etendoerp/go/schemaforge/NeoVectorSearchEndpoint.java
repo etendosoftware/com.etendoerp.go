@@ -42,24 +42,32 @@ class NeoVectorSearchEndpoint {
   private static final int HTTP_UNPROCESSABLE_ENTITY = 422;
   private final SearchGateway searchGateway;
   private final NamespaceAuthorizer namespaceAuthorizer;
+  private TargetSearchGateway targetSearchGateway;
+  private NamespaceAuthorizer targetAuthorizer;
 
   NeoVectorSearchEndpoint() {
     this((namespaces, query, topK, metadataFilter, minScore, maxScore) ->
         new VectorSearchService(new DalConnectionProvider(false))
             .searchAsJson(namespaces, query, topK, metadataFilter, minScore, maxScore),
         new SourceEntityAuthorizer());
+    targetSearchGateway = (targets, query, topK, minScore, maxScore) ->
+        new VectorSearchService(new DalConnectionProvider(false))
+            .searchTargetsAsJson(targets, query, topK, minScore, maxScore);
+    targetAuthorizer = new TargetEntityAuthorizer();
   }
 
   NeoVectorSearchEndpoint(SearchGateway searchGateway) { this(searchGateway, namespaces -> true); }
   NeoVectorSearchEndpoint(SearchGateway searchGateway, NamespaceAuthorizer namespaceAuthorizer) {
     this.searchGateway = searchGateway; this.namespaceAuthorizer = namespaceAuthorizer;
+    this.targetSearchGateway = null; this.targetAuthorizer = namespaces -> true;
   }
 
   NeoResponse handle(HttpServletRequest request) {
     String query = trimToNull(request.getParameter("query"));
     List<String> namespaces = parseNamespaces(request.getParameter("namespaces"));
-    if (query == null || namespaces.isEmpty()) return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-        "Missing required parameter: query and namespaces are both required");
+    List<String> targets = parseNamespaces(request.getParameter("targets"));
+    if (query == null || (namespaces.isEmpty() && targets.isEmpty())) return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+        "Missing required parameter: query and either targets or namespaces are required");
     Integer topK = parseTopK(request.getParameter("topK"));
     if (topK == null) return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
         "topK must be an integer between 1 and " + MAX_TOP_K);
@@ -67,6 +75,12 @@ class NeoVectorSearchEndpoint {
     if (scoreRange == null) return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
         "minScore and maxScore must be numbers between 0 and 1, with minScore not greater than maxScore");
     try {
+      if (!targets.isEmpty()) {
+        if (targetSearchGateway == null || !targetAuthorizer.isAuthorized(targets))
+          return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN, "Access denied to vector target");
+        return NeoResponse.ok(new JSONObject(targetSearchGateway.search(targets, query, topK,
+            scoreRange.minScore, scoreRange.maxScore)));
+      }
       if (!namespaceAuthorizer.isAuthorized(namespaces))
         return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN, "Access denied to vector source");
       return NeoResponse.ok(new JSONObject(searchGateway.search(namespaces, query, topK,
@@ -101,6 +115,8 @@ class NeoVectorSearchEndpoint {
 
   interface SearchGateway { String search(List<String> namespaces, String query, int topK,
       String metadataFilter, double minScore, double maxScore); }
+  interface TargetSearchGateway { String search(List<String> targets, String query, int topK,
+      double minScore, double maxScore); }
   interface NamespaceAuthorizer { boolean isAuthorized(List<String> namespaces); }
   private static final class ScoreRange {
     private final double minScore, maxScore;
@@ -126,6 +142,32 @@ class NeoVectorSearchEndpoint {
       try (PreparedStatement statement = connectionProvider.getPreparedStatement(
           "SELECT ad_table_id FROM etarc_vector_source WHERE namespace = ? AND isactive = 'Y'")) {
         statement.setString(1, namespace);
+        try (ResultSet result = statement.executeQuery()) { return result.next() ? result.getString(1) : null; }
+      }
+    }
+  }
+
+  /** Applies the same entity read authorization to a target's configured physical source. */
+  private static final class TargetEntityAuthorizer implements NamespaceAuthorizer {
+    @Override public boolean isAuthorized(List<String> targets) {
+      try {
+        DalConnectionProvider connectionProvider = new DalConnectionProvider(false);
+        for (String target : targets) {
+          String tableId = findSourceTableId(connectionProvider, target);
+          if (tableId == null) return false;
+          Entity entity = ModelProvider.getInstance().getEntityByTableId(tableId);
+          if (entity == null) return false;
+          OBContext.getOBContext().getEntityAccessChecker().checkReadable(entity);
+        }
+        return true;
+      } catch (Exception e) { return false; }
+    }
+    private static String findSourceTableId(DalConnectionProvider connectionProvider, String target) throws Exception {
+      String sql = "SELECT s.ad_table_id FROM etarc_vector_search_target t JOIN etarc_vector_source s "
+          + "ON s.etarc_vector_source_id=t.etarc_vector_source_id "
+          + "WHERE t.search_key=? AND t.isactive='Y' AND s.isactive='Y'";
+      try (PreparedStatement statement = connectionProvider.getPreparedStatement(sql)) {
+        statement.setString(1, target);
         try (ResultSet result = statement.executeQuery()) { return result.next() ? result.getString(1) : null; }
       }
     }
