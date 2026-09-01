@@ -48,6 +48,7 @@ import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
+import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoCommercialLinePolicy;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
@@ -616,11 +617,18 @@ public class McpToolRouter {
    * Update an existing record.
    */
   private JSONObject handleUpdate(String specName, JSONObject args) throws Exception {
-    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, "id", McpConstants.PARAM_FIELDS);
+    // ETP-5073 / DOC-04: `updated` joins the required set. Core's optimistic-locking check only
+    // runs when the write payload carries it (JsonToDataConverter#setData guards on the key being
+    // present), so an omission does not fail loudly — it silently disables the check and lets this
+    // write overwrite a concurrent edit. Refusing the call is therefore the only safe answer, and
+    // validateArgs already produces the 422 envelope that names the missing argument.
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, "id",
+        McpConstants.PARAM_FIELDS, McpConstants.PARAM_UPDATED);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String recordId = args.getString("id");
     JSONObject fields = args.getJSONObject(McpConstants.PARAM_FIELDS);
+    String updated = args.getString(McpConstants.PARAM_UPDATED);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
@@ -668,6 +676,22 @@ public class McpToolRouter {
     if (preHookResult != null) {
       return preHookResult;
     }
+
+    // ETP-5073 / DOC-04: the conflict is detected before the write, for the same reason the REST
+    // path does it there — core's refusal reaches us as translated prose with nothing stable to
+    // key on. See NeoRecordVersion.
+    if (NeoRecordVersion.isStale(dalEntityName, recordId, updated)) {
+      return wrapAsErrorContent(McpWriteRequestSupport.buildStaleRecordError().toString(2));
+    }
+
+    // ETP-5073 / DOC-04: injected here, deliberately last, so it never passes through the type
+    // coercion pass above. That pass canonicalises date and datetime strings, and rewriting this
+    // value by even a second would make every update look like a conflict, since the check
+    // compares it for exact equality against the stored timestamp. It is also not a field the
+    // caller is editing: core reads it, compares it, and then overwrites the column with its own
+    // stamp on save. Keeping it out of the caller's field map is what makes that distinction
+    // visible in the tool schema.
+    filteredBody.put(McpConstants.PARAM_UPDATED, updated);
 
     // Wrap for DefaultJsonDataService with record ID
     String wrappedBody = McpToolRouterSupport.wrapForSmartclient(filteredBody, dalEntityName, recordId, log);
