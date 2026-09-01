@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.descriptionExpr;
+import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.attachOptional;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.belongsToAccount;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.bindDateRange;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.docTypeToIsReceipt;
@@ -34,10 +35,12 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
@@ -62,6 +65,7 @@ import org.openbravo.advpaymentmngt.utility.FIN_MatchedTransaction;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchingTransaction;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBCriteria;
@@ -69,6 +73,8 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.financialmgmt.accounting.Costcenter;
 import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
@@ -76,6 +82,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
+import org.openbravo.model.project.Project;
 
 /**
  * NeoHandler that powers the manual bank-reconciliation split panel introduced by
@@ -131,6 +138,13 @@ import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 public class ReconciliationHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(ReconciliationHandler.class);
+
+  /**
+   * Header-level accounting dimensions per financial account, memoized for the lifetime of this
+   * handler. {@code NeoHandler} beans are {@code @Dependent} (one instance per request), so an
+   * {@code applySuggestions} batch resolves the configuration once instead of once per line.
+   */
+  private final Map<String, Set<String>> headerDimensionsByAccount = new HashMap<>();
 
   private static final String METHOD_GET = "GET";
   private static final String METHOD_POST = "POST";
@@ -1385,12 +1399,9 @@ public class ReconciliationHandler implements NeoHandler {
     trx.setPaymentAmount(isDeposit ? BigDecimal.ZERO : absAmount);
     trx.setStatus(isDeposit ? "RPAE" : "RPAP");
     trx.setGLItem(glItem);
-    if (StringUtils.isNotBlank(bpartnerId)) {
-      BusinessPartner bp = OBDal.getInstance().get(BusinessPartner.class, bpartnerId);
-      if (bp != null) {
-        trx.setBusinessPartner(bp);
-      }
-    }
+    attachOptional(bpartnerId, BusinessPartner.class, trx::setBusinessPartner);
+    AccountingDimensionsSupport.applyRuleDimensions(trx, spec,
+        () -> headerDimensionsOf(account.getId()));
     // Rule-origin transaction is auto-created — flag it so the reactivate flow deletes it.
     ReactivationSupport.markAutoCreated(trx);
     OBDal.getInstance().save(trx);
@@ -1400,6 +1411,24 @@ public class ReconciliationHandler implements NeoHandler {
     FIN_TransactionProcess.doTransactionProcess(PROCESS_ACTION, trx);
     OBDal.getInstance().flush();
     return trx.getId();
+  }
+
+  /**
+   * The account's active header dimensions, memoized per handler instance. Fails <b>open</b> on a
+   * configuration-lookup error: a tenant whose accounting setup cannot be read keeps the previous
+   * behaviour for the concept and the business partner, and simply gets no dimensions assigned,
+   * rather than having the whole reconciliation fail.
+   */
+  Set<String> headerDimensionsOf(String accountId) {
+    return headerDimensionsByAccount.computeIfAbsent(accountId, id -> {
+      try {
+        return AccountingDimensionsSupport.activeHeaderDimensionsForAccount(id,
+            AccountingDimensionsSupport.DOCBASETYPE_FAT);
+      } catch (Exception e) {
+        log.warn("Could not resolve active accounting dimensions for account {}", id, e);
+        return Collections.emptySet();
+      }
+    });
   }
 
   // ---------------------------------------------------------------------------

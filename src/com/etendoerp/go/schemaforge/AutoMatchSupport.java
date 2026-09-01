@@ -64,6 +64,14 @@ final class AutoMatchSupport {
   private static final String KEY_STATEMENT_LINE = "statementLine";
   private static final String KEY_OPERATIONS = "operations";
   private static final String KEY_ORIGIN = "origin";
+  /**
+   * Wire keys for the accounting dimensions a rule can carry into the transaction it generates.
+   * Shared with {@link ReconciliationHandler#createTransactionForRule} — the producer and the
+   * consumer of the {@code createPayment} spec must not drift apart (ETP-4950).
+   */
+  static final String KEY_PROJECT_ID = "projectId";
+  static final String KEY_COSTCENTER_ID = "costcenterId";
+  static final String KEY_PRODUCT_ID = "productId";
 
   private static final DateTimeFormatter ISO_UTC =
       DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
@@ -331,6 +339,7 @@ final class AutoMatchSupport {
       proposedOp.put(KEY_ID, "new");
       proposedOp.put("glItemId", StringUtils.defaultIfBlank(rule.glItemId, ""));
       proposedOp.put("bpartnerId", StringUtils.defaultIfBlank(rule.bpartnerId, ""));
+      putRuleDimensions(proposedOp, rule);
       proposedOp.put(KEY_AMOUNT, lineAmt);
       proposedOp.put(KEY_IS_NEW, true);
       ops.put(proposedOp);
@@ -353,10 +362,24 @@ final class AutoMatchSupport {
       cp.put("glItemId", StringUtils.defaultIfBlank(rule.glItemId, ""));
       cp.put("bpartnerId", StringUtils.defaultIfBlank(rule.bpartnerId, ""));
       cp.put("transactionTypeId", StringUtils.defaultIfBlank(rule.transactionTypeId, ""));
+      putRuleDimensions(cp, rule);
       cp.put(KEY_AMOUNT, lineAmt);
       group.put("createPayment", cp);
     }
     return group;
+  }
+
+  /**
+   * Copies the rule's accounting dimensions (project, cost center, product) onto a suggestion
+   * payload. Before ETP-4950 these three were loaded by {@link MatchRuleEngine} and then dropped
+   * here, so the movement Automatch generated never carried them. Whether a dimension is actually
+   * assignable is decided later, against the account's active dimensions, in
+   * {@link ReconciliationHandler#createTransactionForRule}.
+   */
+  static void putRuleDimensions(JSONObject target, MatchRuleEngine.Rule rule) throws JSONException {
+    target.put(KEY_PROJECT_ID, StringUtils.defaultIfBlank(rule.projectId, ""));
+    target.put(KEY_COSTCENTER_ID, StringUtils.defaultIfBlank(rule.costCenterId, ""));
+    target.put(KEY_PRODUCT_ID, StringUtils.defaultIfBlank(rule.productId, ""));
   }
 
   static JSONObject lineToJson(FIN_BankStatementLine line) throws JSONException {
