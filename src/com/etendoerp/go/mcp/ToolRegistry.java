@@ -514,14 +514,27 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
     props.put("id", stringProp("Record ID to update"));
     props.put(McpConstants.PARAM_FIELDS, objectProp("Field values to update"));
+    // ETP-5073 / DOC-04: required, and described in terms of where to obtain it. The schema alone
+    // would only tell an agent that something is missing; naming neo_get as the source is what
+    // lets it recover on the first retry instead of guessing a timestamp (which cannot work — any
+    // value other than the one actually stored is rejected as a conflict).
+    props.put(McpConstants.PARAM_UPDATED, stringProp(
+        "The record's 'updated' value exactly as neo_get returned it. Required: it is how the "
+            + "server verifies nobody else changed the record since you read it. Copy it verbatim "
+            + "— do not reformat, round or invent it. If you do not have it, call neo_get first."));
 
     return new McpToolDefinition(
         "neo_update",
         "Update an existing record in a NEO Headless API spec. "
+            + "Read the record with neo_get first: its 'updated' value is a required argument and "
+            + "guards against overwriting somebody else's concurrent edit. A 409 with "
+            + "error 'stale_record' means the record changed since that read — re-read it, reapply "
+            + "your changes and retry; re-sending the same payload will fail identically. "
             + "Dates must be ISO-8601: 'YYYY-MM-DD' for date fields and "
             + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported.",
         buildObjectSchema(props,
-          List.of("spec", McpConstants.PARAM_ENTITY, "id", McpConstants.PARAM_FIELDS)));
+          List.of("spec", McpConstants.PARAM_ENTITY, "id", McpConstants.PARAM_FIELDS,
+            McpConstants.PARAM_UPDATED)));
   }
 
   private McpToolDefinition buildDeleteTool(List<String> specNames) {

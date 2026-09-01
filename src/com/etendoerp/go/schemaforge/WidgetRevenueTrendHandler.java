@@ -34,6 +34,11 @@ import org.openbravo.dal.service.OBDal;
  * NeoHandler that returns monthly revenue trend data for the dashboard widget.
  * Queries completed sales invoices (c_invoice) grouped by month, using the last
  * 12 months of available data anchored to the most recent invoice date.
+ *
+ * <p>ETP-5011 (Inconsistency 2): uses {@code c_invoice.totallines} (tax-exclusive
+ * subtotal, "base imponible") rather than {@code grandtotal}, so this widget's
+ * monthly totals stay consistent with the net figures in {@code WidgetKpisHandler}
+ * ("Resumen Financiero") — VAT/IVA is not the company's own income or expense.</p>
  */
 @Named("widgetRevenueTrendHandler")
 public class WidgetRevenueTrendHandler implements NeoHandler {
@@ -54,8 +59,8 @@ public class WidgetRevenueTrendHandler implements NeoHandler {
     + "  ) AS month "
     + ") "
     + "SELECT to_char(m.month, 'Mon') AS label, "
-    + "       COALESCE(SUM(CASE WHEN i.issotrx = 'Y' THEN i.grandtotal ELSE 0 END), 0) AS revenue_total, "
-    + "       COALESCE(SUM(CASE WHEN i.issotrx = 'N' THEN i.grandtotal ELSE 0 END), 0) AS expense_total "
+    + "       COALESCE(SUM(CASE WHEN i.issotrx = 'Y' THEN i.totallines ELSE 0 END), 0) AS revenue_total, "
+    + "       COALESCE(SUM(CASE WHEN i.issotrx = 'N' THEN i.totallines ELSE 0 END), 0) AS expense_total "
     + "FROM months m "
     + "LEFT JOIN c_invoice i ON date_trunc('month', i.dateinvoiced) = m.month "
     + "  AND i.docstatus IN ('CO','CL') AND i.ad_client_id = :clientId "
@@ -91,8 +96,8 @@ public class WidgetRevenueTrendHandler implements NeoHandler {
           BigDecimal revenueTotal = (BigDecimal) row[1];
           BigDecimal expenseTotal = (BigDecimal) row[2];
           labels.put(label);
-          values.put(revenueTotal.longValue());
-          expenseValues.put(expenseTotal.longValue());
+          values.put(revenueTotal.doubleValue());
+          expenseValues.put(expenseTotal.doubleValue());
         }
 
         JSONObject trend = new JSONObject();

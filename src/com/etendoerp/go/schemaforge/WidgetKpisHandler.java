@@ -33,8 +33,23 @@ import org.openbravo.dal.service.OBDal;
 
 /**
  * NeoHandler that returns KPI summary data for the dashboard widget.
- * Queries real invoice data from c_invoice, using the most recent invoice
- * month as the "current" month anchor (since data may not be recent).
+ * Queries real invoice data from c_invoice aggregated over the current calendar
+ * year (January 1st through December 31st), compared against the full previous
+ * calendar year.
+ *
+ * <p>ETP-5011: this widget deliberately ignores the dashboard date-range selector
+ * ({@code ?range=}). Unlike the widgets that go through
+ * {@link WidgetQueryHelper#resolveQuery}, the Financial Summary is always a
+ * calendar-year figure, which is what its "this year" / "vs previous year" copy
+ * states. Do not wire it to the range selector.</p>
+ *
+ * <p>ETP-5011 (Inconsistency 2): revenue/expenses use {@code c_invoice.totallines}
+ * (the tax-exclusive subtotal, i.e. "base imponible") rather than
+ * {@code grandtotal} (which includes VAT/IVA). VAT is not the company's own
+ * income or expense, and this keeps the widget consistent with "Productos más
+ * vendidos" (also net). {@code WidgetPendingAmountsHandler} ("Cobros y Pagos")
+ * is a deliberate exception: it uses {@code outstandingamt} because it reports
+ * actual cash owed, where VAT legitimately belongs.</p>
  */
 @Named("widgetKpisHandler")
 public class WidgetKpisHandler implements NeoHandler {
@@ -46,16 +61,18 @@ public class WidgetKpisHandler implements NeoHandler {
 
   private static final String REVENUE_SQL =
       "SELECT "
-      + "  COALESCE(SUM(CASE WHEN date_trunc('month', i.dateinvoiced) = date_trunc('month', mx.max_date) "
-      + "    THEN i.grandtotal END), 0) AS current_month, "
-      + "  COALESCE(SUM(CASE WHEN date_trunc('month', i.dateinvoiced) = date_trunc('month', mx.max_date) - INTERVAL '1 month' "
-      + "    THEN i.grandtotal END), 0) AS previous_month "
-      + "FROM c_invoice i, "
-      + "  (SELECT MAX(dateinvoiced) AS max_date FROM c_invoice WHERE ad_client_id = :clientId AND docstatus IN ('CO','CL')) mx "
+      + "  COALESCE(SUM(CASE WHEN i.dateinvoiced >= date_trunc('year', NOW()) "
+      + "    AND i.dateinvoiced < date_trunc('year', NOW()) + INTERVAL '1 year' "
+      + "    THEN i.totallines END), 0) AS current_year, "
+      + "  COALESCE(SUM(CASE WHEN i.dateinvoiced >= date_trunc('year', NOW()) - INTERVAL '1 year' "
+      + "    AND i.dateinvoiced < date_trunc('year', NOW()) "
+      + "    THEN i.totallines END), 0) AS previous_year "
+      + "FROM c_invoice i "
       + "WHERE i.ad_client_id = :clientId "
       + "  AND i.issotrx = :isSoTrx "
       + "  AND i.docstatus IN ('CO','CL') "
-      + "  AND date_trunc('month', i.dateinvoiced) >= date_trunc('month', mx.max_date) - INTERVAL '1 month'";
+      + "  AND i.dateinvoiced >= date_trunc('year', NOW()) - INTERVAL '1 year' "
+      + "  AND i.dateinvoiced < date_trunc('year', NOW()) + INTERVAL '1 year'";
 
   private static final String PENDING_SQL =
       "SELECT COUNT(*) "
@@ -93,25 +110,25 @@ public class WidgetKpisHandler implements NeoHandler {
         BigDecimal[] revenue = queryInvoiceTotals(clientId, "Y");
         BigDecimal[] expenses = queryInvoiceTotals(clientId, "N");
 
-        BigDecimal revenueCurrentMonth = revenue[0];
-        BigDecimal revenuePreviousMonth = revenue[1];
-        BigDecimal expensesCurrentMonth = expenses[0];
-        BigDecimal expensesPreviousMonth = expenses[1];
+        BigDecimal revenueCurrentYear = revenue[0];
+        BigDecimal revenuePreviousYear = revenue[1];
+        BigDecimal expensesCurrentYear = expenses[0];
+        BigDecimal expensesPreviousYear = expenses[1];
 
-        BigDecimal netProfitCurrent = revenueCurrentMonth.subtract(expensesCurrentMonth);
-        BigDecimal netProfitPrevious = revenuePreviousMonth.subtract(expensesPreviousMonth);
+        BigDecimal netProfitCurrent = revenueCurrentYear.subtract(expensesCurrentYear);
+        BigDecimal netProfitPrevious = revenuePreviousYear.subtract(expensesPreviousYear);
 
         long pendingCount = queryPendingInvoices(clientId);
 
-        double revenueTrend = calculateTrend(revenueCurrentMonth, revenuePreviousMonth);
-        double expensesTrend = calculateTrend(expensesCurrentMonth, expensesPreviousMonth);
+        double revenueTrend = calculateTrend(revenueCurrentYear, revenuePreviousYear);
+        double expensesTrend = calculateTrend(expensesCurrentYear, expensesPreviousYear);
         double netProfitTrend = calculateTrend(netProfitCurrent, netProfitPrevious);
 
         JSONArray data = new JSONArray();
-        data.put(kpi("revenueThisMonth", "Revenue this month",
-          revenueCurrentMonth.doubleValue(), FORMAT_CURRENCY, revenueTrend, "DollarSign"));
-        data.put(kpi("expensesThisMonth", "Expenses this month",
-          expensesCurrentMonth.doubleValue(), FORMAT_CURRENCY, expensesTrend, "CreditCard"));
+        data.put(kpi("revenueThisMonth", "Revenue this year",
+          revenueCurrentYear.doubleValue(), FORMAT_CURRENCY, revenueTrend, "DollarSign"));
+        data.put(kpi("expensesThisMonth", "Expenses this year",
+          expensesCurrentYear.doubleValue(), FORMAT_CURRENCY, expensesTrend, "CreditCard"));
         data.put(kpi("netProfit", "Net Profit",
           netProfitCurrent.doubleValue(), FORMAT_CURRENCY, netProfitTrend, "TrendingUp"));
         data.put(kpi("pendingInvoices", "Pending Invoices",
@@ -135,8 +152,8 @@ public class WidgetKpisHandler implements NeoHandler {
   }
 
   /**
-   * Queries invoice totals for the current month (max dateinvoiced month) and previous month.
-   * Returns an array of [currentMonthTotal, previousMonthTotal].
+   * Queries invoice totals for the current calendar year and the previous calendar year.
+   * Returns an array of [currentYearTotal, previousYearTotal].
    */
   @SuppressWarnings("unchecked")
   private BigDecimal[] queryInvoiceTotals(String clientId, String isSoTrx) {
