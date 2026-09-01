@@ -32,6 +32,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.ad_actionButton.CreateRegFactAcct;
 import org.openbravo.erpCommon.ad_actionButton.DropRegFactAcct;
+import org.openbravo.erpCommon.utility.AccDefUtility;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.calendar.Calendar;
@@ -164,6 +165,18 @@ public class YearCloseHandler implements NeoHandler {
    * generic create route consequently has no parentId from which the mandatory-default service
    * can resolve C_Calendar_ID. Derive it from the current organization instead of falling back to
    * the first readable calendar, which can be the global organization calendar.
+   *
+   * <p><b>ETP-4948 REVIEW fix:</b> {@link Organization#getCalendar()} only reads the org's own
+   * directly-assigned {@code C_Calendar_ID} — it does NOT walk the org tree, so an org that
+   * inherits its calendar from a parent (a completely standard setup) resolved to {@code null}
+   * here, and the caller had no fallback other than erroring or (before this fix) silently
+   * accepting whatever the org-blind mandatory-defaults selector picked first — which can be the
+   * global (org {@code *}) calendar for a client with more than one. {@link
+   * AccDefUtility#getCalendar(Organization)} is the already-precedented pattern in this exact
+   * codebase (used by classic invoice/period logic) for "the calendar this organization should
+   * use, walking up the org tree" — it deliberately treats org {@code *} (id {@code "0"}) as "no
+   * usable calendar" rather than returning the global one, which is exactly the behavior wanted
+   * here.
    */
   private NeoResponse validateAndEnrichFiscalCalendarCreate(NeoContext context) {
     if (!isFiscalCalendarCreate(context)) {
@@ -178,7 +191,7 @@ public class YearCloseHandler implements NeoHandler {
       return NeoResponse.error(400, "Fiscal Year must be a four-digit year between 1900 and 2999");
     }
     Organization organization = OBContext.getOBContext().getCurrentOrganization();
-    Calendar calendar = organization != null ? organization.getCalendar() : null;
+    Calendar calendar = organization != null ? AccDefUtility.getCalendar(organization) : null;
     if (calendar == null || calendar.getId() == null) {
       return NeoResponse.error(400, "The current organization has no fiscal calendar");
     }

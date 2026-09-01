@@ -18,29 +18,39 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
 import org.junit.Test;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.ad_actionButton.CreateRegFactAcct;
+import org.openbravo.erpCommon.ad_actionButton.DropRegFactAcct;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.calendar.Calendar;
 import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.model.financialmgmt.calendar.Year;
+import org.openbravo.service.db.DalConnectionProvider;
 
 /**
  * Unit tests for {@link YearCloseHandler}.
@@ -335,21 +345,70 @@ public class YearCloseHandlerTest {
     assertEquals(400, response.getHttpStatus());
   }
 
+  /**
+   * ETP-4948 REVIEW fix: no direct calendar on the current org is NOT by itself grounds for
+   * rejection any more — {@link org.openbravo.erpCommon.utility.AccDefUtility#getCalendar} walks
+   * up the org tree. This test asserts the genuinely-no-calendar-anywhere case: every ancestor,
+   * all the way up to the {@code *} org (id {@code "0"}), also has no calendar assigned.
+   */
   @Test
   public void fiscalCalendarCreateRejectsMissingOrganizationCalendar() throws Exception {
     org.codehaus.jettison.json.JSONObject body = new org.codehaus.jettison.json.JSONObject()
         .put("fiscalYear", "2026");
 
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+    Organization starOrg = mock(Organization.class);
+    when(starOrg.getId()).thenReturn("0");
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedConstruction<OrganizationStructureProvider> ospMock = mockConstruction(
+             OrganizationStructureProvider.class,
+             (mock, mockContext) -> when(mock.getParentOrg(any(Organization.class))).thenReturn(starOrg))) {
       OBContext obContext = mock(OBContext.class);
       Organization organization = mock(Organization.class);
       ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
       when(obContext.getCurrentOrganization()).thenReturn(organization);
+      when(organization.getId()).thenReturn("org-with-no-calendar-in-its-whole-tree");
       when(organization.getCalendar()).thenReturn(null);
 
       NeoResponse response = new YearCloseHandler().handle(buildFiscalCalendarCreate(body));
 
       assertEquals(400, response.getHttpStatus());
+    }
+  }
+
+  /**
+   * ETP-4948 REVIEW fix: the gap the previous test suite didn't cover — an org with no DIRECTLY
+   * assigned calendar (the exact AD_Org.AD_InheritedCalendar_ID scenario) must still resolve
+   * successfully, using the nearest ancestor's calendar, instead of being rejected.
+   */
+  @Test
+  public void fiscalCalendarCreateInjectsInheritedCalendarFromAncestorOrg() throws Exception {
+    org.codehaus.jettison.json.JSONObject body = new org.codehaus.jettison.json.JSONObject()
+        .put("fiscalYear", "2027");
+
+    Calendar ancestorCalendar = mock(Calendar.class);
+    when(ancestorCalendar.getId()).thenReturn("ancestor-calendar-id");
+    Organization parentOrg = mock(Organization.class);
+    when(parentOrg.getId()).thenReturn("parent-org-id");
+    when(parentOrg.getCalendar()).thenReturn(ancestorCalendar);
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedConstruction<OrganizationStructureProvider> ospMock = mockConstruction(
+             OrganizationStructureProvider.class,
+             (mock, mockContext) -> when(mock.getParentOrg(any(Organization.class))).thenReturn(parentOrg))) {
+      OBContext obContext = mock(OBContext.class);
+      Organization organization = mock(Organization.class);
+      ctxMock.when(OBContext::getOBContext).thenReturn(obContext);
+      when(obContext.getCurrentOrganization()).thenReturn(organization);
+      // The org itself has no directly-assigned calendar (getCalendar() == null) — the exact
+      // "inherits from a parent org" setup AD_Org.AD_InheritedCalendar_ID exists for.
+      when(organization.getId()).thenReturn("child-org-with-no-direct-calendar");
+      when(organization.getCalendar()).thenReturn(null);
+
+      NeoResponse response = new YearCloseHandler().handle(buildFiscalCalendarCreate(body));
+
+      assertNull(response);
+      assertEquals("ancestor-calendar-id", body.getString("calendar"));
     }
   }
 
@@ -375,5 +434,64 @@ public class YearCloseHandlerTest {
         .build();
 
     assertNull(new YearCloseHandler().handle(context));
+  }
+
+  // --- Reflection-mechanics contract tests (ETP-4948 REVIEW W2) ---------------------------
+  //
+  // invokeCreateRegFactAcct/invokeDropRegFactAcct are only ever exercised above with both
+  // methods overridden to return a canned OBError, so newServletInstance, findMyPoolField and
+  // the real Method.invoke(...) call never actually run in this test suite. These tests resolve
+  // (but deliberately never invoke) the exact reflective handles the handler depends on, plus
+  // exercise the real (private) newServletInstance/findMyPoolField mechanics — with no DB
+  // access and no call into the legacy servlets' business logic — so a future Etendo core
+  // version that renames/reshapes CreateRegFactAcct#processButton, DropRegFactAcct#processButton
+  // or HttpBaseServlet#myPool breaks the build here instead of failing silently at runtime.
+
+  @Test
+  public void createRegFactAcctProcessButtonSignatureIsResolvable() throws Exception {
+    Method processButton = CreateRegFactAcct.class.getDeclaredMethod("processButton",
+        VariablesSecureApp.class, String.class, String.class, String.class);
+
+    assertEquals(OBError.class, processButton.getReturnType());
+  }
+
+  @Test
+  public void dropRegFactAcctProcessButtonSignatureIsResolvable() throws Exception {
+    Method processButton = DropRegFactAcct.class.getDeclaredMethod("processButton",
+        VariablesSecureApp.class, String.class, String.class);
+
+    assertEquals(OBError.class, processButton.getReturnType());
+  }
+
+  @Test
+  public void myPoolFieldIsResolvableOnBothLegacyServlets() throws Exception {
+    assertNotNull(findMyPoolFieldViaReflection(CreateRegFactAcct.class));
+    assertNotNull(findMyPoolFieldViaReflection(DropRegFactAcct.class));
+  }
+
+  @Test
+  public void newServletInstanceSetsMyPoolWithoutInvokingProcessButton() throws Exception {
+    Method newServletInstance = YearCloseHandler.class.getDeclaredMethod("newServletInstance", Class.class);
+    newServletInstance.setAccessible(true);
+
+    CreateRegFactAcct servlet = (CreateRegFactAcct) newServletInstance.invoke(
+        new YearCloseHandler(), CreateRegFactAcct.class);
+
+    Field poolField = findMyPoolFieldViaReflection(CreateRegFactAcct.class);
+    poolField.setAccessible(true);
+    assertTrue(poolField.get(servlet) instanceof DalConnectionProvider);
+  }
+
+  /** Mirrors YearCloseHandler#findMyPoolField's own walk-the-superclass-chain logic. */
+  private Field findMyPoolFieldViaReflection(Class<?> clazz) throws NoSuchFieldException {
+    Class<?> current = clazz;
+    while (current != null) {
+      try {
+        return current.getDeclaredField("myPool");
+      } catch (NoSuchFieldException e) {
+        current = current.getSuperclass();
+      }
+    }
+    throw new NoSuchFieldException("myPool not found on " + clazz.getName());
   }
 }
