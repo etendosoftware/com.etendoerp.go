@@ -21,6 +21,9 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.module.sii.data.AEATSIIConfig;
+import org.openbravo.module.sii.utils.SIIUtils;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -47,6 +50,12 @@ import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
 public class NeoBackgroundDefaultsService {
 
   private static final Logger log = LogManager.getLogger(NeoBackgroundDefaultsService.class);
+
+  private static final String PROP_ORGANIZATION = "organization";
+  private static final String PROP_SII_KEY = "aeatsiiClaveTipo";
+  private static final String PROP_BUSINESS_PARTNER = "businessPartner";
+  private static final String PROP_BP_SII_DEFAULT_ENABLED = "aeatsiiDefaultsiikey";
+  private static final String PROP_BP_SII_KEY = "aeatsiiSiikeylist";
 
   private NeoBackgroundDefaultsService() {
   }
@@ -88,6 +97,9 @@ public class NeoBackgroundDefaultsService {
     }
     try {
       JSONObject defaults = resolveBackgroundDefaults(specName, entityName, parentId);
+      // No declared defaults means this pass stamped nothing, and deferSiiKeyToPartnerTrigger
+      // only ever undoes a value THIS pass stamped (it compares against the declared default),
+      // so there is nothing for it to do here — returning early is equivalent, not a shortcut.
       if (defaults == null || defaults.length() == 0) {
         return;
       }
@@ -100,10 +112,117 @@ public class NeoBackgroundDefaultsService {
         }
         applyDeclaredDefaultIfMissing(entity, dalEntity, propName, defaults.opt(propName));
       }
+      deferSiiKeyToPartnerTrigger(entity, dalEntity, defaults);
     } catch (Exception e) {
       log.error("Could not apply declared defaults for {}/{}: {}", specName, entityName,
           e.getMessage(), e);
     }
+  }
+
+  /**
+   * Undoes the generic SII "clave tipo factura" default applied above whenever the document's
+   * business partner declares its own SII key, leaving the column {@code null} so the Classic DB
+   * trigger {@code AEATSII_INVOICE_TRG} derives the partner-specific value on INSERT.
+   *
+   * <p><b>Why (ETP-4784).</b> Documents built in the background (an invoice generated from a
+   * shipment, receipt or order) never travel the HTTP create path, so no callout runs and the
+   * partner's configured key is never resolved. Classic covers exactly this case with that DB
+   * trigger — but the trigger only fires when {@code EM_Aeatsii_Clave_Tipo IS NULL}, and the
+   * declared-defaults pass above had just stamped the generic, partner-agnostic AD default
+   * ({@code "F1"}) into it, blocking the trigger permanently. Restoring the {@code null}
+   * precondition re-enables Classic's own rule instead of re-implementing it in Java, keeping a
+   * single source of truth for how that key is derived.
+   *
+   * <p>Applied here — the one place every background creation path funnels through — rather than
+   * at each caller, so any future background flow inherits it automatically. No-op for entities
+   * without the SII column (module not installed), for entities with no business partner, and for
+   * partners with no configured key, which therefore keep the generic default exactly as before.
+   *
+   * <p>Gated on the organization actually being registered in the SII
+   * ({@code AEATSII_CONFIG.Insiisystem}): for an organization that does not submit to the SII this
+   * key is meaningless, so the column is left exactly as the declared defaults produced it.
+   *
+   * <p>Only the value THIS pass stamped is undone: the current column value must still equal the
+   * declared default for {@code aeatsiiClaveTipo}. A value the caller set explicitly before
+   * invoking this service — e.g. the {@code "R"} a rectificative invoice needs
+   * ({@code ReturnShipmentUtils}), which {@code applyDeclaredDefaultIfMissing} deliberately
+   * preserves, as do the {@code protectedFields}/{@code clientProvidedFields} of ETP-4783 on the
+   * HTTP path — is never cleared. Without that check this method would contradict the invariant
+   * the rest of the pipeline upholds for this very column.
+   *
+   * @param defaults the declared defaults just applied; used to tell an own stamp apart from a
+   *                 caller-provided value
+   */
+  private static void deferSiiKeyToPartnerTrigger(BaseOBObject entity, Entity dalEntity,
+      JSONObject defaults) {
+    try {
+      if (dalEntity == null
+          || !dalEntity.hasProperty(PROP_SII_KEY)
+          || !dalEntity.hasProperty(PROP_BUSINESS_PARTNER)
+          || !wasStampedByDeclaredDefaults(entity, defaults)
+          || !isOrganizationInSiiSystem(entity)) {
+        return;
+      }
+      Object partner = entity.get(PROP_BUSINESS_PARTNER);
+      if (!(partner instanceof BaseOBObject)) {
+        return;
+      }
+      BaseOBObject bp = (BaseOBObject) partner;
+      Entity bpEntity = bp.getEntity();
+      if (!bpEntity.hasProperty(PROP_BP_SII_DEFAULT_ENABLED)
+          || !bpEntity.hasProperty(PROP_BP_SII_KEY)
+          || !Boolean.TRUE.equals(bp.get(PROP_BP_SII_DEFAULT_ENABLED))) {
+        return;
+      }
+      Object partnerKey = bp.get(PROP_BP_SII_KEY);
+      if (partnerKey == null || StringUtils.isBlank(partnerKey.toString())) {
+        return;
+      }
+      entity.set(PROP_SII_KEY, null);
+      log.debug("Deferred {} to the AEATSII_INVOICE_TRG trigger (partner default '{}')",
+          PROP_SII_KEY, partnerKey);
+    } catch (Exception e) {
+      // An optional refinement must never abort a background document creation.
+      log.debug("Could not defer the SII key to the partner trigger: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Tells whether the SII key currently on the entity is the one the declared-defaults pass just
+   * stamped, i.e. it is non-null and equal to the declared default for that property. Compared on
+   * the string form because the declared default travels as JSON while the entity holds the
+   * coerced property value.
+   */
+  private static boolean wasStampedByDeclaredDefaults(BaseOBObject entity, JSONObject defaults) {
+    Object current = entity.get(PROP_SII_KEY);
+    if (current == null || defaults == null) {
+      return false;
+    }
+    Object declared = defaults.opt(PROP_SII_KEY);
+    if (declared == null || JSONObject.NULL.equals(declared)) {
+      return false;
+    }
+    return StringUtils.equals(current.toString(), declared.toString());
+  }
+
+  /**
+   * Tells whether the document's organization is actually registered in the SII, i.e. its legal
+   * entity has an active {@code AEATSII_CONFIG} with {@code Insiisystem = 'Y'}.
+   *
+   * <p>Uses the same {@link SIIUtils#getSiiConfigFromOrg} lookup the rest of the module already
+   * relies on (see {@code AbstractInvoiceHeaderHandler} / {@code InvoiceCalloutHelper}), so the
+   * legal-entity resolution stays consistent across all SII code paths.
+   */
+  private static boolean isOrganizationInSiiSystem(BaseOBObject entity) {
+    if (!entity.getEntity().hasProperty(PROP_ORGANIZATION)) {
+      return false;
+    }
+    Object org = entity.get(PROP_ORGANIZATION);
+    if (!(org instanceof Organization)) {
+      return false;
+    }
+    AEATSIIConfig config = SIIUtils.getSiiConfigFromOrg((Organization) org);
+    return config != null && Boolean.TRUE.equals(config.isAcogidaAlSII());
   }
 
   /**

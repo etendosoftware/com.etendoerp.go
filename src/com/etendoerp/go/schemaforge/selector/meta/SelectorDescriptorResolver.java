@@ -29,6 +29,7 @@ import org.openbravo.base.model.Property;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
+import com.etendoerp.go.schemaforge.SqlToHqlTranslator;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.domain.ReferencedTable;
@@ -307,6 +308,19 @@ public final class SelectorDescriptorResolver {
         addIfAbsent(searchableProps, PROP_SEARCH_KEY);
       }
     }
+    // Always consider "description" a fallback searchable field, regardless of
+    // whether the block above already added something (e.g. a short identifier
+    // key). Almost every AD entity carries a description, and it is typically
+    // the text users actually read and type — e.g. the "IAE Activity Type"
+    // selector (epiae_type: Key + Description) has no explicit
+    // OBUISEL_Selector_Field config, so without this the fallback only searched
+    // the short numeric Key ("3") and typing "alquiler" (which IS in the
+    // description) matched nothing. Placed AFTER the isEmpty() block (not
+    // before it) so it never short-circuits the name/valueProp/searchKey
+    // fallback by making the list non-empty prematurely.
+    if (targetEntity.hasProperty("description")) {
+      addIfAbsent(searchableProps, "description");
+    }
   }
 
   private static void addIfPropertyExists(List<String> props, Entity entity, String property) {
@@ -414,12 +428,47 @@ public final class SelectorDescriptorResolver {
           ? resolveDisplayColumnProperty(targetEntity, displayCol)
           : findIdentifierProperty(targetEntity);
       return new SelectorMeta(targetEntity.getName(), displayProp,
-          StringUtils.trimToNull(refTable.getHqlwhereclause()));
+          resolveRefTableWhereClause(refTable, targetEntity));
     } catch (Exception e) {
       log.warn("Could not resolve ref table for {}: {}",
           column.getDBColumnName(), e.getMessage());
       return null;
     }
+  }
+
+  /**
+   * Resolve the AD_Ref_Table filter into an HQL where-clause fragment.
+   *
+   * <p>Classic Etendo stores this filter either as HQL ({@code Hqlwhereclause}) or as a plain
+   * SQL clause ({@code SQLWhereClause}). Example: the {@code C_Tax_ID} reference used by
+   * {@code C_OrderLine}/{@code C_InvoiceLine} carries {@code C_Tax.Parent_Tax_ID IS NULL} in
+   * {@code SQLWhereClause} (to hide the "child" breakdown taxes of a compound tax, e.g. the
+   * "(+10%)"/"(+1.4%)" rows under "IVA+RE 10+1.4%") with {@code Hqlwhereclause} left empty.
+   * Before this fix, {@code resolveRefTable} only ever read {@code Hqlwhereclause}, so any
+   * column relying solely on the classic SQL clause silently lost its filter — not specific to
+   * taxes, this applies to every {@code Table} reference configured the classic-SQL way.
+   *
+   * <p>{@code Hqlwhereclause} wins when both are populated (unchanged prior behavior). When only
+   * the SQL clause is set, it is translated with {@link SqlToHqlTranslator#convertSqlToHql} —
+   * the same TABLE.COLUMN → {@code e.property[.id]} translator already used to translate AD
+   * validation rules (see {@code SelectorValidationResolver#resolveValidationFilter}) — so
+   * {@code C_Tax.Parent_Tax_ID IS NULL} becomes {@code e.parentTaxRate.id IS NULL}, matching the
+   * {@code "e"} alias every non-rich (Table/TableDir) selector query uses.
+   *
+   * @param refTable resolved AD_Ref_Table record
+   * @param targetEntity DAL entity the where-clause is evaluated against
+   * @return the resolved HQL where-clause fragment, or {@code null} when neither field is set
+   */
+  private static String resolveRefTableWhereClause(ReferencedTable refTable, Entity targetEntity) {
+    String hqlWhere = StringUtils.trimToNull(refTable.getHqlwhereclause());
+    if (hqlWhere != null) {
+      return hqlWhere;
+    }
+    String sqlWhere = StringUtils.trimToNull(refTable.getSQLWhereClause());
+    if (sqlWhere == null) {
+      return null;
+    }
+    return SqlToHqlTranslator.convertSqlToHql(sqlWhere, targetEntity.getName());
   }
 
   private static String resolveDisplayColumnProperty(Entity targetEntity, Column displayCol) {

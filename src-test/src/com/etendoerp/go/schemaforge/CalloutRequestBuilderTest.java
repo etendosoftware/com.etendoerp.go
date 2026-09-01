@@ -31,6 +31,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -451,6 +452,67 @@ public class CalloutRequestBuilderTest {
     // uses the fallback path ("inp" + first-char-lower + rest). Verify something was added.
     // This covers the fallback-to-inp-prefix path through the aux resolution.
     assertTrue(params.containsKey("inpunknownField_LOC"));
+  }
+
+  @Test
+  public void mapAuxValuesToParams_booleanTrue_becomesY() throws Exception {
+    // ETP-4784: aux values were the last bridge point still serialized raw via optString,
+    // which would render a JSON boolean as "true" and break the Classic "Y"/"N" comparison.
+    JSONObject auxValues = new JSONObject();
+    auxValues.put("salesTransaction_LOC", true);
+
+    CalloutRequestBuilder.ColumnLookupMaps maps = new CalloutRequestBuilder.ColumnLookupMaps();
+    maps.propertyNameToInp.put("salestransaction", "inpissotrx");
+    Map<String, String[]> params = new HashMap<>();
+    CalloutRequestBuilder.mapAuxValuesToParams(auxValues, maps, params);
+
+    assertNotNull(params.get("inpissotrx_LOC"));
+    assertEquals("Y", params.get("inpissotrx_LOC")[0]);
+  }
+
+  @Test
+  public void mapAuxValuesToParams_booleanFalse_becomesN() throws Exception {
+    JSONObject auxValues = new JSONObject();
+    auxValues.put("salesTransaction_LOC", false);
+
+    CalloutRequestBuilder.ColumnLookupMaps maps = new CalloutRequestBuilder.ColumnLookupMaps();
+    maps.propertyNameToInp.put("salestransaction", "inpissotrx");
+    Map<String, String[]> params = new HashMap<>();
+    CalloutRequestBuilder.mapAuxValuesToParams(auxValues, maps, params);
+
+    assertNotNull(params.get("inpissotrx_LOC"));
+    assertEquals("N", params.get("inpissotrx_LOC")[0]);
+  }
+
+  @Test
+  public void mapAuxValuesToParams_idStringValueUnchangedAfterConverterSwitch() throws Exception {
+    // Regression guard: routing aux values through toClassicParamValue must not alter the
+    // ordinary id/string case that selectors emit in practice.
+    JSONObject auxValues = new JSONObject();
+    auxValues.put("businessPartner_LOC", "5D2AFF1C4A0B4E3E9E2B0C1D2E3F4A5B");
+
+    CalloutRequestBuilder.ColumnLookupMaps maps = new CalloutRequestBuilder.ColumnLookupMaps();
+    maps.propertyNameToInp.put("businesspartner", "inpcBpartnerId");
+    Map<String, String[]> params = new HashMap<>();
+    CalloutRequestBuilder.mapAuxValuesToParams(auxValues, maps, params);
+
+    assertNotNull(params.get("inpcBpartnerId_LOC"));
+    assertEquals("5D2AFF1C4A0B4E3E9E2B0C1D2E3F4A5B", params.get("inpcBpartnerId_LOC")[0]);
+  }
+
+  @Test
+  public void mapAuxValuesToParams_jsonNullValue_becomesEmptyString() throws Exception {
+    // Same behaviour the previous optString(key, "") default provided.
+    JSONObject auxValues = new JSONObject();
+    auxValues.put("businessPartner_LOC", JSONObject.NULL);
+
+    CalloutRequestBuilder.ColumnLookupMaps maps = new CalloutRequestBuilder.ColumnLookupMaps();
+    maps.propertyNameToInp.put("businesspartner", "inpcBpartnerId");
+    Map<String, String[]> params = new HashMap<>();
+    CalloutRequestBuilder.mapAuxValuesToParams(auxValues, maps, params);
+
+    assertNotNull(params.get("inpcBpartnerId_LOC"));
+    assertEquals("", params.get("inpcBpartnerId_LOC")[0]);
   }
 
   // ─────────────────────────────────────────────────────────────────────
@@ -1032,5 +1094,323 @@ public class CalloutRequestBuilderTest {
     // reformatDateParams converts "2026-06-16" → "16-06-2026" (Etendo dd-MM-yyyy fallback)
     assertNotNull(params.get("inpdateacct"));
     assertEquals("16-06-2026", params.get("inpdateacct")[0]);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // toClassicParamValue (ETP-4784) — JSON form-state value → Classic param string
+  // ─────────────────────────────────────────────────────────────────────
+  //
+  // NEO's formState is typed JSON, so a Yes/No column arrives as a real JSON boolean
+  // (salesTransaction: true). Classic callouts read raw request params and compare them
+  // against Etendo's "Y"/"N" convention — e.g. SiiAutoSetSIIKEYByDefault gates its whole
+  // branch on StringUtils.equals("Y", getStringParameter("inpissotrx")). Rendering the
+  // boolean as "true" made that comparison fail silently and the branch never ran.
+
+  @Test
+  public void toClassicParamValue_booleanTrue_becomesY() {
+    assertEquals("Y", CalloutRequestBuilder.toClassicParamValue(Boolean.TRUE));
+  }
+
+  @Test
+  public void toClassicParamValue_booleanFalse_becomesN() {
+    assertEquals("N", CalloutRequestBuilder.toClassicParamValue(Boolean.FALSE));
+  }
+
+  @Test
+  public void toClassicParamValue_null_becomesEmptyString() {
+    assertEquals("", CalloutRequestBuilder.toClassicParamValue(null));
+  }
+
+  @Test
+  public void toClassicParamValue_jsonNullSentinel_becomesEmptyString() {
+    assertEquals("", CalloutRequestBuilder.toClassicParamValue(JSONObject.NULL));
+  }
+
+  @Test
+  public void toClassicParamValue_stringPassesThroughUnchanged() {
+    assertEquals("BP-001", CalloutRequestBuilder.toClassicParamValue("BP-001"));
+  }
+
+  /**
+   * A literal "true"/"false" STRING is not a JSON boolean and must survive untouched —
+   * only real {@link Boolean} values are translated to the Y/N convention.
+   */
+  @Test
+  public void toClassicParamValue_literalTrueStringIsNotTranslated() {
+    assertEquals("true", CalloutRequestBuilder.toClassicParamValue("true"));
+  }
+
+  @Test
+  public void toClassicParamValue_numberRenderedViaToString() {
+    assertEquals("42", CalloutRequestBuilder.toClassicParamValue(Integer.valueOf(42)));
+    assertEquals("12.50", CalloutRequestBuilder.toClassicParamValue(new BigDecimal("12.50")));
+  }
+
+  /**
+   * An empty string stays empty (it is neither null nor the JSON NULL sentinel), so a
+   * cleared field is still sent to the callout as a blank param rather than being dropped.
+   */
+  @Test
+  public void toClassicParamValue_emptyStringStaysEmpty() {
+    assertEquals("", CalloutRequestBuilder.toClassicParamValue(""));
+  }
+
+  /**
+   * The real regression path (ETP-4784): a boolean in the formState must reach the callout
+   * as "Y", not "true". Previously mapFormStateEntry used {@code optString}, which renders
+   * a JSON boolean as "true" and broke every Classic callout comparing against "Y".
+   */
+  @Test
+  public void mapFormStateToParams_booleanFormStateValueMappedAsY() throws Exception {
+    JSONObject formState = new JSONObject();
+    formState.put("salesTransaction", true);
+
+    CalloutRequestBuilder.ColumnLookupMaps maps = new CalloutRequestBuilder.ColumnLookupMaps();
+    maps.propertyNameToInp.put("salestransaction", "inpissotrx");
+    Map<String, String[]> params = new HashMap<>();
+    CalloutRequestBuilder.mapFormStateToParams(formState, "inpother", maps, params);
+
+    assertNotNull(params.get("inpissotrx"));
+    assertEquals("Y", params.get("inpissotrx")[0]);
+  }
+
+  @Test
+  public void mapFormStateToParams_falseBooleanFormStateValueMappedAsN() throws Exception {
+    JSONObject formState = new JSONObject();
+    formState.put("salesTransaction", false);
+
+    CalloutRequestBuilder.ColumnLookupMaps maps = new CalloutRequestBuilder.ColumnLookupMaps();
+    maps.propertyNameToInp.put("salestransaction", "inpissotrx");
+    Map<String, String[]> params = new HashMap<>();
+    CalloutRequestBuilder.mapFormStateToParams(formState, "inpother", maps, params);
+
+    assertNotNull(params.get("inpissotrx"));
+    assertEquals("N", params.get("inpissotrx")[0]);
+  }
+
+  /**
+   * End-to-end through the public entry point: a boolean form-state value survives the whole
+   * {@code buildRequestParams} pass as "Y" (this is exactly what the Classic callout reads).
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void buildRequestParams_booleanFormStateValueReachesCalloutAsY() throws Exception {
+    Column soTrxCol = mock(Column.class);
+    when(soTrxCol.getDBColumnName()).thenReturn("IsSOTrx");
+    Reference boolRef = mock(Reference.class);
+    when(boolRef.getId()).thenReturn("20");
+    when(soTrxCol.getReference()).thenReturn(boolRef);
+    when(soTrxCol.getDefaultValue()).thenReturn(null);
+
+    Tab tab = mock(Tab.class);
+    Table table = mock(Table.class);
+    when(tab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("C_INVOICE");
+    when(tab.getId()).thenReturn("INV-TAB-001");
+    when(tab.getWindow()).thenReturn(null);
+    when(tab.getTabLevel()).thenReturn(0L);
+
+    OBCriteria<Column> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Column.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.singletonList(soTrxCol));
+    when(modelProvider.getEntityByTableId("C_INVOICE")).thenReturn(null);
+
+    // Typed JSON boolean, as the NEO frontend actually sends it
+    JSONObject formState = new JSONObject();
+    formState.put("issotrx", true);
+
+    Map<String, String[]> params = CalloutRequestBuilder.buildRequestParams(
+        tab, "VALUE", formState, "inpfield", null);
+
+    assertNotNull(params.get("inpissotrx"));
+    assertEquals("Y", params.get("inpissotrx")[0]);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // buildRequestParams — the TRIGGER field's own value (ETP-4784)
+  // ─────────────────────────────────────────────────────────────────────
+  //
+  // The trigger param is written straight from the `value` argument, bypassing
+  // mapFormStateToParams entirely (mapFormStateEntry explicitly skips the trigger key).
+  // It therefore needs its own Y/N normalization: before the fix it went through
+  // value.toString(), so a Yes/No column that was itself the changed field reached the
+  // callout as "true" — exactly the comparison every Classic callout fails on.
+
+  /**
+   * Builds a tab whose only column is the boolean {@code IsSOTrx}, used as the callout
+   * trigger field so the trigger param itself carries the boolean value.
+   */
+  @SuppressWarnings("unchecked")
+  private Tab booleanTriggerTab() {
+    Column soTrxCol = mock(Column.class);
+    when(soTrxCol.getDBColumnName()).thenReturn("IsSOTrx");
+    Reference boolRef = mock(Reference.class);
+    when(boolRef.getId()).thenReturn("20");
+    when(soTrxCol.getReference()).thenReturn(boolRef);
+    when(soTrxCol.getDefaultValue()).thenReturn(null);
+
+    Tab tab = mock(Tab.class);
+    Table table = mock(Table.class);
+    when(tab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("C_INVOICE");
+    when(tab.getId()).thenReturn("INV-TAB-TRIGGER");
+    when(tab.getWindow()).thenReturn(null);
+    when(tab.getTabLevel()).thenReturn(0L);
+
+    OBCriteria<Column> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Column.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.singletonList(soTrxCol));
+    when(modelProvider.getEntityByTableId("C_INVOICE")).thenReturn(null);
+    return tab;
+  }
+
+  /**
+   * The regression the earlier suite missed: when the field that FIRES the callout is itself
+   * a boolean, its param must be "Y" — not "true". The pre-existing boolean test used a
+   * different key ("inpfield") as the trigger, so this exact path stayed unexercised.
+   */
+  @Test
+  public void buildRequestParams_booleanTriggerFieldValueBecomesY() throws Exception {
+    Map<String, String[]> params = CalloutRequestBuilder.buildRequestParams(
+        booleanTriggerTab(), Boolean.TRUE, new JSONObject(), "inpissotrx", null);
+
+    assertNotNull(params.get("inpissotrx"));
+    assertEquals("Y", params.get("inpissotrx")[0]);
+    // The trigger name itself is unaffected by the value normalization.
+    assertEquals("inpissotrx", params.get("inpLastFieldChanged")[0]);
+  }
+
+  /** Same path for the negative value: the trigger param must be "N", never "false". */
+  @Test
+  public void buildRequestParams_booleanTriggerFieldValueBecomesN() throws Exception {
+    Map<String, String[]> params = CalloutRequestBuilder.buildRequestParams(
+        booleanTriggerTab(), Boolean.FALSE, new JSONObject(), "inpissotrx", null);
+
+    assertNotNull(params.get("inpissotrx"));
+    assertEquals("N", params.get("inpissotrx")[0]);
+  }
+
+  /**
+   * A non-boolean trigger value keeps its plain string form — the normalization must not
+   * leak into ordinary fields.
+   */
+  @Test
+  public void buildRequestParams_nonBooleanTriggerFieldValueUnchanged() throws Exception {
+    Map<String, String[]> params = CalloutRequestBuilder.buildRequestParams(
+        booleanTriggerTab(), "BP-001", new JSONObject(), "inpissotrx", null);
+
+    assertEquals("BP-001", params.get("inpissotrx")[0]);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // resolveFieldValueAsString (ETP-4784) — parent-tab record fields
+  // ─────────────────────────────────────────────────────────────────────
+  //
+  // Parent-tab fields are read straight off the DAL bean, where a Yes/No column
+  // materializes as a java.lang.Boolean. Rendering it with val.toString() injected "true"
+  // into every child-tab callout request; it must obey the same Classic Y/N convention as
+  // the form-state params. FK references still resolve to the referenced record's id.
+
+  /**
+   * Runs {@code injectParentTabParams} for a child tab whose parent record exposes the single
+   * column {@code IsSOTrx} carrying {@code parentPropertyValue}, and returns the resulting
+   * params so each test only asserts on the rendered value.
+   */
+  private Map<String, String[]> injectParentFieldValue(Object parentPropertyValue)
+      throws Exception {
+    Tab parentTab = mockTab("parent", 10L, 0L);
+    Tab childTab = mockTab("child", 20L, 1L);
+    Window window = mock(Window.class);
+    when(childTab.getWindow()).thenReturn(window);
+    when(window.getADTabList()).thenReturn(Arrays.asList(parentTab, childTab));
+
+    Table parentTable = mock(Table.class);
+    when(parentTab.getTable()).thenReturn(parentTable);
+    when(parentTable.getId()).thenReturn("C_ORDER");
+    when(parentTable.getDBTableName()).thenReturn("C_Order");
+
+    Column col = mock(Column.class);
+    when(col.isActive()).thenReturn(true);
+    when(col.getDBColumnName()).thenReturn("IsSOTrx");
+    when(parentTable.getADColumnList()).thenReturn(Collections.singletonList(col));
+    when(dal.get(Tab.class, "parent")).thenReturn(parentTab);
+
+    Entity parentEntity = mock(Entity.class);
+    when(parentEntity.getName()).thenReturn("Order");
+    Property prop = mock(Property.class);
+    when(prop.getName()).thenReturn("salesTransaction");
+    when(parentEntity.getPropertyByColumnName("IsSOTrx")).thenReturn(prop);
+    when(modelProvider.getEntityByTableId("C_ORDER")).thenReturn(parentEntity);
+
+    BaseOBObject parentRecord = mock(BaseOBObject.class);
+    when(parentRecord.get("salesTransaction")).thenReturn(parentPropertyValue);
+    when(dal.get("Order", "ORDER-HEADER-001")).thenReturn(parentRecord);
+
+    JSONObject formState = new JSONObject();
+    formState.put("id", "ORDER-HEADER-001");
+
+    Map<String, String[]> params = new HashMap<>();
+    CalloutRequestBuilder.injectParentTabParams(childTab, formState, params);
+    return params;
+  }
+
+  /**
+   * The header's Yes/No column reaches the child-tab callout as "Y" — DAL hands it over as a
+   * Boolean, and {@code toString()} would have produced "true".
+   */
+  @Test
+  public void injectParentTabParams_booleanParentFieldInjectedAsY() throws Exception {
+    Map<String, String[]> params = injectParentFieldValue(Boolean.TRUE);
+
+    assertNotNull(params.get("inpissotrx"));
+    assertEquals("Y", params.get("inpissotrx")[0]);
+  }
+
+  /** Same for the negative value: "N", never "false". */
+  @Test
+  public void injectParentTabParams_falseBooleanParentFieldInjectedAsN() throws Exception {
+    Map<String, String[]> params = injectParentFieldValue(Boolean.FALSE);
+
+    assertNotNull(params.get("inpissotrx"));
+    assertEquals("N", params.get("inpissotrx")[0]);
+  }
+
+  /** An FK-typed parent field still resolves to the referenced record's id, not its toString(). */
+  @Test
+  public void injectParentTabParams_baseObObjectParentFieldInjectedAsId() throws Exception {
+    BaseOBObject referenced = mock(BaseOBObject.class);
+    when(referenced.getId()).thenReturn("BP-001");
+
+    Map<String, String[]> params = injectParentFieldValue(referenced);
+
+    assertNotNull(params.get("inpissotrx"));
+    assertEquals("BP-001", params.get("inpissotrx")[0]);
+  }
+
+  /** A null parent field is sent as a blank param, exactly like a cleared form-state field. */
+  @Test
+  public void injectParentTabParams_nullParentFieldInjectedAsEmptyString() throws Exception {
+    Map<String, String[]> params = injectParentFieldValue(null);
+
+    assertNotNull(params.get("inpissotrx"));
+    assertEquals("", params.get("inpissotrx")[0]);
+  }
+
+  /** Plain strings pass through untouched. */
+  @Test
+  public void injectParentTabParams_stringParentFieldInjectedUnchanged() throws Exception {
+    Map<String, String[]> params = injectParentFieldValue("ORD-001");
+
+    assertEquals("ORD-001", params.get("inpissotrx")[0]);
+  }
+
+  /** Numeric parent fields keep their canonical string form (scale included). */
+  @Test
+  public void injectParentTabParams_numericParentFieldInjectedViaToString() throws Exception {
+    Map<String, String[]> params = injectParentFieldValue(new BigDecimal("12.50"));
+
+    assertEquals("12.50", params.get("inpissotrx")[0]);
   }
 }
