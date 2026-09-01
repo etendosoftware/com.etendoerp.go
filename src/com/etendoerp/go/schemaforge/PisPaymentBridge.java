@@ -26,9 +26,11 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
@@ -61,9 +63,11 @@ import com.etendoerp.psd2.bank.integration.utils.PISPaymentDao;
  * <p>The {@code params} JSON built here uses the exact same keys that {@code GenerateBankPayment}
  * normalizes: {@code template}, {@code end_to_end_id}, {@code creditor_name}, {@code amount},
  * {@code currency_id}, {@code description}, {@code creditor_iban}. Template selection is
- * currency-driven — {@code SEPA} for EUR, {@code FPS} for GBP — any other currency must already
- * have been rejected by the caller's eligibility check (see
- * {@code PaymentRegistrationService#validatePisEligibility}) before this class is reached.
+ * currency-driven — {@code SEPA} for EUR, {@code DOMESTIC} for USD, {@code FPS} for GBP — and the
+ * currency that drives it is the DEBTOR ACCOUNT's, not the invoice's (ETP-5084), because that is
+ * the currency the money actually leaves the bank in. Any other account currency must already have
+ * been rejected by the caller's eligibility check (see
+ * {@code PisPaymentService#validatePisEligibility}) before this class is reached.
  */
 final class PisPaymentBridge {
 
@@ -74,6 +78,8 @@ final class PisPaymentBridge {
   private static final String KEY_DESCRIPTION = "description";
   private static final String TEMPLATE_SEPA = "SEPA";
   private static final String TEMPLATE_FPS = "FPS";
+  private static final String TEMPLATE_DOMESTIC = "DOMESTIC";
+  private static final String CURRENCY_USD = "USD";
   private static final String CURRENCY_GBP = "GBP";
 
   private static final Logger log = LogManager.getLogger(PisPaymentBridge.class);
@@ -113,9 +119,14 @@ final class PisPaymentBridge {
    * <p>The payment-derived fields (end-to-end id, creditor name, amount, currency, description)
    * are set here; the template and creditor account identifiers come from {@code pisInput} — the
    * user's choices in the SPA (mirroring the classic "Generate Bank Payment" dialog). When the
-   * template is missing it defaults from the currency (EUR→SEPA, GBP→FPS) for backwards
-   * compatibility. {@code GenerateBankPayment} validates which creditor fields are required per
-   * template.
+   * template is missing it defaults from the DEBTOR ACCOUNT's currency (EUR→SEPA, USD→DOMESTIC,
+   * GBP→FPS) for backwards compatibility. {@code GenerateBankPayment} validates which creditor
+   * fields are required per template.
+   *
+   * <p><b>Currency (ETP-5084).</b> The bank is instructed in the account's currency, so a payment
+   * whose invoice was in another currency is sent with its already-converted
+   * {@code financialTransactionAmount} — not {@code getAmount()}, which stays in the invoice
+   * currency. See {@link #bankAmountFor}.
    *
    * @param payment  the draft {@link FIN_Payment} to submit for a real bank transfer
    * @param pisInput template + creditor fields, keyed by the orchestrator's parameter names
@@ -130,9 +141,10 @@ final class PisPaymentBridge {
       JSONObject pisInput, HttpServletRequest request) throws JSONException {
     String apiKey = BankIntegrationUtils.getPsd2ApiKey(OBContext.getOBContext().getCurrentClient());
 
+    Currency bankCurrency = bankCurrencyFor(payment);
     JSONObject params = pisInput != null ? pisInput : new JSONObject();
     if (!params.has(KEY_TEMPLATE) || StringUtils.isBlank(params.optString(KEY_TEMPLATE, null))) {
-      params.put(KEY_TEMPLATE, templateForCurrency(payment.getCurrency().getISOCode()));
+      params.put(KEY_TEMPLATE, templateForCurrency(bankCurrency.getISOCode()));
     }
     // The payment's own documentNo is only the default. A retry passes its own reference, because
     // end-to-end ids must be unique per debtor account and resending this one verbatim risks a
@@ -141,8 +153,8 @@ final class PisPaymentBridge {
       params.put(BankIntegrationConstants.END_TO_END_ID, payment.getDocumentNo());
     }
     params.put(BankIntegrationConstants.CREDITOR_NAME, payment.getBusinessPartner().getName());
-    params.put(KEY_AMOUNT, payment.getAmount().toString());
-    params.put(KEY_CURRENCY_ID, payment.getCurrency().getId());
+    params.put(KEY_AMOUNT, bankAmountFor(payment, bankCurrency).toString());
+    params.put(KEY_CURRENCY_ID, bankCurrency.getId());
     params.put(KEY_DESCRIPTION, descriptionFor(payment));
 
     // Salt Edge returns to our own servlet, which resolves the status server-side and only then
@@ -168,28 +180,33 @@ final class PisPaymentBridge {
    * (invoice + selected account here, the FIN_Payment there). Validation, payload shape and
    * persistence are therefore identical.
    *
+   * @param bankAmount
+   *     the amount to instruct the bank for, already expressed in {@code account}'s currency. When
+   *     the invoice is in another currency the caller converted it (ETP-5084) with the very same
+   *     rate the replayed {@code FIN_Payment} is booked at, so what leaves the bank and what is
+   *     posted to the ledger agree by construction. Never the raw invoice-currency figure.
    * @param endToEndId
    *     the bank reference for this attempt; the caller guarantees it is unique, since with no
    *     payment there is no {@code documentNo} to borrow and a reused reference risks a duplicate
    *     rejection at the bank
    */
   static BankIntegrationPISUtils.PISCreatePaymentResult initiateDeferredPisPayment(Invoice invoice,
-      FIN_FinancialAccount account, BigDecimal amount, String endToEndId, JSONObject pisInput,
+      FIN_FinancialAccount account, BigDecimal bankAmount, String endToEndId, JSONObject pisInput,
       HttpServletRequest request) throws JSONException {
     String apiKey = BankIntegrationUtils.getPsd2ApiKey(OBContext.getOBContext().getCurrentClient());
 
     JSONObject params = pisInput != null ? pisInput : new JSONObject();
     if (!params.has(KEY_TEMPLATE) || StringUtils.isBlank(params.optString(KEY_TEMPLATE, null))) {
-      params.put(KEY_TEMPLATE, templateForCurrency(invoice.getCurrency().getISOCode()));
+      params.put(KEY_TEMPLATE, templateForCurrency(account.getCurrency().getISOCode()));
     }
     params.put(BankIntegrationConstants.END_TO_END_ID, endToEndId);
     params.put(BankIntegrationConstants.CREDITOR_NAME, invoice.getBusinessPartner().getName());
-    params.put(KEY_AMOUNT, amount.toString());
-    params.put(KEY_CURRENCY_ID, invoice.getCurrency().getId());
+    params.put(KEY_AMOUNT, bankAmount.toString());
+    params.put(KEY_CURRENCY_ID, account.getCurrency().getId());
     params.put(KEY_DESCRIPTION, invoice.getDocumentNo());
 
     GenerateBankPayment.PisRequestContext context = GenerateBankPayment.PisRequestContext.of(
-        account, invoice.getBusinessPartner(), amount, invoice.getCurrency(), endToEndId,
+        account, invoice.getBusinessPartner(), bankAmount, account.getCurrency(), endToEndId,
         invoice.getDocumentNo());
 
     String appReturnUrl = resolveGoReturnUrl(request);
@@ -368,8 +385,65 @@ final class PisPaymentBridge {
     return StringUtils.removeEnd(origin, "/") + PIS_CALLBACK_PATH;
   }
 
-  /** SEPA for EUR, FPS for GBP. Fallback only — the SPA normally sends the template explicitly. */
+  /**
+   * Payment template for the currency the transfer is instructed in — i.e. the DEBTOR ACCOUNT's
+   * currency, never the invoice's (ETP-5084): EUR → SEPA, USD → DOMESTIC, GBP → FPS.
+   *
+   * <p>Fallback only — the SPA normally sends the template explicitly, derived from the same
+   * account currency by {@code defaultPisTemplate} in {@code NewPaymentEntryModal.jsx}. Any other
+   * currency has already been rejected by {@code PisPaymentService.validatePisEligibility}; SEPA
+   * stays the default so an unforeseen code degrades instead of failing.
+   */
   private static String templateForCurrency(String isoCode) {
-    return CURRENCY_GBP.equalsIgnoreCase(isoCode) ? TEMPLATE_FPS : TEMPLATE_SEPA;
+    if (CURRENCY_GBP.equalsIgnoreCase(isoCode)) {
+      return TEMPLATE_FPS;
+    }
+    if (CURRENCY_USD.equalsIgnoreCase(isoCode)) {
+      return TEMPLATE_DOMESTIC;
+    }
+    return TEMPLATE_SEPA; // EUR and anything unforeseen
+  }
+
+  /**
+   * The currency the transfer is instructed in: the debtor financial account's (ETP-5084), falling
+   * back to the payment's own for a payment with no account set, which cannot be cross-currency
+   * anyway.
+   */
+  private static Currency bankCurrencyFor(FIN_Payment payment) {
+    Currency accountCurrency = payment.getAccount() != null
+        ? payment.getAccount().getCurrency()
+        : null;
+    return accountCurrency != null ? accountCurrency : payment.getCurrency();
+  }
+
+  /**
+   * The amount to instruct the bank for, in {@code bankCurrency}.
+   *
+   * <p>{@code FIN_Payment.amount} is denominated in the INVOICE currency, so for a cross-currency
+   * payment it is the wrong figure to send — the money leaves the account in the account's
+   * currency. The converted value already lives on the payment as {@code financialTransactionAmount}
+   * (written by {@link PaymentCurrencyConverter#applyTransactionAmountAndRate} at registration
+   * time), so a retry reuses it verbatim and cannot drift from what the ledger holds. Only if that
+   * column was never populated do we recompute from the stored rate; with neither we refuse rather
+   * than silently instruct an unconverted amount.
+   */
+  private static BigDecimal bankAmountFor(FIN_Payment payment, Currency bankCurrency) {
+    Currency paymentCurrency = payment.getCurrency();
+    if (bankCurrency == null || paymentCurrency == null
+        || StringUtils.equals(bankCurrency.getId(), paymentCurrency.getId())) {
+      return payment.getAmount();
+    }
+    BigDecimal txnAmount = payment.getFinancialTransactionAmount();
+    if (txnAmount != null && txnAmount.signum() != 0) {
+      return txnAmount;
+    }
+    BigDecimal rate = payment.getFinancialTransactionConvertRate();
+    if (rate != null && rate.signum() > 0) {
+      return PaymentCurrencyConverter.convertedAmount(payment.getAmount(), rate,
+          payment.getAccount());
+    }
+    throw new OBException("Payment " + payment.getDocumentNo() + " is in "
+        + paymentCurrency.getISOCode() + " but the bank account is in " + bankCurrency.getISOCode()
+        + ", and it carries no conversion rate, so the transfer amount cannot be determined.");
   }
 }

@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -30,6 +31,8 @@ import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+
+import org.codehaus.jettison.json.JSONObject;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -316,5 +319,85 @@ class PaymentCurrencyConverterTest {
     BigDecimal result = PaymentCurrencyConverter.invoiceAmountFor(
         new BigDecimal("10"), new BigDecimal("3"), usd);
     assertEquals("3.33", result.toPlainString());
+  }
+
+  // ── isCrossCurrency / seedInvoiceRateIfAbsent (ETP-5084) ─────────────────
+
+  @Test
+  void isCrossCurrency_differentCurrencies_isTrue() {
+    Invoice inv = invoice(currency(INVOICE_CURRENCY_ID));
+    FIN_FinancialAccount acc = account(currency(ACCOUNT_CURRENCY_ID));
+
+    assertTrue(PaymentCurrencyConverter.isCrossCurrency(inv, acc));
+  }
+
+  @Test
+  void isCrossCurrency_sameCurrencyOrMissingOne_isFalse() {
+    Currency eur = currency(ACCOUNT_CURRENCY_ID);
+    assertFalse(PaymentCurrencyConverter.isCrossCurrency(invoice(eur), account(eur)));
+    // A missing currency on either side cannot be shown to be a cross-currency payment.
+    assertFalse(PaymentCurrencyConverter.isCrossCurrency(invoice(null), account(eur)));
+    assertFalse(PaymentCurrencyConverter.isCrossCurrency(invoice(eur), account(null)));
+  }
+
+  /**
+   * The PIS path cannot proceed without a rate (the bank is instructed for the converted amount), so
+   * a direct API caller that omits it gets the invoice's own rate filled in rather than a 400.
+   */
+  @Test
+  void seedInvoiceRateIfAbsent_crossCurrencyWithNoRate_writesTheInvoiceRateIntoTheBody()
+      throws Exception {
+    Invoice inv = invoice(currency(INVOICE_CURRENCY_ID));
+    FIN_FinancialAccount acc = account(currency(ACCOUNT_CURRENCY_ID));
+    stubDocumentRateCriteria(Collections.singletonList(rateDoc("0.92")));
+    JSONObject body = new JSONObject();
+
+    PaymentCurrencyConverter.seedInvoiceRateIfAbsent(body, inv, acc);
+
+    assertEquals("0.92", body.getString("conversionRate"));
+    // And the seeded body now satisfies the very validation that would otherwise have rejected it.
+    assertEquals(0, new BigDecimal("0.92").compareTo(
+        PaymentCurrencyConverter.resolveConversionRate(body, inv, acc).rate()));
+  }
+
+  /**
+   * Seeding must never overwrite what the user typed in the modal: that rate is what the resulting
+   * payment is booked at, so replacing it would make the instructed and booked amounts diverge.
+   */
+  @Test
+  void seedInvoiceRateIfAbsent_rateAlreadyPresent_leavesItUntouched() throws Exception {
+    Invoice inv = invoice(currency(INVOICE_CURRENCY_ID));
+    FIN_FinancialAccount acc = account(currency(ACCOUNT_CURRENCY_ID));
+    JSONObject body = new JSONObject().put("conversionRate", "0.87");
+
+    PaymentCurrencyConverter.seedInvoiceRateIfAbsent(body, inv, acc);
+
+    assertEquals("0.87", body.getString("conversionRate"));
+    // No rate source was consulted at all.
+    financialUtilsMock.verify(
+        () -> FinancialUtils.getConversionRate(any(), any(), any(), any(), any()), never());
+  }
+
+  @Test
+  void seedInvoiceRateIfAbsent_sameCurrency_addsNothing() throws Exception {
+    Currency eur = currency(ACCOUNT_CURRENCY_ID);
+    JSONObject body = new JSONObject();
+
+    PaymentCurrencyConverter.seedInvoiceRateIfAbsent(body, invoice(eur), account(eur));
+
+    assertFalse(body.has("conversionRate"));
+  }
+
+  /** No rate anywhere: throwing beats instructing the bank for an unconverted amount. */
+  @Test
+  void seedInvoiceRateIfAbsent_noRateAvailable_throws() {
+    Invoice inv = invoice(currency(INVOICE_CURRENCY_ID));
+    FIN_FinancialAccount acc = account(currency(ACCOUNT_CURRENCY_ID));
+    stubDocumentRateCriteria(Collections.emptyList());
+    stubGeneralRateReturnsNull();
+    JSONObject body = new JSONObject();
+
+    assertThrows(OBException.class,
+        () -> PaymentCurrencyConverter.seedInvoiceRateIfAbsent(body, inv, acc));
   }
 }

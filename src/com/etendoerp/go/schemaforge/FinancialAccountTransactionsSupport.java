@@ -35,9 +35,11 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
@@ -232,5 +234,35 @@ final class FinancialAccountTransactionsSupport {
   static FIN_BankStatementLine linkedBankStatementLine(FIN_FinaccTransaction trx) {
     List<FIN_BankStatementLine> lines = trx.getFINBankStatementLineList();
     return lines.isEmpty() ? null : lines.get(0);
+  }
+
+  /**
+   * Is {@code trx} one of the two legs of a funds transfer, i.e. is it POINTED AT by another
+   * transaction? A transfer creates a paired withdrawal (source) + deposit (destination) that
+   * reference each other through two self-FKs on {@code FIN_FINACC_TRANSACTION}, both
+   * <b>RESTRICT</b>: {@code EM_APRM_FINACC_TRANS_ORIGIN} (Classic, destination &rarr; source) and
+   * {@code EM_ETGO_FINACC_TRANS_DEST} (the mirror half added by {@code FundsTransferDestinationHook},
+   * source &rarr; destination). Removing either leg therefore fails at flush time with a JDBC
+   * constraint violation, which is NOT an {@code OBException} and so used to escape
+   * {@link #runMutation}'s business-error branch and surface as an opaque HTTP 500 (ETP-5085).
+   *
+   * <p>The check is deliberately shaped like the FK itself — "does any row reference me?" — rather
+   * than reading {@code trx}'s own outgoing links: a destination-side bank fee ({@code BF}) also
+   * carries an origin, yet nothing references IT, so it stays deletable. It also covers transfers
+   * created before the mirror column existed, where only the Classic half is set.
+   */
+  static boolean isTransferCounterpart(FIN_FinaccTransaction trx) {
+    return isReferencedBy(FIN_FinaccTransaction.PROPERTY_APRMFINACCTRANSORIGIN, trx)
+        || isReferencedBy(FIN_FinaccTransaction.PROPERTY_ETGOFINACCTRANSDEST, trx);
+  }
+
+  /** {@code OBCriteria} probe: does at least one transaction reference {@code trx} through
+   *  {@code fkProperty}? Same idiom as {@code FinancialAccountDeleteSupport.hasAnyRow}. */
+  private static boolean isReferencedBy(String fkProperty, FIN_FinaccTransaction trx) {
+    OBCriteria<FIN_FinaccTransaction> criteria =
+        OBDal.getInstance().createCriteria(FIN_FinaccTransaction.class);
+    criteria.add(Restrictions.eq(fkProperty, trx));
+    criteria.setMaxResults(1);
+    return criteria.uniqueResult() != null;
   }
 }
