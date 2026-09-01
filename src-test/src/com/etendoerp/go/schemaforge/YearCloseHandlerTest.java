@@ -424,6 +424,29 @@ public class YearCloseHandlerTest {
     assertNull(new YearCloseHandler().handle(context));
   }
 
+  /**
+   * ETP-4948 QA finding: {@code isFiscalCalendarCreate} requires {@code recordId == null}, so
+   * {@link YearCloseHandler#validateAndEnrichFiscalCalendarCreate} — the only place Issue 5's
+   * fiscal-year format/range check lives — never runs for an UPDATE. This is the same
+   * originally-reported symptom ("asd" accepted as a Fiscal Year) still reproducible by editing
+   * an existing, previously-valid year rather than creating a new one: {@code decisions.json}
+   * declares no {@code readOnlyLogic} for {@code fiscalYear}, so the field stays editable in the
+   * UI after save with no client-side format guard either. Documents the current gap (an update
+   * with garbage input falls through to default CRUD, same as {@link
+   * #fiscalCalendarUpdateFallsThrough}) rather than fixing it — QA reports, DEV fixes.
+   */
+  @Test
+  public void fiscalCalendarUpdateWithNonNumericFiscalYearFallsThrough() throws Exception {
+    NeoContext context = NeoContext.builder()
+        .specName("fiscal-calendar").entityName("year")
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .recordId(YEAR_ID)
+        .requestBody(new org.codehaus.jettison.json.JSONObject().put("fiscalYear", "asd"))
+        .build();
+
+    assertNull(new YearCloseHandler().handle(context));
+  }
+
   @Test
   public void fiscalCalendarPutCreateFallsThrough() throws Exception {
     NeoContext context = NeoContext.builder()
