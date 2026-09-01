@@ -22,11 +22,14 @@ import static org.junit.Assert.assertSame;
 
 import java.math.BigDecimal;
 import java.sql.Timestamp;
-import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.Date;
+import java.util.TimeZone;
 
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
 /**
@@ -34,6 +37,18 @@ import org.junit.Test;
  * from {@link BankStatementsHandler}. All pure, no mocks required.
  */
 public class BankStatementsSupportTest {
+
+  private TimeZone originalDefaultTimeZone;
+
+  @Before
+  public void saveDefaultTimeZone() {
+    originalDefaultTimeZone = TimeZone.getDefault();
+  }
+
+  @After
+  public void restoreDefaultTimeZone() {
+    TimeZone.setDefault(originalDefaultTimeZone);
+  }
 
   // ── deriveStatementStatus ────────────────────────────────────────────────
 
@@ -91,10 +106,57 @@ public class BankStatementsSupportTest {
     assertEquals("", BankStatementsSupport.formatDate(null));
   }
 
+  /**
+   * {@code datetrx}/{@code statementdate}/etc. are {@code timestamp without time zone} columns:
+   * {@code rs.getTimestamp(...)} reads the naive literal back via the JVM's default timezone,
+   * mirroring how it was written. {@link Timestamp#valueOf(LocalDateTime)} is the JDK-blessed way
+   * to build a {@link Timestamp} the SAME way — from a literal wall-clock value, not an absolute
+   * instant — so it is what actually represents "what {@code rs.getTimestamp} hands back for a
+   * naive column", unlike {@code Timestamp.from(Instant)} (which the previous version of this
+   * test used, and which does not exercise the JDBC-driver round-trip at all).
+   */
   @Test
-  public void formatDateRendersIsoUtc() {
-    Timestamp ts = Timestamp.from(Instant.parse("2026-06-04T10:00:00Z"));
+  public void formatDateRendersTheLiteralCalendarDayAndTime() {
+    Timestamp ts = Timestamp.valueOf(LocalDateTime.of(2026, 6, 4, 10, 0, 0));
     assertEquals("2026-06-04T10:00:00Z", BankStatementsSupport.formatDate(ts));
+  }
+
+  /**
+   * ETP-4924 — the actual reported bug: a CSV-imported line's date showed one day earlier than
+   * the CSV said, but ONLY on a deployed ("experimental") server, never on local dev. Root cause:
+   * the previous implementation read {@code ts.getTime()} (raw epoch millis) and unconditionally
+   * labelled the result as UTC — correct only when the server JVM's default timezone happens to
+   * BE UTC. A server whose default timezone has a POSITIVE UTC offset (e.g. `Europe/Madrid`,
+   * CET/CEST) reads a naive "00:00:00" literal as an epoch instant that falls BEFORE UTC midnight
+   * of that day, so labelling it "Z" printed the previous calendar day. A NEGATIVE-offset default
+   * (e.g. `America/Argentina/Buenos_Aires`, the task's own description of local dev) reads that
+   * same literal as an instant AFTER UTC midnight, so the bug was invisible there — matching
+   * "wrong on experimental, correct on local dev" with zero code differences between the two.
+   *
+   * <p>This test pins the JVM default timezone directly (restored in {@link #restoreDefaultTimeZone})
+   * so it reproduces deterministically regardless of whatever zone actually runs it.
+   */
+  @Test
+  public void formatDateIsNotShiftedByAPositiveOffsetServerTimezone() {
+    TimeZone.setDefault(TimeZone.getTimeZone("Europe/Madrid"));
+    Timestamp ts = Timestamp.valueOf(LocalDateTime.of(2026, 2, 8, 0, 0, 0));
+    assertEquals("2026-02-08T00:00:00Z", BankStatementsSupport.formatDate(ts));
+  }
+
+  /** Sanity check: a negative-offset default timezone (matching local dev) was never affected. */
+  @Test
+  public void formatDateIsNotShiftedByANegativeOffsetServerTimezone() {
+    TimeZone.setDefault(TimeZone.getTimeZone("America/Argentina/Buenos_Aires"));
+    Timestamp ts = Timestamp.valueOf(LocalDateTime.of(2026, 2, 8, 0, 0, 0));
+    assertEquals("2026-02-08T00:00:00Z", BankStatementsSupport.formatDate(ts));
+  }
+
+  /** And the UTC case itself — the one timezone under which the old buggy code was also correct. */
+  @Test
+  public void formatDateIsCorrectUnderUtcDefaultTimezone() {
+    TimeZone.setDefault(TimeZone.getTimeZone("UTC"));
+    Timestamp ts = Timestamp.valueOf(LocalDateTime.of(2026, 2, 8, 0, 0, 0));
+    assertEquals("2026-02-08T00:00:00Z", BankStatementsSupport.formatDate(ts));
   }
 
   // ── parseIsoDate ─────────────────────────────────────────────────────────
