@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -64,8 +65,18 @@ import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 /**
  * Unit tests for {@link AutoMatchSupport} — covers {@link AutoMatchSupport#matchByKey} (the 1:N
  * signal-grouping core), {@link AutoMatchSupport#classifyPendingLine} (state classification for
- * the left-panel filter), and {@link BankStatementsSupport#mergeMatchGroups} (sub-line collapsing
- * for the statement-lines panel).
+ * the left-panel filter), {@link AutoMatchSupport#matchFallback} (the automatch preview) and
+ * {@link BankStatementsSupport#mergeMatchGroups} (sub-line collapsing for the statement-lines
+ * panel).
+ *
+ * <p><b>Scope split with {@code NearMatchSupportTest}.</b> The ETP-4965 1:1 near-match search moved
+ * to {@link NearMatchSupport} when {@code AutoMatchSupport} hit the Sonar per-class method limit, so
+ * {@code findNearMatch}, {@code differenceTolerance} and {@code dayDistance} are unit-tested there.
+ * What stays here is everything that reads them through a method of THIS class: the §5.1
+ * classification matrix as {@code classifyPendingLine} reports it, the precedence of a 1:N signal
+ * group over a near match, the shared accumulators across a pass, and the automatch preview. The
+ * overlap is deliberate — the search finding a candidate and the classifier reporting the right
+ * state are two different contracts, and either can break without the other.
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class AutoMatchSupportTest {
@@ -291,24 +302,44 @@ public class AutoMatchSupportTest {
   }
 
   /**
-   * Standard algorithm returns a non-STRONG, non-NOMATCH level → state must be {@code difference}.
+   * ETP-4965 regression — Core's WEAK level now classifies {@code suggested}, NOT
+   * {@code difference}.
+   *
+   * <p>Core's {@code StandardMatchingAlgorithm} searches by EXACT amount and EXACT date; WEAK only
+   * means the payment REFERENCE did not also match. Amount and date agree, so there is no deviation
+   * to post — and after this ticket "Con diferencia" means exactly one thing: a real amount and/or
+   * date deviation that is still inside the account's tolerances. Routing WEAK there polluted the
+   * filter with matches that had nothing to adjust.
+   *
+   * <p>Like the STRONG branch, the WEAK branch must also feed BOTH accumulators, so the transaction
+   * it claims is not offered again to a later line of the same amount in the same pass.
    */
   @Test
-  public void testClassifyPendingLineStandardAlgorithmWeakMatchReturnsDifference() {
+  public void testClassifyPendingLineStandardAlgorithmWeakMatchReturnsSuggested() {
     FIN_FinancialAccount account = accountWithAlgorithm("com.example.DummyAlgo");
     FIN_BankStatementLine line = pendingLine("Transfer ACME", "", "");
 
+    FIN_FinaccTransaction weakTxn = mock(FIN_FinaccTransaction.class);
+    lenient().when(weakTxn.getId()).thenReturn("T-WEAK");
     FIN_MatchedTransaction matched = mock(FIN_MatchedTransaction.class);
-    when(matched.getTransaction()).thenReturn(mock(FIN_FinaccTransaction.class));
-    // Any level that is not STRONG and not NOMATCH → difference path.
+    when(matched.getTransaction()).thenReturn(weakTxn);
+    // Any level that is not STRONG and not NOMATCH — historically the "difference" path.
     when(matched.getMatchLevel()).thenReturn("WEAK");
+
+    Set<String> usedTxnIds = new HashSet<>();
+    List<FIN_FinaccTransaction> excludedTxns = new java.util.ArrayList<>();
 
     try (MockedConstruction<FIN_MatchingTransaction> mc =
         mockConstruction(FIN_MatchingTransaction.class, (m, ctx) ->
-            when(m.match(line, new java.util.ArrayList<>())).thenReturn(matched))) {
-      String state = AutoMatchSupport.classifyPendingLine(
-          account, line, Collections.emptyList());
-      assertEquals(AutoMatchSupport.STATE_DIFFERENCE, state);
+            when(m.match(any(), any())).thenReturn(matched))) {
+      String state = AutoMatchSupport.classifyPendingLine(account, line,
+          Collections.emptyList(), AutoMatchSupport.DEFAULT_DATE_TOL_DAYS, BigDecimal.ZERO,
+          usedTxnIds, excludedTxns);
+
+      assertEquals(AutoMatchSupport.STATE_SUGGESTED, state);
+      assertTrue("a WEAK match must consume its transaction like a STRONG one does",
+          usedTxnIds.contains("T-WEAK"));
+      assertTrue(excludedTxns.contains(weakTxn));
     }
   }
 
@@ -1164,8 +1195,45 @@ public class AutoMatchSupportTest {
     }
   }
 
+  /**
+   * The automatch PREVIEW must offer the date-only near match at 0% amount tolerance too — the
+   * user-visible half of the "0% is not a master switch" contract (§5.2). Every account ships with
+   * a 3-day date tolerance, so this pass proposes groups on accounts that never configured a
+   * percentage; that is intended, because the group it emits carries a ZERO difference and
+   * therefore cannot produce any accounting entry when applied.
+   *
+   * <p>Uses the same 6-arg-equivalent 0% call the untouched overload makes, so a regression back to
+   * "null tolerance means stop searching" fails here as well as in
+   * {@code NearMatchSupportTest#testZeroAmountToleranceStillDetectsADateOnlyDeviation}.
+   */
+  @Test
+  public void testMatchFallbackOffersADateOnlyNearMatchAtZeroTolerance() throws Exception {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-FB-DATE", "100.00", NO_DEBIT, today);
+    FIN_FinaccTransaction twoDaysEarlier = nearTxn(T_NEAR, "100.00", daysFrom(today, -2));
+
+    Set<String> usedTxnIds = new HashSet<>();
+    List<FIN_FinaccTransaction> excludedTxns = new java.util.ArrayList<>();
+    JSONArray groups = new JSONArray();
+
+    try (MockedStatic<OBDal> obDal =
+        mockUnreconciledPool(Collections.singletonList(twoDaysEarlier))) {
+      int[] delta = AutoMatchSupport.matchFallback(NEAR_ACC, line, usedTxnIds, excludedTxns,
+          Collections.emptyList(), groups, DATE_TOL_DAYS, BigDecimal.ZERO);
+
+      assertEquals("the near match links one operation", 1, delta[0]);
+      assertEquals("nothing is created — a date-only difference posts nothing", 0, delta[1]);
+      assertEquals(1, groups.length());
+      assertTrue(usedTxnIds.contains(T_NEAR));
+      assertTrue(excludedTxns.contains(twoDaysEarlier));
+      assertEquals("the proposed group carries no amount difference",
+          0, new BigDecimal(groups.getJSONObject(0).getString("difference"))
+              .compareTo(BigDecimal.ZERO));
+    }
+  }
+
   // ---------------------------------------------------------------------------
-  // computeAmountTolerance
+  // signalGroupTolerance (formerly computeAmountTolerance)
   // ---------------------------------------------------------------------------
 
   /**
@@ -1173,8 +1241,8 @@ public class AutoMatchSupportTest {
    * behaviour that existed before per-account tolerances were introduced.
    */
   @Test
-  public void testComputeAmountToleranceZeroPctReturnsFloor() {
-    BigDecimal result = AutoMatchSupport.computeAmountTolerance(
+  public void testSignalGroupToleranceZeroPctReturnsFloor() {
+    BigDecimal result = AutoMatchSupport.signalGroupTolerance(
         new BigDecimal("100.00"), BigDecimal.ZERO);
     assertEquals(0, new BigDecimal("0.01").compareTo(result));
   }
@@ -1183,8 +1251,8 @@ public class AutoMatchSupportTest {
    * 2% of 100.00 = 2.00 which exceeds the floor of 0.01, so the derived value is returned.
    */
   @Test
-  public void testComputeAmountTolerance2PctOf100Returns2() {
-    BigDecimal result = AutoMatchSupport.computeAmountTolerance(
+  public void testSignalGroupTolerance2PctOf100Returns2() {
+    BigDecimal result = AutoMatchSupport.signalGroupTolerance(
         new BigDecimal("100.00"), new BigDecimal("2"));
     assertEquals(0, new BigDecimal("2.00").compareTo(result));
   }
@@ -1193,8 +1261,8 @@ public class AutoMatchSupportTest {
    * 10% of 50.00 = 5.00 which exceeds the floor of 0.01, so the derived value is returned.
    */
   @Test
-  public void testComputeAmountTolerance10PctOf50Returns5() {
-    BigDecimal result = AutoMatchSupport.computeAmountTolerance(
+  public void testSignalGroupTolerance10PctOf50Returns5() {
+    BigDecimal result = AutoMatchSupport.signalGroupTolerance(
         new BigDecimal("50.00"), new BigDecimal("10"));
     assertEquals(0, new BigDecimal("5.00").compareTo(result));
   }
@@ -1203,10 +1271,39 @@ public class AutoMatchSupportTest {
    * A null percentage behaves the same as 0 — the floor tolerance is returned.
    */
   @Test
-  public void testComputeAmountToleranceNullPctReturnsFloor() {
-    BigDecimal result = AutoMatchSupport.computeAmountTolerance(
+  public void testSignalGroupToleranceNullPctReturnsFloor() {
+    BigDecimal result = AutoMatchSupport.signalGroupTolerance(
         new BigDecimal("100.00"), null);
     assertEquals(0, new BigDecimal("0.01").compareTo(result));
+  }
+
+  /**
+   * <b>Cross-class contrast, half two of two.</b> {@link AutoMatchSupport#signalGroupTolerance} and
+   * {@link NearMatchSupport#differenceTolerance} read the SAME {@code EM_ETGO_Amount_Tolerance}
+   * column with deliberately opposite conventions, and the ETP-4965 split put them in two different
+   * classes — which makes them easier, not harder, to confuse. Asserting the divergence explicitly
+   * is the point: collapsing them back into one method is the support trap the rename came to
+   * remove.
+   *
+   * <p>This half reads from the {@code AutoMatchSupport} side, so it fails when the 1:N rounding
+   * slack loses its one-cent floor or starts returning null. Its twin,
+   * {@code NearMatchSupportTest#testDifferenceToleranceIsNotSignalGroupTolerance}, reads from the
+   * other side and fails when the POSTING gate is given a floor. Whichever class a future change
+   * touches, one of the two runs — that is why the pair survived the move instead of collapsing
+   * into a single test in one file.
+   */
+  @Test
+  public void testSignalGroupToleranceIsNotDifferenceTolerance() {
+    BigDecimal target = new BigDecimal("27.00");
+    // 0% → one cent of rounding slack for a 1:N SUM here, but nothing may be POSTED there.
+    assertEquals(0, new BigDecimal("0.01")
+        .compareTo(AutoMatchSupport.signalGroupTolerance(target, BigDecimal.ZERO)));
+    assertNull(NearMatchSupport.differenceTolerance(target, BigDecimal.ZERO));
+    // A percentage below the floor is raised to 0.01 for the sum, but NOT for the posting gate.
+    assertEquals(0, new BigDecimal("0.01")
+        .compareTo(AutoMatchSupport.signalGroupTolerance(target, new BigDecimal("0.001"))));
+    assertEquals(0, BigDecimal.ZERO
+        .compareTo(NearMatchSupport.differenceTolerance(target, new BigDecimal("0.001"))));
   }
 
   // ---------------------------------------------------------------------------
@@ -1306,8 +1403,450 @@ public class AutoMatchSupportTest {
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-4965 — the §5.1 classification matrix, as classifyPendingLine reports it
+  //
+  // The whole matrix, row by row, with the ticket's own numbers: a 27.00 statement line, a 26.62
+  // movement (0.38 = 1.41% deviation), a 5% amount tolerance and the default 3-day date tolerance.
+  //
+  // These assert the STATE the left-panel filter paints. The search that feeds them —
+  // NearMatchSupport.findNearMatch, its tolerances, ordering and accumulator contract — is unit-
+  // tested in NearMatchSupportTest; a row asserted on both sides is asserted twice on purpose.
+  //
+  //   amount dev | date dev            | state
+  //   -----------+---------------------+-------------
+  //   0          | 0                   | suggested
+  //   0          | > 0, <= date tol    | difference
+  //   > 0, <= tol| 0                   | difference
+  //   > 0, <= tol| > 0, <= date tol    | difference
+  //   > tol      | any                 | pending
+  //   any        | > date tol          | pending
+  //
+  // The two tolerances are INDEPENDENT: amount 0% only collapses the third and fourth rows onto
+  // "exact amount", it does not switch the second row off. See the pair of 0% tests below.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  private static final String LINE_CREDIT = "27.00";
+  private static final String NO_DEBIT = "0.00";
+  /** 26.62 against 27.00 — a 0.38 deviation, i.e. 1.41%, inside the 5% tolerance. */
+  private static final String NEAR_AMOUNT = "26.62";
+  private static final BigDecimal PCT_FIVE = new BigDecimal("5");
+  private static final int DATE_TOL_DAYS = 3;
+  private static final String NEAR_ACC = "ACC-NEAR";
+  private static final String T_NEAR = "T-NEAR";
+
+  private static Date daysFrom(Date base, int days) {
+    Calendar cal = Calendar.getInstance();
+    cal.setTime(base);
+    cal.add(Calendar.DAY_OF_MONTH, days);
+    return cal.getTime();
+  }
+
+  /** A statement line with a fixed amount and transaction date. */
+  private static FIN_BankStatementLine datedLine(String id, String credit, String debit, Date date) {
+    FIN_BankStatementLine line = bslLine(id, credit, debit);
+    lenient().when(line.getTransactionDate()).thenReturn(date);
+    lenient().when(line.getBpartnername()).thenReturn("");
+    return line;
+  }
+
+  /** A bare unreconciled transaction (no partner, no reference) with an amount and a date. */
+  private static FIN_FinaccTransaction nearTxn(String id, String amount, Date date) {
+    BigDecimal amt = new BigDecimal(amount);
+    FIN_FinaccTransaction t = mock(FIN_FinaccTransaction.class);
+    lenient().when(t.getId()).thenReturn(id);
+    lenient().when(t.getBusinessPartner()).thenReturn(null);
+    lenient().when(t.getFinPayment()).thenReturn(null);
+    lenient().when(t.getDepositAmount())
+        .thenReturn(amt.signum() >= 0 ? amt : BigDecimal.ZERO);
+    lenient().when(t.getPaymentAmount())
+        .thenReturn(amt.signum() >= 0 ? BigDecimal.ZERO : amt.abs());
+    lenient().when(t.getTransactionDate()).thenReturn(date);
+    return t;
+  }
+
+  /**
+   * Mocks the DAL seam {@code loadUnreconciledSameSign} reaches through, so {@code findSignalGroup}
+   * and the near-match pass {@code classifyPendingLine} delegates to both see {@code pool} as the
+   * account's whole unreconciled set. Caller closes it.
+   */
+  private static MockedStatic<OBDal> mockUnreconciledPool(List<FIN_FinaccTransaction> pool) {
+    MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+    OBDal dal = mock(OBDal.class);
+    obDal.when(OBDal::getInstance).thenReturn(dal);
+    org.hibernate.Session session = mock(org.hibernate.Session.class);
+    lenient().when(dal.getSession()).thenReturn(session);
+    @SuppressWarnings("unchecked")
+    org.hibernate.query.Query<FIN_FinaccTransaction> query =
+        mock(org.hibernate.query.Query.class);
+    lenient().when(session.createQuery(anyString(), eq(FIN_FinaccTransaction.class)))
+        .thenReturn(query);
+    lenient().when(query.setParameter(anyString(), any())).thenReturn(query);
+    lenient().when(query.list()).thenReturn(pool);
+    return obDal;
+  }
+
+  /**
+   * Core's standard algorithm finds nothing — the only way to reach
+   * {@link NearMatchSupport#findNearMatch}, since {@code StandardMatchingAlgorithm} searches by
+   * EXACT amount AND EXACT date and therefore never sees a deviating movement at all (that is the
+   * bug this ticket fixes). Caller closes it.
+   */
+  private static MockedConstruction<FIN_MatchingTransaction> mockNoStandardMatch() {
+    return mockConstruction(FIN_MatchingTransaction.class, (m, ctx) -> {
+      FIN_MatchedTransaction nomatch = mock(FIN_MatchedTransaction.class);
+      lenient().when(nomatch.getTransaction()).thenReturn(mock(FIN_FinaccTransaction.class));
+      lenient().when(nomatch.getMatchLevel()).thenReturn(FIN_MatchedTransaction.NOMATCH);
+      when(m.match(any(), any())).thenReturn(nomatch);
+    });
+  }
+
+  /** The account under test: has an algorithm configured (so standardMatch runs) and an id. */
+  private static FIN_FinancialAccount nearAccount() {
+    FIN_FinancialAccount account = accountWithAlgorithm("com.example.DummyAlgo");
+    lenient().when(account.getId()).thenReturn(NEAR_ACC);
+    return account;
+  }
+
+  /** Classifies {@code line} against {@code pool} with the ticket's tolerances, fresh accumulators. */
+  private static String classifyAgainst(FIN_BankStatementLine line,
+      List<FIN_FinaccTransaction> pool) {
+    try (MockedConstruction<FIN_MatchingTransaction> mc = mockNoStandardMatch();
+        MockedStatic<OBDal> obDal = mockUnreconciledPool(pool)) {
+      return AutoMatchSupport.classifyPendingLine(nearAccount(), line, Collections.emptyList(),
+          DATE_TOL_DAYS, PCT_FIVE, new HashSet<>(), new java.util.ArrayList<>());
+    }
+  }
+
+  /**
+   * Matrix row 1 — no deviation at all is a SUGGESTION, not a difference. Core's standard algorithm
+   * finds the pair, so the classifier reports it as suggested and never reaches the near-match pass.
+   *
+   * <p>The other half of this row — that {@link NearMatchSupport#findNearMatch} explicitly REJECTS
+   * the exact-exact case, the single exclusion that separates the first two rows of the matrix —
+   * is asserted in {@code NearMatchSupportTest#testExactAmountExactDateIsNeverANearMatch}.
+   */
+  @Test
+  public void testExactAmountExactDateIsSuggested() {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-EXACT", LINE_CREDIT, NO_DEBIT, today);
+    FIN_FinaccTransaction exact = nearTxn(T_NEAR, LINE_CREDIT, today);
+
+    FIN_MatchedTransaction matched = mock(FIN_MatchedTransaction.class);
+    lenient().when(matched.getTransaction()).thenReturn(exact);
+    lenient().when(matched.getMatchLevel()).thenReturn(FIN_MatchedTransaction.STRONG);
+    try (MockedConstruction<FIN_MatchingTransaction> mc =
+        mockConstruction(FIN_MatchingTransaction.class, (m, ctx) ->
+            when(m.match(any(), any())).thenReturn(matched))) {
+      assertEquals(AutoMatchSupport.STATE_SUGGESTED,
+          AutoMatchSupport.classifyPendingLine(nearAccount(), line, Collections.emptyList(),
+              DATE_TOL_DAYS, PCT_FIVE, new HashSet<>(), new java.util.ArrayList<>()));
+    }
+  }
+
+  /**
+   * Matrix row 2 — the amount matches to the cent but the movement is 2 days away (tolerance 3).
+   * Core cannot see it (it searches by exact date), so without
+   * {@link NearMatchSupport#findNearMatch} this line is stuck on "Pendiente" forever.
+   */
+  @Test
+  public void testExactAmountTwoDaysApartIsDifference() {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-DATE-ONLY", LINE_CREDIT, NO_DEBIT, today);
+    FIN_FinaccTransaction twoDaysLater = nearTxn(T_NEAR, LINE_CREDIT, daysFrom(today, 2));
+
+    assertEquals(AutoMatchSupport.STATE_DIFFERENCE,
+        classifyAgainst(line, Collections.singletonList(twoDaysLater)));
+  }
+
+  /**
+   * Matrix row 3 — the ticket's own reported case: a 27.00 line against a 26.62 movement of the
+   * same date. 0.38 is 1.41% of the line, inside the 5% tolerance.
+   */
+  @Test
+  public void testAmountWithinToleranceSameDateIsDifference() {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-AMT", LINE_CREDIT, NO_DEBIT, today);
+    FIN_FinaccTransaction near = nearTxn(T_NEAR, NEAR_AMOUNT, today);
+
+    assertEquals(AutoMatchSupport.STATE_DIFFERENCE,
+        classifyAgainst(line, Collections.singletonList(near)));
+  }
+
+  /** Matrix row 4 — both deviations present, each within its own tolerance. */
+  @Test
+  public void testAmountAndDateBothWithinToleranceIsDifference() {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-BOTH", LINE_CREDIT, NO_DEBIT, today);
+    FIN_FinaccTransaction near = nearTxn(T_NEAR, NEAR_AMOUNT, daysFrom(today, 2));
+
+    assertEquals(AutoMatchSupport.STATE_DIFFERENCE,
+        classifyAgainst(line, Collections.singletonList(near)));
+  }
+
+  /**
+   * Matrix row 5 — a 20.00 movement deviates by 7.00 from the 27.00 line, far past the 1.35 limit.
+   * The automatch must not propose it: an out-of-tolerance gap is not an adjustment, it is a
+   * different document. The search-level twin is
+   * {@code NearMatchSupportTest#testAmountOutsideToleranceIsNeverANearMatch}.
+   */
+  @Test
+  public void testAmountOutsideToleranceStaysPending() {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-OUT-AMT", LINE_CREDIT, NO_DEBIT, today);
+    FIN_FinaccTransaction far = nearTxn(T_NEAR, "20.00", today);
+
+    assertEquals(AutoMatchSupport.STATE_PENDING,
+        classifyAgainst(line, Collections.singletonList(far)));
+  }
+
+  /**
+   * Matrix row 6 — an EXACT amount 4 days away with a 3-day tolerance is still out of reach. The
+   * date window is a hard bound, not a preference.
+   */
+  @Test
+  public void testExactAmountOutsideDateWindowStaysPending() {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-OUT-DATE", LINE_CREDIT, NO_DEBIT, today);
+    FIN_FinaccTransaction fourDaysLater = nearTxn(T_NEAR, LINE_CREDIT, daysFrom(today, 4));
+
+    assertEquals(AutoMatchSupport.STATE_PENDING,
+        classifyAgainst(line, Collections.singletonList(fourDaysLater)));
+  }
+
+  /**
+   * A 0% amount tolerance bounds the AMOUNT dimension and only that one: no amount deviation is
+   * ever accepted, so the ticket's own 26.62-against-27.00 case is not detected at all and the line
+   * stays Pendiente. This is what guarantees an account that never configured a percentage can
+   * never receive an automatic accounting entry — {@link NearMatchSupport#differenceTolerance}
+   * returns null and {@code findNearMatch} degrades to "exact amount only", never to "any amount"
+   * (both asserted in {@code NearMatchSupportTest#testZeroAmountToleranceRejectsAnAmountDeviation}).
+   *
+   * <p>It is NOT a master switch over the whole feature; see the date-only twin below.
+   */
+  @Test
+  public void testZeroAmountToleranceRejectsAnAmountDeviation() {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-TOL0-AMT", LINE_CREDIT, NO_DEBIT, today);
+    FIN_FinaccTransaction near = nearTxn(T_NEAR, NEAR_AMOUNT, today);
+
+    try (MockedConstruction<FIN_MatchingTransaction> mc = mockNoStandardMatch();
+        MockedStatic<OBDal> obDal = mockUnreconciledPool(Collections.singletonList(near))) {
+      assertEquals(AutoMatchSupport.STATE_PENDING,
+          AutoMatchSupport.classifyPendingLine(nearAccount(), line, Collections.emptyList(),
+              DATE_TOL_DAYS, BigDecimal.ZERO, new HashSet<>(), new java.util.ArrayList<>()));
+    }
+  }
+
+  /**
+   * <b>DETECTION is not POSTING — the distinction this whole ticket turns on.</b>
+   *
+   * <p>The two account fields govern independent dimensions. {@code EM_ETGO_Amount_Tolerance}
+   * bounds how far the AMOUNT may drift and is the only thing that can authorise an accounting
+   * entry; {@code EM_ETGO_Date_Tolerance} bounds how many days apart the two may be, defaults to 3
+   * on every account ever created, and stays in force at 0% amount tolerance. A date-only deviation
+   * creates no accounting entry at all, so the safety reasoning behind 0% simply does not apply to
+   * it.
+   *
+   * <p>The canonical case: a 100.00 line of the 28th against a 100.00 movement of the 26th, on an
+   * account at 0% amount / 3 days, classifies as a DIFFERENCE — and reconciling it posts nothing,
+   * because the gap is zero (the posting side is asserted in
+   * {@code ReconciliationDifferenceSupportTest}). This is the user-visible end of the contract; the
+   * search-level requirement that {@link NearMatchSupport#findNearMatch} keep searching with a null
+   * {@code amtTolerance} instead of bailing out is asserted in
+   * {@code NearMatchSupportTest#testZeroAmountToleranceStillDetectsADateOnlyDeviation}.
+   */
+  @Test
+  public void testZeroAmountToleranceStillDetectsADateOnlyDeviation() {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-TOL0-DATE", "100.00", NO_DEBIT, today);
+    FIN_FinaccTransaction twoDaysEarlier = nearTxn(T_NEAR, "100.00", daysFrom(today, -2));
+
+    try (MockedConstruction<FIN_MatchingTransaction> mc = mockNoStandardMatch();
+        MockedStatic<OBDal> obDal =
+            mockUnreconciledPool(Collections.singletonList(twoDaysEarlier))) {
+      assertEquals(AutoMatchSupport.STATE_DIFFERENCE,
+          AutoMatchSupport.classifyPendingLine(nearAccount(), line, Collections.emptyList(),
+              DATE_TOL_DAYS, BigDecimal.ZERO, new HashSet<>(), new java.util.ArrayList<>()));
+    }
+  }
+
+  /**
+   * The accumulator contract, applied to the new path.
+   *
+   * <p>Two pending lines of the SAME amount classified in ONE pass share {@code usedTxnIds} /
+   * {@code excludedTxns}. There is a single candidate movement, so the first line claims it and
+   * gets {@code difference}; the second must fall through to {@code pending}. Getting this wrong
+   * makes the left panel's "Con diferencia" counter promise more than an actual automatch run can
+   * apply — exactly the defect the ETP-4951 refactor introduced these accumulators to prevent.
+   */
+  @Test
+  public void testNearMatchHonoursSharedAccumulatorAcrossLines() {
+    Date today = new Date();
+    FIN_BankStatementLine line1 = datedLine("L-ACC-1", LINE_CREDIT, NO_DEBIT, today);
+    FIN_BankStatementLine line2 = datedLine("L-ACC-2", LINE_CREDIT, NO_DEBIT, today);
+    FIN_FinaccTransaction onlyCandidate = nearTxn(T_NEAR, NEAR_AMOUNT, today);
+
+    Set<String> usedTxnIds = new HashSet<>();
+    List<FIN_FinaccTransaction> excludedTxns = new java.util.ArrayList<>();
+
+    try (MockedConstruction<FIN_MatchingTransaction> mc = mockNoStandardMatch();
+        MockedStatic<OBDal> obDal =
+            mockUnreconciledPool(Collections.singletonList(onlyCandidate))) {
+      FIN_FinancialAccount account = nearAccount();
+
+      String first = AutoMatchSupport.classifyPendingLine(account, line1, Collections.emptyList(),
+          DATE_TOL_DAYS, PCT_FIVE, usedTxnIds, excludedTxns);
+      assertEquals(AutoMatchSupport.STATE_DIFFERENCE, first);
+      assertTrue("a near-match must consume its candidate in BOTH accumulators",
+          usedTxnIds.contains(T_NEAR));
+      assertTrue(excludedTxns.contains(onlyCandidate));
+
+      String second = AutoMatchSupport.classifyPendingLine(account, line2, Collections.emptyList(),
+          DATE_TOL_DAYS, PCT_FIVE, usedTxnIds, excludedTxns);
+      assertEquals("the only candidate is already claimed — the second line cannot reuse it",
+          AutoMatchSupport.STATE_PENDING, second);
+    }
+  }
+
+  /**
+   * Order of precedence: a 1:N signal group still wins over a 1:1 near-match. Two same-partner
+   * movements summing EXACTLY to the line are a better answer than one movement that is merely
+   * close, and they post nothing.
+   */
+  @Test
+  public void testSignalGroupTakesPrecedenceOverNearMatch() {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-PREC", LINE_CREDIT, NO_DEBIT, today);
+    BusinessPartner bp = mock(BusinessPartner.class);
+    lenient().when(bp.getId()).thenReturn("BP-PREC");
+    FIN_FinaccTransaction half1 = txnWithPartnerAndDate("T-H1", "13.50", bp, today);
+    FIN_FinaccTransaction half2 = txnWithPartnerAndDate("T-H2", "13.50", bp, today);
+    FIN_FinaccTransaction near = nearTxn(T_NEAR, NEAR_AMOUNT, today);
+
+    assertEquals(AutoMatchSupport.STATE_SUGGESTED,
+        classifyAgainst(line, Arrays.asList(half1, half2, near)));
+  }
+
+  /**
+   * The outflow twin of the reference case: a -27.00 line against a -26.62 payment. Sign handling
+   * is the highest-risk part of this feature, so the negative direction is asserted end to end and
+   * not assumed to follow from the positive one.
+   */
+  @Test
+  public void testOutflowLineWithinToleranceIsDifference() {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-OUTFLOW", NO_DEBIT, LINE_CREDIT, today);
+    FIN_FinaccTransaction near = nearTxn(T_NEAR, "-26.62", today);
+
+    assertEquals(AutoMatchSupport.STATE_DIFFERENCE,
+        classifyAgainst(line, Collections.singletonList(near)));
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-4965 — the date axis is CALENDAR DAYS, not elapsed milliseconds
+  //
+  // Every date column this feature reads is a timestamp, not a date: FIN_BankStatementLine.datetrx,
+  // FIN_FinaccTransaction.statementdate and .dateacct are all `timestamp without time zone`, and
+  // rows carrying a real time component exist in production (imported statements above all). A
+  // millisecond distance therefore turns 13:00 and 00:00 of the SAME day into a "date deviation",
+  // which silently demotes matrix row 1 (exact amount, exact date = SUGGESTED) to "con diferencia"
+  // and makes the tie-break order candidates by clock time instead of by day.
+  //
+  // NearMatchSupport.dayDistance is what implements the day-based reading, and NearMatchSupportTest
+  // pins it directly (including the tie-break, whose candidates the clock and the calendar order
+  // differently, and the null-date convention). The two tests below are the consequence side that
+  // only classifyPendingLine can show: the STATE a same-day timestamp pair produces.
+  //
+  // NOTE: they say nothing about withinDateWindow, which still measures N days as N x 24h. That is
+  // pre-existing, shared with findSignalGroup/standardMatch, and out of this ticket's scope. Every
+  // date pair used here sits comfortably inside the 3-day window under EITHER reading, so fixing
+  // that window later cannot break these tests.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * A local-zone instant at a named calendar day and hour, with minutes, seconds and millis zeroed.
+   * Goes through {@code Calendar}, i.e. the very zone {@code ZoneId.systemDefault()} resolves to in
+   * the production epoch-day conversion, so the calendar day a test names is the calendar day the
+   * code under test sees on any CI host.
+   *
+   * <p>Late August on purpose: no inhabited time zone shifts its DST offset there, in either
+   * hemisphere, so no test below can start failing because a host runs in Santiago or Sydney.
+   */
+  private static Date dayAt(int year, int month, int dayOfMonth, int hour) {
+    Calendar cal = Calendar.getInstance();
+    cal.clear();
+    cal.set(year, month - 1, dayOfMonth, hour, 0, 0);
+    return cal.getTime();
+  }
+
+  /**
+   * <b>Regression, matrix row 1, as the user sees it.</b> A statement line at 13:00 and its
+   * movement at 00:00 of the SAME calendar day, for the very same amount, are ZERO days apart — a
+   * plain suggestion. Measured in millis they are 13 hours apart, which reads as a date deviation
+   * and hands the exact match over to the near-match pass: the line then shows "Con diferencia" for
+   * a match that deviates in nothing at all, and the filter stops meaning what its name says.
+   * Nothing in the timestamps is unusual — importers routinely stamp a real time on the statement
+   * side and midnight on the movement side.
+   *
+   * <p>The unit underneath ({@link NearMatchSupport#dayDistance} returning 0, and the search
+   * refusing to claim the pair) is asserted in
+   * {@code NearMatchSupportTest#testSameCalendarDayDifferentTimesExactAmountIsNeverANearMatch}.
+   * This test is the half that made the bug visible: the STATE the left panel would have shown.
+   */
+  @Test
+  public void testSameCalendarDayDifferentTimesExactAmountIsNotADifference() {
+    Date lineAfternoon = dayAt(2026, 8, 28, 13);
+    Date movementMidnight = dayAt(2026, 8, 28, 0);
+    FIN_BankStatementLine line = datedLine("L-SAMEDAY-EXACT", LINE_CREDIT, NO_DEBIT, lineAfternoon);
+    FIN_FinaccTransaction exact = nearTxn(T_NEAR, LINE_CREDIT, movementMidnight);
+
+    // With Core blinded: whatever else the line may be, it is not a difference. (It lands on
+    // pending here only because the mock removes the standard algorithm — the assertion is
+    // deliberately about what the state must NOT be.)
+    try (MockedConstruction<FIN_MatchingTransaction> mc = mockNoStandardMatch();
+        MockedStatic<OBDal> obDal = mockUnreconciledPool(Collections.singletonList(exact))) {
+      assertNotEquals("a same-day exact match is not a difference",
+          AutoMatchSupport.STATE_DIFFERENCE,
+          AutoMatchSupport.classifyPendingLine(nearAccount(), line, Collections.emptyList(),
+              DATE_TOL_DAYS, PCT_FIVE, new HashSet<>(), new java.util.ArrayList<>()));
+    }
+
+    // And what it positively is, in production: Core's standard algorithm does find this pair, so
+    // the line reads "suggested" — row 1 of the matrix, reached with a real time component present.
+    FIN_MatchedTransaction matched = mock(FIN_MatchedTransaction.class);
+    lenient().when(matched.getTransaction()).thenReturn(exact);
+    lenient().when(matched.getMatchLevel()).thenReturn(FIN_MatchedTransaction.STRONG);
+    try (MockedConstruction<FIN_MatchingTransaction> mc =
+        mockConstruction(FIN_MatchingTransaction.class, (m, ctx) ->
+            when(m.match(any(), any())).thenReturn(matched))) {
+      assertEquals(AutoMatchSupport.STATE_SUGGESTED,
+          AutoMatchSupport.classifyPendingLine(nearAccount(), line, Collections.emptyList(),
+              DATE_TOL_DAYS, PCT_FIVE, new HashSet<>(), new java.util.ArrayList<>()));
+    }
+  }
+
+  /**
+   * The other side of that fix: collapsing the date to a calendar day must not collapse the AMOUNT
+   * with it. A 27.00 line at 09:00 against a 26.62 movement at 19:00 of the same day is still a
+   * difference — the deviation was never the date, it is the 0.38. Guards against "fixing" row 1 by
+   * turning it into "same day means never a difference", which would silently delete the ticket's
+   * own reported case (matrix row 3). The search-level twin is
+   * {@code NearMatchSupportTest#testSameCalendarDayDifferentTimesAmountDeviationIsStillANearMatch}.
+   */
+  @Test
+  public void testSameCalendarDayDifferentTimesAmountDeviationIsStillDifference() {
+    Date lineMorning = dayAt(2026, 8, 28, 9);
+    Date movementEvening = dayAt(2026, 8, 28, 19);
+    FIN_BankStatementLine line = datedLine("L-SAMEDAY-AMT", LINE_CREDIT, NO_DEBIT, lineMorning);
+    FIN_FinaccTransaction near = nearTxn(T_NEAR, NEAR_AMOUNT, movementEvening);
+
+    assertEquals(AutoMatchSupport.STATE_DIFFERENCE,
+        classifyAgainst(line, Collections.singletonList(near)));
+  }
+
   // ---------------------------------------------------------------------------
-  // Builders for the new tests
+  // Builders
   // ---------------------------------------------------------------------------
 
   /** A bank-statement line mock with a credit/debit amount and a fixed id (no date). */

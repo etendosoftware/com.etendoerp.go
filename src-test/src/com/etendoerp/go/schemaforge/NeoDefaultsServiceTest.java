@@ -756,6 +756,92 @@ public class NeoDefaultsServiceTest {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // resolveDefaults — blank quoted-literal default (" ") must not leak as a real value
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * ETP-4917 regression: a malformed AD_Column.DefaultValue that is a quoted, whitespace-only
+   * literal — a double-quote, a space, and a closing double-quote (e.g. {@code C_Tax_ID} on the
+   * {@code GL_JournalLine} tab) — must NOT surface as the field's resolved value. Before the
+   * fix, {@link Utility#getDefault} returned that 3-character garbage string verbatim (it does
+   * not strip quotes from a plain literal with no "@" token), and NEO Headless later tried to
+   * resolve it as a real {@code FinancialMgmtTaxRate} id on save, failing the insert with
+   * "refered to but not present in the import set". This is distinct from the deliberate
+   * empty-string literal {@code ""} (see {@link #testResolveDefaultsEmptyStringLiteral}), which
+   * must keep resolving to an actual empty string.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveDefaultsSkipsBlankQuotedLiteralDefault() throws Exception {
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<SFField> fieldCriteria = mock(OBCriteria.class);
+    SFField sfField = mock(SFField.class);
+    Column adColumn = mock(Column.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    OBContext obContext = mock(OBContext.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    Entity dalEntity = mock(Entity.class);
+
+    when(sfEntity.getId()).thenReturn("sf-entity-1");
+    when(sfField.getADColumn()).thenReturn(adColumn);
+    // isReadOnly=true keeps the combo-preselection fallback (resolveFirstComboOption) out of
+    // scope, same as testResolveDefaultsSkipsReadonlyComboAutopick — this test targets
+    // resolveFieldDefault's blank-quoted-literal handling only.
+    when(sfField.isReadOnly()).thenReturn(true);
+    when(sfField.getDefaultValue()).thenReturn(null);
+    when(adColumn.getDBColumnName()).thenReturn("C_Tax_ID");
+    // Reproduces the real C_Tax_ID column on the GL_JournalLine tab: DefaultValue is the
+    // malformed 3-char literal `" "` instead of a genuinely empty value or NULL.
+    when(adColumn.getDefaultValue()).thenReturn("\" \"");
+    when(adColumn.isLinkToParentColumn()).thenReturn(false);
+    when(adColumn.isUseAutomaticSequence()).thenReturn(false);
+    when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
+    when(fieldCriteria.list()).thenReturn(Collections.singletonList(sfField));
+    when(dal.createCriteria(SFField.class)).thenReturn(fieldCriteria);
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
+      obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, null)).thenReturn(vars);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
+          .thenReturn(dalEntity);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper
+          .resolvePropertyName(dalEntity, "C_Tax_ID"))
+          .thenReturn("taxRate");
+      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
+      utilityMock.when(() -> Utility.getPreference(vars, "C_Tax_ID", ""))
+          .thenReturn(null);
+      docTypeMock.when(() -> DocTypeResolver.resolveDefaultDocTypeId(adColumn, ctx))
+          .thenReturn(null);
+
+      NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
+
+      assertEquals(200, response.getHttpStatus());
+      assertFalse(
+          "A blank quoted-literal AD_Column default (\" \") must never surface as the "
+              + "field's value",
+          response.getBody().getJSONObject("defaults").has("taxRate"));
+      // The malformed literal must never even reach Utility.getDefault's plain-literal
+      // resolution path — it must be routed to resolveFromPrefsOrDocType instead.
+      utilityMock.verify(() -> Utility.getDefault(any(), any(), any(), any(), any(), any()),
+          never());
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // resolveDefaults — sequence field deferred to pass 2 with doctype
   // ═══════════════════════════════════════════════════════════════════════════
 

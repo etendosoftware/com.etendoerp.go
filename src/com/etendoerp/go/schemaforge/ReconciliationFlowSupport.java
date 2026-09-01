@@ -332,6 +332,19 @@ final class ReconciliationFlowSupport {
       return opError;
     }
 
+    // ETP-4965: same inline difference funding the manual path applies, so an automatch group whose
+    // near-match leaves a within-tolerance gap reconciles fully instead of splitting. A group whose
+    // account has no GL Item Difference is rejected HERE, before anything is matched into the shared
+    // reconciliation — its error travels back in applySuggestions' results[] and the suggestion
+    // modal reports it as a failed group. A mass run cannot ask for a concept line by line, so it
+    // must never post one blindly. `groupEntry` doubles as the body: an automatch group carries no
+    // glItemId, so the account's own concept is what gets used.
+    NeoResponse diffError = ReconciliationDifferenceSupport.applyInlineDifference(
+        handler, account, line, operationIds, groupEntry, false);
+    if (diffError != null) {
+      return diffError;
+    }
+
     out.add(new ReconciliationHandler.PreparedGroup(line, operationIds));
     return null;
   }
