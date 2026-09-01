@@ -596,15 +596,41 @@ class NeoCrudHandlerTest {
       assertTrue(msg.contains("PATCH"));
     }
 
+    /**
+     * ETP-5073 / DOC-04 changed this contract. A record ID used to be the only requirement; an
+     * update must now also carry the {@code updated} value of the record as it was read, because
+     * that value is what lets the concurrency check evaluate at all. Before the ticket our layer
+     * stripped it from every write, so the check never ran for any entity and the second of two
+     * concurrent editors silently erased the first.
+     *
+     * <p>Kept as two cases rather than adjusted in place: the refusal and the pass are both worth
+     * pinning, and the refusal is the half that regresses silently — an update that goes through
+     * without the token writes without a check and nothing anywhere reports it.
+     */
     @Test
-    @DisplayName("Returns null when PUT/PATCH has record ID")
-    void updateWithRecordIdReturnsNull() throws Exception {
+    @DisplayName("Returns null when PUT/PATCH has both a record ID and `updated`")
+    void updateWithRecordIdAndVersionReturnsNull() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("updated", "2026-08-21T16:20:38+00:00");
+      NeoContext context = buildContext("PATCH", "REC-123", mock(Tab.class),
+          mock(SFEntity.class), body, null);
+
+      NeoResponse result = invokeValidateUpdate(context);
+
+      assertNull(result);
+    }
+
+    @Test
+    @DisplayName("Refuses PUT/PATCH that has a record ID but no `updated`")
+    void updateWithRecordIdButNoVersionIsRefused() throws Exception {
       NeoContext context = buildContext("PATCH", "REC-123", mock(Tab.class),
           mock(SFEntity.class), null, null);
 
       NeoResponse result = invokeValidateUpdate(context);
 
-      assertNull(result);
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      assertEquals("missing_updated", result.getBody().getString("error"));
     }
   }
 

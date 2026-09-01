@@ -65,6 +65,11 @@ public class NeoFieldFilter {
    * <p>Read side only, deliberately: this set is NOT unioned into {@code includedFields}, because
    * that same set gates {@link #filterCreateRequest}, and a client must never be able to write
    * its own {@code updated}.
+   *
+   * <p>Two read-side consumers, and both must stay in agreement: {@link #filterGetResponse} keeps
+   * these keys in the payload, and {@link #emittableResponseKeys} declares them available so the
+   * MCP field-projection validator does not call a served field unknown (ETP-5073). Anything added
+   * here is therefore automatically honest on both, which is why the literal lives in one place.
    */
   private static final Set<String> ALWAYS_READABLE_KEYS = Set.of("updated");
 
@@ -422,6 +427,15 @@ public class NeoFieldFilter {
    * undefined on an empty result set, which is exactly when a typo is most expensive to miss
    * (IMP-18). Read-only: the returned set is a copy.
    *
+   * <p><b>{@link #ALWAYS_READABLE_KEYS} is part of the answer</b> (ETP-5073). Those keys are what
+   * {@link #filterGetResponse} keeps on top of {@code includedFields}, so they genuinely ARE
+   * emittable; leaving them out made the MCP projection validator report {@code updated} in
+   * {@code unknownFields} while the very same response carried its value — a self-contradiction
+   * that teaches the consuming agent to distrust the array or to stop asking for a field that
+   * works. Unioned HERE, on the read side only, and never into {@code includedFields} or
+   * {@code writableFields}: {@code ALWAYS_READABLE_KEYS} also gates {@link #filterCreateRequest},
+   * and a client must still never be able to write its own {@code updated}.
+   *
    * @return {@link Optional#of} the emittable response keys, or {@link Optional#empty()} when this
    *     filter is inactive (no {@code ETGO_SF_FIELD} config), in which case the response is
    *     unfiltered and the caller must fall back to the DAL entity's own property list rather than
@@ -435,6 +449,8 @@ public class NeoFieldFilter {
     for (String propName : includedFields) {
       keys.add(propNameToApiKey.getOrDefault(propName, propName));
     }
+    // Audit keys served regardless of ETGO_SF_FIELD — no rename applies, they have no SFField row.
+    keys.addAll(ALWAYS_READABLE_KEYS);
     return Optional.of(keys);
   }
 

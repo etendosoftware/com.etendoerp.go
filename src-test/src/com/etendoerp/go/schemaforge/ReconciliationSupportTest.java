@@ -278,4 +278,62 @@ public class ReconciliationSupportTest {
     BigDecimal signed = ReconciliationSupport.signedAmount(trxWith(null, null));
     assertEquals(0, BigDecimal.ZERO.compareTo(signed));
   }
+
+  // ---------------------------------------------------------------------------
+  // signedReconciledAmount (ETP-4921) — the left panel's "Progreso" bar
+  // ---------------------------------------------------------------------------
+
+  private static void assertReconciled(String expected, String amount, String pending) {
+    BigDecimal actual = ReconciliationHandlerSupport.signedReconciledAmount(
+        new BigDecimal(amount), new BigDecimal(pending));
+    assertEquals(amount + " - " + pending, 0, new BigDecimal(expected).compareTo(actual));
+  }
+
+  /**
+   * THE BUG. `amount` is signed but `pendingAmount` is the unsigned |cr - dr| the line handler
+   * stores, so the old `amount.subtract(pending)` gave -1.00 for a fully pending 0.50 withdrawal.
+   * Anything non-zero makes ProgressCell draw a bar, and the resulting 200% clamped to 100 drew a
+   * SOLID one — "fully reconciled" under a "Pendiente" badge. Values taken from the live rows of
+   * the Santander account that surfaced it.
+   */
+  @Test
+  public void testReconciledIsZeroForAFullyPendingWithdrawal() {
+    assertReconciled("0", "-0.50", "0.50");
+    assertReconciled("0", "-1.21", "1.21");
+    assertReconciled("0", "-0.30", "0.30");
+  }
+
+  /** Deposits were correct only by coincidence — both signs happened to match. Still correct. */
+  @Test
+  public void testReconciledIsZeroForAFullyPendingDeposit() {
+    assertReconciled("0", "10.00", "10.00");
+    assertReconciled("0", "0.30", "0.30");
+  }
+
+  /** A matched line stores pending = 0, so the whole amount is reconciled, sign included. */
+  @Test
+  public void testReconciledIsTheWholeAmountWhenNothingIsPending() {
+    assertReconciled("-0.50", "-0.50", "0");
+    assertReconciled("10.00", "10.00", "0");
+  }
+
+  /** The case the bar exists for: a partial group keeps the sign of its amount. */
+  @Test
+  public void testReconciledIsThePartialPortionForAPartialGroup() {
+    assertReconciled("53.24", "100", "46.76");
+    assertReconciled("-53.24", "-100", "46.76");
+  }
+
+  /** pending > |amount| is a data anomaly; reporting "nothing reconciled" beats a flipped bar. */
+  @Test
+  public void testReconciledClampsAtZeroWhenPendingExceedsTheAmount() {
+    assertReconciled("0", "-0.50", "5.00");
+    assertReconciled("0", "0.50", "5.00");
+  }
+
+  /** A zero-amount line has nothing to reconcile either way. */
+  @Test
+  public void testReconciledIsZeroForAZeroAmountLine() {
+    assertReconciled("0", "0", "0");
+  }
 }

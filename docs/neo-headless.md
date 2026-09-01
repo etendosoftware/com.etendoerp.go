@@ -1426,6 +1426,14 @@ A requested `$_identifier` companion is normalised to its base property, for bot
 the validation — `fields:["businessPartner$_identifier"]` returns the FK *and* its label (it used to
 return only `id`) and is never mislabelled as unknown.
 
+The always-readable audit keys are known too (ETP-5073). `updated` is an AD *column* on every table
+but not an AD *field*, so no `ETGO_SF_FIELD` row exists for it and no window can opt in; the read
+path serves it anyway (`NeoFieldFilter.ALWAYS_READABLE_KEYS`, ETP-4787). Until ETP-5073 the emittable
+set omitted it, so `fields:["name","updated"]` returned `updated` in `data` **and** listed it in
+`unknownFields` — a response contradicting itself, which for an agent consumer is worse than no
+signal at all. The set is now unioned into `emittableResponseKeys()` only: `updated` stays
+unwritable, and a client that sends it on a create is still filtered/rejected exactly as before.
+
 ---
 
 ## 5. Configuration
@@ -1581,6 +1589,18 @@ response shape, call `error(status, JSONObject)`; only call `error(status, Strin
 standard nested envelope built for you.
 
 Responses support custom headers via `withHeader(name, value)`.
+
+**Real-world example — `ChartOfAccountsHandler` GL Item auto-management (ETP-5020):** `schemaforge/handlers/ChartOfAccountsHandler.java` (`@Named("chart-of-accounts")`, wired on the chart-of-accounts spec) keeps Etendo Classic's `C_Glitem` plumbing invisible behind the `C_ElementValue` subaccount UI.
+
+On a successful live `POST` to the chart-of-accounts entity, its `afterHandle` hook reads the created subaccount id from the previous NEO create response, loads the saved `ElementValue`, resolves every active `AcctSchema` for the client, and delegates to `GlItemProvisioningSupport#ensureGlItemForSubaccount`. The support class creates one invisible `C_Glitem` named after the subaccount and one `C_Glitem_Acct` row per active accounting schema, with debit and credit both pointing at the subaccount's natural `C_ValidCombination`.
+
+The natural combination is looked up, never created by the handler: `C_ELEMENTVALUE_TRG` creates it for leaf accounts, and the support class matches the trigger-shaped row by `Account_ID`, `C_AcctSchema_ID`, and all 11 optional dimensions being null, including `locationFromAddress` and `locationToAddress`. The lookup is deterministic (`ORDER BY id`, max 1). Summary/heading accounts have no natural combination, so they are skipped and no GL Item is created for them.
+
+Idempotency is based on the existing `C_Glitem_Acct` link to that natural combination, not on the GL Item name. This avoids colliding with manually created GL Items that happen to share a name. When a link already exists during provisioning, the existing GL Item is reused and its name is resynchronized from the subaccount. This keeps onboarding re-runs and later provisioning passes aligned without relying on the GL Item name as the idempotency key. If another schema becomes active later, the support scans the subaccount's other natural combinations and reuses the already-created GL Item instead of creating a second one.
+
+On successful `PATCH` or `PUT` requests that include `active`, the hook re-reads the saved subaccount state and mirrors it onto any already-provisioned `C_Glitem_Acct.active` rows. Pre-ETP-5020 subaccounts that do not yet have GL Item account links simply no-op on this path.
+
+Both creation and active-state synchronization are best-effort secondary effects: failures are logged and swallowed so they never block the parent NEO save. Failures are also isolated per schema, so one broken accounting schema does not stop the remaining schemas for the same subaccount.
 
 **Real-world example — `TbaiConfigSequenceHandler`** (`schemaforge/handlers/TbaiConfigSequenceHandler.java`, `@Named("tbai-config-sequence-handler")`, wired as the `header` entity's `JAVA_QUALIFIER` for the `tbai-config` spec): a post-hook (`afterHandle`) that runs on every successful `POST`/`PUT` of the TBAI Fiscal Configuration. It walks the config's organization tree — plus organization `*` (id `0`), added explicitly since Document Types are very commonly defined at org `*` and would otherwise be silently excluded (same precedent as `SelectorOrgFilter#buildOrganizationPredicate`) — and finds every **active** `DocumentType` whose backing table is `C_Invoice` — which naturally covers sales invoices (`ARI`), purchase invoices (`API`), and their credit notes (`ARC`/`APC`), since all four share that table. Rather than one sequence per Document Type, it ensures the whole scope shares **exactly one** chaining `Sequence` (prefix `TBAI-`): it reuses one already assigned to any qualifying Document Type in scope, or creates a single new one only if none exists yet. This is the core fiscal-correctness rule — TicketBAI chains invoice numbers with a single scope-wide counter, so independent per-Document-Type sequences could collide. A Document Type that already has a chaining sequence (`EM_Tbai_Ad_Sequence_ID`) is left untouched, so re-saving the config is safe (idempotent). Any error is logged and swallowed: this is a best-effort secondary side effect and must never fail the parent save request.
 
@@ -1935,7 +1955,7 @@ an internal log of the conversion-rate downloader job that adds no value to the 
       "rawDescription": "*** Please, do not edit this role. Use Copy Record instead ***",
       "isClientAdmin": true,
       "roleSource": "tenant",
-      "userCount": 2,
+      "userCount": 1,
       "windowCount": 48,
       "windows": [
         { "id": "143", "name": "Sales Order", "tier": "full" },
@@ -1980,7 +2000,7 @@ Field types: `id`/`name`/`rawDescription` (`string`, `rawDescription` may be `nu
 > reference screenshot's numbers.** The ETP-4907 reference screenshot shows 17/17/17/18
 > `windowCount` and 13/17/9/126 `userCount` for the 4 template roles (Finance/Sales/Purchasing/
 > Inventory order) — those are **mockup placeholders**, not live data, and were never meant to be
-> reproduced exactly. The confirmed LIVE figures for GOClient (2026-08-18) are: Admin **48
+> reproduced exactly. The confirmed LIVE figures for GOClient (2026-08-18) were: Admin **48
 > windows / 2 users** (exact match with the pre-ETP-4907 behavior — Admin is never subject to the
 > system-template fallback), and for the 4 templates **Finance 27 / Sales 13 / Purchasing 11 /
 > Inventory 13 windows** (independently verified against `AD_Window_Access` for
@@ -1989,6 +2009,12 @@ Field types: `id`/`name`/`rawDescription` (`string`, `rawDescription` may be `nu
 > #getAppliedTemplateRoleIdsForClient`) runs and returns a plausible count — a future reader
 > seeing a `userCount` that doesn't match the Figma mock should treat the Figma numbers as wrong,
 > not the code.
+>
+> **Update (ETP-5065):** the Admin figure above is now stale on `userCount` (not `windowCount`) —
+> see the cross-client bootstrap-user fix described below. Re-verified live against the same
+> GOClient DB, 2026-08-27: Admin is now correctly **48 windows / 1 user** (the second "user" the
+> 2026-08-18 count included was `AD_User_ID = '100'`, the System-level `admin`/`admin` bootstrap
+> login that core auto-grants an active role on every client — never a real GOClient member).
 
 
 
@@ -2001,11 +2027,11 @@ Field types: `id`/`name`/`rawDescription` (`string`, `rawDescription` may be `nu
 **System-template fallback (ETP-4907).** ETP-4852 introduced 4 single, system-owned (`AD_Client_ID = '0'`) template roles (`SystemRoleTemplates`, §8f) that a tenant's users now *compose* their access from (`UserRoleCompositionService`, §8d), rather than every tenant keeping its OWN active copy of the 4 fixed-name roles. A tenant that has migrated to this model — confirmed live for GOClient, 2026-08-18: its own `Finance`/`Sales`/`Purchasing`/`Inventory` rows are `IsActive = 'N'` — would otherwise silently drop from 5 role cards to 1 (just its client-admin role). For each of the 4 fixed names with no active tenant-scoped match, this webhook now falls back to the matching `SystemRoleTemplates.byName()` system role:
 
 - **`windows`/`windowCount`** are resolved via the exact same `AD_Window_Access` query used for a real tenant role (it already disables client/organization filtering, so it works unchanged for a system-client role — no separate "system template window resolution" exists).
-- **`userCount`** is the number of this client's users whose PERSONAL role currently composes that template — from `UserRoleCompositionService#getAppliedTemplateRoleIdsForClient(String)` (called once per request, lazily, only if at least one fallback is needed) — **never** a direct `AD_User_Roles` count against the template itself, which would always read zero (users are never assigned a template role directly).
+- **`userCount`** is the number of this client's users whose PERSONAL role currently composes that template — from `UserRoleCompositionService#getAppliedTemplateRoleIdsForClient(String)` (called once per request, lazily, whenever at least one fixed-name card needs composition data) — **never** a direct `AD_User_Roles` count against the template itself, which would always read zero (users are never assigned a template role directly).
 - **`id`** is the SYSTEM template's own `AD_Role_ID` (client `'0'`) — the SAME id `SFSystemRoleTemplates` (§8f) returns for that role. Callers must not assume every card's `id` belongs to the caller's own client.
 - **`roleSource`** is `"systemTemplate"` (vs. `"tenant"` for a real tenant-owned role, including the client-admin card, which is never subject to this fallback — see the class javadoc's "Never touches the Admin role" convention shared with `UserRoleCompositionService`).
 
-Both paths can appear side-by-side within one response (a tenant may have migrated some fixed roles but not others) — this is intentional graceful coexistence, not a bug. **Admin is never affected**: it is always sourced from the tenant's own client-level `AD_Role`/`AD_User_Roles`/`AD_Window_Access` — confirmed live against GOClient, 2026-08-18: 48 windows, 2 users, matching the pre-ETP-4907 behavior exactly.
+Both paths can appear side-by-side within one response (a tenant may have migrated some fixed roles but not others) — this is intentional graceful coexistence, not a bug. **ETP-5065 hybrid-state rule:** when a tenant still has its own active Finance/Sales/Purchasing/Inventory role, that tenant role remains the source for `windows`, `windowCount`, and `matrix` access, but `userCount` is the union of direct assignees of the tenant role and users whose personal role composes the matching system template. This prevents migrated users from disappearing from the card while preserving the tenant role's access data. **Admin is never affected by template composition**: it is always sourced from the tenant's own client-level `AD_Role`/`AD_User_Roles`/`AD_Window_Access`; after ETP-5065's cross-client bootstrap-user exclusion, GOClient's Admin count is 48 windows / 1 user.
 
 **`windows`/`matrix` window universe:** every distinct `AD_Window` backing an active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` — i.e. every window Etendo GO actually exposes today — so inherited/legacy grants to native-only Etendo windows don't leak into either structure. Each `windows[]` entry's `tier` resolves the same way as `SFWindowAccessMap`: `IsReadWrite = true` → `"full"`, `IsReadWrite = false` → `"read-only"`; a role's `windows` array only lists windows it can actually reach (sorted by name).
 
