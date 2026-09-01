@@ -50,6 +50,7 @@ import org.openbravo.service.db.DalConnectionProvider;
 final class NeoHandlerUtils {
 
   private static final String FIELD_STORAGE_BIN = "storageBin";
+  private static final String FIELD_MOVEMENT_QUANTITY = "movementQuantity";
   private static final String PARAM_PARENT_ID = "parentId";
   // Matches an unresolved raw AD default literal such as "@OnHandLocatorDefault@". See
   // injectDefaultLocatorIfMissing's javadoc for why this must be treated as absent.
@@ -413,6 +414,27 @@ final class NeoHandlerUtils {
   }
 
   /**
+   * POST/CRUD gate around {@link #injectDefaultLocatorIfMissing}: shared by every
+   * {@code M_InOutLine}-based handler's {@code handle()} pre-hook so each one only has to call
+   * this single method instead of repeating the endpoint/method check and the try/catch —
+   * duplicating that boilerplate across handlers is exactly what trips Sonar's duplicated-lines
+   * gate (ETP-5062).
+   *
+   * @param context the current NeoContext; a no-op for anything other than a CRUD POST
+   * @param log     the caller's logger, used for a warn message if the injection throws
+   */
+  static void injectDefaultLocatorOnPost(NeoContext context, Logger log) {
+    if (context != null && NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && "POST".equalsIgnoreCase(context.getHttpMethod())) {
+      try {
+        injectDefaultLocatorIfMissing(context.getRequestBody(), log);
+      } catch (Exception e) {
+        log.warn("Could not default storageBin: {}", e.getMessage(), e);
+      }
+    }
+  }
+
+  /**
    * Sets {@code storageBin} to the header {@code M_InOut}'s own warehouse default locator when
    * a line-create request did not already supply a REAL one. Shared by every
    * {@code M_InOutLine}-based create flow — Goods Receipt, Goods Shipment, and Return to Vendor
@@ -482,6 +504,38 @@ final class NeoHandlerUtils {
       log.debug("Defaulted storageBin={} to header warehouse={}", locatorId, headerWarehouseId);
     }
     body.put(FIELD_STORAGE_BIN, locatorId);
+  }
+
+  /**
+   * Strips the stock-derived {@code movementQuantity} update that the classic
+   * {@code SL_InOutLine_Product} callout (shared by every {@code M_InOutLine}-based window)
+   * echoes back on product selection whenever a line is not created from an order/invoice
+   * import. Shared by {@link GoodsReceiptLineHandler} (ETP-4671, purchase receipts) and
+   * {@link GoodsShipmentLineHandler} (ETP-5062, sales shipments) — for both, a manually-added
+   * line must always start at its own default (0) instead of silently jumping to the product's
+   * on-hand quantity, which risks moving an entire warehouse's stock by accident.
+   *
+   * <p>Mutates {@code context.getPreviousResult()} in place and returns nothing: the dispatcher
+   * (see {@link NeoHandler#afterCallout}) merges a returned {@code NeoResponse} additively only,
+   * so overriding an already-present {@code updates} key requires mutating the shared JSONObject
+   * directly rather than returning a new response.
+   *
+   * @param context the callout context; a no-op for anything other than a CALLOUT endpoint
+   * @param log     the caller's logger, used for a debug message when a value is stripped
+   */
+  static void stripStockDerivedMovementQuantity(NeoContext context, Logger log) {
+    if (context == null || !NeoEndpointType.CALLOUT.equals(context.getEndpointType())) {
+      return;
+    }
+    NeoResponse previous = context.getPreviousResult();
+    if (previous == null || previous.getBody() == null) {
+      return;
+    }
+    JSONObject updates = previous.getBody().optJSONObject("updates");
+    if (updates != null && updates.has(FIELD_MOVEMENT_QUANTITY)) {
+      updates.remove(FIELD_MOVEMENT_QUANTITY);
+      log.debug("Stripped stock-derived movementQuantity from callout response");
+    }
   }
 
   /**
