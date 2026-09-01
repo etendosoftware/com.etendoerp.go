@@ -64,6 +64,14 @@ final class AutoMatchSupport {
   private static final String KEY_STATEMENT_LINE = "statementLine";
   private static final String KEY_OPERATIONS = "operations";
   private static final String KEY_ORIGIN = "origin";
+  /**
+   * Wire keys for the accounting dimensions a rule can carry into the transaction it generates.
+   * Shared with {@link ReconciliationHandler#createTransactionForRule} — the producer and the
+   * consumer of the {@code createPayment} spec must not drift apart (ETP-4950).
+   */
+  static final String KEY_PROJECT_ID = "projectId";
+  static final String KEY_COSTCENTER_ID = "costcenterId";
+  static final String KEY_PRODUCT_ID = "productId";
 
   private static final DateTimeFormatter ISO_UTC =
       DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
@@ -114,7 +122,7 @@ final class AutoMatchSupport {
     return matchByKey(pool, target, tolerance, AutoMatchSupport::referenceKey);
   }
 
-  private static List<FIN_FinaccTransaction> loadUnreconciledSameSign(String accountId,
+  static List<FIN_FinaccTransaction> loadUnreconciledSameSign(String accountId,
       BigDecimal target, java.util.Set<String> usedTxnIds, int dateToleranceDays,
       java.util.Date lineDate) {
     String hql = "select ft from " + FIN_FinaccTransaction.ENTITY_NAME + " as ft"
@@ -150,10 +158,16 @@ final class AutoMatchSupport {
   }
 
   /**
-   * Computes the effective amount tolerance as max(SIGNAL_MATCH_TOLERANCE, abs(target) * pct/100).
-   * When {@code pct} is zero the floor tolerance is returned (preserving the current behaviour).
+   * Rounding slack for a 1:N signal-group SUM, as max(SIGNAL_MATCH_TOLERANCE, abs(target) *
+   * pct/100). A zero {@code pct} yields the one-cent floor rather than disabling anything, because
+   * summing several transactions legitimately drifts by a cent and nothing is POSTED on this path —
+   * the group either sums to the line or it does not.
+   *
+   * <p><b>Not a posting threshold.</b> {@link NearMatchSupport#differenceTolerance} reads the very same
+   * {@code EM_ETGO_Amount_Tolerance} column with the opposite convention (0 disables) because it
+   * decides whether an accounting entry is created. Two names for two purposes: never swap them.
    */
-  static BigDecimal computeAmountTolerance(BigDecimal target, BigDecimal pct) {
+  static BigDecimal signalGroupTolerance(BigDecimal target, BigDecimal pct) {
     if (pct == null || pct.signum() == 0) {
       return SIGNAL_MATCH_TOLERANCE;
     }
@@ -249,7 +263,7 @@ final class AutoMatchSupport {
         nextRemainingAbs, picked);
   }
 
-  private static BigDecimal txnSignedAmount(FIN_FinaccTransaction t) {
+  static BigDecimal txnSignedAmount(FIN_FinaccTransaction t) {
     return nullSafe(t.getDepositAmount()).subtract(nullSafe(t.getPaymentAmount()));
   }
 
@@ -331,6 +345,7 @@ final class AutoMatchSupport {
       proposedOp.put(KEY_ID, "new");
       proposedOp.put("glItemId", StringUtils.defaultIfBlank(rule.glItemId, ""));
       proposedOp.put("bpartnerId", StringUtils.defaultIfBlank(rule.bpartnerId, ""));
+      putRuleDimensions(proposedOp, rule);
       proposedOp.put(KEY_AMOUNT, lineAmt);
       proposedOp.put(KEY_IS_NEW, true);
       ops.put(proposedOp);
@@ -353,10 +368,24 @@ final class AutoMatchSupport {
       cp.put("glItemId", StringUtils.defaultIfBlank(rule.glItemId, ""));
       cp.put("bpartnerId", StringUtils.defaultIfBlank(rule.bpartnerId, ""));
       cp.put("transactionTypeId", StringUtils.defaultIfBlank(rule.transactionTypeId, ""));
+      putRuleDimensions(cp, rule);
       cp.put(KEY_AMOUNT, lineAmt);
       group.put("createPayment", cp);
     }
     return group;
+  }
+
+  /**
+   * Copies the rule's accounting dimensions (project, cost center, product) onto a suggestion
+   * payload. Before ETP-4950 these three were loaded by {@link MatchRuleEngine} and then dropped
+   * here, so the movement Automatch generated never carried them. Whether a dimension is actually
+   * assignable is decided later, against the account's active dimensions, in
+   * {@link ReconciliationHandler#createTransactionForRule}.
+   */
+  static void putRuleDimensions(JSONObject target, MatchRuleEngine.Rule rule) throws JSONException {
+    target.put(KEY_PROJECT_ID, StringUtils.defaultIfBlank(rule.projectId, ""));
+    target.put(KEY_COSTCENTER_ID, StringUtils.defaultIfBlank(rule.costCenterId, ""));
+    target.put(KEY_PRODUCT_ID, StringUtils.defaultIfBlank(rule.productId, ""));
   }
 
   static JSONObject lineToJson(FIN_BankStatementLine line) throws JSONException {
@@ -471,14 +500,19 @@ final class AutoMatchSupport {
       List<MatchRuleEngine.Rule> rules, int dateTolDays, BigDecimal amtTolPct,
       Set<String> usedTxnIds, List<FIN_FinaccTransaction> excludedTxns) {
     FIN_MatchedTransaction matched = standardMatch(account, line, dateTolDays, excludedTxns);
-    if (matched != null && FIN_MatchedTransaction.STRONG.equals(matched.getMatchLevel())) {
+    // Core's STRONG/WEAK distinction is about DOCUMENTARY EVIDENCE (does the reference / partner
+    // corroborate the hit), never about amount or date — both are exact either way. So a WEAK match
+    // has no deviation at all and belongs in "suggested" alongside STRONG. Mapping it to
+    // "difference" (as this did before ETP-4965) made that filter mean two unrelated things and left
+    // it unable to show the one thing its name promises.
+    if (matched != null) {
       usedTxnIds.add(matched.getTransaction().getId());
       excludedTxns.add(matched.getTransaction());
       return STATE_SUGGESTED;
     }
     if (account != null && StringUtils.isNotBlank(account.getId())) {
       BigDecimal target = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
-      BigDecimal amtTol = computeAmountTolerance(target, amtTolPct);
+      BigDecimal amtTol = signalGroupTolerance(target, amtTolPct);
       List<FIN_FinaccTransaction> signalGroup =
           findSignalGroup(account.getId(), line, usedTxnIds, amtTol, dateTolDays);
       if (!signalGroup.isEmpty()) {
@@ -486,9 +520,12 @@ final class AutoMatchSupport {
         excludedTxns.addAll(signalGroup);
         return STATE_SUGGESTED;
       }
-    }
-    if (matched != null) {
-      return STATE_DIFFERENCE;
+      // The only path that applies the account's amount/date tolerance to a 1:1 match. Runs after
+      // the exact-match branches so a real suggestion is never downgraded to a difference.
+      if (NearMatchSupport.findNearMatch(account.getId(), line, usedTxnIds, excludedTxns,
+          NearMatchSupport.differenceTolerance(target, amtTolPct), dateTolDays) != null) {
+        return STATE_DIFFERENCE;
+      }
     }
     String desc = StringUtils.trimToEmpty(line.getDescription());
     String ref = StringUtils.trimToEmpty(line.getReferenceNo());
@@ -608,7 +645,7 @@ final class AutoMatchSupport {
       int dateTolDays, BigDecimal amtTolPct) throws JSONException {
     BigDecimal target = ReconciliationSupport.nullSafe(line.getCramount())
         .subtract(ReconciliationSupport.nullSafe(line.getDramount()));
-    BigDecimal amtTol = computeAmountTolerance(target, amtTolPct);
+    BigDecimal amtTol = signalGroupTolerance(target, amtTolPct);
     List<FIN_FinaccTransaction> signalGroup =
         findSignalGroup(accountId, line, usedTxnIds, amtTol, dateTolDays);
     if (!signalGroup.isEmpty()) {
@@ -616,6 +653,20 @@ final class AutoMatchSupport {
       excludedTxns.addAll(signalGroup);
       groups.put(buildMultiGroup(line, signalGroup));
       return new int[]{signalGroup.size(), 0};
+    }
+    // Pass 1c (ETP-4965): the 1:1 near match. Sits HERE — after the signal group, before the rule
+    // engine — so this preview proposes groups in exactly the order classifyPendingLine assigns
+    // states. Anywhere else and a line with both a 1:N group and a near match would be counted
+    // "suggested" in the left panel while the automatch offered it as a difference.
+    FIN_FinaccTransaction nearMatch = NearMatchSupport.findNearMatch(accountId, line,
+        usedTxnIds, excludedTxns, NearMatchSupport.differenceTolerance(target, amtTolPct),
+        dateTolDays);
+    if (nearMatch != null) {
+      // findNearMatch already claimed it in usedTxnIds/excludedTxns. WEAK is Core's own vocabulary,
+      // carried for diagnostics only (no consumer reads it); what marks the group as a difference is
+      // the non-zero `difference` field buildStandardGroup emits, which the suggestion modal shows.
+      groups.put(buildStandardGroup(line, nearMatch, FIN_MatchedTransaction.WEAK));
+      return new int[]{1, 0};
     }
     MatchRuleEngine.MatchResult ruleResult = MatchRuleEngine.evaluate(
         StringUtils.trimToEmpty(line.getDescription()),

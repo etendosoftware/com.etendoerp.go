@@ -38,6 +38,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+import org.openbravo.model.pricing.pricelist.PriceList;
 
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 
@@ -69,6 +70,11 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   private static final String FIELD_MOVEMENT_DATE = "movementDate";
   private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
   private static final String ACTION_DOCUMENT_ACTION = "documentAction";
+  private static final String FIELD_LINKED_ORDERS = "linkedOrders";
+  private static final String FIELD_PRICE_LIST_ID = "priceListId";
+  private static final String FIELD_PRICE_LIST_IDENTIFIER = "priceList$_identifier";
+  private static final String FIELD_RESOLVED_PRICE_LIST_ID = "resolvedPriceListId";
+  private static final String FIELD_RESOLVED_PRICE_LIST_IDENTIFIER = "resolvedPriceList$_identifier";
 
   @Inject
   private CreateDraftInvoiceHandler createDraftInvoiceHandler;
@@ -137,8 +143,9 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       if (context.getRecordId() != null) {
         JSONObject shipmentRec = dataArr.getJSONObject(0);
         shipmentRec.put(FIELD_INVOICE_STATUS, computeSingle(context.getRecordId()));
-        enrichIssuerOrg(shipmentRec, context.getRecordId());
+        NeoHandlerUtils.enrichIssuerOrg(shipmentRec, context.getRecordId());
         enrichLinkedOrder(shipmentRec, context.getRecordId());
+        enrichResolvedPriceList(shipmentRec, context.getRecordId());
         enrichLinkedInvoices(shipmentRec, context.getRecordId());
         enrichReturnReceipts(shipmentRec, context.getRecordId());
         enrichCanCreateReturn(shipmentRec, context.getRecordId());
@@ -149,25 +156,6 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
     } catch (Exception e) {
       log.error("Error computing invoiceStatus for goods shipment", e);
       return null;
-    }
-  }
-
-  private void enrichIssuerOrg(JSONObject shipmentRec, String recordId) {
-    try {
-      OBContext.setAdminMode(true);
-      ShipmentInOut shipment = OBDal.getReadOnlyInstance().get(ShipmentInOut.class, recordId);
-      if (shipment == null) {
-        return;
-      }
-      String orgId = shipment.getOrganization().getId();
-      JSONObject orgInfo = NeoSessionService.resolveOrganization(orgId);
-      if (orgInfo != null) {
-        shipmentRec.put("issuerOrg", orgInfo);
-      }
-    } catch (Exception e) {
-      log.warn("Could not enrich issuer org for shipment {}: {}", recordId, e.getMessage());
-    } finally {
-      OBContext.restorePreviousMode();
     }
   }
 
@@ -227,10 +215,15 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
   @SuppressWarnings("java:S2077")
   private void enrichLinkedOrder(JSONObject shipmentRec, String shipmentId) {
     // Union: orders linked via header C_Order_ID + orders linked via imported lines
+    // ETP-5052 (post-ETP-4942 QA fix): also bring the order's own price list (id + name)
+    // via a LEFT JOIN to m_pricelist, so enrichResolvedPriceList can reuse this SAME
+    // "first linked order" resolution instead of duplicating the query.
     String sql =
-        "SELECT DISTINCT co.c_order_id, co.documentno, co.grandtotal, co.docstatus, cur.iso_code " +
+        "SELECT DISTINCT co.c_order_id, co.documentno, co.grandtotal, co.docstatus, cur.iso_code, " +
+        "  co.m_pricelist_id, pl.name " +
         "FROM c_order co " +
         "LEFT JOIN c_currency cur ON cur.c_currency_id = co.c_currency_id " +
+        "LEFT JOIN m_pricelist pl ON pl.m_pricelist_id = co.m_pricelist_id " +
         "WHERE co.isactive = 'Y' AND co.c_order_id IN (" +
         "  SELECT io.c_order_id FROM m_inout io WHERE io.m_inout_id = ? AND io.c_order_id IS NOT NULL" +
         "  UNION" +
@@ -251,12 +244,84 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
           order.put("grandTotalAmount", orderTotal != null ? orderTotal : JSONObject.NULL);
           order.put(FIELD_DOCUMENT_STATUS, rs.getString(4));
           order.put("currency$_identifier", rs.getString(5));
+          String orderPriceListId = rs.getString(6);
+          order.put(FIELD_PRICE_LIST_ID, orderPriceListId != null ? orderPriceListId : JSONObject.NULL);
+          String orderPriceListName = rs.getString(7);
+          order.put(FIELD_PRICE_LIST_IDENTIFIER, orderPriceListName != null ? orderPriceListName : JSONObject.NULL);
           orders.put(order);
         }
       }
-      shipmentRec.put("linkedOrders", orders);
+      shipmentRec.put(FIELD_LINKED_ORDERS, orders);
     } catch (Exception e) {
       log.warn("Could not enrich linked orders for shipment {}: {}", shipmentId, e.getMessage());
+    }
+  }
+
+  /**
+   * Resolves the effective sales price list to preselect in the frontend's tariff picker
+   * (ETP-5052 — QA-reported regression on ETP-4942), replicating the EXACT priority
+   * {@code CreateDraftInvoiceHandler#createInvoiceHeaderFromShipment} uses to build the real
+   * invoice header:
+   * <ol>
+   *   <li>the price list of the first linked sales order — same "linked order" notion as
+   *       {@link #enrichLinkedOrder} (i.e. {@code shipmentRec.linkedOrders[0]}), which this
+   *       method reads rather than re-querying;</li>
+   *   <li>otherwise, the Business Partner's own configured price list;</li>
+   *   <li>otherwise, neither field is added — the frontend picker already falls back to the
+   *       system default price list on its own.</li>
+   * </ol>
+   * Adds {@code resolvedPriceListId} / {@code resolvedPriceList$_identifier} to the header
+   * JSON. Must run AFTER {@link #enrichLinkedOrder} in {@link #afterHandle}, since it reads
+   * the {@code linkedOrders} array that method just populated. Defensive by design — like
+   * every other {@code enrich*} method here, a failure is logged and swallowed, never
+   * propagated to the response.
+   */
+  private void enrichResolvedPriceList(JSONObject shipmentRec, String shipmentId) {
+    try {
+      if (applyPriceListFromLinkedOrder(shipmentRec)) {
+        return;
+      }
+      applyPriceListFromBusinessPartner(shipmentRec, shipmentId);
+    } catch (Exception e) {
+      log.warn("Could not resolve price list for shipment {}: {}", shipmentId, e.getMessage());
+    }
+  }
+
+  private boolean applyPriceListFromLinkedOrder(JSONObject shipmentRec) throws JSONException {
+    JSONArray linkedOrders = shipmentRec.optJSONArray(FIELD_LINKED_ORDERS);
+    if (linkedOrders == null || linkedOrders.length() == 0) {
+      return false;
+    }
+    JSONObject firstOrder = linkedOrders.getJSONObject(0);
+    Object rawPriceListId = firstOrder.opt(FIELD_PRICE_LIST_ID);
+    String priceListId = (rawPriceListId == null || JSONObject.NULL.equals(rawPriceListId))
+        ? null : rawPriceListId.toString();
+    if (priceListId == null || priceListId.isEmpty()) {
+      return false;
+    }
+    Object rawPriceListName = firstOrder.opt(FIELD_PRICE_LIST_IDENTIFIER);
+    Object priceListName = (rawPriceListName == null || JSONObject.NULL.equals(rawPriceListName))
+        ? JSONObject.NULL : rawPriceListName.toString();
+    shipmentRec.put(FIELD_RESOLVED_PRICE_LIST_ID, priceListId);
+    shipmentRec.put(FIELD_RESOLVED_PRICE_LIST_IDENTIFIER, priceListName);
+    return true;
+  }
+
+  private void applyPriceListFromBusinessPartner(JSONObject shipmentRec, String shipmentId)
+      throws JSONException {
+    try {
+      OBContext.setAdminMode(true);
+      ShipmentInOut shipment = OBDal.getReadOnlyInstance().get(ShipmentInOut.class, shipmentId);
+      if (shipment == null || shipment.getBusinessPartner() == null) {
+        return;
+      }
+      PriceList priceList = shipment.getBusinessPartner().getPriceList();
+      if (priceList != null) {
+        shipmentRec.put(FIELD_RESOLVED_PRICE_LIST_ID, priceList.getId());
+        shipmentRec.put(FIELD_RESOLVED_PRICE_LIST_IDENTIFIER, priceList.getName());
+      }
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 
