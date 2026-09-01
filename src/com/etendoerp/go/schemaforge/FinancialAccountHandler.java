@@ -48,6 +48,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
+import com.etendoerp.go.schemaforge.handlers.FinancialAccountAccountingDefaultsSupport;
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
 
@@ -266,6 +267,7 @@ public class FinancialAccountHandler implements NeoHandler {
       FIN_FinancialAccount account = loadAccount(accountId);
       if (account != null) {
         FinancialAccountSupport.assignDefaultPaymentMethods(account);
+        FinancialAccountAccountingDefaultsSupport.applyDefaultAccountingConfiguration(account);
       }
     } catch (Exception e) {
       log.error("financial-account afterHandle: failed to assign default payment methods", e);

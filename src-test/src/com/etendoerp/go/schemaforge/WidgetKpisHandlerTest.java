@@ -18,16 +18,21 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -37,6 +42,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -102,6 +108,16 @@ class WidgetKpisHandlerTest {
         .entityName("kpis")
         .httpMethod("GET")
         .endpointType(NeoEndpointType.CRUD)
+        .build();
+  }
+
+  private NeoContext getContextWithRange(String range) {
+    return NeoContext.builder()
+        .specName("dashboard")
+        .entityName("kpis")
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .queryParams(Map.of("range", range))
         .build();
   }
 
@@ -208,6 +224,94 @@ class WidgetKpisHandlerTest {
     assertEquals("number",   data.getJSONObject(3).getString("format"));
   }
 
+  // ── ETP-5011: calendar-year query, range selector ignored on purpose ──────
+
+  /**
+   * Regression test for ETP-5011: the revenue/expense SQL must aggregate over the
+   * full calendar year (Jan 1st - Dec 31st), not a single month anchored to the most
+   * recent invoice.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandle_queriesFullCalendarYear_notJustCurrentMonth() throws Exception {
+    mockActivityQuery("1");
+    mockRevenueAndPendingQueries();
+
+    handler.handle(getContext());
+
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    verify(session, atLeastOnce()).createNativeQuery(sqlCaptor.capture());
+    boolean anyRevenueSqlUsesYearTruncation = sqlCaptor.getAllValues().stream()
+        .filter(sql -> sql.contains("totallines"))
+        .anyMatch(sql -> sql.contains("date_trunc('year'"));
+
+    assertTrue(anyRevenueSqlUsesYearTruncation,
+        "Revenue/expense SQL must aggregate by calendar year (date_trunc('year', ...))");
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandle_doesNotAnchorToMostRecentInvoiceMonth() throws Exception {
+    mockActivityQuery("1");
+    mockRevenueAndPendingQueries();
+
+    handler.handle(getContext());
+
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    verify(session, atLeastOnce()).createNativeQuery(sqlCaptor.capture());
+    boolean anyRevenueSqlAnchorsToMonth = sqlCaptor.getAllValues().stream()
+        .filter(sql -> sql.contains("totallines"))
+        .anyMatch(sql -> sql.contains("date_trunc('month'") || sql.contains("MAX(dateinvoiced)"));
+
+    assertFalse(anyRevenueSqlAnchorsToMonth,
+        "Revenue/expense SQL must not be anchored to the most recent invoice month anymore");
+  }
+
+  /**
+   * Regression test for ETP-5011: the Financial Summary widget deliberately ignores
+   * the dashboard date-range selector (?range=). It must query the same calendar-year
+   * SQL regardless of whether a range query param is present.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandle_ignoresRangeQueryParam() throws Exception {
+    mockActivityQuery("1");
+    mockRevenueAndPendingQueries();
+
+    handler.handle(getContextWithRange("last30d"));
+
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    verify(session, atLeastOnce()).createNativeQuery(sqlCaptor.capture());
+    boolean anyRevenueSqlUsesYearTruncation = sqlCaptor.getAllValues().stream()
+        .filter(sql -> sql.contains("totallines"))
+        .anyMatch(sql -> sql.contains("date_trunc('year'"));
+
+    assertTrue(anyRevenueSqlUsesYearTruncation,
+        "Presence of ?range= must not change the KPI SQL — this widget is always calendar-year");
+  }
+
+  /**
+   * Regression test for ETP-5011 (Inconsistency 2): revenue/expenses must use
+   * {@code totallines} (tax-exclusive "base imponible"), not {@code grandtotal}
+   * (which includes VAT/IVA). VAT is not the company's own income or expense.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandle_usesTaxExclusiveTotalNotGrandtotal() throws Exception {
+    mockActivityQuery("1");
+    mockRevenueAndPendingQueries();
+
+    handler.handle(getContext());
+
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    verify(session, atLeastOnce()).createNativeQuery(sqlCaptor.capture());
+    boolean anyQueryStillSumsGrandtotal = sqlCaptor.getAllValues().stream()
+        .anyMatch(sql -> sql.contains("SUM(CASE") && sql.contains("grandtotal"));
+
+    assertFalse(anyQueryStillSumsGrandtotal,
+        "Revenue/expense SQL must sum totallines (net), not grandtotal (gross, VAT included)");
+  }
+
   // ── calculateTrend (private static, via reflection) ──────────────────────
 
   @Test
@@ -285,7 +389,7 @@ class WidgetKpisHandlerTest {
     when(activityQuery.setMaxResults(1)).thenReturn(activityQuery);
     when(activityQuery.uniqueResult()).thenReturn("1");
 
-    when(session.createNativeQuery(contains("grandtotal"))).thenReturn(revenueQuery);
+    when(session.createNativeQuery(contains("totallines"))).thenReturn(revenueQuery);
     when(revenueQuery.setParameter(anyString(), any())).thenReturn(revenueQuery);
     when(revenueQuery.list()).thenReturn(Collections.singletonList(zeroRow));
 

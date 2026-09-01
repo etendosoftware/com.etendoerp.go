@@ -447,9 +447,23 @@ class NeoFieldFilterTest {
           Collections.emptyMap(), propToApiKey);
 
       // The DAL name "dateAcct" must NOT appear: the caller never sees it, so asking for it is
-      // as wrong as asking for a field that does not exist.
-      assertEquals(Optional.of(Set.of("id", "documentNo", "accountingDate")),
+      // as wrong as asking for a field that does not exist. "updated" DOES appear: it is served
+      // unconditionally on the read path (ETP-5073).
+      assertEquals(Optional.of(Set.of("id", "documentNo", "accountingDate", "updated")),
           filter.emittableResponseKeys());
+    }
+
+    @Test
+    @DisplayName("'updated' is emittable even though no window can declare it (ETP-5073)")
+    void alwaysReadableKeyIsEmittable() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "name"));
+      NeoFieldFilter filter = activeFilter(included, included);
+
+      // Regression: filterGetResponse serves "updated", but emittableResponseKeys used to omit it,
+      // so the MCP projection validator reported it in "unknownFields" while handing the caller
+      // its value. Declaring it here keeps that array honest; the write path is unaffected.
+      Set<String> emittable = filter.emittableResponseKeys().orElseThrow();
+      assertTrue(emittable.contains("updated"));
     }
 
     @Test
