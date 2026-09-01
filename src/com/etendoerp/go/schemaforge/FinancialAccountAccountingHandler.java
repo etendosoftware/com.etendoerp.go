@@ -44,7 +44,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 /**
  * NeoHandler for the {@code accountingConfiguration} entity of the {@code financial-account} spec
- * (ETP-4530 — Tab Contabilidad of the account edit form).
+ * (ETP-4530 — Tab Contabilidad of the account edit form; extended by ETP-4872 to the full,
+ * account-type-dependent field set).
  *
  * <p>{@code FIN_Financial_Account_Acct} (AD tab "Accounting Configuration") is a per-ledger row:
  * one financial account can have one configuration row per active {@link AcctSchema}. This
@@ -53,10 +54,18 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * (account, ledger) pair — finding it on GET, finding-or-creating it on save — so the frontend
  * never has to know whether the row already exists.
  *
- * <p>Only the two fields the ticket requires are exposed for write: {@code fINAssetAcct}
- * ("Cuenta bancaria", required) and {@code fINTransitoryAcct} ("Cuenta transitoria", optional).
- * The remaining accounting-configuration columns (deposit/withdrawal/credit/debit/etc.) stay
- * {@code discarded} in {@code decisions.json} — out of scope for this ticket.
+ * <p>Nine fields are exposed for read/write, covering the Banco/Caja/Tarjeta account types
+ * combined: {@code fINBankrevaluationgainAcct}, {@code fINBankrevaluationlossAcct},
+ * {@code fINBankfeeAcct} (Banco only), and {@code inTransitPaymentAccountIN},
+ * {@code depositAccount}, {@code clearedPaymentAccount}, {@code fINOutIntransitAcct},
+ * {@code withdrawalAccount}, {@code clearedPaymentAccountOUT} (all three types). None of the
+ * nine is required — whichever subset the active account type's form renders is whatever the
+ * frontend sends; this handler has no notion of account type and always reads/writes exactly
+ * what the request body contains (PATCH-like semantics, see {@link #applyCombination}).
+ * {@code fINAssetAcct} / {@code fINTransitoryAcct} (the original ETP-4530 pair) are retired and
+ * no longer read or written here. The remaining accounting-configuration columns
+ * (receive/make payment, credit/debit, enablebankstatement) stay {@code discarded} in
+ * {@code decisions.json} — out of scope.
  *
  * <p>Registered via {@code entities.accountingConfiguration.javaQualifier =
  * "financialAccountAccountingHandler"} in {@code artifacts/financial-account/decisions.json}.
@@ -65,13 +74,22 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  *
  * <pre>
  * GET  /sws/neo/financial-account/accountingConfiguration?financialAccountId={id}
- *   → { id, financialAccountId, fINAssetAcct, fINAssetAcct$_identifier,
- *       fINTransitoryAcct, fINTransitoryAcct$_identifier, ledgerConfigured,
- *       catalogs: { accounts: [{ id, code, name }, ...] } }
+ *   → { id, financialAccountId,
+ *       fINBankrevaluationgainAcct, fINBankrevaluationgainAcct$_identifier,
+ *       fINBankrevaluationlossAcct, fINBankrevaluationlossAcct$_identifier,
+ *       fINBankfeeAcct, fINBankfeeAcct$_identifier,
+ *       inTransitPaymentAccountIN, inTransitPaymentAccountIN$_identifier,
+ *       depositAccount, depositAccount$_identifier,
+ *       clearedPaymentAccount, clearedPaymentAccount$_identifier,
+ *       fINOutIntransitAcct, fINOutIntransitAcct$_identifier,
+ *       withdrawalAccount, withdrawalAccount$_identifier,
+ *       clearedPaymentAccountOUT, clearedPaymentAccountOUT$_identifier,
+ *       ledgerConfigured, catalogs: { accounts: [{ id, code, name }, ...] } }
  *
  * POST/PUT /sws/neo/financial-account/accountingConfiguration
- *   body: { financialAccountId, fINAssetAcct, fINTransitoryAcct? }
- *   → same shape as GET, reflecting the persisted row
+ *   body: { financialAccountId, <any subset of the 9 fields above> }
+ *   → same shape as GET, reflecting the persisted row. A field key omitted from the body
+ *     leaves the stored value untouched; a field present with a null/blank value clears it.
  * </pre>
  */
 @Named("financialAccountAccountingHandler")
@@ -89,8 +107,15 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
   private static final String PARAM_FINANCIAL_ACCOUNT_ID = "financialAccountId";
   private static final String FIELD_ID = "id";
   private static final String FIELD_FINANCIAL_ACCOUNT_ID = "financialAccountId";
-  private static final String FIELD_ASSET_ACCT = "fINAssetAcct";
-  private static final String FIELD_TRANSITORY_ACCT = "fINTransitoryAcct";
+  private static final String FIELD_BANK_REVAL_GAIN_ACCT = "fINBankrevaluationgainAcct";
+  private static final String FIELD_BANK_REVAL_LOSS_ACCT = "fINBankrevaluationlossAcct";
+  private static final String FIELD_BANK_FEE_ACCT = "fINBankfeeAcct";
+  private static final String FIELD_IN_TRANSIT_IN_ACCT = "inTransitPaymentAccountIN";
+  private static final String FIELD_DEPOSIT_ACCT = "depositAccount";
+  private static final String FIELD_CLEARED_PAYMENT_ACCT_IN = "clearedPaymentAccount";
+  private static final String FIELD_IN_TRANSIT_OUT_ACCT = "fINOutIntransitAcct";
+  private static final String FIELD_WITHDRAWAL_ACCT = "withdrawalAccount";
+  private static final String FIELD_CLEARED_PAYMENT_ACCT_OUT = "clearedPaymentAccountOUT";
   private static final String FIELD_LEDGER_CONFIGURED = "ledgerConfigured";
   private static final String IDENTIFIER_SUFFIX = "$_identifier";
 
@@ -146,25 +171,19 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
       throw new OBException("The account's organization has no general ledger configured");
     }
 
-    String assetAcctId = StringUtils.trimToNull(body.optString(FIELD_ASSET_ACCT, null));
-    if (assetAcctId == null) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Cuenta bancaria is required");
-    }
-    AccountingCombination assetAcct = resolveCombination(assetAcctId, ledger);
-    AccountingCombination transitoryAcct = null;
-    if (body.has(FIELD_TRANSITORY_ACCT) && !body.isNull(FIELD_TRANSITORY_ACCT)) {
-      String transitoryId = StringUtils.trimToNull(body.optString(FIELD_TRANSITORY_ACCT, null));
-      if (transitoryId != null) {
-        transitoryAcct = resolveCombination(transitoryId, ledger);
-      }
-    }
-
     FIN_FinancialAccountAccounting row = findOrCreateRow(account, ledger);
-    row.setFINAssetAcct(assetAcct);
-    row.setFINTransitoryAcct(transitoryAcct);
+    applyCombination(row::setFINBankrevaluationgainAcct, body, FIELD_BANK_REVAL_GAIN_ACCT, ledger);
+    applyCombination(row::setFINBankrevaluationlossAcct, body, FIELD_BANK_REVAL_LOSS_ACCT, ledger);
+    applyCombination(row::setFINBankfeeAcct, body, FIELD_BANK_FEE_ACCT, ledger);
+    applyCombination(row::setInTransitPaymentAccountIN, body, FIELD_IN_TRANSIT_IN_ACCT, ledger);
+    applyCombination(row::setDepositAccount, body, FIELD_DEPOSIT_ACCT, ledger);
+    applyCombination(row::setClearedPaymentAccount, body, FIELD_CLEARED_PAYMENT_ACCT_IN, ledger);
+    applyCombination(row::setFINOutIntransitAcct, body, FIELD_IN_TRANSIT_OUT_ACCT, ledger);
+    applyCombination(row::setWithdrawalAccount, body, FIELD_WITHDRAWAL_ACCT, ledger);
+    applyCombination(row::setClearedPaymentAccountOUT, body, FIELD_CLEARED_PAYMENT_ACCT_OUT, ledger);
     // WARNING (ETP-4530): this flips EnableBankStatement to Y on EVERY Contabilidad save, not just
-    // the two fields this tab visually presents — Classic's bank-statement accounting engine only
-    // reads fINAssetAcct/fINTransitoryAcct when this flag is Y, so without it the save would have
+    // the fields this tab visually presents — Classic's bank-statement accounting engine only
+    // reads this row's accounting fields when this flag is Y, so without it the save would have
     // no observable effect in Classic. The flag itself is NOT exposed as an editable field here
     // (out of scope for this ticket), so a user who later opens the equivalent Classic window will
     // find it pre-checked without having touched it directly — see financial-account.md, "Not
@@ -174,6 +193,22 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
     OBDal.getInstance().flush();
 
     return NeoResponse.ok(wrapSingle(buildRow(account, ledger, row)));
+  }
+
+  /**
+   * Resolves and sets one optional {@link AccountingCombination} field. A field key omitted
+   * entirely from the request body leaves the stored value untouched (PATCH-like semantics, so
+   * a per-account-type partial form never accidentally nulls out fields it doesn't render); a
+   * field present with a null/blank value explicitly clears it. No field is required — see the
+   * class Javadoc above.
+   */
+  private void applyCombination(java.util.function.Consumer<AccountingCombination> setter,
+      JSONObject body, String field, AcctSchema ledger) {
+    if (!body.has(field)) {
+      return;
+    }
+    String id = StringUtils.trimToNull(body.optString(field, null));
+    setter.accept(id != null ? resolveCombination(id, ledger) : null);
   }
 
   // ---------------------------------------------------------------------------
@@ -271,8 +306,15 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
     JSONObject out = new JSONObject();
     out.put(FIELD_ID, JSONObject.NULL);
     out.put(FIELD_FINANCIAL_ACCOUNT_ID, account.getId());
-    out.put(FIELD_ASSET_ACCT, JSONObject.NULL);
-    out.put(FIELD_TRANSITORY_ACCT, JSONObject.NULL);
+    putCombination(out, FIELD_BANK_REVAL_GAIN_ACCT, null);
+    putCombination(out, FIELD_BANK_REVAL_LOSS_ACCT, null);
+    putCombination(out, FIELD_BANK_FEE_ACCT, null);
+    putCombination(out, FIELD_IN_TRANSIT_IN_ACCT, null);
+    putCombination(out, FIELD_DEPOSIT_ACCT, null);
+    putCombination(out, FIELD_CLEARED_PAYMENT_ACCT_IN, null);
+    putCombination(out, FIELD_IN_TRANSIT_OUT_ACCT, null);
+    putCombination(out, FIELD_WITHDRAWAL_ACCT, null);
+    putCombination(out, FIELD_CLEARED_PAYMENT_ACCT_OUT, null);
     out.put(FIELD_LEDGER_CONFIGURED, false);
     out.put("catalogs", buildCatalogs(null));
     return out;
@@ -283,8 +325,15 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
     JSONObject out = new JSONObject();
     out.put(FIELD_ID, row != null ? row.getId() : JSONObject.NULL);
     out.put(FIELD_FINANCIAL_ACCOUNT_ID, account.getId());
-    putCombination(out, FIELD_ASSET_ACCT, row != null ? row.getFINAssetAcct() : null);
-    putCombination(out, FIELD_TRANSITORY_ACCT, row != null ? row.getFINTransitoryAcct() : null);
+    putCombination(out, FIELD_BANK_REVAL_GAIN_ACCT, row != null ? row.getFINBankrevaluationgainAcct() : null);
+    putCombination(out, FIELD_BANK_REVAL_LOSS_ACCT, row != null ? row.getFINBankrevaluationlossAcct() : null);
+    putCombination(out, FIELD_BANK_FEE_ACCT, row != null ? row.getFINBankfeeAcct() : null);
+    putCombination(out, FIELD_IN_TRANSIT_IN_ACCT, row != null ? row.getInTransitPaymentAccountIN() : null);
+    putCombination(out, FIELD_DEPOSIT_ACCT, row != null ? row.getDepositAccount() : null);
+    putCombination(out, FIELD_CLEARED_PAYMENT_ACCT_IN, row != null ? row.getClearedPaymentAccount() : null);
+    putCombination(out, FIELD_IN_TRANSIT_OUT_ACCT, row != null ? row.getFINOutIntransitAcct() : null);
+    putCombination(out, FIELD_WITHDRAWAL_ACCT, row != null ? row.getWithdrawalAccount() : null);
+    putCombination(out, FIELD_CLEARED_PAYMENT_ACCT_OUT, row != null ? row.getClearedPaymentAccountOUT() : null);
     out.put(FIELD_LEDGER_CONFIGURED, true);
     out.put("catalogs", buildCatalogs(ledger));
     return out;
