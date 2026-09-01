@@ -234,6 +234,10 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String KEY_DESCRIPTION = "description";
   private static final String KEY_PENDING_BALANCE = "pendingBalance";
   private static final String KEY_SUGGESTED = "suggested";
+  /** Candidate matched only within the account's amount/date tolerance — drives the red badge. */
+  private static final String KEY_NEAR_MATCH = "nearMatch";
+  /** Why an un-reconcile / reactivate could not complete — shown verbatim by the client. */
+  static final String KEY_FAILURE_REASON = "failureReason";
   private static final String COL_PARTNER_NAME = "partner_name";
   static final String KEY_COUNTS = "counts";
   static final String KEY_TOTAL = "total";
@@ -517,16 +521,32 @@ public class ReconciliationHandler implements NeoHandler {
     BigDecimal candidateAmtTolPct = candidateTols[1];
 
     Set<String> suggestedIds = suggestedTransactionIds(accountId, lineId, candidateDateTolDays);
+    // ETP-4965: ids that matched only WITHIN TOLERANCE. Tracked apart from suggestedIds so the row
+    // can carry the red "with difference" badge instead of the blue "with suggestion" — the
+    // deviation is the point of the row and has to be visible before the user reconciles.
+    Set<String> nearMatchIds = new HashSet<>();
     // 1:N: if the selected line amount equals the sum of a signal group (same logic the automatch
     // uses), pre-mark ALL of its operations as suggested — not only a single 1:1 standard match.
     if (selectedLine != null) {
       BigDecimal lineTarget = nullSafe(selectedLine.getCramount())
           .subtract(nullSafe(selectedLine.getDramount()));
       BigDecimal candidateAmtTol =
-          AutoMatchSupport.computeAmountTolerance(lineTarget, candidateAmtTolPct);
+          AutoMatchSupport.signalGroupTolerance(lineTarget, candidateAmtTolPct);
       for (FIN_FinaccTransaction t : AutoMatchSupport.findSignalGroup(
           accountId, selectedLine, new HashSet<>(), candidateAmtTol, candidateDateTolDays)) {
         suggestedIds.add(t.getId());
+      }
+      // ETP-4965: same precedence as classifyPendingLine and the automatch preview — an exact 1:1
+      // or a signal group wins, and the near match is only offered when neither produced anything.
+      // Fresh accumulators: this is a single-line view, with no earlier line to have claimed one.
+      if (suggestedIds.isEmpty()) {
+        FIN_FinaccTransaction nearMatch = NearMatchSupport.findNearMatch(
+            accountId, selectedLine, new HashSet<>(), new ArrayList<>(),
+            NearMatchSupport.differenceTolerance(lineTarget, candidateAmtTolPct),
+            candidateDateTolDays);
+        if (nearMatch != null) {
+          nearMatchIds.add(nearMatch.getId());
+        }
       }
     }
 
@@ -565,7 +585,8 @@ public class ReconciliationHandler implements NeoHandler {
           // allocations against invoices are a follow-up).
           row.put(KEY_PENDING_BALANCE, amount);
           row.put(KEY_STATUS, STATUS_PENDING);
-          row.put(KEY_SUGGESTED, suggestedIds.contains(id));
+          row.put(KEY_SUGGESTED, suggestedIds.contains(id) || nearMatchIds.contains(id));
+          row.put(KEY_NEAR_MATCH, nearMatchIds.contains(id));
           candidates.put(row);
         }
       }
@@ -742,8 +763,12 @@ public class ReconciliationHandler implements NeoHandler {
     if (periodError != null) {
       return periodError;
     }
+    // Why each failure happened, keyed by transaction id. The removal helpers swallow their
+    // exceptions so one failure does not abort the batch; without this accumulator the reason
+    // reached the server log only, and the client could say WHICH transactions failed but never WHY.
+    java.util.Map<String, String> failureReasons = new java.util.LinkedHashMap<>();
     ReconciliationHandlerSupport.removeSelectedFromReconciliations(
-        this, account, recById, selectedByRec);
+        this, account, recById, selectedByRec, failureReasons);
 
     // Core's own removal utilities commit mid-flow, so re-check the ACTUAL post-state of every
     // requested transaction — same rationale as removeOperation.
@@ -768,6 +793,15 @@ public class ReconciliationHandler implements NeoHandler {
     data.put(KEY_STATEMENT_LINE_ID, statementLineId);
     data.put("transactionIds", new JSONArray(doneIds));
     data.put("failedTransactionIds", new JSONArray(failedIds));
+    // The cause of the first failure, translated. The commonest by far is a closed accounting
+    // period, which the user can act on — but only if it is actually shown, so it travels with the
+    // 200 rather than staying in the log. Failures within one request share a cause in practice
+    // (one closed period, one Core guard), so a single message beats a per-transaction list the
+    // client has no room to render.
+    String failureReason = ReconciliationHandlerSupport.firstFailureReason(failedIds, failureReasons);
+    if (StringUtils.isNotBlank(failureReason)) {
+      data.put(KEY_FAILURE_REASON, failureReason);
+    }
     data.put(KEY_UPDATED_BALANCE, updatedBalance);
     return envelope(data);
   }
@@ -776,6 +810,24 @@ public class ReconciliationHandler implements NeoHandler {
   // POST reconcileGroup
   // ---------------------------------------------------------------------------
 
+  /**
+   * Reconciles one statement line against the selected operations and/or invoices.
+   *
+   * <p><b>ETP-4965 — the difference is funded before composing.</b> When the operations fall short
+   * of the line by a gap within the account's amount tolerance,
+   * {@link ReconciliationDifferenceSupport#applyInlineDifference} creates the compensating GL-item
+   * movement and joins it to the selection, so the sum matches the line exactly and Core leaves both
+   * split halves reconciled instead of a pending remainder nothing can settle.
+   *
+   * <p><b>Why that helper may roll back.</b> The guards run in the only order the data allows, and
+   * that order is not fully safe on its own: {@code payInvoices} above WRITES payments and
+   * transactions, and the gap is not knowable until it has. So by the time a missing GL Item
+   * Difference is detected on the invoice path, writes are already pending — and a returned
+   * {@code NeoResponse.error} commits rather than rolls back (see
+   * {@link ReconciliationDifferenceSupport}'s header javadoc). The helper therefore rolls back
+   * explicitly before returning that 400, the same way {@link ReconciliationFlowSupport#compose}
+   * does when Core rejects the reconciliation.
+   */
   NeoResponse reconcileGroup(JSONObject body) throws Exception {
     String accountId = body.optString(KEY_FINANCIAL_ACCOUNT_ID, null);
     String statementLineId = body.optString(KEY_STATEMENT_LINE_ID, null);
@@ -833,6 +885,16 @@ public class ReconciliationHandler implements NeoHandler {
         operationIds, accountId, line, this::loadTransaction, TOLERANCE);
     if (opError != null) {
       return opError;
+    }
+
+    // ETP-4965: fund a within-tolerance shortfall with a GL-item movement BEFORE composing, so the
+    // operations sum exactly to the line and Core leaves every split half reconciled instead of a
+    // dangling pending remainder. Mutates operationIds on success.
+    operationIds = new ArrayList<>(operationIds);
+    NeoResponse diffError = ReconciliationDifferenceSupport.applyInlineDifference(
+        this, account, line, operationIds, body, hasInvoices);
+    if (diffError != null) {
+      return diffError;
     }
 
     return ReconciliationFlowSupport.compose(this, account, line, operationIds);
@@ -1097,11 +1159,26 @@ public class ReconciliationHandler implements NeoHandler {
               + e.getMessage());
     }
 
+    // Unpost BEFORE anything is captured: ResetAccounting runs native SQL and clears the session, so
+    // `rec`, `line` and `matched` would all be detached if this ran later. Everything below is
+    // re-read afterwards for that reason.
+    ReconciliationHandlerSupport.unpostBeforeUndo(rec.getId());
+    rec = OBDal.getInstance().get(FIN_Reconciliation.class, rec.getId());
+    line = loadLine(statementLineId);
+
     List<FIN_FinaccTransaction> matched = transactionsOfLineIn(line, rec);
     if (ReconciliationHandlerSupport.coversReconciliation(rec, matched)) {
+      // Unlike the two batch endpoints, this one lets the failure propagate: runPostAction turns it
+      // into an error response, so the caller already learns something went wrong.
       undoReconciliation(account, rec, matched);
     } else {
-      ReconciliationHandlerSupport.detachSelected(this, matched);
+      // The accumulator is intentionally discarded HERE and only here. detachSelected swallows its
+      // per-transaction failures by design, and this endpoint — unlike removeOperation and
+      // reactivateSelected — never re-checks the post-state and always answers {reactivated:true}.
+      // Reporting a reason would therefore mean also giving it a failedTransactionIds contract it
+      // does not have, which is a product change, not a compile fix. Pre-existing gap, deliberately
+      // left as-is; see the un-reconcile section of docs/generated-custom-windows/financial-account.md.
+      ReconciliationHandlerSupport.detachSelected(this, matched, new java.util.LinkedHashMap<>());
     }
     normalizeReactivatedMatchGroup(line);
 
@@ -1199,8 +1276,12 @@ public class ReconciliationHandler implements NeoHandler {
     if (periodError != null) {
       return periodError;
     }
+    // Why each failure happened, keyed by transaction id. The removal helpers swallow their
+    // exceptions so one failure does not abort the batch; without this accumulator the reason
+    // reached the server log only, and the client could say WHICH transactions failed but never WHY.
+    java.util.Map<String, String> failureReasons = new java.util.LinkedHashMap<>();
     ReconciliationHandlerSupport.removeSelectedFromReconciliations(
-        this, account, recById, selectedByRec);
+        this, account, recById, selectedByRec, failureReasons);
 
     // Core's own removal utilities commit mid-flow (SessionHandler#commitAndStart), so a failure
     // partway through the batch does not roll back what already persisted, and
@@ -1229,6 +1310,15 @@ public class ReconciliationHandler implements NeoHandler {
     data.put(KEY_STATEMENT_LINE_ID, statementLineId);
     data.put("transactionIds", new JSONArray(removedIds));
     data.put("failedTransactionIds", new JSONArray(failedIds));
+    // The cause of the first failure, translated. The commonest by far is a closed accounting
+    // period, which the user can act on — but only if it is actually shown, so it travels with the
+    // 200 rather than staying in the log. Failures within one request share a cause in practice
+    // (one closed period, one Core guard), so a single message beats a per-transaction list the
+    // client has no room to render.
+    String failureReason = ReconciliationHandlerSupport.firstFailureReason(failedIds, failureReasons);
+    if (StringUtils.isNotBlank(failureReason)) {
+      data.put(KEY_FAILURE_REASON, failureReason);
+    }
     data.put(KEY_UPDATED_BALANCE, updatedBalance);
     return envelope(data);
   }
