@@ -412,8 +412,16 @@ public class YearCloseHandlerTest {
     }
   }
 
+  /**
+   * ETP-4948 DEV fix: {@code isFiscalCalendarCreate} requires {@code recordId == null}, so the
+   * fiscal-year format/range check previously only ran on CREATE — a user could edit an existing
+   * year and set Fiscal Year to an out-of-range value (e.g. {@code "1800"}) with no rejection.
+   * {@link YearCloseHandler#validateFiscalYearForUpdate} now covers this same UPDATE path
+   * (renamed from {@code fiscalCalendarUpdateFallsThrough}, which documented the gap as
+   * "falls through"; it no longer does).
+   */
   @Test
-  public void fiscalCalendarUpdateFallsThrough() throws Exception {
+  public void fiscalCalendarUpdateRejectsOutOfRangeFiscalYear() throws Exception {
     NeoContext context = NeoContext.builder()
         .specName("fiscal-calendar").entityName("year")
         .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
@@ -421,27 +429,63 @@ public class YearCloseHandlerTest {
         .requestBody(new org.codehaus.jettison.json.JSONObject().put("fiscalYear", "1800"))
         .build();
 
-    assertNull(new YearCloseHandler().handle(context));
+    NeoResponse response = new YearCloseHandler().handle(context);
+
+    assertEquals(400, response.getHttpStatus());
   }
 
   /**
-   * ETP-4948 QA finding: {@code isFiscalCalendarCreate} requires {@code recordId == null}, so
-   * {@link YearCloseHandler#validateAndEnrichFiscalCalendarCreate} — the only place Issue 5's
-   * fiscal-year format/range check lives — never runs for an UPDATE. This is the same
-   * originally-reported symptom ("asd" accepted as a Fiscal Year) still reproducible by editing
-   * an existing, previously-valid year rather than creating a new one: {@code decisions.json}
-   * declares no {@code readOnlyLogic} for {@code fiscalYear}, so the field stays editable in the
-   * UI after save with no client-side format guard either. Documents the current gap (an update
-   * with garbage input falls through to default CRUD, same as {@link
-   * #fiscalCalendarUpdateFallsThrough}) rather than fixing it — QA reports, DEV fixes.
+   * ETP-4948 QA finding, now fixed: {@code isFiscalCalendarCreate} requires {@code recordId ==
+   * null}, so {@link YearCloseHandler#validateAndEnrichFiscalCalendarCreate} — the only place
+   * Issue 5's fiscal-year format/range check used to live — never ran for an UPDATE. This is the
+   * same originally-reported symptom ("asd" accepted as a Fiscal Year) reproducible by editing an
+   * existing, previously-valid year rather than creating a new one. {@link
+   * YearCloseHandler#validateFiscalYearForUpdate} now rejects it (renamed from {@code
+   * fiscalCalendarUpdateWithNonNumericFiscalYearFallsThrough}, which documented the gap as
+   * "falls through"; it no longer does).
    */
   @Test
-  public void fiscalCalendarUpdateWithNonNumericFiscalYearFallsThrough() throws Exception {
+  public void fiscalCalendarUpdateRejectsNonNumericFiscalYear() throws Exception {
     NeoContext context = NeoContext.builder()
         .specName("fiscal-calendar").entityName("year")
         .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
         .recordId(YEAR_ID)
         .requestBody(new org.codehaus.jettison.json.JSONObject().put("fiscalYear", "asd"))
+        .build();
+
+    NeoResponse response = new YearCloseHandler().handle(context);
+
+    assertEquals(400, response.getHttpStatus());
+  }
+
+  /**
+   * ETP-4948 DEV fix: a partial update that does not touch {@code fiscalYear} at all (e.g. only
+   * changing {@code Description}) must not be rejected for a field it never sent — the validation
+   * only runs when {@code fiscalYear} is actually present in the update body.
+   */
+  @Test
+  public void fiscalCalendarUpdateWithoutFiscalYearFallsThrough() throws Exception {
+    NeoContext context = NeoContext.builder()
+        .specName("fiscal-calendar").entityName("year")
+        .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+        .recordId(YEAR_ID)
+        .requestBody(new org.codehaus.jettison.json.JSONObject().put("description", "renamed"))
+        .build();
+
+    assertNull(new YearCloseHandler().handle(context));
+  }
+
+  /**
+   * ETP-4948 DEV fix: a valid fiscal-year value on update must still fall through to default CRUD
+   * (this handler only rejects invalid input, it never short-circuits a valid update).
+   */
+  @Test
+  public void fiscalCalendarUpdateWithValidFiscalYearFallsThrough() throws Exception {
+    NeoContext context = NeoContext.builder()
+        .specName("fiscal-calendar").entityName("year")
+        .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+        .recordId(YEAR_ID)
+        .requestBody(new org.codehaus.jettison.json.JSONObject().put("fiscalYear", "2027"))
         .build();
 
     assertNull(new YearCloseHandler().handle(context));

@@ -117,6 +117,10 @@ public class YearCloseHandler implements NeoHandler {
     if (createResponse != null || isFiscalCalendarCreate(context)) {
       return createResponse;
     }
+    NeoResponse updateValidation = validateFiscalYearForUpdate(context);
+    if (updateValidation != null) {
+      return updateValidation;
+    }
     if (fiscalYearPeriodsHandler.handles(context)) {
       return fiscalYearPeriodsHandler.handle(context);
     }
@@ -212,6 +216,50 @@ public class YearCloseHandler implements NeoHandler {
         && context.getRecordId() == null
         && SPEC_FISCAL_CALENDAR.equals(context.getSpecName())
         && ENTITY_YEAR.equals(context.getEntityName());
+  }
+
+  /**
+   * ETP-4948 QA fix: {@link #isFiscalCalendarCreate} requires {@code recordId == null}, so the
+   * four-digit/1900-2999 fiscal-year format check in {@link
+   * #validateAndEnrichFiscalCalendarCreate} never ran on an UPDATE — a user could edit an
+   * existing year and set Fiscal Year to {@code "asd"} or {@code "1800"} with no rejection. This
+   * mirrors {@code isFiscalCalendarCreate}'s spec/entity match but for the update case
+   * (non-null {@code recordId}, any write method — {@code NeoHandlerUtils#isWriteMethod} covers
+   * {@code POST}/{@code PUT}/{@code PATCH}, matching whatever method the live UI or a direct API
+   * caller actually uses for a partial update). Deliberately does NOT gate on a specific method
+   * the way {@code isFiscalCalendarCreate} gates on {@code POST} only — an update's HTTP verb is
+   * not this validation's concern, only "is fiscalYear being changed."
+   */
+  private boolean isFiscalCalendarYearUpdate(NeoContext context) {
+    return context != null
+        && NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())
+        && context.getRecordId() != null
+        && SPEC_FISCAL_CALENDAR.equals(context.getSpecName())
+        && ENTITY_YEAR.equals(context.getEntityName());
+  }
+
+  /**
+   * Validates {@code fiscalYear} on an UPDATE to an existing {@code year} record — the calendar
+   * FK injection in {@link #validateAndEnrichFiscalCalendarCreate} is deliberately NOT repeated
+   * here (the calendar is set once, on create, from the organization, by design). Only runs the
+   * format/range check, and only when the update actually touches {@code fiscalYear} — a partial
+   * update that only changes e.g. {@code Description} must not be rejected for a field it never
+   * sent.
+   */
+  private NeoResponse validateFiscalYearForUpdate(NeoContext context) {
+    if (!isFiscalCalendarYearUpdate(context)) {
+      return null;
+    }
+    org.codehaus.jettison.json.JSONObject body = context.getRequestBody();
+    if (body == null || !body.has(FIELD_FISCAL_YEAR) || body.isNull(FIELD_FISCAL_YEAR)) {
+      return null;
+    }
+    String fiscalYear = body.optString(FIELD_FISCAL_YEAR, "").trim();
+    if (!isValidFiscalYear(fiscalYear)) {
+      return NeoResponse.error(400, "Fiscal Year must be a four-digit year between 1900 and 2999");
+    }
+    return null;
   }
 
   private boolean isValidFiscalYear(String value) {
