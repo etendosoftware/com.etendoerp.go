@@ -453,6 +453,30 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       Date now = new Date();
       saveMessage(conv, SENDER_USER, "Tú", text, now, user, attachments);
 
+      // Live re-check, BOTH directions: neither the assignee-reset webhook (bot ← human) nor
+      // any webhook at all (bot → human: a support agent who reassigns the ticket directly in
+      // Jira, bypassing our own "quiero hablar con un agente" flow entirely, never notifies us)
+      // is a reliable way to learn the ticket's real current owner — the reset webhook depends
+      // on a Jira Automation rule that isn't always configured/reachable (confirmed gap), and
+      // there is no forward-direction webhook at all today. Poll the real assignee on every
+      // message that has a linked ticket so both kinds of manual reassignment are caught on the
+      // very next message regardless of what Jira Automation is or isn't wired up to do.
+      String jiraKey = conv.getJiraTicketKey();
+      if (jiraKey != null && !jiraKey.isEmpty()) {
+        String[] assignee = SupportIntegrationClient.getTicketAssignee(jiraKey);
+        boolean assigneeKnown = assignee[0] != null || assignee[1] != null;
+        boolean assigneeIsBot = SupportJiraWebhookHandler.isBotIdentity(assignee[0], assignee[1]);
+        if (Boolean.TRUE.equals(conv.isHumanTakeover())) {
+          if (assigneeIsBot) {
+            conv.setHumanTakeover(false);
+            OBDal.getInstance().save(conv);
+          }
+        } else if (assigneeKnown && !assigneeIsBot) {
+          conv.setHumanTakeover(true);
+          OBDal.getInstance().save(conv);
+        }
+      }
+
       // If ticket is assigned to a human agent, block AI response
       if (Boolean.TRUE.equals(conv.isHumanTakeover())) {
         // Human agent is handling this — forward user message to Jira, send no AI reply.
