@@ -607,39 +607,10 @@ class NeoCrudHandler {
     JSONObject body = context.getRequestBody();
     String updated = body == null ? null : body.optString(FIELD_UPDATED, null);
     if (StringUtils.isBlank(updated) || "null".equals(updated)) {
-      logMissingUpdated(context);
+      NeoWriteRefusalLog.missingUpdated(context, FIELD_UPDATED);
       return buildMissingUpdatedResponse();
     }
     return null;
-  }
-
-  /**
-   * ETP-5112: names the endpoint that sent an update with no concurrency token.
-   *
-   * <p>Without this the rejection is nearly invisible from the server side. It happens in 8-14 ms,
-   * before the database is touched, so there is no stack trace and no SQL; the only trace is
-   * {@code LogNeoTelemetrySink}'s generic {@code status=failed httpStatus=400} line, which says a
-   * write failed but not WHICH screen sent it. ETP-5112 was reported by a user who could not save,
-   * not by anyone reading a log — and it had been failing 100% of the time on ~15 screens.
-   *
-   * <p>Logged at ERROR rather than WARN even though a 400 is formally a client fault. The
-   * telemetry sink already emits WARN for exactly this event ({@code level()} maps
-   * {@code status=failed} to {@code Level.WARN}) and that is the line everybody missed, so
-   * repeating the level would repeat the outcome. It also matches how this class already reports
-   * an update it could not carry out (see the default-handler catch above). The condition is
-   * always a client bug that needs a code fix, never a transient or user-correctable state.
-   *
-   * <p>The endpoint is rebuilt from the context rather than read off the request: {@code method},
-   * {@code spec}, {@code entity} and {@code recordId} are what identify the caller
-   * (e.g. {@code PATCH /organization/information/<id>} points straight at the Organization tab).
-   * Deliberately no request body and no field values — the body of a write carries business data
-   * and belongs nowhere near a log.
-   */
-  private void logMissingUpdated(NeoContext context) {
-    log.error("Update rejected: no '{}' token on {} /{}/{}/{} — the caller did not read the"
-        + " record before writing it (ETP-5073 concurrency check)",
-        FIELD_UPDATED, context.getHttpMethod(), context.getSpecName(), context.getEntityName(),
-        context.getRecordId());
   }
 
   /**
@@ -656,36 +627,8 @@ class NeoCrudHandler {
     if (!NeoRecordVersion.isStale(dalEntityName, context.getRecordId(), clientValue)) {
       return null;
     }
-    logStaleRecord(context, clientValue);
+    NeoWriteRefusalLog.staleRecord(context, clientValue);
     return buildStaleRecordResponse(STALE_RECORD_MESSAGE);
-  }
-
-  /**
-   * ETP-5112: names the endpoint whose update lost the concurrency check, and the token it sent.
-   *
-   * <p>The sibling of {@link #logMissingUpdated}, and needed for the same reason: without it the
-   * only server-side trace of a refused write is {@code LogNeoTelemetrySink}'s generic
-   * {@code status=failed} line, which names neither the screen nor the value that lost.
-   *
-   * <p>The token IS logged here, unlike in the missing-token case where there is none. It is a
-   * row's {@code updated} timestamp — not business data — and without it the line cannot be acted
-   * on: telling a stale read apart from a token the client mangled means seeing what was sent.
-   * That distinction is not hypothetical. During ETP-5112 a false conflict was traced to core's
-   * {@code JsonToDataConverter} holding its parser in a {@code private final static
-   * SimpleDateFormat}: two concurrent writes parsing through that one shared, non-thread-safe
-   * instance corrupted each other's date, and the check then failed against a record nobody had
-   * touched. The tell was two requests logged in the same millisecond carrying an identical token,
-   * one passing and one failing — invisible without the token in the line.
-   *
-   * <p>WARN, not ERROR: unlike a missing token this can be legitimate — somebody really did save
-   * first — and the user can act on it by reloading. Only the impossible version of it (a conflict
-   * on a record with no other writer) is a defect, and that is what the token lets a reader spot.
-   */
-  private void logStaleRecord(NeoContext context, String clientValue) {
-    log.warn("Update refused as stale on {} /{}/{}/{} — caller sent '{}' but the row has moved on;"
-        + " a conflict here with no other writer means the token was corrupted, not outdated",
-        context.getHttpMethod(), context.getSpecName(), context.getEntityName(),
-        context.getRecordId(), clientValue);
   }
 
   /**
@@ -816,7 +759,7 @@ class NeoCrudHandler {
       int httpStatus = NeoErrorSanitizer.isDuplicateKeyMessage(translated)
           ? HttpServletResponse.SC_CONFLICT
           : HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
-      logUnclassifiedWriteFailure(httpStatus, errMsg, translated);
+      NeoWriteRefusalLog.unclassifiedWriteFailure(httpStatus, errMsg, translated);
       // Defence-in-depth: a DAL/validator failure message can carry a raw object toString
       // (e.g. a List-reference "one of the following values: pkg.Class@hex ..."). Strip it
       // before it reaches the client — the leak itself is built upstream in core (ETP-4668).
@@ -831,36 +774,6 @@ class NeoCrudHandler {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
     }
     return null;
-  }
-
-  /**
-   * ETP-5112: records a write core refused for a reason none of the branches above recognised.
-   *
-   * <p>This is the blind spot the ticket exposed. A save on the Organization screen answered 500
-   * carrying core's translated "the record has already been changed by another user" — a
-   * concurrency conflict that reached the generic bucket because the branch meant to catch it
-   * ({@code isStaleRecordMessage}) only matches the UNTRANSLATED code, and by then
-   * {@code Utility.translateError} had already consumed it. Nothing named the endpoint, so the
-   * only trace was the telemetry sink's {@code status=failed httpStatus=500}.
-   *
-   * <p>Both strings are logged. {@code errMsg} is what core actually produced and is the only
-   * stable thing to key on; {@code translated} is what the classifiers above examined, so seeing
-   * the pair is what shows WHY a branch did not match — with just one of them, this exact defect
-   * reads as an ordinary server error. Neither carries field values: they are core's own message
-   * text, already sanitised for the client on the next line.
-   *
-   * <p>ERROR at 500 and WARN at 409: a 500 here is by definition unclassified — either a genuine
-   * fault or, as in this case, a condition that deserved its own branch and did not get one.
-   * A 409 is a duplicate key, which is the caller's data to fix and needs no attention from us.
-   */
-  private void logUnclassifiedWriteFailure(int httpStatus, String errMsg, String translated) {
-    String message = "Write refused by core with no matching classifier — status {},"
-        + " raw '{}', translated '{}'";
-    if (httpStatus == HttpServletResponse.SC_INTERNAL_SERVER_ERROR) {
-      log.error(message, httpStatus, errMsg, translated);
-    } else {
-      log.warn(message, httpStatus, errMsg, translated);
-    }
   }
 
   /**
