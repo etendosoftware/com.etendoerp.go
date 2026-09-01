@@ -38,6 +38,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.ui.Window;
@@ -550,7 +551,17 @@ public class SFRolesOverview extends BaseWebhookService {
     criteria.setFilterOnReadableOrganization(false);
     criteria.add(Restrictions.eq(UserRoles.PROPERTY_ROLE + ".id", role.getId()));
     criteria.add(Restrictions.eq(UserRoles.PROPERTY_ACTIVE, true));
-    criteria.add(Restrictions.eq(UserRoles.PROPERTY_USERCONTACT + ".client.id", role.getClient().getId()));
+    // The user's OWN client, not the user-role row's — a role may only count assignees belonging
+    // to the same tenant.
+    //
+    // This needs an explicit alias: a Hibernate Criteria resolves a one-level `property.id` (it is
+    // the FK column on this very table) but NOT a two-level path like `userContact.client.id`,
+    // which throws `could not resolve property` from AbstractEntityPersister.toColumns at query
+    // time. ETP-5065 added the filter written that way and it blew up the whole Roles page with a
+    // 500 — the failure is at RUNTIME, so nothing catches it until the request is actually made.
+    criteria.createAlias(UserRoles.PROPERTY_USERCONTACT, "assignee");
+    criteria.add(Restrictions.eq("assignee." + User.PROPERTY_CLIENT + ".id",
+        role.getClient().getId()));
 
     Set<String> userIds = new LinkedHashSet<>();
     for (UserRoles userRole : (List<UserRoles>) criteria.list()) {
