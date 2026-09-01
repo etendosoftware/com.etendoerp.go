@@ -111,15 +111,29 @@ class NeoVectorSearchEndpoint {
           && minScore <= maxScore ? new ScoreRange(minScore, maxScore) : null;
     } catch (NumberFormatException e) { return null; }
   }
-  private static String trimToNull(String value) { if (value == null) return null; String trimmed = value.trim(); return trimmed.isEmpty() ? null : trimmed; }
+  private static String trimToNull(String value) {
+    if (value == null) return null;
+    String trimmed = value.trim();
+    return trimmed.isEmpty() ? null : trimmed;
+  }
 
-  interface SearchGateway { String search(List<String> namespaces, String query, int topK,
+  /** Executes a namespace-scoped vector search and returns its JSON response. */
+  interface SearchGateway {
+    String search(List<String> namespaces, String query, int topK,
       String metadataFilter, double minScore, double maxScore); }
-  interface TargetSearchGateway { String search(List<String> targets, String query, int topK,
+
+  /** Executes a target-scoped vector search and returns its JSON response. */
+  interface TargetSearchGateway {
+    String search(List<String> targets, String query, int topK,
       double minScore, double maxScore); }
-  interface NamespaceAuthorizer { boolean isAuthorized(List<String> namespaces); }
+
+  /** Checks whether the current user can read all requested namespaces. */
+  interface NamespaceAuthorizer {
+    boolean isAuthorized(List<String> namespaces);
+  }
   private static final class ScoreRange {
-    private final double minScore, maxScore;
+    private final double minScore;
+    private final double maxScore;
     private ScoreRange(double minScore, double maxScore) { this.minScore = minScore; this.maxScore = maxScore; }
   }
 
