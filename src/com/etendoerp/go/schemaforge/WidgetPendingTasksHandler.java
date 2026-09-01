@@ -95,13 +95,18 @@ public class WidgetPendingTasksHandler implements NeoHandler {
   }
 
   /**
-   * Overdue invoices: completed sales invoices with outstanding amount > 0.
+   * Overdue invoices: completed sales invoices with outstanding amount > 0
+   * whose due date has already passed (ETP-5012 — a future due date must
+   * count as pending, not overdue). etgo_get_due_date() is the same function
+   * backing the em_etgo_due_date virtual column the frontend list filters
+   * and displays on, so the counter and the drill-down list stay in sync.
    */
   private void addOverdueInvoices(JSONArray data, String clientId) throws Exception {
     String sql = "SELECT COUNT(*), COALESCE(SUM(outstandingamt), 0)"
-        + " FROM c_invoice"
-        + " WHERE issotrx = 'Y' AND docstatus = 'CO' AND outstandingamt > 0"
-        + " AND ad_client_id = :clientId";
+        + " FROM c_invoice ci"
+        + " WHERE ci.issotrx = 'Y' AND ci.docstatus = 'CO' AND ci.outstandingamt > 0"
+        + "   AND ci.ad_client_id = :clientId"
+        + "   AND etgo_get_due_date(ci.c_invoice_id) < CURRENT_DATE";
 
     NativeQuery<Object[]> query = OBDal.getInstance().getSession().createNativeQuery(sql);
     query.setParameter(PARAM_CLIENT_ID, clientId);

@@ -432,6 +432,22 @@ final class AutoMatchSupport {
     return classifyPendingLine(account, line, rules, dateTolDays, amtTolPct);
   }
 
+  /**
+   * Same as above, but consuming a shared {@code usedTxnIds}/{@code excludedTxns} accumulator
+   * across the caller's loop over pending lines — see the 7-arg {@code classifyPendingLine}
+   * overload for why this matters.
+   */
+  static String classifyPendingLine(FIN_FinancialAccount account, String lineId,
+      List<MatchRuleEngine.Rule> rules, int dateTolDays, BigDecimal amtTolPct,
+      Set<String> usedTxnIds, List<FIN_FinaccTransaction> excludedTxns) {
+    FIN_BankStatementLine line = OBDal.getInstance().get(FIN_BankStatementLine.class, lineId);
+    if (line == null) {
+      return STATE_PENDING;
+    }
+    return classifyPendingLine(account, line, rules, dateTolDays, amtTolPct, usedTxnIds,
+        excludedTxns);
+  }
+
   static String classifyPendingLine(FIN_FinancialAccount account, FIN_BankStatementLine line,
       List<MatchRuleEngine.Rule> rules) {
     return classifyPendingLine(account, line, rules, DEFAULT_DATE_TOL_DAYS, BigDecimal.ZERO);
@@ -439,18 +455,39 @@ final class AutoMatchSupport {
 
   static String classifyPendingLine(FIN_FinancialAccount account, FIN_BankStatementLine line,
       List<MatchRuleEngine.Rule> rules, int dateTolDays, BigDecimal amtTolPct) {
-    String level = standardMatchLevel(account, line, dateTolDays);
-    if (FIN_MatchedTransaction.STRONG.equals(level)) {
+    return classifyPendingLine(account, line, rules, dateTolDays, amtTolPct, new HashSet<>(),
+        new ArrayList<>());
+  }
+
+  /**
+   * Classifies one pending line as {@code buildAutoMatch} would evaluate it, consuming the SAME
+   * {@code usedTxnIds}/{@code excludedTxns} accumulator across every line the caller classifies in
+   * one pass. Without this, a transaction already claimed by an earlier line (in the same
+   * {@code datetrx, line} order {@code buildAutoMatch} iterates) would still be offered as a
+   * "suggested" match for a later line of the same amount, so the left-panel counter could show
+   * more suggestions than an actual automatch run produces.
+   */
+  static String classifyPendingLine(FIN_FinancialAccount account, FIN_BankStatementLine line,
+      List<MatchRuleEngine.Rule> rules, int dateTolDays, BigDecimal amtTolPct,
+      Set<String> usedTxnIds, List<FIN_FinaccTransaction> excludedTxns) {
+    FIN_MatchedTransaction matched = standardMatch(account, line, dateTolDays, excludedTxns);
+    if (matched != null && FIN_MatchedTransaction.STRONG.equals(matched.getMatchLevel())) {
+      usedTxnIds.add(matched.getTransaction().getId());
+      excludedTxns.add(matched.getTransaction());
       return STATE_SUGGESTED;
     }
     if (account != null && StringUtils.isNotBlank(account.getId())) {
       BigDecimal target = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
       BigDecimal amtTol = computeAmountTolerance(target, amtTolPct);
-      if (!findSignalGroup(account.getId(), line, new HashSet<>(), amtTol, dateTolDays).isEmpty()) {
+      List<FIN_FinaccTransaction> signalGroup =
+          findSignalGroup(account.getId(), line, usedTxnIds, amtTol, dateTolDays);
+      if (!signalGroup.isEmpty()) {
+        signalGroup.forEach(t -> usedTxnIds.add(t.getId()));
+        excludedTxns.addAll(signalGroup);
         return STATE_SUGGESTED;
       }
     }
-    if (level != null) {
+    if (matched != null) {
       return STATE_DIFFERENCE;
     }
     String desc = StringUtils.trimToEmpty(line.getDescription());
@@ -469,6 +506,21 @@ final class AutoMatchSupport {
 
   static String standardMatchLevel(FIN_FinancialAccount account, FIN_BankStatementLine line,
       int dateTolDays) {
+    FIN_MatchedTransaction matched = standardMatch(account, line, dateTolDays, new ArrayList<>());
+    return matched == null ? null : matched.getMatchLevel();
+  }
+
+  /**
+   * Runs the account's configured standard matching algorithm against {@code line}, honoring
+   * {@code excluded} exactly like Classic's own auto-match driver
+   * ({@code MatchStatementOnLoadActionHandler.runAutoMatchingAlgorithm}) does — so callers can
+   * accumulate consumed transactions across multiple lines in one run and avoid Core suggesting the
+   * same transaction for two different lines of equal amount. Returns {@code null} when there is no
+   * algorithm configured, the algorithm finds nothing, or the match falls outside the date-tolerance
+   * window.
+   */
+  static FIN_MatchedTransaction standardMatch(FIN_FinancialAccount account,
+      FIN_BankStatementLine line, int dateTolDays, List<FIN_FinaccTransaction> excluded) {
     if (account == null || account.getMatchingAlgorithm() == null
         || StringUtils.isBlank(account.getMatchingAlgorithm().getJavaClassName())) {
       return null;
@@ -476,17 +528,15 @@ final class AutoMatchSupport {
     try {
       FIN_MatchingTransaction matcher =
           new FIN_MatchingTransaction(account.getMatchingAlgorithm().getJavaClassName());
-      FIN_MatchedTransaction matched = matcher.match(line, new ArrayList<>());
+      FIN_MatchedTransaction matched = matcher.match(line, excluded);
       if (matched != null && matched.getTransaction() != null
-          && !FIN_MatchedTransaction.NOMATCH.equals(matched.getMatchLevel())) {
-        if (!withinDateWindow(line.getTransactionDate(),
-            matched.getTransaction().getTransactionDate(), dateTolDays)) {
-          return null;
-        }
-        return matched.getMatchLevel();
+          && !FIN_MatchedTransaction.NOMATCH.equals(matched.getMatchLevel())
+          && withinDateWindow(line.getTransactionDate(),
+              matched.getTransaction().getTransactionDate(), dateTolDays)) {
+        return matched;
       }
     } catch (Exception e) {
-      log.debug("Standard match level failed for line {}: {}", line.getId(), e.getMessage());
+      log.debug("Standard match failed for line {}: {}", line.getId(), e.getMessage());
     }
     return null;
   }
@@ -539,19 +589,22 @@ final class AutoMatchSupport {
   /**
    * Passes 1b (1:N signal grouping) and 2 (rule engine) of the autoMatch preview — evaluated only
    * when the standard 1:1 algorithm did not match. Appends any group it finds to {@code groups} and
-   * marks the consumed transactions in {@code usedTxnIds}.
+   * marks the consumed transactions in {@code usedTxnIds}/{@code excludedTxns} — the latter is fed
+   * back into the standard algorithm for later lines, same as {@link #standardMatch}.
    *
    * @return int[2] where [0] = opsToLink increment, [1] = willCreate increment
    */
   static int[] matchFallback(String accountId, FIN_BankStatementLine line,
-      Set<String> usedTxnIds, List<MatchRuleEngine.Rule> rules, JSONArray groups)
+      Set<String> usedTxnIds, List<FIN_FinaccTransaction> excludedTxns,
+      List<MatchRuleEngine.Rule> rules, JSONArray groups)
       throws JSONException {
-    return matchFallback(accountId, line, usedTxnIds, rules, groups,
+    return matchFallback(accountId, line, usedTxnIds, excludedTxns, rules, groups,
         DEFAULT_DATE_TOL_DAYS, BigDecimal.ZERO);
   }
 
   static int[] matchFallback(String accountId, FIN_BankStatementLine line,
-      Set<String> usedTxnIds, List<MatchRuleEngine.Rule> rules, JSONArray groups,
+      Set<String> usedTxnIds, List<FIN_FinaccTransaction> excludedTxns,
+      List<MatchRuleEngine.Rule> rules, JSONArray groups,
       int dateTolDays, BigDecimal amtTolPct) throws JSONException {
     BigDecimal target = ReconciliationSupport.nullSafe(line.getCramount())
         .subtract(ReconciliationSupport.nullSafe(line.getDramount()));
@@ -560,6 +613,7 @@ final class AutoMatchSupport {
         findSignalGroup(accountId, line, usedTxnIds, amtTol, dateTolDays);
     if (!signalGroup.isEmpty()) {
       signalGroup.forEach(t -> usedTxnIds.add(t.getId()));
+      excludedTxns.addAll(signalGroup);
       groups.put(buildMultiGroup(line, signalGroup));
       return new int[]{signalGroup.size(), 0};
     }

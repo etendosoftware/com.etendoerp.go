@@ -38,6 +38,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.ui.Window;
@@ -52,8 +53,9 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * Webhook that returns, for an admin caller, an aggregate overview of the CALLING TENANT's 5
  * fixed roles (ETP-4513 — "Configuración &gt; Roles"): each role's display name, raw AD
  * description, count of assigned users, and the list of Etendo GO windows it can reach ({@code
- * AD_Window_Access}, intersected with the windows Etendo GO actually exposes today — see {@link
- * #resolveActiveEtendoGoWindowsById()}) — plus (ETP-4907) an explicit {@code windowCount} per
+ * AD_Window_Access}, intersected with the windows Etendo GO actually exposes today, minus those it
+ * serves over NEO/MCP but never shows in its UI — see {@link #resolveActiveEtendoGoWindowsById()}
+ * and {@link #UI_EXCLUDED_WINDOW_IDS}) — plus (ETP-4907) an explicit {@code windowCount} per
  * role and a full window × role permission {@code matrix}, grouped by top-level menu category.
  *
  * <p>Unlike {@code SFWindowAccessMap}, which answers "what can the CURRENT caller's own role
@@ -202,6 +204,32 @@ public class SFRolesOverview extends BaseWebhookService {
   /** {@code ETGO_SF_SPEC.SPEC_TYPE} value identifying a window/CRUD spec. */
   private static final String SPEC_TYPE_WINDOW = "W";
 
+  /**
+   * AD windows Etendo GO deliberately does NOT surface anywhere in its own UI, even though they
+   * still have an active {@code SPEC_TYPE = 'W'} {@code ETGO_SF_SPEC} because NEO/MCP keeps
+   * serving them read-only.
+   *
+   * <p>Filtered out in {@link #resolveActiveEtendoGoWindowsById()}, which is the single source
+   * every downstream structure derives from — each role's {@code windows} array, its {@code
+   * windowCount}, and the {@code matrix} — so ONE entry here removes the window from
+   * "Configuración &gt; Roles" AND from "Usuario &gt; Roles" (whose React tab intersects {@code
+   * SFListMenu}'s raw AD tree against the union of these {@code windows} arrays — see
+   * {@code UserRolesTab.jsx}'s {@code activeWindowIds}).
+   *
+   * <p>ETP-5068 — "Conversion Rate Downloader Log"
+   * ({@code 6FEBA130CDE24CC09041FFA6117ADFA9}): an internal log of the conversion-rate
+   * downloader job, dropped from the Etendo Go menu because it adds no value to the end user.
+   * Administrators read it in Etendo classic, so the GO template roles deliberately KEEP their
+   * {@code AD_Window_Access} grant (see {@code TemplateRoleWindowAccess}) — which is precisely
+   * why the window cannot be hidden by revoking access, and why the exclusion lives here and
+   * not in {@code SFListMenu}, whose tree must keep reporting the native AD menu as-is for its
+   * other consumers.
+   *
+   * <p>Note {@code Set.of(...)} rejects {@code contains(null)} with an NPE rather than returning
+   * {@code false}, so callers must guard the id before probing this set.
+   */
+  private static final Set<String> UI_EXCLUDED_WINDOW_IDS = Set.of("6FEBA130CDE24CC09041FFA6117ADFA9");
+
   /** JSON key for the full window × role permission matrix (ETP-4907). */
   private static final String MATRIX = "matrix";
 
@@ -312,13 +340,16 @@ public class SFRolesOverview extends BaseWebhookService {
       addTenantRoleCard(adminRole, goWindowsById, roleCards, tierMapsByRoleId);
     }
 
-    // Lazily resolved on the first fixed-name role that actually needs the system-template
-    // fallback — most tenants (not yet migrated to ETP-4852) never touch this at all.
+    // Lazily resolved on the first fixed-name role that actually needs composition data — either
+    // branch below may need it now (ETP-5065 hybrid-state fix), so both pass the same lazily
+    // populated map through and reuse whatever the other already resolved.
     Map<String, List<String>> composedTemplateUserIdsByUserId = null;
     for (Map.Entry<String, String> fixedRole : SystemRoleTemplates.byName().entrySet()) {
       Role tenantRole = tenantFixedRolesByName.get(fixedRole.getKey());
       if (tenantRole != null) {
-        addTenantRoleCard(tenantRole, goWindowsById, roleCards, tierMapsByRoleId);
+        composedTemplateUserIdsByUserId = addTenantRoleCardWithTemplateOverlap(tenantRole,
+            fixedRole.getValue(), clientId, goWindowsById, roleCards, tierMapsByRoleId,
+            composedTemplateUserIdsByUserId);
       } else {
         composedTemplateUserIdsByUserId = addSystemTemplateRoleCardIfResolvable(
             fixedRole.getValue(), clientId, goWindowsById, roleCards, tierMapsByRoleId,
@@ -346,7 +377,56 @@ public class SFRolesOverview extends BaseWebhookService {
       List<JSONObject> roleCards, Map<String, Map<String, String>> tierMapsByRoleId) throws JSONException {
     Map<String, String> tiers = resolveWindowTierMap(role, goWindowsById.keySet());
     tierMapsByRoleId.put(role.getId(), tiers);
-    roleCards.add(buildRoleCardJson(role, tiers, goWindowsById, SOURCE_TENANT, countActiveUsers(role)));
+    roleCards.add(buildRoleCardJson(role, tiers, goWindowsById, SOURCE_TENANT,
+        resolveActiveUserIds(role).size()));
+  }
+
+  /**
+   * ETP-5065 (hybrid-state fix) — like {@link #addTenantRoleCard}, but for a fixed-name role
+   * (Finance/Sales/Purchasing/Inventory) specifically: {@code userCount} is the UNION of (a)
+   * users directly assigned to the tenant's own active {@code tenantRole} ({@link
+   * #resolveActiveUserIds}), and (b) users of {@code clientId} whose personal role currently
+   * composes the matching SYSTEM TEMPLATE role ({@code templateId} — a separate {@code AD_Role}
+   * row, owned by client {@code '0'}, {@code ISTEMPLATE = 'Y'} — see {@link
+   * SystemRoleTemplates}).
+   *
+   * <p>Before this fix, a tenant in the (increasingly common, ETP-4852-adjacent) hybrid state —
+   * its own copy of a fixed-name role still ACTIVE, while some real users reach that same
+   * fixed-name access via a personal role's {@code AD_Role_Inheritance} pointing at the SEPARATE
+   * system-template role — silently dropped every composed user from the card: {@link
+   * #addTenantRoleCard} only ever saw direct assignees of {@code tenantRole}, and the
+   * system-template branch ({@link #addSystemTemplateRoleCardIfResolvable}) was skipped entirely
+   * because {@code tenantRole} being active took priority in {@link #buildRolesOverview(String)}
+   * 's branch selection. Confirmed live on GOClient (2026-08-27): its own active "Sales"/
+   * "Purchasing"/"Inventory" roles had zero direct assignees, showing {@code 0} on those cards,
+   * despite 1-2 real invited users actually holding that access by composing the corresponding
+   * system template onto their personal role. Windows/tier data for the card still comes from
+   * {@code tenantRole} alone (unchanged, not reported as broken) — only {@code userCount} is a
+   * union.</p>
+   *
+   * @return {@code composedTemplateUserIdsByUserId}, unchanged if it was already resolved, or
+   *     newly populated if this was the first call in the request that needed it (mirrors {@link
+   *     #addSystemTemplateRoleCardIfResolvable}'s identical laziness contract)
+   */
+  private Map<String, List<String>> addTenantRoleCardWithTemplateOverlap(Role tenantRole,
+      String templateId, String clientId, Map<String, Window> goWindowsById,
+      List<JSONObject> roleCards, Map<String, Map<String, String>> tierMapsByRoleId,
+      Map<String, List<String>> composedTemplateUserIdsByUserId) throws JSONException {
+    Map<String, String> tiers = resolveWindowTierMap(tenantRole, goWindowsById.keySet());
+    tierMapsByRoleId.put(tenantRole.getId(), tiers);
+
+    Set<String> userIds = new LinkedHashSet<>(resolveActiveUserIds(tenantRole));
+    Map<String, List<String>> composed = composedTemplateUserIdsByUserId != null
+        ? composedTemplateUserIdsByUserId
+        : new UserRoleCompositionService().getAppliedTemplateRoleIdsForClient(clientId);
+    for (Map.Entry<String, List<String>> entry : composed.entrySet()) {
+      if (entry.getValue().contains(templateId)) {
+        userIds.add(entry.getKey());
+      }
+    }
+
+    roleCards.add(buildRoleCardJson(tenantRole, tiers, goWindowsById, SOURCE_TENANT, userIds.size()));
+    return composed;
   }
 
   /**
@@ -432,18 +512,56 @@ public class SFRolesOverview extends BaseWebhookService {
   }
 
   /**
-   * Counts the distinct users with an active {@code AD_User_Roles} row for {@code role}. Only
-   * valid for a REAL, directly-assignable role (a tenant's own role, or the client-admin role) —
-   * never for a system-level template, which users are never assigned to directly (see the class
-   * javadoc's system-template-fallback section).
+   * The distinct users with an active {@code AD_User_Roles} row for {@code role}. Only valid for a
+   * REAL, directly-assignable role (a tenant's own role, or the client-admin role) — never for a
+   * system-level template, which users are never assigned to directly (see the class javadoc's
+   * system-template-fallback section).
+   *
+   * <p><b>Cross-client bootstrap user excluded (ETP-5065).</b> Etendo core's standard
+   * client-provisioning flow ({@code InitialClientSetup}/{@code InitialOrgSetup} reference-data
+   * copy) automatically grants the seed {@code AD_User_ID = '100'} account ({@code username =
+   * admin}, always {@code AD_Client_ID = '0'}/System — the classic Openbravo "admin/admin"
+   * bootstrap login) an active {@code AD_User_Roles} row on every role of every newly created
+   * client, as a safety-net login. That row is real and active, but the user it points to is not
+   * a member of {@code role}'s own tenant — confirmed identically present across every client in
+   * the DB, so this is systemic core behavior, not tenant-specific data corruption. Counting it
+   * inflated a brand-new, single-owner tenant's "Administrador" card to 2 users. Restricting the
+   * join to users whose OWN client matches {@code role}'s client excludes this (and any other
+   * cross-client) row without special-casing the {@code '100'} id.</p>
+   *
+   * <p><b>Why direct-assignment counting remains correct here, even with personal roles live.</b>
+   * {@link UserRoleCompositionService#resolveOrCreatePersonalRole} explicitly refuses to ever
+   * reuse an {@code isClientAdmin()} role as a user's personal role, and the admin promotion
+   * design being built alongside this fix assigns a promoted user's tenant admin role directly
+   * in {@code AD_User_Roles} (unwiring, not deleting, their personal role) — so, unlike the 4
+   * fixed-name roles, one or more real users holding a DIRECT {@code AD_User_Roles} row here is
+   * always the correct, intended shape, both today and after that feature ships. This fix does
+   * does not extend to the direct-assignee set for an active tenant-owned copy of a fixed-name role
+   * (Finance/Sales/Purchasing/Inventory) composed onto via a personal role's {@code
+   * AD_Role_Inheritance} — see {@link #addTenantRoleCardWithTemplateOverlap} for that separate fix,
+   * folded into the same ETP-5065 ticket after further investigation.</p>
+   *
+   * <p>Returns ids instead of a count so {@link #addTenantRoleCardWithTemplateOverlap} can union the
+   * direct-assignee set with template-composed users before taking a final size.</p>
    */
   @SuppressWarnings("unchecked")
-  private int countActiveUsers(Role role) {
+  private Set<String> resolveActiveUserIds(Role role) {
     OBCriteria<UserRoles> criteria = OBDal.getInstance().createCriteria(UserRoles.class);
     criteria.setFilterOnReadableClients(false);
     criteria.setFilterOnReadableOrganization(false);
     criteria.add(Restrictions.eq(UserRoles.PROPERTY_ROLE + ".id", role.getId()));
     criteria.add(Restrictions.eq(UserRoles.PROPERTY_ACTIVE, true));
+    // The user's OWN client, not the user-role row's — a role may only count assignees belonging
+    // to the same tenant.
+    //
+    // This needs an explicit alias: a Hibernate Criteria resolves a one-level `property.id` (it is
+    // the FK column on this very table) but NOT a two-level path like `userContact.client.id`,
+    // which throws `could not resolve property` from AbstractEntityPersister.toColumns at query
+    // time. ETP-5065 added the filter written that way and it blew up the whole Roles page with a
+    // 500 — the failure is at RUNTIME, so nothing catches it until the request is actually made.
+    criteria.createAlias(UserRoles.PROPERTY_USERCONTACT, "assignee");
+    criteria.add(Restrictions.eq("assignee." + User.PROPERTY_CLIENT + ".id",
+        role.getClient().getId()));
 
     Set<String> userIds = new LinkedHashSet<>();
     for (UserRoles userRole : (List<UserRoles>) criteria.list()) {
@@ -451,7 +569,7 @@ public class SFRolesOverview extends BaseWebhookService {
         userIds.add(userRole.getUserContact().getId());
       }
     }
-    return userIds.size();
+    return userIds;
   }
 
   /**
@@ -535,9 +653,11 @@ public class SFRolesOverview extends BaseWebhookService {
   /**
    * Resolves every distinct {@code AD_Window} backing an active, {@code SPEC_TYPE = 'W'}
    * {@code ETGO_SF_SPEC} — i.e. every window Etendo GO actually exposes today, keyed by id for
-   * O(1) lookups while building both the per-role {@code windows} arrays and the {@code matrix}.
+   * O(1) lookups while building both the per-role {@code windows} arrays and the {@code matrix}
+   * — minus the windows Etendo GO serves over NEO/MCP but never shows in its UI
+   * ({@link #UI_EXCLUDED_WINDOW_IDS}).
    *
-   * @return the distinct windows, keyed by id (insertion order)
+   * @return the distinct UI-exposed windows, keyed by id (insertion order)
    */
   @SuppressWarnings("unchecked")
   private Map<String, Window> resolveActiveEtendoGoWindowsById() {
@@ -550,8 +670,9 @@ public class SFRolesOverview extends BaseWebhookService {
     Map<String, Window> windowsById = new LinkedHashMap<>();
     for (SFSpec spec : (List<SFSpec>) criteria.list()) {
       Window window = spec.getADWindow();
-      if (window != null) {
-        windowsById.put(window.getId(), window);
+      String windowId = window == null ? null : window.getId();
+      if (windowId != null && !UI_EXCLUDED_WINDOW_IDS.contains(windowId)) {
+        windowsById.put(windowId, window);
       }
     }
     return windowsById;
