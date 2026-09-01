@@ -775,4 +775,36 @@ final class NeoHandlerUtils {
       log.warn("Could not reanchor lines to header warehouse for {}: {}", inOutId, e.getMessage());
     }
   }
+
+  /**
+   * Injects the issuing organization's info as {@code issuerOrg} into a single shipment record's
+   * GET response, mutating {@code shipmentRec} in place.
+   *
+   * <p>Shared implementation behind {@code GoodsShipmentHeaderHandler} and
+   * {@code ReturnToVendorShipmentHeaderHandler}'s {@code afterHandle} hooks (ETP-4939): both
+   * defined an identical private {@code enrichIssuerOrg} method — same
+   * admin-mode/lookup/resolve-organization shape — which SonarQube flagged as
+   * duplicated-lines-on-new-code (PR #972, 18.18% vs. the 3% gate).
+   *
+   * @param shipmentRec the single shipment record to mutate in place
+   * @param recordId    the {@code M_InOut} id to resolve the organization for
+   */
+  static void enrichIssuerOrg(JSONObject shipmentRec, String recordId) {
+    try {
+      OBContext.setAdminMode(true);
+      ShipmentInOut shipment = OBDal.getReadOnlyInstance().get(ShipmentInOut.class, recordId);
+      if (shipment == null) {
+        return;
+      }
+      String orgId = shipment.getOrganization().getId();
+      JSONObject orgInfo = NeoSessionService.resolveOrganization(orgId);
+      if (orgInfo != null) {
+        shipmentRec.put("issuerOrg", orgInfo);
+      }
+    } catch (Exception e) {
+      log.warn("Could not enrich issuer org for shipment {}: {}", recordId, e.getMessage());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
 }

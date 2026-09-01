@@ -143,7 +143,7 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
       if (context.getRecordId() != null) {
         JSONObject shipmentRec = dataArr.getJSONObject(0);
         shipmentRec.put(FIELD_INVOICE_STATUS, computeSingle(context.getRecordId()));
-        enrichIssuerOrg(shipmentRec, context.getRecordId());
+        NeoHandlerUtils.enrichIssuerOrg(shipmentRec, context.getRecordId());
         enrichLinkedOrder(shipmentRec, context.getRecordId());
         enrichResolvedPriceList(shipmentRec, context.getRecordId());
         enrichLinkedInvoices(shipmentRec, context.getRecordId());
@@ -156,25 +156,6 @@ public class GoodsShipmentHeaderHandler implements NeoHandler {
     } catch (Exception e) {
       log.error("Error computing invoiceStatus for goods shipment", e);
       return null;
-    }
-  }
-
-  private void enrichIssuerOrg(JSONObject shipmentRec, String recordId) {
-    try {
-      OBContext.setAdminMode(true);
-      ShipmentInOut shipment = OBDal.getReadOnlyInstance().get(ShipmentInOut.class, recordId);
-      if (shipment == null) {
-        return;
-      }
-      String orgId = shipment.getOrganization().getId();
-      JSONObject orgInfo = NeoSessionService.resolveOrganization(orgId);
-      if (orgInfo != null) {
-        shipmentRec.put("issuerOrg", orgInfo);
-      }
-    } catch (Exception e) {
-      log.warn("Could not enrich issuer org for shipment {}: {}", recordId, e.getMessage());
-    } finally {
-      OBContext.restorePreviousMode();
     }
   }
 
