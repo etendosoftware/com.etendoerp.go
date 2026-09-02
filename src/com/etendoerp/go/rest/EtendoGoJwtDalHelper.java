@@ -296,6 +296,16 @@ final class EtendoGoJwtDalHelper {
     return account != null && StringUtils.isNotBlank(account.getPasswordHash());
   }
 
+  /**
+   * When the account's local password was last set or changed, or null when it has never had one.
+   *
+   * @param account account to read, may be null
+   * @return the timestamp, or null
+   */
+  static Date getPasswordChangedAt(Account account) {
+    return account == null ? null : (Date) account.get(PROPERTY_PASSWORD_CHANGED);
+  }
+
   static boolean hasPasswordResetToken(Account account) {
     return account != null && StringUtils.isNotBlank((String) account.get(PROPERTY_RESET_TOKEN_HASH));
   }

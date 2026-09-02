@@ -1366,10 +1366,17 @@ public class EtendoGoJwtServletTest {
     when(account.getName()).thenReturn("Test User");
     when(account.getCreationDate()).thenReturn(new Date());
 
+    // ETP-5115: /me now reports how the account can be signed into, so it reads the identity rows
+    // as well. Stubbed empty here because this test is about the account fields; the authMethods
+    // shape has its own tests.
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<AccountIdentityDalHelper> identityMock =
+             mockStatic(AccountIdentityDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
+      identityMock.when(() -> AccountIdentityDalHelper.identitiesFor(account))
+          .thenReturn(java.util.Collections.emptyList());
 
       servlet.doGet(req, resp.response);
     }

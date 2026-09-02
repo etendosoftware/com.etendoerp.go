@@ -43,6 +43,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
@@ -77,6 +78,7 @@ import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingBankConnectionSyncService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.AccountIdentity;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -1197,6 +1199,82 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Header: Authorization: Bearer <session_token>
    * Returns 200 with account info, 401 if token is invalid.
    */
+  /**
+   * Describes how an account can be signed into: an optional local password plus one entry per
+   * linked identity provider.
+   *
+   * <p>ETP-5115. Until now the client had to guess. The web app decided whether to offer "change
+   * password" by reading a value it had stashed in {@code localStorage} at login, which is why an
+   * SSO account was shown no such option at all — not disabled with a reason, simply absent. The
+   * server is the only side that knows, so it says so.
+   *
+   * <p><strong>{@code removable} is computed here and nowhere else.</strong> It lists the methods
+   * that could be taken away while leaving the account still reachable, and it is the only thing a
+   * client may use to enable a remove control. Recomputing the rule in the browser would put the
+   * invariant in the one place that cannot enforce it. The server checks it again when a removal is
+   * actually requested — this list is for drawing the screen, never for authorising the act.
+   *
+   * <p>The provider's subject claim is deliberately absent. It identifies the user at the provider
+   * and nothing on this screen needs it.
+   *
+   * <p><strong>Reading the identities can write one.</strong> An account still carrying its
+   * identity in the old inline columns is migrated to a child row on first read, so this GET has a
+   * write as a side effect. That is deliberate and it is the point: {@code /me} is the most-called
+   * endpoint in the app, which makes it the fastest way for the population to migrate without a
+   * backfill. The write is idempotent, guarded by a unique constraint, and opens no transaction of
+   * its own.
+   *
+   * @param account the account being described
+   * @return the {@code authMethods} object
+   * @throws JSONException if the response cannot be built
+   */
+  private JSONObject buildAuthMethods(Account account) throws JSONException {
+    boolean hasPassword = EtendoGoJwtDalHelper.hasLocalPassword(account);
+    List<AccountIdentity> identities = AccountIdentityDalHelper.identitiesFor(account);
+
+    JSONObject password = new JSONObject();
+    password.put("enabled", hasPassword);
+    Date changedAt = EtendoGoJwtDalHelper.getPasswordChangedAt(account);
+    if (hasPassword && changedAt != null) {
+      password.put("lastChanged", changedAt.toInstant().toString());
+    }
+
+    JSONArray identityArray = new JSONArray();
+    for (AccountIdentity identity : identities) {
+      JSONObject entry = new JSONObject();
+      entry.put("provider", identity.getAuthProvider());
+      entry.put(FIELD_EMAIL, identity.getExternalEmail());
+      if (identity.getLinked() != null) {
+        entry.put("linked", identity.getLinked().toInstant().toString());
+      }
+      if (identity.getLastSSOLogin() != null) {
+        entry.put("lastLogin", identity.getLastSSOLogin().toInstant().toString());
+      }
+      identityArray.put(entry);
+    }
+
+    // One method has to survive. With a password and N identities the total is 1 + N, and a method
+    // is removable exactly when the total is greater than one — which is why the sole remaining
+    // method is reported as not removable rather than being left out of the list entirely: the
+    // screen still has to draw it, just without an enabled control.
+    int total = (hasPassword ? 1 : 0) + identities.size();
+    JSONArray removable = new JSONArray();
+    if (total > 1) {
+      if (hasPassword) {
+        removable.put("password");
+      }
+      for (AccountIdentity identity : identities) {
+        removable.put(identity.getAuthProvider());
+      }
+    }
+
+    JSONObject authMethods = new JSONObject();
+    authMethods.put("password", password);
+    authMethods.put("identities", identityArray);
+    authMethods.put("removable", removable);
+    return authMethods;
+  }
+
   private void handleMe(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     String token = extractBearerToken(request);
@@ -1229,6 +1307,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_EMAIL_VERIFIED, EmailVerificationDalHelper.isEmailVerified(account));
       result.put(FIELD_EMAIL_VERIFICATION_PENDING,
           EmailVerificationDalHelper.isEmailVerificationPending(account));
+      result.put("authMethods", buildAuthMethods(account));
 
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
