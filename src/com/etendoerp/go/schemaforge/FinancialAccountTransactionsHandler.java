@@ -145,8 +145,6 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final String FIELD_PROJECT_ID = "projectId";
   private static final String FIELD_COSTCENTER_ID = "costcenterId";
   private static final String FIELD_PRODUCT_ID = "productId";
-  /** Document base type of finacc transactions — used to resolve header dimensions. */
-  private static final String DOCBASETYPE_FAT = AccountingDimensionsSupport.DOCBASETYPE_FAT;
   /** AD reference backing FIN_Finacc_Transaction.Trxtype (core list: BPD/BPW/BF). */
   private static final String TRXTYPE_REFERENCE_ID = "4EFC9773F30B4ACE97D225BD13CFF8CB";
   /** JSON keys reused across rows and totals — extracted to satisfy Sonar S1192. */
@@ -447,10 +445,14 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   }
 
   /**
-   * Navigable accounting dimensions active in the client's chart of accounts. This is the coarse,
-   * informational set surfaced as {@code enabledDimensions}; anything that decides whether a
-   * dimension may be <b>edited on a movement header</b> must use {@link #loadHeaderDimensions}
-   * instead, which honours {@code AD_Client.Acctdim_Centrally_Maintained}.
+   * Navigable accounting dimensions active in the client's chart of accounts (the "Ledger
+   * Configuration" screen's per-dimension switches, {@code C_AcctSchema_Element.IsActive}) — the
+   * single source of truth for both {@code enabledDimensions} (informational) and
+   * {@code headerDimensions} (what the New/Edit Movement UI and the automatch rule engine may
+   * actually set — see {@link #loadHeaderDimensions}). ETP-5101 QA direction: a
+   * {@code FIN_Finacc_Transaction} must be governed by the exact same flat, per-tenant switch
+   * every other GO window uses, not a document-type-scoped override — see
+   * {@link AccountingDimensionsSupport}'s class javadoc for the fuller history.
    */
   Set<String> loadActiveDimensionSet(String accountId) throws Exception {
     return AccountingDimensionsSupport.flatActiveDimensionsForAccount(accountId);
@@ -461,15 +463,14 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   }
 
   /**
-   * Dimensions available at the finacc transaction header (docbasetype {@code FAT}) — the set the
-   * New Movement wizard renders and the automatch rule engine propagates. Delegated to
-   * {@link AccountingDimensionsSupport}, which picks the right source of truth depending on
-   * {@code AD_Client.Acctdim_Centrally_Maintained} (see gap K1 / ETP-4854): reading
-   * {@code C_AcctSchema_Element} directly is wrong for centrally-maintained tenants.
+   * Dimensions the New/Edit Movement UI and the automatch rule engine may set on a
+   * {@code FIN_Finacc_Transaction}. Kept as its own method/JSON key ({@code headerDimensions})
+   * for wire-compatibility with the existing frontend contract, but — per
+   * {@link #loadActiveDimensionSet} — it is now exactly {@link #loadEnabledDimensions}: no
+   * separate, document-type-scoped source.
    */
   JSONArray loadHeaderDimensions(String accountId) throws Exception {
-    return AccountingDimensionsSupport.toOrderedArray(
-        AccountingDimensionsSupport.activeHeaderDimensionsForAccount(accountId, DOCBASETYPE_FAT));
+    return loadEnabledDimensions(accountId);
   }
 
   /** Active transaction types (BPD/BPW/BF) from the AD reference list, localized. */
