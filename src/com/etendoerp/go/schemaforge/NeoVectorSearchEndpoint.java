@@ -32,6 +32,7 @@ import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.db.extended.vector.VectorException;
 import com.etendoerp.db.extended.vector.VectorSearchService;
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /** Authenticated global semantic-search endpoint backed by DB Extended's pgvector facade. */
 public class NeoVectorSearchEndpoint {
@@ -185,7 +186,7 @@ public class NeoVectorSearchEndpoint {
         DalConnectionProvider connectionProvider = new DalConnectionProvider(false);
         for (String namespace : namespaces) {
           String tableId = findSourceTableId(connectionProvider, namespace);
-          if (tableId == null) return false;
+          if (tableId == null || !TargetEntityAuthorizer.hasAuthorizedSchemaForgeWindow(connectionProvider, tableId)) return false;
           Entity entity = ModelProvider.getInstance().getEntityByTableId(tableId);
           if (entity == null) return false;
           OBContext.getOBContext().getEntityAccessChecker().checkReadable(entity);
@@ -209,7 +210,7 @@ public class NeoVectorSearchEndpoint {
         DalConnectionProvider connectionProvider = new DalConnectionProvider(false);
         for (String target : targets) {
           String tableId = findSourceTableId(connectionProvider, target);
-          if (tableId == null) return false;
+          if (tableId == null || !hasAuthorizedSchemaForgeWindow(connectionProvider, tableId)) return false;
           Entity entity = ModelProvider.getInstance().getEntityByTableId(tableId);
           if (entity == null) return false;
           OBContext.getOBContext().getEntityAccessChecker().checkReadable(entity);
@@ -224,6 +225,35 @@ public class NeoVectorSearchEndpoint {
       try (PreparedStatement statement = connectionProvider.getPreparedStatement(sql)) {
         statement.setString(1, target);
         try (ResultSet result = statement.executeQuery()) { return result.next() ? result.getString(1) : null; }
+      }
+    }
+
+    /**
+     * Vector targets are a second data surface, so entity DAL access alone is not sufficient.
+     * Require an active Schema Forge window for the physical table and apply the same
+     * AD_Window_Access decision used by MCP CRUD discovery and execution.
+     */
+    private static boolean hasAuthorizedSchemaForgeWindow(DalConnectionProvider connectionProvider,
+        String tableId) throws Exception {
+      String sql = "SELECT DISTINCT spec.ad_window_id "
+          + "FROM etgo_sf_entity entity "
+          + "JOIN etgo_sf_spec spec ON spec.etgo_sf_spec_id=entity.etgo_sf_spec_id "
+          + "JOIN ad_tab tab ON tab.ad_tab_id=entity.ad_tab_id "
+          + "WHERE tab.ad_table_id=? AND entity.ad_client_id=? AND spec.ad_client_id=? "
+          + "AND entity.isactive='Y' AND entity.isincluded='Y' "
+          + "AND spec.isactive='Y' AND spec.showinmcp='Y' AND spec.spec_type='W' "
+          + "AND spec.ad_window_id IS NOT NULL";
+      try (PreparedStatement statement = connectionProvider.getPreparedStatement(sql)) {
+        statement.setString(1, tableId);
+        String clientId = OBContext.getOBContext().getCurrentClient().getId();
+        statement.setString(2, clientId);
+        statement.setString(3, clientId);
+        try (ResultSet result = statement.executeQuery()) {
+          while (result.next()) {
+            if (NeoAccessHelper.hasWindowAccess(result.getString(1), "GET")) return true;
+          }
+          return false;
+        }
       }
     }
   }
