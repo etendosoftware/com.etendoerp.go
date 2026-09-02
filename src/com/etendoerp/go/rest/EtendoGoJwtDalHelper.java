@@ -130,7 +130,7 @@ final class EtendoGoJwtDalHelper {
       }
       account = findAccountForEnvironmentUser(user);
       if (account == null) {
-        log.debug("No active account owns environment user {}", maskUsername(user.getUsername()));
+        log.debug("No active account owns environment user {}", AccountTextUtils.maskUsername(user.getUsername()));
         return null;
       }
       // Unchanged tenant-isolation gate: the client the JWT was issued for must actually be owned
@@ -167,16 +167,6 @@ final class EtendoGoJwtDalHelper {
       return byEmail;
     }
     return GoAccountResolver.findAccountByUsername(user.getUsername()).orElse(null);
-  }
-
-  /** Masks a username for logging, mirroring {@code EtendoGoJwtServlet.maskEmail}. */
-  private static String maskUsername(String username) {
-    String trimmed = StringUtils.trimToNull(username);
-    if (trimmed == null) {
-      return "(unknown)";
-    }
-    int at = trimmed.indexOf('@');
-    return at <= 0 ? trimmed.charAt(0) + "***" : trimmed.charAt(0) + "***" + trimmed.substring(at);
   }
 
   // ETP-5115: identities moved to their own child table so an account can carry more than one.
@@ -465,7 +455,7 @@ final class EtendoGoJwtDalHelper {
             + "and user.active = true");
     query.setNamedParameter(PARAM_CLIENT_ID, clientId);
     query.setNamedParameter(PARAM_ACCOUNT_EMAIL, accountEmail);
-    query.setNamedParameter(PARAM_ACCOUNT_PREFIX, escapeLikeWildcards(accountEmail) + "+%");
+    query.setNamedParameter(PARAM_ACCOUNT_PREFIX, AccountTextUtils.escapeLikeWildcards(accountEmail) + "+%");
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     query.setMaxResult(1);
@@ -480,25 +470,10 @@ final class EtendoGoJwtDalHelper {
             + "and user.active = true and user.client.active = true and user.client.id <> '0' "
             + "order by user.client.creationDate, user.creationDate");
     query.setNamedParameter(PARAM_ACCOUNT_EMAIL, accountEmail);
-    query.setNamedParameter(PARAM_ACCOUNT_PREFIX, escapeLikeWildcards(accountEmail) + "+%");
+    query.setNamedParameter(PARAM_ACCOUNT_PREFIX, AccountTextUtils.escapeLikeWildcards(accountEmail) + "+%");
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     return query.list();
-  }
-
-  /**
-   * Escapes the SQL/HQL LIKE wildcards ({@code %} and {@code _}) and the escape character itself
-   * ({@code \}) in {@code value} so it can be embedded as a literal fragment in a LIKE pattern.
-   * The backslash must be escaped first to avoid double-escaping the wildcard replacements.
-   * Callers must pair the escaped value with an {@code escape '\'} clause in the LIKE, otherwise
-   * the backslashes are treated as literals and the wildcards are NOT neutralized.
-   *
-   * @param value
-   *     the raw value to embed inside a LIKE pattern
-   * @return the value with LIKE wildcards escaped for use with {@code escape '\'}
-   */
-  private static String escapeLikeWildcards(String value) {
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
   }
 
   static List<Organization> findNonStarOrganizations(String clientId) {

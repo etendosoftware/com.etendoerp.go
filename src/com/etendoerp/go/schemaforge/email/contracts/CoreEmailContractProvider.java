@@ -35,6 +35,8 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
 
   /** Catalog key of the "this link expires in N" note, shared by the link contracts. */
   private static final String NOTE_EXPIRY = "note.expiry";
+  private static final String NOTE_IGNORE = "note.ignore";
+  private static final String NOTE_WARNING = "note.warning";
 
   private final EmailContractDataResolver contractResolver;
   private static final int RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT = 3;
@@ -72,13 +74,13 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
     return Arrays.asList(
         new AccountLinkEmailContract("reset-password", contractResolver,
             RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
-            NOTE_EXPIRY, "note.ignore"),
+            NOTE_EXPIRY, NOTE_IGNORE),
         // ETP-5115: the reset flow's other half. An account with no local password gets this
         // instead of reset-password: same link, same token, same expiry note — wording that asks
         // it to create a password rather than restore one it never had.
         new AccountLinkEmailContract("set-password", contractResolver,
             SET_PASSWORD_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
-            NOTE_EXPIRY, "note.ignore"),
+            NOTE_EXPIRY, NOTE_IGNORE),
         new AccountLinkEmailContract("new-account", contractResolver,
             NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
             ValidityWindow.Unit.HOURS, NOTE_EXPIRY),
@@ -87,17 +89,17 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
             DASHBOARD_LINK_PATH),
         new AccountLinkEmailContract("verify-email", contractResolver,
             VERIFY_EMAIL_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
-            ValidityWindow.Unit.HOURS, NOTE_EXPIRY, "note.ignore"),
+            ValidityWindow.Unit.HOURS, NOTE_EXPIRY, NOTE_IGNORE),
         // An invited operator gets a welcome of its own: its button goes to the dashboard, not to
         // email verification, because an invitation is itself the proof that somebody meant to
         // reach this address (ETP-5003).
         new AccountLinkEmailContract("new-account-invitee", contractResolver,
             NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS),
-        new AccountNoticeEmailContract("password-changed", contractResolver, "note.warning"),
+        new AccountNoticeEmailContract("password-changed", contractResolver, NOTE_WARNING),
         // ETP-5115: its own contract rather than reusing password-changed, whose copy would tell
         // somebody their password "was changed" the first time they ever set one.
-        new AccountNoticeEmailContract("password-added", contractResolver, "note.warning"),
-        new AccountNoticeEmailContract("auth-method-removed", contractResolver, "note.warning"),
+        new AccountNoticeEmailContract("password-added", contractResolver, NOTE_WARNING),
+        new AccountNoticeEmailContract("auth-method-removed", contractResolver, NOTE_WARNING),
         new LoginAlertEmailContract(contractResolver),
         new OrganizationJoinedEmailContract(contractResolver),
         new CompanyInvitationEmailContract());

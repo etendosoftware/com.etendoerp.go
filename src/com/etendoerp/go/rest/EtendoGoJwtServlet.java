@@ -1088,6 +1088,33 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * Verifies the current password of an account that has one, writing the error response itself.
+   *
+   * <p>Only the nesting moved here; both branches are unchanged. It is a separate method so
+   * {@link #handleChangePassword} stays inside its cognitive complexity budget, and the caller
+   * guards it with {@code !enrolling} because an account with no local password has nothing to
+   * verify.
+   *
+   * @return true when the caller may proceed; false when a response has already been written
+   */
+  private boolean currentPasswordAccepted(HttpServletResponse response, Account account,
+      String currentPassword) throws IOException {
+    if (currentPassword.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
+          "changePassword: request lacks currentPassword for an account that has one",
+          "The current password is required.");
+      return false;
+    }
+    if (!verifyPassword(currentPassword, account.getPasswordHash())) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, CODE_INVALID_CURRENT_PASSWORD,
+          "changePassword: current password did not verify",
+          "The current password is not correct.");
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * POST /sws/go/change-password
    * Header: Authorization: Bearer <session_token>
    * Body: { "currentPassword": "...", "newPassword": "..." }
@@ -1148,19 +1175,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // to be a dead end that told the caller the account "has no password to change" and stopped
       // there, leaving an SSO-only account unable to give itself one from inside the app.
       boolean enrolling = !EtendoGoJwtDalHelper.hasLocalPassword(account);
-      if (!enrolling) {
-        if (currentPassword.isEmpty()) {
-          writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
-              "changePassword: request lacks currentPassword for an account that has one",
-              "The current password is required.");
-          return;
-        }
-        if (!verifyPassword(currentPassword, account.getPasswordHash())) {
-          writeError(response, HttpServletResponse.SC_UNAUTHORIZED, CODE_INVALID_CURRENT_PASSWORD,
-              "changePassword: current password did not verify",
-              "The current password is not correct.");
-          return;
-        }
+      if (!enrolling && !currentPasswordAccepted(response, account, currentPassword)) {
+        return;
       }
       String sessionToken = generateToken();
       EtendoGoJwtDalHelper.changePassword(account, hashPassword(newPassword), sessionToken,
@@ -1384,7 +1400,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     JSONArray removable = new JSONArray();
     if (total > 1) {
       if (hasPassword) {
-        removable.put("password");
+        removable.put(FIELD_PASSWORD);
       }
       for (AccountIdentity identity : identities) {
         removable.put(identity.getAuthProvider());
