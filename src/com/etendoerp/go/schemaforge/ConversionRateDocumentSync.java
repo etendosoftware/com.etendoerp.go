@@ -76,6 +76,24 @@ final class ConversionRateDocumentSync {
     }
   }
 
+  /**
+   * Removes every {@code C_Conversion_Rate_Document} row for this invoice+org-currency pair.
+   * Called when the invoice's currency is switched back to the org currency: at that point no
+   * exchange rate applies anymore, so a row from an earlier foreign-currency state would be
+   * stale and must not be left behind (ETP-4836 — QA regression: switching a foreign currency
+   * to another foreign currency correctly replaced the row, but switching back to the org
+   * currency silently no-op'd instead of clearing it).
+   */
+  static void deleteAllForInvoice(String invoiceId, String orgCurrencyId) throws java.sql.SQLException {
+    Connection conn = OBDal.getInstance().getConnection();
+    List<String> existingIds = findConversionRateDocumentIds(conn, invoiceId, orgCurrencyId);
+    for (String staleId : existingIds) {
+      deleteConversionRateDocument(conn, staleId);
+      log.info("[ETP-4836] Deleted C_Conversion_Rate_Document {} for invoice {} (doc currency"
+          + " now matches org currency)", staleId, invoiceId);
+    }
+  }
+
   private static List<String> findConversionRateDocumentIds(Connection conn, String invoiceId,
       String orgCurrencyId) throws java.sql.SQLException {
     String sql =
