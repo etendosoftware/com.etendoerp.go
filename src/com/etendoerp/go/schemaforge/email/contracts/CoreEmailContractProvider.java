@@ -94,6 +94,9 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
         new AccountLinkEmailContract("new-account-invitee", contractResolver,
             NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS),
         new AccountNoticeEmailContract("password-changed", contractResolver, "note.warning"),
+        // ETP-5115: its own contract rather than reusing password-changed, whose copy would tell
+        // somebody their password "was changed" the first time they ever set one.
+        new AccountNoticeEmailContract("password-added", contractResolver, "note.warning"),
         new LoginAlertEmailContract(contractResolver),
         new OrganizationJoinedEmailContract(contractResolver),
         new CompanyInvitationEmailContract());

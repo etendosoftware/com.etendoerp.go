@@ -45,6 +45,7 @@ class TransactionalAuthEmailSender {
   private static final String CONTRACT_NEW_ACCOUNT_INVITEE = "new-account-invitee";
   private static final String CONTRACT_ORGANIZATION_JOINED = "organization-joined";
   private static final String CONTRACT_PASSWORD_CHANGED = "password-changed";
+  private static final String CONTRACT_PASSWORD_ADDED = "password-added";
   private static final String CONTRACT_RESET_PASSWORD = "reset-password";
   private static final String CONTRACT_SET_PASSWORD = "set-password";
   private static final String CONTRACT_VERIFY_EMAIL = "verify-email";
@@ -274,6 +275,35 @@ class TransactionalAuthEmailSender {
       return sendBestEffort(CONTRACT_COMPANY_INVITATION, body);
     } catch (JSONException e) {
       log.warn("Could not build company-invitation email command", e);
+      return false;
+    }
+  }
+
+  /**
+   * Notifies that a password was added to an account that had none.
+   *
+   * <p>ETP-5115. Separate from {@code password-changed} on purpose: telling somebody their password
+   * "was changed" when they just created their first one reads as though something happened to a
+   * credential they did not have, which is exactly the alarm this mail exists to avoid raising
+   * falsely. Like its sibling it carries a per-send record id so two operations in a row are not
+   * collapsed into one by the duplicate check.
+   *
+   * @param account the account that now has a local password
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendPasswordAdded(Account account) {
+    if (account == null) {
+      return false;
+    }
+    try {
+      JSONObject body = baseCommand(account);
+      addLanguageField(body, null);
+      body.put(EmailContractCommandSupport.FIELD_DATE, Instant.now().toString());
+      body.put(EmailContractCommandSupport.FIELD_RECORD_ID,
+          account.getId() + ":" + java.util.UUID.randomUUID());
+      return sendBestEffort(CONTRACT_PASSWORD_ADDED, body);
+    } catch (JSONException e) {
+      log.warn("Could not build password-added email command", e);
       return false;
     }
   }

@@ -1101,21 +1101,26 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
 
-    String currentPassword;
+    // ETP-5115: currentPassword is read optionally rather than demanded up front. An account with
+    // no local password has none to give, and requiring it here rejected those callers with a
+    // missing-credentials error before anything ever looked at the account — so the endpoint that
+    // says "this account signs in through an external provider" could not be reached by the very
+    // accounts it describes. Whether it is actually required is decided below, once the account is
+    // known; an account that has a password still must supply it.
+    String currentPassword = body.optString("currentPassword", "");
     String newPassword;
     try {
-      currentPassword = body.getString("currentPassword");
       newPassword = body.getString("newPassword");
     } catch (JSONException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
-          "changePassword: request body lacks currentPassword and/or newPassword",
-          "The current and new password are both required.");
+          "changePassword: request body lacks newPassword",
+          "The new password is required.");
       return;
     }
-    if (currentPassword.isEmpty() || newPassword.isEmpty()) {
+    if (newPassword.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
-          "changePassword: currentPassword and/or newPassword is empty",
-          "The current and new password are both required.");
+          "changePassword: newPassword is empty",
+          "The new password is required.");
       return;
     }
     if (!PasswordPolicy.isStrong(newPassword)) {
@@ -1131,23 +1136,39 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
-      if (!EtendoGoJwtDalHelper.hasLocalPassword(account)) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_NO_LOCAL_PASSWORD,
-            "changePassword: account has no local password (external identity provider)",
-            "This account signs in through an external provider, so it has no password to change.");
-        return;
-      }
-      if (!verifyPassword(currentPassword, account.getPasswordHash())) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, CODE_INVALID_CURRENT_PASSWORD,
-            "changePassword: current password did not verify",
-            "The current password is not correct.");
-        return;
+      // ETP-5115: an account with no local password is enrolling rather than changing, and there
+      // is no current password to verify — the bearer token already proves who is asking. This used
+      // to be a dead end that told the caller the account "has no password to change" and stopped
+      // there, leaving an SSO-only account unable to give itself one from inside the app.
+      boolean enrolling = !EtendoGoJwtDalHelper.hasLocalPassword(account);
+      if (!enrolling) {
+        if (currentPassword.isEmpty()) {
+          writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
+              "changePassword: request lacks currentPassword for an account that has one",
+              "The current password is required.");
+          return;
+        }
+        if (!verifyPassword(currentPassword, account.getPasswordHash())) {
+          writeError(response, HttpServletResponse.SC_UNAUTHORIZED, CODE_INVALID_CURRENT_PASSWORD,
+              "changePassword: current password did not verify",
+              "The current password is not correct.");
+          return;
+        }
       }
       String sessionToken = generateToken();
       EtendoGoJwtDalHelper.changePassword(account, hashPassword(newPassword), sessionToken,
           new Date());
-      sendAuthEmailBestEffort("password-changed",
-          () -> authEmailSender.sendPasswordChanged(account));
+      // The notice tells the owner their way in changed, so it has to say which thing happened:
+      // "your password was changed" is alarming and wrong for somebody who just created a first one.
+      // A block lambda, not a ternary — sendAuthEmailBestEffort takes a Runnable, and a conditional
+      // expression is not void-compatible.
+      sendAuthEmailBestEffort(enrolling ? "password-added" : "password-changed", () -> {
+        if (enrolling) {
+          authEmailSender.sendPasswordAdded(account);
+        } else {
+          authEmailSender.sendPasswordChanged(account);
+        }
+      });
 
       JSONObject accountJson = new JSONObject();
       accountJson.put("id", account.getId());
