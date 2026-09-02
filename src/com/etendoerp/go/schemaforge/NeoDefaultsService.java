@@ -748,12 +748,41 @@ public class NeoDefaultsService {
         && !request.sfFieldDefault.trim().isEmpty())
         ? request.sfFieldDefault.trim()
         : adColumn.getDefaultValue();
-    if (defaultExpr == null || defaultExpr.trim().isEmpty()) {
+    if (defaultExpr == null || defaultExpr.trim().isEmpty()
+        || isBlankQuotedLiteral(defaultExpr.trim())) {
       return resolveFromPrefsOrDocType(adColumn, request.vars, request.conn, request.windowId,
           dbColumnName, request.ctx);
     }
 
     return resolveNonEmptyDefaultExpr(defaultExpr.trim(), adColumn, dbColumnName, request);
+  }
+
+  /**
+   * True when {@code expr} is a quoted string literal (e.g. {@code " "}, {@code "  "}) whose
+   * content is entirely whitespace, EXCLUDING the deliberate empty-string literal {@code ""}
+   * (exactly two characters), which {@link #resolveNonEmptyDefaultExpr} handles on purpose by
+   * returning an empty string.
+   *
+   * <p>AD_Column.DefaultValue occasionally carries a malformed "no default" placeholder as a
+   * quoted space — e.g. {@code C_Tax_ID} on the {@code GL_JournalLine} tab has DefaultValue
+   * literally {@code " "} (a double-quote, a space, and another double-quote) — instead of a
+   * genuinely empty value or NULL. {@link Utility#getDefault} does NOT strip surrounding quotes
+   * for a plain literal (no "@" token): it returns the string verbatim, quote characters
+   * included, so that 3-character garbage string is what ends up injected as the "resolved"
+   * default. For an FK column that garbage is then used as a referenced entity id, which is
+   * fatal on save ("New object ... refered to but not present in the import set", ETP-4917).
+   * Treating this pattern as "no default configured" here — the single choke point shared by
+   * both the create-time mandatory-defaults pass and the {@code /defaults} bootstrap endpoint —
+   * lets the column fall through to the normal preference/doctype/no-default path instead.</p>
+   */
+  private static boolean isBlankQuotedLiteral(String expr) {
+    if (expr == null || expr.length() <= 2) {
+      return false;
+    }
+    if (!expr.startsWith("\"") || !expr.endsWith("\"")) {
+      return false;
+    }
+    return StringUtils.isBlank(expr.substring(1, expr.length() - 1));
   }
 
   /**
@@ -803,7 +832,13 @@ public class NeoDefaultsService {
     String resolved = Utility.getDefault(request.conn, request.vars, dbColumnName, defaultExpr,
         request.windowId, "");
 
-    if (resolved != null && !resolved.isEmpty()) {
+    // ETP-4917: a resolved value that is entirely whitespace is not a genuine default — it is
+    // indistinguishable, downstream, from the malformed-quoted-literal case handled by
+    // isBlankQuotedLiteral above, except it can also come from a preference, session variable,
+    // or @token@ resolution that happens to yield a blank string. Treat it the same way: as "no
+    // default", not as a literal value to inject (fatal for FK columns, whose blank/whitespace
+    // "id" is never present in the import set).
+    if (StringUtils.isNotBlank(resolved)) {
       return resolved;
     }
 
