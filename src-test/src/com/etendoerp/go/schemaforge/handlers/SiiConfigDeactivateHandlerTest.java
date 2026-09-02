@@ -25,24 +25,34 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Field;
 import java.util.Date;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.Session;
+import org.hibernate.query.NativeQuery;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.module.sii.data.AEATSIIConfig;
 import org.openbravo.module.sii.data.AEATSIIFacturas;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.SiiTbaiAutoSendScheduleService;
 
 /**
  * Unit tests for {@link SiiConfigDeactivateHandler} (ETP-4785).
@@ -335,6 +345,208 @@ public class SiiConfigDeactivateHandlerTest {
       assertNotNull(result);
       assertEquals(500, result.getHttpStatus());
       obCtxMock.verify(OBContext::restorePreviousMode, Mockito.times(1));
+    }
+  }
+
+  // ─── afterHandle(): ETP-5117 twice-a-day auto-send schedule ─────────────────
+
+  private static final String AUTO_SEND_SCHEDULE_DESCRIPTION =
+      "Automatic SII invoice sending (Etendo GO)";
+  private static final String CLIENT_ID = "client-001";
+  private static final String USER_ID = "user-001";
+  private static final String ROLE_ID = "role-001";
+
+  /**
+   * Injects a mock {@link SiiTbaiAutoSendScheduleService} into the handler's private final
+   * {@code scheduleService} field via reflection, bypassing its real construction so the
+   * ETP-5117 auto-send scheduling call can be verified in isolation from the DAL wiring
+   * {@link SiiTbaiAutoSendScheduleService} itself needs — same convention as
+   * {@code SalesInvoiceHeaderHandlerTest#handlerWithTotalDiscountMock}.
+   */
+  private static SiiConfigDeactivateHandler handlerWithScheduleServiceMock(
+      SiiTbaiAutoSendScheduleService mockScheduleService) throws Exception {
+    SiiConfigDeactivateHandler handler = new SiiConfigDeactivateHandler();
+    Field field = SiiConfigDeactivateHandler.class.getDeclaredField("scheduleService");
+    field.setAccessible(true);
+    field.set(handler, mockScheduleService);
+    return handler;
+  }
+
+  private static OBContext mockObContextWithUserAndRole() {
+    OBContext obContext = mock(OBContext.class);
+    User user = mock(User.class);
+    when(user.getId()).thenReturn(USER_ID);
+    Role role = mock(Role.class);
+    when(role.getId()).thenReturn(ROLE_ID);
+    when(obContext.getUser()).thenReturn(user);
+    when(obContext.getRole()).thenReturn(role);
+    return obContext;
+  }
+
+  @SuppressWarnings("rawtypes")
+  private static NativeQuery stubInSiiSystemNativeQuery(OBDal dal) {
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    NativeQuery nq = mock(NativeQuery.class);
+    when(session.createNativeQuery(Mockito.anyString())).thenReturn(nq);
+    when(nq.setParameter(Mockito.anyString(), Mockito.any())).thenReturn(nq);
+    return nq;
+  }
+
+  /** A POST that creates an active SII config triggers the auto-send schedule. */
+  @Test
+  public void afterHandlePostTriggersAutoSendScheduleForActiveConfig() throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    SiiConfigDeactivateHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    JSONObject dataRow = new JSONObject().put("id", RECORD_ID);
+    JSONObject response = new JSONObject().put("data", new JSONArray().put(dataRow));
+    JSONObject body = new JSONObject().put("response", response);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .previousResult(new NeoResponse(201, body))
+        .obContext(mockObContextWithUserAndRole())
+        .build();
+
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(ORG_ID);
+    AEATSIIConfig config = mock(AEATSIIConfig.class);
+    when(config.isActive()).thenReturn(true);
+    when(config.getClient()).thenReturn(client);
+    when(config.getOrganization()).thenReturn(org);
+
+    when(scheduleService.ensureAutoSendSchedule(eq(CLIENT_ID), eq(ORG_ID), eq(USER_ID), eq(ROLE_ID),
+        eq(SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY), eq(AUTO_SEND_SCHEDULE_DESCRIPTION)))
+        .thenReturn("req-new");
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(AEATSIIConfig.class), eq(RECORD_ID))).thenReturn(config);
+
+      assertNull(handler.afterHandle(ctx));
+
+      verify(scheduleService).ensureAutoSendSchedule(CLIENT_ID, ORG_ID, USER_ID, ROLE_ID,
+          SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY, AUTO_SEND_SCHEDULE_DESCRIPTION);
+      verify(scheduleService).activateSchedule("req-new");
+    }
+  }
+
+  /** A PUT that explicitly deactivates the config never reaches the scheduling logic. */
+  @Test
+  public void afterHandlePutDeactivatingDoesNotTriggerAutoSendSchedule() throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    SiiConfigDeactivateHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PUT")
+        .requestBody(new JSONObject().put("active", false))
+        .recordId(RECORD_ID)
+        .build();
+
+    assertNull(handler.afterHandle(ctx));
+
+    verifyNoInteractions(scheduleService);
+  }
+
+  /**
+   * A PUT that leaves the config active triggers the auto-send schedule AND the pre-existing
+   * {@code INSIISYSTEM='Y'} native-SQL update still runs — regression guard confirming ETP-5117
+   * did not disturb the ETP-4783 logic.
+   */
+  @Test
+  public void afterHandlePutNonDeactivatingTriggersAutoSendScheduleAndKeepsInsiiSystemLogic()
+      throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    SiiConfigDeactivateHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PUT")
+        .requestBody(new JSONObject().put("name", "foo"))
+        .recordId(RECORD_ID)
+        .obContext(mockObContextWithUserAndRole())
+        .build();
+
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(ORG_ID);
+    AEATSIIConfig config = mock(AEATSIIConfig.class);
+    when(config.isActive()).thenReturn(true);
+    when(config.getClient()).thenReturn(client);
+    when(config.getOrganization()).thenReturn(org);
+
+    when(scheduleService.ensureAutoSendSchedule(eq(CLIENT_ID), eq(ORG_ID), eq(USER_ID), eq(ROLE_ID),
+        eq(SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY), eq(AUTO_SEND_SCHEDULE_DESCRIPTION)))
+        .thenReturn("req-new");
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(AEATSIIConfig.class), eq(RECORD_ID))).thenReturn(config);
+      @SuppressWarnings("rawtypes")
+      NativeQuery nq = stubInSiiSystemNativeQuery(dal);
+
+      assertNull(handler.afterHandle(ctx));
+
+      verify(scheduleService).ensureAutoSendSchedule(CLIENT_ID, ORG_ID, USER_ID, ROLE_ID,
+          SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY, AUTO_SEND_SCHEDULE_DESCRIPTION);
+      verify(scheduleService).activateSchedule("req-new");
+      // Regression: the INSIISYSTEM native update still fires for a non-deactivating PUT.
+      verify(nq).setParameter(eq("id"), eq(RECORD_ID));
+      verify(nq).executeUpdate();
+    }
+  }
+
+  /**
+   * A config that resolves {@code isActive() == false} after load must not get a schedule, even
+   * when the PUT body itself did not explicitly set {@code active=false} (e.g. some other flow
+   * already deactivated it). The pre-existing INSIISYSTEM update is unaffected since it is not
+   * gated by the active flag.
+   */
+  @Test
+  public void afterHandleDoesNotScheduleWhenConfigIsInactiveAfterLoad() throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    SiiConfigDeactivateHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PUT")
+        .requestBody(new JSONObject().put("name", "foo"))
+        .recordId(RECORD_ID)
+        .obContext(mockObContextWithUserAndRole())
+        .build();
+
+    AEATSIIConfig config = mock(AEATSIIConfig.class);
+    when(config.isActive()).thenReturn(false);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(AEATSIIConfig.class), eq(RECORD_ID))).thenReturn(config);
+      @SuppressWarnings("rawtypes")
+      NativeQuery nq = stubInSiiSystemNativeQuery(dal);
+
+      assertNull(handler.afterHandle(ctx));
+
+      verifyNoInteractions(scheduleService);
+      // Regression: INSIISYSTEM update still runs regardless of the config's active flag.
+      verify(nq).setParameter(eq("id"), eq(RECORD_ID));
+      verify(nq).executeUpdate();
     }
   }
 }
