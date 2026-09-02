@@ -97,6 +97,7 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
         // ETP-5115: its own contract rather than reusing password-changed, whose copy would tell
         // somebody their password "was changed" the first time they ever set one.
         new AccountNoticeEmailContract("password-added", contractResolver, "note.warning"),
+        new AccountNoticeEmailContract("auth-method-removed", contractResolver, "note.warning"),
         new LoginAlertEmailContract(contractResolver),
         new OrganizationJoinedEmailContract(contractResolver),
         new CompanyInvitationEmailContract());

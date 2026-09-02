@@ -46,6 +46,7 @@ class TransactionalAuthEmailSender {
   private static final String CONTRACT_ORGANIZATION_JOINED = "organization-joined";
   private static final String CONTRACT_PASSWORD_CHANGED = "password-changed";
   private static final String CONTRACT_PASSWORD_ADDED = "password-added";
+  private static final String CONTRACT_AUTH_METHOD_REMOVED = "auth-method-removed";
   private static final String CONTRACT_RESET_PASSWORD = "reset-password";
   private static final String CONTRACT_SET_PASSWORD = "set-password";
   private static final String CONTRACT_VERIFY_EMAIL = "verify-email";
@@ -304,6 +305,35 @@ class TransactionalAuthEmailSender {
       return sendBestEffort(CONTRACT_PASSWORD_ADDED, body);
     } catch (JSONException e) {
       log.warn("Could not build password-added email command", e);
+      return false;
+    }
+  }
+
+  /**
+   * Notifies that a way of signing in was removed from an account.
+   *
+   * <p>ETP-5115. Deliberately does not name which one. The copy is one catalog entry and naming the
+   * method would mean interpolating it, which this contract shape does not carry — and the value of
+   * the notice does not depend on it: what the owner needs to know is that the ways into their
+   * account changed without them, and the remedy is the same either way. Naming it would be an
+   * improvement, not a prerequisite.
+   *
+   * @param account the account a method was removed from
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendAuthMethodRemoved(Account account) {
+    if (account == null) {
+      return false;
+    }
+    try {
+      JSONObject body = baseCommand(account);
+      addLanguageField(body, null);
+      body.put(EmailContractCommandSupport.FIELD_DATE, Instant.now().toString());
+      body.put(EmailContractCommandSupport.FIELD_RECORD_ID,
+          account.getId() + ":" + java.util.UUID.randomUUID());
+      return sendBestEffort(CONTRACT_AUTH_METHOD_REMOVED, body);
+    } catch (JSONException e) {
+      log.warn("Could not build auth-method-removed email command", e);
       return false;
     }
   }

@@ -227,6 +227,27 @@ final class AccountIdentityDalHelper {
     return identities.isEmpty() ? null : identities.get(0);
   }
 
+  /**
+   * Unlinks one identity from an account.
+   *
+   * <p>Deletes the row rather than deactivating it. A deactivated identity would keep occupying the
+   * unique over (provider, subject) and silently block the user from ever linking that same
+   * provider account again — including back to this very account, which is the most likely thing
+   * they would try after an accidental removal.
+   *
+   * <p>Does not commit and does not check the last-method invariant. Both belong to the caller: the
+   * invariant has to be evaluated over the account's whole method set inside the same transaction
+   * as the delete, which this method cannot see.
+   *
+   * @param identity identity to unlink, may be null
+   */
+  static void unlink(AccountIdentity identity) {
+    if (identity == null) {
+      return;
+    }
+    OBDal.getInstance().remove(identity);
+  }
+
   private static AccountIdentity findIdentity(String provider, String subject) {
     OBQuery<AccountIdentity> query = OBDal.getInstance().createQuery(AccountIdentity.class,
         IDENTITY_QUERY + AccountIdentity.PROPERTY_AUTHPROVIDER + " = :" + PARAM_AUTH_PROVIDER

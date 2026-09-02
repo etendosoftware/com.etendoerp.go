@@ -170,6 +170,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String CODE_MISSING_CREDENTIALS = "CHANGE_PASSWORD_MISSING_CREDENTIALS";
   private static final String CODE_NO_LOCAL_PASSWORD = "NO_LOCAL_PASSWORD";
   private static final String CODE_INVALID_CURRENT_PASSWORD = "INVALID_CURRENT_PASSWORD";
+  private static final String CODE_METHOD_NOT_FOUND = "AUTH_METHOD_NOT_FOUND";
+  private static final String CODE_LAST_AUTH_METHOD = "LAST_AUTH_METHOD";
+  private static final String METHOD_PASSWORD = "password";
   private static final String PROGRESS_IN_PROGRESS = "in_progress";
   private static final String PROGRESS_CLIENT = "client";
   private static final String PROGRESS_ERROR = "error";
@@ -346,6 +349,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handlePasswordResetConfirm(request, response);
     } else if (isPath(path, "/change-password")) {
       handleChangePassword(request, response);
+    } else if (isPath(path, "/auth-methods/remove")) {
+      handleRemoveAuthMethod(request, response);
     } else if (isPath(path, PATH_VERIFY_EMAIL)) {
       handleVerifyEmail(request, response);
     } else if (isPath(path, PATH_VERIFY_EMAIL_RESEND)) {
@@ -1228,6 +1233,124 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * @return the {@code authMethods} object
    * @throws JSONException if the response cannot be built
    */
+  /**
+   * POST /sws/go/auth-methods/remove
+   * Body: { "method": "password" | "<provider>", "currentPassword": "..." }
+   *
+   * <p>ETP-5115. Removes one way of signing in. One endpoint rather than two so the invariant that
+   * makes this safe — an account must keep at least one method — is evaluated in exactly one place
+   * for both kinds of method.
+   *
+   * <p><strong>The invariant is enforced here, on the server, inside the transaction.</strong> The
+   * {@code removable} list that {@code /me} publishes exists to draw the screen and is deliberately
+   * not trusted: two tabs would each read one remaining method and both would be allowed through,
+   * emptying the account. The set is therefore re-read here, immediately before the delete.
+   *
+   * <p><strong>Re-authentication</strong> asks the caller to prove they hold a method, where doing
+   * so is cheap. Removing the password requires the current password. Removing an identity does
+   * not, because no equally cheap proof exists for a provider — the session token carries it, and
+   * the notice mail is what makes an unwanted removal visible. Tightening that into a full step-up
+   * is a decision left open in the plan, not an oversight.
+   */
+  private void handleRemoveAuthMethod(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String token = extractBearerToken(request);
+    if (token == null) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
+      return;
+    }
+
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      return;
+    }
+    String method = StringUtils.trimToEmpty(body.optString("method", ""));
+    String currentPassword = body.optString("currentPassword", "");
+    if (method.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
+          "removeAuthMethod: request body lacks method", "The method to remove is required.");
+      return;
+    }
+
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
+      if (account == null) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return;
+      }
+      removeAuthMethod(account, method, currentPassword, response);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("remove auth method", e, log);
+      log.error("Database error removing an authentication method", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("JSON error building remove-auth-method response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** Split out of {@link #handleRemoveAuthMethod} so neither trips the complexity limit. */
+  private void removeAuthMethod(Account account, String method, String currentPassword,
+      HttpServletResponse response) throws IOException, JSONException {
+    boolean hasPassword = EtendoGoJwtDalHelper.hasLocalPassword(account);
+    List<AccountIdentity> identities = AccountIdentityDalHelper.identitiesFor(account);
+    boolean removingPassword = StringUtils.equals(method, METHOD_PASSWORD);
+    AccountIdentity target = removingPassword ? null
+        : AccountIdentityDalHelper.identityForProvider(account, method);
+
+    if (removingPassword ? !hasPassword : target == null) {
+      writeError(response, HttpServletResponse.SC_NOT_FOUND, CODE_METHOD_NOT_FOUND,
+          "removeAuthMethod: the account does not have the requested method",
+          "That sign-in method is not enabled on this account.");
+      return;
+    }
+    // Re-read rather than trusting what /me last published: this is the check that keeps the
+    // account reachable, and it has to see the state as it is at this instant.
+    if ((hasPassword ? 1 : 0) + identities.size() <= 1) {
+      writeError(response, HttpServletResponse.SC_CONFLICT, CODE_LAST_AUTH_METHOD,
+          "removeAuthMethod: refusing to remove the only remaining method",
+          "This is the only way you can sign in. Add another method before removing this one.");
+      return;
+    }
+    if (removingPassword) {
+      if (currentPassword.isEmpty()) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
+            "removeAuthMethod: request lacks currentPassword",
+            "The current password is required.");
+        return;
+      }
+      if (!verifyPassword(currentPassword, account.getPasswordHash())) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, CODE_INVALID_CURRENT_PASSWORD,
+            "removeAuthMethod: current password did not verify",
+            "The current password is not correct.");
+        return;
+      }
+    }
+
+    String sessionToken = generateToken();
+    if (removingPassword) {
+      EtendoGoJwtDalHelper.removeLocalPassword(account, sessionToken, new Date());
+    } else {
+      AccountIdentityDalHelper.unlink(target);
+      EtendoGoJwtDalHelper.updateSessionToken(account, sessionToken);
+    }
+    sendAuthEmailBestEffort("auth-method-removed",
+        () -> authEmailSender.sendAuthMethodRemoved(account));
+
+    JSONObject result = new JSONObject();
+    result.put(FIELD_STATUS, STATUS_SUCCESS);
+    result.put(FIELD_TOKEN, sessionToken);
+    result.put("authMethods", buildAuthMethods(account));
+    writeResponse(response, HttpServletResponse.SC_OK, result);
+  }
+
   private JSONObject buildAuthMethods(Account account) throws JSONException {
     boolean hasPassword = EtendoGoJwtDalHelper.hasLocalPassword(account);
     List<AccountIdentity> identities = AccountIdentityDalHelper.identitiesFor(account);

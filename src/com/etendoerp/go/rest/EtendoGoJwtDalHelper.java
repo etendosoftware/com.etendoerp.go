@@ -306,6 +306,28 @@ final class EtendoGoJwtDalHelper {
     return account == null ? null : (Date) account.get(PROPERTY_PASSWORD_CHANGED);
   }
 
+  /**
+   * Removes the account's local password, leaving its identities untouched.
+   *
+   * <p>Rotates the session token: whoever asked is holding a session that was, until a moment ago,
+   * backed partly by a credential that no longer exists, and the sessions of anyone else holding
+   * the old token must not survive the removal. Also clears any pending reset token, which would
+   * otherwise let the removed password be restored from an email already sitting in an inbox.
+   *
+   * @param account account to strip
+   * @param sessionToken the replacement session token
+   * @param removedAt when it happened
+   */
+  static void removeLocalPassword(Account account, String sessionToken, Date removedAt) {
+    account.setPasswordHash(null);
+    account.setSessionToken(sessionToken);
+    account.set(PROPERTY_RESET_TOKEN_HASH, null);
+    account.set(PROPERTY_RESET_TOKEN_EXPIRES, null);
+    account.set(PROPERTY_PASSWORD_CHANGED, removedAt);
+    OBDal.getInstance().save(account);
+    flushAndCommitDalChanges();
+  }
+
   static boolean hasPasswordResetToken(Account account) {
     return account != null && StringUtils.isNotBlank((String) account.get(PROPERTY_RESET_TOKEN_HASH));
   }
