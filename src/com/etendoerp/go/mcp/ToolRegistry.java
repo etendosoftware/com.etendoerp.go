@@ -176,13 +176,16 @@ public class ToolRegistry {
     // Split the write catalog per method. A spec with one PUT/PATCH entity but no POST or
     // DELETE entity (monitor-verifactu) belongs only in neo_update; a shared "writable"
     // enum would incorrectly advertise it to neo_create and neo_delete.
-    if (McpToolRouterSupport.hasEntityWithMethod(spec, "POST")) {
+    if (McpToolRouterSupport.hasEntityWithMethod(spec, "POST")
+        && NeoAccessUtils.hasWindowAccessForSpec(spec, "POST")) {
       creatableWindowSpecs.add(spec.getName());
     }
-    if (McpToolRouterSupport.hasEntityWithMethod(spec, "PUT")) {
+    if (McpToolRouterSupport.hasEntityWithMethod(spec, "PUT")
+        && NeoAccessUtils.hasWindowAccessForSpec(spec, "PUT")) {
       updatableWindowSpecs.add(spec.getName());
     }
-    if (McpToolRouterSupport.hasEntityWithMethod(spec, "DELETE")) {
+    if (McpToolRouterSupport.hasEntityWithMethod(spec, "DELETE")
+        && NeoAccessUtils.hasWindowAccessForSpec(spec, "DELETE")) {
       deletableWindowSpecs.add(spec.getName());
     }
   }
