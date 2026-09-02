@@ -24,6 +24,7 @@ import javax.inject.Named;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Projections;
@@ -38,6 +39,7 @@ import org.openbravo.model.common.invoice.Invoice;
 import com.etendoerp.go.schemaforge.AbstractSmartDeactivationHandler;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.SiiTbaiAutoSendScheduleService;
 
 /**
  * NeoHandler for the {@code sii-config} spec ({@code siiConfiguration} entity, table
@@ -68,6 +70,13 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * config. This column is not mapped in the generated {@link AEATSIIConfig} entity class and
  * defaults to {@code 'N'}, so without this hook every PUT would clear the org flag.
  *
+ * <h3>POST/PUT afterHandle — twice-a-day auto-send schedule (ETP-5117)</h3>
+ * <p>After a successful create (POST) or non-deactivating update (PUT) that leaves the config
+ * active, ensures a scheduled {@code AD_Process_Request} exists for the SII sending process,
+ * scoped to the config's own client + organization (SII configs are per-organization) — see
+ * {@link SiiTbaiAutoSendScheduleService} for the full scope/idempotency reasoning. GO-only by
+ * design: this never runs for a config saved through Classic UI.
+ *
  * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
  * {@code docs/neo-headless-extensibility.md} §2.2 (this qualifier silently stops being
  * discovered if a scope annotation such as {@code @ApplicationScoped} is added).
@@ -76,6 +85,13 @@ import com.etendoerp.go.schemaforge.NeoResponse;
 public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler {
 
   private static final Logger log = LogManager.getLogger(SiiConfigDeactivateHandler.class);
+
+  private static final String METHOD_POST = "POST";
+
+  private static final String AUTO_SEND_SCHEDULE_DESCRIPTION =
+      "Automatic SII invoice sending (Etendo GO)";
+
+  private final SiiTbaiAutoSendScheduleService scheduleService = new SiiTbaiAutoSendScheduleService();
 
   /**
    * Decides between deleting the config record (no invoices sent through it) and letting the
@@ -117,40 +133,96 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
   }
 
   /**
-   * After a successful PUT that saves an active SII config, ensures {@code INSIISYSTEM = 'Y'}
-   * in the DB so the {@code AEATSII_CHECK_SIFS_CONFIGS_TRG} trigger correctly marks the org's
-   * {@code em_etsg_has_sii_config} flag.
+   * After a successful create (POST) or non-deactivating update (PUT) of an SII config:
+   * <ul>
+   *   <li>PUT only — ensures {@code INSIISYSTEM = 'Y'} in the DB so the
+   *       {@code AEATSII_CHECK_SIFS_CONFIGS_TRG} trigger correctly marks the org's
+   *       {@code em_etsg_has_sii_config} flag (ETP-4783, unchanged).</li>
+   *   <li>POST or PUT — ensures the twice-a-day auto-send schedule exists for the config's
+   *       organization (ETP-5117). POST is included (not just PUT) because SII configuration is
+   *       most commonly created via POST; gating only on PUT would silently skip the schedule for
+   *       every tenant that never edits the config after the initial save.</li>
+   * </ul>
    *
-   * <p>Deactivation PUTs ({@code active=false}) are skipped — the org flag should be cleared
-   * when the config is deactivated.
+   * <p>Deactivation PUTs ({@code active=false}) are skipped entirely — the org flag should be
+   * cleared, and a config that is not becoming active must not get a schedule.
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
-    if (!"PUT".equalsIgnoreCase(context.getHttpMethod())) {
+    String method = context.getHttpMethod();
+    boolean isPost = METHOD_POST.equalsIgnoreCase(method);
+    boolean isPut = METHOD_PUT.equalsIgnoreCase(method);
+    if (!isPost && !isPut) {
       return null;
     }
-    // Skip when this PUT is deactivating the record; the trigger should clear the org flag.
-    JSONObject body = context.getRequestBody();
-    if (body != null && body.has("active") && !body.optBoolean("active", true)) {
+    if (isPut && isExplicitlyDeactivating(context.getRequestBody())) {
       return null;
     }
-    String recordId = context.getRecordId();
+    String recordId = isPut ? context.getRecordId() : resolveCreatedRecordId(context);
     if (StringUtils.isBlank(recordId)) {
       return null;
     }
     try {
       OBContext.setAdminMode(true);
       try {
-        setInSiiSystemY(recordId);
+        if (isPut) {
+          setInSiiSystemY(recordId);
+        }
+        scheduleAutoSendIfActive(context, recordId);
       } finally {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
       // Non-fatal — the save already committed; log and continue.
-      log.warn("SiiConfigDeactivateHandler.afterHandle: could not set INSIISYSTEM='Y' for {}: {}",
-          recordId, e.getMessage(), e);
+      log.warn("SiiConfigDeactivateHandler.afterHandle: could not complete post-save side "
+          + "effects for {}: {}", recordId, e.getMessage(), e);
     }
     return null;
+  }
+
+  /**
+   * Resolves the {@code id} of a just-created record from a POST response
+   * ({@code response.data[0].id}). Etendo's {@code DefaultJsonDataService} always serializes
+   * {@code data} as a {@link JSONArray} for a create response.
+   */
+  private String resolveCreatedRecordId(NeoContext context) {
+    NeoResponse prev = context.getPreviousResult();
+    if (prev == null || prev.getBody() == null) {
+      return null;
+    }
+    JSONObject response = prev.getBody().optJSONObject("response");
+    if (response == null) {
+      return null;
+    }
+    JSONArray dataArr = response.optJSONArray("data");
+    if (dataArr != null && dataArr.length() > 0) {
+      JSONObject first = dataArr.optJSONObject(0);
+      return first == null ? null : StringUtils.trimToNull(first.optString("id", null));
+    }
+    JSONObject dataObj = response.optJSONObject("data");
+    return dataObj == null ? null : StringUtils.trimToNull(dataObj.optString("id", null));
+  }
+
+  /**
+   * Ensures the twice-a-day auto-send schedule exists (and attempts to activate it) for the
+   * saved config's client/organization, but only when the config is actually active — a config
+   * that was created inactive, or whose deactivation slipped through some other path, must not
+   * get a schedule.
+   */
+  private void scheduleAutoSendIfActive(NeoContext context, String recordId) {
+    AEATSIIConfig config = OBDal.getInstance().get(AEATSIIConfig.class, recordId);
+    if (config == null || !Boolean.TRUE.equals(config.isActive())
+        || config.getClient() == null || config.getOrganization() == null) {
+      return;
+    }
+    OBContext obContext = context.getObContext();
+    if (obContext == null || obContext.getUser() == null || obContext.getRole() == null) {
+      return;
+    }
+    String requestId = scheduleService.ensureAutoSendSchedule(config.getClient().getId(),
+        config.getOrganization().getId(), obContext.getUser().getId(), obContext.getRole().getId(),
+        SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY, AUTO_SEND_SCHEDULE_DESCRIPTION);
+    scheduleService.activateSchedule(requestId);
   }
 
   /**

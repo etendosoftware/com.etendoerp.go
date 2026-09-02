@@ -47,6 +47,7 @@ import com.etendoerp.go.schemaforge.AbstractSmartDeactivationHandler;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.SiiTbaiAutoSendScheduleService;
 import com.smf.ticketbai.data.TbaiConfig;
 
 /**
@@ -86,6 +87,16 @@ import com.smf.ticketbai.data.TbaiConfig;
  * response is kept untouched — mirrors {@code VerifactuConfigReadyHandler} and
  * {@code ChartOfAccountsHandler#afterHandle}.
  *
+ * <h3>POST/PUT afterHandle — twice-a-day auto-send schedule (ETP-5117)</h3>
+ * <p>After a successful create-or-update that leaves the config active, also ensures a
+ * scheduled {@code AD_Process_Request} exists for the TicketBAI sending process, scoped to the
+ * config's own client + organization (TBAI configs are per-organization) — see
+ * {@link SiiTbaiAutoSendScheduleService} for the full scope/idempotency reasoning. Deliberately
+ * checked independently of {@link #ensureTbaiSequences} (which runs regardless of the config's
+ * active flag, since chaining sequences must survive a pause/resume): the schedule is only
+ * created while the config is genuinely active. GO-only by design: this never runs for a config
+ * saved through Classic UI.
+ *
  * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
  * {@code docs/neo-headless-extensibility.md} §2.2 (this qualifier silently stops being
  * discovered if a scope annotation such as {@code @ApplicationScoped} is added — regressed
@@ -97,6 +108,11 @@ public class TbaiConfigSequenceHandler extends AbstractSmartDeactivationHandler 
   private static final Logger log = LogManager.getLogger(TbaiConfigSequenceHandler.class);
 
   private static final String METHOD_POST = "POST";
+
+  private static final String AUTO_SEND_SCHEDULE_DESCRIPTION =
+      "Automatic TicketBAI invoice sending (Etendo GO)";
+
+  private final SiiTbaiAutoSendScheduleService scheduleService = new SiiTbaiAutoSendScheduleService();
 
   /**
    * DB table name that identifies invoice {@link DocumentType}s. All invoice-category doc types
@@ -187,6 +203,7 @@ public class TbaiConfigSequenceHandler extends AbstractSmartDeactivationHandler 
       OBContext.setAdminMode(true);
       try {
         ensureTbaiSequences(context, method);
+        scheduleAutoSendIfActive(context, method);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -194,6 +211,32 @@ public class TbaiConfigSequenceHandler extends AbstractSmartDeactivationHandler 
       log.warn("TbaiConfigSequenceHandler.afterHandle error: {}", e.getMessage(), e);
     }
     return null;
+  }
+
+  /**
+   * Ensures the twice-a-day auto-send schedule exists (and attempts to activate it) for the
+   * saved config's client/organization, but only when the config is actually active — a config
+   * created inactive, or a deactivating PUT that fell through to default CRUD (see class
+   * Javadoc), must not get a schedule.
+   */
+  private void scheduleAutoSendIfActive(NeoContext context, String method) {
+    String recordId = resolveRecordId(context, method);
+    if (StringUtils.isBlank(recordId)) {
+      return;
+    }
+    TbaiConfig config = OBDal.getInstance().get(TbaiConfig.class, recordId);
+    if (config == null || !Boolean.TRUE.equals(config.isActive())
+        || config.getClient() == null || config.getOrganization() == null) {
+      return;
+    }
+    OBContext obContext = context.getObContext();
+    if (obContext == null || obContext.getUser() == null || obContext.getRole() == null) {
+      return;
+    }
+    String requestId = scheduleService.ensureAutoSendSchedule(config.getClient().getId(),
+        config.getOrganization().getId(), obContext.getUser().getId(), obContext.getRole().getId(),
+        SiiTbaiAutoSendScheduleService.TBAI_PROCESS_SEARCH_KEY, AUTO_SEND_SCHEDULE_DESCRIPTION);
+    scheduleService.activateSchedule(requestId);
   }
 
   /**
