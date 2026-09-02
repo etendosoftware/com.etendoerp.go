@@ -1377,6 +1377,154 @@ public class ChartOfAccountsHandlerTest {
     }
   }
 
+  // ── afterHandle() CRUD PATCH/PUT — ETP-5101 GL Item name resync (H) ────────
+  //
+  // syncGlItemNameAfterUpdate closes the gap where a subaccount rename via PUT/PATCH never
+  // propagated to its linked GL Item's name (only POST create did, via
+  // provisionGlItemAfterCreate — see the section above). It reuses
+  // GlItemProvisioningSupport#ensureGlItemForSubaccount, whose idempotent-rerun branch already
+  // resyncs the composed name for any schema with an existing link — that internal behavior is
+  // GlItemProvisioningSupportTest's territory, so these tests only prove the handler's own
+  // early-exit guards and that it reaches and wires the call correctly.
+
+  @Test
+  public void afterHandlePatchDoesNotTouchOBDalWhenBodyOmitsNameAndSearchKey() {
+    JSONObject requestBody = new JSONObject(); // touches neither name, searchKey, nor active
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+
+    try (MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNull(result);
+      // Both syncGlItemActiveState and syncGlItemNameAfterUpdate early-exit on their own cheap
+      // body check before ever touching OBContext/OBDal.
+      obCtxStatic.verify(() -> OBContext.setAdminMode(true), never());
+      obDalStatic.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
+  public void afterHandlePatchSkipsGlItemNameResyncWhenRecordIdIsNull() throws Exception {
+    JSONObject requestBody = new JSONObject().put("name", "Renamed Subaccount");
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+    when(ctx.getRecordId()).thenReturn(null);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNull(result);
+      obDalStatic.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void afterHandlePutSkipsGlItemNameResyncWhenSubaccountNotFound() throws Exception {
+    JSONObject requestBody = new JSONObject().put("searchKey", "10000002");
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+    when(ctx.getRecordId()).thenReturn("EV-GONE");
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(ElementValue.class, "EV-GONE")).thenReturn(null); // record not found
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNull(result);
+      verify(dal).get(ElementValue.class, "EV-GONE");
+      verify(dal, never()).flush();
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void afterHandlePatchResyncsGlItemNameWhenBodyTouchesName() throws Exception {
+    JSONObject requestBody = new JSONObject().put("name", "Renamed Subaccount");
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+    when(ctx.getRecordId()).thenReturn("EV-1");
+
+    ElementValue subaccount = mock(ElementValue.class);
+    Client client = mock(Client.class);
+    when(subaccount.getClient()).thenReturn(client);
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(ElementValue.class, "EV-1")).thenReturn(subaccount);
+
+    OBCriteria<AcctSchema> schemaCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AcctSchema.class)).thenReturn(schemaCrit);
+    // No active schemas: ensureGlItemForSubaccount's own isEmpty() guard short-circuits before
+    // touching AccountingCombination/GLItemAccounts — this test only needs to prove the handler
+    // reaches and wires the call correctly, not GlItemProvisioningSupport's internals (already
+    // covered by GlItemProvisioningSupportTest).
+    when(schemaCrit.list()).thenReturn(Collections.emptyList());
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNull(result);
+      verify(dal).get(ElementValue.class, "EV-1");
+      verify(dal).createCriteria(AcctSchema.class);
+      verify(dal).flush();
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void afterHandlePutResyncsGlItemNameWhenBodyTouchesSearchKey() throws Exception {
+    JSONObject requestBody = new JSONObject().put("searchKey", "10000003");
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+    when(ctx.getRecordId()).thenReturn("EV-2");
+
+    ElementValue subaccount = mock(ElementValue.class);
+    Client client = mock(Client.class);
+    when(subaccount.getClient()).thenReturn(client);
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(ElementValue.class, "EV-2")).thenReturn(subaccount);
+
+    OBCriteria<AcctSchema> schemaCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AcctSchema.class)).thenReturn(schemaCrit);
+    when(schemaCrit.list()).thenReturn(Collections.emptyList());
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNull(result);
+      verify(dal).get(ElementValue.class, "EV-2");
+      verify(dal).flush();
+    }
+  }
+
   // ── helpers ───────────────────────────────────────────────────────────────
 
   /** Shorthand for creating BigDecimal from string. */

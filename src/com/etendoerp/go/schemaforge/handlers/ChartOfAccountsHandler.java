@@ -90,6 +90,12 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *       mirrors the new state onto its {@code GLItemAccounts} row(s) via
  *       {@link GlItemProvisioningSupport#setGlItemAccountsActiveForSubaccount}, so the invisible
  *       GL Item can never silently diverge from its subaccount's active state.</li>
+ *   <li><b>H — GL Item name resync</b> (afterHandle, CRUD PATCH/PUT — ETP-5101): when a
+ *       request touches {@code name} or {@code searchKey} on a subaccount (a rename or a code
+ *       edit), recomposes and rewrites its GL Item's name via
+ *       {@link GlItemProvisioningSupport#ensureGlItemForSubaccount} — until this was added,
+ *       only the POST path (F) ever refreshed the composed name, so a rename via PUT/PATCH left
+ *       the GL Item's name silently stale.</li>
  * </ul>
  *
  * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern.
@@ -117,6 +123,9 @@ public class ChartOfAccountsHandler implements NeoHandler {
 
   /** API/body field name for the record's active flag. */
   private static final String FIELD_ACTIVE = "active";
+
+  /** API/body field name for the record's display name. */
+  private static final String FIELD_NAME = "name";
 
   /**
    * Number of leading digits that form the PGC prefix (immutable for leaf accounts).
@@ -275,6 +284,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
         }
         if ("PATCH".equals(method) || "PUT".equals(method)) {
           syncGlItemActiveState(context);
+          syncGlItemNameAfterUpdate(context);
           return null;
         }
         return null;
@@ -361,6 +371,39 @@ public class ChartOfAccountsHandler implements NeoHandler {
       List<AcctSchema> schemas = glItemProvisioning.resolveActiveSchemas(subaccount.getClient());
       boolean active = Boolean.TRUE.equals(subaccount.isActive());
       glItemProvisioning.setGlItemAccountsActiveForSubaccount(subaccount, schemas, active);
+      OBDal.getInstance().flush();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * H — when a PATCH/PUT touches {@code name} or {@code searchKey} on a subaccount, resyncs its
+   * already-provisioned GL Item's composed name (see class javadoc). Reuses
+   * {@link GlItemProvisioningSupport#ensureGlItemForSubaccount} — its idempotent-rerun branch
+   * already recomposes and rewrites the name for a schema with an existing link (see
+   * {@code GlItemProvisioningSupport#ensureGlItemForSchema}); this hook is what actually invokes
+   * it after an update, since {@link #provisionGlItemAfterCreate} only runs on POST. Same cheap
+   * early-exit pattern as {@link #syncGlItemActiveState} — only runs when the request body
+   * actually touches one of the two fields the composed name depends on.
+   */
+  private void syncGlItemNameAfterUpdate(NeoContext context) {
+    JSONObject body = context.getRequestBody();
+    if (body == null || (!body.has(FIELD_NAME) && !body.has(FIELD_SEARCH_KEY))) {
+      return;
+    }
+    String recordId = context.getRecordId();
+    if (recordId == null) {
+      return;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      ElementValue subaccount = OBDal.getInstance().get(ElementValue.class, recordId);
+      if (subaccount == null) {
+        return;
+      }
+      List<AcctSchema> schemas = glItemProvisioning.resolveActiveSchemas(subaccount.getClient());
+      glItemProvisioning.ensureGlItemForSubaccount(subaccount, schemas);
       OBDal.getInstance().flush();
     } finally {
       OBContext.restorePreviousMode();
