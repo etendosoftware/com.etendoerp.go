@@ -19,17 +19,14 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertNotSame;
 
 import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.LocalDate;
-import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.Date;
-import java.util.TimeZone;
 
-import org.junit.After;
-import org.junit.Before;
 import org.junit.Test;
 
 /**
@@ -37,18 +34,6 @@ import org.junit.Test;
  * from {@link BankStatementsHandler}. All pure, no mocks required.
  */
 public class BankStatementsSupportTest {
-
-  private TimeZone originalDefaultTimeZone;
-
-  @Before
-  public void saveDefaultTimeZone() {
-    originalDefaultTimeZone = TimeZone.getDefault();
-  }
-
-  @After
-  public void restoreDefaultTimeZone() {
-    TimeZone.setDefault(originalDefaultTimeZone);
-  }
 
   // ── deriveStatementStatus ────────────────────────────────────────────────
 
@@ -107,56 +92,19 @@ public class BankStatementsSupportTest {
   }
 
   /**
-   * {@code datetrx}/{@code statementdate}/etc. are {@code timestamp without time zone} columns:
-   * {@code rs.getTimestamp(...)} reads the naive literal back via the JVM's default timezone,
-   * mirroring how it was written. {@link Timestamp#valueOf(LocalDateTime)} is the JDK-blessed way
-   * to build a {@link Timestamp} the SAME way — from a literal wall-clock value, not an absolute
-   * instant — so it is what actually represents "what {@code rs.getTimestamp} hands back for a
-   * naive column", unlike {@code Timestamp.from(Instant)} (which the previous version of this
-   * test used, and which does not exercise the JDBC-driver round-trip at all).
-   */
-  @Test
-  public void formatDateRendersTheLiteralCalendarDayAndTime() {
-    Timestamp ts = Timestamp.valueOf(LocalDateTime.of(2026, 6, 4, 10, 0, 0));
-    assertEquals("2026-06-04T10:00:00Z", BankStatementsSupport.formatDate(ts));
-  }
-
-  /**
-   * ETP-4924 — the actual reported bug: a CSV-imported line's date showed one day earlier than
-   * the CSV said, but ONLY on a deployed ("experimental") server, never on local dev. Root cause:
-   * the previous implementation read {@code ts.getTime()} (raw epoch millis) and unconditionally
-   * labelled the result as UTC — correct only when the server JVM's default timezone happens to
-   * BE UTC. A server whose default timezone has a POSITIVE UTC offset (e.g. `Europe/Madrid`,
-   * CET/CEST) reads a naive "00:00:00" literal as an epoch instant that falls BEFORE UTC midnight
-   * of that day, so labelling it "Z" printed the previous calendar day. A NEGATIVE-offset default
-   * (e.g. `America/Argentina/Buenos_Aires`, the task's own description of local dev) reads that
-   * same literal as an instant AFTER UTC midnight, so the bug was invisible there — matching
-   * "wrong on experimental, correct on local dev" with zero code differences between the two.
+   * A business timestamp renders as the canonical wire datetime in the server's own zone —
+   * no trailing {@code Z} (ETP-5100).
    *
-   * <p>This test pins the JVM default timezone directly (restored in {@link #restoreDefaultTimeZone})
-   * so it reproduces deterministically regardless of whatever zone actually runs it.
+   * <p>The input is built as a CIVIL value ({@link Timestamp#valueOf}, which reads the literal
+   * in the default zone), not from a UTC {@code Instant}. That is what makes the assertion
+   * timezone-independent: input and expectation denote the same wall-clock reading in whatever
+   * zone the runner happens to be in. Asserting a UTC-rendered string against an instant — as
+   * this test used to — passed in a UTC CI and failed in UTC-3.
    */
   @Test
-  public void formatDateIsNotShiftedByAPositiveOffsetServerTimezone() {
-    TimeZone.setDefault(TimeZone.getTimeZone("Europe/Madrid"));
-    Timestamp ts = Timestamp.valueOf(LocalDateTime.of(2026, 2, 8, 0, 0, 0));
-    assertEquals("2026-02-08T00:00:00Z", BankStatementsSupport.formatDate(ts));
-  }
-
-  /** Sanity check: a negative-offset default timezone (matching local dev) was never affected. */
-  @Test
-  public void formatDateIsNotShiftedByANegativeOffsetServerTimezone() {
-    TimeZone.setDefault(TimeZone.getTimeZone("America/Argentina/Buenos_Aires"));
-    Timestamp ts = Timestamp.valueOf(LocalDateTime.of(2026, 2, 8, 0, 0, 0));
-    assertEquals("2026-02-08T00:00:00Z", BankStatementsSupport.formatDate(ts));
-  }
-
-  /** And the UTC case itself — the one timezone under which the old buggy code was also correct. */
-  @Test
-  public void formatDateIsCorrectUnderUtcDefaultTimezone() {
-    TimeZone.setDefault(TimeZone.getTimeZone("UTC"));
-    Timestamp ts = Timestamp.valueOf(LocalDateTime.of(2026, 2, 8, 0, 0, 0));
-    assertEquals("2026-02-08T00:00:00Z", BankStatementsSupport.formatDate(ts));
+  public void formatDateRendersCanonicalWireDatetimeInTheServerZone() {
+    Timestamp ts = Timestamp.valueOf("2026-06-04 10:00:00");
+    assertEquals("2026-06-04T10:00:00", BankStatementsSupport.formatDate(ts));
   }
 
   // ── parseIsoDate ─────────────────────────────────────────────────────────
@@ -194,6 +142,50 @@ public class BankStatementsSupportTest {
     assertEquals(expected, BankStatementsSupport.parseIsoDate("2026-06-04T23:59:59Z", new Date(0L)));
   }
 
+
+  /**
+   * A zone-LESS ISO datetime round-trips (ETP-5100).
+   *
+   * <p>Since the outbound formatters stopped appending {@code Z}, {@code 2026-06-04T10:00:00} is
+   * the shape NEO itself emits — and the frontend echoes it straight back. {@code Instant.parse}
+   * rejects it for want of an offset, so without the {@code yyyy-MM-dd}-prefix fallback the value
+   * would silently collapse to the fallback. That fallback is {@code new Date()} at both
+   * {@code BankStatementsHandler} call sites, i.e. it would substitute TODAY for the statement's
+   * real day and look like nothing went wrong.
+   */
+  @Test
+  public void parseIsoDateAcceptsAZonelessIsoDatetime() {
+    Date expected = Date.from(LocalDate.of(2026, 6, 4).atStartOfDay(ZoneId.systemDefault()).toInstant());
+    Date fallback = new Date(0L);
+    Date actual = BankStatementsSupport.parseIsoDate("2026-06-04T10:00:00", fallback);
+    assertNotSame("the zone-less shape must round-trip, not collapse to the fallback",
+        fallback, actual);
+    assertEquals(expected, actual);
+  }
+
+  /** A bare {@code yyyy-MM-dd} is the whole datum and resolves to local start-of-day. */
+  @Test
+  public void parseIsoDateAcceptsABareCalendarDay() {
+    Date expected = Date.from(LocalDate.of(2026, 6, 4).atStartOfDay(ZoneId.systemDefault()).toInstant());
+    Date fallback = new Date(0L);
+    Date actual = BankStatementsSupport.parseIsoDate("2026-06-04", fallback);
+    assertNotSame("a bare calendar day must round-trip, not collapse to the fallback",
+        fallback, actual);
+    assertEquals(expected, actual);
+  }
+
+  /**
+   * The tolerance is a prefix fallback, not a licence to guess: input with no readable
+   * {@code yyyy-MM-dd} prefix still returns the fallback rather than an invented day.
+   */
+  @Test
+  public void parseIsoDateStillFallsBackWhenThereIsNoCalendarDayPrefix() {
+    Date fallback = new Date(0L);
+    assertSame(fallback, BankStatementsSupport.parseIsoDate("04-06-2026", fallback));
+    assertSame(fallback, BankStatementsSupport.parseIsoDate("2026-06", fallback));
+    assertSame(fallback, BankStatementsSupport.parseIsoDate("2026-13-40T10:00:00", fallback));
+    assertSame(fallback, BankStatementsSupport.parseIsoDate("banana-time", fallback));
+  }
   // ── parseAmount ──────────────────────────────────────────────────────────
 
   @Test

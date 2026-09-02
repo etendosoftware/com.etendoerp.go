@@ -24,7 +24,6 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
@@ -38,6 +37,8 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.ModelProvider;
+
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
 /**
  * Stateless helpers shared across {@link BankStatementsHandler}: statement
@@ -239,11 +240,6 @@ public final class BankStatementsSupport {
     }
   }
 
-  // No `.withZone(...)`: this formats a `LocalDateTime` (no zone concept), and the quoted
-  // `'Z'` is a literal character, not the zone-offset pattern letter — see `formatDate`.
-  private static final DateTimeFormatter ISO_UTC =
-      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'");
-
   private BankStatementsSupport() {
     // utility class — no instances
   }
@@ -291,32 +287,17 @@ public final class BankStatementsSupport {
   }
 
   /**
-   * Formats a timestamp as an ISO-ish string carrying the SAME calendar day/time-of-day
-   * literal that is stored in the (timezone-naive) database column — a trailing {@code Z} is
-   * appended by convention (frontend consumers only read the {@code yyyy-MM-dd} prefix via
-   * {@code parseCalendarDate}, e.g. {@code ManualStatementModal.jsx}), it is NOT a claim that
-   * this instant is actually UTC.
+   * Formats a business timestamp as the canonical NEO wire datetime, in the server's own zone.
    *
-   * <p>{@code datetrx}/{@code statementdate}/{@code importdate} and friends are all
-   * {@code timestamp without time zone} columns — {@code rs.getTimestamp(...)} (via the JDBC
-   * driver, with no explicit {@link java.util.Calendar}) reads that naive literal back into a
-   * {@link Timestamp} by interpreting it in the JVM's default timezone, exactly mirroring how
-   * Hibernate wrote it in the first place (also via the JVM default). {@link Timestamp#toLocalDateTime()}
-   * reverses that SAME conversion, so the default-timezone dependency introduced on write is
-   * exactly cancelled out on read, regardless of what that default timezone actually is.
-   *
-   * <p>The previous implementation instead read {@code ts.getTime()} (the raw epoch millis)
-   * and labelled it as UTC unconditionally — correct only when the JVM's default timezone
-   * happens to BE UTC, and off by up to a day (ETP-4924) on any other server, e.g. one whose
-   * default timezone has a positive UTC offset (`ISO_UTC` would have printed the previous
-   * calendar day for anything before that offset past local midnight).
+   * <p>Delegates to {@link NeoDateFormat#toWireDateTime} — see there for why this must NOT go
+   * through UTC (ETP-5100).
    *
    * @param ts the timestamp to format (may be {@code null})
-   * @return the formatted string (e.g. {@code 2026-06-04T10:00:00Z}), or {@code ""} when {@code ts} is {@code null}
+   * @return e.g. {@code 2026-06-04T10:00:00}, or {@code ""} when {@code ts} is {@code null}
    */
   public static String formatDate(Timestamp ts) {
-    if (ts == null) return "";
-    return ISO_UTC.format(ts.toLocalDateTime());
+    String formatted = NeoDateFormat.toWireDateTime(ts);
+    return formatted == null ? "" : formatted;
   }
 
   /**
@@ -339,11 +320,28 @@ public final class BankStatementsSupport {
    */
   public static Date parseIsoDate(String iso, Date fallback) {
     if (StringUtils.isBlank(iso)) return fallback;
+    LocalDate calendarDay;
     try {
-      LocalDate calendarDay = Instant.parse(iso).atZone(ZoneOffset.UTC).toLocalDate();
-      return Date.from(calendarDay.atStartOfDay(ZoneId.systemDefault()).toInstant());
+      calendarDay = Instant.parse(iso).atZone(ZoneOffset.UTC).toLocalDate();
     } catch (Exception e) {
-      return fallback;
+      // Zone-less ISO (`2026-06-04T10:00:00`, or a bare `2026-06-04`): Instant.parse rejects it
+      // for want of an offset. Since ETP-5100 that is the shape NEO itself emits, so a value
+      // this API handed out and got echoed back must round-trip rather than silently collapse
+      // to `fallback` — which, being `new Date()` at both call sites in BankStatementsHandler,
+      // would substitute TODAY for the statement's real day and look like nothing went wrong.
+      // Only the calendar day is read here anyway, so the prefix is the whole datum.
+      calendarDay = parseCalendarDayPrefix(iso);
+      if (calendarDay == null) return fallback;
+    }
+    return Date.from(calendarDay.atStartOfDay(ZoneId.systemDefault()).toInstant());
+  }
+
+  /** The leading {@code yyyy-MM-dd} of an ISO string, or {@code null} when it has none. */
+  private static LocalDate parseCalendarDayPrefix(String iso) {
+    try {
+      return LocalDate.parse(iso.trim().substring(0, 10));
+    } catch (Exception e) {
+      return null;
     }
   }
 

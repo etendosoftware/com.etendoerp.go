@@ -313,6 +313,66 @@ place the three accepted shapes are listed. Two coercers apply it — one per wr
 | Write — REST | `NeoTypeCoercionHelper.coerceField` | date branch, reached via `coerceTypes` |
 | Write — MCP | `McpToolRouterSupport.coercePrimitiveFieldValue` | same branch, mirrored |
 
+##### Outbound: hand-written payloads (ETP-5100)
+
+The coercers above guard values on the way **in**. Handlers that build a JSON payload by hand —
+the finance ones read straight from JDBC — bypass all of that and must format the value
+themselves, so they get their own rule:
+
+> **Render a business timestamp with `NeoDateFormat.toWireDateTime` / `toWireDate`. Never
+> hand-roll a `DateTimeFormatter`, and never format through `ZoneOffset.UTC`.**
+
+An accounting date, a statement date, a transaction date is a **civil** value: the calendar day is
+the datum, and it is stored at the server's local start-of-day (`parseLocalDate`). Pushing it
+through `Instant` + `ZoneOffset.UTC` reinterprets that civil value as an instant and re-expresses
+it in another zone, which moves the day. Five copies of
+
+```java
+DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC)
+```
+
+had spread across `FinancialAccountTransactionsHandler`, `BankStatementsSupport`,
+`ReconciliationSupport`, `AutoMatchSupport` and `CashCloseSupport`. They were wrong twice over:
+they moved the day, and the literal `'Z'` asserted UTC on a value that carries no zone — which
+also contradicted the table above, where DateTime is `yyyy-MM-dd'T'HH:mm:ss` with no suffix.
+
+How it surfaced: a funds transfer made at **21:43 in UTC-3** went out as `2026-09-02T00:43:02Z`.
+React's range filter reads the `yyyy-MM-dd` prefix (`parseCalendarDate`), saw *tomorrow*, and hid
+the row — the movement was in the database and in the account balance, but not in the list. It
+only bit after 21:00 local because every other flow sends a date-only value that lands at
+midnight, and midnight in UTC-3 still formats to the same day. On a **positive** offset it is far
+worse: `2026-09-01 00:00` in UTC+5 formats as `2026-08-31T19:00:00Z`, so the entire list shows a
+day early.
+
+This is also simply what the rest of the platform does. Core's own serializers
+(`JsonUtils.createDateFormat`, `createDateTimeFormat`) never call `setTimeZone`, so they format in
+the server's zone — and the datetime one emits the real offset (`ZZZZZ`), never a fixed `Z`. The
+five formatters were the outliers, not the norm.
+
+Inbound counterpart: `BankStatementsSupport.parseIsoDate` accepts a zone-less ISO string as well
+as an instant, so a value NEO emitted and a client echoed back round-trips instead of collapsing
+to its fallback (`new Date()` — i.e. silently substituting today for the statement's real day).
+
+**Known debt — legacy rows this fix un-masks (not corrected, deliberate).** An older write path
+persisted the raw UTC instant instead of re-anchoring it, so on a UTC-3 tenant a value meant for
+day *D* landed as `D-1 21:00:00`. `parseIsoDate` stopped producing those (its javadoc describes the
+exact symptom), but the rows written before that are still there. For them the two bugs
+**cancelled**: the day was stored one early and the UTC formatter read it one late, so the screen
+happened to show the right day. Correcting the formatter therefore makes these specific rows
+display one day EARLY — it exposes bad stored data rather than causing it.
+
+They are identifiable by an exact `21:00:00.000` with no sub-second part (genuine wall-clock values
+come from `now()` and carry milliseconds; date-only pickers land on `00:00:00`). On this
+installation that is 17 rows — 10 `fin_bankstatementline.datetrx` and 7
+`fin_finacc_transaction.statementdate`. Note the literal depends on the tenant's offset: it is
+`19:00:00` on a UTC-5 server, not `21:00:00`.
+
+No data-fix was written: the decision was to ship the formatter correction alone and leave the
+historical rows as they are. Do NOT "fix" this by reinstating the UTC formatter — two errors
+cancelling is not a working system, and the pair already fails on any positive UTC offset, where
+even a correctly stored midnight renders as the previous day.
+
+
 **A coercer only protects the call sites that invoke it**, and that — not the coercer — is what made
 IMP-16 read as fixed while `neo_update` still corrupted. Every path that persists must run its
 stack's pass:

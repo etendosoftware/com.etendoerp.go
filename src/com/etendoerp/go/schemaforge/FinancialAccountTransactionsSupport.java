@@ -19,10 +19,8 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.sql.Timestamp;
-import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.Date;
@@ -116,8 +114,11 @@ final class FinancialAccountTransactionsSupport {
       "RDNC", "Deposited not Cleared",
       "RPPC", "Payment Cleared");
 
-  private static final DateTimeFormatter DMY_DASH =
-      DateTimeFormatter.ofPattern("dd-MM-yyyy").withZone(ZoneOffset.UTC);
+  // No .withZone(UTC) — same reason as NeoDateFormat.toWireDateTime (ETP-5100): a payment date is
+  // a civil value stored at the server's local midnight, so rendering it as a UTC instant moves
+  // the day. This one is a display label rather than a wire value, so it keeps its own dd-MM-yyyy
+  // pattern, but it is fed a LocalDate exactly like its DMY neighbour below.
+  private static final DateTimeFormatter DMY_DASH = DateTimeFormatter.ofPattern("dd-MM-yyyy");
 
   private static final DateTimeFormatter DMY = DateTimeFormatter.ofPattern("dd/MM/yyyy");
 
@@ -136,7 +137,7 @@ final class FinancialAccountTransactionsSupport {
 
   /** Synthetic "Payment" column: {@code docNo - dd-MM-yyyy - contact - |amount|}. */
   static String buildPaymentLabel(String docNo, Timestamp date, String contact, BigDecimal amount) {
-    String dateStr = date == null ? "" : DMY_DASH.format(Instant.ofEpochMilli(date.getTime()));
+    String dateStr = date == null ? "" : DMY_DASH.format(date.toLocalDateTime().toLocalDate());
     String amt = (amount == null ? BigDecimal.ZERO : amount.abs())
         .stripTrailingZeros().toPlainString();
     StringBuilder sb = new StringBuilder();
