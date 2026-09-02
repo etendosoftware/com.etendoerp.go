@@ -159,9 +159,10 @@ public class ChartOfAccountsHandlerTest {
 
   // ── validateSave() — duplicate searchKey on create (ETP-5101) ──────────────
   //
-  // findDuplicateSearchKey scopes an OBCriteria(ElementValue) lookup by client + searchKey;
-  // these two tests drive it through handle() rather than calling the private method
-  // directly, mirroring the rest of this file's black-box style for validateSave-adjacent
+  // The duplicate-code check itself is inlined into validateSave (not a separate method,
+  // java:S1448 — this class was already at the Sonar method-count limit), so these two
+  // tests drive it through handle() rather than calling a private method directly,
+  // mirroring the rest of this file's black-box style for validateSave-adjacent
   // behaviour (see the class javadoc note re: validateSave being otherwise excluded as
   // "integration-test territory" — these two cases only need OBDal/OBContext mocks, not a
   // real Hibernate session, since OBCriteria itself is mocked).
@@ -223,8 +224,8 @@ public class ChartOfAccountsHandlerTest {
       obDalStatic.when(OBDal::getInstance).thenReturn(dal);
 
       // Falls through to the default CRUD handler — format/protected-code validations
-      // (covered by the other handleReturnsError*OnCreate tests above) still apply first;
-      // this test only proves the duplicate check itself does not block a genuinely new code.
+      // (covered by the other handleReturnsError*OnCreate tests above) still apply first.
+      // This test only proves the duplicate check itself does not block a genuinely new code.
       assertNull(handler.handle(ctx));
     }
   }

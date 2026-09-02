@@ -1142,12 +1142,24 @@ public class ChartOfAccountsHandler implements NeoHandler {
       return NeoResponse.error(400, ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT);
     }
 
-    // New records: format/protected-code checks apply, plus a duplicate-code check
+    // New records: format/protected-code checks apply, plus a duplicate-code check.
+    // Inlined rather than a separate method (ETP-5101 code review, java:S1448) — it has
+    // exactly this one call site and no test calls it directly (this file's tests drive
+    // validateSave black-box through handle(), per the class javadoc note).
     if (isNewRecord) {
       OBContext.setAdminMode(true);
       try {
-        if (findDuplicateSearchKey(submittedCode, context.getObContext()) != null) {
-          return NeoResponse.error(409, String.format(ERR_DUPLICATE_CODE, submittedCode));
+        OBContext obCtx = context.getObContext();
+        if (obCtx != null && obCtx.getCurrentClient() != null) {
+          OBCriteria<ElementValue> criteria = OBDal.getInstance().createCriteria(ElementValue.class);
+          criteria.setFilterOnReadableClients(false);
+          criteria.setFilterOnReadableOrganization(false);
+          criteria.add(Restrictions.eq(ElementValue.PROPERTY_CLIENT, obCtx.getCurrentClient()));
+          criteria.add(Restrictions.eq(ElementValue.PROPERTY_SEARCHKEY, submittedCode));
+          criteria.setMaxResults(1);
+          if (criteria.uniqueResult() != null) {
+            return NeoResponse.error(409, String.format(ERR_DUPLICATE_CODE, submittedCode));
+          }
         }
         return null;
       } catch (Exception e) {
@@ -1214,29 +1226,6 @@ public class ChartOfAccountsHandler implements NeoHandler {
     }
 
     return null;
-  }
-
-  /**
-   * Looks up an existing {@code ElementValue} with the same {@code searchKey} in the
-   * request's client, if any (ETP-5101 duplicate-code check on create). Never creates
-   * anything — read-only lookup, caller decides what to do with the result.
-   *
-   * @param searchKey the submitted 8-digit code
-   * @param obCtx     the request's {@link OBContext}; a {@code null} client means the
-   *                  lookup can't be scoped, so no duplicate is reported
-   * @return the existing account with that code, or {@code null} if none / no client
-   */
-  private ElementValue findDuplicateSearchKey(String searchKey, OBContext obCtx) {
-    if (obCtx == null || obCtx.getCurrentClient() == null) {
-      return null;
-    }
-    OBCriteria<ElementValue> criteria = OBDal.getInstance().createCriteria(ElementValue.class);
-    criteria.setFilterOnReadableClients(false);
-    criteria.setFilterOnReadableOrganization(false);
-    criteria.add(Restrictions.eq(ElementValue.PROPERTY_CLIENT, obCtx.getCurrentClient()));
-    criteria.add(Restrictions.eq(ElementValue.PROPERTY_SEARCHKEY, searchKey));
-    criteria.setMaxResults(1);
-    return (ElementValue) criteria.uniqueResult();
   }
 
   private NeoResponse validateExistingProtectedAccount(String recordId) {
