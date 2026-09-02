@@ -43,6 +43,7 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 
@@ -127,6 +128,9 @@ public class ChartOfAccountsHandler implements NeoHandler {
   /** API/body field name for the record's display name. */
   private static final String FIELD_NAME = "name";
 
+  /** API/body field name for the record's optimistic-locking version (ETP-5073/DOC-04). */
+  private static final String FIELD_UPDATED = "updated";
+
   /**
    * Number of leading digits that form the PGC prefix (immutable for leaf accounts).
    *
@@ -205,7 +209,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
    * for JWT-authenticated GO users even when the current client owns account records.
    */
   private static final String SQL_LIST_LEAF_ACCOUNTS =
-      "SELECT c_elementvalue_id, value, name, description, accounttype, issummary, isactive "
+      "SELECT c_elementvalue_id, value, name, description, accounttype, issummary, isactive, updated "
       + "FROM c_elementvalue "
       + "WHERE ad_client_id = :clientId "
       + "  AND issummary = 'N'";
@@ -216,7 +220,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
       + "  AND issummary = 'N'";
 
   private static final String SQL_GET_ACCOUNT_BY_ID =
-      "SELECT c_elementvalue_id, value, name, description, accounttype, issummary, isactive "
+      "SELECT c_elementvalue_id, value, name, description, accounttype, issummary, isactive, updated "
       + "FROM c_elementvalue "
       + "WHERE ad_client_id = :clientId "
       + "  AND c_elementvalue_id = :recordId";
@@ -513,6 +517,20 @@ public class ChartOfAccountsHandler implements NeoHandler {
     }
   }
 
+  /**
+   * Row shape: {@code id, searchKey, name, description, accountType, summaryLevel, active,
+   * updated} — matches {@link #SQL_LIST_LEAF_ACCOUNTS}/{@link #SQL_GET_ACCOUNT_BY_ID} 1:1.
+   *
+   * <p>{@code row[7]} ({@code updated}) is mandatory for every PUT/PATCH by
+   * {@code NeoCrudHandler#validateUpdateRequest} (ETP-5073/DOC-04) — omitting it here left a
+   * client with no way to echo the value back, so every edit or deactivate through this
+   * bypass-the-generic-service list/detail path 400'd with {@code missing_updated}, no matter
+   * how freshly the record had just been re-read. Formatted through
+   * {@link NeoDateFormat#toCanonical} rather than {@code row[7].toString()} verbatim, since a
+   * native-SQL {@code Timestamp} prints in the raw Postgres shape
+   * ({@code yyyy-MM-dd HH:mm:ss.ffffff}) that class exists to convert into the ISO wire format
+   * {@code NeoRecordVersion}/{@code JsonUtils} parse back on the way in.
+   */
   private static JSONObject toAccountJson(Object[] row) throws Exception {
     JSONObject entry = new JSONObject();
     entry.put("id", row[0]);
@@ -524,6 +542,8 @@ public class ChartOfAccountsHandler implements NeoHandler {
     entry.put(FIELD_ACTIVE, "Y".equals(String.valueOf(row[6])));
     entry.put("protectedParentLikeSubaccount",
         ChartOfAccountsSaveValidationSupport.isProtectedParentLikeSubaccount(String.valueOf(row[1])) ? "Y" : "N");
+    String canonicalUpdated = row[7] != null ? NeoDateFormat.toCanonical(String.valueOf(row[7]), true) : null;
+    entry.put(FIELD_UPDATED, canonicalUpdated != null ? canonicalUpdated : JSONObject.NULL);
     return entry;
   }
 

@@ -62,6 +62,7 @@ import org.openbravo.model.financialmgmt.gl.GLItemAccounts;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
 /**
  * Unit tests for {@link ChartOfAccountsHandler}.
@@ -1176,8 +1177,25 @@ public class ChartOfAccountsHandlerTest {
    * {@code protectedParentLikeSubaccount} — these tests prove {@code summaryLevel} and
    * {@code active} now get the same treatment.
    */
+  /** Raw Postgres timestamp shape for {@code row[7]} ({@code updated}) — see ETP-5101. */
+  private static final String SAMPLE_UPDATED_RAW = "2026-09-02 14:30:00.123456";
+
+  /** Canonical ISO form {@link NeoDateFormat#toCanonical} produces for {@link #SAMPLE_UPDATED_RAW}. */
+  private static final String SAMPLE_UPDATED_CANONICAL = "2026-09-02T14:30:00";
+
   private static Object[] rowWith(Object issummary, Object isactive) {
-    return new Object[]{"EV1", "10000001", "Test Account", null, null, issummary, isactive};
+    return rowWith(issummary, isactive, SAMPLE_UPDATED_RAW);
+  }
+
+  /**
+   * ETP-5101: {@code toAccountJson} now reads an 8th column, {@code row[7]} ({@code updated}),
+   * mandatory for every PUT/PATCH by {@code NeoCrudHandler#validateUpdateRequest}
+   * (ETP-5073/DOC-04). {@code updated} lets a caller pass a specific raw value (including
+   * {@code null}) to exercise the {@link NeoDateFormat#toCanonical} formatting and its
+   * null-safety independently of the {@code summaryLevel}/{@code active} coverage above.
+   */
+  private static Object[] rowWith(Object issummary, Object isactive, Object updated) {
+    return new Object[]{"EV1", "10000001", "Test Account", null, null, issummary, isactive, updated};
   }
 
   private static JSONObject invokeToAccountJson(Object[] row) throws Exception {
@@ -1191,6 +1209,11 @@ public class ChartOfAccountsHandlerTest {
     JSONObject entry = invokeToAccountJson(rowWith("Y", "Y"));
     assertTrue("summaryLevel must be true for a plain String \"Y\"", entry.getBoolean("summaryLevel"));
     assertTrue("active must be true for a plain String \"Y\"", entry.getBoolean("active"));
+    // ETP-5101: row[7] (raw Postgres timestamp) must be reformatted through
+    // NeoDateFormat.toCanonical into the ISO wire shape NeoRecordVersion/JsonUtils parse back,
+    // not passed through verbatim — this is what let missing_updated PATCH/PUT requests through.
+    assertEquals("updated must be reformatted to the canonical ISO datetime via NeoDateFormat.toCanonical",
+        SAMPLE_UPDATED_CANONICAL, entry.getString("updated"));
   }
 
   @Test
@@ -1218,6 +1241,18 @@ public class ChartOfAccountsHandlerTest {
     JSONObject entry = invokeToAccountJson(rowWith(Character.valueOf('N'), Character.valueOf('N')));
     assertFalse(entry.getBoolean("summaryLevel"));
     assertFalse(entry.getBoolean("active"));
+  }
+
+  /**
+   * ETP-5101: a {@code null} {@code row[7]} (record was never previously updated, or the raw
+   * value was unparseable) must produce {@code JSONObject.NULL} for {@code "updated"} — never
+   * throw, and never the literal string {@code "null"}.
+   */
+  @Test
+  public void toAccountJsonHandlesNullUpdatedValue() throws Exception {
+    JSONObject entry = invokeToAccountJson(rowWith("Y", "Y", null));
+    assertTrue("updated must be JSON null, not absent, when row[7] is null", entry.isNull("updated"));
+    assertEquals(JSONObject.NULL, entry.get("updated"));
   }
 
   // ── afterHandle() CRUD POST — ETP-5020 GL Item auto-provisioning (F) ───────
