@@ -561,4 +561,44 @@ class ProductTransactionsHandlerTest {
       }
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // afterHandle() — internal consumption (ETP-5039)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * A transaction linked to an Internal Consumption line must resolve to the
+   * {@code internal-consumption} window key, with the header id and label taken
+   * from {@code M_Internal_Consumption} (which, like {@code M_Inventory}, has no
+   * {@code documentno} column and uses {@code name} as its identifier).
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void afterHandle_internalConsumption_resolvesToInternalConsumptionWindow() throws Exception {
+    JSONArray data = new JSONArray().put(txRow("TX-IC-1"));
+    JSONObject body = wrapData(data);
+
+    Object[] sqlRow = new Object[]{ "TX-IC-1", "HDR-IC-1", "internal-consumption", "IC-0001" };
+
+    try (MockedStatic<OBDal> obDal = Mockito.mockStatic(
+        OBDal.class); MockedStatic<OBContext> obCtx = Mockito.mockStatic(OBContext.class)) {
+
+      OBDal mockDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      when(mockDal.getSession()).thenReturn(session);
+      obDal.when(OBDal::getInstance).thenReturn(mockDal);
+      mockNativeQuery(session, Collections.singletonList(sqlRow));
+
+      NeoContext ctx = getCtx();
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = HANDLER.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject row = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("HDR-IC-1", row.getString("etgoDocHeaderId"));
+      assertEquals("internal-consumption", row.getString("etgoDocWindow"));
+      assertEquals("IC-0001", row.getString("etgoDocLabel"));
+    }
+  }
 }

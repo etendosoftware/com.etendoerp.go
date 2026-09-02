@@ -238,18 +238,40 @@ Both PUT and PATCH are delegated to DataSourceServlet's PUT handler internally. 
 
 Delegated to DataSourceServlet's DELETE handler.
 
-**CSV export (generic)** -- `GET /{...}?export=csv`
+**File export (generic)** -- `GET /{...}?export=csv|xlsx`
 
-Any list GET (generic CRUD entity *or* a custom `NeoHandler`) can stream its result as a CSV download instead of JSON by adding `export=csv`. The servlet runs the handler exactly as usual and, before writing the JSON envelope, hands the produced rows to `NeoCsvExportService`, which serializes them and streams the file (`Content-Type: text/csv`, `Content-Disposition: attachment`). No per-window code is needed — it operates on the standard `{response:{data:{<key>:[...]}}}` envelope.
+Any list GET (generic CRUD entity *or* a custom `NeoHandler`) can stream its result as a file download instead of JSON by adding `export=csv` or `export=xlsx`. The servlet runs the handler exactly as usual and, before writing the JSON envelope, hands the produced rows to `NeoCsvExportService`, which serializes them and streams the file (`Content-Disposition: attachment`, and `Content-Type: text/csv` or the OOXML spreadsheet type). An unrecognized `export` value declines rather than guessing, so the caller writes JSON as if the param were absent. No per-window code is needed — it operates on the JSON envelope any list GET returns, in **both** of its shapes: `{response:{data:[...]}}` for a generic CRUD list (the standard Openbravo envelope from `DefaultJsonDataService`) and `{response:{data:{<key>:[...]}}}` for a custom handler that nests named collections.
+
+> **ETP-4997.** Only the nested shape used to be recognized, so every *generic* list export silently fell through to the JSON response: `tryExport` declined and the client saved a `.csv` file containing the raw JSON envelope. The failure was invisible because a missing rows array is a legitimate "not an exportable response" answer for a non-list GET, so the service can only warn and decline. `useCsvExport` on the client now also rejects a response whose `Content-Type` is not a CSV, so a future decline surfaces as an error instead of a corrupt file.
 
 Optional query params (all but `export` are optional):
 
 | Param | Purpose |
 |-------|---------|
-| `export=csv` | Opt into CSV streaming. |
+| `export=csv` \| `export=xlsx` | Opt into file streaming, and pick the format. Case-insensitive. |
 | `ids=a,b,c` | Keep only rows whose `id` is in the set. The client sends the already-filtered ids so a server-side export honors the on-screen (client-side) filters without re-implementing them. |
 | `columns=key:Label:type\|key2:Label2` | Ordered column spec. `key` may be a dotted path into nested values (e.g. `txns.0.documentNo`). `type=date` reformats an ISO date to `dd-MM-yyyy`. Omitted → every key of the first row is used. |
-| `filename=Name` | Download filename (`.csv` appended if missing). |
+| `filename=Name` | Download filename. The extension always follows the **format**, not the request: `filename=contacts-export.csv` with `export=xlsx` streams `contacts-export.xlsx`. The client deliberately sends one name for both formats, since the format is chosen at click time. |
+| `valueMaps={"col":{"raw":"Label"}}` | Per-column value translation, applied after the value is read and formatted. Lets a caller export an AD-coded column as the word a human reads — and re-types on an import round trip — instead of its stored code (`etgoIsperson` `false` → `Empresa`, `oBTIKTaxIDKey` `6` → `Otro documento probatorio`). A value with no entry is written unchanged; a **blank cell is never translated** (empty means "this row says nothing about the field", which is how the import reads it back); malformed JSON degrades to raw codes rather than failing the export. |
+
+**xlsx specifics (ETP-4997).** `export=xlsx` is served by `NeoXlsxExportWriter` (`SXSSFWorkbook`, sliding row window, so a 5000-row export never materializes in the JVM). Three properties a caller can rely on, and a maintainer must not break:
+
+- **Every cell is a string cell.** Measured against the reader the import uses: a text cell round-trips byte-exactly (`08018` keeps its leading zero, `1.234,56` its separators, a date the exact `dd-MM-yyyy` the CSV writes), while a typed cell does not — written as a number, `08018` comes back as `8018`, unrecoverably. The export exists to feed a re-import, so typed cells would trade that guarantee for nicer sorting in Excel.
+- **The CSV formula-injection apostrophe is NOT applied.** A workbook string cell is inert — a formula is a different cell type — so `=SUM(A1)` stored as a string is just text, and the prefix would be a literal character in the user's spreadsheet. Escaping is per-format and stays with each writer.
+- **Both formats share one cell projection** (`NeoExportTable`: column spec, dotted paths, `type=date` reformatting, `valueMaps`, the `ids` filter). Two writers resolving cells independently would be two chances to disagree, and a disagreement surfaces as a re-import that maps a column differently depending on which format the user picked.
+
+The xlsx branch writes to `response.getOutputStream()`; the CSV branch keeps `getWriter()`. Those are mutually exclusive on one `HttpServletResponse` — touching both throws `IllegalStateException` at runtime, not at compile time — so only one branch may ever run per request. Apache POI needed no new runtime dependency: it is already declared in the Etendo core compile classpath and deployed in `WEB-INF/lib`, so the module pins it `compileOnly` at the deployed version (a `compileOnly` that drifts ahead of the runtime jar compiles fine and fails with `NoSuchMethodError`).
+
+**Child records a list row does not carry** — `includeChildData=1`
+
+A CSV export feeds a file the user edits and re-imports, so it needs whatever the import writes, including records on other tables. A list row has no way to express those, and the `fields` projection cannot expand a child collection (§4.12.5 — it is a flat whitelist over the entity's own keys). The export therefore sends `includeChildData=1` on every list GET, as a standing request: *a handler that can supply its child records should.* Handlers that cannot simply ignore it, exactly as they ignore `export`/`columns`.
+
+`BusinessPartnerHandler` implements it for Contacts (`attachChildData`): on a list GET it attaches each partner's primary contact person (`AD_User`) and primary address (`C_BPartner_Location` + `C_Location`) under a nested `etgoChildData` object, which the export addresses by dotted path (`columns=etgoChildData.city:ciudad`). Conventions worth copying in a new implementation:
+
+- **Nest, do not flatten.** A nested object cannot collide with a present or future DAL property name, and the `columns` spec already understands dotted paths.
+- **Reuse the ranking the UI already shows.** The address ranking is copied from `ETGO_GET_LOCATION` (the function behind the `eTGOLocation` column) — bill-to, then ship-to, then newest — so the list and the exported file cannot disagree. The contact is the oldest active one, the same one the `etgoEmail` fallback picks.
+- **One statement per child set.** A window function over `c_bpartner_id = ANY(?)` keeps a 5000-row export at two queries instead of ten thousand.
+- **Opt-in, and non-fatal.** The normal grid does not need the data and should not pay for it; a failed enrichment declines (leaving the default result) so the user gets empty columns, never a failed export.
 
 The export is intercepted at the two points where list responses are written: `NeoCrudHandler.handleWindowEntityCrud` (generic CRUD + entity-qualifier handlers) and `NeoRequestRouter.handleReportSpecRequest` (single-segment custom handlers such as `bank-statements`). Output is built fully in server memory from the rows the handler already returns, so large lists are streamed by the server rather than assembled in the browser.
 
@@ -290,6 +312,66 @@ place the three accepted shapes are listed. Two coercers apply it — one per wr
 | Read — `/defaults` response | `NeoDefaultsService.canonicalizeDateDefaults` | every date-valued default leaves as ISO |
 | Write — REST | `NeoTypeCoercionHelper.coerceField` | date branch, reached via `coerceTypes` |
 | Write — MCP | `McpToolRouterSupport.coercePrimitiveFieldValue` | same branch, mirrored |
+
+##### Outbound: hand-written payloads (ETP-5100)
+
+The coercers above guard values on the way **in**. Handlers that build a JSON payload by hand —
+the finance ones read straight from JDBC — bypass all of that and must format the value
+themselves, so they get their own rule:
+
+> **Render a business timestamp with `NeoDateFormat.toWireDateTime` / `toWireDate`. Never
+> hand-roll a `DateTimeFormatter`, and never format through `ZoneOffset.UTC`.**
+
+An accounting date, a statement date, a transaction date is a **civil** value: the calendar day is
+the datum, and it is stored at the server's local start-of-day (`parseLocalDate`). Pushing it
+through `Instant` + `ZoneOffset.UTC` reinterprets that civil value as an instant and re-expresses
+it in another zone, which moves the day. Five copies of
+
+```java
+DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC)
+```
+
+had spread across `FinancialAccountTransactionsHandler`, `BankStatementsSupport`,
+`ReconciliationSupport`, `AutoMatchSupport` and `CashCloseSupport`. They were wrong twice over:
+they moved the day, and the literal `'Z'` asserted UTC on a value that carries no zone — which
+also contradicted the table above, where DateTime is `yyyy-MM-dd'T'HH:mm:ss` with no suffix.
+
+How it surfaced: a funds transfer made at **21:43 in UTC-3** went out as `2026-09-02T00:43:02Z`.
+React's range filter reads the `yyyy-MM-dd` prefix (`parseCalendarDate`), saw *tomorrow*, and hid
+the row — the movement was in the database and in the account balance, but not in the list. It
+only bit after 21:00 local because every other flow sends a date-only value that lands at
+midnight, and midnight in UTC-3 still formats to the same day. On a **positive** offset it is far
+worse: `2026-09-01 00:00` in UTC+5 formats as `2026-08-31T19:00:00Z`, so the entire list shows a
+day early.
+
+This is also simply what the rest of the platform does. Core's own serializers
+(`JsonUtils.createDateFormat`, `createDateTimeFormat`) never call `setTimeZone`, so they format in
+the server's zone — and the datetime one emits the real offset (`ZZZZZ`), never a fixed `Z`. The
+five formatters were the outliers, not the norm.
+
+Inbound counterpart: `BankStatementsSupport.parseIsoDate` accepts a zone-less ISO string as well
+as an instant, so a value NEO emitted and a client echoed back round-trips instead of collapsing
+to its fallback (`new Date()` — i.e. silently substituting today for the statement's real day).
+
+**Known debt — legacy rows this fix un-masks (not corrected, deliberate).** An older write path
+persisted the raw UTC instant instead of re-anchoring it, so on a UTC-3 tenant a value meant for
+day *D* landed as `D-1 21:00:00`. `parseIsoDate` stopped producing those (its javadoc describes the
+exact symptom), but the rows written before that are still there. For them the two bugs
+**cancelled**: the day was stored one early and the UTC formatter read it one late, so the screen
+happened to show the right day. Correcting the formatter therefore makes these specific rows
+display one day EARLY — it exposes bad stored data rather than causing it.
+
+They are identifiable by an exact `21:00:00.000` with no sub-second part (genuine wall-clock values
+come from `now()` and carry milliseconds; date-only pickers land on `00:00:00`). On this
+installation that is 17 rows — 10 `fin_bankstatementline.datetrx` and 7
+`fin_finacc_transaction.statementdate`. Note the literal depends on the tenant's offset: it is
+`19:00:00` on a UTC-5 server, not `21:00:00`.
+
+No data-fix was written: the decision was to ship the formatter correction alone and leave the
+historical rows as they are. Do NOT "fix" this by reinstating the UTC formatter — two errors
+cancelling is not a working system, and the pair already fails on any positive UTC offset, where
+even a correctly stored midnight renders as the previous day.
+
 
 **A coercer only protects the call sites that invoke it**, and that — not the coercer — is what made
 IMP-16 read as fixed while `neo_update` still corrupted. Every path that persists must run its
@@ -1699,6 +1781,8 @@ NEO Headless enforces security at multiple levels:
    2. The spec's `SFEntity` children resolve — via their `AD_Tab` — to one or more real `AD_Window`s (a "combination" of windows) → the role must have `hasWindowAccess` (for the same `httpMethod`) to **every** one of them; deny if any single one is inaccessible.
    3. No entity has a populated `AD_Tab` at all (no combination data exists — the current shape of the `dashboard` and `not-posted-documents` specs) → fall back to allowing any authenticated role. There is no per-window `AD_Window_Access` provisioning for these specs today, so denying everyone would be a regression rather than a fix.
 
+   **`dashboard` no longer relies on that fallback alone (ETP-5088).** Reaching the spec is still open to any authenticated role — the fallback above is unchanged — but each of the 9 widget handlers now gates itself, so what a role actually *receives* is decided per widget (and, for two of them, per row). See §7b.
+
    Wired into `NeoRequestRouter`, `ToolRegistry#addWindowSpec`, `NeoDiscoveryHelper#isSpecAccessible`, and the MCP support layer (`McpToolRouterSupport`) — anywhere a spec's accessibility needs resolving without assuming a single `AD_Window`. Before this fix (ETP-4510 BUG-3), a windowless spec skipped the access check entirely, even for a request with no role assigned at all.
 
 5. **Process access control:** For process specs and button actions, the servlet checks `ADProcessAccess` for the current role before execution — binary, no read/write tiering: any active row grants full execute access. A request with no role assigned is denied the same as an unrecognized role. Denied requests return `403 Forbidden`.
@@ -1796,6 +1880,57 @@ NEO Headless enforces security at multiple levels:
 **Report spec access control (ETP-4596):** `NeoAccessHelper.hasReportSpecAccess(SFSpec, String)` is the single gate now shared by all 4 access-check call sites that previously either skipped `SPEC_TYPE = 'R'` report specs entirely or fell through a `spec.getProcess() == null` guard that was always true for them — `NeoRequestRouter.handleReportSpecRequest` (the real HTTP data-access gate, which previously had zero check), `NeoDiscoveryHelper.isSpecAccessible`, `McpToolRouterSupport.hasSpecAccess`, and `ToolRegistry`. It checks a linked `AD_Process`/`OBUIAPP_Process` first when the spec has one (delegating to items 5/6 above), else falls back to the same constituent-window check from item 4, keyed off each active/included `SFEntity`'s `AD_TAB_ID`. Five of the 8 report specs now have `AD_TAB_ID` populated and gate on the classic "Financial Account" window (`AD_Window_ID=94EAA455D2644E04AB25D93BE5157B6D`): `financial-accounts-page`, `financial-account-transactions`, `bank-statements`, `bank-reconciliation`, `financial-account-bank-connection`. Verified end-to-end against real roles: `403` for a role lacking Financial Account window access, `200` for a role that has it; discovery listing correctly excludes these specs for an unauthorized role while still showing them to an authorized one.
 
 **Known limitations (ETP-4596):** two report specs — `tax-report` and `inventory-stock-report` — are wired to neither a classic `AD_Process` nor a populated `AD_TAB_ID` yet, so they still hit `hasReportSpecAccess`'s permissive fallback and remain reachable by any authenticated role regardless of `AD_Window_Access`. Closing this needs a functional decision on their process/window mapping (pending, tracked separately); once linked, they gate with zero further code changes. Unrelated to access control: `bank-reconciliation`'s handler currently returns `500` for correctly-authorized roles due to a pre-existing `ReconciliationHandler` dispatch bug ("No AD_Tab linked to entity") — the RBAC gate added above is confirmed correct for it; the report itself is separately non-functional today even for authorized users.
+
+---
+
+## 7b. Dashboard Widget Access (ETP-5088)
+
+The 9 `/sws/neo/dashboard/{entity}` widget handlers each resolve the caller's role and gate on the
+`AD_Window_Access` grants the tenant already provisions — no new table, no per-role widget
+configuration, no new admin screen. The requirement is the widget × role matrix attached to
+ETP-5088, which was verified to be reproducible from the real grants of the 5 fixed roles.
+
+`WidgetAccessPolicy` (`schemaforge/WidgetAccessPolicy.java`) holds the declarations and two
+resolvers: `canRead(role, windowId)` and `canReadSlug(role, slug)`. Both delegate to
+`NeoAccessHelper.hasWindowAccess(role, windowId, "GET")` — a widget only ever reads, so a
+read-only grant is enough to see one — and both fail closed on a `null` role or an unknown slug.
+
+| widget | gate | shape |
+|---|---|---|
+| `kpis`, `trends` | financial-account (`94EAA455…`) | whole widget |
+| `recent-invoices`, `top-clients` | sales-invoice (`167`) | whole widget |
+| `best-products`, `best-sellers` | product (`140`) | whole widget |
+| `pending-amounts` | sales-invoice / purchase-invoice | **per half** — a hidden half is neither queried nor emitted |
+| `pending-tasks` | per task: `167`, `183`, `169`, `184`, `168` | **per row** — each check also skips the query behind the task |
+| `activity` | per entry, from its document type + `issotrx` | **per row** |
+
+Three conventions this follows, all shared with the `SFListMenu`/`SFWindowAccessMap` family:
+
+1. **The role is resolved BEFORE `OBContext.setAdminMode(true)`.** Admin mode exists to bypass
+   row-level security on the widget's query, never to decide access.
+2. **Denied means an empty payload, not `403`.** A restricted role gets a smaller dashboard, never
+   an error toast. `WidgetQueryHelper.buildEmptyDataResponse()` is the single way to say it.
+3. **Unknown means denied.** A widget row whose window cannot be resolved is dropped, so a new,
+   unmapped kind of row disappears rather than leaking.
+
+Two mapping choices are deliberate and worth not "fixing" later:
+
+- **`kpis`/`trends` gate on financial-account, not on invoices.** The matrix gives them to Admin +
+  Finance only; invoices would let Sales and Purchasing in. `capabilities.showAccountingFields`
+  (§8b) cannot express this row either — in the real tenant only the client-admin role has
+  `EM_ETGO_Show_Acct_Fields = 'Y'`, and Finance has `'N'`.
+- **`top-clients` gates on sales-invoice, not on contacts.** The matrix excludes Purchasing, which
+  does hold contacts; the ranking's data origin is the correct axis.
+
+**`activity` now emits `navigation`** (`{type: "record", window, recordId}`), resolved from each
+row's document type and `issotrx`. That information was always derivable but was previously used
+only to build the entry's text, which left the payload unable to say what an entry was about — the
+frontend could neither gate it nor link to it.
+
+The frontend applies the identical declarations in
+`tools/app-shell/src/lib/dashboardWidgetAccess.js` (schema_forge), so a widget a role cannot see is
+never even requested. **The two halves must not drift**: a widget added on one side has to be
+declared on the other.
 
 ---
 
@@ -2755,6 +2890,7 @@ The module includes unit tests that run without a backend:
 | `NeoPreviewFileServiceTest` | ~250 | Validation (invalid JSON, blank fields), GET miss/hit, POST INSERT/UPDATE paths, DELETE miss/hit. All without a live DB via `MockedStatic<OBDal>` + `MockedStatic<OBContext>`. |
 | `SFListMenuTest` | -- | Tree building/pruning, flat search, role-based filtering (window/process/OBUIAPP-process nodes), no-role → empty menu, multi-level nesting, viewer-role identity fields (`viewerRoleId`/`viewerIsClientAdmin`) present when a role is resolved and absent when it isn't. |
 | `SFWindowAccessMapTest` | -- | Role-based windowAccess resolution (full/read-only/absent), no-role → both maps empty, admin/client-admin bypass → full access to every active Etendo GO window + every capability true, `showAccountingFields` true/false/unset/missing-role, `isAdminOrClientAdmin` true on bypass / false for a restricted role. |
+| `WidgetAccessPolicyTest` | -- | ETP-5088 dashboard widget gate: financial-account reachable by Finance only (and not by Sales/Purchasing), product reachable by every template role, null role denied without consulting the access helper, the helper always asked with `GET`, per-slug sales/purchase split, unknown/blank/null slug denied (fail closed). |
 | `SFRolesOverviewTest` | -- | Admin/client-admin access gate (no role, restricted role, System Administrator, client-admin); tenant-relative role resolution via a client-scoped `Role` criteria (not hardcoded ids), admin-first-then-fixed-name sort order, a tenant with fewer than 5 matching roles; distinct-user-count aggregation; GO-window intersection (native-only windows excluded); tier resolution (full/read-only); exception handling. Two defense-in-depth regression cases confirm the gate is genuinely `isAdminOrClientAdmin`, not "is this one of the tenant's 5 fixed roles": a caller authenticated AS one of those roles (Finance) but not admin/client-admin is still denied (empty `roles`, zero `Role` lookups), and a role with zero active `AD_User_Roles` AND zero active `AD_Window_Access` rows degrades gracefully to `userCount: 0` + an empty `windows` array for all 5 roles rather than throwing or omitting the role. **ETP-4907 additions:** missing tenant roles fall back to the system-level templates with composition-based `userCount` (`UserRoleCompositionService` constructed lazily, once, via `mockConstruction`); an active tenant role is never overridden by its template counterpart, and the composition service is never even constructed when unneeded; the `matrix` covers every GO window (including one no role can reach, resolving to `"none"`) grouped by category, and a window with no resolvable category falls back to the `"Other"` bucket. QA (Sentinel) added 3 more targeting the fallback's early-return branch: a system-template role that doesn't resolve at all (`OBDal.get` returns `null`, e.g. deleted/never-seeded) is silently omitted rather than appearing as a 5th entry with null/empty fields; a system-template role that resolves but is `IsActive = 'N'` is treated identically (also omitted, not returned with stale data); and the full degradation case — every one of the 4 templates missing/inactive — still returns a valid minimal response (just the admin card, `roles.length() == 1`) without ever constructing `UserRoleCompositionService`, confirming the fallback's laziness holds even under total non-resolution, not only when every fixed name already has a tenant role. |
 | `TemplateRoleWindowAccessTest` (ETP-4878) | -- | The real ETP-4878 permission matrix in `TemplateRoleWindowAccess` (`src/com/etendoerp/go/roles/`), DB-free (12 tests): exactly the 4 non-Admin template roles present, exact grant counts per role (Sales 13 / Purchasing 11 / Finance 27 / Inventory 13, 64 total), Asientos manuales resolves to Simple G/L Journal and never to the classic G/L Journal window (`132`), Sales has no grant for Pago, "Categoría del producto" is read-only for Sales/Purchasing but full for Finance/Inventory, no role repeats the same `AD_Window_ID` twice, `byRoleId()` returns a fresh mutable map per call. QA (Sentinel) added 3 more: the 64 grants resolve to exactly 33 DISTINCT `AD_Window_ID`s (not just a raw count that would stay 64 even under duplication); all 8 window/role pairs from the old ETP-4852 2-window smoke test survive unchanged (same full access) in the new matrix, confirming `EnsureSystemRoleTemplatesScript#removeStaleWindowAccess`'s delete path is never actually exercised by that specific migration; and at least one window (e.g. Contactos, Pedido de venta) is granted at genuinely conflicting access levels across 2+ roles — the data-level root cause behind the ETP-4852 cross-template overlap bug fixed in `UserRoleCompositionService` (see §8d and `UserRoleCompositionServiceOverlapIntegrationTest`). |
 | `UserRoleCompositionServiceTest` | -- | **ETP-4830 items #6.1/#6.2 additions:** `createFreshPersonalRole` grants `AD_Role_OrgAccess` to both the user's real organization and the wildcard `'*'` (two distinct `RoleOrganization` saves, both scoped to the role's own client); skips the duplicate org-access row when the user's own organization already IS the wildcard; sets `Default_Ad_Client_ID`/`Default_Ad_Org_ID`/`Default_M_Warehouse_ID`/`EM_SMFSWS_Default_WS_Role_ID` on the user (warehouse resolved via a `Warehouse` criteria scoped to the user's org); and skips the org/warehouse defaults entirely (no crash) when the user has no organization at all. Pure-Mockito unit test covering `assignTemplateRoles`'s input-validation guard clauses — the slice that fails before any persistence side effect: blank user id, `null` template id list, unknown user, unknown/inactive template id, a role that is not a template, the client-admin "Admin" role rejected even if somehow marked as a template, requested-id dedup happening before the per-id validation loop (verified via a single `Role` lookup despite 3 whitespace-noisy repeats of the same id), and the two `enforceCallerClientBoundary` regression cases from REVIEW cycle 1: a caller whose client differs from the target user's is rejected with a "different client" message, while the literal System Administrator role id (`"0"`) bypasses the check and reaches the (unrelated) template-validation error instead. **ETP-4906 additions:** `getAppliedTemplateRoleIds`'s read path — blank/unknown user id rejected the same way, a user with no `Default_Ad_Role_ID` yet returns an empty list without ever calling `createPersonalRole`, a reusable personal role with 2 active `AD_Role_Inheritance` rows returns both `InheritFrom` ids in `Seqno` order, and the read path enforces the exact same `enforceCallerClientBoundary` regression pair (cross-client rejected, System Administrator bypasses) as the write path. **ETP-4830 owner-protection additions:** the 4-arg `assignTemplateRoles(String, List, Role, String)` overload rejects a non-owner `callerUserId` reassigning a `EM_ETGO_Is_Owner`-flagged user's roles (`OwnerSupport.isOwner` mocked statically); the owner reassigning their OWN roles reaches the (unrelated) template-validation error instead, proving `enforceOwnerProtection` did not block it; a target NOT flagged as owner is unaffected regardless of caller mismatch (baseline); and a `null` `callerUserId` (the 2-/3-arg overloads) skips the check entirely without ever calling `OwnerSupport` — deliberately left unmocked in that one test so a regression would surface as a loud NPE, not a silent behavior change. |
