@@ -69,6 +69,7 @@ import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
+import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
 import com.etendoerp.go.onboarding.OnboardingDefaultCustomerService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
@@ -185,6 +186,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_BP_GROUP_ACCT_PATCH = "bpGroupAcctPatch";
   private static final String PROGRESS_ACCTDIM_VISIBILITY = "acctdimVisibility";
   private static final String PROGRESS_ADMIN_IDENTITY = "adminIdentity";
+  private static final String PROGRESS_FORCE_TEST_MODE = "forceTestMode";
   private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
   // Stable codes for provisioning failures whose underlying message is an unresolved AD message
   // key. Mirrored by the frontend's onboarding/errorMessages.js (ETP-4665).
@@ -244,6 +246,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingAdminIdentityService();
   OnboardingBaselineService onboardingBaselineService =
       new OnboardingBaselineService();
+  OnboardingForceTestModeService onboardingForceTestModeService =
+      new OnboardingForceTestModeService();
   OnboardingBankConnectionSyncService onboardingBankConnectionSyncService =
       new OnboardingBankConnectionSyncService();
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
@@ -2194,6 +2198,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!wireAdminIdentity(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
+    // ETP-5117 (gap N1): force SII/TicketBAI/VeriFactu into test/sandbox mode for Demo/free
+    // tenants, so no manual step in Classic is needed to trial the fiscal submission modules.
+    // Runs AFTER the org exists (needed as the new preference row's visibility scope) and BEFORE
+    // the baseline stamp — see OnboardingForceTestModeService for the full explanation (including
+    // why it must never touch the System-level default preference row) and its lockstep
+    // corrective twin (R31-force-test-mode-demo-tenants.sql).
+    if (!forceTestModeForFreeTenant(writer, clientId, orgId)) {
+      return false;
+    }
     // Final action before commitDalChanges: stamp the tenant's data-fix baseline so it lands in the
     // same atomic onboarding commit. A genuine SQL error propagates (not caught here) so the outer
     // handleOnboarding catch rolls back cleanly; the expected ON CONFLICT->0-rows case is benign.
@@ -2431,6 +2444,28 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String errorMessage = e.getMessage() != null ? e.getMessage()
           : "Admin identity wiring failed";
       sendProgress(writer, PROGRESS_ADMIN_IDENTITY, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
+  /**
+   * Forces SII/TicketBAI/VeriFactu submissions into test/sandbox mode for a Demo/free tenant
+   * (ETP-5117, gap N1) — see {@link OnboardingForceTestModeService} for the full explanation and
+   * its corrective twin ({@code R31-force-test-mode-demo-tenants.sql}).
+   */
+  boolean forceTestModeForFreeTenant(PrintWriter writer, String clientId, String orgId) {
+    sendProgress(writer, PROGRESS_FORCE_TEST_MODE, PROGRESS_IN_PROGRESS,
+        "Configuring fiscal test mode...");
+    try {
+      onboardingForceTestModeService.forceTestModeForFreeTenant(clientId, orgId);
+      sendProgress(writer, PROGRESS_FORCE_TEST_MODE, "done", "Fiscal test mode configured");
+      return true;
+    } catch (Exception e) {
+      EtendoGoDalHelper.rollbackDalChanges("onboarding force-test-mode", e, log);
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Fiscal test mode configuration failed";
+      sendProgress(writer, PROGRESS_FORCE_TEST_MODE, PROGRESS_ERROR, errorMessage);
       sendFinalResult(writer, false, errorMessage);
       return false;
     }

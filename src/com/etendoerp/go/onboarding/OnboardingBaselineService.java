@@ -192,8 +192,19 @@ public class OnboardingBaselineService {
    * scope and remain {@code Y} / present, untouched. Corrective twin:
    * {@code 20260828T140000Z__R29-acctschema-allownegative-revert.sql}. Bumped to R29's own
    * timestamp, {@code 2026-08-28T14:00:00Z}.</p>
+   *
+   * <p><b>2026-09-01 (ETP-5117, R31):</b> gap N1 — a Demo/free tenant had no way to force
+   * SII/TicketBAI/VeriFactu into test/sandbox mode without a manual step in Classic. Closed by
+   * {@link OnboardingForceTestModeService#forceTestModeForFreeTenant}, wired as the new step right
+   * after {@code wireAdminIdentity} and before this baseline stamp — it writes a brand-new,
+   * per-Client {@code ETSG_ForceTestMode='Y'} preference row for the tenant when (and only when)
+   * {@link com.etendoerp.go.payment.TenantPlanService#resolvePlan} reads it back as {@code free};
+   * a paid/productive onboarding is left untouched. It never edits the System-level default row
+   * ({@code AD_Client_ID='0'}) and never overwrites a tenant's own pre-existing row. Corrective
+   * twin: {@code 20260901T120000Z__R31-force-test-mode-demo-tenants.sql}. Bumped to R31's own
+   * timestamp, {@code 2026-09-01T12:00:00Z}.</p>
    */
-  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-28T14:00:00Z");
+  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-09-01T12:00:00Z");
 
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("
