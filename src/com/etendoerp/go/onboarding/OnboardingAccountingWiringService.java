@@ -44,6 +44,8 @@ import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
 import org.w3c.dom.Document;
 import org.w3c.dom.NodeList;
 
+import com.etendoerp.go.schemaforge.handlers.GlItemProvisioningSupport;
+
 /**
  * Wires the newly created organization to the general ledger that the onboarding dataset import
  * brings in (Gap A1).
@@ -84,6 +86,9 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
       SAMPLE_DATA_RESOURCE_DIRECTORY + "/C_ELEMENTVALUE.xml";
   private static final String SOURCE_TREENODE_RESOURCE =
       SAMPLE_DATA_RESOURCE_DIRECTORY + "/AD_TREENODE.xml";
+
+  /** ETP-5020 — GL Item auto-provisioning behind subaccounts, shared with {@code ChartOfAccountsHandler}. */
+  private final GlItemProvisioningSupport glItemProvisioning = new GlItemProvisioningSupport();
 
   /**
    * Inserts one account-element tree node, mapping the bundled hierarchy onto the tenant's own
@@ -132,6 +137,7 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
         ensureOrganizationAcctSchema(client, org, ledger);
         wireAccountElementTree(client);
         rebrandImportedChartNames(client, ledger);
+        provisionGlItemsForImportedChart(client, ledger);
         provisionEntityPostingAccounts(client, ledger);
         flushChanges();
       } finally {
@@ -578,6 +584,75 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
    */
   protected String replaceSourceMoniker(String value, String clientName) {
     return OnboardingSourceMoniker.replace(value, clientName);
+  }
+
+  /**
+   * ETP-5020 — bulk GL Item auto-provisioning for the tenant's imported default chart of accounts
+   * (requirement 2a: "creating a subaccount must auto-create a matching GL Item ... both at
+   * onboarding time for the default chart of accounts, and whenever a user creates a new
+   * subaccount afterward"). The live per-subaccount twin of this step is
+   * {@code ChartOfAccountsHandler.afterHandle}'s POST hook; both share
+   * {@link GlItemProvisioningSupport#ensureGlItemForSubaccount} so the two entry points can never
+   * drift into different behavior.
+   *
+   * <p><b>Placement decision (judgment call, both options were valid per the design doc):</b> wired
+   * right after {@link #rebrandImportedChartNames}, BEFORE {@link #provisionEntityPostingAccounts},
+   * rather than as a new sibling service. Reasoning:
+   * <ul>
+   *   <li>Names must be final BEFORE GL Items are minted — {@link #rebrandImportedChartNames}
+   *   renames the dataset's generic "GOClient" chart names to the tenant's own; a GL Item created
+   *   before that rename would immediately be named "GOClient ..." instead of the tenant's real
+   *   subaccount name, recreating the exact "GL Item can diverge from its subaccount" problem this
+   *   ticket exists to eliminate (see the design doc's dataset-vs-dynamic-onboarding analysis).</li>
+   *   <li>{@link #wireAccountElementTree} must have already run so every leaf {@code ElementValue}
+   *   is placed in the tenant's own tree — not strictly required by this step's own SQL, but
+   *   keeps the whole {@code wire()} chain in one clear "structure, then names, then accounting
+   *   plumbing" order.</li>
+   *   <li>A separate sibling service would need to duplicate this exact same
+   *   {@code client}/{@code ledger} resolution {@link #wire} already did two lines above, for no
+   *   benefit — this class already owns "things that must happen once, right after the dataset
+   *   import, before the tenant's business partners exist" (see {@link #provisionEntityPostingAccounts}'s
+   *   own javadoc for the same reasoning about its two-call-site split).</li>
+   * </ul>
+   *
+   * <p>Idempotent (delegates entirely to {@link GlItemProvisioningSupport}'s own idempotency
+   * guarantees) and best-effort per subaccount: a failure provisioning ONE subaccount's GL Item
+   * never blocks the rest of the chart or the onboarding chain.
+   *
+   * @param client target client
+   * @param ledger the accounting schema whose GL Items are being provisioned (used only to prove
+   *               onboarding reached this far with a resolved ledger; the actual schema set
+   *               provisioned per subaccount is {@link GlItemProvisioningSupport#resolveActiveSchemas}
+   *               — the same one the live {@code ChartOfAccountsHandler} path uses)
+   */
+  protected void provisionGlItemsForImportedChart(Client client, AcctSchema ledger) {
+    if (ledger == null) {
+      return;
+    }
+    List<AcctSchema> activeSchemas = glItemProvisioning.resolveActiveSchemas(client);
+    if (activeSchemas.isEmpty()) {
+      return;
+    }
+    for (ElementValue subaccount : loadLeafElementValues(client)) {
+      glItemProvisioning.ensureGlItemForSubaccount(subaccount, activeSchemas);
+    }
+  }
+
+  /**
+   * Loads every leaf ({@code elementLevel = 'S'}) {@code ElementValue} for {@code client} — the
+   * same "subaccount" population {@code C_ELEMENTVALUE_TRG} auto-creates a natural
+   * {@code C_ValidCombination} for (see {@link GlItemProvisioningSupport} class javadoc). Summary
+   * accounts are excluded here rather than relying solely on
+   * {@link GlItemProvisioningSupport#ensureGlItemForSubaccount}'s own Case-3 filter, so onboarding
+   * never even attempts (and logs, at debug level, zero times) a lookup doomed to find nothing.
+   */
+  protected List<ElementValue> loadLeafElementValues(Client client) {
+    OBCriteria<ElementValue> criteria = OBDal.getInstance().createCriteria(ElementValue.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    criteria.add(Restrictions.eq(ElementValue.PROPERTY_CLIENT, client));
+    criteria.add(Restrictions.eq(ElementValue.PROPERTY_ELEMENTLEVEL, "S"));
+    return criteria.list();
   }
 
   /**

@@ -48,6 +48,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
+import com.etendoerp.go.schemaforge.handlers.FinancialAccountAccountingDefaultsSupport;
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
 
@@ -266,6 +267,7 @@ public class FinancialAccountHandler implements NeoHandler {
       FIN_FinancialAccount account = loadAccount(accountId);
       if (account != null) {
         FinancialAccountSupport.assignDefaultPaymentMethods(account);
+        FinancialAccountAccountingDefaultsSupport.applyDefaultAccountingConfiguration(account);
       }
     } catch (Exception e) {
       log.error("financial-account afterHandle: failed to assign default payment methods", e);
@@ -824,7 +826,7 @@ public class FinancialAccountHandler implements NeoHandler {
    * <p>Enforced here and not only in the edit modal because this is a generic W spec: anything
    * holding a token can PUT {@code eTGOAmountTolerance} straight at the entity. The value is read as
    * a PERCENTAGE of the statement line by both the automatch engine
-   * ({@code AutoMatchSupport.computeAmountTolerance}) and the difference posting
+   * ({@code AutoMatchSupport.signalGroupTolerance}) and the difference posting
    * ({@code ReconciliationDifferenceSupport.differenceLimit}); at 100 % or more the latter's gate
    * would authorise posting an entire statement line of any size to a G/L item, so this is a
    * boundary, not a nicety.

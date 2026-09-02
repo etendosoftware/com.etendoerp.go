@@ -325,6 +325,51 @@ public class NeoErrorSanitizerTest {
     assertTrue(safe.contains(NeoErrorSanitizer.REDACTED_ROW));
   }
 
+  // ─── optimistic-locking code detection (ETP-5073 / DOC-04) ───
+
+  /**
+   * The literal code is spelled out here rather than read off the class: what this method has to
+   * survive is core emitting exactly this token, so the test pins the token, not our copy of it.
+   */
+  private static final String STALE_CODE = "OBJSON_StaleDate";
+
+  @Test
+  public void isStaleRecordMessage_rawCode_matches() {
+    assertTrue(NeoErrorSanitizer.isStaleRecordMessage(STALE_CODE));
+  }
+
+  /**
+   * On the one path where the code survives — a stateless request, where
+   * {@code convertExceptionToJson} skips translation — it arrives embedded in the exception's own
+   * message rather than alone, so a substring match is what is needed.
+   */
+  @Test
+  public void isStaleRecordMessage_codeEmbeddedInABody_matches() {
+    assertTrue(NeoErrorSanitizer.isStaleRecordMessage(
+        "org.openbravo.base.exception.OBStaleObjectException: OBJSON_StaleDate"));
+  }
+
+  /**
+   * Deliberately narrow: the method must NOT try to recognise the translated sentence. Matching
+   * prose is what failed twice against a live server, and it would break the moment the session
+   * language changes — which is precisely the situation this check guards. The real detection now
+   * lives in {@code NeoRecordVersion}, which compares timestamps and needs no message at all.
+   */
+  @Test
+  public void isStaleRecordMessage_translatedProse_doesNotMatch() {
+    assertFalse(NeoErrorSanitizer.isStaleRecordMessage(
+        "The record has been changed by another user. Please refresh and try again."));
+    assertFalse(NeoErrorSanitizer.isStaleRecordMessage(
+        "El registro ha sido modificado por otro usuario."));
+  }
+
+  @Test
+  public void isStaleRecordMessage_nullOrUnrelated_doesNotMatch() {
+    assertFalse(NeoErrorSanitizer.isStaleRecordMessage(null));
+    assertFalse(NeoErrorSanitizer.isStaleRecordMessage(""));
+    assertFalse(NeoErrorSanitizer.isStaleRecordMessage("duplicate key value violates unique constraint"));
+  }
+
   // Inner classes whose names contain the patterns checked by isDbException.
   // getName() returns the binary name, e.g. "...NeoErrorSanitizerTest$FakeSQLException",
   // which contains "SQLException" as a substring.

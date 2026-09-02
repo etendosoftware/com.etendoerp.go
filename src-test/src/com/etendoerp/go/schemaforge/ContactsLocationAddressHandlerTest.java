@@ -318,6 +318,7 @@ class ContactsLocationAddressHandlerTest {
     Country country = mock(Country.class);
     when(country.getId()).thenReturn("country-id");
     when(country.getName()).thenReturn("Spain");
+    when(country.getIdentifier()).thenReturn("España");
     when(obDal.get(Country.class, "country-id")).thenReturn(country);
 
     Region region = mock(Region.class);
@@ -431,7 +432,11 @@ class ContactsLocationAddressHandlerTest {
 
     Country country = mock(Country.class);
     when(country.getId()).thenReturn("US");
+    // ETP-5022 — both getters are stubbed on purpose: getName() is the base-language value the
+    // handler must NOT use, getIdentifier() is the translated one it must. Asserting the
+    // translated value below is what fails if a call site ever slips back to getName().
     when(country.getName()).thenReturn("United States");
+    when(country.getIdentifier()).thenReturn("Estados Unidos");
     when(geoLoc.getCountry()).thenReturn(country);
 
     Region region = mock(Region.class);
@@ -462,7 +467,7 @@ class ContactsLocationAddressHandlerTest {
     assertEquals("Springfield", enriched.getString("cityName"));
     assertEquals("62704", enriched.getString("postalCode"));
     assertEquals("US", enriched.getString("country"));
-    assertEquals("United States", enriched.getString("country$_identifier"));
+    assertEquals("Estados Unidos", enriched.getString("country$_identifier"));
     assertEquals("IL", enriched.getString("region"));
     assertEquals("Illinois", enriched.getString("region$_identifier"));
   }
@@ -880,10 +885,14 @@ class ContactsLocationAddressHandlerTest {
     when(geoLoc.getRegion()).thenReturn(region);
 
     Country country = mock(Country.class);
+    // ETP-5022 — both getters are stubbed on purpose: getName() is the base-language value the
+    // handler must NOT use, getIdentifier() is the translated one it must. Asserting the
+    // translated value below is what fails if a call site ever slips back to getName().
     when(country.getName()).thenReturn("Spain");
+    when(country.getIdentifier()).thenReturn("España");
     when(geoLoc.getCountry()).thenReturn(country);
 
-    assertEquals("Catalonia, Spain", method.invoke(null, geoLoc));
+    assertEquals("Catalonia, España", method.invoke(null, geoLoc));
   }
 
   /**

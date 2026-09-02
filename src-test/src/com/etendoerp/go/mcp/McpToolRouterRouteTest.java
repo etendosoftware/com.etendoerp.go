@@ -87,6 +87,15 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
 @MockitoSettings(strictness = Strictness.LENIENT)
 class McpToolRouterRouteTest {
 
+  /**
+   * A syntactically valid `updated` token for cases that are NOT about concurrency (ETP-5073).
+   *
+   * Its value is irrelevant: these tests never reach the version comparison, they only have to get
+   * past the required-argument check. Naming it makes that intent explicit instead of leaving a
+   * bare timestamp literal that reads like it matters.
+   */
+  private static final String STALE_SAFE_VERSION = "2026-08-21T16:20:38+00:00";
+
   private static final String SPEC_NAME = "sales-order";
   private static final String ENTITY_NAME = "header";
   private static final String SPEC_ID = "spec-id-001";
@@ -743,6 +752,11 @@ class McpToolRouterRouteTest {
     private JSONObject updateArgs() throws Exception {
       JSONObject args = createArgs();
       args.put("id", "rec-1");
+      // ETP-5073 / DOC-04: neo_update requires the record's `updated` value. These cases are about
+      // the method-flag gate, not about argument validation, so the token is supplied to let them
+      // reach the gate they are testing — argument validation runs first and would otherwise
+      // answer "Missing required argument: updated" before the gate is ever consulted.
+      args.put("updated", STALE_SAFE_VERSION);
       return args;
     }
 
@@ -2026,6 +2040,9 @@ class McpToolRouterRouteTest {
       JSONObject args = buildCrudArgs();
       args.put("id", "rec-1");
       args.put("fields", new JSONObject());
+      // ETP-5073 / DOC-04: required now, and supplied here for the same reason as in updateArgs —
+      // this case is about entity resolution, and argument validation precedes it.
+      args.put("updated", STALE_SAFE_VERSION);
       assertNoTabError(routeWithNoTabEntity("neo_update", args, WRITE_SCOPES));
     }
 

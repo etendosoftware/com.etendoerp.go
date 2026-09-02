@@ -447,9 +447,23 @@ class NeoFieldFilterTest {
           Collections.emptyMap(), propToApiKey);
 
       // The DAL name "dateAcct" must NOT appear: the caller never sees it, so asking for it is
-      // as wrong as asking for a field that does not exist.
-      assertEquals(Optional.of(Set.of("id", "documentNo", "accountingDate")),
+      // as wrong as asking for a field that does not exist. "updated" DOES appear: it is served
+      // unconditionally on the read path (ETP-5073).
+      assertEquals(Optional.of(Set.of("id", "documentNo", "accountingDate", "updated")),
           filter.emittableResponseKeys());
+    }
+
+    @Test
+    @DisplayName("'updated' is emittable even though no window can declare it (ETP-5073)")
+    void alwaysReadableKeyIsEmittable() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "name"));
+      NeoFieldFilter filter = activeFilter(included, included);
+
+      // Regression: filterGetResponse serves "updated", but emittableResponseKeys used to omit it,
+      // so the MCP projection validator reported it in "unknownFields" while handing the caller
+      // its value. Declaring it here keeps that array honest; the write path is unaffected.
+      Set<String> emittable = filter.emittableResponseKeys().orElseThrow();
+      assertTrue(emittable.contains("updated"));
     }
 
     @Test
@@ -583,6 +597,117 @@ class NeoFieldFilterTest {
       JSONObject result = filter.filterCreateRequest(body);
       assertTrue(result.has("bookQuantity"));
       assertTrue(result.has("transactionDocument"));
+    }
+  }
+
+  @Nested
+  @DisplayName("filterCalloutResponse (ETP-4917)")
+  class FilterCalloutResponse {
+
+    /**
+     * Reproduces the exact ETP-4917 scenario: a legacy callout (e.g. {@code SL_JournalLineAmt}
+     * on {@code simple-g-l-journal}'s line entity) echoes back both the field the user is
+     * editing ({@code foreignCurrencyDebit}) AND the derived accounted-amount columns whose DAL
+     * property names happen to literally be {@code debit}/{@code credit} — read-only, no
+     * default, no handler, so {@code filterCreateRequest} would reject them with a 422 if the
+     * frontend later spread them into a create request. The callout response must not hand the
+     * client a field it cannot legally send back.
+     */
+    @Test
+    @DisplayName("strips a read-only-on-create field from 'updates' while keeping editable fields")
+    void stripsRejectableFieldFromUpdates() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "foreignCurrencyDebit", "debit", "credit"));
+      Set<String> writable = new HashSet<>(Set.of("id", "foreignCurrencyDebit"));
+      Set<String> rejectableOnCreate = new HashSet<>(Set.of("debit", "credit"));
+      NeoFieldFilter filter = activeFilterWithRejectable(included, writable, rejectableOnCreate);
+
+      JSONObject updates = new JSONObject();
+      updates.put("foreignCurrencyDebit", new JSONObject().put("value", "100.00"));
+      updates.put("debit", new JSONObject().put("value", "100.00"));
+      updates.put("credit", new JSONObject().put("value", "0.00"));
+      JSONObject calloutBody = new JSONObject();
+      calloutBody.put("updates", updates);
+      calloutBody.put("combos", new JSONObject());
+
+      JSONObject result = filter.filterCalloutResponse(calloutBody);
+
+      JSONObject resultUpdates = result.getJSONObject("updates");
+      assertTrue(resultUpdates.has("foreignCurrencyDebit"),
+          "the field the callout was triggered for must survive");
+      assertFalse(resultUpdates.has("debit"), "read-only-on-create field must be stripped");
+      assertFalse(resultUpdates.has("credit"), "read-only-on-create field must be stripped");
+    }
+
+    @Test
+    @DisplayName("also strips a rejectable field from 'combos'")
+    void stripsRejectableFieldFromCombos() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "documentStatus"));
+      Set<String> writable = new HashSet<>(Set.of("id"));
+      Set<String> rejectableOnCreate = new HashSet<>(Set.of("documentStatus"));
+      NeoFieldFilter filter = activeFilterWithRejectable(included, writable, rejectableOnCreate);
+
+      JSONObject combos = new JSONObject();
+      combos.put("documentStatus", new JSONObject().put("selected", "DR"));
+      JSONObject calloutBody = new JSONObject();
+      calloutBody.put("updates", new JSONObject());
+      calloutBody.put("combos", combos);
+
+      JSONObject result = filter.filterCalloutResponse(calloutBody);
+
+      assertFalse(result.getJSONObject("combos").has("documentStatus"));
+    }
+
+    @Test
+    @DisplayName("a handler-supplied or default-backed read-only field is never rejectable, so it survives")
+    void keepsFieldsNotInRejectableSet() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "transactionDocument"));
+      Set<String> writable = new HashSet<>(Set.of("id"));
+      // Empty on purpose: this mirrors an entity with a Java_Qualifier/AD default, where clause 2
+      // never adds the field to rejectableOnCreateFields in the first place.
+      NeoFieldFilter filter = activeFilterWithRejectable(included, writable, Collections.emptySet());
+
+      JSONObject updates = new JSONObject();
+      updates.put("transactionDocument", new JSONObject().put("value", "doc-type-1"));
+      JSONObject calloutBody = new JSONObject().put("updates", updates);
+
+      JSONObject result = filter.filterCalloutResponse(calloutBody);
+
+      assertTrue(result.getJSONObject("updates").has("transactionDocument"));
+    }
+
+    @Test
+    @DisplayName("inactive filter (no ETGO_SF_FIELD config) is a no-op")
+    void inactiveFilterIsNoOp() throws Exception {
+      NeoFieldFilter filter = createFilter(null, null, null,
+          Collections.emptyMap(), Collections.emptyMap(), false);
+
+      JSONObject updates = new JSONObject().put("debit", new JSONObject().put("value", "1"));
+      JSONObject calloutBody = new JSONObject().put("updates", updates);
+
+      JSONObject result = filter.filterCalloutResponse(calloutBody);
+
+      assertTrue(result.getJSONObject("updates").has("debit"));
+    }
+
+    @Test
+    @DisplayName("null callout body is handled gracefully")
+    void nullBodyReturnsNull() throws Exception {
+      NeoFieldFilter filter = activeFilterWithRejectable(
+          Set.of("id"), Set.of("id"), Set.of("debit"));
+      assertNull(filter.filterCalloutResponse(null));
+    }
+
+    @Test
+    @DisplayName("missing 'updates'/'combos' sections do not throw")
+    void missingSectionsDoNotThrow() throws Exception {
+      NeoFieldFilter filter = activeFilterWithRejectable(
+          Set.of("id"), Set.of("id"), Set.of("debit"));
+      JSONObject calloutBody = new JSONObject().put("messages", new JSONArray());
+
+      JSONObject result = filter.filterCalloutResponse(calloutBody);
+
+      assertNotNull(result);
+      assertFalse(result.has("updates"));
     }
   }
 
