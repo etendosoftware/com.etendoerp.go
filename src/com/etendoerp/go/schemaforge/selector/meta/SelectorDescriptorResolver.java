@@ -395,10 +395,13 @@ public final class SelectorDescriptorResolver {
     }
   }
 
+  // Expected, not anomalous: resolveTarget() routes every column here as a fallback, and
+  // LocatorWarehouseResolver.isLocatorRef() probes non-FK columns (dates, numbers) on every
+  // read. Logging at warn floods the log with rows like "Column DateDelivered has ...".
   private static SelectorMeta resolveRefTable(Column column) {
     org.openbravo.model.ad.domain.Reference refValue = column.getReferenceSearchKey();
     if (refValue == null) {
-      log.warn("Column {} has no AD_Reference_Value", column.getDBColumnName());
+      log.debug("Column {} has no AD_Reference_Value", column.getDBColumnName());
       return null;
     }
 
