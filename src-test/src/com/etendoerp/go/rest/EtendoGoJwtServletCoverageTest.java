@@ -409,26 +409,52 @@ public class EtendoGoJwtServletCoverageTest {
     assertEquals("success", new JSONObject(resp.body()).getString("status"));
   }
 
+  /**
+   * ETP-5115 / AUTH-05. This test used to assert the opposite: that an account with no local
+   * password got no token and no email. That was the bug, pinned as if it were the contract — every
+   * SSO-created account has no local password by design, so the one flow that exists to recover
+   * access was a silent no-op for exactly the people who could not get in. It now issues the same
+   * token and mails the same link, through the set-password contract rather than reset-password,
+   * because the account is being asked to create a first password and not to restore a forgotten
+   * one. Rewritten rather than deleted, so the regression cannot come back unnoticed.
+   */
   @Test
-  public void passwordResetRequestKnownEmailWithoutLocalPasswordSkipsToken() throws Exception {
+  public void passwordResetRequestKnownEmailWithoutLocalPasswordIssuesSetPasswordLink()
+      throws Exception {
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = jsonRequest("/password-reset/request",
         "{\"email\":\"sso@test.com\"}");
 
     Account account = mock(Account.class);
+    TransactionalAuthEmailSender emailSender = mock(TransactionalAuthEmailSender.class);
+    when(emailSender.sendSetPassword(any(), anyString(), anyString(), any())).thenReturn(true);
+    EtendoGoJwtServlet servletWithEmailSender = new EtendoGoJwtServlet(emailSender);
+
+    // The link builder is pinned rather than left to read the ambient app base URL, same reason as
+    // registerSuccessCreatesAccount: without it the outcome depends on whether the machine running
+    // the suite has etendo.go.app.baseUrl set, and a null link makes the send be skipped entirely.
+    // Pinning PublicUrlResolver instead would not work — it would also stub appendPath, which the
+    // builder uses, so the link would come back null anyway.
     try (var ctxMock = mockStatic(OBContext.class);
-         var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+         var dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         var linkMock = mockStatic(EtendoGoAuthLinkBuilder.class)) {
+      linkMock.when(() -> EtendoGoAuthLinkBuilder.resetPasswordLink(anyString(), any()))
+          .thenReturn("https://go.example.com/reset-password?token=t");
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByEmail("sso@test.com"))
           .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(false);
 
-      servlet.doPost(req, resp.response);
+      servletWithEmailSender.doPost(req, resp.response);
 
       dalMock.verify(() -> EtendoGoJwtDalHelper.storePasswordResetToken(
-          any(Account.class), anyString(), any(Date.class)), never());
+          any(Account.class), anyString(), any(Date.class)));
+      verify(emailSender).sendSetPassword(eq(account), anyString(), anyString(), any());
+      verify(emailSender, never()).sendPasswordReset(any(), anyString(), anyString(), any());
     }
-
+    // The response is the same neutral body an unknown address gets. Varying it by account state
+    // would tell an anonymous prober both that the address exists and which provider it uses.
     assertEquals(200, resp.status);
+    assertEquals("success", new JSONObject(resp.body()).getString("status"));
   }
 
   // ===================== POST /password-reset/confirm — validation branches ===========

@@ -891,8 +891,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
       Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
-      if (account != null && EtendoGoJwtDalHelper.hasLocalPassword(account)) {
-        storeResetTokenAndSendEmail(account, PublicUrlResolver.resolveConfiguredAppBaseUrl());
+      // ETP-5115 / AUTH-05: an account with no local password used to fall out here and receive
+      // nothing at all, while the screen still confirmed a link had been sent. That is every
+      // SSO-created account, which has passwordHash null by design — so the one flow that exists to
+      // recover access was a silent no-op for exactly the users who most needed it. It now gets a
+      // link too; only the wording differs, because it is being asked to create a first password
+      // rather than restore one it forgot.
+      //
+      // The neutral response below stays exactly as it was, and must. Varying it by account state
+      // is the classic user-enumeration vector: it would confirm to any anonymous prober both that
+      // the address is registered and which identity provider it uses. The disclosure belongs in
+      // the email, which only the owner of the mailbox reads.
+      if (account != null) {
+        storeResetTokenAndSendEmail(account, PublicUrlResolver.resolveConfiguredAppBaseUrl(),
+            EtendoGoJwtDalHelper.hasLocalPassword(account));
+      } else {
+        logPasswordResetBranch("no-account", email);
       }
       writePasswordResetNeutralResponse(response);
     } catch (RuntimeException e) {
@@ -2593,7 +2607,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return account != null ? account : EtendoGoJwtDalHelper.findActiveAccountByEmail(accountEmail);
   }
 
-  private void storeResetTokenAndSendEmail(Account account, String appBaseUrl) {
+  /**
+   * Issues a password link and mails it out, picking the contract from whether the account already
+   * has a local password: {@code reset-password} when it does, {@code set-password} when it does
+   * not. The link, the token and its expiry are identical either way — only the copy changes.
+   *
+   * @param account the account requesting the link
+   * @param appBaseUrl configured public app base URL, null when none is configured
+   * @param hasLocalPassword whether the account already has a password to restore
+   */
+  private void storeResetTokenAndSendEmail(Account account, String appBaseUrl,
+      boolean hasLocalPassword) {
+    String branch = hasLocalPassword ? "reset" : "enrol";
     EtendoGoJwtDalHelper.PasswordResetTokenState previousTokenState =
         EtendoGoJwtDalHelper.capturePasswordResetToken(account);
     String resetToken = generateSecureUrlToken();
@@ -2604,18 +2629,35 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     boolean emailSent = false;
     String resetLink = EtendoGoAuthLinkBuilder.resetPasswordLink(resetToken, appBaseUrl);
     if (resetLink == null) {
-      log.warn("Auth email reset-password skipped because the public app base URL is not configured");
+      log.warn("Auth email {} skipped because the public app base URL is not configured", branch);
     } else {
       try {
-        emailSent = authEmailSender.sendPasswordReset(account, resetTokenHash, resetLink,
-            expiresAt);
+        emailSent = hasLocalPassword
+            ? authEmailSender.sendPasswordReset(account, resetTokenHash, resetLink, expiresAt)
+            : authEmailSender.sendSetPassword(account, resetTokenHash, resetLink, expiresAt);
       } catch (RuntimeException e) {
-        log.warn("Auth email reset-password failed after token storage", e);
+        log.warn("Auth email {} failed after token storage", branch, e);
       }
     }
     if (!emailSent) {
       EtendoGoJwtDalHelper.restorePasswordResetToken(account, previousTokenState);
     }
+    logPasswordResetBranch(emailSent ? branch : branch + "-not-sent", account.getEmail());
+  }
+
+  /**
+   * Records which branch a password-reset request took.
+   *
+   * <p>ETP-5115. The neutral response is deliberate and stays, but it means one answer hides
+   * several outcomes, and until now only two of them left even a warning — so nobody could tell
+   * "it did not arrive" from "it was never sent", which is precisely what the AUTH-05 finding asked
+   * for. The address is masked: this is a diagnostic, not a record of who asked to reset what.
+   *
+   * @param branch what happened: no-account, reset, enrol, or either of the latter not sent
+   * @param email the requested address, logged masked
+   */
+  private void logPasswordResetBranch(String branch, String email) {
+    log.info("Password reset request resolved to branch {} for {}", branch, maskEmail(email));
   }
 
   /**

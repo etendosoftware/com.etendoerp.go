@@ -46,6 +46,7 @@ class TransactionalAuthEmailSender {
   private static final String CONTRACT_ORGANIZATION_JOINED = "organization-joined";
   private static final String CONTRACT_PASSWORD_CHANGED = "password-changed";
   private static final String CONTRACT_RESET_PASSWORD = "reset-password";
+  private static final String CONTRACT_SET_PASSWORD = "set-password";
   private static final String CONTRACT_VERIFY_EMAIL = "verify-email";
 
   private final TransactionalEmailService emailService;
@@ -225,6 +226,32 @@ class TransactionalAuthEmailSender {
       return false;
     }
     return sendAccountLink(CONTRACT_RESET_PASSWORD, account, resetLink, resetTokenHash, null,
+        expiresAt);
+  }
+
+  /**
+   * Sends the set-password email: the same link as a reset, worded for somebody who has no password
+   * yet rather than one who forgot theirs.
+   *
+   * <p>ETP-5115. An account created through an identity provider has no local password, so a reset
+   * request used to skip the send entirely while the screen still said a link had gone out — the
+   * account had no way to recover and no way to give itself one. It gets this instead. The link and
+   * the token are identical to a reset; only the copy differs, because telling someone we received
+   * a request to <em>reset</em> a password they never had is how you make a working flow read like
+   * a bug.
+   *
+   * @param account the account requesting the reset
+   * @param resetTokenHash hash of the issued token, used as the record id
+   * @param resetLink the link that lets the account choose its first password
+   * @param expiresAt when the token stops working; the email states the remaining window and omits
+   *     it when unknown
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendSetPassword(Account account, String resetTokenHash, String resetLink, Date expiresAt) {
+    if (account == null || StringUtils.isBlank(resetTokenHash) || StringUtils.isBlank(resetLink)) {
+      return false;
+    }
+    return sendAccountLink(CONTRACT_SET_PASSWORD, account, resetLink, resetTokenHash, null,
         expiresAt);
   }
 

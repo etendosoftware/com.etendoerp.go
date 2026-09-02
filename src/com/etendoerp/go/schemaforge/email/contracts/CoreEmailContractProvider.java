@@ -38,6 +38,10 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
 
   private final EmailContractDataResolver contractResolver;
   private static final int RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT = 3;
+  // ETP-5115: same ceiling as reset-password. Asking again is the same normal thing to do — the
+  // first mail lands in spam, the user waits — and the two are the same flow seen from either side
+  // of "does this account already have a password", so a different limit would be arbitrary.
+  private static final int SET_PASSWORD_RECIPIENT_THROTTLE_LIMIT = 3;
   private static final int NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT = 2;
   private static final int ENVIRONMENT_READY_RECIPIENT_THROTTLE_LIMIT = 2;
   // ETP-4798: one more than reset-password. Asking for the confirmation link again is a normal
@@ -68,6 +72,12 @@ public final class CoreEmailContractProvider implements EmailContractProvider {
     return Arrays.asList(
         new AccountLinkEmailContract("reset-password", contractResolver,
             RESET_PASSWORD_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
+            NOTE_EXPIRY, "note.ignore"),
+        // ETP-5115: the reset flow's other half. An account with no local password gets this
+        // instead of reset-password: same link, same token, same expiry note — wording that asks
+        // it to create a password rather than restore one it never had.
+        new AccountLinkEmailContract("set-password", contractResolver,
+            SET_PASSWORD_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
             NOTE_EXPIRY, "note.ignore"),
         new AccountLinkEmailContract("new-account", contractResolver,
             NEW_ACCOUNT_RECIPIENT_THROTTLE_LIMIT, ACCOUNT_LINK_THROTTLE_WINDOW_SECONDS, null,
