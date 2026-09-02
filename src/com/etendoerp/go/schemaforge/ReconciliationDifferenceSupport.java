@@ -34,8 +34,10 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
+import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 /**
@@ -66,7 +68,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * <p><b>Tolerance semantics — deliberate divergence, documented on purpose.</b> The gate reuses the
  * per-account {@code EM_ETGO_Amount_Tolerance} percentage, and reads an unset/zero percentage as
  * "no difference may be posted", i.e. the action is inert until an administrator configures it.
- * Note that {@code AutoMatchSupport.computeAmountTolerance} reads the SAME column with the opposite
+ * Note that {@code AutoMatchSupport.signalGroupTolerance} reads the SAME column with the opposite
  * convention (zero means "one cent of slack, never zero"). Two meanings for one field is a support
  * trap, so the 400 message spells out the configured percentage and the resulting limit.
  */
@@ -91,6 +93,8 @@ final class ReconciliationDifferenceSupport {
   private static final String MSG_REACTIVATED =
       "This statement line was reactivated and has more than one pending portion. Re-confirm the "
           + "reconciliation before posting a difference.";
+  /** Dictionary key for the auto-created difference movement's description. */
+  private static final String MSG_DIFFERENCE_DESCRIPTION = "ETGO_ReconciliationDifference";
   private static final String MSG_LOCK_BUSY =
       "Another reconciliation is already in progress for this statement line. Try again.";
 
@@ -145,8 +149,11 @@ final class ReconciliationDifferenceSupport {
     }
 
     // ===== every validation above is read-only. The first write is the next statement. =====
-    String trxId = handler.createTransactionForRule(pre.account(), pre.line(),
-        differenceSpec(pre.glItemId(), pre.remainder(), pre.description()));
+    // Same default as the inline path: the modal's description field is optional, so without this
+    // the manual action creates the very same nameless movement in the Movements list.
+    String trxId = handler.createTransactionForRule(pre.account(), pre.line(), differenceSpec(
+        pre.glItemId(), pre.remainder(),
+        defaultDifferenceDescription(pre.description(), pre.glItemId())));
 
     NeoResponse delegated = handler.reconcileGroup(
         reconcileGroupBody(accountId, lineId, trxId));
@@ -300,6 +307,168 @@ final class ReconciliationDifferenceSupport {
           "GL item not found: " + requestedGlItemId);
     }
     return null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // ETP-4965 — inline difference posting, shared by the manual and automatch paths
+  // ---------------------------------------------------------------------------
+
+  /** Error code the frontend keys on to open its accounting-concept picker and retry. */
+  static final String CODE_GL_ITEM_REQUIRED = "GL_ITEM_REQUIRED";
+
+  private static final String MSG_GL_ITEM_REQUIRED =
+      "This match leaves a difference and the financial account has no GL Item Difference "
+          + "configured. Choose an accounting concept, or configure one in Edit account.";
+
+  /**
+   * Closes a within-tolerance 1:1 difference AT THE MOMENT OF RECONCILING, by creating the
+   * compensating GL-item movement and adding it to {@code operationIds} so the operations sum
+   * EXACTLY to the line.
+   *
+   * <p><b>Why a compensating movement rather than letting the remainder survive.</b> Core splits the
+   * line either way ({@code APRM_MatchingUtility} chains the operations and clones the leftover),
+   * but with the gap funded both halves end up matched: the group's pending amount reaches zero,
+   * {@code BankStatementsSupport.mergeSubLineIntoHead} reports RECONCILED, and the user sees one
+   * closed line. Without it the leftover stays as a pending physical row that nothing can settle —
+   * the "stuck on Pendiente" bug of ETP-4965.
+   *
+   * <p><b>Order of operations is the safety mechanism.</b> A returned {@code NeoResponse.error} does
+   * NOT roll back — it commits (see this class's header javadoc). Every branch that can fail is
+   * therefore evaluated before {@link ReconciliationHandler#createTransactionForRule}, the single
+   * write. The one case where a write already happened upstream is the invoice path, whose
+   * {@code payInvoices} runs before this helper is reached; there the rejection rolls back
+   * explicitly rather than leaving orphan payments committed.
+   *
+   * @param operationIds mutated in place on success — the new movement's id is appended
+   * @param rollbackOnReject whether a rejection must roll the transaction back. TRUE only for the
+   *     manual path when invoices were paid upstream, since that is the one case with uncommitted
+   *     writes and a single request to undo. MUST stay false for the automatch batch: there the
+   *     rejection is per group, sibling groups have already been prepared, and rolling back would
+   *     discard their work and close the session the rest of the loop still needs.
+   * @return {@code null} to let the caller carry on (nothing to post, out of scope, or posted
+   *         successfully), or the error response to return verbatim
+   */
+  static NeoResponse applyInlineDifference(ReconciliationHandler handler,
+      FIN_FinancialAccount account, FIN_BankStatementLine line, List<String> operationIds,
+      JSONObject body, boolean rollbackOnReject) throws Exception {
+    BigDecimal lineAmount = signedLineAmount(line);
+    BigDecimal opSum = BigDecimal.ZERO;
+    for (String opId : operationIds) {
+      // validateOperations already rejected unresolvable ids upstream; the guard just keeps this
+      // helper safe to call from any future ordering.
+      FIN_FinaccTransaction trx = handler.loadTransaction(opId);
+      if (trx != null) {
+        opSum = opSum.add(ReconciliationSupport.signedAmount(trx));
+      }
+    }
+    BigDecimal gap = lineAmount.subtract(opSum);
+
+    // Nothing to post. This is also where a DATE-only deviation lands: the amount balances, so no
+    // accounting entry is created and no GL item is required — the date affects classification and
+    // the automatch proposal, never the posting.
+    if (isNegligible(gap)) {
+      return null;
+    }
+    // Over-coverage (the operations exceed the line). Out of scope for ETP-4965 and already
+    // rejected upstream by validateOperations; never post our way out of it.
+    if (gap.signum() != lineAmount.signum()) {
+      return null;
+    }
+    // Nothing was actually matched, so there is no near-match to complete — only an empty (or
+    // zero-amount) selection. Same reasoning as reconcileDifference's MSG_NOT_PARTIAL guard: without
+    // it the gap equals the whole line, and a tolerance of 100% or more would authorise posting the
+    // entire statement line to the difference concept.
+    if (isNegligible(opSum)) {
+      return null;
+    }
+    BigDecimal limit = NearMatchSupport.differenceTolerance(lineAmount, handler.loadTolerances(
+        account.getId())[1]);
+    // Tolerance unset (0% = disabled) or the gap is bigger than it: leave the pre-existing partial
+    // split behaviour exactly as it was.
+    if (limit == null || gap.abs().compareTo(limit) > 0) {
+      return null;
+    }
+
+    String requestedGlItemId = body != null ? body.optString(KEY_GL_ITEM_ID, null) : null;
+    String glItemId = effectiveGlItemId(requestedGlItemId, account);
+    if (StringUtils.isBlank(glItemId)) {
+      return glItemRequired(handler, gap, rollbackOnReject);
+    }
+    // A client-supplied id that does not resolve is a different failure from "none configured": it
+    // must NOT come back as GL_ITEM_REQUIRED, or the UI would reopen the picker on the very id the
+    // user just chose.
+    NeoResponse glError = checkGlItem(glItemId, requestedGlItemId);
+    if (glError != null) {
+      if (rollbackOnReject) {
+        rollbackQuietly(handler);
+      }
+      return glError;
+    }
+
+    String description = body != null ? StringUtils.trimToNull(body.optString(KEY_DESCRIPTION, null))
+        : null;
+    String trxId = handler.createTransactionForRule(account, line,
+        differenceSpec(glItemId, gap, defaultDifferenceDescription(description, glItemId)));
+    if (StringUtils.isNotBlank(trxId)) {
+      operationIds.add(trxId);
+    }
+    return null;
+  }
+
+  /**
+   * A description the difference movement can be recognised by in the Movements list.
+   *
+   * <p>Without one, {@code createTransactionForRule} falls back to the statement line's description
+   * — and an imported line very often has none, which is how a bare 0,38 row with nothing but an
+   * amount ends up in the list, indistinguishable from a real movement.
+   *
+   * <p>The text is resolved from the message dictionary so it arrives in the user's language;
+   * {@code messageBD} echoes the key back when the message is not installed, so that case degrades
+   * to the accounting concept's own name, which is at least meaningful and already localized.
+   *
+   * @param requested the description explicitly supplied by the caller, which always wins
+   */
+  static String defaultDifferenceDescription(String requested, String glItemId) {
+    if (StringUtils.isNotBlank(requested)) {
+      return requested;
+    }
+    String label = OBMessageUtils.messageBD(MSG_DIFFERENCE_DESCRIPTION);
+    if (StringUtils.isNotBlank(label) && !StringUtils.equals(label, MSG_DIFFERENCE_DESCRIPTION)) {
+      return label;
+    }
+    GLItem glItem = StringUtils.isNotBlank(glItemId)
+        ? OBDal.getInstance().get(GLItem.class, glItemId) : null;
+    return glItem != null ? glItem.getName() : null;
+  }
+
+  /**
+   * The 400 that tells the client to pick an accounting concept, shaped like
+   * {@link #alreadyReconciled} so the {@code code} and the amount survive alongside the message —
+   * the manual panel opens its concept picker on that code, and the automatch modal counts the
+   * group as failed and offers a link to Edit account.
+   *
+   * <p>{@code rollbackOnReject} covers the manual invoice path, where {@code payInvoices} has
+   * already written payments by the time this is reached and a plain error return would commit
+   * them. It is deliberately NOT set for the automatch batch — see {@link #applyInlineDifference}.
+   */
+  private static NeoResponse glItemRequired(ReconciliationHandler handler, BigDecimal gap,
+      boolean rollbackOnReject) {
+    if (rollbackOnReject) {
+      rollbackQuietly(handler);
+    }
+    try {
+      JSONObject error = new JSONObject();
+      error.put("message", MSG_GL_ITEM_REQUIRED);
+      error.put(ReconciliationHandler.KEY_STATUS, HttpServletResponse.SC_BAD_REQUEST);
+      JSONObject payload = new JSONObject();
+      payload.put("error", error);
+      payload.put("code", CODE_GL_ITEM_REQUIRED);
+      payload.put("differenceAmount", gap.toPlainString());
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, payload);
+    } catch (Exception e) {
+      log.debug("Could not build the GL-item-required payload", e);
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, MSG_GL_ITEM_REQUIRED);
+    }
   }
 
   // ---------------------------------------------------------------------------

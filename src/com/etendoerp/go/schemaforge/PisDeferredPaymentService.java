@@ -160,16 +160,22 @@ public final class PisDeferredPaymentService {
    * @param account
    *     the financial account debited; mandatory on {@code PSD2_PIS_PAYMENT} and the source of the
    *     debtor IBAN and PSD2 provider
+   * @param bankAmount
+   *     the amount to instruct the bank for, in {@code account}'s currency — already converted by
+   *     the caller when the invoice is in another currency (ETP-5084). The unconverted,
+   *     invoice-currency figure travels inside {@code body} instead, and the replay recomputes this
+   *     same value from the {@code body}'s conversion rate, so the two can never disagree.
    * @param body
    *     the original SPA request, stored verbatim as the intent
    */
   static NeoResponse initiateDeferredPis(Invoice invoice, FIN_FinancialAccount account,
-      BigDecimal amount, JSONObject body, JSONObject pisInput, boolean isReceipt) throws Exception {
+      BigDecimal bankAmount, JSONObject body, JSONObject pisInput, boolean isReceipt)
+      throws Exception {
     String endToEndId = nextEndToEndId(invoice);
 
     BankIntegrationPISUtils.PISCreatePaymentResult result =
-        PisPaymentBridge.initiateDeferredPisPayment(invoice, account, amount, endToEndId, pisInput,
-            currentRequest());
+        PisPaymentBridge.initiateDeferredPisPayment(invoice, account, bankAmount, endToEndId,
+            pisInput, currentRequest());
 
     PisPayment pisPayment = PISPaymentDao.findBySaltedgePaymentId(result.getPaymentId());
     if (pisPayment == null) {

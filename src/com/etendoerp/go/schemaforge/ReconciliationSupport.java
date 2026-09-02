@@ -23,9 +23,6 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.sql.Types;
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -38,6 +35,8 @@ import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
+
 /**
  * Stateless helpers shared by {@link ReconciliationHandler}: the NEO response envelope, date /
  * amount formatting, optional SQL date-range binding and small JSON / entity utilities. Extracted
@@ -47,9 +46,6 @@ final class ReconciliationSupport {
 
   private static final String KEY_RESPONSE = "response";
   private static final String KEY_DATA = "data";
-  private static final DateTimeFormatter ISO_UTC =
-      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
-
   private ReconciliationSupport() {
   }
 
@@ -62,9 +58,13 @@ final class ReconciliationSupport {
     return NeoResponse.ok(wrapper);
   }
 
-  /** Formats a timestamp as an ISO-8601 UTC string ({@code ""} when null). */
+  /**
+   * Formats a business timestamp as the canonical NEO wire datetime, in the server's own zone
+   * ({@code ""} when null). See {@link NeoDateFormat#toWireDateTime} for why not UTC (ETP-5100).
+   */
   static String formatDate(Timestamp ts) {
-    return ts == null ? "" : ISO_UTC.format(Instant.ofEpochMilli(ts.getTime()));
+    String formatted = NeoDateFormat.toWireDateTime(ts);
+    return formatted == null ? "" : formatted;
   }
 
   /** Returns {@code value}, or {@link BigDecimal#ZERO} when null. */

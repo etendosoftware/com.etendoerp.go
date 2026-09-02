@@ -485,14 +485,32 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         JSONObject adminRole = result.getJSONArray("roles").getJSONObject(0);
         assertEquals(1, adminRole.getInt("userCount"));
 
+        // The restriction must reach the user's OWN client, and must be expressed through an
+        // explicit alias. It used to be written as the two-level path "userContact.client.id",
+        // which compiles and passes a mocked criteria but throws "could not resolve property" from
+        // AbstractEntityPersister.toColumns the moment Hibernate runs it — a Criteria resolves a
+        // one-level "property.id" (the FK column on this table) and nothing deeper. That shipped
+        // and answered 500 for the whole Roles page.
+        //
+        // So this asserts the PAIR — the alias on userContact, and the client restriction hanging
+        // off that alias — instead of one hardcoded property string. The alias NAME is captured
+        // rather than assumed, so renaming it stays a free refactor while dropping either half
+        // still fails here.
+        ArgumentCaptor<String> aliasCaptor = ArgumentCaptor.forClass(String.class);
+        // atLeastOnce: the same mocked criteria is reused across the five roles of the overview.
+        verify(userRolesCriteria, atLeastOnce())
+                .createAlias(eq(UserRoles.PROPERTY_USERCONTACT), aliasCaptor.capture());
+        String userContactAlias = aliasCaptor.getValue();
+
         ArgumentCaptor<Criterion> restrictionCaptor = ArgumentCaptor.forClass(Criterion.class);
         verify(userRolesCriteria, atLeastOnce()).add(restrictionCaptor.capture());
         boolean hasClientRestriction = restrictionCaptor.getAllValues().stream()
                 .filter(SimpleExpression.class::isInstance)
                 .map(SimpleExpression.class::cast)
-                .anyMatch(expr -> (UserRoles.PROPERTY_USERCONTACT + ".client.id").equals(expr.getPropertyName()));
+                .anyMatch(expr -> (userContactAlias + ".client.id").equals(expr.getPropertyName()));
         assertTrue(hasClientRestriction,
-                "resolveActiveUserIds must restrict UserRoles.userContact.client.id to the role's own client");
+                "resolveActiveUserIds must restrict the assignee's own client through the "
+                        + UserRoles.PROPERTY_USERCONTACT + " alias, not a nested property path");
     }
 
     /**

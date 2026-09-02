@@ -583,6 +583,13 @@ public final class PaymentRegistrationService {
     String overpaymentAction = body.optString("overpaymentAction", null);
     boolean pis = body.optBoolean(FIELD_PIS, false);
 
+    // A cross-currency bank transfer cannot proceed without a rate — the amount instructed to the
+    // bank is the converted one (ETP-5084) — so seed the invoice's own rate when a direct API
+    // caller omitted it, instead of failing the request below. The SPA always sends one.
+    if (pis) {
+      PaymentCurrencyConverter.seedInvoiceRateIfAbsent(body, invoice, account);
+    }
+
     // Multi-currency: resolve (and validate) the conversion rate — foreign accounts require an
     // explicit positive rate; same-currency defaults to ONE. See PaymentCurrencyConverter.
     PaymentCurrencyConverter.RateResolution rr =
@@ -605,12 +612,19 @@ public final class PaymentRegistrationService {
       PisPaymentService.validatePisEligibility(account, paymentMethod, invoice);
       JSONObject pisInput = PisPaymentService.extractPisInput(body);
       if (doProcess) {
+        // A transfer leaves the bank in the ACCOUNT's currency, so an invoice in another currency
+        // must be converted before the bank is instructed (ETP-5084) — otherwise the wrong amount
+        // of money moves. Deliberately the same rate and the same conversion helper the replay
+        // uses below (see createDraftPayment), so the instructed and the booked amount agree by
+        // construction rather than by coincidence.
+        BigDecimal bankAmount =
+            PaymentCurrencyConverter.convertedAmount(cash, conversionRate, account);
         // Bank transfers do NOT create a payment here. Nothing is registered until Salt Edge
         // reports a resolutive status, so abandoning the bank popup leaves the invoice untouched
         // instead of stranding a payment that reads as made (ETP-4895). The request is snapshotted
         // and replayed through this very method once the transfer resolves.
-        return PisDeferredPaymentService.initiateDeferredPis(invoice, account, cash, body, pisInput,
-            isReceipt);
+        return PisDeferredPaymentService.initiateDeferredPis(invoice, account, bankAmount, body,
+            pisInput, isReceipt);
       }
       // process:"draft" is an ordinary draft save — the PIS block is just showing in the form.
     }
