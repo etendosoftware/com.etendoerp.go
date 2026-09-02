@@ -303,30 +303,83 @@ public class GlItemProvisioningSupport {
     return null;
   }
 
-  /** Creates a brand-new {@link GLItem} named after {@code subaccount}, in its client/org. */
+  /**
+   * {@code C_Glitem.Name} is {@code varchar(60)} — narrower than {@code C_ElementValue.Name}'s
+   * {@code varchar(255)}. A live check against this DB's own data found 422 of GOClient's 1317
+   * leaf subaccounts already exceed 60 characters on the BARE name alone (pre-existing, not
+   * introduced by ETP-5101), and appending the code (see {@link #composeGlItemName}) pushes 166
+   * more over the edge that previously fit. Without a guard, {@code OBDal.save} on any of those
+   * throws (or the DB truncates/rejects, backend-dependent) — and since both call sites
+   * ({@link #createGlItem}, this class's {@code afterHandle} caller) are best-effort/swallowed,
+   * that failure is currently silent: the subaccount save succeeds, its GL Item just never gets
+   * created, with nothing surfacing the gap short of reading logs.
+   */
+  private static final int GL_ITEM_NAME_MAX_LENGTH = 60;
+
+  /**
+   * Builds the {@link GLItem} name for {@code subaccount} — ETP-5101: the subaccount's name plus
+   * its 8-digit code, so "Cuenta contable" and its GL Item read as the same account even when
+   * several subaccounts happen to share a name. Single source of truth for the format: both
+   * {@link #createGlItem} and {@link #syncGlItemName} build the name through this method, so their
+   * comparison never drifts — see the warning on {@link #syncGlItemName}.
+   *
+   * <p>Truncates the NAME portion, never the code — the code is what disambiguates two
+   * subaccounts sharing a name (the entire point of appending it), so it must always survive
+   * intact within the {@link #GL_ITEM_NAME_MAX_LENGTH} budget.
+   *
+   * @return {@code "<name, truncated to fit> <searchKey>"}, or the (possibly truncated) bare name
+   *     if {@code searchKey} is blank (should not happen for a real leaf account, but keeps this
+   *     method total)
+   */
+  protected static String composeGlItemName(ElementValue subaccount) {
+    String name = subaccount.getName();
+    String code = subaccount.getSearchKey();
+    if (code == null || code.isEmpty()) {
+      return truncateToFit(name, GL_ITEM_NAME_MAX_LENGTH);
+    }
+    String suffix = " " + code;
+    String truncatedName = truncateToFit(name, GL_ITEM_NAME_MAX_LENGTH - suffix.length());
+    return truncatedName + suffix;
+  }
+
+  /** Hard-truncates {@code value} to {@code maxLength}. Null-safe; {@code maxLength <= 0} yields "". */
+  private static String truncateToFit(String value, int maxLength) {
+    if (value == null) {
+      return "";
+    }
+    return value.length() <= maxLength ? value : value.substring(0, Math.max(0, maxLength));
+  }
+
+  /** Creates a brand-new {@link GLItem} for {@code subaccount} (see {@link #composeGlItemName}), in its client/org. */
   protected GLItem createGlItem(ElementValue subaccount) {
     GLItem glItem = OBProvider.getInstance().get(GLItem.class);
     glItem.setNewOBObject(true);
     glItem.setClient(subaccount.getClient());
     glItem.setOrganization(subaccount.getOrganization());
-    glItem.setName(subaccount.getName());
+    glItem.setName(composeGlItemName(subaccount));
     glItem.setActive(true);
     OBDal.getInstance().save(glItem);
     return glItem;
   }
 
   /**
-   * Keeps {@code glItem}'s name in sync with {@code subaccount}'s current name, so a subaccount
-   * rename (PUT {@code /elementValue}) can never leave "Cuenta contable" and its underlying GL Item
-   * silently diverged. No-op when the names already match or the subaccount has no name.
+   * Keeps {@code glItem}'s name in sync with {@code subaccount}'s current name/code, so a
+   * subaccount rename (PUT {@code /elementValue}) can never leave "Cuenta contable" and its
+   * underlying GL Item silently diverged. No-op when the composed name already matches.
+   *
+   * <p><b>Must always compare against {@link #composeGlItemName}'s output, never the bare
+   * {@code subaccount.getName()}</b> — comparing against the bare name here while
+   * {@link #createGlItem} sets the composed one would make every {@code afterHandle} call think
+   * the name drifted and rewrite it back down to the bare name on every single save, silently
+   * undoing ETP-5101 on the very next edit.
    */
   protected void syncGlItemName(GLItem glItem, ElementValue subaccount) {
     if (glItem == null) {
       return;
     }
-    String subaccountName = subaccount.getName();
-    if (subaccountName != null && !subaccountName.equals(glItem.getName())) {
-      glItem.setName(subaccountName);
+    String composedName = composeGlItemName(subaccount);
+    if (composedName != null && !composedName.equals(glItem.getName())) {
+      glItem.setName(composedName);
       OBDal.getInstance().save(glItem);
     }
   }

@@ -86,7 +86,7 @@ public class OnboardingBaselineService {
    * Use the exact UTC timestamp prefix of the last incorporated .sql file, e.g.:
    * {@code "20260617T120000Z"} matches {@code 20260617T120000Z__R7-tax-accounts.sql}.</p>
    *
-   * Current watermark: R29 acctschema-allownegative-revert (2026-08-28).
+   * Current watermark: R31 glitem-subaccount-backfill (2026-09-01).
    *
    * <p><b>Note (2026-08-26, ETP-4999):</b> gap M1 — the self-registration provisioning chain
    * ({@code InitialClientSetup} then, separately and later, {@code
@@ -192,8 +192,38 @@ public class OnboardingBaselineService {
    * scope and remain {@code Y} / present, untouched. Corrective twin:
    * {@code 20260828T140000Z__R29-acctschema-allownegative-revert.sql}. Bumped to R29's own
    * timestamp, {@code 2026-08-28T14:00:00Z}.</p>
+   *
+   * <p><b>2026-09-01 (ETP-5101 S2.2, gap N1):</b> the preventive front for N1 shipped EARLIER, in
+   * a separate ticket (ETP-5020, merged 2026-08-30) — {@code
+   * GlItemProvisioningSupport#ensureGlItemForSubaccount}, called from both {@code
+   * ChartOfAccountsHandler#afterHandle} (live subaccount POST/PATCH) and {@code
+   * OnboardingAccountingWiringService#provisionGlItemsForImportedChart} (bulk chart-of-accounts
+   * import) — but, like the ETP-4720/A2c precedent above, deliberately did NOT bump this constant
+   * at the time because its corrective {@code .sql} twin did not exist yet. This ticket adds that
+   * twin ({@code R31-glitem-subaccount-backfill}, backfilling {@code C_Glitem}/{@code
+   * C_Glitem_Acct} for leaf subaccounts created before ETP-5020 shipped), so the bump now closes
+   * the loop the same way ETP-4743 did: new tenants are already provisioned correctly by the live
+   * ETP-5020 code, and the runner correctly skips R31 for them via this watermark. This bump is a
+   * pure optimization, not a correctness dependency — R31's own {@code @check} already converges
+   * to 0 rows for any subaccount ETP-5020 already covered, watermark or not. NOT a preventive-front
+   * fix in THIS ticket — {@code GlItemProvisioningSupport}/{@code ChartOfAccountsHandler} are
+   * unchanged here. Bumped to R31's own timestamp, {@code 2026-09-01T14:00:00Z}.
+   * <b>Gap N2, discovered during R31's live validation, FIXED same session on BOTH fronts:</b>
+   * {@code C_Glitem.Name} is {@code varchar(60)} while {@code C_ElementValue.Name} is {@code
+   * varchar(255)} — {@code composeGlItemName}'s {@code "<name> <searchKey>"} format originally had
+   * no length guard, so a subaccount whose composed name exceeded 60 chars silently failed GL Item
+   * provisioning on BOTH fronts (confirmed live: 294 of GOClient's 658 leaf subaccounts, mostly
+   * long Spanish PGC names) — {@code ensureGlItemForSchema}'s own best-effort try/catch swallowed
+   * the failure per-schema, silent even on a live subaccount save. Fixed via {@code
+   * composeGlItemName}/the new {@code truncateToFit} helper + {@code GL_ITEM_NAME_MAX_LENGTH=60}:
+   * the NAME portion is hard-truncated, the 8-digit CODE always survives intact (it disambiguates
+   * two subaccounts sharing a name — the entire point of appending it). R31's corrective twin
+   * mirrors this EXACT formula in SQL — not merely "no longer diverges going forward", the two
+   * fronts now converge on byte-identical GL Item names (verified 0 mismatches across all 294
+   * previously-blocked GOClient rows) — so no subaccount is skipped anymore; {@code @report} now
+   * lists which names actually got shortened, for operator visibility.</p>
    */
-  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-28T14:00:00Z");
+  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-09-01T14:00:00Z");
 
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("

@@ -157,6 +157,78 @@ public class ChartOfAccountsHandlerTest {
     assertNull(handler.handle(ctx));
   }
 
+  // ── validateSave() — duplicate searchKey on create (ETP-5101) ──────────────
+  //
+  // findDuplicateSearchKey scopes an OBCriteria(ElementValue) lookup by client + searchKey;
+  // these two tests drive it through handle() rather than calling the private method
+  // directly, mirroring the rest of this file's black-box style for validateSave-adjacent
+  // behaviour (see the class javadoc note re: validateSave being otherwise excluded as
+  // "integration-test territory" — these two cases only need OBDal/OBContext mocks, not a
+  // real Hibernate session, since OBCriteria itself is mocked).
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void handleReturnsConflictWhenSearchKeyAlreadyExistsOnCreate() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    JSONObject body = new JSONObject().put("searchKey", "20000005");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    OBContext obCtx = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(obCtx.getCurrentClient()).thenReturn(client);
+    when(ctx.getObContext()).thenReturn(obCtx);
+
+    ElementValue existing = mock(ElementValue.class);
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<ElementValue> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(ElementValue.class)).thenReturn(criteria);
+    when(criteria.uniqueResult()).thenReturn(existing);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse resp = handler.handle(ctx);
+
+      assertNotNull("a duplicate searchKey must be rejected", resp);
+      assertEquals(409, resp.getHttpStatus());
+      assertEquals("Account 20000005 already exists.",
+          resp.getBody().getJSONObject("error").getString("message"));
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void handleReturnsNullWhenSearchKeyIsNotDuplicateOnCreate() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    JSONObject body = new JSONObject().put("searchKey", "20000006");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    OBContext obCtx = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(obCtx.getCurrentClient()).thenReturn(client);
+    when(ctx.getObContext()).thenReturn(obCtx);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<ElementValue> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(ElementValue.class)).thenReturn(criteria);
+    when(criteria.uniqueResult()).thenReturn(null); // no existing account with this code
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      // Falls through to the default CRUD handler — format/protected-code validations
+      // (covered by the other handleReturnsError*OnCreate tests above) still apply first;
+      // this test only proves the duplicate check itself does not block a genuinely new code.
+      assertNull(handler.handle(ctx));
+    }
+  }
+
   // ── afterHandle() routing ─────────────────────────────────────────────────
 
   @Test

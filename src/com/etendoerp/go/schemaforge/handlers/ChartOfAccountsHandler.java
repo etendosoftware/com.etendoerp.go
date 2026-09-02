@@ -32,9 +32,11 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
@@ -146,6 +148,16 @@ public class ChartOfAccountsHandler implements NeoHandler {
 
   static final String ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT =
       "Las subcuentas padre terminadas en 0000 no pueden crearse ni modificarse";
+
+  /**
+   * ETP-5101. Deliberately English, unlike its siblings above (which are hardcoded
+   * Spanish and, as far as this handler is concerned, never routed through the
+   * frontend's {@code backendErrors.js} translation map). This one IS registered there
+   * (see {@code BACKEND_ERROR_MAP['backendError.accountAlreadyExists']}) so it renders
+   * correctly in both locales — the pattern the siblings should have used too, tracked
+   * separately, not fixed here. {@code %s} is the submitted 8-digit code.
+   */
+  static final String ERR_DUPLICATE_CODE = "Account %s already exists.";
 
   /**
    * SQL that returns the {@code AD_Tree_ID} for a given {@code C_ElementValue_ID}.
@@ -1095,6 +1107,9 @@ public class ChartOfAccountsHandler implements NeoHandler {
    *       {@value #ACCOUNT_CODE_LENGTH} decimal digits.</li>
    *   <li>Protected parent-like subaccount codes ending in {@code 0000} are rejected
    *       on create and on update, even when the request omits {@code searchKey}.</li>
+   *   <li>On create: a {@code searchKey} already used by another account in the same
+   *       client is rejected (ETP-5101) — without this the request falls through to the
+   *       DB unique constraint and the user sees a raw/generic error.</li>
    *   <li>For updates (PUT/PATCH): if the account has children in {@code AD_TreeNode}
  *       and the code is being changed, the update is rejected.</li>
    *   <li>For updates to leaf accounts (no children): if the first
@@ -1127,9 +1142,21 @@ public class ChartOfAccountsHandler implements NeoHandler {
       return NeoResponse.error(400, ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT);
     }
 
-    // New records: format/protected-code checks apply (no existing code to compare against)
+    // New records: format/protected-code checks apply, plus a duplicate-code check
     if (isNewRecord) {
-      return null;
+      OBContext.setAdminMode(true);
+      try {
+        if (findDuplicateSearchKey(submittedCode, context.getObContext()) != null) {
+          return NeoResponse.error(409, String.format(ERR_DUPLICATE_CODE, submittedCode));
+        }
+        return null;
+      } catch (Exception e) {
+        log.error("ChartOfAccountsHandler.validateSave duplicate-code check failed for "
+            + "searchKey={}: {}", submittedCode, e.getMessage(), e);
+        return null; // let the default handler proceed
+      } finally {
+        OBContext.restorePreviousMode();
+      }
     }
 
     // Update: apply immutability rules
@@ -1187,6 +1214,29 @@ public class ChartOfAccountsHandler implements NeoHandler {
     }
 
     return null;
+  }
+
+  /**
+   * Looks up an existing {@code ElementValue} with the same {@code searchKey} in the
+   * request's client, if any (ETP-5101 duplicate-code check on create). Never creates
+   * anything — read-only lookup, caller decides what to do with the result.
+   *
+   * @param searchKey the submitted 8-digit code
+   * @param obCtx     the request's {@link OBContext}; a {@code null} client means the
+   *                  lookup can't be scoped, so no duplicate is reported
+   * @return the existing account with that code, or {@code null} if none / no client
+   */
+  private ElementValue findDuplicateSearchKey(String searchKey, OBContext obCtx) {
+    if (obCtx == null || obCtx.getCurrentClient() == null) {
+      return null;
+    }
+    OBCriteria<ElementValue> criteria = OBDal.getInstance().createCriteria(ElementValue.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    criteria.add(Restrictions.eq(ElementValue.PROPERTY_CLIENT, obCtx.getCurrentClient()));
+    criteria.add(Restrictions.eq(ElementValue.PROPERTY_SEARCHKEY, searchKey));
+    criteria.setMaxResults(1);
+    return (ElementValue) criteria.uniqueResult();
   }
 
   private NeoResponse validateExistingProtectedAccount(String recordId) {
