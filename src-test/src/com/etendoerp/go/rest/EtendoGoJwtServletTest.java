@@ -17,6 +17,7 @@
 package com.etendoerp.go.rest;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
@@ -41,8 +42,10 @@ import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
@@ -64,6 +67,7 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.AccountIdentity;
 
 /**
  * Unit tests for {@link EtendoGoJwtServlet}.
@@ -1385,6 +1389,218 @@ public class EtendoGoJwtServletTest {
     JSONObject respBody = new JSONObject(resp.body());
     assertEquals("acct-1", respBody.getString("id"));
     assertEquals("user@test.com", respBody.getString("email"));
+  }
+
+  // ===================== GET /me — authMethods (ETP-5115) =====================
+  //
+  // buildAuthMethods is private, so it is exercised through the endpoint that publishes it. The
+  // point of these tests is the contract the settings screen reads: what "removable" means, and
+  // what is deliberately absent from the payload.
+
+  private static final Date PASSWORD_CHANGED_AT = Date.from(Instant.parse("2026-08-01T10:15:30Z"));
+  private static final Date IDENTITY_LINKED_AT = Date.from(Instant.parse("2026-07-04T08:00:00Z"));
+  private static final Date IDENTITY_LAST_LOGIN_AT = Date.from(Instant.parse("2026-08-20T19:45:00Z"));
+
+  @Test
+  public void meAuthMethodsPasswordOnlyReportsNothingRemovable() throws Exception {
+    ResponseCapture resp = callMeWithAuthMethods(true, PASSWORD_CHANGED_AT, Collections.emptyList());
+
+    assertEquals(200, resp.status);
+    JSONObject authMethods = new JSONObject(resp.body()).getJSONObject("authMethods");
+    JSONObject password = authMethods.getJSONObject("password");
+    assertTrue(password.getBoolean("enabled"));
+    assertEquals("2026-08-01T10:15:30Z", password.getString("lastChanged"));
+    assertEquals(0, authMethods.getJSONArray("identities").length());
+    // The sole method is reported as present but not removable: the screen still draws it, just
+    // without an enabled control.
+    assertEquals(Collections.emptyList(), stringList(authMethods.getJSONArray("removable")));
+  }
+
+  @Test
+  public void meAuthMethodsIdentityOnlyOmitsLastChangedAndReportsNothingRemovable()
+      throws Exception {
+    AccountIdentity google = mockIdentity("google", "user@gmail.test", IDENTITY_LINKED_AT,
+        IDENTITY_LAST_LOGIN_AT);
+
+    ResponseCapture resp = callMeWithAuthMethods(false, null, Collections.singletonList(google));
+
+    assertEquals(200, resp.status);
+    JSONObject authMethods = new JSONObject(resp.body()).getJSONObject("authMethods");
+    JSONObject password = authMethods.getJSONObject("password");
+    assertFalse(password.getBoolean("enabled"));
+    // Not null, absent: an SSO-born account has never had a password to date.
+    assertFalse(password.has("lastChanged"));
+
+    JSONArray identities = authMethods.getJSONArray("identities");
+    assertEquals(1, identities.length());
+    JSONObject entry = identities.getJSONObject(0);
+    assertEquals("google", entry.getString("provider"));
+    assertEquals("user@gmail.test", entry.getString("email"));
+    assertEquals("2026-07-04T08:00:00Z", entry.getString("linked"));
+    assertEquals("2026-08-20T19:45:00Z", entry.getString("lastLogin"));
+
+    assertEquals(Collections.emptyList(), stringList(authMethods.getJSONArray("removable")));
+  }
+
+  @Test
+  public void meAuthMethodsPasswordAndIdentityMakeBothRemovable() throws Exception {
+    AccountIdentity google = mockIdentity("google", "user@gmail.test", IDENTITY_LINKED_AT,
+        IDENTITY_LAST_LOGIN_AT);
+
+    ResponseCapture resp = callMeWithAuthMethods(true, PASSWORD_CHANGED_AT,
+        Collections.singletonList(google));
+
+    assertEquals(200, resp.status);
+    JSONObject authMethods = new JSONObject(resp.body()).getJSONObject("authMethods");
+    assertEquals(Arrays.asList("password", "google"),
+        stringList(authMethods.getJSONArray("removable")));
+  }
+
+  @Test
+  public void meAuthMethodsTwoIdentitiesWithoutPasswordMakeBothRemovable() throws Exception {
+    AccountIdentity google = mockIdentity("google", "user@gmail.test", IDENTITY_LINKED_AT, null);
+    AccountIdentity microsoft = mockIdentity("microsoft", "user@outlook.test", IDENTITY_LINKED_AT,
+        null);
+
+    ResponseCapture resp = callMeWithAuthMethods(false, null, Arrays.asList(google, microsoft));
+
+    assertEquals(200, resp.status);
+    JSONObject authMethods = new JSONObject(resp.body()).getJSONObject("authMethods");
+    assertFalse(authMethods.getJSONObject("password").getBoolean("enabled"));
+    // The rule keys on the total number of methods, not on whether a password is one of them.
+    assertEquals(Arrays.asList("google", "microsoft"),
+        stringList(authMethods.getJSONArray("removable")));
+  }
+
+  @Test
+  public void meAuthMethodsNeverExposeTheProviderSubject() throws Exception {
+    AccountIdentity google = mockIdentity("google", "user@gmail.test", IDENTITY_LINKED_AT,
+        IDENTITY_LAST_LOGIN_AT);
+    when(google.getExternalSubject()).thenReturn("subject-claim-must-not-leak");
+
+    ResponseCapture resp = callMeWithAuthMethods(true, PASSWORD_CHANGED_AT,
+        Collections.singletonList(google));
+
+    // Asserted on the serialised body rather than on the parsed object, so the check holds at any
+    // nesting depth. The omission is deliberate: the subject identifies the user at the provider
+    // and nothing on this screen needs it.
+    String body = resp.body();
+    assertFalse(body.contains("subject-claim-must-not-leak"));
+    assertFalse(body.contains("external_subject"));
+    assertFalse(body.contains("externalSubject"));
+  }
+
+  @Test
+  public void meAuthMethodsOmitLastChangedWhenTheAccountHasNoPassword() throws Exception {
+    // A non-null timestamp on an account that has no password hash: the guard is on hasPassword,
+    // not on the timestamp, so the key must still be absent.
+    ResponseCapture resp = callMeWithAuthMethods(false, PASSWORD_CHANGED_AT,
+        Collections.emptyList());
+
+    assertEquals(200, resp.status);
+    JSONObject password = new JSONObject(resp.body()).getJSONObject("authMethods")
+        .getJSONObject("password");
+    assertFalse(password.getBoolean("enabled"));
+    assertFalse(password.has("lastChanged"));
+  }
+
+  @Test
+  public void meAuthMethodsOmitLinkedAndLastLoginWhenNull() throws Exception {
+    // A migrated identity carries no link timestamp by design, so this is the normal case rather
+    // than an edge one. The keys must be absent, not serialised as null.
+    AccountIdentity migrated = mockIdentity("google", "user@gmail.test", null, null);
+
+    ResponseCapture resp = callMeWithAuthMethods(false, null,
+        Collections.singletonList(migrated));
+
+    assertEquals(200, resp.status);
+    JSONArray identities = new JSONObject(resp.body()).getJSONObject("authMethods")
+        .getJSONArray("identities");
+    JSONObject entry = identities.getJSONObject(0);
+    assertEquals("google", entry.getString("provider"));
+    assertFalse(entry.has("linked"));
+    assertFalse(entry.has("lastLogin"));
+    assertFalse(identities.toString().contains("null"));
+  }
+
+  @Test
+  public void meWithoutTokenReturnsUnauthorizedWithoutReadingIdentities() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/me");
+
+    try (MockedStatic<AccountIdentityDalHelper> identityMock =
+             mockStatic(AccountIdentityDalHelper.class)) {
+      servlet.doGet(req, resp.response);
+      identityMock.verifyNoInteractions();
+    }
+
+    assertEquals(401, resp.status);
+  }
+
+  @Test
+  public void meWithExpiredTokenReturnsUnauthorizedWithoutReadingIdentities() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/me", "expired-token");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<AccountIdentityDalHelper> identityMock =
+             mockStatic(AccountIdentityDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("expired-token"))
+          .thenReturn(null);
+
+      servlet.doGet(req, resp.response);
+      identityMock.verifyNoInteractions();
+    }
+
+    assertEquals(401, resp.status);
+    assertFalse(resp.body().contains("authMethods"));
+  }
+
+  /** Drives GET /me with the account's password state and identity rows stubbed. */
+  private ResponseCapture callMeWithAuthMethods(boolean hasPassword, Date passwordChangedAt,
+      List<AccountIdentity> identities) throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/me", "valid-token");
+
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("acct-1");
+    when(account.getEmail()).thenReturn("user@test.com");
+    when(account.getName()).thenReturn("Test User");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class);
+         MockedStatic<AccountIdentityDalHelper> identityMock =
+             mockStatic(AccountIdentityDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(hasPassword);
+      dalMock.when(() -> EtendoGoJwtDalHelper.getPasswordChangedAt(account))
+          .thenReturn(passwordChangedAt);
+      identityMock.when(() -> AccountIdentityDalHelper.identitiesFor(account))
+          .thenReturn(identities);
+
+      servlet.doGet(req, resp.response);
+    }
+    return resp;
+  }
+
+  private static AccountIdentity mockIdentity(String provider, String email, Date linked,
+      Date lastLogin) {
+    AccountIdentity identity = mock(AccountIdentity.class);
+    when(identity.getAuthProvider()).thenReturn(provider);
+    when(identity.getExternalEmail()).thenReturn(email);
+    when(identity.getLinked()).thenReturn(linked);
+    when(identity.getLastSSOLogin()).thenReturn(lastLogin);
+    return identity;
+  }
+
+  private static List<String> stringList(JSONArray array) throws Exception {
+    List<String> values = new ArrayList<>();
+    for (int i = 0; i < array.length(); i++) {
+      values.add(array.getString(i));
+    }
+    return values;
   }
 
   // ===================== GET /environments =====================
