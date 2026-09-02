@@ -261,56 +261,56 @@ public class ChartOfAccountsHandlerTest {
   @Test
   public void errInvalidCodeMessageIsInSpanish() {
     assertTrue("Error must be a user-facing Spanish message",
-        ChartOfAccountsHandler.ERR_INVALID_CODE.contains("8 dígitos"));
+        ChartOfAccountsSaveValidationSupport.ERR_INVALID_CODE.contains("8 dígitos"));
   }
 
   @Test
   public void errSummaryLockedMessageIsInSpanish() {
-    assertTrue(ChartOfAccountsHandler.ERR_SUMMARY_LOCKED.length() > 5);
+    assertTrue(ChartOfAccountsSaveValidationSupport.ERR_SUMMARY_LOCKED.length() > 5);
   }
 
   @Test
   public void errPrefixLockedMessageIsInSpanish() {
-    assertTrue(ChartOfAccountsHandler.ERR_PREFIX_LOCKED.length() > 5);
+    assertTrue(ChartOfAccountsSaveValidationSupport.ERR_PREFIX_LOCKED.length() > 5);
   }
 
   @Test
   public void errProtectedParentLikeSubaccountMessageIsInSpanish() {
     assertTrue("Error must mention protected parent-like subaccounts",
-        ChartOfAccountsHandler.ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT.contains("subcuentas padre"));
-    assertTrue(ChartOfAccountsHandler.ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT.contains("0000"));
+        ChartOfAccountsSaveValidationSupport.ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT.contains("subcuentas padre"));
+    assertTrue(ChartOfAccountsSaveValidationSupport.ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT.contains("0000"));
   }
 
   // ── account code validation ────────────────────────────────────────────────
 
   @Test
   public void isValidAccountCodeAcceptsExactlyEightDigits() {
-    assertTrue(ChartOfAccountsHandler.isValidAccountCode("12345678"));
-    assertTrue(ChartOfAccountsHandler.isValidAccountCode("00000000"));
+    assertTrue(ChartOfAccountsSaveValidationSupport.isValidAccountCode("12345678"));
+    assertTrue(ChartOfAccountsSaveValidationSupport.isValidAccountCode("00000000"));
   }
 
   @Test
   public void isValidAccountCodeRejectsNullNonDigitsAndWrongLength() {
-    assertFalse(ChartOfAccountsHandler.isValidAccountCode(null));
-    assertFalse(ChartOfAccountsHandler.isValidAccountCode("1234567"));
-    assertFalse(ChartOfAccountsHandler.isValidAccountCode("123456789"));
-    assertFalse(ChartOfAccountsHandler.isValidAccountCode("1234A678"));
-    assertFalse(ChartOfAccountsHandler.isValidAccountCode(" 12345678"));
+    assertFalse(ChartOfAccountsSaveValidationSupport.isValidAccountCode(null));
+    assertFalse(ChartOfAccountsSaveValidationSupport.isValidAccountCode("1234567"));
+    assertFalse(ChartOfAccountsSaveValidationSupport.isValidAccountCode("123456789"));
+    assertFalse(ChartOfAccountsSaveValidationSupport.isValidAccountCode("1234A678"));
+    assertFalse(ChartOfAccountsSaveValidationSupport.isValidAccountCode(" 12345678"));
   }
 
   @Test
   public void isProtectedParentLikeSubaccountAcceptsEightDigitCodesEndingInFourZeros() {
-    assertTrue(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("10000000"));
-    assertTrue(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("10100000"));
-    assertTrue(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("99990000"));
+    assertTrue(ChartOfAccountsSaveValidationSupport.isProtectedParentLikeSubaccount("10000000"));
+    assertTrue(ChartOfAccountsSaveValidationSupport.isProtectedParentLikeSubaccount("10100000"));
+    assertTrue(ChartOfAccountsSaveValidationSupport.isProtectedParentLikeSubaccount("99990000"));
   }
 
   @Test
   public void isProtectedParentLikeSubaccountRejectsLeafCodesAndInvalidCodes() {
-    assertFalse(ChartOfAccountsHandler.isProtectedParentLikeSubaccount(null));
-    assertFalse(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("10000001"));
-    assertFalse(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("1000"));
-    assertFalse(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("1000000A"));
+    assertFalse(ChartOfAccountsSaveValidationSupport.isProtectedParentLikeSubaccount(null));
+    assertFalse(ChartOfAccountsSaveValidationSupport.isProtectedParentLikeSubaccount("10000001"));
+    assertFalse(ChartOfAccountsSaveValidationSupport.isProtectedParentLikeSubaccount("1000"));
+    assertFalse(ChartOfAccountsSaveValidationSupport.isProtectedParentLikeSubaccount("1000000A"));
   }
 
   @Test

@@ -32,11 +32,9 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
@@ -77,16 +75,11 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *   <li><b>D — codePrefix default</b> (handle, DEFAULTS): when {@code parentAccountId}
  *       is present as a query parameter, returns the first 4 characters of the parent's
  *       {@code Value} (account code) as {@code codePrefix} in the defaults payload.</li>
- *   <li><b>E — PGC save validation</b> (handle, CRUD POST/PUT/PATCH):
- *       <ol>
- *         <li>Rejects codes that do not match {@code ^\d{8}$}.</li>
- *         <li>Rejects protected parent-like subaccount codes such as {@code 10000000}
- *             or {@code 10100000}.</li>
- *         <li>Rejects code changes on summary (non-leaf) accounts — accounts that have
- *             children in {@code AD_TreeNode}.</li>
- *         <li>Rejects prefix changes on leaf accounts (first 4 digits are immutable).</li>
- *       </ol>
- *   </li>
+ *   <li><b>E — PGC save validation</b> (handle, CRUD POST/PUT/PATCH): code format, protected
+ *       parent-like codes, cross-client duplicates on create, and code-immutability rules on
+ *       update. Delegated to {@link ChartOfAccountsSaveValidationSupport#validateSave} — split
+ *       out purely to keep this class's own method count under the Sonar {@code java:S1448}
+ *       limit; see that class's javadoc for the full rule list.</li>
  *   <li><b>F — GL Item auto-provisioning</b> (afterHandle, CRUD POST — ETP-5020): after a
  *       successful subaccount create, ensures an invisible {@code GLItem}/{@code GLItemAccounts}
  *       pair exists behind it for every active {@code AcctSchema}, via
@@ -109,6 +102,9 @@ public class ChartOfAccountsHandler implements NeoHandler {
   /** ETP-5020 — GL Item auto-provisioning behind subaccounts. See class javadoc F/G. */
   private final GlItemProvisioningSupport glItemProvisioning = new GlItemProvisioningSupport();
 
+  /** ETP-5101 — save validation. See class javadoc E and {@link ChartOfAccountsSaveValidationSupport}. */
+  private final ChartOfAccountsSaveValidationSupport saveValidation = new ChartOfAccountsSaveValidationSupport();
+
   /** API field name for the account code (mapped from DB column {@code Value}). */
   static final String FIELD_SEARCH_KEY = "searchKey";
 
@@ -122,11 +118,13 @@ public class ChartOfAccountsHandler implements NeoHandler {
   /** API/body field name for the record's active flag. */
   private static final String FIELD_ACTIVE = "active";
 
-  /** Number of leading digits that form the PGC prefix (immutable for leaf accounts). */
-  private static final int PGC_PREFIX_LENGTH = 4;
-
-  /** Required exact length of the account code. */
-  private static final int ACCOUNT_CODE_LENGTH = 8;
+  /**
+   * Number of leading digits that form the PGC prefix (immutable for leaf accounts).
+   *
+   * <p>Package-private: also used by {@link ChartOfAccountsSaveValidationSupport}, which was
+   * split out of this class to keep its method count under the Sonar {@code java:S1448} limit.
+   */
+  static final int PGC_PREFIX_LENGTH = 4;
 
   /**
    * Maximum number of hops traversed upward in the tree before bailing out,
@@ -136,43 +134,6 @@ public class ChartOfAccountsHandler implements NeoHandler {
    * this class to keep its method count under the Sonar {@code java:S1448} limit.
    */
   static final int MAX_TREE_DEPTH = 30;
-
-  static final String ERR_INVALID_CODE =
-      "El código de cuenta debe tener exactamente 8 dígitos";
-
-  static final String ERR_SUMMARY_LOCKED =
-      "Las cuentas resumen no pueden modificarse";
-
-  static final String ERR_PREFIX_LOCKED =
-      "El prefijo PGC (primeros 4 dígitos) no puede modificarse";
-
-  static final String ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT =
-      "Las subcuentas padre terminadas en 0000 no pueden crearse ni modificarse";
-
-  /**
-   * ETP-5101. Deliberately English, unlike its siblings above (which are hardcoded
-   * Spanish and, as far as this handler is concerned, never routed through the
-   * frontend's {@code backendErrors.js} translation map). This one IS registered there
-   * (see {@code BACKEND_ERROR_MAP['backendError.accountAlreadyExists']}) so it renders
-   * correctly in both locales — the pattern the siblings should have used too, tracked
-   * separately, not fixed here. {@code %s} is the submitted 8-digit code.
-   */
-  static final String ERR_DUPLICATE_CODE = "Account %s already exists.";
-
-  /**
-   * SQL that returns the {@code AD_Tree_ID} for a given {@code C_ElementValue_ID}.
-   * Used to scope the children-count query to the correct chart of accounts tree.
-   */
-  private static final String SQL_TREE_ID =
-      "SELECT AD_Tree_ID FROM AD_TreeNode WHERE Node_ID = :nodeId LIMIT 1";
-
-  /**
-   * SQL that counts immediate children of a node in a specific tree.
-   * If count > 0 the account is a parent/summary account.
-   */
-  private static final String SQL_CHILDREN_COUNT =
-      "SELECT COUNT(*) FROM AD_TreeNode "
-      + "WHERE Parent_ID = :parentId AND AD_Tree_ID = :treeId";
 
   /**
    * SQL that finds the {@code AD_Tree_ID} for the {@code EV} (Element Value) tree
@@ -282,7 +243,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
           : fetchElementValueByIdDirectly(context);
     }
     if ("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)) {
-      return validateSave(context);
+      return saveValidation.validateSave(context);
     }
     return null;
   }
@@ -518,7 +479,8 @@ public class ChartOfAccountsHandler implements NeoHandler {
     entry.put("accountType", row[4] != null ? row[4] : JSONObject.NULL);
     entry.put("summaryLevel", "Y".equals(String.valueOf(row[5])));
     entry.put(FIELD_ACTIVE, "Y".equals(String.valueOf(row[6])));
-    entry.put("protectedParentLikeSubaccount", isProtectedParentLikeSubaccount(String.valueOf(row[1])) ? "Y" : "N");
+    entry.put("protectedParentLikeSubaccount",
+        ChartOfAccountsSaveValidationSupport.isProtectedParentLikeSubaccount(String.valueOf(row[1])) ? "Y" : "N");
     return entry;
   }
 
@@ -1094,199 +1056,5 @@ public class ChartOfAccountsHandler implements NeoHandler {
           e.getMessage());
     }
     return null;
-  }
-
-  // ── E. Save validation ─────────────────────────────────────────────────────
-
-  /**
-   * Validates the account code in a create or update request.
-   *
-   * <p>Validation rules:
-   * <ol>
-   *   <li>If {@code searchKey} is present in the request body it must match exactly
-   *       {@value #ACCOUNT_CODE_LENGTH} decimal digits.</li>
-   *   <li>Protected parent-like subaccount codes ending in {@code 0000} are rejected
-   *       on create and on update, even when the request omits {@code searchKey}.</li>
-   *   <li>On create: a {@code searchKey} already used by another account in the same
-   *       client is rejected (ETP-5101) — without this the request falls through to the
-   *       DB unique constraint and the user sees a raw/generic error.</li>
-   *   <li>For updates (PUT/PATCH): if the account has children in {@code AD_TreeNode}
- *       and the code is being changed, the update is rejected.</li>
-   *   <li>For updates to leaf accounts (no children): if the first
-   *       {@value #PGC_PREFIX_LENGTH} digits of the code would change, the update is
-   *       rejected.</li>
-   * </ol>
-   *
-   * <p>Returns {@code null} (fall through to default CRUD) when all validations pass
-   * or when {@code searchKey} is absent from the body.
-   */
-  private NeoResponse validateSave(NeoContext context) {
-    JSONObject body = context.getRequestBody();
-    if (body == null) {
-      return null;
-    }
-
-    boolean isNewRecord = "POST".equals(context.getHttpMethod())
-        || context.getRecordId() == null;
-    String submittedCode = body.optString(FIELD_SEARCH_KEY, null);
-    if (submittedCode == null) {
-      return isNewRecord ? null : validateExistingProtectedAccount(context.getRecordId());
-    }
-
-    // Validation 1: exactly 8 decimal digits
-    if (!isValidAccountCode(submittedCode)) {
-      return NeoResponse.error(400, ERR_INVALID_CODE);
-    }
-
-    if (isProtectedParentLikeSubaccount(submittedCode)) {
-      return NeoResponse.error(400, ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT);
-    }
-
-    // New records: format/protected-code checks apply, plus a duplicate-code check.
-    // Inlined rather than a separate method (ETP-5101 code review, java:S1448) — it has
-    // exactly this one call site and no test calls it directly (this file's tests drive
-    // validateSave black-box through handle(), per the class javadoc note).
-    if (isNewRecord) {
-      OBContext.setAdminMode(true);
-      try {
-        OBContext obCtx = context.getObContext();
-        if (obCtx != null && obCtx.getCurrentClient() != null) {
-          OBCriteria<ElementValue> criteria = OBDal.getInstance().createCriteria(ElementValue.class);
-          criteria.setFilterOnReadableClients(false);
-          criteria.setFilterOnReadableOrganization(false);
-          criteria.add(Restrictions.eq(ElementValue.PROPERTY_CLIENT, obCtx.getCurrentClient()));
-          criteria.add(Restrictions.eq(ElementValue.PROPERTY_SEARCHKEY, submittedCode));
-          criteria.setMaxResults(1);
-          if (criteria.uniqueResult() != null) {
-            return NeoResponse.error(409, String.format(ERR_DUPLICATE_CODE, submittedCode));
-          }
-        }
-        return null;
-      } catch (Exception e) {
-        log.error("ChartOfAccountsHandler.validateSave duplicate-code check failed for "
-            + "searchKey={}: {}", submittedCode, e.getMessage(), e);
-        return null; // let the default handler proceed
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    }
-
-    // Update: apply immutability rules
-    OBContext.setAdminMode(true);
-    try {
-      return applyImmutabilityRules(context.getRecordId(), submittedCode);
-    } catch (Exception e) {
-      log.error("ChartOfAccountsHandler.validateSave error for recordId={}: {}",
-          context.getRecordId(), e.getMessage(), e);
-      return null; // let the default handler proceed
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  /**
-   * Applies the two immutability rules for an existing account:
-   * summary-account code lock and leaf-account PGC prefix lock.
-   *
-   * @param recordId      the {@code C_ElementValue_ID} being updated
-   * @param submittedCode the new {@code Value} submitted by the client
-   * @return an error {@link NeoResponse} if a rule is violated, {@code null} otherwise
-   */
-  private NeoResponse applyImmutabilityRules(String recordId, String submittedCode) {
-    ElementValue existing = OBDal.getInstance().get(ElementValue.class, recordId);
-    if (existing == null) {
-      return null; // record not found — let the default handler return 404
-    }
-
-    String currentCode = existing.getSearchKey();
-    if (currentCode == null) {
-      return null; // no current code to compare
-    }
-
-    if (isProtectedParentLikeSubaccount(currentCode)) {
-      return NeoResponse.error(400, ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT);
-    }
-
-    boolean codeChanged = !submittedCode.equals(currentCode);
-    int childrenCount = countChildren(recordId);
-    boolean hasChildren = childrenCount > 0;
-
-    // Rule 2: summary account (has children) — code must not change
-    if (hasChildren && codeChanged) {
-      return NeoResponse.error(400, ERR_SUMMARY_LOCKED);
-    }
-
-    // Rule 3: leaf account (no children) — PGC prefix (first 4 digits) is immutable
-    if (!hasChildren && codeChanged
-        && currentCode.length() >= PGC_PREFIX_LENGTH
-        && submittedCode.length() >= PGC_PREFIX_LENGTH
-        && !submittedCode.substring(0, PGC_PREFIX_LENGTH)
-            .equals(currentCode.substring(0, PGC_PREFIX_LENGTH))) {
-      return NeoResponse.error(400, ERR_PREFIX_LOCKED);
-    }
-
-    return null;
-  }
-
-  private NeoResponse validateExistingProtectedAccount(String recordId) {
-    OBContext.setAdminMode(true);
-    try {
-      ElementValue existing = OBDal.getInstance().get(ElementValue.class, recordId);
-      if (existing != null && isProtectedParentLikeSubaccount(existing.getSearchKey())) {
-        return NeoResponse.error(400, ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT);
-      }
-      return null;
-    } catch (Exception e) {
-      log.error("ChartOfAccountsHandler.validateExistingProtectedAccount error for recordId={}: {}",
-          recordId, e.getMessage(), e);
-      return null;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  static boolean isValidAccountCode(String code) {
-    return code != null && code.matches("\\d{" + ACCOUNT_CODE_LENGTH + "}");
-  }
-
-  static boolean isProtectedParentLikeSubaccount(String code) {
-    return isValidAccountCode(code) && code.endsWith("0000");
-  }
-
-  /**
-   * Counts the number of immediate children of {@code parentId} in {@code AD_TreeNode}.
-   * Scopes the query to the tree that contains the node (first match).
-   *
-   * @param parentId a {@code C_ElementValue_ID}
-   * @return the number of child nodes; 0 if the node is not in any tree
-   */
-  @SuppressWarnings("unchecked")
-  int countChildren(String parentId) {
-    NativeQuery<Object> treeIdQry = (NativeQuery<Object>) OBDal.getInstance()
-        .getSession()
-        .createNativeQuery(SQL_TREE_ID);
-    treeIdQry.setParameter("nodeId", parentId);
-    List<Object> treeIdRows = treeIdQry.list();
-
-    if (treeIdRows.isEmpty()) {
-      return 0;
-    }
-    String treeId = String.valueOf(treeIdRows.get(0));
-
-    NativeQuery<Object> countQry = (NativeQuery<Object>) OBDal.getInstance()
-        .getSession()
-        .createNativeQuery(SQL_CHILDREN_COUNT);
-    countQry.setParameter("parentId", parentId);
-    countQry.setParameter("treeId", treeId);
-    List<Object> countRows = countQry.list();
-
-    if (countRows.isEmpty()) {
-      return 0;
-    }
-    Object countVal = countRows.get(0);
-    if (countVal instanceof Number) {
-      return ((Number) countVal).intValue();
-    }
-    return 0;
   }
 }
