@@ -62,6 +62,14 @@ public class NeoVectorSearchEndpoint {
     this.targetSearchGateway = null; this.targetAuthorizer = namespaces -> true;
   }
 
+  NeoVectorSearchEndpoint(SearchGateway searchGateway, NamespaceAuthorizer namespaceAuthorizer,
+      TargetSearchGateway targetSearchGateway, NamespaceAuthorizer targetAuthorizer) {
+    this.searchGateway = searchGateway;
+    this.namespaceAuthorizer = namespaceAuthorizer;
+    this.targetSearchGateway = targetSearchGateway;
+    this.targetAuthorizer = targetAuthorizer;
+  }
+
   NeoResponse handle(HttpServletRequest request) {
     String query = trimToNull(request.getParameter("query"));
     return handle(query, request.getParameter("namespaces"), request.getParameter("targets"),
