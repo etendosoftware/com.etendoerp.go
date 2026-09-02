@@ -119,19 +119,40 @@ class NeoVectorSearchEndpoint {
 
   /** Executes a namespace-scoped vector search and returns its JSON response. */
   interface SearchGateway {
-    /** Executes the search for the requested namespaces. */
+    /**
+     * Executes the search for the requested namespaces.
+     * @param namespaces namespaces to search
+     * @param query search text
+     * @param topK maximum number of results
+     * @param metadataFilter optional metadata filter
+     * @param minScore minimum score threshold
+     * @param maxScore maximum score threshold
+     * @return serialized search response
+     */
     String search(List<String> namespaces, String query, int topK,
       String metadataFilter, double minScore, double maxScore); }
 
   /** Executes a target-scoped vector search and returns its JSON response. */
   interface TargetSearchGateway {
-    /** Executes the search for the requested entity targets. */
+    /**
+     * Executes the search for the requested entity targets.
+     * @param targets entity targets to search
+     * @param query search text
+     * @param topK maximum number of results
+     * @param minScore minimum score threshold
+     * @param maxScore maximum score threshold
+     * @return serialized search response
+     */
     String search(List<String> targets, String query, int topK,
       double minScore, double maxScore); }
 
   /** Checks whether the current user can read all requested namespaces. */
   interface NamespaceAuthorizer {
-    /** Returns whether the current user can access every namespace. */
+    /**
+     * Returns whether the current user can access every namespace.
+     * @param namespaces namespaces to authorize
+     * @return true when all namespaces are readable
+     */
     boolean isAuthorized(List<String> namespaces);
   }
   private static final class ScoreRange {
