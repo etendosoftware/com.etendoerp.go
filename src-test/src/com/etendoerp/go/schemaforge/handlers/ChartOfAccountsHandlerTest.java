@@ -1371,6 +1371,9 @@ public class ChartOfAccountsHandlerTest {
     OBDal dal = mock(OBDal.class);
     when(dal.get(ElementValue.class, "EV-1")).thenReturn(subaccount);
 
+    Session sessionMock = mock(Session.class);
+    when(dal.getSession()).thenReturn(sessionMock);
+
     OBCriteria<AcctSchema> schemaCrit = mock(OBCriteria.class);
     when(dal.createCriteria(AcctSchema.class)).thenReturn(schemaCrit);
     when(schemaCrit.list()).thenReturn(Collections.singletonList(schema));
@@ -1390,6 +1393,11 @@ public class ChartOfAccountsHandlerTest {
       NeoResponse result = handler.afterHandle(ctx);
 
       assertNull(result);
+      // ETP-5101 (QA finding): pins the refresh() this method now performs BEFORE reading
+      // subaccount.isActive() — without it, deleting the refresh() call would not fail this test
+      // even though it reintroduces the stale-read bug (OBDal.get() returning the same managed
+      // instance the generic CRUD service just wrote to, without reflecting that write).
+      verify(sessionMock).refresh(subaccount);
       verify(link).setActive(false);
       verify(dal).save(link);
       verify(dal).flush();
@@ -1505,6 +1513,9 @@ public class ChartOfAccountsHandlerTest {
     OBDal dal = mock(OBDal.class);
     when(dal.get(ElementValue.class, "EV-1")).thenReturn(subaccount);
 
+    Session sessionMock = mock(Session.class);
+    when(dal.getSession()).thenReturn(sessionMock);
+
     OBCriteria<AcctSchema> schemaCrit = mock(OBCriteria.class);
     when(dal.createCriteria(AcctSchema.class)).thenReturn(schemaCrit);
     // No active schemas: ensureGlItemForSubaccount's own isEmpty() guard short-circuits before
@@ -1521,6 +1532,10 @@ public class ChartOfAccountsHandlerTest {
 
       assertNull(result);
       verify(dal).get(ElementValue.class, "EV-1");
+      // ETP-5101 (QA finding): pins the refresh() call — see the identical comment on
+      // assertAfterHandleSyncsGlItemActiveStateWhenBodyTouchesActive above for why this must be
+      // asserted, not just tolerated as a no-crash NPE fix.
+      verify(sessionMock).refresh(subaccount);
       verify(dal).createCriteria(AcctSchema.class);
       verify(dal).flush();
     }
@@ -1544,6 +1559,9 @@ public class ChartOfAccountsHandlerTest {
     OBDal dal = mock(OBDal.class);
     when(dal.get(ElementValue.class, "EV-2")).thenReturn(subaccount);
 
+    Session sessionMock = mock(Session.class);
+    when(dal.getSession()).thenReturn(sessionMock);
+
     OBCriteria<AcctSchema> schemaCrit = mock(OBCriteria.class);
     when(dal.createCriteria(AcctSchema.class)).thenReturn(schemaCrit);
     when(schemaCrit.list()).thenReturn(Collections.emptyList());
@@ -1556,6 +1574,10 @@ public class ChartOfAccountsHandlerTest {
 
       assertNull(result);
       verify(dal).get(ElementValue.class, "EV-2");
+      // ETP-5101 (QA finding): pins the refresh() call — see the identical comment on
+      // assertAfterHandleSyncsGlItemActiveStateWhenBodyTouchesActive above for why this must be
+      // asserted, not just tolerated as a no-crash NPE fix.
+      verify(sessionMock).refresh(subaccount);
       verify(dal).flush();
     }
   }

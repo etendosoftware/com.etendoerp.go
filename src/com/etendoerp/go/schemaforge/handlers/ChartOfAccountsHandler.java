@@ -372,6 +372,15 @@ public class ChartOfAccountsHandler implements NeoHandler {
       if (subaccount == null) {
         return;
       }
+      // ETP-5101 (QA finding): OBDal.get() returns the SAME managed instance the generic CRUD
+      // service just wrote to, but that instance's fields do not reliably reflect the write here —
+      // observed live as the GLItemAccounts row staying active after deactivating its subaccount,
+      // with no exception anywhere (this method's own isActive() read was silently stale, so the
+      // no-op `if` guard below never fired). refresh() forces a re-read of the row this request
+      // already flushed (the generic CRUD service commits before afterHandle runs), matching the
+      // established pattern for this exact "must see the just-persisted state" need elsewhere in
+      // this module (e.g. CreatePurchaseInvoiceHandler, OrderLineHandler).
+      OBDal.getInstance().getSession().refresh(subaccount);
       List<AcctSchema> schemas = glItemProvisioning.resolveActiveSchemas(subaccount.getClient());
       boolean active = Boolean.TRUE.equals(subaccount.isActive());
       glItemProvisioning.setGlItemAccountsActiveForSubaccount(subaccount, schemas, active);
@@ -406,6 +415,10 @@ public class ChartOfAccountsHandler implements NeoHandler {
       if (subaccount == null) {
         return;
       }
+      // ETP-5101 (QA finding): see the identical refresh() call — and its full rationale — in
+      // syncGlItemActiveState above. Same stale-instance symptom here: the GL Item's composed
+      // name kept the pre-update name/searchKey after a rename, with no exception anywhere.
+      OBDal.getInstance().getSession().refresh(subaccount);
       List<AcctSchema> schemas = glItemProvisioning.resolveActiveSchemas(subaccount.getClient());
       glItemProvisioning.ensureGlItemForSubaccount(subaccount, schemas);
       OBDal.getInstance().flush();
