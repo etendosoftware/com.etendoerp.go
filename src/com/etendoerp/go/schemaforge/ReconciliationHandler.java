@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.descriptionExpr;
+import static com.etendoerp.go.schemaforge.FinancialAccountTransactionsSupport.attachOptional;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.belongsToAccount;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.bindDateRange;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.docTypeToIsReceipt;
@@ -34,10 +35,12 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Consumer;
 
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
@@ -55,12 +58,14 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.advpaymentmngt.dao.TransactionsDao;
 import org.openbravo.advpaymentmngt.process.FIN_TransactionProcess;
 import org.openbravo.advpaymentmngt.utility.APRM_MatchingUtility;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchedTransaction;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchingTransaction;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBCriteria;
@@ -68,6 +73,8 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.financialmgmt.accounting.Costcenter;
 import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
@@ -75,6 +82,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
+import org.openbravo.model.project.Project;
 
 /**
  * NeoHandler that powers the manual bank-reconciliation split panel introduced by
@@ -130,6 +138,13 @@ import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 public class ReconciliationHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(ReconciliationHandler.class);
+
+  /**
+   * Header-level accounting dimensions per financial account, memoized for the lifetime of this
+   * handler. {@code NeoHandler} beans are {@code @Dependent} (one instance per request), so an
+   * {@code applySuggestions} batch resolves the configuration once instead of once per line.
+   */
+  private final Map<String, Set<String>> headerDimensionsByAccount = new HashMap<>();
 
   private static final String METHOD_GET = "GET";
   private static final String METHOD_POST = "POST";
@@ -196,7 +211,7 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String TRX_TYPE_DEPOSIT = "BPD";
   private static final String TRX_TYPE_WITHDRAWAL = "BPW";
   /** Tolerance applied when comparing the line amount to the sum of operations. */
-  private static final BigDecimal TOLERANCE = new BigDecimal("0.01");
+  static final BigDecimal TOLERANCE = new BigDecimal("0.01");
 
   /**
    * JSON keys / messages reused across rows — extracted to satisfy Sonar S1192. Some are
@@ -219,6 +234,10 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String KEY_DESCRIPTION = "description";
   private static final String KEY_PENDING_BALANCE = "pendingBalance";
   private static final String KEY_SUGGESTED = "suggested";
+  /** Candidate matched only within the account's amount/date tolerance — drives the red badge. */
+  private static final String KEY_NEAR_MATCH = "nearMatch";
+  /** Why an un-reconcile / reactivate could not complete — shown verbatim by the client. */
+  static final String KEY_FAILURE_REASON = "failureReason";
   private static final String COL_PARTNER_NAME = "partner_name";
   static final String KEY_COUNTS = "counts";
   static final String KEY_TOTAL = "total";
@@ -231,7 +250,7 @@ public class ReconciliationHandler implements NeoHandler {
       "Statement line does not belong to the financial account";
   /** Shared with {@link ReconciliationDifferenceSupport}, which hoists this very guard. */
   static final String MSG_LINE_ALREADY_RECONCILED = "Statement line is already reconciled";
-  private static final String KEY_UPDATED_BALANCE = "updatedBalance";
+  static final String KEY_UPDATED_BALANCE = "updatedBalance";
 
   /**
    * Pending bank-statement lines (panel left): unmatched lines of the account,
@@ -319,14 +338,8 @@ public class ReconciliationHandler implements NeoHandler {
           + "  FROM fin_finacc_transaction ft"
           + "  LEFT JOIN fin_payment fp ON fp.fin_payment_id = ft.fin_payment_id"
           + "  LEFT JOIN c_bpartner bp ON bp.c_bpartner_id = COALESCE(ft.c_bpartner_id, fp.c_bpartner_id)"
-          // Normally only free transactions are candidates (unreconciled + not already cleared). The
-          // second branch covers a "Reactivar"-ed line: its transactions stay linked to the now-DRAFT
-          // reconciliation AND keep their cleared (RPPC) status, so both filters must be bypassed for
-          // them — they have to be offered (pre-selected) for the line they are still matched to.
-          // Bind: that draft reconciliation id, or NULL for every other line (branch matches
-          // nothing, behavior unchanged).
-          + " WHERE ((ft.fin_reconciliation_id IS NULL AND ft.status <> 'RPPC')"
-          + "        OR ft.fin_reconciliation_id = ?)"
+          + " WHERE ft.fin_reconciliation_id IS NULL"
+          + "   AND ft.status <> 'RPPC'"
           + "   AND ft.processed = 'Y'"
           + "   AND ft.fin_financial_account_id = ?"
           + "   AND (CAST(? AS date) IS NULL OR ft.statementdate >= ?)"
@@ -497,15 +510,9 @@ public class ReconciliationHandler implements NeoHandler {
       String dateFrom, String dateTo) throws Exception {
     FIN_BankStatementLine selectedLine =
         StringUtils.isNotBlank(lineId) ? loadLine(lineId) : null;
-    // "Reactivar" leaves the line linked to its transaction while the reconciliation goes back to
-    // draft. Such a line is NOT reconciled — it is pending re-confirmation, so it must get the full
-    // editable candidate list (with its own transactions pre-selected below), not the read-only
-    // linked-movements view.
-    FIN_Reconciliation draftRec = draftReconciliationOf(selectedLine);
-    if (selectedLine != null && selectedLine.getFinancialAccountTransaction() != null
-        && draftRec == null) {
-      // A reconciled line is read-only: return ONLY the movement(s) already linked to it (its 1:1
-      // transaction, or every transaction of its 1:N match group) — never the unreconciled pool.
+    // A reconciled line is read-only: return ONLY the movement(s) already linked to it (its 1:1
+    // transaction, or every transaction of its 1:N match group) — never the unreconciled pool.
+    if (selectedLine != null && selectedLine.getFinancialAccountTransaction() != null) {
       return CandidatesSupport.buildLinkedTransactions(lineId);
     }
 
@@ -513,27 +520,33 @@ public class ReconciliationHandler implements NeoHandler {
     int candidateDateTolDays = candidateTols[0].intValue();
     BigDecimal candidateAmtTolPct = candidateTols[1];
 
-    // Its own (still-linked) transactions are filtered out of the normal candidate pool, so surface
-    // them explicitly and pre-select them: confirming then re-processes this same draft.
-    Set<String> draftTxnIds = new HashSet<>();
-    if (draftRec != null) {
-      for (FIN_FinaccTransaction t : draftRec.getFINFinaccTransactionList()) {
-        draftTxnIds.add(t.getId());
-      }
-    }
-
     Set<String> suggestedIds = suggestedTransactionIds(accountId, lineId, candidateDateTolDays);
-    suggestedIds.addAll(draftTxnIds);
+    // ETP-4965: ids that matched only WITHIN TOLERANCE. Tracked apart from suggestedIds so the row
+    // can carry the red "with difference" badge instead of the blue "with suggestion" — the
+    // deviation is the point of the row and has to be visible before the user reconciles.
+    Set<String> nearMatchIds = new HashSet<>();
     // 1:N: if the selected line amount equals the sum of a signal group (same logic the automatch
     // uses), pre-mark ALL of its operations as suggested — not only a single 1:1 standard match.
     if (selectedLine != null) {
       BigDecimal lineTarget = nullSafe(selectedLine.getCramount())
           .subtract(nullSafe(selectedLine.getDramount()));
       BigDecimal candidateAmtTol =
-          AutoMatchSupport.computeAmountTolerance(lineTarget, candidateAmtTolPct);
+          AutoMatchSupport.signalGroupTolerance(lineTarget, candidateAmtTolPct);
       for (FIN_FinaccTransaction t : AutoMatchSupport.findSignalGroup(
           accountId, selectedLine, new HashSet<>(), candidateAmtTol, candidateDateTolDays)) {
         suggestedIds.add(t.getId());
+      }
+      // ETP-4965: same precedence as classifyPendingLine and the automatch preview — an exact 1:1
+      // or a signal group wins, and the near match is only offered when neither produced anything.
+      // Fresh accumulators: this is a single-line view, with no earlier line to have claimed one.
+      if (suggestedIds.isEmpty()) {
+        FIN_FinaccTransaction nearMatch = NearMatchSupport.findNearMatch(
+            accountId, selectedLine, new HashSet<>(), new ArrayList<>(),
+            NearMatchSupport.differenceTolerance(lineTarget, candidateAmtTolPct),
+            candidateDateTolDays);
+        if (nearMatch != null) {
+          nearMatchIds.add(nearMatch.getId());
+        }
       }
     }
 
@@ -552,8 +565,6 @@ public class ReconciliationHandler implements NeoHandler {
     sql.append(CANDIDATES_ORDER);
     try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
       int idx = 1;
-      // NULL for every normal line — that OR branch then matches nothing.
-      ps.setString(idx++, draftRec != null ? draftRec.getId() : null);
       ps.setString(idx++, accountId);
       idx = bindDateRange(ps, idx, dateFrom, dateTo);
       if (filterDocType) {
@@ -574,7 +585,8 @@ public class ReconciliationHandler implements NeoHandler {
           // allocations against invoices are a follow-up).
           row.put(KEY_PENDING_BALANCE, amount);
           row.put(KEY_STATUS, STATUS_PENDING);
-          row.put(KEY_SUGGESTED, suggestedIds.contains(id));
+          row.put(KEY_SUGGESTED, suggestedIds.contains(id) || nearMatchIds.contains(id));
+          row.put(KEY_NEAR_MATCH, nearMatchIds.contains(id));
           candidates.put(row);
         }
       }
@@ -673,6 +685,18 @@ public class ReconciliationHandler implements NeoHandler {
   }
 
   Set<String> suggestedTransactionIds(String accountId, String lineId, int dateTolDays) {
+    return suggestedTransactionIds(accountId, lineId, dateTolDays, new ArrayList<>());
+  }
+
+  /**
+   * Same as above, but honoring {@code excluded} — transactions the caller already consumed for an
+   * earlier line in the same run, so this line's suggestion does not collide with one already
+   * claimed. See {@link AutoMatchSupport#standardMatch} for why this matters: without it, N pending
+   * lines of the identical amount all get offered the SAME transaction by Core, and every line past
+   * the first ends up with no 1:1 suggestion at all.
+   */
+  Set<String> suggestedTransactionIds(String accountId, String lineId, int dateTolDays,
+      List<FIN_FinaccTransaction> excluded) {
     Set<String> ids = new HashSet<>();
     if (StringUtils.isBlank(lineId)) {
       return ids;
@@ -682,57 +706,28 @@ public class ReconciliationHandler implements NeoHandler {
       return ids;
     }
     FIN_FinancialAccount account = loadAccount(accountId);
-    if (account == null || account.getMatchingAlgorithm() == null
-        || StringUtils.isBlank(account.getMatchingAlgorithm().getJavaClassName())) {
-      return ids;
-    }
-    try {
-      FIN_MatchingTransaction matcher =
-          new FIN_MatchingTransaction(account.getMatchingAlgorithm().getJavaClassName());
-      FIN_MatchedTransaction matched = matcher.match(line, new ArrayList<>());
-      if (matched != null && matched.getTransaction() != null
-          && !FIN_MatchedTransaction.NOMATCH.equals(matched.getMatchLevel())
-          && AutoMatchSupport.withinDateWindow(line.getTransactionDate(),
-              matched.getTransaction().getTransactionDate(), dateTolDays)) {
-        ids.add(matched.getTransaction().getId());
-      }
-    } catch (Exception e) {
-      log.debug("Standard matching algorithm failed for line {}: {}", lineId, e.getMessage());
+    FIN_MatchedTransaction matched =
+        AutoMatchSupport.standardMatch(account, line, dateTolDays, excluded);
+    if (matched != null) {
+      ids.add(matched.getTransaction().getId());
     }
     return ids;
   }
 
   /**
-   * The DRAFT reconciliation a line is still matched to, or {@code null} when the line is unmatched
-   * or its reconciliation is already processed.
+   * "Reactivar" — the lighter alternative behind the same "Desconciliar (N)" split button. Where
+   * {@link #removeOperation(JSONObject)} always detaches/deletes with no further intent, this one is
+   * framed as "put these back so they can be matched again" — but with a shared-header batch (see
+   * {@link #applySuggestions}) there is no reconciliation-wide DRAFT state left to hand back to the
+   * user any more: reactivating one line would leave every OTHER line sharing that header pending
+   * too. So it runs the exact same detach-and-reprocess mechanics as {@code removeOperation}
+   * ({@link ReconciliationHandlerSupport#removeSelectedFromReconciliations}) — reactivate the
+   * reconciliation, remove just the selected transactions, re-confirm it — and the freed
+   * transactions simply return to the normal candidate pool (no special pre-selection).
    *
-   * <p>This is the whole "Reactivar" state: Core's plain reactivate (action {@code "R"}) only flips
-   * the reconciliation to {@code processed = false} / {@code DR} — it never touches the line's
-   * {@code financialAccountTransaction} nor the transaction's {@code reconciliation}, so every link
-   * survives and the state is fully derivable from the data (no marker column needed). Such a line is
-   * un-confirmed: it belongs in the pending pool, with its own transactions pre-selected.
-   * Package-private test seam.
-   */
-  FIN_Reconciliation draftReconciliationOf(FIN_BankStatementLine line) {
-    if (line == null || line.getFinancialAccountTransaction() == null) {
-      return null;
-    }
-    FIN_Reconciliation rec = line.getFinancialAccountTransaction().getReconciliation();
-    return rec != null && !rec.isProcessed() ? rec : null;
-  }
-
-  /**
-   * "Reactivar" — the lightweight un-reconcile, the alternate action behind the same
-   * "Desconciliar (N)" split button. Instead of deleting the {@code FIN_Reconciliation} (what
-   * {@link #removeOperation(JSONObject)} does), it returns the document to DRAFT via Core's plain
-   * {@code reactivate}, leaving every link intact: the statement line keeps its transaction, the
-   * transaction keeps its reconciliation. The line then shows as pending (see
-   * {@code PENDING_LINES_SQL}) with those transactions pre-selected, so confirming "Conciliar" simply
-   * re-processes this same reconciliation (see {@link #reprocessDraftIfAlreadyMatched}).
-   *
-   * <p>Auto-created movements in the checked selection are still fully deleted — a payment that only
-   * existed to back this reconciliation has nothing worth preserving in a draft — reusing the very
-   * same {@code com.etendoerp.payment.removal} utilities as {@code removeOperation}.
+   * <p>Auto-created movements in the selection are still fully deleted (same {@code
+   * com.etendoerp.payment.removal} utilities as {@code removeOperation}) — a payment that only
+   * existed to back this reconciliation has nothing worth preserving.
    */
   NeoResponse reactivateSelected(JSONObject body) throws Exception {
     String accountId = body.optString(KEY_FINANCIAL_ACCOUNT_ID, null);
@@ -768,24 +763,29 @@ public class ReconciliationHandler implements NeoHandler {
     if (periodError != null) {
       return periodError;
     }
-    int autoConfirmedDrafts = ReconciliationHandlerSupport.reactivateSelectedFromReconciliations(
-        this, account, recById, selectedByRec);
+    // Why each failure happened, keyed by transaction id. The removal helpers swallow their
+    // exceptions so one failure does not abort the batch; without this accumulator the reason
+    // reached the server log only, and the client could say WHICH transactions failed but never WHY.
+    java.util.Map<String, String> failureReasons = new java.util.LinkedHashMap<>();
+    ReconciliationHandlerSupport.removeSelectedFromReconciliations(
+        this, account, recById, selectedByRec, failureReasons);
 
-    // Same partial-batch rationale as removeOperation (Core commits mid-flow), but the success
-    // condition differs: a KEPT transaction stays linked to its now-draft reconciliation on purpose,
-    // so what proves the action worked is the reconciliation no longer being processed — or the
-    // transaction being gone entirely (the auto-created ones).
+    // Core's own removal utilities commit mid-flow, so re-check the ACTUAL post-state of every
+    // requested transaction — same rationale as removeOperation.
     List<String> doneIds = new ArrayList<>();
     List<String> failedIds = new ArrayList<>();
     for (String id : transactionIds) {
       FIN_FinaccTransaction trx = loadTransaction(id);
-      FIN_Reconciliation rec = trx != null ? trx.getReconciliation() : null;
-      if (trx == null || rec == null || !rec.isProcessed()) {
+      if (trx == null || trx.getReconciliation() == null) {
         doneIds.add(id);
       } else {
         failedIds.add(id);
       }
     }
+
+    // Collapse split sub-lines back into a single pending line when the whole group is now
+    // unmatched — same cleanup removeOperation performs.
+    normalizeReactivatedMatchGroup(line);
 
     BigDecimal updatedBalance = ReactivationSupport.currentBalance(account);
     JSONObject data = new JSONObject();
@@ -793,10 +793,15 @@ public class ReconciliationHandler implements NeoHandler {
     data.put(KEY_STATEMENT_LINE_ID, statementLineId);
     data.put("transactionIds", new JSONArray(doneIds));
     data.put("failedTransactionIds", new JSONArray(failedIds));
-    // > 0 when a pre-existing draft had to be confirmed to make room (Core allows one editable
-    // reconciliation per account), i.e. a line left pending by an earlier "Reactivar" is reconciled
-    // again. Surfaced so the UI can warn instead of letting it happen silently.
-    data.put("autoConfirmedDrafts", autoConfirmedDrafts);
+    // The cause of the first failure, translated. The commonest by far is a closed accounting
+    // period, which the user can act on — but only if it is actually shown, so it travels with the
+    // 200 rather than staying in the log. Failures within one request share a cause in practice
+    // (one closed period, one Core guard), so a single message beats a per-transaction list the
+    // client has no room to render.
+    String failureReason = ReconciliationHandlerSupport.firstFailureReason(failedIds, failureReasons);
+    if (StringUtils.isNotBlank(failureReason)) {
+      data.put(KEY_FAILURE_REASON, failureReason);
+    }
     data.put(KEY_UPDATED_BALANCE, updatedBalance);
     return envelope(data);
   }
@@ -805,6 +810,24 @@ public class ReconciliationHandler implements NeoHandler {
   // POST reconcileGroup
   // ---------------------------------------------------------------------------
 
+  /**
+   * Reconciles one statement line against the selected operations and/or invoices.
+   *
+   * <p><b>ETP-4965 — the difference is funded before composing.</b> When the operations fall short
+   * of the line by a gap within the account's amount tolerance,
+   * {@link ReconciliationDifferenceSupport#applyInlineDifference} creates the compensating GL-item
+   * movement and joins it to the selection, so the sum matches the line exactly and Core leaves both
+   * split halves reconciled instead of a pending remainder nothing can settle.
+   *
+   * <p><b>Why that helper may roll back.</b> The guards run in the only order the data allows, and
+   * that order is not fully safe on its own: {@code payInvoices} above WRITES payments and
+   * transactions, and the gap is not knowable until it has. So by the time a missing GL Item
+   * Difference is detected on the invoice path, writes are already pending — and a returned
+   * {@code NeoResponse.error} commits rather than rolls back (see
+   * {@link ReconciliationDifferenceSupport}'s header javadoc). The helper therefore rolls back
+   * explicitly before returning that 400, the same way {@link ReconciliationFlowSupport#compose}
+   * does when Core rejects the reconciliation.
+   */
   NeoResponse reconcileGroup(JSONObject body) throws Exception {
     String accountId = body.optString(KEY_FINANCIAL_ACCOUNT_ID, null);
     String statementLineId = body.optString(KEY_STATEMENT_LINE_ID, null);
@@ -836,11 +859,7 @@ public class ReconciliationHandler implements NeoHandler {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           MSG_LINE_NOT_IN_ACCOUNT);
     }
-    // A "Reactivar"-ed line keeps its transaction link while its reconciliation sits in draft, so the
-    // link alone no longer proves the line is reconciled — only a PROCESSED reconciliation does.
-    // Re-confirming such a line is the whole point of that action (compose then re-processes the same
-    // draft via reprocessDraftIfAlreadyMatched), so it must not be rejected here.
-    if (line.getFinancialAccountTransaction() != null && draftReconciliationOf(line) == null) {
+    if (line.getFinancialAccountTransaction() != null) {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT, MSG_LINE_ALREADY_RECONCILED);
     }
 
@@ -868,23 +887,40 @@ public class ReconciliationHandler implements NeoHandler {
       return opError;
     }
 
-    return compose(account, line, operationIds);
+    // ETP-4965: fund a within-tolerance shortfall with a GL-item movement BEFORE composing, so the
+    // operations sum exactly to the line and Core leaves every split half reconciled instead of a
+    // dangling pending remainder. Mutates operationIds on success.
+    operationIds = new ArrayList<>(operationIds);
+    NeoResponse diffError = ReconciliationDifferenceSupport.applyInlineDifference(
+        this, account, line, operationIds, body, hasInvoices);
+    if (diffError != null) {
+      return diffError;
+    }
+
+    return ReconciliationFlowSupport.compose(this, account, line, operationIds);
   }
 
   /**
-   * Composes the standard Etendo reconciliation services for a 1:N manual match.
-   * Never reimplements the matching logic.
+   * Reuses the financial account's open draft reconciliation (Core allows exactly one), or creates
+   * a fresh one — the same lookup Classic's {@code MatchStatementActionHandler} does before
+   * matching. Lets a whole automatch batch ({@link #applySuggestions}) share ONE
+   * {@code FIN_Reconciliation} header across every accepted group, instead of a document per
+   * statement line.
    */
-  private NeoResponse compose(FIN_FinancialAccount account, FIN_BankStatementLine line,
-      List<String> operationIds) throws Exception {
-    // A "Reactivar"-ed line is still matched to its transactions; only its reconciliation went back
-    // to draft. Re-confirming that same set must PROCESS that document, not build a new one (Core
-    // would reject the transactions — they are not free — and the draft would be orphaned).
-    NeoResponse reprocessed = reprocessDraftIfAlreadyMatched(line, operationIds);
-    if (reprocessed != null) {
-      return reprocessed;
-    }
-    FIN_Reconciliation rec = addNewDraftReconciliation(account);
+  FIN_Reconciliation getOrCreateDraftReconciliation(FIN_FinancialAccount account) {
+    FIN_Reconciliation draft = TransactionsDao.getLastReconciliation(account, "N");
+    return draft != null ? draft : addNewDraftReconciliation(account);
+  }
+
+  /**
+   * Tags the line's match group (when the match will split it) and runs Core's standard
+   * {@code matchBankStatementLine} for a single statement line into {@code rec}. Does not create or
+   * process the reconciliation — the caller decides whether {@code rec} is fresh (one manual match,
+   * see {@link ReconciliationFlowSupport#compose}) or shared across a whole automatch batch, and
+   * processes it once after every group has been matched in.
+   */
+  void matchInto(FIN_BankStatementLine line, List<String> operationIds,
+      FIN_Reconciliation rec) {
     // Grouping (option B): tag the original line with a fresh match-group id BEFORE the match so
     // the split sub-lines inherit it (DalUtil.copy copies all EM_ properties). The UI re-groups
     // the resulting sub-lines by this id. Only needed when the match will actually split the
@@ -896,64 +932,6 @@ public class ReconciliationHandler implements NeoHandler {
       tagMatchGroup(line);
     }
     matchBankStatementLine(line, operationIds, rec);
-    OBError result = processReconciliation(rec);
-    if (result != null && "Error".equalsIgnoreCase(result.getType())) {
-      doRollbackAndClose();
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, result.getMessage());
-    }
-
-    JSONObject data = new JSONObject();
-    data.put("reconciliationId", rec.getId());
-    JSONArray lineIds = new JSONArray();
-    lineIds.put(line.getId());
-    data.put("lineIds", lineIds);
-    data.put(KEY_UPDATED_BALANCE, nullSafe(rec.getEndingBalance()));
-    return NeoResponse.createdWithData(data);
-  }
-
-  /**
-   * The "Reactivar" round-trip. When {@code line} is still matched to a DRAFT reconciliation and the
-   * confirmed {@code operationIds} are exactly that reconciliation's transactions — the common case,
-   * the user just confirmed the pre-checked candidates — nothing has to be re-linked at all: Core's
-   * reactivate never broke a link, so simply PROCESS that same document and return its response.
-   *
-   * <p>When the selection differs (the user (un)checked something) the draft cannot be reused: its
-   * transactions must be freed or the new match would be rejected, and Core does not clean up
-   * leftover drafts on this path. So it is discarded properly
-   * ({@code reactivateAndRemoveReconciliation}) and {@code null} is returned, letting the caller
-   * compose a brand-new reconciliation.
-   *
-   * <p>Returns {@code null} (no-op) when the line is not in the "Reactivar" state, i.e. on every
-   * normal reconcile. Package-private test seam.
-   */
-  NeoResponse reprocessDraftIfAlreadyMatched(FIN_BankStatementLine line, List<String> operationIds)
-      throws Exception {
-    FIN_Reconciliation draft = draftReconciliationOf(line);
-    if (draft == null) {
-      return null;
-    }
-    Set<String> draftTxnIds = new HashSet<>();
-    for (FIN_FinaccTransaction t : draft.getFINFinaccTransactionList()) {
-      draftTxnIds.add(t.getId());
-    }
-    if (!draftTxnIds.equals(new HashSet<>(operationIds))) {
-      ReconciliationRemovalUtil.reactivateAndRemoveReconciliation(draft);
-      return null;
-    }
-
-    OBError result = processReconciliation(draft);
-    if (result != null && "Error".equalsIgnoreCase(result.getType())) {
-      doRollbackAndClose();
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, result.getMessage());
-    }
-
-    JSONObject data = new JSONObject();
-    data.put("reconciliationId", draft.getId());
-    JSONArray lineIds = new JSONArray();
-    lineIds.put(line.getId());
-    data.put("lineIds", lineIds);
-    data.put(KEY_UPDATED_BALANCE, nullSafe(draft.getEndingBalance()));
-    return NeoResponse.createdWithData(data);
   }
 
   // ---------------------------------------------------------------------------
@@ -979,22 +957,28 @@ public class ReconciliationHandler implements NeoHandler {
 
     JSONArray groups = new JSONArray();
     Set<String> usedTxnIds = new HashSet<>();
+    // Fed into the standard algorithm for every subsequent line — mirrors Classic's own
+    // runAutoMatchingAlgorithm accumulator, so N pending lines of the same amount each get their
+    // own suggestion in one run instead of all colliding on the same Core-picked transaction.
+    List<FIN_FinaccTransaction> excludedTxns = new ArrayList<>();
     int opsToLink = 0;
     int willCreate = 0;
 
     for (FIN_BankStatementLine line : pendingLines) {
       // Pass 1 (1:1): standard algorithm — uses lazy evaluation so findSignalGroup is not called
       // when a 1:1 match is already found, avoiding an unnecessary DB query.
-      Set<String> suggested = suggestedTransactionIds(accountId, line.getId(), autoDateTolDays);
+      Set<String> suggested =
+          suggestedTransactionIds(accountId, line.getId(), autoDateTolDays, excludedTxns);
       suggested.removeAll(usedTxnIds);
       FIN_FinaccTransaction txn1to1 = suggested.isEmpty() ? null : loadTransaction(suggested.iterator().next());
       if (txn1to1 != null) {
         usedTxnIds.add(txn1to1.getId());
+        excludedTxns.add(txn1to1);
         groups.put(AutoMatchSupport.buildStandardGroup(line, txn1to1, FIN_MatchedTransaction.STRONG));
         opsToLink++;
       } else {
-        int[] delta = AutoMatchSupport.matchFallback(accountId, line, usedTxnIds, rules, groups,
-            autoDateTolDays, autoAmtTolPct);
+        int[] delta = AutoMatchSupport.matchFallback(accountId, line, usedTxnIds, excludedTxns,
+            rules, groups, autoDateTolDays, autoAmtTolPct);
         opsToLink += delta[0];
         willCreate += delta[1];
       }
@@ -1015,11 +999,40 @@ public class ReconciliationHandler implements NeoHandler {
     return envelope(data);
   }
 
-
   // ---------------------------------------------------------------------------
   // POST applySuggestions (commit — creates payments + reconciles)
   // ---------------------------------------------------------------------------
 
+  /**
+   * Holds one {@code prepareGroup} success: the resolved line + the final operation ids to match.
+   * Package-visible (not private) so {@link ReconciliationHandlerSupport#matchAndProcessBatch} can
+   * read {@code line}/{@code operationIds} directly.
+   */
+  static final class PreparedGroup {
+    final FIN_BankStatementLine line;
+    final List<String> operationIds;
+
+    PreparedGroup(FIN_BankStatementLine line, List<String> operationIds) {
+      this.line = line;
+      this.operationIds = operationIds;
+    }
+  }
+
+  /**
+   * Commits every accepted automatch group in ONE {@code FIN_Reconciliation} document — Core's own
+   * "one reconciliation per statement" model, instead of a header per statement line. Two passes:
+   * <ol>
+   *   <li>{@link ReconciliationFlowSupport#prepareGroup} validates every group (line exists, not
+   *       already reconciled, invoice payments created, operations within the line amount) — an
+   *       invalid group is reported in {@code results[]} without ever touching the shared
+   *       reconciliation;</li>
+   *   <li>every group that passed validation is matched into ONE {@link #getOrCreateDraftReconciliation}
+   *       result via {@link #matchInto}, then that single document is processed once.</li>
+   * </ol>
+   * Not atomic across groups: Core's matching services commit mid-flow, so a failure matching group
+   * <em>k</em> does not roll back groups {@code 1..k-1} already matched into the same document — it
+   * is reported in {@code results[]} and the rest of the batch still proceeds.
+   */
   NeoResponse applySuggestions(JSONObject body) throws Exception {
     String accountId = body.optString(KEY_FINANCIAL_ACCOUNT_ID, null);
     if (StringUtils.isBlank(accountId)) {
@@ -1037,15 +1050,28 @@ public class ReconciliationHandler implements NeoHandler {
     }
 
     JSONArray results = new JSONArray();
-    int successfulGroups = 0;
+    List<PreparedGroup> prepared = new ArrayList<>();
     for (int i = 0; i < groupsJson.length(); i++) {
       JSONObject groupEntry = groupsJson.optJSONObject(i);
-      if (groupEntry != null) {
-        NeoResponse groupResult = applyGroup(account, groupEntry);
-        if (groupResult.getHttpStatus() < HttpServletResponse.SC_BAD_REQUEST) {
-          successfulGroups++;
-        }
-        results.put(groupResult.getBody());
+      if (groupEntry == null) {
+        continue;
+      }
+      NeoResponse prepError = ReconciliationFlowSupport.prepareGroup(
+          this, account, groupEntry, prepared);
+      if (prepError != null) {
+        results.put(prepError.getBody());
+      }
+    }
+
+    // Matching every prepared group into the shared reconciliation and processing it once lives in
+    // ReconciliationHandlerSupport — extracted so this method's cognitive complexity stays under the
+    // Sonar limit (java:S3776); behavior is unchanged, every seam still runs on THIS handler instance.
+    int[] successfulGroups = {0};
+    if (!prepared.isEmpty()) {
+      NeoResponse batchError = ReconciliationHandlerSupport.matchAndProcessBatch(
+          this, account, prepared, results, successfulGroups);
+      if (batchError != null) {
+        return batchError;
       }
     }
 
@@ -1053,60 +1079,8 @@ public class ReconciliationHandler implements NeoHandler {
     data.put("applied", results.length());
     data.put("results", results);
     ReconciliationKpiTelemetry.emitReconciliationMatchEvaluated(
-        groupsJson.length(), results.length(), successfulGroups);
+        groupsJson.length(), results.length(), successfulGroups[0]);
     return NeoResponse.createdWithData(data);
-  }
-
-  private NeoResponse applyGroup(FIN_FinancialAccount account, JSONObject groupEntry)
-      throws Exception {
-    String statementLineId = groupEntry.optString(KEY_STATEMENT_LINE_ID, null);
-    if (StringUtils.isBlank(statementLineId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "statementLineId is required");
-    }
-
-    FIN_BankStatementLine line = loadLine(statementLineId);
-    if (line == null) {
-      return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
-          MSG_STATEMENT_LINE_NOT_FOUND + statementLineId);
-    }
-    // Same exemption as reconcileGroup: a line whose reconciliation is still in draft ("Reactivar")
-    // keeps its transaction link but is NOT reconciled yet.
-    if (line.getFinancialAccountTransaction() != null && draftReconciliationOf(line) == null) {
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
-          "Statement line is already reconciled: " + statementLineId);
-    }
-
-    List<String> operationIds = readOperationIds(groupEntry);
-
-    // When a rule group requires creating a new transaction, do that first.
-    JSONObject createPaymentSpec = groupEntry.optJSONObject("createPayment");
-    if (createPaymentSpec != null && StringUtils.isNotBlank(createPaymentSpec.optString("glItemId", null))) {
-      String newTxnId = createTransactionForRule(account, line, createPaymentSpec);
-      if (StringUtils.isNotBlank(newTxnId)) {
-        operationIds = new ArrayList<>(operationIds);
-        operationIds.add(newTxnId);
-        // Increment the rule's matchCount.
-        String ruleId = createPaymentSpec.optString("ruleId", null);
-        if (StringUtils.isNotBlank(ruleId)) {
-          AutoMatchSupport.incrementMatchCount(ruleId);
-        }
-      }
-    }
-
-    if (operationIds.isEmpty()) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-          "At least one operation is required for line: " + statementLineId);
-    }
-
-    // Operations (including any just-created rule transaction) may match part of the line but must
-    // not EXCEED it — the same over-reconciliation guard the manual reconcileGroup path applies.
-    NeoResponse opError = ReconciliationFlowSupport.validateOperations(
-        operationIds, account.getId(), line, this::loadTransaction, TOLERANCE);
-    if (opError != null) {
-      return opError;
-    }
-
-    return compose(account, line, operationIds);
   }
 
   // ---------------------------------------------------------------------------
@@ -1114,9 +1088,13 @@ public class ReconciliationHandler implements NeoHandler {
   // ---------------------------------------------------------------------------
 
   /**
-   * Reactivates (undoes) the reconciliation that links a single statement line. Delegates ALL
-   * reactivation logic to the {@code com.etendoerp.payment.removal} module — this handler never
-   * reimplements it. Body: {@code { financialAccountId, statementLineId }}.
+   * Reactivates (undoes) the reconciliation for a single statement line. Delegates ALL reactivation
+   * logic to the {@code com.etendoerp.payment.removal} module — this handler never reimplements it.
+   * Body: {@code { financialAccountId, statementLineId }}.
+   *
+   * <p>A shared-header batch (see {@link #applySuggestions}) can hold transactions from OTHER
+   * statement lines too, so this is scoped to just {@code line}'s own transactions — itself plus any
+   * ETGO match-group siblings ({@link #transactionsOfLineIn}) — never the whole reconciliation.
    *
    * <p>Sequence:
    * <ol>
@@ -1126,12 +1104,11 @@ public class ReconciliationHandler implements NeoHandler {
    *   <li>accounting-period guard via
    *       {@link Utilities#checkPeriod(String, String, String, java.util.Date)} on the
    *       reconciliation's accounting date (409 when the period is closed);</li>
-   *   <li>snapshot the reconciliation's transactions (one reconciliation per statement-line group)
-   *       and undo the whole reconciliation via {@link #undoReconciliation(FIN_FinancialAccount,
-   *       FIN_Reconciliation, List)}: every transaction returns to its pre-reconciliation state in a
-   *       single pass, the statement line's {@code financialAccountTransaction} is cleared (so it
-   *       returns to pending), and auto-created movements (invoice payments / rule transactions) are
-   *       deleted, restoring the invoice. Pre-existing transactions are kept.</li>
+   *   <li>resolve this line's own transactions within that reconciliation. When they are ALL of the
+   *       reconciliation's transactions, undo it as a unit via {@link #undoReconciliation} (deletes
+   *       the document); otherwise detach just those via {@link ReconciliationHandlerSupport#detachSelected}
+   *       so the reconciliation is kept, reprocessed, with the OTHER lines' transactions still
+   *       reconciled.</li>
    * </ol>
    */
   NeoResponse reactivate(JSONObject body) throws Exception {
@@ -1182,11 +1159,27 @@ public class ReconciliationHandler implements NeoHandler {
               + e.getMessage());
     }
 
-    // Snapshot the matched transactions BEFORE mutating: removing the reconciliation clears its
-    // transaction list. Etendo Go creates one reconciliation per statement-line group, so every
-    // transaction in it belongs to this line.
-    List<FIN_FinaccTransaction> matched = new ArrayList<>(rec.getFINFinaccTransactionList());
-    undoReconciliation(account, rec, matched);
+    // Unpost BEFORE anything is captured: ResetAccounting runs native SQL and clears the session, so
+    // `rec`, `line` and `matched` would all be detached if this ran later. Everything below is
+    // re-read afterwards for that reason.
+    ReconciliationHandlerSupport.unpostBeforeUndo(rec.getId());
+    rec = OBDal.getInstance().get(FIN_Reconciliation.class, rec.getId());
+    line = loadLine(statementLineId);
+
+    List<FIN_FinaccTransaction> matched = transactionsOfLineIn(line, rec);
+    if (ReconciliationHandlerSupport.coversReconciliation(rec, matched)) {
+      // Unlike the two batch endpoints, this one lets the failure propagate: runPostAction turns it
+      // into an error response, so the caller already learns something went wrong.
+      undoReconciliation(account, rec, matched);
+    } else {
+      // The accumulator is intentionally discarded HERE and only here. detachSelected swallows its
+      // per-transaction failures by design, and this endpoint — unlike removeOperation and
+      // reactivateSelected — never re-checks the post-state and always answers {reactivated:true}.
+      // Reporting a reason would therefore mean also giving it a failedTransactionIds contract it
+      // does not have, which is a product change, not a compile fix. Pre-existing gap, deliberately
+      // left as-is; see the un-reconcile section of docs/generated-custom-windows/financial-account.md.
+      ReconciliationHandlerSupport.detachSelected(this, matched, new java.util.LinkedHashMap<>());
+    }
     normalizeReactivatedMatchGroup(line);
 
     BigDecimal updatedBalance = ReactivationSupport.currentBalance(account);
@@ -1195,6 +1188,26 @@ public class ReconciliationHandler implements NeoHandler {
     data.put(KEY_STATEMENT_LINE_ID, statementLineId);
     data.put(KEY_UPDATED_BALANCE, updatedBalance);
     return envelope(data);
+  }
+
+  /**
+   * Every transaction currently backing {@code line} — itself plus any ETGO match-group siblings —
+   * that belongs to {@code rec}. A shared-header batch (see {@link #applySuggestions}) can hold
+   * transactions from OTHER statement lines too, so this scopes a whole-line undo/reactivate to just
+   * the ones the clicked line owns, never the reconciliation's full transaction list.
+   */
+  List<FIN_FinaccTransaction> transactionsOfLineIn(FIN_BankStatementLine line,
+      FIN_Reconciliation rec) {
+    List<FIN_FinaccTransaction> result = new ArrayList<>();
+    Set<String> seenIds = new HashSet<>();
+    ReconciliationHandlerSupport.addTransactionOwnedByRec(line, rec, result, seenIds);
+    String groupId = ReactivationSupport.readMatchGroupId(line);
+    if (StringUtils.isNotBlank(groupId) && line.getBankStatement() != null) {
+      for (FIN_BankStatementLine sibling : loadMatchGroupLines(line.getBankStatement(), groupId)) {
+        ReconciliationHandlerSupport.addTransactionOwnedByRec(sibling, rec, result, seenIds);
+      }
+    }
+    return result;
   }
 
   /**
@@ -1263,8 +1276,12 @@ public class ReconciliationHandler implements NeoHandler {
     if (periodError != null) {
       return periodError;
     }
+    // Why each failure happened, keyed by transaction id. The removal helpers swallow their
+    // exceptions so one failure does not abort the batch; without this accumulator the reason
+    // reached the server log only, and the client could say WHICH transactions failed but never WHY.
+    java.util.Map<String, String> failureReasons = new java.util.LinkedHashMap<>();
     ReconciliationHandlerSupport.removeSelectedFromReconciliations(
-        this, account, recById, selectedByRec);
+        this, account, recById, selectedByRec, failureReasons);
 
     // Core's own removal utilities commit mid-flow (SessionHandler#commitAndStart), so a failure
     // partway through the batch does not roll back what already persisted, and
@@ -1293,6 +1310,15 @@ public class ReconciliationHandler implements NeoHandler {
     data.put(KEY_STATEMENT_LINE_ID, statementLineId);
     data.put("transactionIds", new JSONArray(removedIds));
     data.put("failedTransactionIds", new JSONArray(failedIds));
+    // The cause of the first failure, translated. The commonest by far is a closed accounting
+    // period, which the user can act on — but only if it is actually shown, so it travels with the
+    // 200 rather than staying in the log. Failures within one request share a cause in practice
+    // (one closed period, one Core guard), so a single message beats a per-transaction list the
+    // client has no room to render.
+    String failureReason = ReconciliationHandlerSupport.firstFailureReason(failedIds, failureReasons);
+    if (StringUtils.isNotBlank(failureReason)) {
+      data.put(KEY_FAILURE_REASON, failureReason);
+    }
     data.put(KEY_UPDATED_BALANCE, updatedBalance);
     return envelope(data);
   }
@@ -1463,12 +1489,9 @@ public class ReconciliationHandler implements NeoHandler {
     trx.setPaymentAmount(isDeposit ? BigDecimal.ZERO : absAmount);
     trx.setStatus(isDeposit ? "RPAE" : "RPAP");
     trx.setGLItem(glItem);
-    if (StringUtils.isNotBlank(bpartnerId)) {
-      BusinessPartner bp = OBDal.getInstance().get(BusinessPartner.class, bpartnerId);
-      if (bp != null) {
-        trx.setBusinessPartner(bp);
-      }
-    }
+    attachOptional(bpartnerId, BusinessPartner.class, trx::setBusinessPartner);
+    AccountingDimensionsSupport.applyRuleDimensions(trx, spec,
+        () -> headerDimensionsOf(account.getId()));
     // Rule-origin transaction is auto-created — flag it so the reactivate flow deletes it.
     ReactivationSupport.markAutoCreated(trx);
     OBDal.getInstance().save(trx);
@@ -1478,6 +1501,24 @@ public class ReconciliationHandler implements NeoHandler {
     FIN_TransactionProcess.doTransactionProcess(PROCESS_ACTION, trx);
     OBDal.getInstance().flush();
     return trx.getId();
+  }
+
+  /**
+   * The account's active header dimensions, memoized per handler instance. Fails <b>open</b> on a
+   * configuration-lookup error: a tenant whose accounting setup cannot be read keeps the previous
+   * behaviour for the concept and the business partner, and simply gets no dimensions assigned,
+   * rather than having the whole reconciliation fail.
+   */
+  Set<String> headerDimensionsOf(String accountId) {
+    return headerDimensionsByAccount.computeIfAbsent(accountId, id -> {
+      try {
+        return AccountingDimensionsSupport.activeHeaderDimensionsForAccount(id,
+            AccountingDimensionsSupport.DOCBASETYPE_FAT);
+      } catch (Exception e) {
+        log.warn("Could not resolve active accounting dimensions for account {}", id, e);
+        return Collections.emptySet();
+      }
+    });
   }
 
   // ---------------------------------------------------------------------------

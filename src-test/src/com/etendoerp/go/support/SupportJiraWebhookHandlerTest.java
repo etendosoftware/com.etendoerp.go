@@ -208,15 +208,28 @@ class SupportJiraWebhookHandlerTest {
     }
 
     @Test
-    @DisplayName("Email matching the configured Jira username returns true, case-insensitively")
-    void matchesJiraUsername() {
-      // JiraConfig ships no hardcoded default username (see JiraConfig javadoc) — set it
-      // explicitly here rather than relying on one, and restore the prior value afterward so
-      // this doesn't leak into other tests in the same JVM.
-      System.setProperty(JiraConfig.PROP_USERNAME, "info@smfconsulting.es");
+    @DisplayName("Email matching the configured bot email returns true, case-insensitively")
+    void matchesConfiguredBotEmail() {
+      System.setProperty(JiraConfig.PROP_BOT_EMAIL, "info@smfconsulting.es");
       try {
         assertTrue(SupportJiraWebhookHandler.isBotEmail("INFO@SMFCONSULTING.ES"));
         assertTrue(SupportJiraWebhookHandler.isBotEmail("info@smfconsulting.es"));
+      } finally {
+        System.clearProperty(JiraConfig.PROP_BOT_EMAIL);
+      }
+    }
+
+    @Test
+    @DisplayName("Email matching support.jira.username (the API AUTH credential) does NOT count "
+        + "as the bot — regression: a dev environment commonly borrows a real person's own "
+        + "token for that property, so treating it as bot-equivalent misidentified a human "
+        + "agent as the bot when that same person was also assigned a ticket as the human "
+        + "escalation target, leaving human_takeover stuck false while a real person owned the "
+        + "ticket")
+    void doesNotMatchJiraApiAuthUsername() {
+      System.setProperty(JiraConfig.PROP_USERNAME, "juan.funes@smfconsulting.es");
+      try {
+        assertFalse(SupportJiraWebhookHandler.isBotEmail("juan.funes@smfconsulting.es"));
       } finally {
         System.clearProperty(JiraConfig.PROP_USERNAME);
       }
@@ -589,9 +602,10 @@ class SupportJiraWebhookHandlerTest {
       JSONObject issue = new JSONObject().put("fields", fields);
       JSONObject body = new JSONObject();
 
-      // JiraConfig ships no hardcoded default username (see its javadoc) — configure it
-      // explicitly so isBotEmail recognizes this address, and restore afterward.
-      System.setProperty(JiraConfig.PROP_USERNAME, "info@smfconsulting.es");
+      // isBotEmail only recognizes the DEDICATED bot-email property (never the API-auth
+      // username — see isBotEmail's javadoc for why) — configure it explicitly and restore
+      // afterward.
+      System.setProperty(JiraConfig.PROP_BOT_EMAIL, "info@smfconsulting.es");
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
         OBDal obDal = mockObDal(dalMock);
@@ -599,7 +613,34 @@ class SupportJiraWebhookHandlerTest {
 
         SupportJiraWebhookHandler.handleJiraNonCommentEvent(response, issue, body, "SUP-1");
       } finally {
-        System.clearProperty(JiraConfig.PROP_USERNAME);
+        System.clearProperty(JiraConfig.PROP_BOT_EMAIL);
+      }
+
+      assertTrue(capture.toString().contains("\"status\":\"ok\""));
+      assertTrue(capture.toString().contains("SUP-1"));
+    }
+
+    @Test
+    @DisplayName("Assignee reset with NO emailAddress (private Atlassian profile) still triggers "
+        + "human takeover reset, via the assignee's displayName")
+    void assigneeIsBotWithPrivateEmailFallsBackToDisplayName() throws Exception {
+      // Regression test: "Information Etendo" has email visibility set to private in its
+      // Atlassian profile, so Jira Cloud omits emailAddress from the assignee object entirely —
+      // isBotEmail(assigneeEmail) alone would silently never match, leaving human_takeover
+      // stuck true forever even after a human reassigns the ticket back to the bot.
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      JSONObject assignee = new JSONObject().put("displayName", "Information Etendo");
+      JSONObject fields = new JSONObject().put("assignee", assignee);
+      JSONObject issue = new JSONObject().put("fields", fields);
+      JSONObject body = new JSONObject();
+
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportConversation.class, List.of(mockConversation("conv-1")));
+
+        SupportJiraWebhookHandler.handleJiraNonCommentEvent(response, issue, body, "SUP-1");
       }
 
       assertTrue(capture.toString().contains("\"status\":\"ok\""));
@@ -769,9 +810,10 @@ class SupportJiraWebhookHandlerTest {
       when(request.getParameter("action")).thenReturn("assignee_reset");
       when(request.getParameter("authorEmail")).thenReturn("info@smfconsulting.es");
 
-      // JiraConfig ships no hardcoded default username (see its javadoc) — configure it
-      // explicitly so isBotEmail recognizes this address, and restore afterward.
-      System.setProperty(JiraConfig.PROP_USERNAME, "info@smfconsulting.es");
+      // isBotEmail only recognizes the DEDICATED bot-email property (never the API-auth
+      // username — see isBotEmail's javadoc for why) — configure it explicitly and restore
+      // afterward.
+      System.setProperty(JiraConfig.PROP_BOT_EMAIL, "info@smfconsulting.es");
       try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
            MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
         OBDal obDal = mockObDal(dalMock);
@@ -782,7 +824,31 @@ class SupportJiraWebhookHandlerTest {
 
         assertNull(result);
       } finally {
-        System.clearProperty(JiraConfig.PROP_USERNAME);
+        System.clearProperty(JiraConfig.PROP_BOT_EMAIL);
+      }
+      assertTrue(capture.toString().contains("\"status\":\"ok\""));
+    }
+
+    @Test
+    @DisplayName("assignee_reset action with no authorEmail still triggers reset via authorName "
+        + "(same private-email fallback as the standard webhook path)")
+    void assigneeResetFromBotWithNoEmailFallsBackToAuthorName() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = mock(HttpServletRequest.class);
+      when(request.getParameter("issueKey")).thenReturn("SUP-11");
+      when(request.getParameter("action")).thenReturn("assignee_reset");
+      when(request.getParameter("authorName")).thenReturn("Information Etendo");
+
+      try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        mockCriteria(obDal, SupportConversation.class, List.of(mockConversation("conv-1")));
+
+        SupportJiraWebhookHandler.JiraWebhookComment result =
+            SupportJiraWebhookHandler.parseAutomationJiraWebhook(request, response);
+
+        assertNull(result);
       }
       assertTrue(capture.toString().contains("\"status\":\"ok\""));
     }

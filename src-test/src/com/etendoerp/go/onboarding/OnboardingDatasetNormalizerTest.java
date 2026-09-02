@@ -310,16 +310,22 @@ public class OnboardingDatasetNormalizerTest {
   }
 
   /**
-   * ETP-4245 (TC-38): verifies the accounting schema ships fully predefined for posting — Allow
-   * Negatives and Centrally Maintained both {@code Y} — instead of the previous {@code N}/{@code N}
-   * defaults, so a new tenant never needs manual configuration of these flags.
+   * ETP-4245 (TC-38) originally asserted the accounting schema shipped fully predefined for
+   * posting — Allow Negatives AND Centrally Maintained both {@code Y}.
+   *
+   * <p><b>2026-08-28 (ETP-4947, R29):</b> the {@code allownegative=Y} half of that assertion is
+   * REVERSED here — TC-38 is being retired/superseded in Confluence by the ticket owner, and
+   * ETP-4947 is now the accepted requirement: {@code C_ACCTSCHEMA.AllowNegative} must default to
+   * {@code N} (unchecked), remaining user-editable. {@code IsCentrallyMaintained} is explicitly OUT
+   * of scope for ETP-4947 and stays {@code Y}, unchanged, per the original A3 assertion.</p>
    */
   @Test
-  public void testNormalizerAccountingSchemaIsPredefinedForPosting() {
+  public void testNormalizerAccountingSchemaAllowNegativeDefaultsToNo() {
     String xml = pathBackedNormalizer().buildDatasetXml();
 
-    assertTrue("allownegative must be Y", xml.contains("<allownegative>Y</allownegative>"));
-    assertTrue("iscentrallymaintained must be Y",
+    assertTrue("allownegative must be N (ETP-4947 reverts ETP-4245/A3's Y default)",
+        xml.contains("<allownegative>N</allownegative>"));
+    assertTrue("iscentrallymaintained must remain Y (out of scope for ETP-4947)",
         xml.contains("<iscentrallymaintained>Y</iscentrallymaintained>"));
   }
 

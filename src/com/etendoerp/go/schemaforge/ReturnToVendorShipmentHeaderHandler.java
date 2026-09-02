@@ -48,6 +48,8 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  *
  * <p>Injects {@code sourceReceiptDocNo}, {@code sourceReceipts}, {@code returnInvoices},
  * {@code linesCount} and {@code invoiceStatus} into every GET response via {@code afterHandle}.
+ * {@code issuerOrg} is additionally injected on detail GETs only (ETP-4939), via the shared
+ * {@link NeoHandlerUtils#enrichIssuerOrg}, also used by {@link GoodsShipmentHeaderHandler}.
  */
 @Named("returnToVendorShipmentHeaderHandler")
 public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
@@ -373,6 +375,11 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
         ReturnShipmentUtils.enrichReturnRecord(rec, id, receiptsMap,
             FIELD_SOURCE_RECEIPTS, FIELD_SOURCE_RECEIPT_DOC_NO,
             returnInvoicesMap, lineCountMap, invoiceStatusMap);
+        // ETP-4939: only enrich issuerOrg on a detail GET (single record), never on a
+        // grid load — otherwise this fires one extra query per row (N+1).
+        if (id != null && context.getRecordId() != null) {
+          NeoHandlerUtils.enrichIssuerOrg(rec, id);
+        }
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {

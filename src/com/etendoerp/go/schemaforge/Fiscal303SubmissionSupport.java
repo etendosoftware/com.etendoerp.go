@@ -48,6 +48,7 @@ import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.erpCommon.ad_reports.OBTL_TaxReport_I;
 
 import com.etendoerp.go.schemaforge.data.FiscalDecl;
+import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 
 /**
  * Handles the AEAT 303 telematic submission entities — {@code GET/POST /neo/fiscal303/generate}
@@ -291,7 +292,7 @@ class Fiscal303SubmissionSupport {
           + ")", e);
       writeJson(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           owner.buildFailureJson(testMode, ERR_SUBMISSION_FAILED,
-              "Could not generate the declaration file: " + e.getMessage()));
+              NeoMessageTranslator.safeParseTranslation(e.getMessage())));
       return;
     }
 
@@ -318,7 +319,8 @@ class Fiscal303SubmissionSupport {
     } catch (OBException e) {
       AbstractFiscalHandler.log.error("AEAT 303 submission failed (decl=" + declId + ")", e);
       writeJson(response, HttpServletResponse.SC_BAD_GATEWAY,
-          owner.buildFailureJson(testMode, ERR_SUBMISSION_FAILED, e.getMessage()));
+          owner.buildFailureJson(testMode, ERR_SUBMISSION_FAILED,
+              NeoMessageTranslator.safeParseTranslation(e.getMessage())));
       return;
     }
 

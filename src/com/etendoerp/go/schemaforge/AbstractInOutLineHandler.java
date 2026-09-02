@@ -86,6 +86,23 @@ public abstract class AbstractInOutLineHandler implements NeoHandler {
         }
       }
     }
+    // ETP-4863: default storageBin to the header warehouse's own locator on create. Lives here
+    // (not per-subclass) because both Goods Shipment and Goods Receipt need it identically —
+    // see NeoHandlerUtils#injectDefaultLocatorOnPost's Javadoc for the full rationale.
+    NeoHandlerUtils.injectDefaultLocatorOnPost(context, log);
+    return null;
+  }
+
+  /**
+   * Strips the stock-derived {@code movementQuantity} update that the classic
+   * {@code SL_InOutLine_Product} callout echoes back on product selection (ETP-4671 for Goods
+   * Receipt, extended to Goods Shipment by ETP-5062 — see
+   * {@link NeoHandlerUtils#stripStockDerivedMovementQuantity}'s Javadoc for the full rationale).
+   * Lives here rather than per-subclass since both entities need it identically.
+   */
+  @Override
+  public NeoResponse afterCallout(NeoContext context) {
+    NeoHandlerUtils.stripStockDerivedMovementQuantity(context, log);
     return null;
   }
 

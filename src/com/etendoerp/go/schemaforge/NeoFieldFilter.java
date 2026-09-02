@@ -65,6 +65,11 @@ public class NeoFieldFilter {
    * <p>Read side only, deliberately: this set is NOT unioned into {@code includedFields}, because
    * that same set gates {@link #filterCreateRequest}, and a client must never be able to write
    * its own {@code updated}.
+   *
+   * <p>Two read-side consumers, and both must stay in agreement: {@link #filterGetResponse} keeps
+   * these keys in the payload, and {@link #emittableResponseKeys} declares them available so the
+   * MCP field-projection validator does not call a served field unknown (ETP-5073). Anything added
+   * here is therefore automatically honest on both, which is why the literal lives in one place.
    */
   private static final Set<String> ALWAYS_READABLE_KEYS = Set.of("updated");
 
@@ -422,6 +427,15 @@ public class NeoFieldFilter {
    * undefined on an empty result set, which is exactly when a typo is most expensive to miss
    * (IMP-18). Read-only: the returned set is a copy.
    *
+   * <p><b>{@link #ALWAYS_READABLE_KEYS} is part of the answer</b> (ETP-5073). Those keys are what
+   * {@link #filterGetResponse} keeps on top of {@code includedFields}, so they genuinely ARE
+   * emittable; leaving them out made the MCP projection validator report {@code updated} in
+   * {@code unknownFields} while the very same response carried its value — a self-contradiction
+   * that teaches the consuming agent to distrust the array or to stop asking for a field that
+   * works. Unioned HERE, on the read side only, and never into {@code includedFields} or
+   * {@code writableFields}: {@code ALWAYS_READABLE_KEYS} also gates {@link #filterCreateRequest},
+   * and a client must still never be able to write its own {@code updated}.
+   *
    * @return {@link Optional#of} the emittable response keys, or {@link Optional#empty()} when this
    *     filter is inactive (no {@code ETGO_SF_FIELD} config), in which case the response is
    *     unfiltered and the caller must fall back to the DAL entity's own property list rather than
@@ -435,6 +449,8 @@ public class NeoFieldFilter {
     for (String propName : includedFields) {
       keys.add(propNameToApiKey.getOrDefault(propName, propName));
     }
+    // Audit keys served regardless of ETGO_SF_FIELD — no rename applies, they have no SFField row.
+    keys.addAll(ALWAYS_READABLE_KEYS);
     return Optional.of(keys);
   }
 
@@ -479,6 +495,60 @@ public class NeoFieldFilter {
       if (rejectableOnCreateFields.contains(propName)) {
         throw new ReadOnlyFieldRejectedException(key);
       }
+    }
+  }
+
+  /**
+   * Strips fields from a callout response that {@link #filterCreateRequest} would reject as
+   * read-only-on-create for this entity (see {@link #rejectableOnCreateFields}, IMP-28,
+   * ETP-4917).
+   *
+   * <p>A legacy Etendo callout answers with every field it recomputed, not just the one the
+   * client changed — e.g. {@code SL_JournalLineAmt} answers both the foreign-currency amount the
+   * user typed AND the derived accounted-amount columns ({@code AmtAcctDr}/{@code AmtAcctCr},
+   * whose DAL property names happen to literally be {@code debit}/{@code credit}). The frontend
+   * merges the whole callout response into local form state and later spreads that state into a
+   * create request, so an echoed read-only field silently becomes a client-supplied value on the
+   * next POST — which {@link #filterCreateRequest} then rejects with a 422 (ETP-4917).
+   *
+   * <p>Safe to apply unconditionally, whether the callout precedes a POST (create) or a
+   * PUT/PATCH (update) of an already-existing record: {@link #rejectableOnCreateFields} is by
+   * construction disjoint from {@link #writableFields} (see its javadoc and the IMP-37
+   * subtraction at the end of {@link #forEntity}), so every key this method removes is one
+   * {@link #filterWriteRequest} would have silently dropped anyway on an update. There is no
+   * separate "reject on update" set to consult instead — this is the correct rejection set for
+   * both write paths that can follow a callout.
+   *
+   * <p>Does not touch the callout's own server-side computation — {@link NeoCalloutService} has
+   * already computed and cached whatever it needed before this runs; only the JSON handed back
+   * to the client is affected.
+   *
+   * @param calloutBody
+   *     the callout response body ({@code updates}/{@code combos}/{@code messages}), modified
+   *     in place
+   * @return the same object, for chaining
+   */
+  public JSONObject filterCalloutResponse(JSONObject calloutBody) {
+    if (!active || calloutBody == null || rejectableOnCreateFields == null
+        || rejectableOnCreateFields.isEmpty()) {
+      return calloutBody;
+    }
+    stripRejectableKeys(calloutBody.optJSONObject("updates"));
+    stripRejectableKeys(calloutBody.optJSONObject("combos"));
+    return calloutBody;
+  }
+
+  /**
+   * Removes every key in {@link #rejectableOnCreateFields} from the given callout response
+   * section ({@code updates} or {@code combos}), if present.
+   */
+  @SuppressWarnings("unchecked")
+  private void stripRejectableKeys(JSONObject section) {
+    if (section == null) {
+      return;
+    }
+    for (String field : rejectableOnCreateFields) {
+      section.remove(field);
     }
   }
 

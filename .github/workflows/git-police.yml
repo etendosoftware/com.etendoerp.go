@@ -7,7 +7,7 @@ on:
 jobs:
   git-police:
     name: Git Police
-    if: github.head_ref != 'develop'
+    if: github.head_ref != 'main'
     runs-on: ubuntu-latest
     env:
       PR_ID: ${{ github.event.pull_request.number }}
