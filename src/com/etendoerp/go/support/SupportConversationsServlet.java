@@ -461,21 +461,7 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       // there is no forward-direction webhook at all today. Poll the real assignee on every
       // message that has a linked ticket so both kinds of manual reassignment are caught on the
       // very next message regardless of what Jira Automation is or isn't wired up to do.
-      String jiraKey = conv.getJiraTicketKey();
-      if (jiraKey != null && !jiraKey.isEmpty()) {
-        String[] assignee = SupportIntegrationClient.getTicketAssignee(jiraKey);
-        boolean assigneeKnown = assignee[0] != null || assignee[1] != null;
-        boolean assigneeIsBot = SupportJiraWebhookHandler.isBotIdentity(assignee[0], assignee[1]);
-        if (Boolean.TRUE.equals(conv.isHumanTakeover())) {
-          if (assigneeIsBot) {
-            conv.setHumanTakeover(false);
-            OBDal.getInstance().save(conv);
-          }
-        } else if (assigneeKnown && !assigneeIsBot) {
-          conv.setHumanTakeover(true);
-          OBDal.getInstance().save(conv);
-        }
-      }
+      syncHumanTakeoverFromJira(conv);
 
       // If ticket is assigned to a human agent, block AI response
       if (Boolean.TRUE.equals(conv.isHumanTakeover())) {
@@ -536,6 +522,29 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
     } finally {
       restoreTenantContext(previous);
+    }
+  }
+
+  /**
+   * Polls the linked Jira ticket's real current assignee and reconciles {@code humanTakeover}
+   * against it, in either direction — see the call site in {@link #handleSendMessage} for why
+   * this can't rely on webhooks alone. No-op when there is no linked ticket.
+   */
+  private void syncHumanTakeoverFromJira(SupportConversation conv) {
+    String jiraKey = conv.getJiraTicketKey();
+    if (jiraKey == null || jiraKey.isEmpty()) return;
+
+    String[] assignee = SupportIntegrationClient.getTicketAssignee(jiraKey);
+    boolean assigneeKnown = assignee[0] != null || assignee[1] != null;
+    boolean assigneeIsBot = SupportJiraWebhookHandler.isBotIdentity(assignee[0], assignee[1]);
+    if (Boolean.TRUE.equals(conv.isHumanTakeover())) {
+      if (assigneeIsBot) {
+        conv.setHumanTakeover(false);
+        OBDal.getInstance().save(conv);
+      }
+    } else if (assigneeKnown && !assigneeIsBot) {
+      conv.setHumanTakeover(true);
+      OBDal.getInstance().save(conv);
     }
   }
 

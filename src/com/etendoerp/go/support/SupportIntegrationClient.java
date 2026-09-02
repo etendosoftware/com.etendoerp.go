@@ -49,6 +49,8 @@ final class SupportIntegrationClient {
   private static final String HEADER_CONTENT_TYPE = "Content-Type";
   private static final String HEADER_AUTHORIZATION = "Authorization";
   private static final String CONTENT_TYPE_JSON = "application/json";
+  private static final String JIRA_ISSUE_PATH = "/rest/api/3/issue/";
+  private static final String AUTH_BASIC_PREFIX = "Basic ";
 
   // Attachment mime types eligible to be forwarded to the ADK model as real inlineData
   // (as opposed to a text placeholder). Scope is images and documents only — no
@@ -318,9 +320,9 @@ final class SupportIntegrationClient {
           "}";
 
       HttpRequest req = HttpRequest.newBuilder()
-          .uri(URI.create(config.getUrl() + "/rest/api/3/issue/" + jiraKey + "/comment"))
+          .uri(URI.create(config.getUrl() + JIRA_ISSUE_PATH + jiraKey + "/comment"))
           .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_JSON)
-          .header(HEADER_AUTHORIZATION, "Basic " + credentials)
+          .header(HEADER_AUTHORIZATION, AUTH_BASIC_PREFIX + credentials)
           .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
           .timeout(Duration.ofSeconds(10))
           .build();
@@ -380,9 +382,9 @@ final class SupportIntegrationClient {
       String payload = "{\"update\":{\"labels\":[{\"add\":\"csat-" + score + "\"}]}}";
 
       HttpRequest req = HttpRequest.newBuilder()
-          .uri(URI.create(config.getUrl() + "/rest/api/3/issue/" + jiraKey))
+          .uri(URI.create(config.getUrl() + JIRA_ISSUE_PATH + jiraKey))
           .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_JSON)
-          .header(HEADER_AUTHORIZATION, "Basic " + credentials)
+          .header(HEADER_AUTHORIZATION, AUTH_BASIC_PREFIX + credentials)
           .method("PUT", HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
           .timeout(Duration.ofSeconds(10))
           .build();
@@ -421,8 +423,8 @@ final class SupportIntegrationClient {
     try {
       String credentials = config.basicAuthCredentials();
       HttpRequest req = HttpRequest.newBuilder()
-          .uri(URI.create(config.getUrl() + "/rest/api/3/issue/" + jiraKey + "?fields=assignee"))
-          .header(HEADER_AUTHORIZATION, "Basic " + credentials)
+          .uri(URI.create(config.getUrl() + JIRA_ISSUE_PATH + jiraKey + "?fields=assignee"))
+          .header(HEADER_AUTHORIZATION, AUTH_BASIC_PREFIX + credentials)
           .timeout(Duration.ofSeconds(5))
           .GET()
           .build();
