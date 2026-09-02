@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -511,6 +512,38 @@ class AccountIdentityDalHelperTest {
       when(byAccountQuery.list()).thenReturn(Collections.singletonList(row));
 
       assertSame(row, AccountIdentityDalHelper.soleIdentityOf(account));
+    }
+
+    @Test
+    @DisplayName("soleIdentityOf refuses to guess when the account has more than one identity")
+    void soleIdentityOfRejectsSeveralIdentities() {
+      Account account = bareAccount();
+      AccountIdentity newest = existingRow("apple", "apple-sub", account);
+      AccountIdentity oldest = existingRow(PROVIDER, SUBJECT, account);
+      when(byAccountQuery.list()).thenReturn(java.util.Arrays.asList(newest, oldest));
+
+      IllegalStateException failure = assertThrows(IllegalStateException.class,
+          () -> AccountIdentityDalHelper.soleIdentityOf(account));
+
+      assertTrue(failure.getMessage().contains("2"),
+          "the message must carry the identity count, was: " + failure.getMessage());
+      verify(obDal, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("soleIdentityOf reports the actual identity count, not a fixed one")
+    void soleIdentityOfReportsTheActualCount() {
+      Account account = bareAccount();
+      AccountIdentity apple = existingRow("apple", "apple-sub", account);
+      AccountIdentity microsoft = existingRow("microsoft", "ms-sub", account);
+      AccountIdentity google = existingRow(PROVIDER, SUBJECT, account);
+      when(byAccountQuery.list()).thenReturn(java.util.Arrays.asList(apple, microsoft, google));
+
+      IllegalStateException failure = assertThrows(IllegalStateException.class,
+          () -> AccountIdentityDalHelper.soleIdentityOf(account));
+
+      assertTrue(failure.getMessage().contains("3"),
+          "the message must carry the identity count, was: " + failure.getMessage());
     }
 
     @Test

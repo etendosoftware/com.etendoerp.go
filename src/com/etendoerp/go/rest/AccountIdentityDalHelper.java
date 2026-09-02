@@ -216,14 +216,33 @@ final class AccountIdentityDalHelper {
    *
    * <p>Valid only while an account is limited to one identity, which
    * {@link #linkIfCompatible} still enforces. Once explicit linking allows a second, every caller
-   * of this method has to name the identity it means instead — hence the name, which is meant to
-   * stop compiling honestly rather than quietly return the wrong row.
+   * has to name the identity it means instead, because there is no such thing as "the" identity of
+   * an account with two.
+   *
+   * <p>This used to claim the method's <em>name</em> would stop the build when that day came. A
+   * name stops no build. What it would actually have done is keep compiling and keep returning
+   * {@code get(0)} — and since {@link #queryIdentitiesFor} orders by creation date descending,
+   * that is the most recently linked identity, not the one the caller is holding an assertion for.
+   * The single caller records a sign-in, so an account with Google linked in January and Apple in
+   * March would sign in through Google and have the login written onto the Apple row: no
+   * exception, no log, just the wrong row, surfacing later as a "last access" line that names the
+   * wrong provider.
+   *
+   * <p>Hence the guard below. It is unreachable today and meant to stay that way; its whole job is
+   * to fail loudly on the first sign-in after the one-identity rule is relaxed, instead of
+   * corrupting a row per login until somebody notices.
    *
    * @param account account to read, may be null
    * @return its single identity, or null
+   * @throws IllegalStateException if the account somehow has more than one identity
    */
   static AccountIdentity soleIdentityOf(Account account) {
     List<AccountIdentity> identities = identitiesFor(account);
+    if (identities.size() > 1) {
+      throw new IllegalStateException(
+          "soleIdentityOf: account has " + identities.size()
+              + " identities; the caller must name the one it means");
+    }
     return identities.isEmpty() ? null : identities.get(0);
   }
 
