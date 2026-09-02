@@ -349,7 +349,7 @@ public class ToolRegistry {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("topic", stringProp(
         "Term/topic to search in the Etendo Go docs (e.g. 'finance', 'payment')."));
-    props.put("tokens", intProp(
+    props.put("tokens", numericProp("integer",
         "Approximate max size of the returned docs (default 5000, clamped to 500-20000)."));
     props.put("type", stringProp(
         "Response format: 'txt' (default) or 'json'."));
@@ -442,9 +442,9 @@ public class ToolRegistry {
         stringProp("Natural-language search query"));
     props.put("targets", stringArrayProp(
         "DB Extended search-target keys to query"));
-    props.put("topK", intProp("Maximum results (default 10, maximum 50)"));
-    props.put("minScore", numberProp("Minimum similarity score from 0 to 1 (default 0.60)"));
-    props.put("maxScore", numberProp("Maximum similarity score from 0 to 1 (default 1.0)"));
+    props.put("topK", numericProp("integer", "Maximum results (default 10, maximum 50)"));
+    props.put("minScore", numericProp("number", "Minimum similarity score from 0 to 1 (default 0.60)"));
+    props.put("maxScore", numericProp("number", "Maximum similarity score from 0 to 1 (default 1.0)"));
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_VECTOR_SEARCH,
         "Search indexed business records by semantic similarity using DB Extended. "
@@ -467,8 +467,8 @@ public class ToolRegistry {
             + "(3) named business filter {\"status\": \"<name>\"} — the spec's own hand-authored "
             + "statuses (e.g. \"pending\", \"partial\", \"completed\"). Call neo_schema to see the "
             + "named filters available for a given spec; an unknown name returns the valid list."));
-    props.put("limit", intProp("Maximum number of records to return (default 100)"));
-    props.put("offset", intProp("Number of records to skip for pagination"));
+    props.put("limit", numericProp("integer", "Maximum number of records to return (default 100)"));
+    props.put("offset", numericProp("integer", "Number of records to skip for pagination"));
     props.put("orderBy", stringProp("Column name to sort by, prefix with '-' for descending"));
     props.put(McpFieldProjection.PARAM_FIELDS, stringArrayProp(
         "Optional projection: return only these field names per row (e.g. "
@@ -823,7 +823,7 @@ public class ToolRegistry {
     Map<String, Object> paramProps = buildProcessParamSchema(spec);
 
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put(McpConstants.PARAM_PARAMETERS, objectPropWithProperties("Process input parameters", paramProps));
+    props.put(McpConstants.PARAM_PARAMETERS, objectProp("Process input parameters", paramProps));
 
     return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()));
   }
@@ -837,7 +837,7 @@ public class ToolRegistry {
    * <p>The parameters used to come from {@code buildProcessParamSchema}, which emits a property
    * only for a field backed by an {@code AD_Column}. Every active report spec has zero
    * {@code ETGO_SF_FIELD} rows — report inputs are not AD columns — so that produced an empty map
-   * and, because {@code objectPropWithProperties} omits the key when the map is empty, a bare
+   * and, because {@code objectProp} omits the key when the map is empty, a bare
    * {@code parameters:{type:"object"}} with no properties and no {@code required} list. An agent
    * had to guess {@code dateFrom} and its date shape, then learn from a 400 that it had guessed
    * wrong. The handler declares the truth, so the schema is built from that instead.</p>
@@ -855,7 +855,7 @@ public class ToolRegistry {
       paramProps.put(param.getName(), reportParamProp(param));
     }
 
-    Map<String, Object> parametersProp = objectPropWithProperties("Report input parameters",
+    Map<String, Object> parametersProp = objectProp("Report input parameters",
         paramProps);
     // An empty `properties` map is itself a statement — "this report takes no inputs" — where an
     // absent one reads as "any object", which is the very ambiguity IMP-19 removes. The shared
@@ -897,7 +897,7 @@ public class ToolRegistry {
       return prop;
     }
     if (NeoReportParam.TYPE_INTEGER.equals(param.getType())) {
-      return intProp(description);
+      return numericProp("integer", description);
     }
     if (NeoReportParam.TYPE_BOOLEAN.equals(param.getType())) {
       Map<String, Object> prop = new LinkedHashMap<>();
@@ -974,24 +974,20 @@ public class ToolRegistry {
     return prop;
   }
 
-  private Map<String, Object> intProp(String description) {
+  private Map<String, Object> numericProp(String type, String description) {
     Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", "integer");
+    prop.put("type", type);
     prop.put(McpConstants.KEY_DESCRIPTION, description);
     return prop;
   }
 
-  private Map<String, Object> numberProp(String description) {
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", "number");
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    return prop;
-  }
-
-  private Map<String, Object> objectProp(String description) {
+  private Map<String, Object> objectProp(String description, Map<String, Object>... nestedProps) {
     Map<String, Object> prop = new LinkedHashMap<>();
     prop.put("type", McpConstants.TYPE_OBJECT);
     prop.put(McpConstants.KEY_DESCRIPTION, description);
+    if (nestedProps.length > 0 && nestedProps[0] != null && !nestedProps[0].isEmpty()) {
+      prop.put(McpConstants.KEY_PROPERTIES, nestedProps[0]);
+    }
     return prop;
   }
 
@@ -1006,16 +1002,6 @@ public class ToolRegistry {
     return prop;
   }
 
-  private Map<String, Object> objectPropWithProperties(String description,
-      Map<String, Object> nestedProps) {
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", McpConstants.TYPE_OBJECT);
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    if (nestedProps != null && !nestedProps.isEmpty()) {
-      prop.put(McpConstants.KEY_PROPERTIES, nestedProps);
-    }
-    return prop;
-  }
 
   // ── Naming helpers ─────────────────────────────────────────────────────
 

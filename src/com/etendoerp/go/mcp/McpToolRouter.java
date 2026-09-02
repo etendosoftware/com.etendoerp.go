@@ -188,29 +188,14 @@ public class McpToolRouter {
   /** Route semantic search through the same authenticated DB Extended contract as REST. */
   private JSONObject handleVectorSearch(JSONObject arguments) {
     String query = arguments == null ? null : arguments.optString(McpConstants.PARAM_QUERY, null);
-    String targets = joinStringArray(arguments == null ? null : arguments.optJSONArray("targets"));
+    String targets = McpArgumentUtils.joinStringArray(
+        arguments == null ? null : arguments.optJSONArray("targets"));
     NeoResponse response = new NeoVectorSearchEndpoint().handle(query, null, targets,
-        optionalString(arguments, "topK"), optionalString(arguments, "minScore"),
-        optionalString(arguments, "maxScore"), null);
+        McpArgumentUtils.optionalString(arguments, "topK"),
+        McpArgumentUtils.optionalString(arguments, "minScore"),
+        McpArgumentUtils.optionalString(arguments, "maxScore"), null);
     String body = response.getBody() == null ? "{}" : response.getBody().toString();
     return response.getHttpStatus() >= 400 ? wrapAsErrorContent(body) : wrapAsTextContent(body);
-  }
-
-  private static String optionalString(JSONObject arguments, String key) {
-    if (arguments == null || !arguments.has(key) || arguments.isNull(key)) return null;
-    return String.valueOf(arguments.opt(key));
-  }
-
-  private static String joinStringArray(JSONArray values) {
-    if (values == null) return null;
-    StringBuilder joined = new StringBuilder();
-    for (int i = 0; i < values.length(); i++) {
-      String value = values.optString(i, null);
-      if (StringUtils.isBlank(value)) continue;
-      if (joined.length() > 0) joined.append(',');
-      joined.append(value);
-    }
-    return joined.toString();
   }
 
   /**
