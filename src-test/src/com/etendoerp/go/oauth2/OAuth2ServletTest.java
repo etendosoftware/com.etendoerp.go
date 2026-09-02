@@ -45,6 +45,7 @@ import java.util.Base64;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
+import javax.servlet.http.Cookie;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -54,6 +55,9 @@ import org.mockito.MockedStatic;
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionSecurity;
+import com.etendoerp.go.session.GoSessionService;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 import org.openbravo.dal.service.OBDal;
@@ -1912,6 +1916,51 @@ public class OAuth2ServletTest {
     Long expiresIn = runAuthorizeThenTokenExchange("60");
     assertNotNull(expiresIn);
     assertEquals(300L, expiresIn.longValue());
+  }
+
+  @Test
+  public void authorizePostAcceptsCookieSessionWithoutJwtInBrowserPayload() throws Exception {
+    GoSessionService sessionService = mock(GoSessionService.class);
+    GoSessionRecord session = new GoSessionRecord();
+    session.setUserId("user-cookie");
+    session.setRoleId("role-cookie");
+    session.setCsrfToken("csrf-cookie");
+    when(sessionService.resolve("session-cookie")).thenReturn(session);
+    OAuth2Servlet cookieServlet = new OAuth2Servlet(sessionService);
+
+    String redirectUri = "https://example.com/callback";
+    HttpServletRequest req = mockRequest("POST", "/authorize");
+    when(req.getContentType()).thenReturn("application/x-www-form-urlencoded");
+    when(req.getParameter("client_id")).thenReturn(TEST_CLIENT_ID);
+    when(req.getParameter("redirect_uri")).thenReturn(redirectUri);
+    when(req.getParameter("code_challenge")).thenReturn("challenge");
+    when(req.getParameter("scope")).thenReturn("neo:read");
+    when(req.getCookies()).thenReturn(new Cookie[] {
+        new Cookie(GoSessionSecurity.COOKIE_NAME, "session-cookie") });
+    when(req.getHeader(GoSessionSecurity.CSRF_HEADER)).thenReturn("csrf-cookie");
+    when(req.getHeader("Origin")).thenReturn("https://app.example.test");
+    when(req.getRequestURL()).thenReturn(
+        new StringBuffer("https://app.example.test/oauth2/authorize"));
+
+    ResultSet clientRs = mock(ResultSet.class);
+    when(clientRs.next()).thenReturn(true);
+    when(clientRs.getString("etgo_oauth2_client_id")).thenReturn(TEST_CLIENT_DB_ID);
+    when(clientRs.getString("scopes")).thenReturn("neo:read");
+    when(clientRs.getString("redirect_uris")).thenReturn("[\"" + redirectUri + "\"]");
+    PreparedStatement findClientPs = mock(PreparedStatement.class);
+    when(findClientPs.executeQuery()).thenReturn(clientRs);
+    Connection conn = mock(Connection.class);
+    when(conn.prepareStatement(anyString())).thenReturn(findClientPs);
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.getConnection()).thenReturn(conn);
+
+    ResponseCapture response = mockResponse();
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      cookieServlet.doPost(req, response.response);
+    }
+
+    assertTrue(new JSONObject(response.body()).getString("redirect_url").contains("code="));
   }
 
   /**
