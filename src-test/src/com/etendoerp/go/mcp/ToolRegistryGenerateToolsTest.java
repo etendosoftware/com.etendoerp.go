@@ -1597,6 +1597,55 @@ class ToolRegistryGenerateToolsTest {
       }
     }
 
+    @Test
+    @DisplayName("write catalog hides denied sales routes while keeping authorized purchase routes")
+    void writeCatalogUsesWindowWriteAccessForSalesAndPurchase() {
+      SFSpec sales = createWindowSpecWithWindow("sales-quotation", "sales-window");
+      SFSpec purchase = createWindowSpecWithWindow("purchase-order", "purchase-window");
+      mockSpecCriteria(List.of(sales, purchase));
+
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(sales, "GET"))
+          .thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(purchase, "GET"))
+          .thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(sales, "POST"))
+          .thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(sales, "PUT"))
+          .thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(sales, "DELETE"))
+          .thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(purchase, "POST"))
+          .thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(purchase, "PUT"))
+          .thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(purchase, "DELETE"))
+          .thenReturn(true);
+
+      try (MockedStatic<McpToolRouterSupport> supportMock = mockStatic(McpToolRouterSupport.class)) {
+        supportMock.when(() -> McpToolRouterSupport.isCatalogExcludedSpec(any())).thenReturn(false);
+        for (SFSpec spec : List.of(sales, purchase)) {
+          supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(spec, "POST"))
+              .thenReturn(true);
+          supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(spec, "PUT"))
+              .thenReturn(true);
+          supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(spec, "DELETE"))
+              .thenReturn(true);
+        }
+
+        List<McpToolDefinition> tools =
+            registry.generateTools(scopesOf("neo:read", "neo:write"));
+
+        assertTrue(specEnumOf(tools, "neo_list").contains("sales-quotation"));
+        assertTrue(specEnumOf(tools, "neo_list").contains("purchase-order"));
+        assertFalse(specEnumOf(tools, "neo_create").contains("sales-quotation"));
+        assertFalse(specEnumOf(tools, "neo_update").contains("sales-quotation"));
+        assertFalse(specEnumOf(tools, "neo_delete").contains("sales-quotation"));
+        assertTrue(specEnumOf(tools, "neo_create").contains("purchase-order"));
+        assertTrue(specEnumOf(tools, "neo_update").contains("purchase-order"));
+        assertTrue(specEnumOf(tools, "neo_delete").contains("purchase-order"));
+      }
+    }
+
     /**
      * The {@code buildActionTool} judgement call (ETP-4254): button actions are served by the
      * {@code /action/*} sub-endpoint, which is deliberately NOT gated by the
