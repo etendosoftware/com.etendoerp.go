@@ -1593,10 +1593,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // that case, so it is logged as an error naming the account — "paid but demo" is the
       // symptom ETP-4966 was reported as, and this line is what makes it searchable instead of
       // indistinguishable from a marker that was never attempted.
-      if (paidUpgrade && !tenantPlanService.markProductive(clientId, adminContext.starOrgId)) {
-        log.error("Paid environment '{}' (client {}) for account {} could not be marked as plan "
-            + "'{}' and will read back as free", onboardingRequest.clientName, clientId,
-            maskEmail(accountEmail), TenantPlanService.PLAN_PRODUCTIVE);
+      if (paidUpgrade) {
+        if (!tenantPlanService.markProductive(clientId, adminContext.starOrgId)) {
+          log.error("Paid environment '{}' (client {}) for account {} could not be marked as plan "
+              + "'{}' and will read back as free", onboardingRequest.clientName, clientId,
+              maskEmail(accountEmail), TenantPlanService.PLAN_PRODUCTIVE);
+        } else {
+          // ETP-5117: a tenant converting to productive must stop overriding the System-level
+          // ETSG_ForceTestMode default (e.g. a tenant that started as Demo and got its own row
+          // via OnboardingForceTestModeService). Same best-effort philosophy as markProductive
+          // itself just above — commercial/fiscal-config metadata, never allowed to abort an
+          // otherwise-successful paid signup. See OnboardingForceTestModeService's own javadoc
+          // ("The reverse direction") for why this needs its own service call, not a one-liner.
+          try {
+            onboardingForceTestModeService.revertTestModeForProductiveTenant(clientId);
+          } catch (RuntimeException e) {
+            log.error("Could not revert ETSG_ForceTestMode for now-productive tenant '{}': {}",
+                clientId, e.getMessage(), e);
+          }
+        }
       }
 
       // The returned flag (created vs. already-existing) is no longer used to gate downstream

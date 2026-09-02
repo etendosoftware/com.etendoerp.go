@@ -92,6 +92,24 @@ import com.etendoerp.go.payment.TenantPlanService;
  * pre-existing config rows' own columns, since a corrective fix cannot rely on the update-cascade
  * either (a data-fix runs as plain SQL, which never goes through Hibernate/DAL at all, so it can
  * never fire any of these observers).</p>
+ *
+ * <h3>The reverse direction: {@link #revertTestModeForProductiveTenant}</h3>
+ * When a Demo tenant later converts to productive ({@code TenantPlanService#markProductive}), its
+ * own {@code ETSG_ForceTestMode} row (if any) must stop overriding the System default —
+ * <b>removed</b>, never left sitting at {@code 'N'} (a value-flip would still be a real,
+ * permanent per-client override; the goal is to fall back to inheriting the System row).
+ * Confirmed by reading all three handlers' {@code dispatch}/{@code handleEvent} methods: none of
+ * them declares an {@code EntityDeleteEvent} observer at all, so a DELETE never fires any
+ * cascade — safe on its own, but it would leave already-existing config rows silently stuck at
+ * whatever they last read. And none of their cascade branches checks {@code IsActive} — only the
+ * row's current {@code SearchKey} (VALUE) — so a plain deactivate-only flip (leaving VALUE='Y')
+ * would still fire the cascade (any update on the {@code Preference} entity does) but would keep
+ * pushing test mode, since the value it reads is unchanged. The correct sequence is therefore
+ * <b>two DAL writes</b>: (1) flip {@code SearchKey} to {@code 'N'} and save — this update fires
+ * the real cascade, correctly reverting every existing config row to production; (2) then remove
+ * the row entirely, which fires nothing (no observer reacts to delete) and leaves no override
+ * behind. Lockstep corrective twin for already-productive tenants stuck with a stale row: {@code
+ * 20260901T130000Z__R32-revert-test-mode-productive-tenants.sql}.
  */
 public class OnboardingForceTestModeService {
 
@@ -101,6 +119,7 @@ public class OnboardingForceTestModeService {
   public static final String FORCE_TEST_MODE_PROPERTY = "ETSG_ForceTestMode";
 
   private static final String YES = "Y";
+  private static final String NO = "N";
 
   private final TenantPlanService tenantPlanService;
 
@@ -166,11 +185,58 @@ public class OnboardingForceTestModeService {
   }
 
   /**
+   * Removes {@code clientId}'s own {@code ETSG_ForceTestMode} row, if any, so it falls back to
+   * inheriting the System-level default (real submissions) — called right after a successful
+   * {@code TenantPlanService#markProductive}. Idempotent: a tenant with no own row is a no-op.
+   *
+   * <p>See the class javadoc's "The reverse direction" section for why this is a two-step DAL
+   * write (flip to {@code 'N'} and save, THEN remove) rather than a single delete or a
+   * deactivate-only flip.
+   *
+   * @param clientId the tenant that was just marked productive
+   */
+  public void revertTestModeForProductiveTenant(String clientId) {
+    if (StringUtils.isBlank(clientId)) {
+      throw new OBException("Cannot revert test mode: no client id given");
+    }
+
+    Preference preference = findOwnForceTestModeRow(clientId);
+    if (preference == null) {
+      log.info("Tenant '{}' has no own ETSG_ForceTestMode row to revert — no-op", clientId);
+      return;
+    }
+
+    // Step 1: flip VALUE to 'N' via a normal DAL save. This UPDATE fires
+    // ForceTestModeEventHandler's cascade (and its SII/TicketBAI siblings), correctly reverting
+    // every already-existing VerifactuConfig/AEATSIIConfig/TbaiConfig row for this client back to
+    // production, BEFORE the row disappears.
+    preference.setSearchKey(NO);
+    OBDal.getInstance().save(preference);
+    OBDal.getInstance().flush();
+
+    // Step 2: remove the row entirely. None of the three handlers declares an EntityDeleteEvent
+    // observer, so this fires nothing — safe — and leaves no permanent client-scoped override
+    // behind: a future NEW config row's Observer B lookup falls through to the System default.
+    OBDal.getInstance().remove(preference);
+    OBDal.getInstance().flush();
+
+    log.info("Reverted ETSG_ForceTestMode for now-productive tenant '{}' (row removed)", clientId);
+  }
+
+  /**
    * @return {@code true} when {@code clientId} already owns an active {@code ETSG_ForceTestMode}
    *     row of its own (never the System default, since this filters on the row's own {@code
    *     Client}, matching exactly what {@code ForceTestModeEventHandler#findPreference} reads).
    */
   private boolean hasOwnForceTestModeRow(String clientId) {
+    return findOwnForceTestModeRow(clientId) != null;
+  }
+
+  /**
+   * @return {@code clientId}'s own active {@code ETSG_ForceTestMode} row, or {@code null} if it
+   *     has none (never the System default row — filtered on the row's own {@code Client}).
+   */
+  private Preference findOwnForceTestModeRow(String clientId) {
     OBCriteria<Preference> criteria = OBDal.getInstance().createCriteria(Preference.class);
     criteria.setFilterOnReadableClients(false);
     criteria.setFilterOnReadableOrganization(false);
@@ -178,6 +244,6 @@ public class OnboardingForceTestModeService {
     criteria.add(Restrictions.eq(Preference.PROPERTY_CLIENT + ".id", clientId));
     criteria.add(Restrictions.eq(Preference.PROPERTY_ACTIVE, true));
     criteria.setMaxResults(1);
-    return criteria.uniqueResult() != null;
+    return (Preference) criteria.uniqueResult();
   }
 }
