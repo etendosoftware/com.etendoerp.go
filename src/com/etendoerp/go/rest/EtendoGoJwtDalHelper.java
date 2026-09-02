@@ -50,8 +50,6 @@ final class EtendoGoJwtDalHelper {
   private static final String SYSTEM_USER_ID = "100";
   private static final String PARAM_EMAIL = "email";
   private static final String PARAM_TOKEN = "token";
-  private static final String PARAM_AUTH_PROVIDER = "authProvider";
-  private static final String PARAM_EXTERNAL_SUBJECT = "externalSubject";
   private static final String PARAM_RESET_TOKEN_HASH = "resetTokenHash";
   private static final String PARAM_ACCOUNT_EMAIL = "accountEmail";
   private static final String PARAM_ACCOUNT_PREFIX = "accountPrefix";
@@ -83,10 +81,9 @@ final class EtendoGoJwtDalHelper {
   static final String PROPERTY_VERIFY_TOKEN_HASH = "verifyTokenHash";
   static final String PROPERTY_VERIFY_TOKEN_EXPIRES = "verifyTokenExpires";
   static final String PROPERTY_EMAIL_VERIFIED = "emailVerified";
-  private static final String PROPERTY_AUTH_PROVIDER = Account.PROPERTY_AUTHPROVIDER;
-  private static final String PROPERTY_EXTERNAL_SUBJECT = Account.PROPERTY_EXTERNALSUBJECT;
-  private static final String PROPERTY_EXTERNAL_EMAIL = Account.PROPERTY_EXTERNALEMAIL;
-  private static final String PROPERTY_LAST_SSO_LOGIN = Account.PROPERTY_LASTSSOLOGIN;
+  // ETP-5115: the constants naming the account's inline SSO columns are gone with the last reader
+  // of those columns. The columns themselves stay as the migration fallback and are read only by
+  // AccountIdentityDalHelper, through Account's own generated property names.
   private static final TenantPlanService TENANT_PLAN_SERVICE = new TenantPlanService();
   // ETP-4829: STATUS distinguishes an account that already owns a usable local password
   // ("active", the default for self-registration/SSO) from one an admin created on a user's
@@ -182,16 +179,11 @@ final class EtendoGoJwtDalHelper {
     return at <= 0 ? trimmed.charAt(0) + "***" : trimmed.charAt(0) + "***" + trimmed.substring(at);
   }
 
+  // ETP-5115: identities moved to their own child table so an account can carry more than one.
+  // The lookup, the legacy-column fallback and the one-off migration all live in
+  // AccountIdentityDalHelper; this stays as the name every caller already uses.
   static Account findActiveAccountBySsoIdentity(String provider, String subject) {
-    OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
-        ACCOUNT_QUERY + PROPERTY_AUTH_PROVIDER + " = :" + PARAM_AUTH_PROVIDER
-            + AND_ACCOUNT + PROPERTY_EXTERNAL_SUBJECT + " = :" + PARAM_EXTERNAL_SUBJECT
-            + ACTIVE_ACCOUNT_FILTER);
-    query.setNamedParameter(PARAM_AUTH_PROVIDER, provider);
-    query.setNamedParameter(PARAM_EXTERNAL_SUBJECT, subject);
-    query.setFilterOnReadableClients(false);
-    query.setFilterOnReadableOrganization(false);
-    return query.uniqueResult();
+    return AccountIdentityDalHelper.findAccountByIdentity(provider, subject);
   }
 
   static Account createAccount(String email, String passwordHash, String name, String sessionToken) {
@@ -280,10 +272,6 @@ final class EtendoGoJwtDalHelper {
     account.setPasswordHash(null);
     account.setName(name);
     account.setSessionToken(sessionToken);
-    account.set(PROPERTY_AUTH_PROVIDER, provider);
-    account.set(PROPERTY_EXTERNAL_SUBJECT, subject);
-    account.set(PROPERTY_EXTERNAL_EMAIL, externalEmail);
-    account.set(PROPERTY_LAST_SSO_LOGIN, loginAt);
     account.set(PROPERTY_STATUS, STATUS_ACTIVE);
     // ETP-4798: the identity provider already proved the user controls this mailbox (the address
     // comes from a verified assertion, not from a form), so an SSO account is born verified.
@@ -291,6 +279,9 @@ final class EtendoGoJwtDalHelper {
     // can never receive a reason to click.
     account.set(PROPERTY_EMAIL_VERIFIED, loginAt);
     OBDal.getInstance().save(account);
+    // ETP-5115: the identity is a row of its own now, written in the same transaction as the
+    // account it belongs to. The four inline columns are no longer written by anything.
+    AccountIdentityDalHelper.link(account, provider, subject, externalEmail, loginAt);
     flushAndCommitDalChanges();
     return account;
   }
@@ -309,25 +300,24 @@ final class EtendoGoJwtDalHelper {
     return account != null && StringUtils.isNotBlank((String) account.get(PROPERTY_RESET_TOKEN_HASH));
   }
 
+  // ETP-5115: same compatibility rule, now expressed over the identity rows. Deliberately still
+  // refuses a second, different identity — see AccountIdentityDalHelper#linkIfCompatible for why
+  // relaxing that belongs to the explicit linking flow and not to a side effect of signing in.
   static boolean linkSsoIdentityIfCompatible(Account account, String provider, String subject,
       String externalEmail) {
-    String currentProvider = StringUtils.trimToNull((String) account.get(PROPERTY_AUTH_PROVIDER));
-    String currentSubject = StringUtils.trimToNull((String) account.get(PROPERTY_EXTERNAL_SUBJECT));
-    if (currentProvider == null && currentSubject == null) {
-      account.set(PROPERTY_AUTH_PROVIDER, provider);
-      account.set(PROPERTY_EXTERNAL_SUBJECT, subject);
-      account.set(PROPERTY_EXTERNAL_EMAIL, externalEmail);
-      return true;
-    }
-    return StringUtils.equals(provider, currentProvider) && StringUtils.equals(subject,
-        currentSubject);
+    return AccountIdentityDalHelper.linkIfCompatible(account, provider, subject, externalEmail);
   }
 
   static void updateSsoSession(Account account, String externalEmail, String sessionToken,
       Date loginAt) {
     account.setSessionToken(sessionToken);
-    account.set(PROPERTY_EXTERNAL_EMAIL, externalEmail);
-    account.set(PROPERTY_LAST_SSO_LOGIN, loginAt);
+    // ETP-5115: the sign-in is recorded on the identity row rather than on the account. Resolving
+    // it from the account alone is sound *because* linkSsoIdentityIfCompatible still refuses a
+    // second, different identity, so an account has at most one. The moment explicit linking
+    // relaxes that, this call has to receive the provider and subject from the caller's assertion
+    // instead — there is no such thing as "the" identity of an account with two.
+    AccountIdentityDalHelper.recordLogin(AccountIdentityDalHelper.soleIdentityOf(account),
+        externalEmail, loginAt);
     // ETP-4798: signing in through the identity provider on this address is itself proof of
     // ownership — stronger proof than clicking a link we mailed. It closes any confirmation still
     // pending from a prior /register on the same address, so the user is not asked to confirm an
