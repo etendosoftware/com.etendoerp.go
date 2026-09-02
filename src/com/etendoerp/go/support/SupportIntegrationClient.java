@@ -49,7 +49,8 @@ final class SupportIntegrationClient {
   private static final String HEADER_CONTENT_TYPE = "Content-Type";
   private static final String HEADER_AUTHORIZATION = "Authorization";
   private static final String CONTENT_TYPE_JSON = "application/json";
-  private static final String JIRA_ISSUE_PATH = "/rest/api/3/issue/";
+  private static final String JIRA_ISSUE_PATH = ConfigPropertyReader.readConfigValue(
+      "support.jira.issuePath", "ETGO_SUPPORT_JIRA_ISSUE_PATH", "/rest/api/3/issue/");
   private static final String AUTH_BASIC_PREFIX = "Basic ";
 
   // Attachment mime types eligible to be forwarded to the ADK model as real inlineData
