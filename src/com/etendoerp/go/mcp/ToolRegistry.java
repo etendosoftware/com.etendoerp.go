@@ -65,6 +65,8 @@ public class ToolRegistry {
 
   /** The JSON-schema {@code required} keyword, kept as one constant so it is not re-typed. */
   private static final String KEY_REQUIRED = "required";
+  /** JSON-schema numeric type used by integer-valued MCP arguments. */
+  private static final String TYPE_INTEGER = "integer";
 
   /**
    * Generate all MCP tools the authenticated user can access.
@@ -349,7 +351,7 @@ public class ToolRegistry {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("topic", stringProp(
         "Term/topic to search in the Etendo Go docs (e.g. 'finance', 'payment')."));
-    props.put("tokens", numericProp("integer",
+    props.put("tokens", numericProp(TYPE_INTEGER,
         "Approximate max size of the returned docs (default 5000, clamped to 500-20000)."));
     props.put("type", stringProp(
         "Response format: 'txt' (default) or 'json'."));
@@ -442,7 +444,7 @@ public class ToolRegistry {
         stringProp("Natural-language search query"));
     props.put("targets", stringArrayProp(
         "DB Extended search-target keys to query"));
-    props.put("topK", numericProp("integer", "Maximum results (default 10, maximum 50)"));
+    props.put("topK", numericProp(TYPE_INTEGER, "Maximum results (default 10, maximum 50)"));
     props.put("minScore", numericProp("number", "Minimum similarity score from 0 to 1 (default 0.60)"));
     props.put("maxScore", numericProp("number", "Maximum similarity score from 0 to 1 (default 1.0)"));
     return new McpToolDefinition(
@@ -467,8 +469,8 @@ public class ToolRegistry {
             + "(3) named business filter {\"status\": \"<name>\"} — the spec's own hand-authored "
             + "statuses (e.g. \"pending\", \"partial\", \"completed\"). Call neo_schema to see the "
             + "named filters available for a given spec; an unknown name returns the valid list."));
-    props.put("limit", numericProp("integer", "Maximum number of records to return (default 100)"));
-    props.put("offset", numericProp("integer", "Number of records to skip for pagination"));
+    props.put("limit", numericProp(TYPE_INTEGER, "Maximum number of records to return (default 100)"));
+    props.put("offset", numericProp(TYPE_INTEGER, "Number of records to skip for pagination"));
     props.put("orderBy", stringProp("Column name to sort by, prefix with '-' for descending"));
     props.put(McpFieldProjection.PARAM_FIELDS, stringArrayProp(
         "Optional projection: return only these field names per row (e.g. "
@@ -897,7 +899,7 @@ public class ToolRegistry {
       return prop;
     }
     if (NeoReportParam.TYPE_INTEGER.equals(param.getType())) {
-      return numericProp("integer", description);
+      return numericProp(TYPE_INTEGER, description);
     }
     if (NeoReportParam.TYPE_BOOLEAN.equals(param.getType())) {
       Map<String, Object> prop = new LinkedHashMap<>();
