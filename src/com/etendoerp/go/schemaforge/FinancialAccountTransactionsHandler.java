@@ -347,8 +347,8 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     data.put("transactions", transactions);
     data.put("totals", totals);
     data.put("enabledDimensions", loadEnabledDimensions(accountId));
-    // Dimensions to show in the New Movement header — mirrors Classic's finacc
-    // transaction form (ad_client_acctdimension, docbasetype FAT, show_in_header).
+    // Dimensions to show in the New Movement header — same flat Ledger Configuration source as
+    // enabledDimensions (see loadHeaderDimensions), not a document-type-scoped override.
     data.put("headerDimensions", loadHeaderDimensions(accountId));
     // Transaction types (BPD/BPW/BF) from the AD reference list — not hardcoded.
     data.put("trxTypes", loadTrxTypes());

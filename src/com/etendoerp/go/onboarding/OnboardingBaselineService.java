@@ -210,7 +210,7 @@ public class OnboardingBaselineService {
    * unchanged here. Bumped to R31's own timestamp, {@code 2026-09-01T14:00:00Z}.
    * <b>Gap N2, discovered during R31's live validation, FIXED same session on BOTH fronts:</b>
    * {@code C_Glitem.Name} is {@code varchar(60)} while {@code C_ElementValue.Name} is {@code
-   * varchar(255)} — {@code composeGlItemName}'s {@code "<name> <searchKey>"} format originally had
+   * varchar(255)} — {@code composeGlItemName}'s {@code "<searchKey>-<name>"} format originally had
    * no length guard, so a subaccount whose composed name exceeded 60 chars silently failed GL Item
    * provisioning on BOTH fronts (confirmed live: 294 of GOClient's 658 leaf subaccounts, mostly
    * long Spanish PGC names) — {@code ensureGlItemForSchema}'s own best-effort try/catch swallowed
