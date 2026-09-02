@@ -581,11 +581,21 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
    * <p>Defaulting to soft is deliberate: a caller that omits the flag degrades to the
    * recoverable behavior instead of silently destroying the connection.
    *
+   * <p>Resolves the connection with {@link SaltEdgeAccountLinkHelper#getLatestConnectionForFinAcc}
+   * — a lookup that matches any status — and then calls
+   * {@link SaltEdgeAccountLinkHelper#disconnectConnection(FinaccConnection, boolean)}, the exact
+   * entry point Classic's own "Disconnect Connection" process uses. Deliberately does
+   * <b>not</b> go through
+   * {@link SaltEdgeAccountLinkHelper#disconnectFinancialAccount(FIN_FinancialAccount, boolean)}:
+   * that wrapper's lookup only matches a connection whose local status is still {@code "AC"}
+   * (active), so a permanent-deletion request against an account that was already
+   * soft-disconnected (status {@code "IN"}) silently found nothing and reported success without
+   * deleting anything (ETP-5097).
+   *
    * <p>The response reports what actually happened rather than what was requested, because a Salt
    * Edge connection shared by several Financial Accounts always takes the unlink path regardless
    * of the flag (marking it inactive would break the sibling accounts). The distinction is
-   * re-derived from the account's own state — the helper's return value only says whether an
-   * active connection existed.
+   * re-derived from the account's own state after the operation, not from a return value.
    */
   private NeoResponse handleDisconnect(NeoContext context) throws JSONException {
     JSONObject body = FinancialAccountBankConnectionSupport.requireBody(context);
@@ -595,8 +605,16 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
       return NeoResponse.error(404, MSG_ACCOUNT_NOT_FOUND);
     }
     boolean permanentDeletion = body.optBoolean(PARAM_PERMANENT_DELETION, false);
-    boolean disconnected = SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc,
-        permanentDeletion);
+    FinaccConnection connection = SaltEdgeAccountLinkHelper.getLatestConnectionForFinAcc(finAcc);
+    boolean disconnected = applyDisconnect(finAcc, connection, permanentDeletion);
+    if (permanentDeletion && StringUtils.isNotBlank(finAcc.getPSD2SaltEdgeAccountID())) {
+      // Post-condition check: report a real failure instead of a false 200 when a permanent
+      // request leaves the account still linked (ETP-5097).
+      return NeoResponse.error(500, "Bank connection could not be permanently deleted");
+    }
+    if (!disconnected) {
+      return NeoResponse.error(404, "No bank connection to disconnect for this account");
+    }
     // Soft disconnect keeps the Salt Edge account id; the permanent path clears it. That is the
     // only reliable discriminator once shared connections are taken into account.
     boolean stillLinked = StringUtils.isNotBlank(finAcc.getPSD2SaltEdgeAccountID());
@@ -605,6 +623,52 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     data.put("permanent", !stillLinked);
     data.put(KEY_RECONNECTABLE, stillLinked);
     return FinancialAccountBankConnectionSupport.okData(data);
+  }
+
+  /**
+   * Applies the disconnect/delete operation for {@link #handleDisconnect} and returns whether a
+   * bank connection actually existed to act on.
+   *
+   * <p>When {@code connection} is {@code null} but the Financial Account still carries a stale
+   * Salt Edge link, a permanent request clears that orphaned link ({@link #clearOrphanedBankLink})
+   * so the account doesn't stay falsely {@code reconnectable} — and blocked from hard-delete by
+   * {@code FinancialAccountDeleteSupport#hasBankConnection} — forever.
+   *
+   * <p>A soft request against a connection already marked inactive locally is a no-op: it must
+   * not re-send the "mark inactive" call to Salt Edge on every repeated click.
+   */
+  private boolean applyDisconnect(FIN_FinancialAccount finAcc, FinaccConnection connection,
+      boolean permanentDeletion) {
+    if (connection == null) {
+      if (permanentDeletion && StringUtils.isNotBlank(finAcc.getPSD2SaltEdgeAccountID())) {
+        clearOrphanedBankLink(finAcc);
+        return true;
+      }
+      return false;
+    }
+    // "IN" is the local FinaccConnection.connectionStatus code for a soft-disconnected
+    // connection (see SaltEdgeAccountLinkHelper#markConnectionInactiveLocally) — the same
+    // convention used across the PSD2 module.
+    if (!permanentDeletion && StringUtils.equals(connection.getConnectionStatus(), "IN")) {
+      return true;
+    }
+    SaltEdgeAccountLinkHelper.disconnectConnection(connection, permanentDeletion);
+    return true;
+  }
+
+  /**
+   * Clears the PSD2 link fields of a Financial Account whose {@link FinaccConnection} record is
+   * already gone, mirroring what
+   * {@code SaltEdgeAccountLinkHelper#unlinkFinancialAccount} (private to that class) does for the
+   * FA side, so an orphaned link doesn't leave the account permanently {@code reconnectable}.
+   */
+  private void clearOrphanedBankLink(FIN_FinancialAccount finAcc) {
+    finAcc.setPSD2SaltEdgeAccountID(null);
+    finAcc.setPSD2ConnectionStatus(BankIntegrationConstants.FA_CONNECTION_STATUS_DISCONNECTED);
+    finAcc.setPsd2Provider(null);
+    finAcc.setPSD2CardNumber(null);
+    OBDal.getInstance().save(finAcc);
+    OBDal.getInstance().flush();
   }
 
   // ---------------------------------------------------------------------------

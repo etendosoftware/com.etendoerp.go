@@ -19,7 +19,6 @@ package com.etendoerp.go.schemaforge.handlers;
 
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -41,6 +40,7 @@ import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.util.AccountingDocumentTypeSupport;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
@@ -150,32 +150,6 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     DOCUMENT_TYPE_CODE_TO_TABLE_ID.put("WE",  "486");                                   // S_TimeExpense
   }
 
-  /**
-   * Document type codes that are <em>never</em> shown in the filter dropdown, regardless of
-   * {@code c_acctschema_table} state. These tables exist in the accounting schema but the APRM
-   * module intentionally disables direct bulk-posting on them ({@code POSTED = 'D'} on all
-   * documents) — accounting flows through {@code FIN_Finacc_Transaction} ({@code T}) instead.
-   *
-   * <p>{@code BMP}, {@code DD}, {@code LC}, {@code LCC} and {@code CA} are globally excluded by
-   * product decision (ETP-4452), for ALL tenants, even though some tenants (e.g. QA Testing,
-   * F&amp;B International Group) have them actively configured for posting — the tradeoff of
-   * hiding those legitimate documents was accepted by the product owner.
-   *
-   * <p>To re-enable any of these (e.g. if APRM posting is later reconfigured), remove its code
-   * from this set.
-   */
-  private static final Set<String> APRM_DISABLED_TYPES = new HashSet<>(Arrays.asList(
-      "BS",   // FIN_BankStatement       — in c_acctschema_table but all docs posted='D'
-      "PIN",  // FIN_Payment             — in c_acctschema_table but 99.9% posted='D'
-      "POT",  // FIN_Payment             — same as PIN
-      "R",    // FIN_Reconciliation      — in c_acctschema_table but ~89% posted='D'
-      "BMP",  // M_Production            — globally excluded, ETP-4452
-      "DD",   // FIN_Doubtful_Debt       — globally excluded, ETP-4452
-      "LC",   // M_LandedCost            — globally excluded, ETP-4452
-      "LCC",  // M_LC_Cost               — globally excluded, ETP-4452
-      "CA"    // M_CostAdjustment        — globally excluded, ETP-4452
-  ));
-
   private static final String KEY_TABLE_ID = "tableId";
   private static final String KEY_ACCOUNTING_STATUS = "accountingStatus";
   private static final String KEY_RECORD_ID = "recordId";
@@ -258,22 +232,6 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     DOCUMENT_TYPE_TO_TABLE_ID.put("Cost Adjustment", "D022B92163074E5E82449C8E0B5AFDF6");                 // M_CostAdjustment
   }
 
-  /**
-   * Table IDs for document types in {@link #APRM_DISABLED_TYPES}, derived at class-load time.
-   * Any grid row whose resolved {@code tableId} is in this set is silently dropped — these
-   * documents cannot be bulk-posted through this window regardless of their current status.
-   */
-  private static final Set<String> APRM_DISABLED_TABLE_IDS = new HashSet<>();
-
-  static {
-    for (String code : APRM_DISABLED_TYPES) {
-      String tableId = DOCUMENT_TYPE_CODE_TO_TABLE_ID.get(code);
-      if (tableId != null) {
-        APRM_DISABLED_TABLE_IDS.add(tableId);
-      }
-    }
-  }
-
   @Inject
   private DocumentPostingService postingService;
 
@@ -329,12 +287,14 @@ public class NotPostedDocumentsHandler implements NeoHandler {
 
   /**
    * Returns document types from {@link #DOCUMENT_TYPE_REF_ID} whose backing table is actively
-   * configured for accounting ({@code c_acctschema_table.isactive = 'Y'}), excluding
-   * {@link #APRM_DISABLED_TYPES}. The check is dynamic — new document types whose modules
-   * register a {@code c_acctschema_table} entry are picked up automatically.
+   * configured for accounting ({@code c_acctschema_table.isactive = 'Y'}) and not APRM-disabled.
+   * The check is dynamic — new document types whose modules register a
+   * {@code c_acctschema_table} entry are picked up automatically. The actual predicate now lives
+   * in {@link AccountingDocumentTypeSupport} (ETP-4948), shared with the Calendar window's
+   * {@code documents} entity so the two can never diverge on what counts as accounting-relevant.
    */
   JSONArray refListDocumentTypes() throws Exception {
-    Set<String> accountedTableIds = getTablesWithActiveAccounting();
+    Set<String> accountedTableIds = AccountingDocumentTypeSupport.loadTablesWithActiveAccounting();
     JSONArray options = new JSONArray();
     Reference ref = OBDal.getInstance().get(Reference.class, DOCUMENT_TYPE_REF_ID);
     if (ref == null) return options;
@@ -343,9 +303,7 @@ public class NotPostedDocumentsHandler implements NeoHandler {
       String code = item.getSearchKey();
       String tableId = DOCUMENT_TYPE_CODE_TO_TABLE_ID.get(code);
       boolean enabled = item.isActive()
-          && !APRM_DISABLED_TYPES.contains(code)
-          && tableId != null
-          && accountedTableIds.contains(tableId);
+          && AccountingDocumentTypeSupport.isTableAccountingRelevant(tableId, accountedTableIds);
       if (enabled) {
         JSONObject opt = new JSONObject();
         opt.put(KEY_VALUE, code);
@@ -355,20 +313,6 @@ public class NotPostedDocumentsHandler implements NeoHandler {
       }
     }
     return options;
-  }
-
-  /** Returns the set of {@code AD_Table_ID} values that have at least one active accounting schema entry. */
-  @SuppressWarnings("unchecked")
-  private Set<String> getTablesWithActiveAccounting() {
-    List<Object> rows = OBDal.getInstance().getSession()
-        .createNativeQuery(
-            "SELECT DISTINCT ad_table_id FROM c_acctschema_table WHERE isactive = 'Y'")
-        .list();
-    Set<String> ids = new HashSet<>();
-    for (Object row : rows) {
-      if (row instanceof String) ids.add((String) row);
-    }
-    return ids;
   }
 
   private JSONArray buildAccountingStatusOptions() throws Exception {
@@ -424,8 +368,8 @@ public class NotPostedDocumentsHandler implements NeoHandler {
   /**
    * Converts one raw {@link NoPostedDocumentDS} row into the JSON shape served to the frontend,
    * enriched with {@code tableId}. Returns {@code null} when the row's document type is
-   * APRM-managed ({@link #APRM_DISABLED_TABLE_IDS}) — such rows must never reach the frontend,
-   * since direct bulk-posting on them always fails by APRM design.
+   * APRM-managed ({@link AccountingDocumentTypeSupport#isAprmDisabledTable}) — such rows must
+   * never reach the frontend, since direct bulk-posting on them always fails by APRM design.
    *
    * <p>Package-private so it can be unit-tested without a live {@link NoPostedDocumentDS}.
    */
@@ -434,7 +378,7 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     String tableId = docType instanceof String
         ? DOCUMENT_TYPE_TO_TABLE_ID.get(docType.toString()) : null;
 
-    if (tableId != null && APRM_DISABLED_TABLE_IDS.contains(tableId)) {
+    if (AccountingDocumentTypeSupport.isAprmDisabledTable(tableId)) {
       return null;
     }
 
