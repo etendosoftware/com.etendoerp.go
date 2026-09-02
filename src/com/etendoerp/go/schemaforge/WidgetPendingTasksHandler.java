@@ -33,6 +33,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+import org.openbravo.model.ad.access.Role;
 
 /**
  * NeoHandler that returns pending tasks and alerts for the dashboard widget.
@@ -65,18 +66,39 @@ public class WidgetPendingTasksHandler implements NeoHandler {
       return NeoResponse.error(405, "Method not allowed");
     }
 
+    // ETP-5088 — this widget is gated PER TASK, not as a whole: the role matrix gives Sales the
+    // sales-invoice tasks and Purchasing the payment ones, and each task already names the window
+    // it navigates to. Resolved before admin mode; each check also SKIPS the query behind the
+    // task, so a role that cannot see a task never pays for counting it either.
+    Role role = WidgetAccessPolicy.currentRole();
+    boolean canSeeSalesInvoices = WidgetAccessPolicy.canRead(role, WidgetAccessPolicy.WINDOW_SALES_INVOICE);
+    boolean canSeePurchaseInvoices = WidgetAccessPolicy.canRead(role, WidgetAccessPolicy.WINDOW_PURCHASE_INVOICE);
+    boolean canSeeReceipts = WidgetAccessPolicy.canRead(role, WidgetAccessPolicy.WINDOW_GOODS_RECEIPT);
+    boolean canSeeShipments = WidgetAccessPolicy.canRead(role, WidgetAccessPolicy.WINDOW_GOODS_SHIPMENT);
+    boolean canSeeStock = WidgetAccessPolicy.canRead(role, WidgetAccessPolicy.WINDOW_PHYSICAL_INVENTORY);
+
     try {
       OBContext.setAdminMode(true);
       try {
         String clientId = OBContext.getOBContext().getCurrentClient().getId();
         JSONArray data = new JSONArray();
 
-        addOverdueInvoices(data, clientId);
-        addCollectionsDueToday(data, clientId);
-        addPaymentsDue(data, clientId);
-        addPendingReceptions(data);
-        addPendingSalesDeliveries(data);
-        addLowStockAlerts(data, clientId);
+        if (canSeeSalesInvoices) {
+          addOverdueInvoices(data, clientId);
+          addCollectionsDueToday(data, clientId);
+        }
+        if (canSeePurchaseInvoices) {
+          addPaymentsDue(data, clientId);
+        }
+        if (canSeeReceipts) {
+          addPendingReceptions(data);
+        }
+        if (canSeeShipments) {
+          addPendingSalesDeliveries(data);
+        }
+        if (canSeeStock) {
+          addLowStockAlerts(data, clientId);
+        }
 
         JSONObject responseData = new JSONObject();
         responseData.put("data", data);
