@@ -195,7 +195,7 @@ public class GlItemProvisioningSupportTest {
       verify(glItem).setNewOBObject(true);
       verify(glItem).setClient(client);
       verify(glItem).setOrganization(org);
-      verify(glItem).setName("20000001 Caja Euros");
+      verify(glItem).setName("20000001-Caja Euros");
       verify(glItem).setActive(true);
       verify(dal).save(glItem);
 
@@ -244,7 +244,7 @@ public class GlItemProvisioningSupportTest {
       // Idempotent: no new GLItem/GLItemAccounts minted.
       obProvider.verify(OBProvider::getInstance, never());
       // Rename propagated onto the already-linked GL Item.
-      verify(existingGlItem).setName("30000002 New Name");
+      verify(existingGlItem).setName("30000002-New Name");
       verify(dal).save(existingGlItem);
     }
   }
@@ -259,7 +259,7 @@ public class GlItemProvisioningSupportTest {
     AccountingCombination combo = mock(AccountingCombination.class);
     GLItem existingGlItem = mock(GLItem.class);
     // Already stores the composed name — nothing to resync.
-    when(existingGlItem.getName()).thenReturn("40000003 Same Name");
+    when(existingGlItem.getName()).thenReturn("40000003-Same Name");
     GLItemAccounts existingLink = mock(GLItemAccounts.class);
     when(existingLink.getGLItem()).thenReturn(existingGlItem);
 
@@ -516,7 +516,7 @@ public class GlItemProvisioningSupportTest {
 
   // ── composeGlItemName — ETP-5101 GL_ITEM_NAME_MAX_LENGTH (60) truncation ──────────────────
   //
-  // C_Glitem.Name is varchar(60); composeGlItemName must never let the composed "<code> <name>"
+  // C_Glitem.Name is varchar(60); composeGlItemName must never let the composed "<code>-<name>"
   // exceed that, and must NEVER truncate the code itself (see class javadoc on
   // GL_ITEM_NAME_MAX_LENGTH / composeGlItemName). composeGlItemName is a protected static pure
   // function, so it's exercised directly here (same package); one end-to-end test further below
@@ -531,14 +531,14 @@ public class GlItemProvisioningSupportTest {
 
     String composed = GlItemProvisioningSupport.composeGlItemName(subaccount);
 
-    assertEquals("20000001 Caja Euros", composed);
+    assertEquals("20000001-Caja Euros", composed);
     assertTrue(composed.length() < 60);
   }
 
   @Test
   public void composeGlItemNameTruncatesLongNameKeepingCodeIntact() {
     String longName = repeat('A', 80);
-    String code = "20000001"; // 8 chars -> prefix code + " " = 9 chars -> name budget = 51
+    String code = "20000001"; // 8 chars -> prefix code + "-" = 9 chars -> name budget = 51
     ElementValue subaccount = mock(ElementValue.class);
     when(subaccount.getName()).thenReturn(longName);
     when(subaccount.getSearchKey()).thenReturn(code);
@@ -546,13 +546,13 @@ public class GlItemProvisioningSupportTest {
     String composed = GlItemProvisioningSupport.composeGlItemName(subaccount);
 
     assertEquals(60, composed.length());
-    assertEquals(code + " " + longName.substring(0, 51), composed);
-    assertTrue("code must survive intact, never truncated", composed.startsWith(code + " "));
+    assertEquals(code + "-" + longName.substring(0, 51), composed);
+    assertTrue("code must survive intact, never truncated", composed.startsWith(code + "-"));
   }
 
   @Test
   public void composeGlItemNameDoesNotTruncateAtExactSixtyCharBoundary() {
-    String code = "20000001"; // prefix code + " " = 9 chars -> name budget = 51
+    String code = "20000001"; // prefix code + "-" = 9 chars -> name budget = 51
     String name = repeat('B', 51); // 51 + 9 = 60 exactly
     ElementValue subaccount = mock(ElementValue.class);
     when(subaccount.getName()).thenReturn(name);
@@ -561,7 +561,7 @@ public class GlItemProvisioningSupportTest {
     String composed = GlItemProvisioningSupport.composeGlItemName(subaccount);
 
     assertEquals(60, composed.length());
-    assertEquals(code + " " + name, composed); // full name preserved, nothing cut
+    assertEquals(code + "-" + name, composed); // full name preserved, nothing cut
   }
 
   @Test
@@ -575,7 +575,7 @@ public class GlItemProvisioningSupportTest {
     String composed = GlItemProvisioningSupport.composeGlItemName(subaccount);
 
     assertEquals(60, composed.length());
-    assertEquals(code + " " + name.substring(0, 51), composed);
+    assertEquals(code + "-" + name.substring(0, 51), composed);
     assertTrue("code must survive intact at the start, never truncated", composed.startsWith(code));
   }
 
@@ -658,7 +658,7 @@ public class GlItemProvisioningSupportTest {
 
       ArgumentCaptor<String> nameCaptor = ArgumentCaptor.forClass(String.class);
       verify(glItem).setName(nameCaptor.capture());
-      String expectedName = code + " " + longName.substring(0, 51);
+      String expectedName = code + "-" + longName.substring(0, 51);
       assertEquals(60, nameCaptor.getValue().length());
       assertEquals(expectedName, nameCaptor.getValue());
       assertTrue("code must survive intact at the start, never truncated",

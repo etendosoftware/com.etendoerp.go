@@ -328,7 +328,7 @@ public class GlItemProvisioningSupport {
    * subaccounts sharing a name (the entire point of prepending it), so it must always survive
    * intact within the {@link #GL_ITEM_NAME_MAX_LENGTH} budget.
    *
-   * @return {@code "<searchKey> <name, truncated to fit>"}, or the (possibly truncated) bare name
+   * @return {@code "<searchKey>-<name, truncated to fit>"}, or the (possibly truncated) bare name
    *     if {@code searchKey} is blank (should not happen for a real leaf account, but keeps this
    *     method total)
    */
@@ -338,7 +338,7 @@ public class GlItemProvisioningSupport {
     if (code == null || code.isEmpty()) {
       return truncateToFit(name, GL_ITEM_NAME_MAX_LENGTH);
     }
-    String prefix = code + " ";
+    String prefix = code + "-";
     String truncatedName = truncateToFit(name, GL_ITEM_NAME_MAX_LENGTH - prefix.length());
     return prefix + truncatedName;
   }
