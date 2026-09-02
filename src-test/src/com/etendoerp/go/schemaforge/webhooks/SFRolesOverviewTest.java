@@ -32,10 +32,13 @@ import java.util.Map;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
+import org.hibernate.criterion.Criterion;
+import org.hibernate.criterion.SimpleExpression;
 import org.hibernate.query.NativeQuery;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedConstruction;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
@@ -199,6 +202,28 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         when(windowAccessCriteria.list()).thenReturn(Collections.emptyList());
     }
 
+    /**
+     * Invokes {@code webhook.get(parameters, responseVars)} under a default, empty {@link
+     * UserRoleCompositionService} construction stub.
+     *
+     * <p>ETP-5065 Fix 2 made {@link SFRolesOverview#addTenantRoleCardWithTemplateOverlap}
+     * resolve composition data for the FIRST active fixed-name tenant role unconditionally
+     * (previously, composition was only ever queried when a fixed name had NO active tenant
+     * role — the system-template-fallback branch). Any test whose tenant roles include at
+     * least one active fixed-name role (e.g. built via {@link #standardTenantRoles()}) now
+     * triggers a REAL {@code new UserRoleCompositionService()} unless this stub — or a
+     * test-specific {@code mockConstruction} block, for tests that care about a particular
+     * composed map — is in scope.</p>
+     */
+    private void invokeWebhookWithNoTemplateComposition() {
+        try (MockedConstruction<UserRoleCompositionService> ignored = mockConstruction(
+                UserRoleCompositionService.class, (mockService, ctx) ->
+                        when(mockService.getAppliedTemplateRoleIdsForClient(anyString()))
+                                .thenReturn(Collections.emptyMap()))) {
+            webhook.get(parameters, responseVars);
+        }
+    }
+
     // ── access gate ──────────────────────────────────────────────────────
 
     @Test
@@ -253,7 +278,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         givenSystemAdminCallerRole();
         stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
 
-        webhook.get(parameters, responseVars);
+        invokeWebhookWithNoTemplateComposition();
 
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
@@ -266,7 +291,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         givenClientAdminCallerRole(ADMIN_ROLE_ID);
         stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
 
-        webhook.get(parameters, responseVars);
+        invokeWebhookWithNoTemplateComposition();
 
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
@@ -288,7 +313,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         givenClientAdminCallerRole(ADMIN_ROLE_ID);
         stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
 
-        webhook.get(parameters, responseVars);
+        invokeWebhookWithNoTemplateComposition();
 
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
@@ -317,7 +342,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
                 mockRole(PURCHASING_ROLE_ID, "Purchasing", false));
         stubBaselineQueries(onlyFour, Collections.emptyList());
 
-        webhook.get(parameters, responseVars);
+        invokeWebhookWithNoTemplateComposition();
 
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
@@ -339,7 +364,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
                 mockRole(SALES_ROLE_ID, "Sales", false));
         stubBaselineQueries(scrambled, Collections.emptyList());
 
-        webhook.get(parameters, responseVars);
+        invokeWebhookWithNoTemplateComposition();
 
         JSONObject result = new JSONObject(responseVars.get(RESULT));
         JSONArray roles = result.getJSONArray("roles");
@@ -379,7 +404,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
                 Collections.emptyList(), Collections.emptyList(),
                 Collections.emptyList(), Collections.emptyList());
 
-        webhook.get(parameters, responseVars);
+        invokeWebhookWithNoTemplateComposition();
 
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
@@ -400,7 +425,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         givenSystemAdminCallerRole();
         stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
 
-        webhook.get(parameters, responseVars);
+        invokeWebhookWithNoTemplateComposition();
 
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
@@ -411,6 +436,211 @@ class SFRolesOverviewTest extends BaseWebhookTest {
             assertEquals(0, role.getInt("userCount"), "userCount for role " + role.getString("id"));
             assertEquals(0, role.getJSONArray("windows").length(), "windows for role " + role.getString("id"));
         }
+    }
+
+    // ── ETP-5065 Fix 1: cross-client bootstrap-user exclusion ───────────
+
+    /**
+     * Regression test for ETP-5065 Fix 1: a role's user count must exclude a cross-client
+     * bootstrap login (the seed {@code AD_User_ID='100'} account, client {@code '0'}) even
+     * though it holds a real, active {@code AD_User_Roles} row on the tenant's admin role — see
+     * {@link SFRolesOverview#resolveActiveUserIds(Role)}'s javadoc for the root cause.
+     *
+     * <p>Because {@link OBCriteria} is fully mocked here, {@code criteria.list()} cannot exercise
+     * real Hibernate-level filtering — the mocked return value is entirely test-controlled and
+     * would report the same count whether or not the fix's restriction exists. So this test
+     * verifies BOTH halves: (1) structurally, that {@link SFRolesOverview#resolveActiveUserIds}
+     * actually adds the {@code userContact.client.id} restriction to the query (captured via
+     * {@link ArgumentCaptor}, since that is the only way a mocked-criteria unit test can prove the
+     * fix's Hibernate restriction exists at all), and (2) the resulting {@code userCount}, given a
+     * {@code list()} return value that simulates what the DB would hand back once that
+     * restriction is applied (i.e. with the cross-client bootstrap row already excluded).</p>
+     */
+    @Test
+    @DisplayName("Admin role user count excludes the cross-client bootstrap user")
+    void testAdminRoleCountExcludesCrossClientBootstrapUser() throws Exception {
+        givenSystemAdminCallerRole();
+
+        OBCriteria<SFSpec> specCriteria = mockCriteria(SFSpec.class);
+        when(specCriteria.list()).thenReturn(Collections.emptyList());
+        stubTenantRoles(standardTenantRoles());
+
+        OBCriteria<WindowAccess> windowAccessCriteria = mockCriteria(WindowAccess.class);
+        when(windowAccessCriteria.list()).thenReturn(Collections.emptyList());
+
+        // Only the real tenant-client owner survives the client-scoped restriction added by
+        // Fix 1 — the cross-client bootstrap user (AD_User_ID='100', client '0') would be
+        // filtered out by the real DB; this simulates that already-filtered result.
+        List<UserRoles> adminRoleRows = Collections.singletonList(mockUserRolesRow("real-owner"));
+        OBCriteria<UserRoles> userRolesCriteria = mockCriteria(UserRoles.class);
+        when(userRolesCriteria.list()).thenReturn(
+                adminRoleRows,
+                Collections.emptyList(), Collections.emptyList(),
+                Collections.emptyList(), Collections.emptyList());
+
+        invokeWebhookWithNoTemplateComposition();
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONObject adminRole = result.getJSONArray("roles").getJSONObject(0);
+        assertEquals(1, adminRole.getInt("userCount"));
+
+        // The restriction must reach the user's OWN client, and must be expressed through an
+        // explicit alias. It used to be written as the two-level path "userContact.client.id",
+        // which compiles and passes a mocked criteria but throws "could not resolve property" from
+        // AbstractEntityPersister.toColumns the moment Hibernate runs it — a Criteria resolves a
+        // one-level "property.id" (the FK column on this table) and nothing deeper. That shipped
+        // and answered 500 for the whole Roles page.
+        //
+        // So this asserts the PAIR — the alias on userContact, and the client restriction hanging
+        // off that alias — instead of one hardcoded property string. The alias NAME is captured
+        // rather than assumed, so renaming it stays a free refactor while dropping either half
+        // still fails here.
+        ArgumentCaptor<String> aliasCaptor = ArgumentCaptor.forClass(String.class);
+        // atLeastOnce: the same mocked criteria is reused across the five roles of the overview.
+        verify(userRolesCriteria, atLeastOnce())
+                .createAlias(eq(UserRoles.PROPERTY_USERCONTACT), aliasCaptor.capture());
+        String userContactAlias = aliasCaptor.getValue();
+
+        ArgumentCaptor<Criterion> restrictionCaptor = ArgumentCaptor.forClass(Criterion.class);
+        verify(userRolesCriteria, atLeastOnce()).add(restrictionCaptor.capture());
+        boolean hasClientRestriction = restrictionCaptor.getAllValues().stream()
+                .filter(SimpleExpression.class::isInstance)
+                .map(SimpleExpression.class::cast)
+                .anyMatch(expr -> (userContactAlias + ".client.id").equals(expr.getPropertyName()));
+        assertTrue(hasClientRestriction,
+                "resolveActiveUserIds must restrict the assignee's own client through the "
+                        + UserRoles.PROPERTY_USERCONTACT + " alias, not a nested property path");
+    }
+
+    /**
+     * The promote/demote admin design (see {@link SFRolesOverview#resolveActiveUserIds(Role)}'s
+     * javadoc) legitimately assigns the tenant admin role directly, in {@code AD_User_Roles}, to
+     * one or more real, same-client users at once. Fix 1's added client-scoping restriction must
+     * not accidentally cap or dedupe this down — two DISTINCT same-client users must both count.
+     */
+    @Test
+    @DisplayName("Admin role user count allows two distinct same-client direct assignees (promote/demote design)")
+    void testAdminRoleCountAllowsMultipleSameClientDirectAssignees() throws Exception {
+        givenSystemAdminCallerRole();
+
+        OBCriteria<SFSpec> specCriteria = mockCriteria(SFSpec.class);
+        when(specCriteria.list()).thenReturn(Collections.emptyList());
+        stubTenantRoles(standardTenantRoles());
+
+        OBCriteria<WindowAccess> windowAccessCriteria = mockCriteria(WindowAccess.class);
+        when(windowAccessCriteria.list()).thenReturn(Collections.emptyList());
+
+        List<UserRoles> adminRoleRows = Arrays.asList(mockUserRolesRow("owner-1"), mockUserRolesRow("owner-2"));
+        OBCriteria<UserRoles> userRolesCriteria = mockCriteria(UserRoles.class);
+        when(userRolesCriteria.list()).thenReturn(
+                adminRoleRows,
+                Collections.emptyList(), Collections.emptyList(),
+                Collections.emptyList(), Collections.emptyList());
+
+        invokeWebhookWithNoTemplateComposition();
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONObject adminRole = result.getJSONArray("roles").getJSONObject(0);
+        assertEquals(2, adminRole.getInt("userCount"));
+    }
+
+    // ── ETP-5065 Fix 2: hybrid-state template-overlap union ─────────────
+
+    /**
+     * Regression test for ETP-5065 Fix 2 (the live GOClient hybrid-state undercount): when the
+     * tenant's own active Finance role has 1 direct assignee, but a DIFFERENT user reaches the
+     * same access by composing the matching SYSTEM TEMPLATE Finance role onto their personal
+     * role ({@link UserRoleCompositionService}), the Finance card's {@code userCount} must be the
+     * union of both sources — before this fix, {@link SFRolesOverview#addTenantRoleCard} (used
+     * for every fixed name whose tenant role is still active) only ever saw the direct assignee,
+     * silently dropping the template-composed user from the card entirely.
+     */
+    @Test
+    @DisplayName("Finance card userCount unions direct tenant-role assignees with template-composed users")
+    void testFinanceCardUnionsDirectAssigneesWithTemplateComposedUsers() throws Exception {
+        givenSystemAdminCallerRole();
+
+        OBCriteria<SFSpec> specCriteria = mockCriteria(SFSpec.class);
+        when(specCriteria.list()).thenReturn(Collections.emptyList());
+        stubTenantRoles(standardTenantRoles());
+
+        OBCriteria<WindowAccess> windowAccessCriteria = mockCriteria(WindowAccess.class);
+        when(windowAccessCriteria.list()).thenReturn(Collections.emptyList());
+
+        // UserRoles.list() is invoked once per role card, in order: admin, then Finance/Sales/
+        // Purchasing/Inventory (SystemRoleTemplates#byName order). Only Finance has a direct
+        // assignee.
+        List<UserRoles> financeDirectRows = Collections.singletonList(mockUserRolesRow("finance-tester"));
+        OBCriteria<UserRoles> userRolesCriteria = mockCriteria(UserRoles.class);
+        when(userRolesCriteria.list()).thenReturn(
+                Collections.emptyList(),
+                financeDirectRows,
+                Collections.emptyList(), Collections.emptyList(), Collections.emptyList());
+
+        // A different user, "invite1", composes the TEMPLATE Finance role onto their personal
+        // role — not present in Finance's direct-assignee rows above.
+        Map<String, List<String>> composed = new LinkedHashMap<>();
+        composed.put("invite1", List.of(SystemRoleTemplates.FINANCE_ROLE_ID));
+        try (MockedConstruction<UserRoleCompositionService> construction = mockConstruction(
+                UserRoleCompositionService.class, (mockService, ctx) ->
+                        when(mockService.getAppliedTemplateRoleIdsForClient(CLIENT_ID)).thenReturn(composed))) {
+
+            webhook.get(parameters, responseVars);
+
+            assertEquals(1, construction.constructed().size(),
+                    "UserRoleCompositionService must be built lazily, once, for the whole request, "
+                            + "even though all 4 fixed-name roles are active tenant roles here");
+        }
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONObject finance = result.getJSONArray("roles").getJSONObject(1);
+        assertEquals(FINANCE_ROLE_ID, finance.getString("id"));
+        assertEquals("tenant", finance.getString("roleSource"));
+        assertEquals(2, finance.getInt("userCount"));
+    }
+
+    /**
+     * A user who satisfies BOTH conditions at once — directly assigned to the tenant's own
+     * Finance role AND (redundantly) composing the matching system-template Finance role onto
+     * their personal role — must be counted exactly once, not twice. Proves the union in {@link
+     * SFRolesOverview#addTenantRoleCardWithTemplateOverlap} is a real set union (dedup by user
+     * id), not a naive count addition.
+     */
+    @Test
+    @DisplayName("Finance card userCount does not double-count a user satisfying both the direct and template-composed conditions")
+    void testFinanceCardDoesNotDoubleCountSameUserInBothPaths() throws Exception {
+        givenSystemAdminCallerRole();
+
+        OBCriteria<SFSpec> specCriteria = mockCriteria(SFSpec.class);
+        when(specCriteria.list()).thenReturn(Collections.emptyList());
+        stubTenantRoles(standardTenantRoles());
+
+        OBCriteria<WindowAccess> windowAccessCriteria = mockCriteria(WindowAccess.class);
+        when(windowAccessCriteria.list()).thenReturn(Collections.emptyList());
+
+        List<UserRoles> financeDirectRows = Collections.singletonList(mockUserRolesRow("hybrid-user"));
+        OBCriteria<UserRoles> userRolesCriteria = mockCriteria(UserRoles.class);
+        when(userRolesCriteria.list()).thenReturn(
+                Collections.emptyList(),
+                financeDirectRows,
+                Collections.emptyList(), Collections.emptyList(), Collections.emptyList());
+
+        // The SAME user id also composes the template Finance role onto their personal role.
+        Map<String, List<String>> composed = new LinkedHashMap<>();
+        composed.put("hybrid-user", List.of(SystemRoleTemplates.FINANCE_ROLE_ID));
+        try (MockedConstruction<UserRoleCompositionService> construction = mockConstruction(
+                UserRoleCompositionService.class, (mockService, ctx) ->
+                        when(mockService.getAppliedTemplateRoleIdsForClient(CLIENT_ID)).thenReturn(composed))) {
+            webhook.get(parameters, responseVars);
+        }
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONObject finance = result.getJSONArray("roles").getJSONObject(1);
+        assertEquals(1, finance.getInt("userCount"));
     }
 
     // ── window list: GO-window intersection + tier resolution ───────────
@@ -440,7 +670,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
                 Collections.emptyList(), Collections.emptyList(),
                 Collections.emptyList(), Collections.emptyList());
 
-        webhook.get(parameters, responseVars);
+        invokeWebhookWithNoTemplateComposition();
 
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
@@ -477,7 +707,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
                 Collections.emptyList(), Collections.emptyList(),
                 Collections.emptyList(), Collections.emptyList());
 
-        webhook.get(parameters, responseVars);
+        invokeWebhookWithNoTemplateComposition();
 
         JSONObject result = new JSONObject(responseVars.get(RESULT));
         JSONArray windows = result.getJSONArray("roles").getJSONObject(0).getJSONArray("windows");
@@ -584,9 +814,20 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     }
 
     /**
-     * When the tenant's own role for a fixed name is still active, it must be used as-is — the
-     * system-template fallback is only for names with NO active tenant-scoped match. Proves the
-     * two paths coexist correctly rather than one always winning.
+     * When the tenant's own role for a fixed name is still active, it must be used as-is (not
+     * overridden by its system-template counterpart) — the system-template fallback ({@code
+     * roleSource: "systemTemplate"}) is only for names with NO active tenant-scoped match. Proves
+     * the two paths coexist correctly rather than one always winning.
+     *
+     * <p>Unlike before ETP-5065 Fix 2, {@link UserRoleCompositionService} IS now constructed here
+     * (exactly once, lazily, for the first active fixed-name role — Finance) even though every
+     * fixed name already has an active tenant role: {@link
+     * SFRolesOverview#addTenantRoleCardWithTemplateOverlap} unions direct assignees with
+     * template-composed users unconditionally, not only in the hybrid-state case. With an empty
+     * composed map (no personal-role composition configured in this test), that union changes
+     * nothing observable here — {@code roleSource} stays {@code "tenant"} and the ids stay the
+     * tenant's own — so this test still proves what its name says, just no longer via "never
+     * constructed".</p>
      */
     @Test
     @DisplayName("An active tenant role is preferred over its system-template counterpart")
@@ -594,13 +835,16 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         givenSystemAdminCallerRole();
         stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
 
-        try (MockedConstruction<UserRoleCompositionService> construction =
-                mockConstruction(UserRoleCompositionService.class)) {
+        try (MockedConstruction<UserRoleCompositionService> construction = mockConstruction(
+                UserRoleCompositionService.class, (mockService, ctx) ->
+                        when(mockService.getAppliedTemplateRoleIdsForClient(anyString()))
+                                .thenReturn(Collections.emptyMap()))) {
             webhook.get(parameters, responseVars);
 
-            assertTrue(construction.constructed().isEmpty(),
-                    "The composition service must never be constructed when every fixed name already "
-                            + "has an active tenant role");
+            assertEquals(1, construction.constructed().size(),
+                    "UserRoleCompositionService must be built lazily, once, for the whole request — "
+                            + "ETP-5065 Fix 2 resolves it for the first active fixed-name role too, not "
+                            + "only in the system-template-fallback branch");
         }
 
         JSONObject result = new JSONObject(responseVars.get(RESULT));
@@ -757,7 +1001,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         Object[] row2 = { "win-unreachable", "Sales Management" };
         when(categoryQuery.getResultList()).thenReturn(Arrays.asList(row1, row2));
 
-        webhook.get(parameters, responseVars);
+        invokeWebhookWithNoTemplateComposition();
 
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
@@ -792,7 +1036,7 @@ class SFRolesOverviewTest extends BaseWebhookTest {
                 Collections.singletonList(mockWindow("win-x", "Mystery Window")));
         // categoryQuery already stubbed to return an empty list by default (see setUp()).
 
-        webhook.get(parameters, responseVars);
+        invokeWebhookWithNoTemplateComposition();
 
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
@@ -800,6 +1044,109 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         assertEquals(1, categories.length());
         assertEquals("Other", categories.getJSONObject(0).getString("name"));
         assertEquals(1, categories.getJSONObject(0).getJSONArray("windows").length());
+    }
+
+    // ── ETP-5068: windows Etendo GO serves but never shows ───────────────
+
+    /**
+     * ETP-5068 — a window listed in {@code UI_EXCLUDED_WINDOW_IDS} must not reach ANY part of
+     * this response, even when the calling tenant's roles hold a live {@code AD_Window_Access}
+     * grant for it. The grant is the real-world state, not a corner case: {@code
+     * TemplateRoleWindowAccess} deliberately keeps granting "Conversion Rate Downloader Log" to
+     * the GO template roles so administrators can still read the log in Etendo classic — which
+     * is exactly why the window cannot be hidden by revoking access and has to be filtered here.
+     *
+     * <p>Asserting all three derived structures at once (the {@code matrix}, the role's {@code
+     * windows} array and its {@code windowCount}) is deliberate: they are what "Configuración
+     * &gt; Roles" and "Usuario &gt; Roles" render, and the whole point of filtering in {@code
+     * resolveActiveEtendoGoWindowsById()} is that one filter covers all of them.
+     */
+    @Test
+    @DisplayName("ETP-5068: a UI-excluded window is absent from the matrix, windows array and windowCount even when granted")
+    void testUiExcludedWindowNeverReachesTheResponse() throws Exception {
+        givenSystemAdminCallerRole();
+
+        Window visibleWindow = mockWindow("win-visible", "Sales Order");
+        Window excludedWindow = mockWindow("6FEBA130CDE24CC09041FFA6117ADFA9",
+                "Conversion Rate Downloader Log");
+        // Build the spec list BEFORE opening the when(...) — mockGoWindowSpec() stubs a mock of
+        // its own, and Mockito rejects a nested stubbing inside an unfinished thenReturn(...)
+        // with UnfinishedStubbingException. Same reason the sibling matrix test above hoists its
+        // list into a local. Do not re-inline this.
+        List<SFSpec> goWindowSpecs = Arrays.asList(
+                mockGoWindowSpec(visibleWindow), mockGoWindowSpec(excludedWindow));
+        OBCriteria<SFSpec> specCriteria = mockCriteria(SFSpec.class);
+        when(specCriteria.list()).thenReturn(goWindowSpecs);
+
+        List<Role> roles = standardTenantRoles();
+        stubTenantRoles(roles);
+
+        OBCriteria<UserRoles> userRolesCriteria = mockCriteria(UserRoles.class);
+        when(userRolesCriteria.list()).thenReturn(Collections.emptyList());
+
+        // The admin role (processed first) is granted BOTH windows — including the excluded one.
+        List<WindowAccess> adminWindowRows = Arrays.asList(
+                mockWindowAccessRow(visibleWindow, true),
+                mockWindowAccessRow(excludedWindow, true));
+        OBCriteria<WindowAccess> windowAccessCriteria = mockCriteria(WindowAccess.class);
+        when(windowAccessCriteria.list()).thenReturn(
+                adminWindowRows,
+                Collections.emptyList(), Collections.emptyList(),
+                Collections.emptyList(), Collections.emptyList());
+
+        // Both windows would land in the same top-level menu folder.
+        when(categoryQuery.getResultList()).thenReturn(Arrays.asList(
+                new Object[] { "win-visible", "Settings" },
+                new Object[] { "6FEBA130CDE24CC09041FFA6117ADFA9", "Settings" }));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        assertNull(responseVars.get(ERROR));
+        String rawResult = responseVars.get(RESULT);
+        // Blunt but decisive: the id must not appear ANYWHERE in the payload, whichever
+        // structure a future refactor might add it to.
+        assertFalse(rawResult.contains("6FEBA130CDE24CC09041FFA6117ADFA9"),
+                "the UI-excluded window id must not appear anywhere in the response");
+
+        JSONObject result = new JSONObject(rawResult);
+        JSONArray categories = result.getJSONObject("matrix").getJSONArray("categories");
+        assertEquals(1, categories.length());
+        JSONArray matrixWindows = categories.getJSONObject(0).getJSONArray("windows");
+        assertEquals(1, matrixWindows.length());
+        assertEquals("win-visible", matrixWindows.getJSONObject(0).getString("id"));
+
+        JSONObject admin = result.getJSONArray("roles").getJSONObject(0);
+        assertEquals(ADMIN_ROLE_ID, admin.getString("id"));
+        assertEquals(1, admin.getInt("windowCount"));
+        assertEquals(1, admin.getJSONArray("windows").length());
+        assertEquals("win-visible", admin.getJSONArray("windows").getJSONObject(0).getString("id"));
+    }
+
+    /**
+     * Guards the flip side of the filter: a window that merely SHARES the excluded window's
+     * category (and, in the real data, a similar name — "Conversion Rates" is the companion
+     * window users actually need) must be completely unaffected.
+     */
+    @Test
+    @DisplayName("ETP-5068: a non-excluded window in the same category is unaffected")
+    void testNonExcludedWindowInSameCategorySurvives() throws Exception {
+        givenSystemAdminCallerRole();
+
+        Window conversionRates = mockWindow("116", "Conversion Rates");
+        stubBaselineQueries(standardTenantRoles(), Collections.singletonList(conversionRates));
+        when(categoryQuery.getResultList()).thenReturn(
+                Collections.singletonList(new Object[] { "116", "Settings" }));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONArray categories = result.getJSONObject("matrix").getJSONArray("categories");
+        assertEquals(1, categories.length());
+        JSONArray windows = categories.getJSONObject(0).getJSONArray("windows");
+        assertEquals(1, windows.length());
+        assertEquals("116", windows.getJSONObject(0).getString("id"));
+        assertEquals("Conversion Rates", windows.getJSONObject(0).getString("name"));
     }
 
     // ── exception handling ───────────────────────────────────────────────

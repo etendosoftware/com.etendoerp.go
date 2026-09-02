@@ -52,7 +52,7 @@ PATCH_FP="$(hooks_fingerprint "$(hooks_patchid_staged)" "$PROOF_VER")"
 # `git diff --cached` would see only the amend delta). Informational only: the
 # Hooks-Verified fingerprint above is the integrity proof; Checks is for visibility.
 CHECKS_BASE=""
-for _b in origin/epic/ETP-3504 origin/develop origin/main; do
+for _b in origin/develop origin/main; do
   if git rev-parse --verify --quiet "$_b" >/dev/null; then
     CHECKS_BASE="$(git merge-base "$_b" HEAD 2>/dev/null || true)"
     break
