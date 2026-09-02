@@ -59,6 +59,8 @@ import com.etendoerp.go.payment.TenantPlanService;
  *       never a write against the System-level default row;</li>
  *   <li>a tenant that already owns its own active row is never overwritten (idempotent no-op on a
  *       resumed/retried onboarding pass, per the ETP-4428 reconcile model);</li>
+ *   <li>the new row's {@code Selected} flag is always {@code true}, matching the shape of a row an
+ *       operator creates by hand via the Classic Preference window (ETP-5117 follow-up);</li>
  *   <li>{@link OnboardingForceTestModeService#revertTestModeForProductiveTenant} performs the
  *       two-step write (flip VALUE to {@code 'N'} and save FIRST, so the real cascade fires and
  *       reverts existing config rows, THEN remove the row) rather than a single delete or a
@@ -127,6 +129,8 @@ class OnboardingForceTestModeServiceTest {
     verify(newPreference).setPropertyList(true);
     verify(newPreference).setProperty(OnboardingForceTestModeService.FORCE_TEST_MODE_PROPERTY);
     verify(newPreference).setSearchKey("Y");
+    // Matches the shape of a row an operator creates by hand in Classic (ETP-5117 follow-up).
+    verify(newPreference).setSelected(true);
     verify(obDal).save(newPreference);
     verify(obDal).flush();
   }

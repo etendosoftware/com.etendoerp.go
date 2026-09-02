@@ -52,8 +52,12 @@ import com.etendoerp.go.payment.TenantPlanService;
  * setPreferenceValue} way would carry {@code AD_Client_ID='0'} and be entirely invisible to
  * these handlers' lookup. This service instead builds and saves the {@link Preference} entity
  * directly, with {@link Preference#setClient} pinned to the <b>tenant itself</b> — never the
- * System client — mirroring the shape already used by every {@code ETSG_ForceTestMode} row an
- * operator creates by hand via the Classic Preference window.
+ * System client — and {@link Preference#setSelected} set to {@code true}, mirroring the shape
+ * already used by every {@code ETSG_ForceTestMode} row an operator creates by hand via the
+ * Classic Preference window (confirmed on the shared dev DB: several hand-made rows for this same
+ * preference carry {@code Selected='Y'}). None of the 3 consuming handlers filters on this
+ * column — it is a data-correctness/consistency-with-Classic fix, not a functional one
+ * (ETP-5117 follow-up).
  *
  * <h3>Non-negotiable: never touches the System-level default row</h3>
  * The bundled default ({@code AD_Preference_ID 6DCB1CD4A0414D78BB97441626B62835}, {@code
@@ -91,7 +95,9 @@ import com.etendoerp.go.payment.TenantPlanService;
  * schema_forge/cli/src/data-fixes/sql/} — which, unlike this service, ALSO directly backfills any
  * pre-existing config rows' own columns, since a corrective fix cannot rely on the update-cascade
  * either (a data-fix runs as plain SQL, which never goes through Hibernate/DAL at all, so it can
- * never fire any of these observers).</p>
+ * never fire any of these observers). R31 shipped before the {@code Selected} fix above landed, so
+ * its rows need their own follow-up backfill: {@code
+ * 20260902T120000Z__R33-force-test-mode-selected-backfill.sql}.</p>
  *
  * <h3>The reverse direction: {@link #revertTestModeForProductiveTenant}</h3>
  * When a Demo tenant later converts to productive ({@code TenantPlanService#markProductive}), its
@@ -178,6 +184,10 @@ public class OnboardingForceTestModeService {
     preference.setPropertyList(true);
     preference.setProperty(FORCE_TEST_MODE_PROPERTY);
     preference.setSearchKey(YES);
+    // Matches the shape of a row an operator creates by hand via the Classic Preference window
+    // (its "selected" checkbox lands checked) — none of the 3 consuming handlers filters on this
+    // column, but the row must still look like a real Classic-created preference (ETP-5117 follow-up).
+    preference.setSelected(true);
     OBDal.getInstance().save(preference);
     OBDal.getInstance().flush();
 

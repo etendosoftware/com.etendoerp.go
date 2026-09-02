@@ -86,7 +86,7 @@ public class OnboardingBaselineService {
    * Use the exact UTC timestamp prefix of the last incorporated .sql file, e.g.:
    * {@code "20260617T120000Z"} matches {@code 20260617T120000Z__R7-tax-accounts.sql}.</p>
    *
-   * Current watermark: R29 acctschema-allownegative-revert (2026-08-28).
+   * Current watermark: R33 force-test-mode-selected-backfill (2026-09-02).
    *
    * <p><b>Note (2026-08-26, ETP-4999):</b> gap M1 — the self-registration provisioning chain
    * ({@code InitialClientSetup} then, separately and later, {@code
@@ -203,8 +203,17 @@ public class OnboardingBaselineService {
    * ({@code AD_Client_ID='0'}) and never overwrites a tenant's own pre-existing row. Corrective
    * twin: {@code 20260901T120000Z__R31-force-test-mode-demo-tenants.sql}. Bumped to R31's own
    * timestamp, {@code 2026-09-01T12:00:00Z}.</p>
+   *
+   * <p><b>2026-09-02 (ETP-5117 follow-up, R33):</b> gap N1 correction — R31's preference INSERT
+   * never set {@code Selected}, so every row it created landed at the schema default {@code 'N'},
+   * inconsistent with the shape of a row an operator creates by hand in Classic (confirmed on the
+   * shared dev DB: several hand-made {@code ETSG_ForceTestMode} rows carry {@code Selected='Y'}).
+   * {@link OnboardingForceTestModeService#forceTestModeForFreeTenant} now calls {@code
+   * Preference#setSelected(true)} on the row it builds. Corrective twin: {@code
+   * 20260902T120000Z__R33-force-test-mode-selected-backfill.sql}. Bumped to R33's own timestamp,
+   * {@code 2026-09-02T12:00:00Z}.</p>
    */
-  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-09-01T12:00:00Z");
+  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-09-02T12:00:00Z");
 
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("
