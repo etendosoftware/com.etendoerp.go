@@ -83,6 +83,7 @@ public class ToolRegistry {
       // neo_widget wraps the handler-backed business widgets (gap G4, ETP-4284). It is a
       // built-in read tool, not gated on any accessible window spec.
       tools.add(buildWidgetTool());
+      tools.add(buildVectorSearchTool());
     }
 
     // Query all active specs
@@ -278,7 +279,7 @@ public class ToolRegistry {
    */
   public static String resolveSpecName(String toolName, org.codehaus.jettison.json.JSONObject arguments) {
     // Static tools (e.g. docs) are not tied to any spec
-    if ("docs".equals(toolName)) {
+    if ("docs".equals(toolName) || McpConstants.TOOL_NEO_VECTOR_SEARCH.equals(toolName)) {
       return null;
     }
 
@@ -427,6 +428,26 @@ public class ToolRegistry {
             + "{response:{data,count}}. Use this for business analysis instead of neo_list; "
             + "these widgets aggregate data that has no single CRUD entity.",
         buildObjectSchema(props, List.of(McpConstants.PARAM_WIDGET)));
+  }
+
+  // ── Global vector search tool ─────────────────────────────────────────
+
+  /** Build the read-only DB Extended semantic-search tool. */
+  McpToolDefinition buildVectorSearchTool() {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put(McpConstants.PARAM_QUERY,
+        stringProp("Natural-language search query"));
+    props.put("targets", stringArrayProp(
+        "DB Extended search-target keys to query"));
+    props.put("topK", intProp("Maximum results (default 10, maximum 50)"));
+    props.put("minScore", numberProp("Minimum similarity score from 0 to 1 (default 0.60)"));
+    props.put("maxScore", numberProp("Maximum similarity score from 0 to 1 (default 1.0)"));
+    return new McpToolDefinition(
+        McpConstants.TOOL_NEO_VECTOR_SEARCH,
+        "Search indexed business records by semantic similarity using DB Extended. "
+            + "Targets are authorized against their physical source entity for the current role. "
+            + "Scores are ranking signals, not confidence probabilities.",
+        buildObjectSchema(props, List.of(McpConstants.PARAM_QUERY, "targets")));
   }
 
   // ── CRUD tools (registered once with spec enum) ───────────────────────
@@ -953,6 +974,13 @@ public class ToolRegistry {
   private Map<String, Object> intProp(String description) {
     Map<String, Object> prop = new LinkedHashMap<>();
     prop.put("type", "integer");
+    prop.put(McpConstants.KEY_DESCRIPTION, description);
+    return prop;
+  }
+
+  private Map<String, Object> numberProp(String description) {
+    Map<String, Object> prop = new LinkedHashMap<>();
+    prop.put("type", "number");
     prop.put(McpConstants.KEY_DESCRIPTION, description);
     return prop;
   }

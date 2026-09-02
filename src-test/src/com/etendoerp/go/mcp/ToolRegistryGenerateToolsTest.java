@@ -224,12 +224,13 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       List<String> names = toolNames(tools);
-      // Read access always yields neo_discover + docs + neo_widget when no specs exist
-      // (neo_widget is a built-in read tool, ETP-4284).
+      // Read access always yields neo_discover + docs + neo_widget + neo_vector_search when no
+      // specs exist. These are built-in read tools (ETP-4284 / ETP-5123).
       assertTrue(names.contains("neo_discover"));
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
-      assertEquals(3, tools.size());
+      assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
+      assertEquals(4, tools.size());
     }
 
     @Test
@@ -331,14 +332,16 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(tools);
 
       // No CRUD tools since there are no accessible window specs; only the
-      // read-scope baseline tools (neo_discover + docs + neo_widget) are present.
+      // read-scope baseline tools (neo_discover + docs + neo_widget + neo_vector_search) are
+      // present.
       assertFalse(names.contains("neo_list"));
       assertFalse(names.contains("neo_get"));
       assertFalse(names.contains("neo_create"));
       assertTrue(names.contains("neo_discover"));
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
-      assertEquals(3, tools.size());
+      assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
+      assertEquals(4, tools.size());
     }
 
     @Test
@@ -364,14 +367,16 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(tools);
 
       // No CRUD tools since there are no accessible window specs; only the
-      // read-scope baseline tools (neo_discover + docs + neo_widget) are present.
+      // read-scope baseline tools (neo_discover + docs + neo_widget + neo_vector_search) are
+      // present.
       assertFalse(names.contains("neo_list"));
       assertFalse(names.contains("neo_get"));
       assertFalse(names.contains("neo_create"));
       assertTrue(names.contains("neo_discover"));
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
-      assertEquals(3, tools.size());
+      assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
+      assertEquals(4, tools.size());
     }
 
     @Test
@@ -470,7 +475,7 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(tools);
 
       // No window specs => no CRUD/window tools. Only the read-scope baseline
-      // tools (neo_discover + docs + neo_widget) are present.
+      // tools (neo_discover + docs + neo_widget + neo_vector_search) are present.
       assertFalse(names.contains("neo_list"));
       assertFalse(names.contains("neo_create"));
       assertFalse(names.contains("neo_update"));
@@ -478,7 +483,8 @@ class ToolRegistryGenerateToolsTest {
       assertTrue(names.contains("neo_discover"));
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
-      assertEquals(3, tools.size());
+      assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
+      assertEquals(4, tools.size());
     }
   }
 

@@ -34,7 +34,7 @@ import com.etendoerp.db.extended.vector.VectorException;
 import com.etendoerp.db.extended.vector.VectorSearchService;
 
 /** Authenticated global semantic-search endpoint backed by DB Extended's pgvector facade. */
-class NeoVectorSearchEndpoint {
+public class NeoVectorSearchEndpoint {
   private static final int DEFAULT_TOP_K = 10;
   private static final int MAX_TOP_K = 50;
   private static final double DEFAULT_MIN_SCORE = 0.60d;
@@ -45,7 +45,7 @@ class NeoVectorSearchEndpoint {
   private TargetSearchGateway targetSearchGateway;
   private NamespaceAuthorizer targetAuthorizer;
 
-  NeoVectorSearchEndpoint() {
+  public NeoVectorSearchEndpoint() {
     this((namespaces, query, topK, metadataFilter, minScore, maxScore) ->
         new VectorSearchService(new DalConnectionProvider(false))
             .searchAsJson(namespaces, query, topK, metadataFilter, minScore, maxScore),
@@ -64,14 +64,23 @@ class NeoVectorSearchEndpoint {
 
   NeoResponse handle(HttpServletRequest request) {
     String query = trimToNull(request.getParameter("query"));
-    List<String> namespaces = parseNamespaces(request.getParameter("namespaces"));
-    List<String> targets = parseNamespaces(request.getParameter("targets"));
+    return handle(query, request.getParameter("namespaces"), request.getParameter("targets"),
+        request.getParameter("topK"), request.getParameter("minScore"),
+        request.getParameter("maxScore"), request.getParameter("metadataFilter"));
+  }
+
+  /** Execute the authenticated search contract for non-servlet adapters such as MCP. */
+  public NeoResponse handle(String queryValue, String rawNamespaces, String rawTargets,
+      String rawTopK, String rawMinScore, String rawMaxScore, String metadataFilter) {
+    String query = trimToNull(queryValue);
+    List<String> namespaces = parseNamespaces(rawNamespaces);
+    List<String> targets = parseNamespaces(rawTargets);
     if (query == null || (namespaces.isEmpty() && targets.isEmpty())) return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
         "Missing required parameter: query and either targets or namespaces are required");
-    Integer topK = parseTopK(request.getParameter("topK"));
+    Integer topK = parseTopK(rawTopK);
     if (topK == null) return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
         "topK must be an integer between 1 and " + MAX_TOP_K);
-    ScoreRange scoreRange = parseScoreRange(request.getParameter("minScore"), request.getParameter("maxScore"));
+    ScoreRange scoreRange = parseScoreRange(rawMinScore, rawMaxScore);
     if (scoreRange == null) return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
         "minScore and maxScore must be numbers between 0 and 1, with minScore not greater than maxScore");
     try {
@@ -84,7 +93,7 @@ class NeoVectorSearchEndpoint {
       if (!namespaceAuthorizer.isAuthorized(namespaces))
         return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN, "Access denied to vector source");
       return NeoResponse.ok(new JSONObject(searchGateway.search(namespaces, query, topK,
-          trimToNull(request.getParameter("metadataFilter")), scoreRange.minScore, scoreRange.maxScore)));
+            trimToNull(metadataFilter), scoreRange.minScore, scoreRange.maxScore)));
     } catch (VectorException e) {
       return NeoResponse.error(HTTP_UNPROCESSABLE_ENTITY, e.getCode().name() + ": " + e.getMessage());
     } catch (Exception e) {

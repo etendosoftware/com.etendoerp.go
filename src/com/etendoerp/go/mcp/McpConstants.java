@@ -151,6 +151,8 @@ final class McpConstants {
 
   /** Tool name for the business-widget enum tool (gap G4, ETP-4284). */
   static final String TOOL_NEO_WIDGET = "neo_widget";
+  /** Global semantic vector-search tool backed by DB Extended. */
+  static final String TOOL_NEO_VECTOR_SEARCH = "neo_vector_search";
   /** Spec name that backs the widget handler entities (type W, no AD_Tab). */
   static final String SPEC_DASHBOARD = "dashboard";
 
