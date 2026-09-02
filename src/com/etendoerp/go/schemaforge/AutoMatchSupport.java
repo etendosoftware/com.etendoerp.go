@@ -22,9 +22,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -46,6 +43,8 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
 /**
  * Static helpers for the {@code autoMatch} and {@code applySuggestions} actions of
@@ -72,9 +71,6 @@ final class AutoMatchSupport {
   static final String KEY_PROJECT_ID = "projectId";
   static final String KEY_COSTCENTER_ID = "costcenterId";
   static final String KEY_PRODUCT_ID = "productId";
-
-  private static final DateTimeFormatter ISO_UTC =
-      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
 
   /** Caps the partner/reference subset search to keep the preview predictable and bounded. */
   private static final int MAX_SIGNAL_SUBSET_SIZE = 12;
@@ -615,8 +611,10 @@ final class AutoMatchSupport {
   // Shared helpers
   // ---------------------------------------------------------------------------
 
+  /** Canonical NEO wire datetime in the server's own zone; see {@link NeoDateFormat} (ETP-5100). */
   private static String formatDate(Timestamp ts) {
-    return ts == null ? "" : ISO_UTC.format(Instant.ofEpochMilli(ts.getTime()));
+    String formatted = NeoDateFormat.toWireDateTime(ts);
+    return formatted == null ? "" : formatted;
   }
 
   static BigDecimal nullSafe(BigDecimal value) {
