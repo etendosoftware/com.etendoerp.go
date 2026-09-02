@@ -201,7 +201,7 @@ public class GlItemProvisioningSupport {
     if (glItem == null) {
       glItem = createGlItem(subaccount);
     }
-    createGlItemAccounts(glItem, schema, combo);
+    createGlItemAccounts(glItem, schema, combo, subaccount);
     return glItem;
   }
 
@@ -375,14 +375,26 @@ public class GlItemProvisioningSupport {
     return value.length() <= maxLength ? value : value.substring(0, Math.max(0, maxLength));
   }
 
-  /** Creates a brand-new {@link GLItem} for {@code subaccount} (see {@link #composeGlItemName}), in its client/org. */
+  /**
+   * Creates a brand-new {@link GLItem} for {@code subaccount} (see {@link #composeGlItemName}), in
+   * its client/org.
+   *
+   * <p><b>Active state mirrors {@code subaccount.isActive()}</b> (ETP-5101 review finding): this
+   * method is reachable from a rename-only trigger (hook H, {@code syncGlItemNameAfterUpdate})
+   * with no active-state guard upstream, and {@link #resolveNaturalCombination}'s
+   * {@code setFilterOnActive(false)} deliberately keeps a deactivated subaccount's combination
+   * findable — so renaming an inactive, not-yet-provisioned subaccount reaches this create branch.
+   * Hardcoding {@code true} here would mint an active, selectable GL Item behind an inactive
+   * account — the exact silent-divergence class hook G exists to prevent, just on the create path
+   * instead of the update path.
+   */
   protected GLItem createGlItem(ElementValue subaccount) {
     GLItem glItem = OBProvider.getInstance().get(GLItem.class);
     glItem.setNewOBObject(true);
     glItem.setClient(subaccount.getClient());
     glItem.setOrganization(subaccount.getOrganization());
     glItem.setName(composeGlItemName(subaccount));
-    glItem.setActive(true);
+    glItem.setActive(Boolean.TRUE.equals(subaccount.isActive()));
     OBDal.getInstance().save(glItem);
     return glItem;
   }
@@ -409,8 +421,15 @@ public class GlItemProvisioningSupport {
     }
   }
 
-  /** Creates the {@code GLItemAccounts} row for {@code schema}, debit = credit = {@code combo}. */
-  protected void createGlItemAccounts(GLItem glItem, AcctSchema schema, AccountingCombination combo) {
+  /**
+   * Creates the {@code GLItemAccounts} row for {@code schema}, debit = credit = {@code combo}.
+   *
+   * <p>Active state mirrors {@code subaccount.isActive()} — same rationale as {@link #createGlItem}:
+   * this is reachable for an inactive subaccount via hook H, and a hardcoded {@code true} would
+   * silently provision an active, selectable link for a deactivated account.
+   */
+  protected void createGlItemAccounts(GLItem glItem, AcctSchema schema, AccountingCombination combo,
+      ElementValue subaccount) {
     GLItemAccounts link = OBProvider.getInstance().get(GLItemAccounts.class);
     link.setNewOBObject(true);
     link.setClient(glItem.getClient());
@@ -419,7 +438,7 @@ public class GlItemProvisioningSupport {
     link.setAccountingSchema(schema);
     link.setGlitemDebitAcct(combo);
     link.setGlitemCreditAcct(combo);
-    link.setActive(true);
+    link.setActive(Boolean.TRUE.equals(subaccount.isActive()));
     OBDal.getInstance().save(link);
   }
 }
