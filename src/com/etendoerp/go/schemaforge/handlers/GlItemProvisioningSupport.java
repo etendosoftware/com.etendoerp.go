@@ -243,12 +243,24 @@ public class GlItemProvisioningSupport {
    * dimension {@code NULL}. Mirrors the exact dimension shape {@code C_ELEMENTVALUE_TRG} inserts
    * (see {@code C_ELEMENTVALUE_TRG.xml:64-75}). Returns {@code null} for a summary/heading account,
    * which never gets one — see class javadoc, Case 3.
+   *
+   * <p><b>{@code setFilterOnActive(false)} is mandatory here</b> (ETP-5101 QA finding): core
+   * cascades a subaccount's own deactivation onto its natural {@code C_ValidCombination} row —
+   * confirmed live, the row's {@code isactive} flips to {@code 'N'} in the same instant as the
+   * subaccount's. {@link OBCriteria} defaults to active-only, so without this the combination
+   * silently becomes invisible the moment the subaccount it belongs to is deactivated — exactly
+   * the one case {@link #setGlItemAccountsActiveForSchema} most needs to still find it, to mirror
+   * that same deactivation onto the {@link GLItemAccounts} row. Without it, {@code combo} reads as
+   * {@code null} and every caller (mis)reads that as Case 3 ("no accounting use"), silently
+   * no-oping — not just the active-state sync, but any LATER rename sync too, for as long as the
+   * subaccount stays inactive.
    */
   protected AccountingCombination resolveNaturalCombination(ElementValue subaccount, AcctSchema schema) {
     OBCriteria<AccountingCombination> criteria =
         OBDal.getInstance().createCriteria(AccountingCombination.class);
     criteria.setFilterOnReadableClients(false);
     criteria.setFilterOnReadableOrganization(false);
+    criteria.setFilterOnActive(false);
     criteria.add(Restrictions.eq(AccountingCombination.PROPERTY_ACCOUNT, subaccount));
     criteria.add(Restrictions.eq(AccountingCombination.PROPERTY_ACCOUNTINGSCHEMA, schema));
     criteria.add(Restrictions.isNull(AccountingCombination.PROPERTY_PRODUCT));
@@ -271,11 +283,18 @@ public class GlItemProvisioningSupport {
    * Idempotency key: any {@link GLItemAccounts} row that already wires {@code combo} as its
    * {@code glitemDebitAcct} (debit and credit are always the same combination for a GL-Item-behind-
    * a-subaccount row — see class javadoc — so checking debit alone is sufficient).
+   *
+   * <p>{@code setFilterOnActive(false)} for the same reason as {@link #resolveNaturalCombination}:
+   * once {@link #setGlItemAccountsActiveForSchema} correctly deactivates this row (ETP-5101 fix),
+   * it must still be findable on a LATER edit (e.g. a rename) of the still-inactive subaccount —
+   * otherwise this idempotency check would wrongly read as "nothing provisioned yet" and mint a
+   * duplicate {@link GLItemAccounts} row instead of reusing/updating the existing one.
    */
   protected GLItemAccounts findGlItemAccountsByCombination(AccountingCombination combo) {
     OBCriteria<GLItemAccounts> criteria = OBDal.getInstance().createCriteria(GLItemAccounts.class);
     criteria.setFilterOnReadableClients(false);
     criteria.setFilterOnReadableOrganization(false);
+    criteria.setFilterOnActive(false);
     criteria.add(Restrictions.eq(GLItemAccounts.PROPERTY_GLITEMDEBITACCT, combo));
     criteria.setMaxResults(1);
     return (GLItemAccounts) criteria.uniqueResult();
@@ -287,12 +306,17 @@ public class GlItemProvisioningSupport {
    * {@link GLItem}, so a newly-active schema reuses the subaccount's existing GL Item instead of
    * minting a second one. Only consulted when {@link #findGlItemAccountsByCombination} found no
    * match for the CURRENT schema (i.e., this schema genuinely has nothing yet).
+   *
+   * <p>{@code setFilterOnActive(false)} — same rationale as {@link #resolveNaturalCombination}: a
+   * deactivated subaccount's combinations must stay findable here too, or a later reactivation /
+   * new-schema pass would mint a second GL Item instead of reusing the existing one.
    */
   protected GLItem findGlItemLinkedToAnyCombinationOf(ElementValue subaccount) {
     OBCriteria<AccountingCombination> comboCriteria =
         OBDal.getInstance().createCriteria(AccountingCombination.class);
     comboCriteria.setFilterOnReadableClients(false);
     comboCriteria.setFilterOnReadableOrganization(false);
+    comboCriteria.setFilterOnActive(false);
     comboCriteria.add(Restrictions.eq(AccountingCombination.PROPERTY_ACCOUNT, subaccount));
     for (AccountingCombination combo : comboCriteria.list()) {
       GLItemAccounts link = findGlItemAccountsByCombination(combo);

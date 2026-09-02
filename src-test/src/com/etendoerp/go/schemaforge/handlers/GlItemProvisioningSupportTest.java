@@ -108,6 +108,60 @@ public class GlItemProvisioningSupportTest {
         .anyMatch(c -> c.toString().contains(AccountingCombination.PROPERTY_LOCATIONTOADDRESS)));
     verify(crit).addOrderBy(AccountingCombination.PROPERTY_ID, true);
     verify(crit).setMaxResults(1);
+    // ETP-5101 regression: without this, a subaccount's own cascaded deactivation makes its
+    // natural combination invisible to this lookup — see the method's javadoc.
+    verify(crit).setFilterOnActive(false);
+  }
+
+  // ── findGlItemAccountsByCombination — active-filter regression (ETP-5101) ─────────────────
+
+  /**
+   * ETP-5101 regression: without {@code setFilterOnActive(false)} here, the {@code
+   * GLItemAccounts} row for an already-deactivated subaccount becomes invisible to this
+   * idempotency lookup the moment {@link GlItemProvisioningSupport#setGlItemAccountsActiveForSchema}
+   * correctly deactivates it — the very next rename/edit would then read "nothing provisioned
+   * yet" and mint a duplicate row instead of resyncing the existing one.
+   */
+  @Test
+  public void findGlItemAccountsByCombinationFiltersOnActiveFalse() {
+    AccountingCombination combo = mock(AccountingCombination.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<GLItemAccounts> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(crit);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      support.findGlItemAccountsByCombination(combo);
+    }
+
+    verify(crit).setFilterOnActive(false);
+    verify(crit).setMaxResults(1);
+  }
+
+  // ── findGlItemLinkedToAnyCombinationOf — active-filter regression (ETP-5101) ──────────────
+
+  /**
+   * ETP-5101 regression: this method's inner {@code AccountingCombination} criteria (the
+   * multi-schema idempotency fallback) must ALSO ignore active state — a deactivated
+   * subaccount's combinations must stay findable here too, or a later reactivation / new-schema
+   * pass would mint a second GL Item instead of reusing the existing one.
+   */
+  @Test
+  public void findGlItemLinkedToAnyCombinationOfFiltersOnActiveFalseForComboCriteria() {
+    ElementValue subaccount = mock(ElementValue.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AccountingCombination> comboCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCriteria);
+    when(comboCriteria.list()).thenReturn(Collections.emptyList());
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      support.findGlItemLinkedToAnyCombinationOf(subaccount);
+    }
+
+    verify(comboCriteria).setFilterOnActive(false);
   }
 
   // ── ensureGlItemForSubaccount — guards ─────────────────────────────────────
@@ -847,5 +901,58 @@ public class GlItemProvisioningSupportTest {
     // Symmetric guard to ensureGlItemForSubaccountNoOpsWhenSchemasEmpty.
     support.setGlItemAccountsActiveForSubaccount(mock(ElementValue.class), Collections.emptyList(),
         false);
+  }
+
+  // ── Full bug-scenario regression (ETP-5101) ────────────────────────────────
+  //
+  // The other tests above pin the QUERY-level half of the fix (setFilterOnActive(false) is
+  // actually called). This test pins the CALLER-level half: even when resolveNaturalCombination
+  // and findGlItemAccountsByCombination hand back an already-INACTIVE AccountingCombination /
+  // GLItemAccounts row (exactly what an active-filtered query would have hidden, and exactly what
+  // core's deactivation cascade produces — see class javadoc), setGlItemAccountsActiveForSchema
+  // must still treat them as found and proceed to sync, never silently re-derive "no accounting
+  // use" (Case 3) from their inactive state. The two lookup seams are overridden directly,
+  // mirroring OnboardingAccountingWiringServiceTest's TestableService pattern referenced in this
+  // class's own javadoc, so this test is independent of the OBCriteria/setFilterOnActive plumbing
+  // already covered above.
+
+  @Test
+  public void setGlItemAccountsActiveForSchemaSyncsAnAlreadyInactiveLinkFoundDespiteFilter() {
+    ElementValue subaccount = mock(ElementValue.class);
+    AcctSchema schema = mock(AcctSchema.class);
+    AccountingCombination inactiveCombo = mock(AccountingCombination.class);
+    when(inactiveCombo.isActive()).thenReturn(false); // the exact ETP-5101 scenario: the
+        // subaccount's own natural combination cascaded to isactive='N'
+    GLItemAccounts inactiveLink = mock(GLItemAccounts.class);
+    when(inactiveLink.isActive()).thenReturn(false); // already deactivated by an earlier sync
+
+    class TestableSupport extends GlItemProvisioningSupport {
+      @Override
+      protected AccountingCombination resolveNaturalCombination(ElementValue s, AcctSchema sch) {
+        // simulates setFilterOnActive(false) finding it despite isactive='N'
+        return inactiveCombo;
+      }
+
+      @Override
+      protected GLItemAccounts findGlItemAccountsByCombination(AccountingCombination combo) {
+        assertEquals(inactiveCombo, combo);
+        return inactiveLink; // ditto for the GLItemAccounts row
+      }
+    }
+
+    TestableSupport testableSupport = new TestableSupport();
+
+    OBDal dal = mock(OBDal.class);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      // Reactivating: the subaccount comes back active, the link must follow even though both
+      // the combo AND the link were found in an inactive state — neither is treated as absent.
+      testableSupport.setGlItemAccountsActiveForSubaccount(subaccount,
+          Collections.singletonList(schema), true);
+
+      verify(inactiveLink).setActive(true);
+      verify(dal).save(inactiveLink);
+    }
   }
 }
