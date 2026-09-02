@@ -1400,7 +1400,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     JSONArray removable = new JSONArray();
     if (total > 1) {
       if (hasPassword) {
-        removable.put(FIELD_PASSWORD);
+        removable.put(METHOD_PASSWORD);
       }
       for (AccountIdentity identity : identities) {
         removable.put(identity.getAuthProvider());
@@ -1408,7 +1408,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
 
     JSONObject authMethods = new JSONObject();
-    authMethods.put("password", password);
+    authMethods.put(METHOD_PASSWORD, password);
     authMethods.put("identities", identityArray);
     authMethods.put("removable", removable);
     return authMethods;
