@@ -317,17 +317,18 @@ public class GlItemProvisioningSupport {
   private static final int GL_ITEM_NAME_MAX_LENGTH = 60;
 
   /**
-   * Builds the {@link GLItem} name for {@code subaccount} — ETP-5101: the subaccount's name plus
-   * its 8-digit code, so "Cuenta contable" and its GL Item read as the same account even when
-   * several subaccounts happen to share a name. Single source of truth for the format: both
+   * Builds the {@link GLItem} name for {@code subaccount} — ETP-5101: the subaccount's 8-digit
+   * code plus its name, so "Cuenta contable" and its GL Item read as the same account even when
+   * several subaccounts happen to share a name, and so the code — the more useful sort/scan key
+   * in a flat GL Item list — leads. Single source of truth for the format: both
    * {@link #createGlItem} and {@link #syncGlItemName} build the name through this method, so their
    * comparison never drifts — see the warning on {@link #syncGlItemName}.
    *
    * <p>Truncates the NAME portion, never the code — the code is what disambiguates two
-   * subaccounts sharing a name (the entire point of appending it), so it must always survive
+   * subaccounts sharing a name (the entire point of prepending it), so it must always survive
    * intact within the {@link #GL_ITEM_NAME_MAX_LENGTH} budget.
    *
-   * @return {@code "<name, truncated to fit> <searchKey>"}, or the (possibly truncated) bare name
+   * @return {@code "<searchKey> <name, truncated to fit>"}, or the (possibly truncated) bare name
    *     if {@code searchKey} is blank (should not happen for a real leaf account, but keeps this
    *     method total)
    */
@@ -337,9 +338,9 @@ public class GlItemProvisioningSupport {
     if (code == null || code.isEmpty()) {
       return truncateToFit(name, GL_ITEM_NAME_MAX_LENGTH);
     }
-    String suffix = " " + code;
-    String truncatedName = truncateToFit(name, GL_ITEM_NAME_MAX_LENGTH - suffix.length());
-    return truncatedName + suffix;
+    String prefix = code + " ";
+    String truncatedName = truncateToFit(name, GL_ITEM_NAME_MAX_LENGTH - prefix.length());
+    return prefix + truncatedName;
   }
 
   /** Hard-truncates {@code value} to {@code maxLength}. Null-safe; {@code maxLength <= 0} yields "". */
