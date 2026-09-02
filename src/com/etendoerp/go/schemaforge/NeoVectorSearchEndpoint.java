@@ -46,6 +46,7 @@ public class NeoVectorSearchEndpoint {
   private TargetSearchGateway targetSearchGateway;
   private NamespaceAuthorizer targetAuthorizer;
 
+  /** Creates the production endpoint backed by DB Extended and authenticated entity access. */
   public NeoVectorSearchEndpoint() {
     this((namespaces, query, topK, metadataFilter, minScore, maxScore) ->
         new VectorSearchService(new DalConnectionProvider(false))
@@ -78,7 +79,18 @@ public class NeoVectorSearchEndpoint {
         request.getParameter("maxScore"), request.getParameter("metadataFilter"));
   }
 
-  /** Execute the authenticated search contract for non-servlet adapters such as MCP. */
+  /**
+   * Executes the authenticated search contract for non-servlet adapters such as MCP.
+   *
+   * @param queryValue user query text
+   * @param rawNamespaces comma-separated vector source namespaces
+   * @param rawTargets comma-separated configured vector target keys
+   * @param rawTopK optional maximum number of results
+   * @param rawMinScore optional minimum normalized score
+   * @param rawMaxScore optional maximum normalized score
+   * @param metadataFilter optional metadata filter for namespace searches
+   * @return HTTP-style response containing search results or a validation/authorization error
+   */
   public NeoResponse handle(String queryValue, String rawNamespaces, String rawTargets,
       String rawTopK, String rawMinScore, String rawMaxScore, String metadataFilter) {
     String query = trimToNull(queryValue);
