@@ -57,14 +57,17 @@ import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.util.NeoReportContract;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
+import com.etendoerp.go.schemaforge.DocTypeResolver;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
 import com.etendoerp.go.schemaforge.NeoMandatoryDefaultsService;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
@@ -118,6 +121,12 @@ public class McpToolRouter {
    */
   public JSONObject route(String toolName, JSONObject arguments, java.util.Set<String> scopes) {
     McpAuthorizationService.authorizeToolCall(toolName, scopes);
+    // Vector target authorization must run in the caller's role context. The regular MCP
+    // handlers use admin mode for DAL metadata and therefore cannot safely host this check.
+    // Dispatching before setAdminMode preserves AD_Window/entity organization isolation.
+    if (McpConstants.TOOL_NEO_VECTOR_SEARCH.equals(toolName)) {
+      return handleVectorSearch(arguments);
+    }
     try {
       OBContext.setAdminMode();
       try {
@@ -174,6 +183,34 @@ public class McpToolRouter {
       log.error("Error routing MCP tool '{}'", toolName, e);
       return wrapAsErrorContent(buildUnexpectedErrorBody(toolName, e));
     }
+  }
+
+  /** Route semantic search through the same authenticated DB Extended contract as REST. */
+  private JSONObject handleVectorSearch(JSONObject arguments) {
+    String query = arguments == null ? null : arguments.optString(McpConstants.PARAM_QUERY, null);
+    String targets = joinStringArray(arguments == null ? null : arguments.optJSONArray("targets"));
+    NeoResponse response = new NeoVectorSearchEndpoint().handle(query, null, targets,
+        optionalString(arguments, "topK"), optionalString(arguments, "minScore"),
+        optionalString(arguments, "maxScore"), null);
+    String body = response.getBody() == null ? "{}" : response.getBody().toString();
+    return response.getHttpStatus() >= 400 ? wrapAsErrorContent(body) : wrapAsTextContent(body);
+  }
+
+  private static String optionalString(JSONObject arguments, String key) {
+    if (arguments == null || !arguments.has(key) || arguments.isNull(key)) return null;
+    return String.valueOf(arguments.opt(key));
+  }
+
+  private static String joinStringArray(JSONArray values) {
+    if (values == null) return null;
+    StringBuilder joined = new StringBuilder();
+    for (int i = 0; i < values.length(); i++) {
+      String value = values.optString(i, null);
+      if (StringUtils.isBlank(value)) continue;
+      if (joined.length() > 0) joined.append(',');
+      joined.append(value);
+    }
+    return joined.toString();
   }
 
   /**
@@ -542,6 +579,15 @@ public class McpToolRouter {
       }
       filteredBody.put(key, userProvided.get(key));
     }
+
+    // Keep MCP creates aligned with the REST create path. The create schema intentionally hides
+    // system document-type fields, but mandatory defaults may still inject the generic "Standard
+    // Order" target before the tab-specific subtype is known. Resolve the canonical type from
+    // the active tab (sales quotations use the quotation subtype) and apply it to both
+    // transactionDocument and documentType. Explicit values remain protected unless the tab has
+    // an authoritative subtype filter.
+    DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, ctx,
+        NeoCrudHelper.snapshotBodyFields(userProvided));
 
     // userProvided is the pre-defaults snapshot, so it is the only reliable witness of whether the
     // agent actually chose a uOM.
