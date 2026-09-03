@@ -77,6 +77,17 @@ import com.etendoerp.go.schemaforge.SiiTbaiAutoSendScheduleService;
  * {@link SiiTbaiAutoSendScheduleService} for the full scope/idempotency reasoning. GO-only by
  * design: this never runs for a config saved through Classic UI.
  *
+ * <h3>PUT afterHandle — auto-send schedule cleanup on deactivation (ETP-5117 follow-up)</h3>
+ * <p>The schedule created above must not outlive the config it was created for. When a PUT
+ * explicitly sets {@code active=false}, {@link #afterHandle} now calls {@link
+ * #unscheduleAutoSendForDeactivatedConfig} instead of returning immediately — covering both
+ * outcomes of {@link #smartDeactivate}: the record deleted outright (no invoices were ever sent
+ * through it) or deactivated by the default-CRUD fall-through (invoices exist, audit trail
+ * preserved). Either way, without this the schedule would keep firing the SII sending process
+ * twice a day for an organization whose fiscal config no longer exists or is no longer active.
+ * See {@link #unscheduleAutoSendForDeactivatedConfig} for how client/organization is resolved
+ * even though the record may already be gone by the time this hook runs.
+ *
  * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
  * {@code docs/neo-headless-extensibility.md} §2.2 (this qualifier silently stops being
  * discovered if a scope annotation such as {@code @ApplicationScoped} is added).
@@ -156,6 +167,7 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
       return null;
     }
     if (isPut && isExplicitlyDeactivating(context.getRequestBody())) {
+      unscheduleAutoSendForDeactivatedConfig(context);
       return null;
     }
     String recordId = isPut ? context.getRecordId() : resolveCreatedRecordId(context);
@@ -223,6 +235,69 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
         config.getOrganization().getId(), obContext.getUser().getId(), obContext.getRole().getId(),
         SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY, AUTO_SEND_SCHEDULE_DESCRIPTION);
     scheduleService.activateSchedule(requestId);
+  }
+
+  /**
+   * Removes the auto-send schedule (if any) for a config that a deactivating PUT just deleted or
+   * deactivated (ETP-5117 follow-up) — see the "auto-send schedule cleanup on deactivation"
+   * class Javadoc section.
+   *
+   * <p><b>Client/organization resolution.</b> By the time {@link #afterHandle} runs, the record
+   * may already be gone: {@link #smartDeactivate} deletes it outright when no SII invoices were
+   * ever sent through it. Two sources are tried, in order:
+   * <ol>
+   *   <li>{@code OBDal.getInstance().get(AEATSIIConfig.class, recordId)} — a primary-key lookup
+   *       is <b>not</b> filtered by {@code Active}, so it still succeeds for the "deactivated by
+   *       default CRUD, not deleted" case and returns the config's own organization, which is
+   *       the most precise source available.</li>
+   *   <li>Only when that lookup returns nothing (the "deleted" case) does this fall back to
+   *       {@code context.getObContext()}'s {@link OBContext#getCurrentClient()}/{@link
+   *       OBContext#getCurrentOrganization()} — the session's client/organization at the time of
+   *       the request. SII configs are per-organization records normally edited from within that
+   *       same organization's context (the same assumption {@code
+   *       TbaiConfigSequenceHandler#resolveConfigScope} already relies on for its own defensive
+   *       fallback), so this is a safe substitute for the one case where the record itself can no
+   *       longer answer the question. Neither {@link NeoContext} nor {@link NeoResponse} carry a
+   *       request-scoped attribute bag that could thread the about-to-be-deleted record's
+   *       client/organization from {@link #smartDeactivate} into this hook, so adding one just
+   *       for this would add more surface than this fallback avoids.</li>
+   * </ol>
+   */
+  private void unscheduleAutoSendForDeactivatedConfig(NeoContext context) {
+    String recordId = context.getRecordId();
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        String clientId = null;
+        String orgId = null;
+        if (StringUtils.isNotBlank(recordId)) {
+          AEATSIIConfig config = OBDal.getInstance().get(AEATSIIConfig.class, recordId);
+          if (config != null && config.getClient() != null && config.getOrganization() != null) {
+            clientId = config.getClient().getId();
+            orgId = config.getOrganization().getId();
+          }
+        }
+        if (clientId == null || orgId == null) {
+          OBContext obContext = context.getObContext();
+          if (obContext == null || obContext.getCurrentClient() == null
+              || obContext.getCurrentOrganization() == null) {
+            log.debug("SiiConfigDeactivateHandler: could not resolve client/organization for "
+                + "the deactivated config {}; skipping auto-send schedule cleanup", recordId);
+            return;
+          }
+          clientId = obContext.getCurrentClient().getId();
+          orgId = obContext.getCurrentOrganization().getId();
+        }
+        scheduleService.unscheduleAutoSend(clientId, orgId,
+            SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      // Non-fatal — the deactivate/delete already committed; log and continue.
+      log.warn("SiiConfigDeactivateHandler.afterHandle: could not unschedule auto-send for "
+          + "deactivated config {}: {}", recordId, e.getMessage(), e);
+    }
   }
 
   /**

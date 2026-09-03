@@ -79,6 +79,18 @@ import org.openbravo.service.db.DalConnectionProvider;
  * (caught, logged) and the row's {@code SCH} status means it is still picked up on the next
  * scheduler initialization — the exact same degraded-but-safe fallback the onboarding service
  * documents for its own activation failures.
+ *
+ * <p><b>Removal counterpart (ETP-5117 follow-up).</b> The original ETP-5117 delivery covered only
+ * the creation side; nothing ever stopped a schedule once its fiscal config was deleted or
+ * deactivated, so it kept firing the sending process twice a day forever. {@link
+ * #unscheduleAutoSend} closes that gap, mirroring the create/activate split: it removes the live
+ * Quartz trigger (best-effort, same degraded-but-safe reasoning as {@link #activateSchedule}) and
+ * then deactivates the {@code AD_Process_Request} row itself (never deletes it — history/audit is
+ * kept, matching this codebase's general preference for deactivation over deletion). It is called
+ * from the same two {@code NeoHandler}s' {@code afterHandle} hooks, on the branch where the
+ * incoming PUT explicitly sets {@code active=false} — whether {@code smartDeactivate} responded by
+ * deleting the fiscal config outright (no invoices ever sent through it) or by letting the request
+ * fall through to default CRUD, which deactivates the config while preserving its audit trail.
  */
 public class SiiTbaiAutoSendScheduleService {
 
@@ -170,6 +182,98 @@ public class SiiTbaiAutoSendScheduleService {
           + "the next scheduler initialization): {}", requestId, e.getMessage());
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Removes the per-client-per-organization twice-a-day auto-send schedule for {@code process},
+   * the counterpart to {@link #ensureAutoSendSchedule}. Called when the fiscal configuration the
+   * schedule was created for is deleted or deactivated through Etendo GO (ETP-5117 follow-up) —
+   * without this, a schedule created for a config that no longer exists (or is no longer active)
+   * would keep firing the SII/TBAI sending process twice a day forever.
+   *
+   * <p>Idempotent and safe to call even when no schedule was ever created for this client/org/
+   * process combination — e.g. the fiscal config was saved only through Classic UI (see class
+   * Javadoc), or the process could not be resolved at creation time: both cases resolve to
+   * "no matching {@code AD_Process_Request} found" via {@link #findExistingRequest} and this
+   * method returns without error. Calling it twice in a row (e.g. two deactivating PUTs, or a
+   * deactivation of an already-unscheduled config) is likewise a safe no-op the second time,
+   * since the first call already flipped the row's {@code Active} flag to {@code false} and
+   * {@link #findExistingRequest} only ever matches active rows.
+   *
+   * <p>Two independent removal steps, in this order:
+   * <ol>
+   *   <li>Best-effort live unschedule via {@link OBScheduler#unschedule(String, ProcessContext)}
+   *       — removes the Quartz trigger/job so the process stops firing immediately. Any failure
+   *       here (this method's own catch, on top of {@link OBScheduler#unschedule}'s own internal
+   *       swallow-and-log) is non-fatal: it only means the live in-memory scheduler still holds a
+   *       stale trigger until the next server restart.</li>
+   *   <li>Deactivating the {@code AD_Process_Request} row itself ({@code Active = false}) via
+   *       OBDal — <b>not</b> deleted, matching this codebase's general preference for
+   *       deactivation over deletion when there is meaningful history (mirrors the
+   *       "invoices were sent → deactivate, don't delete" branch of {@code smartDeactivate} in
+   *       the calling handlers). This is the step that actually guarantees correctness: the row's
+   *       own state is what the scheduler consults on its next initialization, so even if step 1
+   *       fails outright, the row is never picked up again afterwards.</li>
+   * </ol>
+   *
+   * @param clientId         target client identifier
+   * @param orgId            organization identifier the fiscal config belonged to
+   * @param processSearchKey search key of the AD_Process the schedule runs ({@link
+   *                         #SII_PROCESS_SEARCH_KEY} or {@link #TBAI_PROCESS_SEARCH_KEY})
+   */
+  public void unscheduleAutoSend(String clientId, String orgId, String processSearchKey) {
+    OBContext.setAdminMode(true);
+    try {
+      Process process = resolveProcess(processSearchKey);
+      if (process == null) {
+        // Same non-fatal stance as ensureAutoSendSchedule: an unconfigured/partially-updated
+        // database must never block the fiscal config delete/deactivate request.
+        log.warn("Process '{}' not found — nothing to unschedule for client {} org {}",
+            processSearchKey, clientId, orgId);
+        return;
+      }
+      ProcessRequest existing = findExistingRequest(clientId, orgId, process);
+      if (existing == null) {
+        log.debug("No active auto-send schedule found for client {} org {} process {} — already "
+            + "unscheduled, or one was never created", clientId, orgId, processSearchKey);
+        return;
+      }
+      String requestId = existing.getId();
+      unscheduleFromQuartz(requestId, existing.getOpenbravoContext());
+      existing.setActive(false);
+      OBDal.getInstance().save(existing);
+      OBDal.getInstance().flush();
+      log.info("Deactivated auto-send schedule {} for client {} org {} process {}", requestId,
+          clientId, orgId, processSearchKey);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Best-effort removal of {@code requestId}'s live Quartz trigger/job. {@code openbravoContext}
+   * is the same serialized execution context {@link #buildObContext} stored on the row at
+   * creation time; {@link ProcessContext#newInstance(String)} rebuilds it directly (no need for
+   * the {@link org.openbravo.base.secureApp.VariablesSecureApp}/{@link ProcessBundle} detour
+   * {@link #activateSchedule} needs for {@link OBScheduler#schedule(String, ProcessBundle)} —
+   * {@link OBScheduler#unschedule(String, ProcessContext)} takes a {@link ProcessContext}
+   * directly). Any failure (missing/corrupt stored context, scheduler error) is logged and
+   * swallowed here — see {@link #unscheduleAutoSend} Javadoc for why this is safe to no-op.
+   */
+  private void unscheduleFromQuartz(String requestId, String openbravoContext) {
+    try {
+      ProcessContext processContext = ProcessContext.newInstance(openbravoContext);
+      if (processContext == null) {
+        log.warn("Auto-send schedule {} has no usable stored OpenbravoContext — skipping live "
+            + "Quartz unschedule (the row will still be deactivated)", requestId);
+        return;
+      }
+      OBScheduler.getInstance().unschedule(requestId, processContext);
+    } catch (Exception e) {
+      log.warn("Could not immediately unschedule auto-send schedule {} from the live scheduler "
+          + "(it will still be deactivated in the DB, so it will not be picked up on the next "
+          + "scheduler initialization regardless): {}", requestId, e.getMessage());
     }
   }
 
