@@ -146,6 +146,11 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   private static final String DEFAULT_PROVIDER_COUNTRY = "ES";
   private static final String MSG_ACCOUNT_NOT_FOUND = "Financial account not found";
   private static final String MSG_MISSING = "Missing required parameter: ";
+  // ETP-5104. Kept as a fixed English literal, like its two siblings above: the SPA maps it to a
+  // localized label through tools/app-shell/src/lib/backendErrors.js, so the wording here is a wire
+  // contract — rewording it silently un-translates the toast.
+  private static final String MSG_IMPORT_RANGE_INVALID =
+      "The import from date cannot be later than the import to date";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -698,13 +703,27 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     if (finAcc == null) {
       return NeoResponse.error(404, MSG_ACCOUNT_NOT_FOUND);
     }
+    // ETP-5104. Resolved and validated BEFORE anything is written to the entity, on the pair the
+    // request would RESULT in: a body may carry only one of the two bounds, in which case the other
+    // keeps its stored value and is just as much part of the range being saved. Applying the
+    // setters first and rejecting afterwards would not work — `finAcc` is a managed instance, so
+    // Hibernate's dirty checking would flush the rejected values at commit anyway.
+    Date importFrom = body.has(KEY_IMPORT_FROM_DATE)
+        ? FinancialAccountBankConnectionSupport.parseDate(
+            FinancialAccountBankConnectionSupport.bodyString(body, KEY_IMPORT_FROM_DATE))
+        : finAcc.getPSD2ImportFromDate();
+    Date importTo = body.has(KEY_IMPORT_TO_DATE)
+        ? FinancialAccountBankConnectionSupport.parseDate(
+            FinancialAccountBankConnectionSupport.bodyString(body, KEY_IMPORT_TO_DATE))
+        : finAcc.getPSD2ImportToDate();
+    if (FinancialAccountBankConnectionSupport.isImportRangeInvalid(importFrom, importTo)) {
+      return NeoResponse.error(400, MSG_IMPORT_RANGE_INVALID);
+    }
     if (body.has(KEY_IMPORT_FROM_DATE)) {
-      finAcc.setPSD2ImportFromDate(FinancialAccountBankConnectionSupport.parseDate(
-          FinancialAccountBankConnectionSupport.bodyString(body, KEY_IMPORT_FROM_DATE)));
+      finAcc.setPSD2ImportFromDate(importFrom);
     }
     if (body.has(KEY_IMPORT_TO_DATE)) {
-      finAcc.setPSD2ImportToDate(FinancialAccountBankConnectionSupport.parseDate(
-          FinancialAccountBankConnectionSupport.bodyString(body, KEY_IMPORT_TO_DATE)));
+      finAcc.setPSD2ImportToDate(importTo);
     }
     if (body.has(KEY_STATEMENT_GROUPING)) {
       finAcc.setPSD2StatementFrequency(

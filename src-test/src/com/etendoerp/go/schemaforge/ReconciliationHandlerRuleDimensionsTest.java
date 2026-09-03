@@ -74,7 +74,6 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class ReconciliationHandlerRuleDimensionsTest {
 
-
   private static final String ACCOUNT_ID = "ACC-1";
   private static final String OTHER_ACCOUNT_ID = "ACC-2";
 
@@ -120,7 +119,8 @@ public class ReconciliationHandlerRuleDimensionsTest {
              mockStatic(AccountingDimensionsSupport.class)) {
       dims.when(() -> AccountingDimensionsSupport.flatActiveDimensionsForAccount(ACCOUNT_ID))
           .thenReturn(Collections.singleton(AccountingDimensionsSupport.DIM_PROJECT));
-      dims.when(() -> AccountingDimensionsSupport.flatActiveDimensionsForAccount(OTHER_ACCOUNT_ID))
+      dims.when(() -> AccountingDimensionsSupport.flatActiveDimensionsForAccount(
+              OTHER_ACCOUNT_ID))
           .thenReturn(Collections.singleton(AccountingDimensionsSupport.DIM_PRODUCT));
 
       ReconciliationHandler handler = new ReconciliationHandler();
@@ -132,7 +132,8 @@ public class ReconciliationHandlerRuleDimensionsTest {
       dims.verify(
           () -> AccountingDimensionsSupport.flatActiveDimensionsForAccount(ACCOUNT_ID),
           times(1));
-      dims.verify(() -> AccountingDimensionsSupport.flatActiveDimensionsForAccount(OTHER_ACCOUNT_ID), times(1));
+      dims.verify(() -> AccountingDimensionsSupport.flatActiveDimensionsForAccount(
+          OTHER_ACCOUNT_ID), times(1));
     }
   }
 

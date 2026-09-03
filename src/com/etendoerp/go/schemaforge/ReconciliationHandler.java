@@ -1512,15 +1512,11 @@ public class ReconciliationHandler implements NeoHandler {
   }
 
   /**
-   * The account's active accounting dimensions, memoized per handler instance. Fails <b>open</b> on a
-   * configuration-lookup error: a tenant whose accounting setup cannot be read keeps the previous
-   * behaviour for the concept and the business partner, and simply gets no dimensions assigned,
-   * rather than having the whole reconciliation fail.
-   *
-   * <p>Reads the chart of accounts, the same source that gates the rule form
-   * ({@code MatchRuleHandler#DIMENSION_FIELDS}). Before ETP-4950's QA round this used the {@code FAT}
-   * header set, which silently dropped Product from every generated movement on every tenant — the
-   * rule stored it and this discarded it.
+   * The account's active accounting dimensions (chart-of-accounts "Ledger Configuration"),
+   * memoized per handler instance. Fails <b>open</b> on a configuration-lookup error: a tenant
+   * whose accounting setup cannot be read keeps the previous behaviour for the concept and the
+   * business partner, and simply gets no dimensions assigned, rather than having the whole
+   * reconciliation fail.
    */
   Set<String> headerDimensionsOf(String accountId) {
     return headerDimensionsByAccount.computeIfAbsent(accountId, id -> {

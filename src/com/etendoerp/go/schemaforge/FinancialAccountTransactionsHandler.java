@@ -354,8 +354,8 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     data.put("transactions", transactions);
     data.put("totals", totals);
     data.put("enabledDimensions", loadEnabledDimensions(accountId));
-    // Dimensions to show in the New Movement header — mirrors Classic's finacc
-    // transaction form (ad_client_acctdimension, docbasetype FAT, show_in_header).
+    // Dimensions to show in the New Movement header — same flat Ledger Configuration source as
+    // enabledDimensions (see loadHeaderDimensions), not a document-type-scoped override.
     data.put("headerDimensions", loadHeaderDimensions(accountId));
     // Transaction types (BPD/BPW/BF) from the AD reference list — not hardcoded.
     data.put("trxTypes", loadTrxTypes());
@@ -452,10 +452,14 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   }
 
   /**
-   * Navigable accounting dimensions active in the client's chart of accounts. This is the coarse,
-   * informational set surfaced as {@code enabledDimensions}; anything that decides whether a
-   * dimension may be <b>edited on a movement header</b> must use {@link #loadHeaderDimensions}
-   * instead, which honours {@code AD_Client.Acctdim_Centrally_Maintained}.
+   * Navigable accounting dimensions active in the client's chart of accounts (the "Ledger
+   * Configuration" screen's per-dimension switches, {@code C_AcctSchema_Element.IsActive}) — the
+   * single source of truth for both {@code enabledDimensions} (informational) and
+   * {@code headerDimensions} (what the New/Edit Movement UI and the automatch rule engine may
+   * actually set — see {@link #loadHeaderDimensions}). ETP-5101 QA direction: a
+   * {@code FIN_Finacc_Transaction} must be governed by the exact same flat, per-tenant switch
+   * every other GO window uses, not a document-type-scoped override — see
+   * {@link AccountingDimensionsSupport}'s class javadoc for the fuller history.
    */
   Set<String> loadActiveDimensionSet(String accountId) throws Exception {
     return AccountingDimensionsSupport.flatActiveDimensionsForAccount(accountId);
@@ -466,19 +470,14 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   }
 
   /**
-   * Dimensions the New Movement wizard renders, and the same set the automatch rule engine
-   * propagates onto the movement it generates.
-   *
-   * <p>ETP-4854 (gap K1) had moved this to the {@code FAT} header set so it would honour
-   * {@code AD_Client.Acctdim_Centrally_Maintained}. ETP-4950's QA round showed that set subtracts
-   * {@code AD_Client_AcctDimension.Show_In_Header='N'}, which the shipped reference data sets for
-   * Product on {@code FAT} — so Product vanished from this wizard on every tenant, with no screen in
-   * Etendo GO to put it back. The chart of accounts is what the Accounting Schema screen writes and
-   * therefore what the user can actually control, so it is what gates.
+   * Dimensions the New/Edit Movement UI and the automatch rule engine may set on a
+   * {@code FIN_Finacc_Transaction}. Kept as its own method/JSON key ({@code headerDimensions})
+   * for wire-compatibility with the existing frontend contract, but — per
+   * {@link #loadActiveDimensionSet} — it is now exactly {@link #loadEnabledDimensions}: no
+   * separate, document-type-scoped source.
    */
   JSONArray loadHeaderDimensions(String accountId) throws Exception {
-    return AccountingDimensionsSupport.toOrderedArray(
-        AccountingDimensionsSupport.flatActiveDimensionsForAccount(accountId));
+    return loadEnabledDimensions(accountId);
   }
 
   /** Active transaction types (BPD/BPW/BF) from the AD reference list, localized. */

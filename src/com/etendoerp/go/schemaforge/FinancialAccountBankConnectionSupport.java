@@ -234,6 +234,24 @@ final class FinancialAccountBankConnectionSupport {
     return Date.from(LocalDate.parse(value.trim()).atStartOfDay(ZoneOffset.UTC).toInstant());
   }
 
+  /**
+   * True when both import bounds are set and the "from" date is strictly after the "to" date.
+   *
+   * The SPA blocks this range before it can be saved (ETP-5104), so reaching here means an
+   * API/MCP caller bypassed the form. Guarding at the bridge matters because an inverted range is
+   * accepted silently by the setters and only fails much later, on the next synchronization:
+   * {@code SaltEdgeConnectionHelper.validateDateRange} throws inside
+   * {@code processProviderTransactions}, whose catch re-wraps it into
+   * {@code PSD2_ErrorRetrievingRransactionsForTheAccount} — an error the user cannot act on,
+   * reported far from the setting that caused it.
+   *
+   * A null bound means "no limit" and is always valid; a range where both ends are the same day is
+   * valid too, matching the PSD2 module's own {@code compareTo(...) > 0} test.
+   */
+  static boolean isImportRangeInvalid(Date importFrom, Date importTo) {
+    return importFrom != null && importTo != null && importFrom.compareTo(importTo) > 0;
+  }
+
   static String formatDate(Date date) {
     if (date == null) {
       return null;
