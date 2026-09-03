@@ -303,9 +303,19 @@ public class ReconciliationHandler implements NeoHandler {
           + "  LEFT JOIN c_bpartner pbp ON pbp.c_bpartner_id = fp.c_bpartner_id"
           + " WHERE bsl.isactive = 'Y'"
           + "   AND bs.isactive = 'Y'"
-          // Draft statements (processed = 'N') are not reconcilable yet, so their
-          // lines must not show in the reconciliation left panel.
-          + "   AND bs.processed = 'Y'"
+          // Draft statements (processed = 'N') are not reconcilable yet, so their PENDING lines
+          // must not show in the reconciliation left panel. An ALREADY RECONCILED line is a
+          // different case (ETP-5121): reactivating its statement does not touch the
+          // line->transaction or transaction->reconciliation links, so the line stays genuinely
+          // reconciled and has to remain listed under the "reconciled" filter. Dropping it also made
+          // it unreachable from the UI — it could not be un-reconciled from here, and the statement
+          // could not be deleted either while it still held a matched line (see
+          // BankStatementsHandler.handleDelete). The exception repeats the exact predicate that
+          // defines line_status = 'reconciled' above, so a line whose reconciliation is back in
+          // DRAFT keeps falling back to the pending pool instead of being dragged in by this clause.
+          + "   AND (bs.processed = 'Y'"
+          + "        OR (bsl.fin_finacc_transaction_id IS NOT NULL"
+          + "            AND COALESCE(rec.processed, 'N') = 'Y'))"
           + "   AND bs.fin_financial_account_id = ?"
           + "   AND bs.ad_client_id = ?"
           + "   AND bs.ad_org_id = ANY (?)";
