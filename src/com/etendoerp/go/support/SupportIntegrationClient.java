@@ -102,7 +102,8 @@ final class SupportIntegrationClient {
 
   // --- ADK session / messaging ---
 
-  static void createAdkSession(String userId, String sessionId, String locale, String userEmail) {
+  static void createAdkSession(String userId, String sessionId, String locale, String userEmail,
+      String clientId) {
     String url = ADK_BASE_URL + "/apps/" + ADK_APP_NAME + "/users/" + userId + "/sessions/" + sessionId;
     try {
       // The body IS the initial state dict directly — NOT wrapped in a "state" key.
@@ -116,6 +117,9 @@ final class SupportIntegrationClient {
       if (userEmail != null && !userEmail.isEmpty()) {
         state.put("user_email", userEmail);
       }
+      if (clientId != null && !clientId.isEmpty()) {
+        state.put("client_id", clientId);
+      }
       String body = state.toString();
       HttpRequest req = HttpRequest.newBuilder()
           .uri(URI.create(url))
@@ -124,8 +128,8 @@ final class SupportIntegrationClient {
           .timeout(Duration.ofSeconds(10))
           .build();
       HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
-      log.debug("ADK session created: {} (locale={}, user_email={}) → {}", sessionId, locale, userEmail,
-          resp.statusCode());
+      log.debug("ADK session created: {} (locale={}, user_email={}, client_id={}) → {}", sessionId, locale,
+          userEmail, clientId, resp.statusCode());
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       log.warn("Failed to create ADK session {}: {}", sessionId, e.getMessage());
