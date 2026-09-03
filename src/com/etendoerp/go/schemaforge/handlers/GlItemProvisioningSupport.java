@@ -201,7 +201,7 @@ public class GlItemProvisioningSupport {
     if (glItem == null) {
       glItem = createGlItem(subaccount);
     }
-    createGlItemAccounts(glItem, schema, combo);
+    createGlItemAccounts(glItem, schema, combo, subaccount);
     return glItem;
   }
 
@@ -243,12 +243,24 @@ public class GlItemProvisioningSupport {
    * dimension {@code NULL}. Mirrors the exact dimension shape {@code C_ELEMENTVALUE_TRG} inserts
    * (see {@code C_ELEMENTVALUE_TRG.xml:64-75}). Returns {@code null} for a summary/heading account,
    * which never gets one — see class javadoc, Case 3.
+   *
+   * <p><b>{@code setFilterOnActive(false)} is mandatory here</b> (ETP-5101 QA finding): core
+   * cascades a subaccount's own deactivation onto its natural {@code C_ValidCombination} row —
+   * confirmed live, the row's {@code isactive} flips to {@code 'N'} in the same instant as the
+   * subaccount's. {@link OBCriteria} defaults to active-only, so without this the combination
+   * silently becomes invisible the moment the subaccount it belongs to is deactivated — exactly
+   * the one case {@link #setGlItemAccountsActiveForSchema} most needs to still find it, to mirror
+   * that same deactivation onto the {@link GLItemAccounts} row. Without it, {@code combo} reads as
+   * {@code null} and every caller (mis)reads that as Case 3 ("no accounting use"), silently
+   * no-oping — not just the active-state sync, but any LATER rename sync too, for as long as the
+   * subaccount stays inactive.
    */
   protected AccountingCombination resolveNaturalCombination(ElementValue subaccount, AcctSchema schema) {
     OBCriteria<AccountingCombination> criteria =
         OBDal.getInstance().createCriteria(AccountingCombination.class);
     criteria.setFilterOnReadableClients(false);
     criteria.setFilterOnReadableOrganization(false);
+    criteria.setFilterOnActive(false);
     criteria.add(Restrictions.eq(AccountingCombination.PROPERTY_ACCOUNT, subaccount));
     criteria.add(Restrictions.eq(AccountingCombination.PROPERTY_ACCOUNTINGSCHEMA, schema));
     criteria.add(Restrictions.isNull(AccountingCombination.PROPERTY_PRODUCT));
@@ -271,11 +283,18 @@ public class GlItemProvisioningSupport {
    * Idempotency key: any {@link GLItemAccounts} row that already wires {@code combo} as its
    * {@code glitemDebitAcct} (debit and credit are always the same combination for a GL-Item-behind-
    * a-subaccount row — see class javadoc — so checking debit alone is sufficient).
+   *
+   * <p>{@code setFilterOnActive(false)} for the same reason as {@link #resolveNaturalCombination}:
+   * once {@link #setGlItemAccountsActiveForSchema} correctly deactivates this row (ETP-5101 fix),
+   * it must still be findable on a LATER edit (e.g. a rename) of the still-inactive subaccount —
+   * otherwise this idempotency check would wrongly read as "nothing provisioned yet" and mint a
+   * duplicate {@link GLItemAccounts} row instead of reusing/updating the existing one.
    */
   protected GLItemAccounts findGlItemAccountsByCombination(AccountingCombination combo) {
     OBCriteria<GLItemAccounts> criteria = OBDal.getInstance().createCriteria(GLItemAccounts.class);
     criteria.setFilterOnReadableClients(false);
     criteria.setFilterOnReadableOrganization(false);
+    criteria.setFilterOnActive(false);
     criteria.add(Restrictions.eq(GLItemAccounts.PROPERTY_GLITEMDEBITACCT, combo));
     criteria.setMaxResults(1);
     return (GLItemAccounts) criteria.uniqueResult();
@@ -287,12 +306,17 @@ public class GlItemProvisioningSupport {
    * {@link GLItem}, so a newly-active schema reuses the subaccount's existing GL Item instead of
    * minting a second one. Only consulted when {@link #findGlItemAccountsByCombination} found no
    * match for the CURRENT schema (i.e., this schema genuinely has nothing yet).
+   *
+   * <p>{@code setFilterOnActive(false)} — same rationale as {@link #resolveNaturalCombination}: a
+   * deactivated subaccount's combinations must stay findable here too, or a later reactivation /
+   * new-schema pass would mint a second GL Item instead of reusing the existing one.
    */
   protected GLItem findGlItemLinkedToAnyCombinationOf(ElementValue subaccount) {
     OBCriteria<AccountingCombination> comboCriteria =
         OBDal.getInstance().createCriteria(AccountingCombination.class);
     comboCriteria.setFilterOnReadableClients(false);
     comboCriteria.setFilterOnReadableOrganization(false);
+    comboCriteria.setFilterOnActive(false);
     comboCriteria.add(Restrictions.eq(AccountingCombination.PROPERTY_ACCOUNT, subaccount));
     for (AccountingCombination combo : comboCriteria.list()) {
       GLItemAccounts link = findGlItemAccountsByCombination(combo);
@@ -303,36 +327,109 @@ public class GlItemProvisioningSupport {
     return null;
   }
 
-  /** Creates a brand-new {@link GLItem} named after {@code subaccount}, in its client/org. */
+  /**
+   * {@code C_Glitem.Name} is {@code varchar(60)} — narrower than {@code C_ElementValue.Name}'s
+   * {@code varchar(255)}. A live check against this DB's own data found 422 of GOClient's 1317
+   * leaf subaccounts already exceed 60 characters on the BARE name alone (pre-existing, not
+   * introduced by ETP-5101), and appending the code (see {@link #composeGlItemName}) pushes 166
+   * more over the edge that previously fit. Without a guard, {@code OBDal.save} on any of those
+   * throws (or the DB truncates/rejects, backend-dependent) — and since both call sites
+   * ({@link #createGlItem}, this class's {@code afterHandle} caller) are best-effort/swallowed,
+   * that failure is currently silent: the subaccount save succeeds, its GL Item just never gets
+   * created, with nothing surfacing the gap short of reading logs.
+   */
+  private static final int GL_ITEM_NAME_MAX_LENGTH = 60;
+
+  /**
+   * Builds the {@link GLItem} name for {@code subaccount} — ETP-5101: the subaccount's 8-digit
+   * code plus its name, so "Cuenta contable" and its GL Item read as the same account even when
+   * several subaccounts happen to share a name, and so the code — the more useful sort/scan key
+   * in a flat GL Item list — leads. Single source of truth for the format: both
+   * {@link #createGlItem} and {@link #syncGlItemName} build the name through this method, so their
+   * comparison never drifts — see the warning on {@link #syncGlItemName}.
+   *
+   * <p>Truncates the NAME portion, never the code — the code is what disambiguates two
+   * subaccounts sharing a name (the entire point of prepending it), so it must always survive
+   * intact within the {@link #GL_ITEM_NAME_MAX_LENGTH} budget.
+   *
+   * @return {@code "<searchKey>-<name, truncated to fit>"}, or the (possibly truncated) bare name
+   *     if {@code searchKey} is blank (should not happen for a real leaf account, but keeps this
+   *     method total)
+   */
+  protected static String composeGlItemName(ElementValue subaccount) {
+    String name = subaccount.getName();
+    String code = subaccount.getSearchKey();
+    if (code == null || code.isEmpty()) {
+      return truncateToFit(name, GL_ITEM_NAME_MAX_LENGTH);
+    }
+    String prefix = code + "-";
+    String truncatedName = truncateToFit(name, GL_ITEM_NAME_MAX_LENGTH - prefix.length());
+    return prefix + truncatedName;
+  }
+
+  /** Hard-truncates {@code value} to {@code maxLength}. Null-safe; {@code maxLength <= 0} yields "". */
+  private static String truncateToFit(String value, int maxLength) {
+    if (value == null) {
+      return "";
+    }
+    return value.length() <= maxLength ? value : value.substring(0, Math.max(0, maxLength));
+  }
+
+  /**
+   * Creates a brand-new {@link GLItem} for {@code subaccount} (see {@link #composeGlItemName}), in
+   * its client/org.
+   *
+   * <p><b>Active state mirrors {@code subaccount.isActive()}</b> (ETP-5101 review finding): this
+   * method is reachable from a rename-only trigger (hook H, {@code syncGlItemNameAfterUpdate})
+   * with no active-state guard upstream, and {@link #resolveNaturalCombination}'s
+   * {@code setFilterOnActive(false)} deliberately keeps a deactivated subaccount's combination
+   * findable — so renaming an inactive, not-yet-provisioned subaccount reaches this create branch.
+   * Hardcoding {@code true} here would mint an active, selectable GL Item behind an inactive
+   * account — the exact silent-divergence class hook G exists to prevent, just on the create path
+   * instead of the update path.
+   */
   protected GLItem createGlItem(ElementValue subaccount) {
     GLItem glItem = OBProvider.getInstance().get(GLItem.class);
     glItem.setNewOBObject(true);
     glItem.setClient(subaccount.getClient());
     glItem.setOrganization(subaccount.getOrganization());
-    glItem.setName(subaccount.getName());
-    glItem.setActive(true);
+    glItem.setName(composeGlItemName(subaccount));
+    glItem.setActive(Boolean.TRUE.equals(subaccount.isActive()));
     OBDal.getInstance().save(glItem);
     return glItem;
   }
 
   /**
-   * Keeps {@code glItem}'s name in sync with {@code subaccount}'s current name, so a subaccount
-   * rename (PUT {@code /elementValue}) can never leave "Cuenta contable" and its underlying GL Item
-   * silently diverged. No-op when the names already match or the subaccount has no name.
+   * Keeps {@code glItem}'s name in sync with {@code subaccount}'s current name/code, so a
+   * subaccount rename (PUT {@code /elementValue}) can never leave "Cuenta contable" and its
+   * underlying GL Item silently diverged. No-op when the composed name already matches.
+   *
+   * <p><b>Must always compare against {@link #composeGlItemName}'s output, never the bare
+   * {@code subaccount.getName()}</b> — comparing against the bare name here while
+   * {@link #createGlItem} sets the composed one would make every {@code afterHandle} call think
+   * the name drifted and rewrite it back down to the bare name on every single save, silently
+   * undoing ETP-5101 on the very next edit.
    */
   protected void syncGlItemName(GLItem glItem, ElementValue subaccount) {
     if (glItem == null) {
       return;
     }
-    String subaccountName = subaccount.getName();
-    if (subaccountName != null && !subaccountName.equals(glItem.getName())) {
-      glItem.setName(subaccountName);
+    String composedName = composeGlItemName(subaccount);
+    if (composedName != null && !composedName.equals(glItem.getName())) {
+      glItem.setName(composedName);
       OBDal.getInstance().save(glItem);
     }
   }
 
-  /** Creates the {@code GLItemAccounts} row for {@code schema}, debit = credit = {@code combo}. */
-  protected void createGlItemAccounts(GLItem glItem, AcctSchema schema, AccountingCombination combo) {
+  /**
+   * Creates the {@code GLItemAccounts} row for {@code schema}, debit = credit = {@code combo}.
+   *
+   * <p>Active state mirrors {@code subaccount.isActive()} — same rationale as {@link #createGlItem}:
+   * this is reachable for an inactive subaccount via hook H, and a hardcoded {@code true} would
+   * silently provision an active, selectable link for a deactivated account.
+   */
+  protected void createGlItemAccounts(GLItem glItem, AcctSchema schema, AccountingCombination combo,
+      ElementValue subaccount) {
     GLItemAccounts link = OBProvider.getInstance().get(GLItemAccounts.class);
     link.setNewOBObject(true);
     link.setClient(glItem.getClient());
@@ -341,7 +438,7 @@ public class GlItemProvisioningSupport {
     link.setAccountingSchema(schema);
     link.setGlitemDebitAcct(combo);
     link.setGlitemCreditAcct(combo);
-    link.setActive(true);
+    link.setActive(Boolean.TRUE.equals(subaccount.isActive()));
     OBDal.getInstance().save(link);
   }
 }

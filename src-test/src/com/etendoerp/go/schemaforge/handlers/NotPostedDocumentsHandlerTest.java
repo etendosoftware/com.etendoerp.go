@@ -424,6 +424,27 @@ public class NotPostedDocumentsHandlerTest {
     assertEquals(JSONObject.NULL, result.get("tableId"));
   }
 
+  /**
+   * ETP-5075 regression guard — before this entry existed, every Matched Purchase Invoices
+   * ("Relación albarán-factura") row in this grid resolved a null tableId despite table 472
+   * (M_MatchInv) already having active accounting (so {@code refListDocumentTypes()} listed
+   * "MI" in the filter dropdown, but the row itself could never be posted:
+   * {@code postRow()} in {@code NotPostedDocumentsPage.jsx} short-circuits client-side with
+   * "unknown tableId for Matched Invoice" whenever {@code tableId} is null).
+   */
+  @Test
+  public void buildRowResolvesTableIdForMatchedInvoice() throws Exception {
+    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+    Map<String, Object> row = new HashMap<>();
+    row.put("documentType", "Matched Invoice");
+    row.put("documentId", "doc-9");
+
+    JSONObject result = handler.buildRow(row);
+
+    assertNotNull(result);
+    assertEquals("472", result.get("tableId"));
+  }
+
   @Test
   public void buildRowSetsNullTableIdWhenDocumentTypeIsMissing() throws Exception {
     NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();

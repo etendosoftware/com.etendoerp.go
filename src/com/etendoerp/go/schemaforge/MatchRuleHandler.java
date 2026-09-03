@@ -40,6 +40,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.core.OBContext;
 
 /**
  * Validation pre-hook for the Bank Reconciliation <b>matching rules</b> catalog (T5).
@@ -88,8 +89,8 @@ public class MatchRuleHandler extends AbstractNeoHandler {
 
   /**
    * Rule fields that are accounting dimensions: wire field name → dimension key. A rule may only
-   * carry a dimension that is active for the tenant at the {@code FAT} header level, because that
-   * is exactly what the transaction Automatch generates out of the rule can hold.
+   * carry a dimension active for the tenant in the chart of accounts, because that is exactly
+   * what the transaction Automatch generates out of the rule can hold.
    */
   private static final Map<String, String> DIMENSION_FIELDS = dimensionFields();
 
@@ -138,17 +139,17 @@ public class MatchRuleHandler extends AbstractNeoHandler {
   }
 
   /**
-   * {@code GET ?action=activeDimensions} — the accounting dimensions available at the header of a
-   * {@code FAT} document for the current tenant, in the canonical display order. The rule form
-   * renders a dimension selector only when its dimension is listed here, so a dimension switched
-   * off in the Accounting Schema disappears from the rule the same way it disappears from the New
-   * Movement wizard.
+   * {@code GET ?action=activeDimensions} — the accounting dimensions active in the current
+   * tenant's chart of accounts ("Ledger Configuration"), in the canonical display order. The rule
+   * form renders a dimension selector only when its dimension is listed here, so a dimension
+   * switched off there disappears from the rule the same way it disappears from the New Movement
+   * wizard — same single source of truth for both, see {@link AccountingDimensionsSupport}.
    */
   NeoResponse buildActiveDimensions() {
     try {
       enterAdminMode();
-      Set<String> active = AccountingDimensionsSupport.activeHeaderDimensionsForCurrentClient(
-          AccountingDimensionsSupport.DOCBASETYPE_FAT);
+      String clientId = OBContext.getOBContext().getCurrentClient().getId();
+      Set<String> active = AccountingDimensionsSupport.flatActiveDimensionsForClient(clientId);
       JSONArray arr = new JSONArray();
       for (String key : AccountingDimensionsSupport.DIM_ORDER) {
         if (active.contains(key)) {
@@ -253,8 +254,8 @@ public class MatchRuleHandler extends AbstractNeoHandler {
     }
     Set<String> active;
     try {
-      active = AccountingDimensionsSupport.activeHeaderDimensionsForCurrentClient(
-          AccountingDimensionsSupport.DOCBASETYPE_FAT);
+      String clientId = OBContext.getOBContext().getCurrentClient().getId();
+      active = AccountingDimensionsSupport.flatActiveDimensionsForClient(clientId);
     } catch (Exception e) {
       // Fail open: an unreadable accounting configuration must not block saving a rule.
       log.warn("Could not resolve active accounting dimensions; keeping the body as sent", e);
