@@ -74,8 +74,6 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class ReconciliationHandlerRuleDimensionsTest {
 
-  private static final String FAT = AccountingDimensionsSupport.DOCBASETYPE_FAT;
-
   private static final String ACCOUNT_ID = "ACC-1";
   private static final String OTHER_ACCOUNT_ID = "ACC-2";
 
@@ -99,7 +97,7 @@ public class ReconciliationHandlerRuleDimensionsTest {
   public void testHeaderDimensionsOfMemoizesPerAccount() {
     try (MockedStatic<AccountingDimensionsSupport> dims =
              mockStatic(AccountingDimensionsSupport.class)) {
-      dims.when(() -> AccountingDimensionsSupport.activeHeaderDimensionsForAccount(ACCOUNT_ID, FAT))
+      dims.when(() -> AccountingDimensionsSupport.flatActiveDimensionsForAccount(ACCOUNT_ID))
           .thenReturn(Collections.singleton(AccountingDimensionsSupport.DIM_PROJECT));
 
       ReconciliationHandler handler = new ReconciliationHandler();
@@ -109,7 +107,7 @@ public class ReconciliationHandlerRuleDimensionsTest {
       assertEquals(Collections.singleton(AccountingDimensionsSupport.DIM_PROJECT), first);
       assertSame("the memo must hand back the very same set", first, second);
       dims.verify(
-          () -> AccountingDimensionsSupport.activeHeaderDimensionsForAccount(ACCOUNT_ID, FAT),
+          () -> AccountingDimensionsSupport.flatActiveDimensionsForAccount(ACCOUNT_ID),
           times(1));
     }
   }
@@ -119,10 +117,10 @@ public class ReconciliationHandlerRuleDimensionsTest {
   public void testHeaderDimensionsOfKeepsOneEntryPerAccount() {
     try (MockedStatic<AccountingDimensionsSupport> dims =
              mockStatic(AccountingDimensionsSupport.class)) {
-      dims.when(() -> AccountingDimensionsSupport.activeHeaderDimensionsForAccount(ACCOUNT_ID, FAT))
+      dims.when(() -> AccountingDimensionsSupport.flatActiveDimensionsForAccount(ACCOUNT_ID))
           .thenReturn(Collections.singleton(AccountingDimensionsSupport.DIM_PROJECT));
-      dims.when(() -> AccountingDimensionsSupport.activeHeaderDimensionsForAccount(
-              OTHER_ACCOUNT_ID, FAT))
+      dims.when(() -> AccountingDimensionsSupport.flatActiveDimensionsForAccount(
+              OTHER_ACCOUNT_ID))
           .thenReturn(Collections.singleton(AccountingDimensionsSupport.DIM_PRODUCT));
 
       ReconciliationHandler handler = new ReconciliationHandler();
@@ -132,10 +130,10 @@ public class ReconciliationHandlerRuleDimensionsTest {
       assertEquals(Collections.singleton(AccountingDimensionsSupport.DIM_PRODUCT),
           handler.headerDimensionsOf(OTHER_ACCOUNT_ID));
       dims.verify(
-          () -> AccountingDimensionsSupport.activeHeaderDimensionsForAccount(ACCOUNT_ID, FAT),
+          () -> AccountingDimensionsSupport.flatActiveDimensionsForAccount(ACCOUNT_ID),
           times(1));
-      dims.verify(() -> AccountingDimensionsSupport.activeHeaderDimensionsForAccount(
-          OTHER_ACCOUNT_ID, FAT), times(1));
+      dims.verify(() -> AccountingDimensionsSupport.flatActiveDimensionsForAccount(
+          OTHER_ACCOUNT_ID), times(1));
     }
   }
 
@@ -147,7 +145,7 @@ public class ReconciliationHandlerRuleDimensionsTest {
   public void testHeaderDimensionsOfFailsOpenWhenResolutionThrows() {
     try (MockedStatic<AccountingDimensionsSupport> dims =
              mockStatic(AccountingDimensionsSupport.class)) {
-      dims.when(() -> AccountingDimensionsSupport.activeHeaderDimensionsForAccount(ACCOUNT_ID, FAT))
+      dims.when(() -> AccountingDimensionsSupport.flatActiveDimensionsForAccount(ACCOUNT_ID))
           .thenThrow(new IllegalStateException("no accounting schema"));
 
       assertTrue(new ReconciliationHandler().headerDimensionsOf(ACCOUNT_ID).isEmpty());
@@ -162,7 +160,7 @@ public class ReconciliationHandlerRuleDimensionsTest {
   public void testHeaderDimensionsOfMemoizesTheFailOpenResult() {
     try (MockedStatic<AccountingDimensionsSupport> dims =
              mockStatic(AccountingDimensionsSupport.class)) {
-      dims.when(() -> AccountingDimensionsSupport.activeHeaderDimensionsForAccount(ACCOUNT_ID, FAT))
+      dims.when(() -> AccountingDimensionsSupport.flatActiveDimensionsForAccount(ACCOUNT_ID))
           .thenThrow(new IllegalStateException("no accounting schema"));
 
       ReconciliationHandler handler = new ReconciliationHandler();
@@ -170,7 +168,7 @@ public class ReconciliationHandlerRuleDimensionsTest {
       assertTrue(handler.headerDimensionsOf(ACCOUNT_ID).isEmpty());
 
       dims.verify(
-          () -> AccountingDimensionsSupport.activeHeaderDimensionsForAccount(ACCOUNT_ID, FAT),
+          () -> AccountingDimensionsSupport.flatActiveDimensionsForAccount(ACCOUNT_ID),
           times(1));
     }
   }
@@ -183,14 +181,14 @@ public class ReconciliationHandlerRuleDimensionsTest {
   public void testHeaderDimensionsOfMemoIsScopedToTheHandlerInstance() {
     try (MockedStatic<AccountingDimensionsSupport> dims =
              mockStatic(AccountingDimensionsSupport.class)) {
-      dims.when(() -> AccountingDimensionsSupport.activeHeaderDimensionsForAccount(ACCOUNT_ID, FAT))
+      dims.when(() -> AccountingDimensionsSupport.flatActiveDimensionsForAccount(ACCOUNT_ID))
           .thenReturn(Collections.singleton(AccountingDimensionsSupport.DIM_PROJECT));
 
       new ReconciliationHandler().headerDimensionsOf(ACCOUNT_ID);
       new ReconciliationHandler().headerDimensionsOf(ACCOUNT_ID);
 
       dims.verify(
-          () -> AccountingDimensionsSupport.activeHeaderDimensionsForAccount(ACCOUNT_ID, FAT),
+          () -> AccountingDimensionsSupport.flatActiveDimensionsForAccount(ACCOUNT_ID),
           times(2));
     }
   }
