@@ -24,7 +24,6 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
@@ -38,6 +37,8 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.ModelProvider;
+
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
 /**
  * Stateless helpers shared across {@link BankStatementsHandler}: statement
@@ -239,9 +240,6 @@ public final class BankStatementsSupport {
     }
   }
 
-  private static final DateTimeFormatter ISO_UTC =
-      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
-
   private BankStatementsSupport() {
     // utility class — no instances
   }
@@ -289,14 +287,17 @@ public final class BankStatementsSupport {
   }
 
   /**
-   * Formats a timestamp as an ISO-8601 UTC instant.
+   * Formats a business timestamp as the canonical NEO wire datetime, in the server's own zone.
+   *
+   * <p>Delegates to {@link NeoDateFormat#toWireDateTime} — see there for why this must NOT go
+   * through UTC (ETP-5100).
    *
    * @param ts the timestamp to format (may be {@code null})
-   * @return the ISO-8601 UTC string (e.g. {@code 2026-06-04T10:00:00Z}), or {@code ""} when {@code ts} is {@code null}
+   * @return e.g. {@code 2026-06-04T10:00:00}, or {@code ""} when {@code ts} is {@code null}
    */
   public static String formatDate(Timestamp ts) {
-    if (ts == null) return "";
-    return ISO_UTC.format(Instant.ofEpochMilli(ts.getTime()));
+    String formatted = NeoDateFormat.toWireDateTime(ts);
+    return formatted == null ? "" : formatted;
   }
 
   /**
@@ -319,11 +320,28 @@ public final class BankStatementsSupport {
    */
   public static Date parseIsoDate(String iso, Date fallback) {
     if (StringUtils.isBlank(iso)) return fallback;
+    LocalDate calendarDay;
     try {
-      LocalDate calendarDay = Instant.parse(iso).atZone(ZoneOffset.UTC).toLocalDate();
-      return Date.from(calendarDay.atStartOfDay(ZoneId.systemDefault()).toInstant());
+      calendarDay = Instant.parse(iso).atZone(ZoneOffset.UTC).toLocalDate();
     } catch (Exception e) {
-      return fallback;
+      // Zone-less ISO (`2026-06-04T10:00:00`, or a bare `2026-06-04`): Instant.parse rejects it
+      // for want of an offset. Since ETP-5100 that is the shape NEO itself emits, so a value
+      // this API handed out and got echoed back must round-trip rather than silently collapse
+      // to `fallback` — which, being `new Date()` at both call sites in BankStatementsHandler,
+      // would substitute TODAY for the statement's real day and look like nothing went wrong.
+      // Only the calendar day is read here anyway, so the prefix is the whole datum.
+      calendarDay = parseCalendarDayPrefix(iso);
+      if (calendarDay == null) return fallback;
+    }
+    return Date.from(calendarDay.atStartOfDay(ZoneId.systemDefault()).toInstant());
+  }
+
+  /** The leading {@code yyyy-MM-dd} of an ISO string, or {@code null} when it has none. */
+  private static LocalDate parseCalendarDayPrefix(String iso) {
+    try {
+      return LocalDate.parse(iso.trim().substring(0, 10));
+    } catch (Exception e) {
+      return null;
     }
   }
 

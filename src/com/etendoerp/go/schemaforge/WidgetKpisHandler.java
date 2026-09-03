@@ -30,6 +30,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.Role;
 
 /**
  * NeoHandler that returns KPI summary data for the dashboard widget.
@@ -91,6 +92,14 @@ public class WidgetKpisHandler implements NeoHandler {
   public NeoResponse handle(NeoContext context) {
     if (!"GET".equals(context.getHttpMethod())) {
       return NeoResponse.error(405, "Method not allowed");
+    }
+
+    // ETP-5088 — role gate. Resolved BEFORE admin mode below, which exists only to bypass
+    // row-level security on the query, never to decide access. Denied returns an empty payload
+    // rather than a 403 (see WidgetAccessPolicy): the Financial summary is treasury data: the matrix gives it to Admin + Finance only, which invoices cannot express (they would let Sales and Purchasing in).
+    Role role = WidgetAccessPolicy.currentRole();
+    if (!WidgetAccessPolicy.canRead(role, WidgetAccessPolicy.WINDOW_FINANCIAL_ACCOUNT)) {
+      return WidgetQueryHelper.buildEmptyDataResponse();
     }
 
     try {

@@ -17,7 +17,9 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -277,6 +279,278 @@ public class Fiscal349BoxesHandlerTest {
 
     assertEquals("", arr.getJSONObject(0).getString("nif"));
     assertEquals("NoNif SL", arr.getJSONObject(0).getString("name"));
+  }
+
+  // ── rectificative operator rows (ETP-5027) ────────────────────────
+
+  /** A corrective row exactly as AEAT3492010ReportDao returns it: an UNSIGNED magnitude. */
+  private static Map<String, Object> daoCorrectiveRow(String bpId, String magnitude, String key) {
+    return daoCorrectiveRow(bpId, magnitude, key, "2026", "1T");
+  }
+
+  private static Map<String, Object> daoCorrectiveRow(String bpId, String magnitude, String key,
+      String year, String period) {
+    Map<String, Object> r = row(bpId, magnitude, key);
+    r.put("BPFormerAmount", new BigDecimal("100"));
+    r.put("Year", year);
+    r.put("Period", period);
+    return r;
+  }
+
+  // ── declaredYear / declaredPeriod on operator rows (ETP-5027, QA F4) ──
+
+  /**
+   * The DAO groups corrective rows by {@code (BPId, TaxKey, Year, Period)}, so correcting the
+   * same partner's 2025/T1 and 2025/T2 sales of goods in ONE declaration produces two rows that
+   * differ only by period. Dropping {@code Year}/{@code Period} left the frontend unable to tell
+   * them apart, which collided its React keys AND its row selection (ticking one ticked both).
+   */
+  @Test
+  public void testCorrectiveRowsCarryTheDeclaredYearAndPeriod() throws Exception {
+    List<Map<String, Object>> signed = Fiscal349BoxesHandler.toSignedDeltaRows(Arrays.asList(
+        daoCorrectiveRow("bp1", "30", "E", "2025", "1T"),
+        daoCorrectiveRow("bp1", "50", "E", "2025", "2T")));
+
+    JSONArray arr = handler.appendOperators(
+        new JSONArray(), signed, new HashMap<>(), emptySummary(), true);
+
+    assertEquals(2, arr.length());
+    assertEquals("2025", arr.getJSONObject(0).getString("declaredYear"));
+    assertEquals("1T",   arr.getJSONObject(0).getString("declaredPeriod"));
+    assertEquals("2025", arr.getJSONObject(1).getString("declaredYear"));
+    assertEquals("2T",   arr.getJSONObject(1).getString("declaredPeriod"));
+  }
+
+  /**
+   * Regular rows come from {@code getTaxBaseAmountPerBusinessPartner}, which groups by
+   * {@code (BPId, TaxKey)} only and carries no {@code Year}/{@code Period}. They must keep
+   * exactly the JSON shape they had — the keys are emitted only when present.
+   */
+  @Test
+  public void testRegularRowsCarryNoDeclaredYearOrPeriod() throws Exception {
+    JSONArray arr = handler.buildOperatorsArray(
+        Collections.singletonList(row("bp1", "10", "E")), new HashMap<>(), emptySummary());
+
+    assertFalse(arr.getJSONObject(0).has("declaredYear"));
+    assertFalse(arr.getJSONObject(0).has("declaredPeriod"));
+  }
+
+  /** A blank or missing Year/Period is omitted rather than emitted as "". */
+  @Test
+  public void testBlankDeclaredYearAndPeriodAreOmitted() throws Exception {
+    List<Map<String, Object>> signed = Fiscal349BoxesHandler.toSignedDeltaRows(
+        Collections.singletonList(daoCorrectiveRow("bp1", "30", "E", "  ", null)));
+
+    JSONArray arr = handler.appendOperators(
+        new JSONArray(), signed, new HashMap<>(), emptySummary(), true);
+
+    assertFalse(arr.getJSONObject(0).has("declaredYear"));
+    assertFalse(arr.getJSONObject(0).has("declaredPeriod"));
+  }
+
+  /**
+   * Pins the sign convention, which is the whole point of reporting a delta.
+   *
+   * <p>{@code getCorrectiveTaxBaseAmountPerBusinessPartner} computes {@code BPTaxBaseAmount} as
+   * {@code sum(it.taxableAmount * -1)}, so a credit note for 3 units of a 10.00 product (line
+   * amount {@code -30}) arrives as {@code +30} — an unsigned magnitude, not a delta.
+   * {@code AEAT3492010Report.generateLine2_Corrections} writes
+   * {@code BPFormerAmount - BPTaxBaseAmount} as the corrected base and {@code BPFormerAmount} as
+   * the previously declared one, so {@code corrected - former == -BPTaxBaseAmount}. We therefore
+   * negate, and the identity holds in BOTH directions.
+   */
+  @Test
+  public void testToSignedDeltaRowsNegatesTheAeatMagnitude() {
+    List<Map<String, Object>> signed = Fiscal349BoxesHandler.toSignedDeltaRows(Arrays.asList(
+        daoCorrectiveRow("bp1", "30", "E"),    // reduction of 30 → delta -30
+        daoCorrectiveRow("bp2", "-30", "S")));  // upward correction  → delta +30
+
+    assertEquals(new BigDecimal("-30"), signed.get(0).get("BPTaxBaseAmount"));
+    assertEquals(new BigDecimal("30"),  signed.get(1).get("BPTaxBaseAmount"));
+    // Everything else on the row is carried through untouched.
+    assertEquals("bp1",  signed.get(0).get("BPId"));
+    assertEquals("E",    signed.get(0).get("TaxKey"));
+    assertEquals("2026", signed.get(0).get("Year"));
+  }
+
+  /** A null amount survives as null so {@code appendOperators} can skip the row. */
+  @Test
+  public void testToSignedDeltaRowsPassesNullAmountThrough() {
+    List<Map<String, Object>> signed = Fiscal349BoxesHandler.toSignedDeltaRows(
+        Collections.singletonList(daoCorrectiveRow("bp1", null, "E")));
+
+    assertEquals(1, signed.size());
+    assertNull(signed.get(0).get("BPTaxBaseAmount"));
+  }
+
+  /** The DAO's own maps must not be mutated — rows are copied. */
+  @Test
+  public void testToSignedDeltaRowsDoesNotMutateInput() {
+    Map<String, Object> original = daoCorrectiveRow("bp1", "30", "E");
+    Fiscal349BoxesHandler.toSignedDeltaRows(Collections.singletonList(original));
+
+    assertEquals(new BigDecimal("30"), original.get("BPTaxBaseAmount"));
+  }
+
+  @Test
+  public void testToSignedDeltaRowsHandlesNullList() {
+    assertEquals(0, Fiscal349BoxesHandler.toSignedDeltaRows(null).size());
+  }
+
+  /**
+   * End-to-end for the sign: a reduction must surface as a NEGATIVE {@code base} on the operator
+   * row and a NEGATIVE rectificative subtotal. Nothing on the way out may clamp or {@code abs()}
+   * it — the zero-base skip in {@code appendOperators} must drop only genuine no-ops.
+   */
+  @Test
+  public void testReductionYieldsNegativeBaseAndNegativeSubtotal() throws Exception {
+    Map<String, BigDecimal> rectificative = emptySummary();
+    List<Map<String, Object>> signed = Fiscal349BoxesHandler.toSignedDeltaRows(
+        Collections.singletonList(daoCorrectiveRow("bp1", "30", "E")));
+
+    JSONArray arr = handler.appendOperators(
+        new JSONArray(), signed, new HashMap<>(), rectificative, true);
+
+    assertEquals(1, arr.length());
+    assertEquals("-30.00", arr.getJSONObject(0).getString("base"));
+    assertTrue(arr.getJSONObject(0).getBoolean("rectificative"));
+    assertEquals(new BigDecimal("-30"), rectificative.get("E"));
+
+    JSONObject subtotal = Fiscal349BoxesHandler.buildKeyTotals(rectificative);
+    assertEquals("-30.00", subtotal.getString("totalE"));
+  }
+
+  /**
+   * A correction whose delta nets to zero is a no-op and is skipped, exactly like a zero regular
+   * base — but a negative one is NOT, which is the case the skip could plausibly have swallowed.
+   */
+  @Test
+  public void testZeroDeltaIsSkippedButNegativeIsKept() throws Exception {
+    Map<String, BigDecimal> rectificative = emptySummary();
+    List<Map<String, Object>> signed = Fiscal349BoxesHandler.toSignedDeltaRows(Arrays.asList(
+        daoCorrectiveRow("bp-noop", "0", "E"),
+        daoCorrectiveRow("bp-real", "5", "E")));
+
+    JSONArray arr = handler.appendOperators(
+        new JSONArray(), signed, new HashMap<>(), rectificative, true);
+
+    assertEquals(1, arr.length());
+    assertEquals("bp-real", arr.getJSONObject(0).getString("bpId"));
+    assertEquals("-5.00", arr.getJSONObject(0).getString("base"));
+    assertEquals(new BigDecimal("-5"), rectificative.get("E"));
+  }
+
+  /**
+   * Regression guard for ETP-5027. Corrective invoices are stripped out before the per-BP
+   * aggregation, so their business partners never reached the Operadores array. They are now
+   * appended to the SAME array — tagged {@code rectificative: true} so the UI can badge them
+   * and so the existing key filter/search picks them up — but with their OWN totals map.
+   *
+   * <p>The load-bearing assertion is the last one: the pre-existing {@code summary} totals must
+   * be byte-for-byte what they were before correctives were emitted at all. The AEAT treats
+   * correctives as a separate record type (registro tipo 2); folding a signed delta into the
+   * regular subtotal would silently understate the declared base.
+   */
+  @Test
+  public void testAppendOperatorsTagsRectificativeRowsWithoutTouchingSummary() throws Exception {
+    Map<String, BigDecimal> summary       = emptySummary();
+    Map<String, BigDecimal> rectificative = emptySummary();
+
+    JSONArray arr = handler.buildOperatorsArray(
+        Collections.singletonList(row("bp1", "100", "E")), new HashMap<>(), summary);
+    handler.appendOperators(arr,
+        Fiscal349BoxesHandler.toSignedDeltaRows(
+            Collections.singletonList(daoCorrectiveRow("bp2", "40", "E"))),
+        new HashMap<>(), rectificative, true);
+
+    assertEquals(2, arr.length());
+    assertEquals("bp1", arr.getJSONObject(0).getString("bpId"));
+    assertFalse(arr.getJSONObject(0).getBoolean("rectificative"));
+    assertEquals("bp2", arr.getJSONObject(1).getString("bpId"));
+    assertTrue(arr.getJSONObject(1).getBoolean("rectificative"));
+    assertEquals("-40.00", arr.getJSONObject(1).getString("base"));
+
+    // Corrective deltas land in their own subtotal only...
+    assertEquals(new BigDecimal("-40"), rectificative.get("E"));
+    // ...and the regular summary is exactly the non-corrective total, unchanged and unreduced.
+    assertEquals(new BigDecimal("100"), summary.get("E"));
+    assertEquals(BigDecimal.ZERO, summary.get("S"));
+    assertEquals(BigDecimal.ZERO, summary.get("A"));
+    assertEquals(BigDecimal.ZERO, summary.get("I"));
+  }
+
+  /**
+   * A period with no corrective invoices must leave the response identical to before ETP-5027:
+   * no extra rows, an all-zero rectificative subtotal, and an untouched summary.
+   */
+  @Test
+  public void testAppendOperatorsWithNoCorrectivesChangesNothing() throws Exception {
+    Map<String, BigDecimal> summary       = emptySummary();
+    Map<String, BigDecimal> rectificative = emptySummary();
+
+    JSONArray arr = handler.buildOperatorsArray(
+        Collections.singletonList(row("bp1", "100", "S")), new HashMap<>(), summary);
+    handler.appendOperators(arr, Collections.<Map<String, Object>>emptyList(),
+        new HashMap<>(), rectificative, true);
+
+    assertEquals(1, arr.length());
+    assertEquals(new BigDecimal("100"), summary.get("S"));
+    for (BigDecimal v : rectificative.values()) {
+      assertEquals(BigDecimal.ZERO, v);
+    }
+  }
+
+  /**
+   * Rows produced by the regular path must be explicitly flagged {@code rectificative: false}
+   * rather than omitting the field — the frontend badges off this flag, and a missing key
+   * would make every regular operator ambiguous.
+   */
+  @Test
+  public void testBuildOperatorsArrayFlagsRegularRowsAsNonRectificative() throws Exception {
+    JSONArray arr = handler.buildOperatorsArray(
+        Collections.singletonList(row("bp1", "10", "E")), new HashMap<>(), emptySummary());
+
+    assertTrue(arr.getJSONObject(0).has("rectificative"));
+    assertFalse(arr.getJSONObject(0).getBoolean("rectificative"));
+  }
+
+  /**
+   * The rectificative subtotal is emitted as its own object with EXACTLY the same
+   * {@code totalE/S/A/I} shape as {@code summary}.
+   *
+   * <p>ETP-5027 (QA F1): it must NOT carry a {@code total} grand figure. E/S are sales and A/I
+   * are purchases, so their sum is not a meaningful quantity — netting a sales correction
+   * against a purchase correction would render {@code 0,00} for two real, non-cancelling
+   * corrections. Both subtotals now go through the single no-grand-total shape.
+   */
+  @Test
+  public void testBuildKeyTotalsShapeHasNoGrandTotal() throws Exception {
+    Map<String, BigDecimal> totals = emptySummary();
+    totals.put("E", new BigDecimal("-30.005"));
+    totals.put("S", new BigDecimal("12"));
+
+    JSONObject json = Fiscal349BoxesHandler.buildKeyTotals(totals);
+    assertEquals("-30.01", json.getString("totalE")); // HALF_UP, away from zero
+    assertEquals("12.00",  json.getString("totalS"));
+    assertEquals("0.00",   json.getString("totalA"));
+    assertEquals("0.00",   json.getString("totalI"));
+    assertFalse(json.has("total"));
+  }
+
+  /**
+   * The exact regression: a sales correction of -30 and a purchase correction of +30 must not
+   * collapse into a single "0" figure. With no grand total the two remain visible per key.
+   */
+  @Test
+  public void testOffsettingSalesAndPurchaseCorrectionsStayVisible() throws Exception {
+    Map<String, BigDecimal> totals = emptySummary();
+    totals.put("E", new BigDecimal("-30"));
+    totals.put("A", new BigDecimal("30"));
+
+    JSONObject json = Fiscal349BoxesHandler.buildKeyTotals(totals);
+    assertEquals("-30.00", json.getString("totalE"));
+    assertEquals("30.00",  json.getString("totalA"));
+    assertFalse(json.has("total"));
   }
 
   // ── buildOperatorsArray VIES status mapping (ETP-4755) ─────────────

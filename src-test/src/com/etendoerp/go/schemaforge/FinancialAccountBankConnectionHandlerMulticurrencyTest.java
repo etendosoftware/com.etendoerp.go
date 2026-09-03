@@ -20,10 +20,8 @@ package com.etendoerp.go.schemaforge;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.ACCOUNT_ID;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.API_KEY;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.CONNECTION_ID;
-import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.ORIGIN;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_ACCOUNT_ID;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_CONNECTION_ID;
-import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_TYPE;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.SALT_EDGE_ACCOUNT_ID;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.postContext;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.stubObContext;
@@ -31,7 +29,6 @@ import static org.junit.Assert.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
@@ -42,10 +39,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 
-import javax.servlet.http.HttpServletRequest;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -56,45 +51,37 @@ import org.junit.runner.RunWith;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
-import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 
-import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
 
 /**
- * Unit tests for the ETP-4503 multicurrency wiring in {@link FinancialAccountBankConnectionHandler}: when a
- * Bank account is connected to its bank (the {@code link} and {@code createAndLink} paths, both routed
- * through the private {@code linkAccount} choke point), the handler must disable multicurrency on
- * the account's bank-transfer payment-method link via
- * {@link FinancialAccountSupport#disableMulticurrencyForBankTransfer}. The {@code reconnect} path
- * must NOT — it does not establish a fresh link and leaves multicurrency untouched.
+ * Regression guard for the ETP-5084 reversal in {@link FinancialAccountBankConnectionHandler}:
+ * connecting a Bank account to its bank must leave the multicurrency flags on the account's
+ * payment-method links completely untouched.
  *
- * <p>The transfer-link disabling logic itself is covered exhaustively in
- * {@link FinancialAccountSupportTest}; here we assert the handler's orchestration:
- * <ul>
- *   <li>{@code link}: exercised with the REAL helper (Bank account + a transfer link that is
- *       multicurrency-ON) so the transfer link ends OFF and a Cash link stays untouched.</li>
- *   <li>{@code createAndLink}: {@link FinancialAccountSupport} is mocked statically to assert the
- *       disable call is issued on the freshly created account.</li>
- *   <li>{@code reconnect}: {@link FinancialAccountSupport} is mocked statically to assert the disable
- *       call is never issued.</li>
- * </ul>
+ * <p>ETP-4503 used to clear {@code payin/payout_ismulticurrency} on the bank-transfer link at that
+ * exact moment, on the premise that a transfer can only be instructed in the account's own currency
+ * and therefore cannot settle a foreign invoice. ETP-5084 removed that: a PIS transfer converts the
+ * invoice amount to the account currency before instructing the bank, so a cross-currency transfer
+ * is a supported operation and the transfer link is multicurrency like every other payment method.
+ * (Data-fix R29 re-enables it on accounts connected before the change.)
+ *
+ * <p>The test therefore asserts a NEGATIVE: neither the transfer link nor any other link is written
+ * to. It is kept rather than deleted because the removed behavior was subtle and invisible from the
+ * UI — a well-meaning reintroduction would silently break cross-currency transfers and
+ * cross-currency reconciliation again.
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class FinancialAccountBankConnectionHandlerMulticurrencyTest {
 
   private static final String ACTION_LINK = "link";
-  private static final String ACTION_CREATE_AND_LINK = "createAndLink";
-  private static final String ACTION_RECONNECT = "reconnect";
-  private static final String CALLBACK = "/financial-account/bank-connection-callback";
   private static final String TYPE_BANK = "B";
   private static final String METHOD_TRANSFER = "Transferencia bancaria";
   private static final String METHOD_CASH = "Efectivo";
@@ -113,12 +100,12 @@ public class FinancialAccountBankConnectionHandlerMulticurrencyTest {
   }
 
   /**
-   * link on a Bank account whose transfer link is multicurrency-ON: the real helper turns both
-   * multicurrency columns OFF on that link (transfer link ends {@code N}); a Cash link on the same
-   * account is left untouched (stays {@code Y}). AC#2.
+   * link on a Bank account whose transfer link is multicurrency-ON: the flags survive the
+   * connection. Runs against the REAL FinancialAccountSupport (only OBDal is stubbed), so it would
+   * fail the moment any disabling logic is reintroduced on this path.
    */
   @Test
-  public void testLinkDisablesMulticurrencyOnBankTransferLink() throws Exception {
+  public void testLinkLeavesMulticurrencyUntouched() throws Exception {
     JSONObject body = linkBody();
     FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
     when(finAcc.getId()).thenReturn(ACCOUNT_ID);
@@ -159,100 +146,18 @@ public class FinancialAccountBankConnectionHandlerMulticurrencyTest {
 
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      // Both disableAutomaticWithdrawnForTransferMethod and disableMulticurrencyForBankTransfer
-      // iterate the account's FinAccPaymentMethod rows via the same criteria stub.
+      // disableAutomaticWithdrawnForTransferMethod (ETP-4891, still in force) iterates the
+      // account's FinAccPaymentMethod rows through this same criteria stub.
       stubFinAccPaymentMethods(dal, Arrays.asList(transferLink, cashLink));
 
       NeoResponse response = handler.handle(postContext(ACTION_LINK, body));
 
       assertEquals(200, response.getHttpStatus());
-      verify(transferLink).setPayinIsMulticurrency(false);
-      verify(transferLink).setPayoutIsMulticurrency(false);
-      // Cash link is not a bank-transfer link → multicurrency left as-is (Y).
+      // ETP-5084: no link's multicurrency flags are written, in either direction, on either link.
+      verify(transferLink, never()).setPayinIsMulticurrency(anyBoolean());
+      verify(transferLink, never()).setPayoutIsMulticurrency(anyBoolean());
       verify(cashLink, never()).setPayinIsMulticurrency(anyBoolean());
       verify(cashLink, never()).setPayoutIsMulticurrency(anyBoolean());
-    }
-  }
-
-  /**
-   * createAndLink on a Bank account must issue the disable call on the freshly created account. With
-   * {@link FinancialAccountSupport} mocked statically the disable is a no-op stub; the verification is
-   * that the handler invokes it (via {@code linkAccount}).
-   */
-  @Test
-  public void testCreateAndLinkInvokesDisableMulticurrency() throws Exception {
-    JSONObject body = createAndLinkBody();
-    JSONArray nodes = new JSONArray().put(new JSONObject()
-        .put("id", SALT_EDGE_ACCOUNT_ID).put("name", "Ahorro").put("currency_code", "EUR"));
-    JSONObject details = new JSONObject().put("provider_name", "BBVA");
-    Currency currency = mock(Currency.class);
-    FIN_FinancialAccount created = mock(FIN_FinancialAccount.class);
-    when(created.getId()).thenReturn("FA-NEW");
-    when(created.getName()).thenReturn("BBVA - Ahorro");
-
-    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
-        MockedStatic<FinancialAccountSupport> support = mockStatic(FinancialAccountSupport.class);
-        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class);
-        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
-      stubObContext(obContext);
-      utils.when(() -> BankIntegrationUtils.getPsd2ApiKey(any())).thenReturn(API_KEY);
-      utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
-          .thenReturn(nodes);
-      utils.when(() -> BankIntegrationUtils.getSaltEdgeConnectionDetails(CONNECTION_ID, API_KEY))
-          .thenReturn(details);
-      support.when(() -> FinancialAccountSupport.findCurrencyByIsoCode("EUR")).thenReturn(currency);
-      support.when(() -> FinancialAccountSupport.createAccount(any(), any(), eq(currency),
-          anyString(), eq(TYPE_BANK))).thenReturn(created);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(any(), anyString()))
-          .thenReturn(null);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(created),
-          eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(), any())).thenReturn("");
-
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      stubFinAccPaymentMethods(dal, Collections.emptyList());
-
-      NeoResponse response = handler.handle(postContext(ACTION_CREATE_AND_LINK, body));
-
-      assertEquals(201, response.getHttpStatus());
-      support.verify(() -> FinancialAccountSupport.disableMulticurrencyForBankTransfer(created));
-    }
-  }
-
-  /**
-   * reconnect must NOT touch multicurrency: it returns a reconnect URL without re-establishing a
-   * link, so {@code disableMulticurrencyForBankTransfer} is never called.
-   */
-  @Test
-  public void testReconnectDoesNotInvokeDisableMulticurrency() throws Exception {
-    JSONObject body = new JSONObject().put(PARAM_ACCOUNT_ID, ACCOUNT_ID);
-    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
-    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
-    FinaccConnection connection = mock(FinaccConnection.class);
-    when(connection.getSaltEdgeConnection()).thenReturn(CONNECTION_ID);
-
-    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-        MockedStatic<RequestContext> requestContext = mockStatic(RequestContext.class);
-        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
-        MockedStatic<FinancialAccountSupport> support = mockStatic(FinancialAccountSupport.class);
-        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
-            mockStatic(SaltEdgeAccountLinkHelper.class)) {
-      stubObContext(obContext);
-      stubOrigin(requestContext, ORIGIN);
-      stubAnyConnection(obDal, connection);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getApiKeyForFinAcc(finAcc)).thenReturn(API_KEY);
-      utils.when(() -> BankIntegrationUtils.reconnectSaltEdgeConnection(eq(CONNECTION_ID),
-          eq(API_KEY), eq(ORIGIN + CALLBACK), any()))
-          .thenReturn("https://saltedge.example/reconnect");
-
-      NeoResponse response = handler.handle(postContext(ACTION_RECONNECT, body));
-
-      assertEquals(200, response.getHttpStatus());
-      support.verify(() -> FinancialAccountSupport.disableMulticurrencyForBankTransfer(any()),
-          never());
     }
   }
 
@@ -263,30 +168,6 @@ public class FinancialAccountBankConnectionHandlerMulticurrencyTest {
         .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
         .put(PARAM_CONNECTION_ID, CONNECTION_ID)
         .put("saltEdgeAccountId", SALT_EDGE_ACCOUNT_ID);
-  }
-
-  private static JSONObject createAndLinkBody() throws Exception {
-    return new JSONObject()
-        .put(PARAM_TYPE, TYPE_BANK)
-        .put(PARAM_CONNECTION_ID, CONNECTION_ID)
-        .put("saltEdgeAccountId", SALT_EDGE_ACCOUNT_ID);
-  }
-
-  private static void stubOrigin(MockedStatic<RequestContext> requestContext, String origin) {
-    HttpServletRequest request = mock(HttpServletRequest.class);
-    when(request.getHeader("Origin")).thenReturn(origin);
-    RequestContext rc = mock(RequestContext.class);
-    when(rc.getRequest()).thenReturn(request);
-    requestContext.when(RequestContext::get).thenReturn(rc);
-  }
-
-  @SuppressWarnings("unchecked")
-  private static void stubAnyConnection(MockedStatic<OBDal> obDal, FinaccConnection result) {
-    OBDal dal = mock(OBDal.class);
-    obDal.when(OBDal::getInstance).thenReturn(dal);
-    OBCriteria<FinaccConnection> criteria = mock(OBCriteria.class);
-    when(dal.createCriteria(FinaccConnection.class)).thenReturn(criteria);
-    when(criteria.uniqueResult()).thenReturn(result);
   }
 
   @SuppressWarnings("unchecked")
