@@ -61,11 +61,15 @@ import org.openbravo.model.project.Project;
  *       the wrong answer (see gap K1 / ETP-4854 in {@code docs/etendo-ad/onboarding-gaps.md}).</li>
  * </ul>
  *
- * <p>Callers that need the header-level set for a document type — the New Movement wizard, and the
- * transaction Automatch creates out of a matching rule, both of which are {@code FAT} documents —
- * must go through {@link #activeHeaderDimensions(Client, String)} /
- * {@link #activeHeaderDimensionsForAccount(String, String)} rather than querying either table on
- * their own.
+ * <p><b>Which source gates a user-facing surface (ETP-4950 QA round): the flat one, always</b> —
+ * {@link #flatActiveDimensionsForCurrentClient()} / {@link #flatActiveDimensionsForAccount(String)}.
+ * {@code C_AcctSchema_Element.IsActive} is what the "Esquema contable → Dimensiones" screen writes
+ * ({@code GeneralLedgerConfigurationHandler} toggles that column and nothing else), so it is the only
+ * dimension configuration a user of Etendo GO can reach. The header-level set additionally subtracts
+ * {@code AD_Client_AcctDimension.Show_In_Header='N'}, a table GO ships no screen for — and the shipped
+ * reference data marks Product hidden for {@code FAT}, so gating on it made Product permanently
+ * invisible in the match-rule form and in the New Movement wizard on every tenant. The header helpers
+ * are {@code @Deprecated} and have no production consumer.
  *
  * <p>Dimension codes are Core's ({@code PJ}, {@code CC}, {@code PR}, …, mapped in
  * {@code DimensionDisplayUtility}); the keys this class returns are the lowercase UI keys the
@@ -155,8 +159,26 @@ final class AccountingDimensionsSupport {
     return queryDimensions(FLAT_ACTIVE_BY_CLIENT_SQL, "elementtype", clientId);
   }
 
+  /**
+   * Active chart-of-accounts elements of the CURRENT tenant, resolved from {@link OBContext} rather
+   * than from an id supplied by the request — so a caller can never be pointed at another tenant's
+   * accounting configuration (ETP-4950).
+   *
+   * <p>This is the set the "Esquema contable &rarr; Dimensiones" screen writes, and therefore the only
+   * one a user of Etendo GO can actually manage: {@code GeneralLedgerConfigurationHandler} toggles
+   * {@code C_AcctSchema_Element.IsActive} and nothing else. See {@link #flatActiveDimensionsForAccount}
+   * for the rationale on why the header-level source was abandoned.
+   */
+  static Set<String> flatActiveDimensionsForCurrentClient() throws Exception {
+    Client client = currentClient();
+    if (client == null) {
+      return new HashSet<>();
+    }
+    return flatActiveDimensionsForClient(client.getId());
+  }
+
   // ---------------------------------------------------------------------------
-  // Header-level set — the one the movement surfaces must use
+  // Header-level set — NO PRODUCTION CONSUMER (see the deprecation note below)
   // ---------------------------------------------------------------------------
 
   /**
@@ -165,7 +187,16 @@ final class AccountingDimensionsSupport {
    *
    * @param client      the tenant whose configuration decides the answer
    * @param docBaseType the document base type, e.g. {@link #DOCBASETYPE_FAT}
+   * @deprecated Do not gate a user-facing surface on this. It is the chart of accounts minus
+   *     {@code AD_Client_AcctDimension.Show_In_Header='N'}, and Etendo GO ships no screen for
+   *     {@code AD_Client_AcctDimension} — so whatever it subtracts is unreachable for the user. The
+   *     shipped reference data marks Product hidden for {@code FAT}, which is why Product could never
+   *     appear in the match-rule form nor in the New Movement wizard on any tenant provisioned from
+   *     the published dataset (ETP-4950 QA round). Use {@link #flatActiveDimensionsForCurrentClient()}
+   *     or {@link #flatActiveDimensionsForAccount(String)} instead — that is what the Accounting
+   *     Schema screen writes. Kept only until its tests are retired.
    */
+  @Deprecated
   static Set<String> activeHeaderDimensions(Client client, String docBaseType) throws Exception {
     if (client == null) {
       return new HashSet<>();
@@ -183,7 +214,10 @@ final class AccountingDimensionsSupport {
    * Same as {@link #activeHeaderDimensions(Client, String)} but resolving the tenant from a
    * financial account. Falls back to the flat source when the account (or its client) cannot be
    * resolved, so a caller is never left with an empty set because of a lookup failure.
+   *
+   * @deprecated see {@link #activeHeaderDimensions(Client, String)}.
    */
+  @Deprecated
   static Set<String> activeHeaderDimensionsForAccount(String accountId, String docBaseType)
       throws Exception {
     Client client = clientOfAccount(accountId);
@@ -196,7 +230,12 @@ final class AccountingDimensionsSupport {
     return flat;
   }
 
-  /** The current tenant's header dimensions for {@code docBaseType}. */
+  /**
+   * The current tenant's header dimensions for {@code docBaseType}.
+   *
+   * @deprecated see {@link #activeHeaderDimensions(Client, String)}.
+   */
+  @Deprecated
   static Set<String> activeHeaderDimensionsForCurrentClient(String docBaseType) throws Exception {
     return activeHeaderDimensions(currentClient(), docBaseType);
   }
@@ -318,7 +357,7 @@ final class AccountingDimensionsSupport {
     }
     try {
       FIN_FinancialAccount account =
-          OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+          TenantOwnership.loadOwned(FIN_FinancialAccount.class, accountId);
       return account != null ? account.getClient() : null;
     } catch (Exception e) {
       log.debug("Could not resolve the client of financial account {}: {}", accountId,

@@ -413,6 +413,7 @@ final class ReconciliationHandlerSupport {
   static void appendAccountEquivalent(JSONObject row, String invoiceId,
       FIN_FinancialAccount account, BigDecimal signedAmount) {
     try {
+      // tenant-ok: invoiceId comes from INVOICE_CANDIDATES_SQL, already scoped by client and org
       Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
       if (invoice == null) {
         return;
@@ -554,6 +555,7 @@ final class ReconciliationHandlerSupport {
       if (unpostFailed.contains(recId)) {
         continue;
       }
+      // tenant-ok: recId comes from a reconciliation reached through a validated line
       FIN_Reconciliation r = OBDal.getInstance().get(FIN_Reconciliation.class, recId);
       List<FIN_FinaccTransaction> selForRec = refetch(selectedByRec.get(recId));
       if (coversReconciliation(r, selForRec)) {
@@ -575,6 +577,7 @@ final class ReconciliationHandlerSupport {
     }
     for (FIN_FinaccTransaction t : txns) {
       FIN_FinaccTransaction reloaded =
+          // tenant-ok: re-read after flush of a transaction already validated by groupSelectedByReconciliation
           OBDal.getInstance().get(FIN_FinaccTransaction.class, t.getId());
       if (reloaded != null) {
         fresh.add(reloaded);
@@ -614,6 +617,7 @@ final class ReconciliationHandlerSupport {
       return;
     }
     FIN_Reconciliation rec =
+        // tenant-ok: re-read after flush; the id belongs to a reconciliation already resolved above
         OBDal.getInstance().get(FIN_Reconciliation.class, reconciliationId);
     if (rec == null || !"Y".equals(rec.getPosted())) {
       return;
@@ -626,6 +630,7 @@ final class ReconciliationHandlerSupport {
     // is detached by now. Saving THAT one is what made OBInterceptor report a record with no current
     // state in the database. Re-read before touching the flag.
     FIN_Reconciliation fresh =
+        // tenant-ok: re-read after flush; same reconciliation as above
         OBDal.getInstance().get(FIN_Reconciliation.class, reconciliationId);
     if (fresh != null && !"N".equals(fresh.getPosted())) {
       fresh.setPosted("N");
@@ -759,6 +764,7 @@ final class ReconciliationHandlerSupport {
     }
     for (String id : ids) {
       try {
+        // tenant-ok: id already cross-checked against the account by groupSelectedByReconciliation
         FIN_FinaccTransaction trx = OBDal.getInstance().get(FIN_FinaccTransaction.class, id);
         // No unposting here: detaching reactivates the whole reconciliation and so meets the same
         // date-narrowed reset, but running it mid-loop would detach the instance just loaded above.
@@ -777,6 +783,7 @@ final class ReconciliationHandlerSupport {
             + "this batch are not rolled back (Core commits mid-flow) — continuing with the rest.",
             id, e);
         recordFailure(Collections.singletonList(
+            // tenant-ok: diagnostics only, on an id already validated in this same loop
             OBDal.getInstance().get(FIN_FinaccTransaction.class, id)), failureReasons, e);
       }
     }

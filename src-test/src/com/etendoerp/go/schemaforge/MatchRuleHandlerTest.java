@@ -72,12 +72,12 @@ public class MatchRuleHandlerTest {
   private static final int SERVER_ERROR = HttpServletResponse.SC_INTERNAL_SERVER_ERROR; // 500
 
   private static final String SPEC = "match-rule";
-  private static final String FAT = AccountingDimensionsSupport.DOCBASETYPE_FAT;
 
-  /** Wire field names of the three accounting dimensions a rule can carry. */
+  /** Wire field names of the accounting dimensions a rule can carry. */
   private static final String F_PROJECT = "project";
   private static final String F_COST_CENTER = "costCenter";
   private static final String F_PRODUCT = "product";
+  private static final String F_BUSINESS_PARTNER = "businessPartner";
 
   private MatchRuleHandler handler;
 
@@ -453,10 +453,16 @@ public class MatchRuleHandlerTest {
     return new HashSet<>(Arrays.asList(keys));
   }
 
-  /** Pins the tenant's active FAT header dimensions for the duration of the mocked static. */
+  /**
+   * Pins the tenant's active chart-of-accounts dimensions for the duration of the mocked static.
+   *
+   * <p>Stubs the flat source, not the {@code FAT} header one: ETP-4950's QA round moved the gate to
+   * {@code C_AcctSchema_Element}, the only dimension configuration the Accounting Schema screen
+   * writes and therefore the only one a user of Etendo GO can change.
+   */
   private static void stubActive(MockedStatic<AccountingDimensionsSupport> mocked,
       Set<String> active) {
-    mocked.when(() -> AccountingDimensionsSupport.activeHeaderDimensionsForCurrentClient(FAT))
+    mocked.when(AccountingDimensionsSupport::flatActiveDimensionsForCurrentClient)
         .thenReturn(active);
   }
 
@@ -536,7 +542,7 @@ public class MatchRuleHandlerTest {
   public void testBuildActiveDimensionsReturns500WhenResolutionThrows() {
     try (MockedStatic<AccountingDimensionsSupport> mocked =
              mockStatic(AccountingDimensionsSupport.class)) {
-      mocked.when(() -> AccountingDimensionsSupport.activeHeaderDimensionsForCurrentClient(FAT))
+      mocked.when(AccountingDimensionsSupport::flatActiveDimensionsForCurrentClient)
           .thenThrow(new IllegalStateException("no accounting schema"));
 
       MatchRuleHandler spyHandler = quietSpy();
@@ -626,6 +632,72 @@ public class MatchRuleHandlerTest {
   }
 
   /**
+   * Product survives the strip when the tenant has it active in the chart of accounts.
+   *
+   * <p>Regression for the ETP-4950 QA round: the gate read the {@code FAT} header set, which the
+   * shipped reference data has Product hidden from, so Product was dropped on save for every tenant
+   * no matter what the Accounting Schema screen said.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testStripInactiveDimensionsKeepsProductWhenActiveInTheChartOfAccounts()
+      throws Exception {
+    JSONObject b = body(F_PRODUCT, "PR-1", "name", "Bank fee");
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      stubActive(mocked, dims(AccountingDimensionsSupport.DIM_PRODUCT));
+
+      handler.stripInactiveDimensions(b);
+
+      assertEquals("PR-1", b.getString(F_PRODUCT));
+    }
+  }
+
+  /**
+   * The contact follows the same gate as the other dimensions: it is dropped when the tenant has the
+   * business-partner dimension switched off. On a rule the contact is assigned to the generated
+   * movement, not used to match (the engine matches on textPattern only), so the Accounting Schema
+   * toggle must govern it — before ETP-4950's QA round it was ungated and always survived.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testStripInactiveDimensionsDropsTheContactWhenItsDimensionIsInactive()
+      throws Exception {
+    JSONObject b = body(F_BUSINESS_PARTNER, "BP-1", F_PRODUCT, "PR-1", "name", "Bank fee");
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      stubActive(mocked, dims(AccountingDimensionsSupport.DIM_PRODUCT));
+
+      handler.stripInactiveDimensions(b);
+
+      assertFalse("an inactive contact dimension must be dropped", b.has(F_BUSINESS_PARTNER));
+      assertEquals("PR-1", b.getString(F_PRODUCT));
+      assertEquals("Bank fee", b.getString("name"));
+    }
+  }
+
+  /**
+   * The contact survives when its dimension is active.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testStripInactiveDimensionsKeepsTheContactWhenItsDimensionIsActive()
+      throws Exception {
+    JSONObject b = body(F_BUSINESS_PARTNER, "BP-1", "name", "Bank fee");
+    try (MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      stubActive(mocked, dims(AccountingDimensionsSupport.DIM_BPARTNER));
+
+      handler.stripInactiveDimensions(b);
+
+      assertEquals("BP-1", b.getString(F_BUSINESS_PARTNER));
+    }
+  }
+
+  /**
    * With no dimension active, all three fields are dropped and nothing else is touched.
    *
    * @throws Exception if the JSON plumbing fails
@@ -677,7 +749,7 @@ public class MatchRuleHandlerTest {
     JSONObject b = body(F_PROJECT, "PJ-1", F_COST_CENTER, "CC-1", F_PRODUCT, "PR-1");
     try (MockedStatic<AccountingDimensionsSupport> mocked =
              mockStatic(AccountingDimensionsSupport.class)) {
-      mocked.when(() -> AccountingDimensionsSupport.activeHeaderDimensionsForCurrentClient(FAT))
+      mocked.when(AccountingDimensionsSupport::flatActiveDimensionsForCurrentClient)
           .thenThrow(new IllegalStateException("no accounting schema"));
 
       handler.stripInactiveDimensions(b);

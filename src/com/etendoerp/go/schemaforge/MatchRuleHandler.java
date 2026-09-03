@@ -77,6 +77,8 @@ public class MatchRuleHandler extends AbstractNeoHandler {
   private static final String F_TEXT_PATTERN = "textPattern";
   private static final String F_ACCOUNTING_CONCEPT = "accountingConcept";
   private static final String F_PRIORITY = "priority";
+  /** Wire name of the contact field, as declared in the match-rule contract (C_BPartner_ID). */
+  private static final String F_BUSINESS_PARTNER = "businessPartner";
 
   private static final String METHOD_GET = "GET";
   private static final String PARAM_ACTION = "action";
@@ -88,8 +90,17 @@ public class MatchRuleHandler extends AbstractNeoHandler {
 
   /**
    * Rule fields that are accounting dimensions: wire field name → dimension key. A rule may only
-   * carry a dimension that is active for the tenant at the {@code FAT} header level, because that
-   * is exactly what the transaction Automatch generates out of the rule can hold.
+   * carry a dimension the tenant has switched on in the Accounting Schema ("Esquema contable →
+   * Dimensiones").
+   *
+   * <p>Until ETP-4950's QA round this was gated by the {@code FAT} <i>header</i> set instead, on the
+   * reasoning that the movement Automatch generates <i>is</i> a {@code FAT} document. That set is the
+   * chart of accounts minus {@code AD_Client_AcctDimension.Show_In_Header='N'}, and the shipped
+   * reference data marks Product as hidden for {@code FAT} — so Product could never appear no matter
+   * what the user toggled, on every tenant provisioned from the published dataset. Worse, Etendo GO
+   * ships no screen for {@code AD_Client_AcctDimension}, so that configuration was unreachable. The
+   * chart of accounts is the only dimension surface a user of GO can actually manage, so it is the
+   * only one that gates.
    */
   private static final Map<String, String> DIMENSION_FIELDS = dimensionFields();
 
@@ -98,6 +109,17 @@ public class MatchRuleHandler extends AbstractNeoHandler {
     fields.put("project", AccountingDimensionsSupport.DIM_PROJECT);
     fields.put("costCenter", AccountingDimensionsSupport.DIM_COSTCENTER);
     fields.put("product", AccountingDimensionsSupport.DIM_PRODUCT);
+    // The contact is an ASSIGNMENT here, not a matching criterion: the engine only ever matches on
+    // textPattern (see MatchRuleEngine#matches), and c_bpartner_id is copied onto the movement the
+    // rule generates exactly like the other three. So the RULE FORM gates it like them (ETP-4950 QA
+    // round: it was the one toggle in the Accounting Schema that changed nothing).
+    //
+    // Scope of this gate is the rule form only. It deliberately does NOT extend to
+    // AccountingDimensionsSupport#applyRuleDimensions: on a FIN_FinaccTransaction the contact is a
+    // first-class field, always visible in the New Movement wizard, and folding it into
+    // requestsAnyDimension would make every difference posting resolve the dimension configuration —
+    // laziness that javadoc calls out as load-bearing rather than an optimization.
+    fields.put(F_BUSINESS_PARTNER, AccountingDimensionsSupport.DIM_BPARTNER);
     return fields;
   }
 
@@ -138,17 +160,15 @@ public class MatchRuleHandler extends AbstractNeoHandler {
   }
 
   /**
-   * {@code GET ?action=activeDimensions} — the accounting dimensions available at the header of a
-   * {@code FAT} document for the current tenant, in the canonical display order. The rule form
-   * renders a dimension selector only when its dimension is listed here, so a dimension switched
-   * off in the Accounting Schema disappears from the rule the same way it disappears from the New
-   * Movement wizard.
+   * {@code GET ?action=activeDimensions} — the accounting dimensions the current tenant has active
+   * in its chart of accounts, in the canonical display order. The rule form renders a dimension
+   * selector only when its dimension is listed here, so switching a dimension off in the Accounting
+   * Schema removes it from the rule, and switching it on brings it back.
    */
   NeoResponse buildActiveDimensions() {
     try {
       enterAdminMode();
-      Set<String> active = AccountingDimensionsSupport.activeHeaderDimensionsForCurrentClient(
-          AccountingDimensionsSupport.DOCBASETYPE_FAT);
+      Set<String> active = AccountingDimensionsSupport.flatActiveDimensionsForCurrentClient();
       JSONArray arr = new JSONArray();
       for (String key : AccountingDimensionsSupport.DIM_ORDER) {
         if (active.contains(key)) {
@@ -253,8 +273,7 @@ public class MatchRuleHandler extends AbstractNeoHandler {
     }
     Set<String> active;
     try {
-      active = AccountingDimensionsSupport.activeHeaderDimensionsForCurrentClient(
-          AccountingDimensionsSupport.DOCBASETYPE_FAT);
+      active = AccountingDimensionsSupport.flatActiveDimensionsForCurrentClient();
     } catch (Exception e) {
       // Fail open: an unreadable accounting configuration must not block saving a rule.
       log.warn("Could not resolve active accounting dimensions; keeping the body as sent", e);

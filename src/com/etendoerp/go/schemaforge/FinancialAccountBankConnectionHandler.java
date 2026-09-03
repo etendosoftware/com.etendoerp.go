@@ -785,11 +785,25 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     return OBContext.getOBContext().getCurrentClient();
   }
 
+  /**
+   * The account named by the request, but only when it belongs to the current tenant.
+   *
+   * <p>Single choke point for all nine actions of this handler ({@code status}, {@code accounts},
+   * {@code connect}, {@code link}, {@code reconnect}, {@code reconnect-callback},
+   * {@code disconnect}, {@code sync}, {@code import-settings}), every one of which takes the id from
+   * a query parameter or the body and runs under the {@code setAdminMode(true)} opened above. A bare
+   * {@code OBDal.get} applies no tenant predicate, so a foreign id used to leak PSD2 data straight
+   * off the entity — connection status, the Salt Edge account id, the masked card number and the
+   * import window — and made the outbound Salt Edge calls run under the API key of the account's
+   * OWNER rather than the caller's (ETP-4950).
+   *
+   * <p>The write actions were not silently corrupting data: a flush on another client's row is
+   * rejected by {@code SecurityChecker} (admin mode with {@code doOrgClientAccessCheck} still on),
+   * so they failed with a 500. That protection is implicit and one refactor away from breaking, and
+   * the 500 itself was an existence oracle — hence the explicit guard here.
+   */
   FIN_FinancialAccount loadAccount(String accountId) {
-    if (StringUtils.isBlank(accountId)) {
-      return null;
-    }
-    return OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+    return TenantOwnership.loadOwned(FIN_FinancialAccount.class, accountId);
   }
 
   void doRollbackAndClose() {

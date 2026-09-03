@@ -145,8 +145,6 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final String FIELD_PROJECT_ID = "projectId";
   private static final String FIELD_COSTCENTER_ID = "costcenterId";
   private static final String FIELD_PRODUCT_ID = "productId";
-  /** Document base type of finacc transactions — used to resolve header dimensions. */
-  private static final String DOCBASETYPE_FAT = AccountingDimensionsSupport.DOCBASETYPE_FAT;
   /** AD reference backing FIN_Finacc_Transaction.Trxtype (core list: BPD/BPW/BF). */
   private static final String TRXTYPE_REFERENCE_ID = "4EFC9773F30B4ACE97D225BD13CFF8CB";
   /** JSON keys reused across rows and totals — extracted to satisfy Sonar S1192. */
@@ -332,6 +330,13 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     }
     try {
       OBContext.setAdminMode(true);
+      // Ownership gate for the whole read. Every query in buildPayload is scoped by
+      // fin_financial_account_id alone, so without this an id from another tenant returned that
+      // account's full movement list, balance, contacts and dimensions (ETP-4950). Reported as
+      // "not found" rather than 403 so the response cannot be used to probe which ids exist.
+      if (loadAccount(accountId) == null) {
+        return NeoResponse.error(400, "Financial account not found: " + accountId);
+      }
       return buildPayload(accountId);
     } catch (Exception e) {
       log.error("Error building financial-account-transactions payload for account {}", accountId, e);
@@ -461,15 +466,19 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   }
 
   /**
-   * Dimensions available at the finacc transaction header (docbasetype {@code FAT}) — the set the
-   * New Movement wizard renders and the automatch rule engine propagates. Delegated to
-   * {@link AccountingDimensionsSupport}, which picks the right source of truth depending on
-   * {@code AD_Client.Acctdim_Centrally_Maintained} (see gap K1 / ETP-4854): reading
-   * {@code C_AcctSchema_Element} directly is wrong for centrally-maintained tenants.
+   * Dimensions the New Movement wizard renders, and the same set the automatch rule engine
+   * propagates onto the movement it generates.
+   *
+   * <p>ETP-4854 (gap K1) had moved this to the {@code FAT} header set so it would honour
+   * {@code AD_Client.Acctdim_Centrally_Maintained}. ETP-4950's QA round showed that set subtracts
+   * {@code AD_Client_AcctDimension.Show_In_Header='N'}, which the shipped reference data sets for
+   * Product on {@code FAT} — so Product vanished from this wizard on every tenant, with no screen in
+   * Etendo GO to put it back. The chart of accounts is what the Accounting Schema screen writes and
+   * therefore what the user can actually control, so it is what gates.
    */
   JSONArray loadHeaderDimensions(String accountId) throws Exception {
     return AccountingDimensionsSupport.toOrderedArray(
-        AccountingDimensionsSupport.activeHeaderDimensionsForAccount(accountId, DOCBASETYPE_FAT));
+        AccountingDimensionsSupport.flatActiveDimensionsForAccount(accountId));
   }
 
   /** Active transaction types (BPD/BPW/BF) from the AD reference list, localized. */
@@ -595,7 +604,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           if (validationError != null) return validationError;
 
           String accountId = body.optString(PARAM_ACCOUNT_ID, null);
-          FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+          FIN_FinancialAccount account = TenantOwnership.loadOwned(FIN_FinancialAccount.class, accountId);
           if (account == null) return NeoResponse.error(400, "Financial account not found: " + accountId);
 
           Currency currency = FinancialAccountTransactionsSupport.resolveCurrency(body, account.getCurrency());
@@ -687,7 +696,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    */
   private FIN_FinaccTransaction loadTransactionFromBody(JSONObject body) {
     String id = body.optString("id", null);
-    return StringUtils.isBlank(id) ? null : OBDal.getInstance().get(FIN_FinaccTransaction.class, id);
+    return TenantOwnership.loadOwned(FIN_FinaccTransaction.class, id);
   }
 
   /**
@@ -734,7 +743,8 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
    * is missing on this path: when the transaction was matched to a bank-statement line that Core
    * physically split for a 1:N match, {@code TransactionRemovalUtil.reactivate} only clears the
    * line's transaction link ({@code
-   * ReconciliationRemovalUtil.removeTransactionFromReconciliation}), never re-collapsing its
+   * ReconciliationRemovalUtil.removeTransactionFr
+   * omReconciliation}), never re-collapsing its
    * ETGO-tagged split siblings — so the line stays fragmented into sub-amounts that no longer match
    * anything the bank actually sent. The statement line is captured BEFORE reactivating (the detach
    * clears the transaction→line pointer), then {@link ReconciliationHandler#normalizeReactivatedMatchGroup}
@@ -753,6 +763,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           if (line != null) {
             new ReconciliationHandler().normalizeReactivatedMatchGroup(line);
           }
+          // tenant-ok: re-read after flush; the id is trx.getId() of an already validated movement
           trx = OBDal.getInstance().get(FIN_FinaccTransaction.class, trx.getId());
           return lifecycleOk(trx);
         });
@@ -842,7 +853,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     GLItem glItem = null;
     String glItemId = body.optString(FIELD_GL_ITEM_ID, null);
     if (StringUtils.isNotBlank(glItemId)) {
-      glItem = OBDal.getInstance().get(GLItem.class, glItemId);
+      glItem = TenantOwnership.loadOwned(GLItem.class, glItemId);
     }
     BigDecimal conversionRate = resolveConversionRate(source, dest, optBigDecimal(body, "conversionRate"));
     // Bank fee mirrors Classic: an optional fee on the source bank AND on the destination bank.
@@ -866,7 +877,7 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   // ── transfer seams (package-private so unit tests can stub the DAL / Classic layer) ──
 
   FIN_FinancialAccount loadAccount(String accountId) {
-    return OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+    return TenantOwnership.loadOwned(FIN_FinancialAccount.class, accountId);
   }
 
   /** True when both accounts share a client and the destination org is in the source's natural tree. */
