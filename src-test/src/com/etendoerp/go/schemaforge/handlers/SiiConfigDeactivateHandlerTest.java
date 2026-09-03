@@ -439,9 +439,14 @@ public class SiiConfigDeactivateHandlerTest {
     }
   }
 
-  /** A PUT that explicitly deactivates the config never reaches the scheduling logic. */
+  /**
+   * A PUT that explicitly deactivates the config never reaches the CREATE-side scheduling logic
+   * ({@code ensureAutoSendSchedule}/{@code activateSchedule}) — instead it takes the ETP-5117
+   * follow-up cleanup branch, which calls {@code unscheduleAutoSend} instead (see the dedicated
+   * cleanup tests below for its client/organization resolution rules).
+   */
   @Test
-  public void afterHandlePutDeactivatingDoesNotTriggerAutoSendSchedule() throws Exception {
+  public void afterHandlePutDeactivatingDoesNotTriggerCreateSideAutoSendSchedule() throws Exception {
     SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
     SiiConfigDeactivateHandler handler = handlerWithScheduleServiceMock(scheduleService);
 
@@ -451,9 +456,159 @@ public class SiiConfigDeactivateHandlerTest {
         .recordId(RECORD_ID)
         .build();
 
-    assertNull(handler.afterHandle(ctx));
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
 
-    verifyNoInteractions(scheduleService);
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      // No obContext on this NeoContext AND the record is gone — the cleanup call itself is a
+      // safe no-op (see afterHandlePutDeactivatingSkipsCleanlyWhenNeitherRecordNorObContextResolve).
+      when(dal.get(eq(AEATSIIConfig.class), eq(RECORD_ID))).thenReturn(null);
+
+      assertNull(handler.afterHandle(ctx));
+
+      verify(scheduleService, never())
+          .ensureAutoSendSchedule(any(), any(), any(), any(), any(), any());
+      verify(scheduleService, never()).activateSchedule(any());
+    }
+  }
+
+  // ─── afterHandle(): ETP-5117 follow-up — unschedule cleanup on deactivation ──
+
+  /**
+   * When the deactivating PUT's config record is gone (deleted outright by
+   * {@code smartDeactivate} because no SII invoices were ever sent through it), the cleanup falls
+   * back to {@code context.getObContext()}'s current client/organization to resolve the schedule
+   * to remove.
+   */
+  @Test
+  public void afterHandlePutDeactivatingUnschedulesUsingObContextFallbackWhenConfigRecordIsGone()
+      throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    SiiConfigDeactivateHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    OBContext requestObContext = mock(OBContext.class);
+    Client fallbackClient = mock(Client.class);
+    when(fallbackClient.getId()).thenReturn(CLIENT_ID);
+    Organization fallbackOrg = mock(Organization.class);
+    when(fallbackOrg.getId()).thenReturn(ORG_ID);
+    when(requestObContext.getCurrentClient()).thenReturn(fallbackClient);
+    when(requestObContext.getCurrentOrganization()).thenReturn(fallbackOrg);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PUT")
+        .requestBody(new JSONObject().put("active", false))
+        .recordId(RECORD_ID)
+        .obContext(requestObContext)
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      // The config record is gone — smartDeactivate deleted it outright (no invoices ever sent).
+      when(dal.get(eq(AEATSIIConfig.class), eq(RECORD_ID))).thenReturn(null);
+
+      assertNull(handler.afterHandle(ctx));
+
+      verify(scheduleService).unscheduleAutoSend(CLIENT_ID, ORG_ID,
+          SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+      verify(scheduleService, never())
+          .ensureAutoSendSchedule(any(), any(), any(), any(), any(), any());
+      verify(scheduleService, never()).activateSchedule(any());
+    }
+  }
+
+  /**
+   * When the deactivating PUT's config record survives (default CRUD deactivated it because SII
+   * invoices exist — audit trail preserved), the cleanup uses the record's OWN client/organization
+   * via a primary-key lookup, NOT the request's current {@code OBContext} — proven here by giving
+   * the fallback different ids than the record's.
+   */
+  @Test
+  public void afterHandlePutDeactivatingUnschedulesUsingRecordLookupWhenConfigSurvives()
+      throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    SiiConfigDeactivateHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    OBContext requestObContext = mock(OBContext.class);
+    Client fallbackClient = mock(Client.class);
+    when(fallbackClient.getId()).thenReturn("fallback-client");
+    Organization fallbackOrg = mock(Organization.class);
+    when(fallbackOrg.getId()).thenReturn("fallback-org");
+    when(requestObContext.getCurrentClient()).thenReturn(fallbackClient);
+    when(requestObContext.getCurrentOrganization()).thenReturn(fallbackOrg);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PUT")
+        .requestBody(new JSONObject().put("active", false))
+        .recordId(RECORD_ID)
+        .obContext(requestObContext)
+        .build();
+
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(ORG_ID);
+    AEATSIIConfig config = mock(AEATSIIConfig.class);
+    when(config.getClient()).thenReturn(client);
+    when(config.getOrganization()).thenReturn(org);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      // The config record survives, deactivated by default CRUD (SII invoices exist).
+      when(dal.get(eq(AEATSIIConfig.class), eq(RECORD_ID))).thenReturn(config);
+
+      assertNull(handler.afterHandle(ctx));
+
+      verify(scheduleService).unscheduleAutoSend(CLIENT_ID, ORG_ID,
+          SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+      verify(scheduleService, never()).unscheduleAutoSend("fallback-client", "fallback-org",
+          SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+    }
+  }
+
+  /**
+   * When neither the config record nor the request's {@code OBContext} can resolve a
+   * client/organization (e.g. the config never had a schedule and the session context is also
+   * unavailable), the cleanup skips cleanly — no exception, no interaction with the schedule
+   * service.
+   */
+  @Test
+  public void afterHandlePutDeactivatingSkipsCleanlyWhenNeitherRecordNorObContextResolve()
+      throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    SiiConfigDeactivateHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PUT")
+        .requestBody(new JSONObject().put("active", false))
+        .recordId(RECORD_ID)
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(AEATSIIConfig.class), eq(RECORD_ID))).thenReturn(null);
+
+      assertNull(handler.afterHandle(ctx));
+
+      verifyNoInteractions(scheduleService);
+    }
   }
 
   /**
@@ -506,6 +661,8 @@ public class SiiConfigDeactivateHandlerTest {
       // Regression: the INSIISYSTEM native update still fires for a non-deactivating PUT.
       verify(nq).setParameter(eq("id"), eq(RECORD_ID));
       verify(nq).executeUpdate();
+      // Regression (ETP-5117 follow-up): a non-deactivating save never triggers the cleanup path.
+      verify(scheduleService, never()).unscheduleAutoSend(any(), any(), any());
     }
   }
 
@@ -550,3 +707,4 @@ public class SiiConfigDeactivateHandlerTest {
     }
   }
 }
+

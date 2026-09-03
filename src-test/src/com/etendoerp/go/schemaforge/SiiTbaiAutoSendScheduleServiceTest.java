@@ -32,6 +32,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.util.List;
@@ -474,6 +475,214 @@ public class SiiTbaiAutoSendScheduleServiceTest {
 
       service.activateSchedule(NEW_REQUEST_ID);
       obContext.verify(OBContext::restorePreviousMode, times(1));
+    }
+  }
+
+  // ─── unscheduleAutoSend: process resolution (ETP-5117 follow-up) ────────────
+
+  /** When the process cannot be resolved, unscheduling is a safe no-op — nothing touched. */
+  @Test
+  public void unscheduleAutoSendIsNoOpWhenProcessNotFound() {
+    SiiTbaiAutoSendScheduleService service = spy(new SiiTbaiAutoSendScheduleService());
+    doReturn(null).when(service).resolveProcess(SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      service.unscheduleAutoSend(CLIENT_ID, ORG_ID, SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+
+      verify(service, never()).findExistingRequest(any(), any(), any());
+      verify(dal, never()).save(any());
+      verify(dal, never()).flush();
+    }
+  }
+
+  // ─── unscheduleAutoSend: no existing schedule ────────────────────────────────
+
+  /**
+   * Idempotent no-op branch: no active {@code AD_Process_Request} exists for client + org +
+   * process — either the fiscal config was only ever saved through Classic UI, or it was already
+   * unscheduled by a prior call.
+   */
+  @Test
+  public void unscheduleAutoSendIsNoOpWhenNoExistingActiveRequest() {
+    SiiTbaiAutoSendScheduleService service = spy(new SiiTbaiAutoSendScheduleService());
+    Process process = mock(Process.class);
+    doReturn(process).when(service).resolveProcess(SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+    doReturn(null).when(service).findExistingRequest(CLIENT_ID, ORG_ID, process);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBScheduler> obScheduler = mockStatic(OBScheduler.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      service.unscheduleAutoSend(CLIENT_ID, ORG_ID, SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+
+      verify(dal, never()).save(any());
+      verify(dal, never()).flush();
+      obScheduler.verifyNoInteractions();
+    }
+  }
+
+  // ─── unscheduleAutoSend: deactivates the row + best-effort Quartz unschedule ─
+
+  /**
+   * An existing active schedule is deactivated ({@code Active=false}, saved, flushed) and a
+   * best-effort live Quartz unschedule is attempted with a {@link ProcessContext} rebuilt from
+   * the row's own stored {@code OpenbravoContext}.
+   */
+  @Test
+  public void unscheduleAutoSendDeactivatesExistingRequestAndUnschedulesFromQuartz() {
+    SiiTbaiAutoSendScheduleService service = spy(new SiiTbaiAutoSendScheduleService());
+    Process process = mock(Process.class);
+    ProcessRequest existing = mock(ProcessRequest.class);
+    when(existing.getId()).thenReturn(EXISTING_REQUEST_ID);
+    when(existing.getOpenbravoContext()).thenReturn(OB_CONTEXT);
+    doReturn(process).when(service).resolveProcess(SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+    doReturn(existing).when(service).findExistingRequest(CLIENT_ID, ORG_ID, process);
+
+    ProcessContext processContext = mock(ProcessContext.class);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBScheduler> obSchedulerStatic = mockStatic(OBScheduler.class);
+        MockedStatic<ProcessContext> processContextStatic = mockStatic(ProcessContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      processContextStatic.when(() -> ProcessContext.newInstance(OB_CONTEXT)).thenReturn(processContext);
+
+      OBScheduler scheduler = mock(OBScheduler.class);
+      obSchedulerStatic.when(OBScheduler::getInstance).thenReturn(scheduler);
+
+      service.unscheduleAutoSend(CLIENT_ID, ORG_ID, SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+
+      verify(scheduler).unschedule(EXISTING_REQUEST_ID, processContext);
+      verify(existing).setActive(false);
+      verify(dal).save(existing);
+      verify(dal).flush();
+    }
+  }
+
+  /**
+   * When the row's stored {@code OpenbravoContext} cannot be rebuilt into a usable
+   * {@link ProcessContext} (missing/corrupt), the live Quartz call is skipped entirely — but the
+   * row is still deactivated, since that DB flag alone guarantees the schedule will not be picked
+   * up again.
+   */
+  @Test
+  public void unscheduleAutoSendSkipsQuartzCallWhenStoredContextIsUnusableButStillDeactivatesRow() {
+    SiiTbaiAutoSendScheduleService service = spy(new SiiTbaiAutoSendScheduleService());
+    Process process = mock(Process.class);
+    ProcessRequest existing = mock(ProcessRequest.class);
+    when(existing.getId()).thenReturn(EXISTING_REQUEST_ID);
+    when(existing.getOpenbravoContext()).thenReturn(null);
+    doReturn(process).when(service).resolveProcess(SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+    doReturn(existing).when(service).findExistingRequest(CLIENT_ID, ORG_ID, process);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBScheduler> obSchedulerStatic = mockStatic(OBScheduler.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      OBScheduler scheduler = mock(OBScheduler.class);
+      obSchedulerStatic.when(OBScheduler::getInstance).thenReturn(scheduler);
+      // ProcessContext.newInstance(null) runs for REAL here (not mocked) — it returns null for a
+      // blank input per its own contract, exercising unscheduleFromQuartz's own null-guard.
+
+      service.unscheduleAutoSend(CLIENT_ID, ORG_ID, SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+
+      verify(scheduler, never()).unschedule(any(), any());
+      verify(existing).setActive(false);
+      verify(dal).save(existing);
+      verify(dal).flush();
+    }
+  }
+
+  /**
+   * A failure inside the live Quartz unschedule call (e.g. scheduler unavailable) is caught and
+   * logged — never propagated — and the row is still deactivated, matching
+   * {@link #activateScheduleSwallowsSchedulerFailure}'s best-effort contract on the creation side.
+   */
+  @Test
+  public void unscheduleAutoSendSwallowsQuartzFailureAndStillDeactivatesRow() {
+    SiiTbaiAutoSendScheduleService service = spy(new SiiTbaiAutoSendScheduleService());
+    Process process = mock(Process.class);
+    ProcessRequest existing = mock(ProcessRequest.class);
+    when(existing.getId()).thenReturn(EXISTING_REQUEST_ID);
+    when(existing.getOpenbravoContext()).thenReturn(OB_CONTEXT);
+    doReturn(process).when(service).resolveProcess(SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+    doReturn(existing).when(service).findExistingRequest(CLIENT_ID, ORG_ID, process);
+
+    ProcessContext processContext = mock(ProcessContext.class);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBScheduler> obSchedulerStatic = mockStatic(OBScheduler.class);
+        MockedStatic<ProcessContext> processContextStatic = mockStatic(ProcessContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      processContextStatic.when(() -> ProcessContext.newInstance(OB_CONTEXT)).thenReturn(processContext);
+
+      OBScheduler scheduler = mock(OBScheduler.class);
+      obSchedulerStatic.when(OBScheduler::getInstance).thenReturn(scheduler);
+      doThrow(new RuntimeException("scheduler unavailable"))
+          .when(scheduler).unschedule(EXISTING_REQUEST_ID, processContext);
+
+      service.unscheduleAutoSend(CLIENT_ID, ORG_ID, SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+      // No exception propagated — best-effort contract holds.
+
+      verify(existing).setActive(false);
+      verify(dal).save(existing);
+      verify(dal).flush();
+      obContext.verify(OBContext::restorePreviousMode, times(1));
+    }
+  }
+
+  // ─── unscheduleAutoSend: idempotency ──────────────────────────────────────────
+
+  /**
+   * Calling {@code unscheduleAutoSend} twice in a row is a safe no-op the second time: the first
+   * call already flips {@code Active} to {@code false}, and
+   * {@link SiiTbaiAutoSendScheduleService#findExistingRequest} only ever matches active rows —
+   * mirroring a config that is deactivated twice, or a second deactivating PUT on an already
+   * unscheduled config.
+   */
+  @Test
+  public void unscheduleAutoSendSecondCallIsNoOpAfterFirstDeactivates() {
+    SiiTbaiAutoSendScheduleService service = spy(new SiiTbaiAutoSendScheduleService());
+    Process process = mock(Process.class);
+    ProcessRequest existing = mock(ProcessRequest.class);
+    when(existing.getId()).thenReturn(EXISTING_REQUEST_ID);
+    when(existing.getOpenbravoContext()).thenReturn(OB_CONTEXT);
+    doReturn(process).when(service).resolveProcess(SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+    // First call finds the active row; the second finds nothing — findExistingRequest only ever
+    // matches Active=true, and the first call already deactivated it.
+    doReturn(existing, (ProcessRequest) null)
+        .when(service).findExistingRequest(CLIENT_ID, ORG_ID, process);
+
+    ProcessContext processContext = mock(ProcessContext.class);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBScheduler> obSchedulerStatic = mockStatic(OBScheduler.class);
+        MockedStatic<ProcessContext> processContextStatic = mockStatic(ProcessContext.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      processContextStatic.when(() -> ProcessContext.newInstance(OB_CONTEXT)).thenReturn(processContext);
+      OBScheduler scheduler = mock(OBScheduler.class);
+      obSchedulerStatic.when(OBScheduler::getInstance).thenReturn(scheduler);
+
+      service.unscheduleAutoSend(CLIENT_ID, ORG_ID, SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+      service.unscheduleAutoSend(CLIENT_ID, ORG_ID, SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+
+      // Only the FIRST call did any work.
+      verify(existing, times(1)).setActive(false);
+      verify(dal, times(1)).save(existing);
+      verify(dal, times(1)).flush();
+      verify(scheduler, times(1)).unschedule(EXISTING_REQUEST_ID, processContext);
     }
   }
 }
