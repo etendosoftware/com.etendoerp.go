@@ -119,6 +119,24 @@ final class WidgetQueryHelper {
   }
 
   /** Wraps a data array into the standard {@code {"response":{"data":[...],"count":N}}} envelope. */
+  /**
+   * ETP-5088 — the response a widget returns when the caller's role may not see it: a well-formed,
+   * EMPTY payload rather than a 403, following the SFListMenu/SFWindowAccessMap family's "deny
+   * silently" convention. A restricted role gets a smaller dashboard, never an error toast.
+   *
+   * <p>Swallows the {@link JSONException} that building an empty array cannot realistically throw,
+   * so callers can gate with a single {@code return} and no extra try/catch.</p>
+   *
+   * @return an OK response carrying zero rows
+   */
+  static NeoResponse buildEmptyDataResponse() {
+    try {
+      return buildDataResponse(new JSONArray());
+    } catch (JSONException e) {
+      return NeoResponse.error(500, "Failed to build empty widget response: " + e.getMessage());
+    }
+  }
+
   static NeoResponse buildDataResponse(JSONArray data) throws JSONException {
     JSONObject responseData = new JSONObject();
     responseData.put("data", data);

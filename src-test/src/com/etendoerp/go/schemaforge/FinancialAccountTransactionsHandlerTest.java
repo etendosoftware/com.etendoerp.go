@@ -362,7 +362,11 @@ public class FinancialAccountTransactionsHandlerTest {
     when(ps.executeQuery()).thenReturn(rs);
     when(rs.next()).thenReturn(true, false);
 
-    Timestamp date = Timestamp.from(Instant.parse("2026-05-06T10:00:00Z"));
+    // A CIVIL timestamp, not an instant: `date` is asserted below against the canonical wire
+    // datetime, which is rendered in the server's own zone since ETP-5100. Building the input
+    // from `Instant.parse(...)` and expecting a UTC string (as this test used to) would tie the
+    // assertion to the runner's timezone — green in a UTC CI, red in UTC-3.
+    Timestamp date = Timestamp.valueOf("2026-05-06 10:00:00");
     stubTransactionRow(rs,
         "TRX-42",
         date,
@@ -386,7 +390,7 @@ public class FinancialAccountTransactionsHandlerTest {
       assertEquals(1, arr.length());
       JSONObject row = arr.getJSONObject(0);
       assertEquals("TRX-42", row.getString("id"));
-      assertEquals("2026-05-06T10:00:00Z", row.getString("date"));
+      assertEquals("2026-05-06T10:00:00", row.getString("date"));
       assertEquals("RPPC", row.getString("paymentStatus"));
       assertEquals("BPD", row.getString("trxType"));
       assertEquals(0,
@@ -420,7 +424,11 @@ public class FinancialAccountTransactionsHandlerTest {
     when(ps.executeQuery()).thenReturn(rs);
     when(rs.next()).thenReturn(true, false);
 
-    Timestamp date = Timestamp.from(Instant.parse("2026-05-06T10:00:00Z"));
+    // A CIVIL timestamp: the date-derived value asserted here is `paymentLabel`, and since
+    // ETP-5100 buildPaymentLabel renders the local calendar day like every other formatter in
+    // this module (its dd-MM-yyyy pattern was the sixth copy of the UTC bug). Pairing a civil
+    // input with a civil expectation is what keeps this assertion timezone-independent.
+    Timestamp date = Timestamp.valueOf("2026-05-06 10:00:00");
     stubTransactionRow(rs,
         "TRX-1", date, "RPPC", "BPD",
         new BigDecimal("100.00"), new BigDecimal("500.00"),

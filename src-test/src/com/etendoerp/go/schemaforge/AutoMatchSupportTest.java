@@ -37,6 +37,7 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.Timestamp;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collections;
@@ -738,7 +739,16 @@ public class AutoMatchSupportTest {
   // lineToJson / txnToJson (pure JSON builders)
   // ---------------------------------------------------------------------------
 
-  /** lineToJson serializes id, trimmed text fields, a signed amount, and a formatted UTC date. */
+  /**
+   * lineToJson serializes id, trimmed text fields, a signed amount, and the canonical NEO wire
+   * datetime in the server's own zone (ETP-5100) — no trailing {@code Z}.
+   *
+   * <p>The transaction date is supplied as a CIVIL value ({@link Timestamp#valueOf} reads the
+   * literal in the default zone), not as the epoch instant {@code new Date(0L)} this test used
+   * to pass. A business date is a civil datum, and pairing an instant input with a UTC-rendered
+   * expectation only ever worked because the old formatter forced UTC; this pairing holds in any
+   * timezone.
+   */
   @Test
   public void testLineToJsonSerializesFields() throws Exception {
     FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
@@ -747,7 +757,7 @@ public class AutoMatchSupportTest {
     when(line.getReferenceNo()).thenReturn(" REF-1 ");
     when(line.getCramount()).thenReturn(new BigDecimal("100.00"));
     when(line.getDramount()).thenReturn(new BigDecimal("0.00"));
-    when(line.getTransactionDate()).thenReturn(new Date(0L));
+    when(line.getTransactionDate()).thenReturn(Timestamp.valueOf("2026-09-01 21:43:02"));
 
     JSONObject json = AutoMatchSupport.lineToJson(line);
 
@@ -755,7 +765,9 @@ public class AutoMatchSupportTest {
     assertEquals("Bank fee", json.getString("description"));
     assertEquals("REF-1", json.getString("referenceNo"));
     assertEquals(0, new BigDecimal("100.00").compareTo(new BigDecimal(json.getString("amount"))));
-    assertEquals("1970-01-01T00:00:00Z", json.getString("date"));
+    // Under the old UTC formatter this came out as 2026-09-02T00:43:02Z in UTC-3 — the next
+    // calendar day — and the React range filter then dropped the row.
+    assertEquals("2026-09-01T21:43:02", json.getString("date"));
   }
 
   /** lineToJson with a null transaction date produces an empty date string. */

@@ -1504,16 +1504,16 @@ public class ReconciliationHandler implements NeoHandler {
   }
 
   /**
-   * The account's active header dimensions, memoized per handler instance. Fails <b>open</b> on a
-   * configuration-lookup error: a tenant whose accounting setup cannot be read keeps the previous
-   * behaviour for the concept and the business partner, and simply gets no dimensions assigned,
-   * rather than having the whole reconciliation fail.
+   * The account's active accounting dimensions (chart-of-accounts "Ledger Configuration"),
+   * memoized per handler instance. Fails <b>open</b> on a configuration-lookup error: a tenant
+   * whose accounting setup cannot be read keeps the previous behaviour for the concept and the
+   * business partner, and simply gets no dimensions assigned, rather than having the whole
+   * reconciliation fail.
    */
   Set<String> headerDimensionsOf(String accountId) {
     return headerDimensionsByAccount.computeIfAbsent(accountId, id -> {
       try {
-        return AccountingDimensionsSupport.activeHeaderDimensionsForAccount(id,
-            AccountingDimensionsSupport.DOCBASETYPE_FAT);
+        return AccountingDimensionsSupport.flatActiveDimensionsForAccount(id);
       } catch (Exception e) {
         log.warn("Could not resolve active accounting dimensions for account {}", id, e);
         return Collections.emptySet();

@@ -339,14 +339,19 @@ public class FinancialAccountBankConnectionHandlerConnectTest {
     FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
     when(finAcc.getPSD2SaltEdgeAccountID()).thenReturn(null);
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+    FinaccConnection connection = mock(FinaccConnection.class);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
             mockStatic(SaltEdgeAccountLinkHelper.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, true))
-          .thenReturn(true);
+      // ETP-5097: resolved via getLatestConnectionForFinAcc (matches any status), then dispatched
+      // through disconnectConnection — the same entry point Classic's own process uses.
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getLatestConnectionForFinAcc(finAcc))
+          .thenReturn(connection);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectConnection(connection, true))
+          .thenReturn(false);
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
       stubFinAccPaymentMethods(dal, Collections.emptyList());
@@ -373,12 +378,16 @@ public class FinancialAccountBankConnectionHandlerConnectTest {
     FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
     when(finAcc.getPSD2SaltEdgeAccountID()).thenReturn("SE-ACC-1");
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+    FinaccConnection connection = mock(FinaccConnection.class);
+    when(connection.getConnectionStatus()).thenReturn("AC");
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
             mockStatic(SaltEdgeAccountLinkHelper.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, false))
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getLatestConnectionForFinAcc(finAcc))
+          .thenReturn(connection);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectConnection(connection, false))
           .thenReturn(true);
 
       NeoResponse response = handler.handle(postContext(ACTION_DISCONNECT, body));
@@ -387,7 +396,7 @@ public class FinancialAccountBankConnectionHandlerConnectTest {
       assertTrue(dataOf(response).getBoolean("disconnected"));
       assertFalse(dataOf(response).getBoolean("permanent"));
       assertTrue(dataOf(response).getBoolean("reconnectable"));
-      linkHelper.verify(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, false));
+      linkHelper.verify(() -> SaltEdgeAccountLinkHelper.disconnectConnection(connection, false));
     }
   }
 
@@ -408,14 +417,18 @@ public class FinancialAccountBankConnectionHandlerConnectTest {
     // The shared-connection path unlinked the account despite the soft request.
     when(finAcc.getPSD2SaltEdgeAccountID()).thenReturn(null);
     doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+    FinaccConnection connection = mock(FinaccConnection.class);
+    when(connection.getConnectionStatus()).thenReturn("AC");
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
             mockStatic(SaltEdgeAccountLinkHelper.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, false))
-          .thenReturn(true);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getLatestConnectionForFinAcc(finAcc))
+          .thenReturn(connection);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectConnection(connection, false))
+          .thenReturn(false);
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
       stubFinAccPaymentMethods(dal, Collections.emptyList());

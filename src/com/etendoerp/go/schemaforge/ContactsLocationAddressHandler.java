@@ -20,15 +20,21 @@ package com.etendoerp.go.schemaforge;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.text.Normalizer;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
 
 import javax.inject.Named;
 
 import org.openbravo.module.bptaxidkey.ViesService;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.core.SessionHandler;
@@ -65,6 +71,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   private static final String FIELD_INVOICE_TO_ADDRESS = "invoiceToAddress";
   private static final String FIELD_COUNTRY = "country";
   private static final String FIELD_REGION = "region";
+  /** Free-text region, resolved server-side against the payload's own country. See {@link #resolveRegionByName}. */
+  private static final String FIELD_REGION_NAME = "regionName";
   private static final String FIELD_RESPONSE = "response";
   private static final String FIELD_DATA = "data";
 
@@ -319,15 +327,131 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       }
     }
 
+    // An explicit id still wins — every existing caller (the Contacts address form, which picks
+    // from a selector) sends one and is untouched. `regionName` is the import's entry point.
     String regionId = nullIfEmpty(body.optString(FIELD_REGION, null));
-    if (body.has(FIELD_REGION)) {
-      if (regionId != null) {
-        Region region = OBDal.getInstance().get(Region.class, regionId);
-        geoLoc.setRegion(region);
-      } else {
-        geoLoc.setRegion(null);
+    // trimToNull, not nullIfEmpty: a `regionName` of "   " is visually empty to whoever typed
+    // it in a spreadsheet, and nullIfEmpty only rejects "". Left untrimmed it reached
+    // resolveRegionByName, which answered null for a blank name, and the region was CLEARED —
+    // so a whitespace cell in a re-imported file would erase a province already on the record.
+    String regionName = StringUtils.trimToNull(nullIfEmpty(body.optString(FIELD_REGION_NAME, null)));
+    if (regionId != null) {
+      geoLoc.setRegion(OBDal.getInstance().get(Region.class, regionId));
+    } else if (regionName != null) {
+      geoLoc.setRegion(resolveRegionByName(regionName, geoLoc.getCountry()));
+    } else if (body.has(FIELD_REGION)) {
+      // Only the id field clears. `regionName` is set-if-provided: a blank one means "this file
+      // says nothing about the province", never "erase it". Clearing stays an explicit
+      // `region: null`, which is what the Location modal's selector sends.
+      geoLoc.setRegion(null);
+    }
+  }
+
+  /**
+   * A region-resolution failure, phrased the same way whatever the cause.
+   *
+   * <p>The message is what the import prints on the failing row, so all three refusals name the
+   * offending value the same way. One method rather than three assembled strings: the shared
+   * prefix would otherwise be spelled out at each throw, and a reworded one would silently
+   * disagree with its siblings.
+   */
+  private static OBException regionFailure(String shown, String detail) {
+    return new OBException("The region \"" + shown + "\" " + detail);
+  }
+
+  /**
+   * Resolves a free-text region name to a {@link Region} of {@code country}.
+   *
+   * <p>ETP-4997. Before this the CSV/xlsx import resolved the region in the browser and then
+   * dropped it in silence. Region names collide across countries ("Córdoba" is both Spanish and
+   * Argentine), so the browser-side resolver scoped its candidates by asking
+   * {@code GET /sws/neo/contacts/region} for each one's country — an endpoint that does not
+   * exist, because no NEO spec exposes a region entity. Every call 404'd, every candidate was
+   * filtered out, and the descriptor's {@code if (status === 'auto-resolved')} guard skipped the
+   * field with no error at all: the address was created with street, city, postal code and
+   * country, and no province, and nothing told the user. Resolving here needs no new endpoint —
+   * the country is already in the same payload, and it is the only scope the lookup ever needed.
+   *
+   * <p>Names are compared trimmed, accent-folded and upper-cased, and that is required by the
+   * seed data rather than a nicety: a stock instance carries the 52 Spanish provinces TWICE —
+   * once at System level ({@code AD_Client_ID = '0'}) and once for the tenant, the tenant copy
+   * with a trailing space ("MADRID "). Both are active and both readable, so an exact match finds
+   * two rows and a fuzzy match rates them equally plausible — the second, independent reason the
+   * browser could not decide. The tenant's own row wins over the System one, which is how Etendo
+   * treats every client-overridable master record; only a real ambiguity inside a single client
+   * is refused. Folding accents also lets a hand-typed "Alava" or "A Coruna" match, which the
+   * fuzzy search used to absorb and an exact comparison would not.
+   *
+   * <p>Refuses loudly instead of degrading. A row whose province cannot be resolved now fails
+   * with a message naming the region and the country, where before it imported an address that
+   * was quietly missing a field — the failure the user can see and fix is worth more than the
+   * one they cannot.
+   */
+  private static Region resolveRegionByName(String rawName, Country country) {
+    String wanted = normalizeRegionName(rawName);
+    if (wanted == null) {
+      return null;
+    }
+    String shown = rawName.trim();
+    if (country == null) {
+      throw regionFailure(shown,
+          "cannot be resolved without a country: region names are not unique across countries.");
+    }
+    List<Region> matches = new ArrayList<>();
+    for (Region region : OBDal.getInstance()
+        .createQuery(Region.class, "country.id = :countryId")
+        .setNamedParameter("countryId", country.getId())
+        .list()) {
+      if (wanted.equals(normalizeRegionName(region.getName()))) {
+        matches.add(region);
       }
     }
+    if (matches.isEmpty()) {
+      throw regionFailure(shown, "does not exist in " + country.getName() + ".");
+    }
+    if (matches.size() > 1) {
+      matches = preferOwnClient(matches);
+    }
+    if (matches.size() > 1) {
+      throw regionFailure(shown, "matches " + matches.size() + " records in "
+          + country.getName() + ", so it is ambiguous.");
+    }
+    return matches.get(0);
+  }
+
+  /**
+   * Narrows equally-named regions to the ones belonging to the session's own client, when there
+   * are any. This is what disambiguates the System copy from the tenant's own.
+   */
+  private static List<Region> preferOwnClient(List<Region> matches) {
+    String currentClientId = OBContext.getOBContext().getCurrentClient().getId();
+    List<Region> ownClient = new ArrayList<>();
+    for (Region region : matches) {
+      if (region.getClient() != null && currentClientId.equals(region.getClient().getId())) {
+        ownClient.add(region);
+      }
+    }
+    return ownClient.isEmpty() ? matches : ownClient;
+  }
+
+  /**
+   * Trimmed, accent-folded, upper-cased region name — {@code null} for a blank one.
+   *
+   * <p>NFD decomposition splits "Á" into "A" + a combining acute, which the mark class then
+   * removes; upper-casing with {@code Locale.ROOT} keeps the result independent of the server's
+   * default locale.
+   */
+  private static String normalizeRegionName(String raw) {
+    if (raw == null) {
+      return null;
+    }
+    String trimmed = raw.trim();
+    if (trimmed.isEmpty()) {
+      return null;
+    }
+    return Normalizer.normalize(trimmed, Normalizer.Form.NFD)
+        .replaceAll("\\p{M}+", "")
+        .toUpperCase(Locale.ROOT);
   }
 
   private static void putGeoLocFields(JSONObject locationJson,

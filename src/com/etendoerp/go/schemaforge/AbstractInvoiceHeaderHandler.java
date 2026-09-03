@@ -1199,8 +1199,10 @@ public abstract class AbstractInvoiceHeaderHandler {
    * request body — so that {@code foreignAmount} stays in sync as {@code grandTotalAmount}
    * evolves while lines are added/edited after the currency was first set.
    *
-   * <p>No-op when the invoice has no currency, the invoice currency equals the org currency,
-   * or no {@code EM_ETGO_Currency_Rate} override has been set on the invoice yet.
+   * <p>No-op when the invoice has no currency or no {@code EM_ETGO_Currency_Rate} override has
+   * been set on the invoice yet. When the invoice currency equals the org currency, any
+   * conversion-rate row left over from an earlier foreign-currency state is deleted instead
+   * (ETP-4836) — switching back to the org currency must clear the tab, not leave it stale.
    *
    * <p>Call unconditionally at the top of each subclass's {@code afterHandle()}, alongside
    * any other per-save hooks, before their own method-gated (e.g. GET-only) logic.
@@ -1261,8 +1263,14 @@ public abstract class AbstractInvoiceHeaderHandler {
         OBDal.getInstance().getSession().refresh(invoice);
         String orgId = invoice.getOrganization().getId();
         String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
-        if (orgCurrencyId == null || orgCurrencyId.equals(invoice.getCurrency().getId())) {
-          return; // nothing to track: same currency as org, or org currency unresolved
+        if (orgCurrencyId == null) {
+          return; // org currency unresolved, nothing to do
+        }
+        if (orgCurrencyId.equals(invoice.getCurrency().getId())) {
+          // Doc currency now matches org — any conversion-rate row left over from an earlier
+          // foreign-currency state is stale and must be cleared, not silently ignored (ETP-4836).
+          ConversionRateDocumentSync.deleteAllForInvoice(invoice.getId(), orgCurrencyId);
+          return;
         }
         BigDecimal rate = invoice.getETGOCurrencyRate();
         if (rate == null) {

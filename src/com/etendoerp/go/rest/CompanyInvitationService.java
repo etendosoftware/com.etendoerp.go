@@ -272,7 +272,25 @@ public class CompanyInvitationService {
         hashToken(rawToken), expiresAt);
     String baseUrl = StringUtils.isNotBlank(appBaseUrl) ? appBaseUrl
         : PublicUrlResolver.resolveConfiguredAppBaseUrl();
-    String inviteLink = PublicUrlResolver.appendPath(baseUrl, "invite") + "?token=" + rawToken;
+    String invitePath = PublicUrlResolver.appendPath(baseUrl, "invite");
+    // An unresolvable base URL used to be silent: appendPath returns null, `null + "?token=…"`
+    // concatenates the literal string "null", which is not blank — so it sailed past the sender's
+    // blank check and the email contract refused it as "link must be an absolute HTTP URL". The
+    // operator saw a bare HTTP 400 and nothing anywhere named the missing property. Say it out
+    // loud instead, and do not attempt a send that cannot possibly work.
+    if (invitePath == null) {
+      log.error("Cannot build the invitation link for {}: no application base URL is configured. "
+          + "Set {} in Openbravo.properties (or the {} environment variable) and restart Tomcat — "
+          + "the properties file is read at startup. Invitation {} will be marked {}.",
+          email, PublicUrlResolver.APP_BASE_URL_PROPERTY, PublicUrlResolver.APP_BASE_URL_ENV,
+          invitation.getId(), STATUS_DELIVERY_FAILED);
+      invitation.setStatus(STATUS_DELIVERY_FAILED);
+      OBDal.getInstance().save(invitation);
+      OBDal.getInstance().flush();
+      OBDal.getInstance().commitAndClose();
+      return invitationResponse(invitation);
+    }
+    String inviteLink = invitePath + "?token=" + rawToken;
     boolean sent = sendInvitation(invitation, inviteLink, language);
     invitation.setStatus(sent ? STATUS_SENT : STATUS_DELIVERY_FAILED);
     OBDal.getInstance().save(invitation);

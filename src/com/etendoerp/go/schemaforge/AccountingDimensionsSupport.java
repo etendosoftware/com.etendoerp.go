@@ -30,53 +30,42 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 import org.apache.commons.lang3.StringUtils;
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.structure.BaseOBObject;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.erpCommon.utility.DimensionDisplayUtility;
-import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.financialmgmt.accounting.Costcenter;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
-import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.project.Project;
 
 /**
- * Single source of truth for "which accounting dimensions are active right now".
+ * Single source of truth for "which accounting dimensions are active right now", for every
+ * consumer of the {@code FIN_Finacc_Transaction} entity — the New/Edit Movement UI, the
+ * accounting-dimensions grid card, Automatch's generated transactions, and reconciliation
+ * difference postings.
  *
- * <p>Etendo answers that question from <b>two different places</b>, and which one wins is decided
- * by {@code AD_Client.Acctdim_Centrally_Maintained}:
- *
- * <ul>
- *   <li>{@code 'N'} — the flat per-ledger switches in {@code C_AcctSchema_Element.IsActive}
- *       (the "Dimensiones" tab of the Accounting Schema / Esquema Contable window).</li>
- *   <li>{@code 'Y'} — the fine-grained per-dimension / per-document-type / per-level matrix in
- *       {@code AD_Client} + {@code AD_Client_AcctDimension}, resolved by Core's
- *       {@link DimensionDisplayUtility#getAccountingDimensionConfiguration(Client)}. Under this
- *       flag {@code C_AcctSchema_Element.IsActive} is a <b>no-op</b>, so reading it directly gives
- *       the wrong answer (see gap K1 / ETP-4854 in {@code docs/etendo-ad/onboarding-gaps.md}).</li>
- * </ul>
- *
- * <p>Callers that need the header-level set for a document type — the New Movement wizard, and the
- * transaction Automatch creates out of a matching rule, both of which are {@code FAT} documents —
- * must go through {@link #activeHeaderDimensions(Client, String)} /
- * {@link #activeHeaderDimensionsForAccount(String, String)} rather than querying either table on
- * their own.
+ * <p><b>ETP-5101 QA finding (this class's history):</b> an earlier version of this class read
+ * {@code AD_Client_AcctDimension}'s per-{@code docBaseType}/level matrix — the fine-grained
+ * override Core's centrally-maintained dimension configuration exposes — for
+ * {@code docBaseType = FAT}, on the theory that a {@code FIN_Finacc_Transaction} needed the same
+ * document-type-scoped treatment a real header+lines document (an invoice, a shipment) gets. Two
+ * problems surfaced live: (1) the level actually queried was Header, but a
+ * {@code FIN_Finacc_Transaction} is tab level 1 under {@code FIN_Financial_Account} (tab level 0)
+ * per {@code AD_Tab} — a document <i>line</i>, never a header — so even the "fixed" Lines-level
+ * query was reading Core configuration a Classic admin has no reason to associate with financial
+ * account movements at all; (2) explicitly, per product direction: FAT dimension visibility must
+ * come from the <b>same</b> flat, per-tenant switch every other GO window already uses (the
+ * "Ledger Configuration" screen, {@code C_AcctSchema_Element.IsActive}) — not a document-type
+ * override no other GO surface consults. This class is now a thin, single-source wrapper around
+ * that flat switch; the {@code Acctdim_Centrally_Maintained} / {@code AD_Client_AcctDimension}
+ * machinery was removed entirely rather than left unused.
  *
  * <p>Dimension codes are Core's ({@code PJ}, {@code CC}, {@code PR}, …, mapped in
  * {@code DimensionDisplayUtility}); the keys this class returns are the lowercase UI keys the
  * Etendo GO frontend already speaks ({@code project}, {@code costcenter}, {@code product}, …).
  */
 final class AccountingDimensionsSupport {
-
-  private static final Logger log = LogManager.getLogger(AccountingDimensionsSupport.class);
-
-  /** Document base type of finacc transactions — the movements + automatch surfaces. */
-  static final String DOCBASETYPE_FAT = "FAT";
 
   /** Accounting-dimension UI keys, shared with the frontend payloads. */
   static final String DIM_ORGANIZATION = "organization";
@@ -101,9 +90,6 @@ final class AccountingDimensionsSupport {
       DIM_ORGANIZATION, DIM_BPARTNER, DIM_PROJECT, DIM_COSTCENTER, DIM_PRODUCT,
       DIM_ACTIVITY, DIM_CAMPAIGN, DIM_SALESREGION, DIM_USER1, DIM_USER2);
 
-  /** Header level, as {@code DimensionDisplayUtility} spells it in its session-variable keys. */
-  private static final String LEVEL_HEADER = DimensionDisplayUtility.DIM_Header;
-
   private static final String FLAT_ACTIVE_BY_ACCOUNT_SQL =
       "SELECT DISTINCT e.elementtype"
           + "  FROM c_acctschema_element e"
@@ -119,30 +105,11 @@ final class AccountingDimensionsSupport {
           + " WHERE s.isactive = 'Y' AND e.isactive = 'Y'"
           + "   AND s.ad_client_id = ?"; // NOSONAR java:S2077
 
-  /**
-   * Dimensions explicitly hidden from a document header via
-   * {@code ad_client_acctdimension.show_in_header = 'N'}. Header dimensions default to visible
-   * when there is no override row (matching Classic), so the header set is "active dimensions
-   * minus the ones explicitly hidden here" rather than only the rows flagged to show.
-   */
-  private static final String HIDDEN_HEADER_BY_ACCOUNT_SQL =
-      "SELECT DISTINCT d.dimension"
-          + "  FROM ad_client_acctdimension d"
-          + " WHERE d.isactive = 'Y' AND d.show_in_header = 'N' AND d.docbasetype = ?"
-          + "   AND d.ad_client_id = (SELECT ad_client_id FROM fin_financial_account"
-          + "                          WHERE fin_financial_account_id = ?)"; // NOSONAR java:S2077
-
-  private static final String HIDDEN_HEADER_BY_CLIENT_SQL =
-      "SELECT DISTINCT d.dimension"
-          + "  FROM ad_client_acctdimension d"
-          + " WHERE d.isactive = 'Y' AND d.show_in_header = 'N' AND d.docbasetype = ?"
-          + "   AND d.ad_client_id = ?"; // NOSONAR java:S2077
-
   private AccountingDimensionsSupport() {
   }
 
   // ---------------------------------------------------------------------------
-  // Flat source (C_AcctSchema_Element) — authoritative only when NOT centrally maintained
+  // Flat source (C_AcctSchema_Element) — the single source of truth for every caller
   // ---------------------------------------------------------------------------
 
   /** Active chart-of-accounts elements of the account's client, as UI dimension keys. */
@@ -153,52 +120,6 @@ final class AccountingDimensionsSupport {
   /** Active chart-of-accounts elements of the given client, as UI dimension keys. */
   static Set<String> flatActiveDimensionsForClient(String clientId) throws Exception {
     return queryDimensions(FLAT_ACTIVE_BY_CLIENT_SQL, "elementtype", clientId);
-  }
-
-  // ---------------------------------------------------------------------------
-  // Header-level set — the one the movement surfaces must use
-  // ---------------------------------------------------------------------------
-
-  /**
-   * Dimensions available at the header of a {@code docBaseType} document for the current tenant,
-   * honouring {@code Acctdim_Centrally_Maintained}.
-   *
-   * @param client      the tenant whose configuration decides the answer
-   * @param docBaseType the document base type, e.g. {@link #DOCBASETYPE_FAT}
-   */
-  static Set<String> activeHeaderDimensions(Client client, String docBaseType) throws Exception {
-    if (client == null) {
-      return new HashSet<>();
-    }
-    Set<String> flat = flatActiveDimensionsForClient(client.getId());
-    if (!isCentrallyMaintained(client)) {
-      flat.removeAll(queryDimensions(HIDDEN_HEADER_BY_CLIENT_SQL, "dimension",
-          docBaseType, client.getId()));
-      return flat;
-    }
-    return centrallyMaintainedHeaderSet(client, docBaseType, flat);
-  }
-
-  /**
-   * Same as {@link #activeHeaderDimensions(Client, String)} but resolving the tenant from a
-   * financial account. Falls back to the flat source when the account (or its client) cannot be
-   * resolved, so a caller is never left with an empty set because of a lookup failure.
-   */
-  static Set<String> activeHeaderDimensionsForAccount(String accountId, String docBaseType)
-      throws Exception {
-    Client client = clientOfAccount(accountId);
-    if (client != null) {
-      return activeHeaderDimensions(client, docBaseType);
-    }
-    Set<String> flat = flatActiveDimensionsForAccount(accountId);
-    flat.removeAll(queryDimensions(HIDDEN_HEADER_BY_ACCOUNT_SQL, "dimension",
-        docBaseType, accountId));
-    return flat;
-  }
-
-  /** The current tenant's header dimensions for {@code docBaseType}. */
-  static Set<String> activeHeaderDimensionsForCurrentClient(String docBaseType) throws Exception {
-    return activeHeaderDimensions(currentClient(), docBaseType);
   }
 
   // ---------------------------------------------------------------------------
@@ -271,71 +192,6 @@ final class AccountingDimensionsSupport {
   // ---------------------------------------------------------------------------
   // Internals
   // ---------------------------------------------------------------------------
-
-  /**
-   * Reads the header set out of Core's centrally-maintained configuration. Core only emits
-   * {@code $Element_<DIM>_<DOCBASETYPE>_<LEVEL>} entries for the dimensions its Client window can
-   * configure (organization, business partner, project, product, cost center, user1, user2); the
-   * remaining ones (activity, campaign, sales region) have no entry at all, so for those we keep
-   * the flat chart-of-accounts answer instead of reading absence as "inactive".
-   */
-  private static Set<String> centrallyMaintainedHeaderSet(Client client, String docBaseType,
-      Set<String> flat) {
-    Map<String, String> config = DimensionDisplayUtility.getAccountingDimensionConfiguration(client);
-    Set<String> header = new HashSet<>();
-    for (Map.Entry<String, String> entry : DIM_BY_ELEMENT.entrySet()) {
-      String uiKey = entry.getValue();
-      String configured = config.get(sessionKey(entry.getKey(), docBaseType));
-      if (configured == null) {
-        if (flat.contains(uiKey)) {
-          header.add(uiKey);
-        }
-      } else if ("Y".equals(configured)) {
-        header.add(uiKey);
-      }
-    }
-    return header;
-  }
-
-  /** {@code $Element_PJ_FAT_H} — the key layout {@code DimensionDisplayUtility} writes. */
-  private static String sessionKey(String elementCode, String docBaseType) {
-    return DimensionDisplayUtility.ELEMENT + "_" + elementCode + "_"
-        + StringUtils.trimToEmpty(docBaseType) + "_" + LEVEL_HEADER;
-  }
-
-  private static boolean isCentrallyMaintained(Client client) {
-    try {
-      OBContext.setAdminMode(true);
-      return Boolean.TRUE.equals(client.isAcctdimCentrallyMaintained());
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  private static Client clientOfAccount(String accountId) {
-    if (StringUtils.isBlank(accountId)) {
-      return null;
-    }
-    try {
-      FIN_FinancialAccount account =
-          OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
-      return account != null ? account.getClient() : null;
-    } catch (Exception e) {
-      log.debug("Could not resolve the client of financial account {}: {}", accountId,
-          e.getMessage());
-      return null;
-    }
-  }
-
-  private static Client currentClient() {
-    try {
-      return OBDal.getInstance()
-          .get(Client.class, OBContext.getOBContext().getCurrentClient().getId());
-    } catch (Exception e) {
-      log.debug("Could not resolve the current client: {}", e.getMessage());
-      return null;
-    }
-  }
 
   /** Runs a single-column dimension-code query and maps the codes to UI dimension keys. */
   private static Set<String> queryDimensions(String sql, String column, String... params)

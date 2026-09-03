@@ -19,10 +19,10 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertNotSame;
 
 import java.math.BigDecimal;
 import java.sql.Timestamp;
-import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.Date;
@@ -91,10 +91,20 @@ public class BankStatementsSupportTest {
     assertEquals("", BankStatementsSupport.formatDate(null));
   }
 
+  /**
+   * A business timestamp renders as the canonical wire datetime in the server's own zone —
+   * no trailing {@code Z} (ETP-5100).
+   *
+   * <p>The input is built as a CIVIL value ({@link Timestamp#valueOf}, which reads the literal
+   * in the default zone), not from a UTC {@code Instant}. That is what makes the assertion
+   * timezone-independent: input and expectation denote the same wall-clock reading in whatever
+   * zone the runner happens to be in. Asserting a UTC-rendered string against an instant — as
+   * this test used to — passed in a UTC CI and failed in UTC-3.
+   */
   @Test
-  public void formatDateRendersIsoUtc() {
-    Timestamp ts = Timestamp.from(Instant.parse("2026-06-04T10:00:00Z"));
-    assertEquals("2026-06-04T10:00:00Z", BankStatementsSupport.formatDate(ts));
+  public void formatDateRendersCanonicalWireDatetimeInTheServerZone() {
+    Timestamp ts = Timestamp.valueOf("2026-06-04 10:00:00");
+    assertEquals("2026-06-04T10:00:00", BankStatementsSupport.formatDate(ts));
   }
 
   // ── parseIsoDate ─────────────────────────────────────────────────────────
@@ -132,6 +142,50 @@ public class BankStatementsSupportTest {
     assertEquals(expected, BankStatementsSupport.parseIsoDate("2026-06-04T23:59:59Z", new Date(0L)));
   }
 
+
+  /**
+   * A zone-LESS ISO datetime round-trips (ETP-5100).
+   *
+   * <p>Since the outbound formatters stopped appending {@code Z}, {@code 2026-06-04T10:00:00} is
+   * the shape NEO itself emits — and the frontend echoes it straight back. {@code Instant.parse}
+   * rejects it for want of an offset, so without the {@code yyyy-MM-dd}-prefix fallback the value
+   * would silently collapse to the fallback. That fallback is {@code new Date()} at both
+   * {@code BankStatementsHandler} call sites, i.e. it would substitute TODAY for the statement's
+   * real day and look like nothing went wrong.
+   */
+  @Test
+  public void parseIsoDateAcceptsAZonelessIsoDatetime() {
+    Date expected = Date.from(LocalDate.of(2026, 6, 4).atStartOfDay(ZoneId.systemDefault()).toInstant());
+    Date fallback = new Date(0L);
+    Date actual = BankStatementsSupport.parseIsoDate("2026-06-04T10:00:00", fallback);
+    assertNotSame("the zone-less shape must round-trip, not collapse to the fallback",
+        fallback, actual);
+    assertEquals(expected, actual);
+  }
+
+  /** A bare {@code yyyy-MM-dd} is the whole datum and resolves to local start-of-day. */
+  @Test
+  public void parseIsoDateAcceptsABareCalendarDay() {
+    Date expected = Date.from(LocalDate.of(2026, 6, 4).atStartOfDay(ZoneId.systemDefault()).toInstant());
+    Date fallback = new Date(0L);
+    Date actual = BankStatementsSupport.parseIsoDate("2026-06-04", fallback);
+    assertNotSame("a bare calendar day must round-trip, not collapse to the fallback",
+        fallback, actual);
+    assertEquals(expected, actual);
+  }
+
+  /**
+   * The tolerance is a prefix fallback, not a licence to guess: input with no readable
+   * {@code yyyy-MM-dd} prefix still returns the fallback rather than an invented day.
+   */
+  @Test
+  public void parseIsoDateStillFallsBackWhenThereIsNoCalendarDayPrefix() {
+    Date fallback = new Date(0L);
+    assertSame(fallback, BankStatementsSupport.parseIsoDate("04-06-2026", fallback));
+    assertSame(fallback, BankStatementsSupport.parseIsoDate("2026-06", fallback));
+    assertSame(fallback, BankStatementsSupport.parseIsoDate("2026-13-40T10:00:00", fallback));
+    assertSame(fallback, BankStatementsSupport.parseIsoDate("banana-time", fallback));
+  }
   // ── parseAmount ──────────────────────────────────────────────────────────
 
   @Test

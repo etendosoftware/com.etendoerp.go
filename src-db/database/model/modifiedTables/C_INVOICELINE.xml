@@ -9,5 +9,8 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <foreign-key foreignTable="C_INVOICELINE" name="EM_ETGO_INVLINE_SOURCE_FK">
+        <reference local="EM_ETGO_SOURCE_INVOICELINE_ID" foreign="C_INVOICELINE_ID"/>
+      </foreign-key>
     </table>
   </database>

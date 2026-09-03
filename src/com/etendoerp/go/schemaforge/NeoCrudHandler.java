@@ -192,8 +192,8 @@ class NeoCrudHandler {
     }
     NeoResponse neoResponse = dispatchCrudRequest(entity, neoContext, request, response);
     if (neoResponse != null) {
-      // Generic CSV export: when the GET carries export=csv, stream the rows the
-      // handler produced as a CSV attachment instead of the JSON envelope.
+      // Generic file export: when the GET carries export=csv or export=xlsx, stream the rows
+      // the handler produced as a file attachment instead of the JSON envelope.
       if ("GET".equals(method)
           && NeoCsvExportService.tryExport(neoResponse, queryParams, response)) {
         return;
@@ -607,6 +607,7 @@ class NeoCrudHandler {
     JSONObject body = context.getRequestBody();
     String updated = body == null ? null : body.optString(FIELD_UPDATED, null);
     if (StringUtils.isBlank(updated) || "null".equals(updated)) {
+      NeoWriteRefusalLog.missingUpdated(context, FIELD_UPDATED);
       return buildMissingUpdatedResponse();
     }
     return null;
@@ -626,6 +627,7 @@ class NeoCrudHandler {
     if (!NeoRecordVersion.isStale(dalEntityName, context.getRecordId(), clientValue)) {
       return null;
     }
+    NeoWriteRefusalLog.staleRecord(context, clientValue);
     return buildStaleRecordResponse(STALE_RECORD_MESSAGE);
   }
 
@@ -757,6 +759,7 @@ class NeoCrudHandler {
       int httpStatus = NeoErrorSanitizer.isDuplicateKeyMessage(translated)
           ? HttpServletResponse.SC_CONFLICT
           : HttpServletResponse.SC_INTERNAL_SERVER_ERROR;
+      NeoWriteRefusalLog.unclassifiedWriteFailure(httpStatus, errMsg, translated);
       // Defence-in-depth: a DAL/validator failure message can carry a raw object toString
       // (e.g. a List-reference "one of the following values: pkg.Class@hex ..."). Strip it
       // before it reaches the client — the leak itself is built upstream in core (ETP-4668).

@@ -382,6 +382,24 @@ public class NeoMandatoryDefaultsService {
     if (parentValues == null || parentValues.isEmpty()) {
       return false;
     }
+    // ETP-4948: a TRUE master-detail parent-FK column (AD_Column.ISPARENT = 'Y') always
+    // links to the immediate parent tab's own record, regardless of whether AD_Column
+    // .DefaultValue happens to carry a classic "@VarName@" expression. C_Year.C_Calendar_ID
+    // is exactly this case: ISPARENT='Y' but DefaultValue is NULL, so the generic
+    // "@VarName@" match below is a no-op for it and resolution used to fall through all the
+    // way to the org-blind resolveFirstComboOption fallback, which picks the
+    // alphabetically-first readable C_Calendar row instead of the actual parent — silently
+    // attaching the new Year to the wrong Calendar whenever a client has more than one.
+    // NeoParentValuesLoader already keys parentValues by the parent record's own DB column
+    // name (upper-cased), so injecting directly from there closes that gap without touching
+    // the generic (and intentionally separate — ETP-5086) org-scoping fallback.
+    if (Boolean.TRUE.equals(col.isLinkToParentColumn())) {
+      Object ownParentValue = parentValues.get(col.getDBColumnName().toUpperCase(Locale.ROOT));
+      if (ownParentValue != null
+          && injectParentValue(body, dalEntity, col, propName, ownParentValue, prop)) {
+        return true;
+      }
+    }
     String defaultExpr = col.getDefaultValue();
     if (defaultExpr == null || !defaultExpr.matches("^@[A-Za-z_]+@$") ) {
       return false;
@@ -391,6 +409,16 @@ public class NeoMandatoryDefaultsService {
     if (value == null) {
       return false;
     }
+    return injectParentValue(body, dalEntity, col, propName, value, prop);
+  }
+
+  /**
+   * Applies a resolved parent-derived default value to the body and injects its DAL identifier
+   * companion field. Shared by both {@code tryInjectFromParentValues} resolution paths (the
+   * direct ISPARENT match and the classic {@code @VarName@} expression match).
+   */
+  private static boolean injectParentValue(JSONObject body, Entity dalEntity, Column col,
+      String propName, Object value, Property prop) {
     try {
       applyResolvedDefault(body, col, propName, value, null, prop);
       NeoDefaultsService.tryInjectIdentifier(body, dalEntity, propName, body.opt(propName));

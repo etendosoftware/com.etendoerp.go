@@ -390,11 +390,21 @@ final class SupportJiraWebhookHandler {
     }
   }
 
+  /** Compares only against the DEDICATED bot-identity property ({@code support.jira.bot.email}
+   * — deliberately never {@code support.jira.username}, the credential used to AUTHENTICATE API
+   * calls). Those are two different concerns: whichever Jira account's token is configured for
+   * API access is not necessarily the bot's own account — a dev environment commonly borrows a
+   * real person's personal token for that (confirmed incident: with
+   * {@code support.jira.username} set to a developer's own email, and that SAME person also
+   * configured as the human escalation target for local testing, assigning a ticket to
+   * themselves was silently read as "still with the bot" via this fallback, so human_takeover
+   * never got set — no reply-with-a-stub, the bot kept answering right through the human
+   * takeover). {@link #isBotIdentity} is the actually-reliable check (falls back to
+   * displayName), since the bot's email is private and rarely configurable anyway. */
   static boolean isBotEmail(String email) {
     if (email == null || email.isEmpty()) return false;
     JiraConfig config = JiraConfig.fromRuntime();
-    return (!config.getBotEmail().isEmpty() && config.getBotEmail().equalsIgnoreCase(email))
-        || email.equalsIgnoreCase(config.getUsername());
+    return !config.getBotEmail().isEmpty() && config.getBotEmail().equalsIgnoreCase(email);
   }
 
   /** True if {@code email} OR {@code displayName} identifies our own Jira integration account

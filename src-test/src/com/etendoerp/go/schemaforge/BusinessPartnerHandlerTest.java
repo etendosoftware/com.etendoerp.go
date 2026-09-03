@@ -32,11 +32,15 @@ import static org.mockito.Mockito.when;
 
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
+import java.sql.Array;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Savepoint;
+
+import java.util.HashMap;
+import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -1282,5 +1286,185 @@ class BusinessPartnerHandlerTest {
       assertNotNull(result);
       assertEquals("warning", body.getJSONArray("messages").getJSONObject(0).getString("type"));
     }
+  }
+
+  // ── afterHandle() GET — child data for the CSV export (ETP-4997) ─────────────
+
+  /** A list response whose rows carry the given ids. */
+  private static JSONObject buildListBody(String... ids) throws Exception {
+    JSONArray data = new JSONArray();
+    for (String id : ids) {
+      data.put(new JSONObject().put("id", id).put("name", "BP " + id));
+    }
+    return new JSONObject().put("response", new JSONObject().put("data", data));
+  }
+
+  /**
+   * Wires a GET list context asking for child data, plus a mock connection whose two child
+   * queries answer from {@code locationRows} / {@code contactRows} (keyed by business partner).
+   */
+  private Connection stubChildQueries(JSONObject body,
+      Map<String, String[]> locationRows, Map<String, String[]> contactRows) throws Exception {
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn(null);
+    when(ctx.getQueryParams()).thenReturn(Map.of("includeChildData", "1"));
+    when(ctx.getPreviousResult()).thenReturn(NeoResponse.ok(body));
+
+    Connection connMock = mock(Connection.class);
+    when(connMock.createArrayOf(anyString(), org.mockito.ArgumentMatchers.any())).thenReturn(mock(Array.class));
+    when(connMock.prepareStatement(anyString())).thenAnswer(invocation -> {
+      String sql = invocation.getArgument(0);
+      boolean isLocation = sql.contains("c_bpartner_location");
+      Map<String, String[]> source = isLocation ? locationRows : contactRows;
+      // Read off the handler's own constants, never re-spelled here: a mock that declares its
+      // own column names asserts the test's idea of the schema instead of the code's. That is
+      // how `postcode` (the column C_Location does not have) passed this test while the real
+      // export silently produced blank address columns — see BusinessPartnerHandlerDbTest, which
+      // covers the half a mock structurally cannot: whether the names match the database.
+      String[] cols = isLocation
+          ? BusinessPartnerHandler.LOCATION_COLUMNS
+          : BusinessPartnerHandler.CONTACT_COLUMNS;
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      java.util.Iterator<Map.Entry<String, String[]>> it = source.entrySet().iterator();
+      java.util.concurrent.atomic.AtomicReference<Map.Entry<String, String[]>> current =
+          new java.util.concurrent.atomic.AtomicReference<>();
+      when(rs.next()).thenAnswer(i -> {
+        if (!it.hasNext()) {
+          return false;
+        }
+        current.set(it.next());
+        return true;
+      });
+      when(rs.getString(anyString())).thenAnswer(i -> {
+        String column = i.getArgument(0);
+        if ("c_bpartner_id".equals(column)) {
+          return current.get().getKey();
+        }
+        for (int c = 0; c < cols.length; c++) {
+          if (cols[c].equals(column)) {
+            return current.get().getValue()[c];
+          }
+        }
+        return null;
+      });
+      when(ps.executeQuery()).thenReturn(rs);
+      return ps;
+    });
+    return connMock;
+  }
+
+  private NeoResponse runAfterHandleGet(Connection connMock) {
+    try (MockedStatic<OBDal> mDal = mockStatic(OBDal.class)) {
+      OBDal obDalMock = mock(OBDal.class);
+      when(obDalMock.getConnection()).thenReturn(connMock);
+      mDal.when(OBDal::getInstance).thenReturn(obDalMock);
+      return handler.afterHandle(ctx);
+    }
+  }
+
+  /**
+   * The address and contact person a Contacts row does NOT carry are attached under
+   * {@code etgoChildData}, keyed by the import targets the CSV export addresses by dotted path.
+   */
+  @Test
+  void attachesPrimaryAddressAndContactToEachListRow() throws Exception {
+    JSONObject body = buildListBody("BP1", "BP2");
+    Map<String, String[]> locations = new HashMap<>();
+    locations.put("BP1", new String[] { "Calle Mayor 12", "Madrid", "28013", "Spain", "Madrid" });
+    locations.put("BP2", new String[] { "Av. Industria 45", "Barcelona", "08018", "Spain", "Barcelona" });
+    Map<String, String[]> contacts = new HashMap<>();
+    contacts.put("BP1", new String[] { "Lucía", "Fernández", "lucia@example.com", "610000101", "Compras" });
+    contacts.put("BP2", new String[] { "Andrés", "Molina", "andres@example.com", "610000102", "Taller" });
+
+    NeoResponse result = runAfterHandleGet(stubChildQueries(body, locations, contacts));
+
+    assertNotNull(result);
+    JSONObject row = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    JSONObject child = row.getJSONObject("etgoChildData");
+    assertEquals("Calle Mayor 12", child.getString("address"));
+    assertEquals("Madrid", child.getString("city"));
+    assertEquals("28013", child.getString("postal"));
+    assertEquals("Spain", child.getString("country"));
+    assertEquals("Madrid", child.getString("region"));
+    assertEquals("lucia@example.com", child.getString("email"));
+    assertEquals("Lucía", child.getString("firstName"));
+    assertEquals("Fernández", child.getString("lastName"));
+    assertEquals("610000101", child.getString("phone"));
+    assertEquals("Compras", child.getString("position"));
+
+    JSONObject second = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(1);
+    assertEquals("Barcelona", second.getJSONObject("etgoChildData").getString("city"));
+  }
+
+  /**
+   * A partner with no address and no contact still gets the key, empty — the export must emit
+   * its columns (the header set has to match the import template) with blank cells.
+   */
+  @Test
+  void attachesAnEmptyChildObjectWhenAPartnerHasNoChildren() throws Exception {
+    JSONObject body = buildListBody("BP1");
+    NeoResponse result = runAfterHandleGet(stubChildQueries(body, new HashMap<>(), new HashMap<>()));
+
+    assertNotNull(result);
+    JSONObject row = result.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    assertTrue(row.has("etgoChildData"));
+    assertEquals(0, row.getJSONObject("etgoChildData").length());
+  }
+
+  /** Without the opt-in flag the normal grid must not pay for the two extra queries. */
+  @Test
+  void doesNotAttachChildDataWithoutTheFlag() throws Exception {
+    JSONObject body = buildListBody("BP1");
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn(null);
+    when(ctx.getQueryParams()).thenReturn(Map.of());
+    when(ctx.getPreviousResult()).thenReturn(NeoResponse.ok(body));
+
+    Connection connMock = mock(Connection.class);
+    NeoResponse result = runAfterHandleGet(connMock);
+
+    assertNull(result);
+    verify(connMock, never()).prepareStatement(anyString());
+    assertFalse(body.getJSONObject("response").getJSONArray("data").getJSONObject(0).has("etgoChildData"));
+  }
+
+  /**
+   * A failed enrichment must cost the user empty columns, never their export: the handler
+   * declines and the default CRUD result stands.
+   */
+  @Test
+  void declinesWhenAChildQueryFails() throws Exception {
+    JSONObject body = buildListBody("BP1");
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn(null);
+    when(ctx.getQueryParams()).thenReturn(Map.of("includeChildData", "1"));
+    when(ctx.getPreviousResult()).thenReturn(NeoResponse.ok(body));
+
+    Connection connMock = mock(Connection.class);
+    when(connMock.createArrayOf(anyString(), org.mockito.ArgumentMatchers.any())).thenReturn(mock(Array.class));
+    when(connMock.prepareStatement(anyString())).thenThrow(new SQLException("boom"));
+
+    assertNull(runAfterHandleGet(connMock));
+  }
+
+  /** The flag is a list-only concern; a single-record GET keeps the contact-email fallback. */
+  @Test
+  void ignoresTheFlagOnASingleRecordGet() throws Exception {
+    when(ctx.getHttpMethod()).thenReturn("GET");
+    when(ctx.getRecordId()).thenReturn("BP1");
+    when(ctx.getQueryParams()).thenReturn(Map.of("includeChildData", "1"));
+    when(ctx.getPreviousResult()).thenReturn(NeoResponse.ok(buildListBody("BP1")));
+
+    Connection connMock = mock(Connection.class);
+    ResultSet rs = mock(ResultSet.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    when(rs.next()).thenReturn(false);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(connMock.prepareStatement(anyString())).thenReturn(ps);
+
+    // No child data attached; the email fallback found nothing, so the default result stands.
+    NeoResponse result = runAfterHandleGet(connMock);
+    assertNull(result);
   }
 }

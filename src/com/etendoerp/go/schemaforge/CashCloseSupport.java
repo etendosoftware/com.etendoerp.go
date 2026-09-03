@@ -25,9 +25,6 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
@@ -62,6 +59,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentDetail;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentScheduleDetail;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
+
 /**
  * Stateless helpers backing {@link CashCloseHandler} — the dispatch wrappers (OBContext admin mode
  * + rollback boilerplate, identical in shape to {@link ReconciliationHandlerSupport}), the pending
@@ -71,9 +70,6 @@ import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 final class CashCloseSupport {
 
   private static final Logger log = LogManager.getLogger(CashCloseSupport.class);
-
-  private static final DateTimeFormatter ISO_DATE =
-      DateTimeFormatter.ofPattern("yyyy-MM-dd").withZone(ZoneOffset.UTC);
 
   private CashCloseSupport() {
     // utility class — no instances
@@ -700,7 +696,8 @@ final class CashCloseSupport {
     return ReconciliationSupport.envelope(data);
   }
 
+  /** Canonical NEO wire date (day only) in the server's own zone; see {@link NeoDateFormat} (ETP-5100). */
   private static String formatIsoDate(Date date) {
-    return date == null ? null : ISO_DATE.format(Instant.ofEpochMilli(date.getTime()));
+    return NeoDateFormat.toWireDate(date);
   }
 }

@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -25,10 +26,15 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
+import java.util.Arrays;
+
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
+import org.hibernate.query.NativeQuery;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -140,5 +146,149 @@ public class PeriodControlDocOpenCloseHandlerTest {
     NeoResponse r = handler.onError("pctrl-id", new RuntimeException("boom"));
     assertEquals(500, r.getHttpStatus());
     assertTrue(r.getBody().getJSONObject("error").getString("message").contains("boom"));
+  }
+
+  // ── afterHandle — ETP-4948 Issue 3: accounting-relevant document-category filter ──────
+
+  private NeoContext buildGetContext() {
+    return NeoContext.builder()
+        .specName("open-close-period-control").entityName("documents")
+        .httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
+  }
+
+  private JSONObject rowWithCategory(String category) throws Exception {
+    return new JSONObject().put("id", "pc-" + category).put("documentCategory", category);
+  }
+
+  @SuppressWarnings("unchecked")
+  private MockedStatic<OBDal> mockAccountedTableIds(Object... tableIds) {
+    MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+    OBDal dal = mock(OBDal.class);
+    obDalMock.when(OBDal::getInstance).thenReturn(dal);
+    Session session = mock(Session.class);
+    NativeQuery<Object> query = mock(NativeQuery.class);
+    when(dal.getSession()).thenReturn(session);
+    when(session.createNativeQuery(anyString())).thenReturn(query);
+    when(query.list()).thenReturn(Arrays.asList(tableIds));
+    return obDalMock;
+  }
+
+  @Test
+  public void afterHandleReturnsNullForNonGetMethod() {
+    PeriodControlDocOpenCloseHandler handler = new PeriodControlDocOpenCloseHandler();
+    NeoContext ctx = NeoContext.builder()
+        .specName("open-close-period-control").entityName("documents")
+        .httpMethod("POST").endpointType(NeoEndpointType.ACTION).build();
+
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  /**
+   * ETP-4948 review finding W2: {@code afterHandle} must guard on {@code NeoEndpointType.CRUD}
+   * as well as the HTTP method, matching the documented {@code FinancialAccountHandler}
+   * convention — a GET on a non-CRUD endpoint type (e.g. a SELECTOR) must not be treated as the
+   * plain list/getById fetch this override filters.
+   */
+  @Test
+  public void afterHandleReturnsNullForGetWithNonCrudEndpointType() {
+    PeriodControlDocOpenCloseHandler handler = new PeriodControlDocOpenCloseHandler();
+    NeoContext ctx = NeoContext.builder()
+        .specName("open-close-period-control").entityName("documents")
+        .httpMethod("GET").endpointType(NeoEndpointType.SELECTOR).build();
+
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  @Test
+  public void afterHandleReturnsNullWhenNoPreviousResult() {
+    PeriodControlDocOpenCloseHandler handler = new PeriodControlDocOpenCloseHandler();
+    NeoContext ctx = buildGetContext();
+    // getPreviousResult() is never set on this context.
+
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  @Test
+  public void afterHandleReturnsNullWhenResponseHasNoRows() throws Exception {
+    PeriodControlDocOpenCloseHandler handler = new PeriodControlDocOpenCloseHandler();
+    NeoContext ctx = buildGetContext();
+    JSONObject data = new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray()));
+    ctx.setPreviousResult(NeoResponse.ok(data));
+
+    assertNull(handler.afterHandle(ctx));
+  }
+
+  /**
+   * Reproduces Issue 3's own reported bug: SOO (Sales Order) never posts to accounting at all,
+   * so it must be dropped even though its row is a real, active {@code C_PeriodControl} entry.
+   */
+  @Test
+  public void afterHandleDropsNonPostableOrderCategory() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = mockAccountedTableIds("318")) { // only C_Invoice accounted
+      PeriodControlDocOpenCloseHandler handler = new PeriodControlDocOpenCloseHandler();
+      NeoContext ctx = buildGetContext();
+      JSONArray rows = new JSONArray().put(rowWithCategory("SOO")).put(rowWithCategory("ARI"));
+      JSONObject body = new JSONObject().put("response", new JSONObject().put("data", rows));
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertEquals(200, result.getHttpStatus());
+      JSONArray filtered = result.getBody().getJSONObject("response").getJSONArray("data");
+      assertEquals(1, filtered.length());
+      assertEquals("ARI", filtered.getJSONObject(0).getString("documentCategory"));
+    }
+  }
+
+  /**
+   * ETP-4948 Issue 3 scope decision: the 5 ETP-4452 globally-excluded document types must also
+   * be hidden here, in Calendar's own DocBaseType code space (MMP/DDB/LDC/LCC/CAD), even when
+   * their table is actively configured for accounting — no divergence from Not Posted Documents.
+   */
+  @Test
+  public void afterHandleDropsAllFiveEtp4452EquivalentCategoriesEvenWhenAccounted() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = mockAccountedTableIds(
+        "325",                                // M_Production
+        "30721072789F410E9606D2235CB2A226",  // FIN_Doubtful_Debt
+        "082F967CDF7245EB9A150941F326C45C",  // M_LandedCost
+        "55A984C314FD4C4FB5E7C32DE36BB07B",  // M_LC_Cost
+        "D022B92163074E5E82449C8E0B5AFDF6")) { // M_CostAdjustment
+      PeriodControlDocOpenCloseHandler handler = new PeriodControlDocOpenCloseHandler();
+      NeoContext ctx = buildGetContext();
+      JSONArray rows = new JSONArray()
+          .put(rowWithCategory("MMP")).put(rowWithCategory("DDB")).put(rowWithCategory("LDC"))
+          .put(rowWithCategory("LCC")).put(rowWithCategory("CAD"));
+      JSONObject body = new JSONObject().put("response", new JSONObject().put("data", rows));
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertEquals(200, result.getHttpStatus());
+      JSONArray filtered = result.getBody().getJSONObject("response").getJSONArray("data");
+      assertEquals(0, filtered.length());
+    }
+  }
+
+  @Test
+  public void afterHandleKeepsAccountingRelevantCategoriesAndDropsUnmappedOnes() throws Exception {
+    try (MockedStatic<OBDal> obDalMock = mockAccountedTableIds("318", "224")) { // C_Invoice, GL_Journal
+      PeriodControlDocOpenCloseHandler handler = new PeriodControlDocOpenCloseHandler();
+      NeoContext ctx = buildGetContext();
+      JSONArray rows = new JSONArray()
+          .put(rowWithCategory("ARI"))   // C_Invoice, accounted → kept
+          .put(rowWithCategory("GLJ"))   // GL_Journal, accounted → kept
+          .put(rowWithCategory("PJI"));  // no known table → dropped
+      JSONObject body = new JSONObject().put("response", new JSONObject().put("data", rows));
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertEquals(200, result.getHttpStatus());
+      JSONArray filtered = result.getBody().getJSONObject("response").getJSONArray("data");
+      assertEquals(2, filtered.length());
+      assertEquals("ARI", filtered.getJSONObject(0).getString("documentCategory"));
+      assertEquals("GLJ", filtered.getJSONObject(1).getString("documentCategory"));
+    }
   }
 }

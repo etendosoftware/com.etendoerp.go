@@ -1380,6 +1380,9 @@ class SupportConversationsServletTest {
         when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
         stubProvider(providerMock, null, mock(SupportMessage.class));
         mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+        // Live re-check still finds a real human assignee — stays on the forward-to-Jira path.
+        sicMock.when(() -> SupportIntegrationClient.getTicketAssignee("SUP-5"))
+            .thenReturn(new String[]{"agente@example.com", "Agente Soporte"});
 
         // backgroundTaskRunner is forced same-thread by forceSynchronousBackgroundTasks(),
         // so this static mock reliably intercepts postJiraComment() instead of a real
@@ -1387,6 +1390,89 @@ class SupportConversationsServletTest {
         new SupportConversationsServlet().doPost(request, response);
 
         sicMock.verify(() -> SupportIntegrationClient.postJiraComment("SUP-5", "hola", false));
+      }
+
+      assertTrue(capture.toString().contains(FIELD_MESSAGES_LITERAL));
+    }
+
+    @Test
+    @DisplayName("Live assignee re-check clears human takeover when the ticket was reassigned "
+        + "back to the bot ('Information Etendo') and lets the AI reply normally — regression: "
+        + "this used to depend entirely on a Jira Automation webhook that isn't always "
+        + "configured/reachable, so the conversation could stay stuck forever")
+    void humanTakeoverClearsWhenReassignedBackToBot() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/conversations/conv-1/messages", "{\"text\":\"hola\"}");
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+           MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        // Mockito mocks don't link a setter call to a later getter read — sequential
+        // thenReturn simulates that setHumanTakeover(false) below actually took effect: the
+        // live re-check's OWN read (1st call) must still see the stale `true` to enter the
+        // block at all, then the gate's read right after (2nd call) must see the corrected
+        // `false` so it falls through to the normal AI path instead of forwarding to Jira.
+        when(conv.isHumanTakeover()).thenReturn(true, false);
+        when(conv.getJiraTicketKey()).thenReturn("SUP-5");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+        stubProvider(providerMock, null, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+        // "Information Etendo" has email visibility set to private — Jira omits emailAddress,
+        // displayName is the only signal that survives.
+        sicMock.when(() -> SupportIntegrationClient.getTicketAssignee("SUP-5"))
+            .thenReturn(new String[]{null, "Information Etendo"});
+        sicMock.when(() -> SupportIntegrationClient.sendToAdk(
+                anyString(), anyString(), anyString(), any(), any()))
+            .thenReturn("Claro, contame más");
+
+        new SupportConversationsServlet().doPost(request, response);
+
+        verify(conv).setHumanTakeover(false);
+        sicMock.verify(() -> SupportIntegrationClient.postJiraComment(anyString(), anyString(), anyBoolean()), never());
+      }
+
+      assertTrue(capture.toString().contains(FIELD_MESSAGES_LITERAL));
+    }
+
+    @Test
+    @DisplayName("Live assignee re-check SETS human takeover when a support agent reassigns the "
+        + "ticket to themselves directly in Jira, bypassing the chat's own \"talk to a human\" "
+        + "flow entirely — regression: there was no forward-direction detection at all outside "
+        + "that flow, so a manual reassignment left the bot answering normally forever")
+    void humanTakeoverSetsWhenManuallyReassignedToARealPersonInJira() throws Exception {
+      StringWriter capture = new StringWriter();
+      HttpServletResponse response = mockResponse(capture);
+      HttpServletRequest request = authenticatedRequest("/conversations/conv-1/messages", "{\"text\":\"hola\"}");
+
+      try (MockedStatic<SecureWebServicesUtils> swsMock = mockValidAuth();
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class);
+           MockedStatic<SupportIntegrationClient> sicMock = mockStatic(SupportIntegrationClient.class)) {
+        OBDal obDal = mockObDal(dalMock);
+        SupportConversation conv = mockConversation("conv-1");
+        // 1st read (the new live re-check) must see the stale `false` to reach the "else"
+        // branch; the 2nd read (the original gate, right after setHumanTakeover(true) above
+        // it) must see the corrected `true` so it forwards to Jira instead of calling the AI.
+        when(conv.isHumanTakeover()).thenReturn(false, true);
+        when(conv.getJiraTicketKey()).thenReturn("SUP-5");
+        when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
+        stubProvider(providerMock, null, mock(SupportMessage.class));
+        mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+        sicMock.when(() -> SupportIntegrationClient.getTicketAssignee("SUP-5"))
+            .thenReturn(new String[]{"agente@example.com", "Agente Soporte"});
+
+        new SupportConversationsServlet().doPost(request, response);
+
+        verify(conv).setHumanTakeover(true);
+        sicMock.verify(() -> SupportIntegrationClient.postJiraComment("SUP-5", "hola", false));
+        sicMock.verify(() -> SupportIntegrationClient.sendToAdk(
+            anyString(), anyString(), anyString(), any(), any()), never());
       }
 
       assertTrue(capture.toString().contains(FIELD_MESSAGES_LITERAL));
@@ -1478,6 +1564,10 @@ class SupportConversationsServletTest {
         when(obDal.get(SupportConversation.class, "conv-1")).thenReturn(conv);
         stubProvider(providerMock, null, mock(SupportMessage.class));
         mockCriteria(obDal, SupportMessage.class, Collections.emptyList());
+        // Every linked-ticket send now polls the live assignee (both-direction re-check) —
+        // stub it as unassigned/unknown so neither branch of that check fires.
+        sicMock.when(() -> SupportIntegrationClient.getTicketAssignee("SUP-ACTIVE"))
+            .thenReturn(new String[]{null, null});
 
         ArgumentCaptor<String> textCaptor = ArgumentCaptor.forClass(String.class);
         sicMock.when(() -> SupportIntegrationClient.sendToAdk(

@@ -44,15 +44,15 @@ import org.openbravo.dal.service.OBDal;
  *   <li>{@code etgoDocHeaderId} &mdash; the header record id to navigate to.</li>
  *   <li>{@code etgoDocWindow} &mdash; the GO window key for that header
  *       ({@code goods-shipment}, {@code goods-receipt}, {@code return-material-receipt},
- *       {@code return-to-vendor-shipment}, {@code goods-movements}
- *       or {@code physical-inventory}).</li>
+ *       {@code return-to-vendor-shipment}, {@code goods-movements},
+ *       {@code physical-inventory} or {@code internal-consumption}).</li>
  *   <li>{@code etgoDocLabel} &mdash; the header's existing document number, used as the
  *       link label (read straight from the header column; nothing is computed).</li>
  * </ul>
  *
- * <p>Movement types with no GO window yet (production, internal consumption) are
- * left without these fields, so the frontend renders them as plain, non-navigable
- * text. A single batched native query resolves every row in the page.
+ * <p>Movement types with no GO window yet (production) are left without these
+ * fields, so the frontend renders them as plain, non-navigable text. A single
+ * batched native query resolves every row in the page.
  */
 @Named("productTransactionsHandler")
 public class ProductTransactionsHandler implements NeoHandler {
@@ -62,7 +62,7 @@ public class ProductTransactionsHandler implements NeoHandler {
   // tx id -> [headerId, windowKey, docLabel]; resolved in one batched query.
   private static final String RESOLVE_SQL =
       "SELECT t.m_transaction_id AS tx_id, "
-      + "  COALESCE(io.m_inout_id, mv.m_movement_id, inv.m_inventory_id) AS header_id, "
+      + "  COALESCE(io.m_inout_id, mv.m_movement_id, inv.m_inventory_id, ic.m_internal_consumption_id) AS header_id, "
       + "  CASE "
       + "    WHEN t.m_inoutline_id IS NOT NULL AND io.issotrx = 'Y' AND dt.isreturn = 'N' THEN 'goods-shipment' "
       + "    WHEN t.m_inoutline_id IS NOT NULL AND io.issotrx = 'Y' AND dt.isreturn = 'Y' THEN 'return-material-receipt' "
@@ -70,10 +70,11 @@ public class ProductTransactionsHandler implements NeoHandler {
       + "    WHEN t.m_inoutline_id IS NOT NULL AND io.issotrx = 'N' AND dt.isreturn = 'Y' THEN 'return-to-vendor-shipment' "
       + "    WHEN t.m_movementline_id IS NOT NULL THEN 'goods-movements' "
       + "    WHEN t.m_inventoryline_id IS NOT NULL THEN 'physical-inventory' "
+      + "    WHEN t.m_internal_consumptionline_id IS NOT NULL THEN 'internal-consumption' "
       + "    ELSE NULL "
       + "  END AS window_key, "
-      // m_inventory has no documentno column; its identifier is `name`.
-      + "  COALESCE(io.documentno, mv.documentno, inv.name) AS doc_label "
+      // m_inventory and m_internal_consumption have no documentno column; their identifier is `name`.
+      + "  COALESCE(io.documentno, mv.documentno, inv.name, ic.name) AS doc_label "
       + "FROM m_transaction t "
       + "  LEFT JOIN m_inoutline iol ON iol.m_inoutline_id = t.m_inoutline_id "
       + "  LEFT JOIN m_inout io ON io.m_inout_id = iol.m_inout_id "
@@ -82,6 +83,8 @@ public class ProductTransactionsHandler implements NeoHandler {
       + "  LEFT JOIN m_movement mv ON mv.m_movement_id = ml.m_movement_id "
       + "  LEFT JOIN m_inventoryline invl ON invl.m_inventoryline_id = t.m_inventoryline_id "
       + "  LEFT JOIN m_inventory inv ON inv.m_inventory_id = invl.m_inventory_id "
+      + "  LEFT JOIN m_internal_consumptionline icl ON icl.m_internal_consumptionline_id = t.m_internal_consumptionline_id "
+      + "  LEFT JOIN m_internal_consumption ic ON ic.m_internal_consumption_id = icl.m_internal_consumption_id "
       + "WHERE t.m_transaction_id IN (:ids)";
 
   @Override
@@ -125,7 +128,7 @@ public class ProductTransactionsHandler implements NeoHandler {
    *
    * @param txIds the M_Transaction ids visible in the current page
    * @return a map of transaction id to {@code [headerId, windowKey, docLabel]}; entries
-   *         without a navigable target (production, internal consumption) are simply absent
+   *         without a navigable target (production) are simply absent
    */
   private Map<String, String[]> resolveDocumentTargets(List<String> txIds) {
     Map<String, String[]> result = new HashMap<>();

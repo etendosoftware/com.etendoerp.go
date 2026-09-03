@@ -5,5 +5,8 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <foreign-key foreignTable="C_CURRENCY" name="EM_ETGO_INOUT_CURRENCY_FK">
+        <reference local="EM_ETGO_CURRENCY_ID" foreign="C_CURRENCY_ID"/>
+      </foreign-key>
     </table>
   </database>
