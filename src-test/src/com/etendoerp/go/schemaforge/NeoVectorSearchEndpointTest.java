@@ -49,4 +49,42 @@ public class NeoVectorSearchEndpointTest {
     assertEquals(HttpServletResponse.SC_FORBIDDEN,
         endpoint.handle(requestWith("paper", "products", null)).getHttpStatus());
   }
+
+  @Test
+  public void unauthorizedSalesTargetReturnsForbiddenWithoutSearching() {
+    NeoVectorSearchEndpoint endpoint = endpointWithTargetAccess(false);
+
+    assertEquals(HttpServletResponse.SC_FORBIDDEN,
+        endpoint.handle("quotation", null, "sales-quotation", null, null, null, null)
+            .getHttpStatus());
+  }
+
+  @Test
+  public void unauthorizedPurchaseTargetReturnsForbiddenWithoutSearching() {
+    NeoVectorSearchEndpoint endpoint = endpointWithTargetAccess(false);
+
+    assertEquals(HttpServletResponse.SC_FORBIDDEN,
+        endpoint.handle("purchase order", null, "purchase-order", null, null, null, null)
+            .getHttpStatus());
+  }
+
+  @Test
+  public void authorizedSalesAndPurchaseTargetsReachSearchGateway() {
+    NeoVectorSearchEndpoint endpoint = endpointWithTargetAccess(true);
+
+    assertEquals(HttpServletResponse.SC_OK,
+        endpoint.handle("quotation", null, "sales-quotation", null, null, null, null)
+            .getHttpStatus());
+    assertEquals(HttpServletResponse.SC_OK,
+        endpoint.handle("purchase order", null, "purchase-order", null, null, null, null)
+            .getHttpStatus());
+  }
+
+  private NeoVectorSearchEndpoint endpointWithTargetAccess(boolean authorized) {
+    return new NeoVectorSearchEndpoint(
+        (namespaces, query, topK, filter, minScore, maxScore) -> "{\"items\":[]}",
+        namespaces -> true,
+        (targets, query, topK, minScore, maxScore) -> "{\"items\":[]}",
+        targets -> authorized);
+  }
 }
