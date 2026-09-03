@@ -1159,7 +1159,8 @@ specs — not a replacement for this one).
 
 ### 4.12 MCP Tool Ergonomics (Wave 3 — ETP-4601)
 
-The MCP tool layer (`/sws/neo/mcp`, routed by `McpToolRouter`) exposes the same specs described
+The MCP tool layer (`/sws/mcp`, with `/mcp` as the WebMCP-friendly alias, routed by
+`McpToolRouter`) exposes the same specs described
 above to AI agents as JSON-RPC tools (`neo_discover`, `neo_schema`, `neo_create`, `neo_update`, …).
 Wave 3 of the MCP improvements adds three agent-ergonomics features on top of that surface. Each is
 additive and backwards-compatible: an existing caller that ignores the new parameter/field sees the

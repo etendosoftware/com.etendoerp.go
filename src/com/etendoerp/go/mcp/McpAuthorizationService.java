@@ -24,7 +24,9 @@ import java.util.Set;
 import org.openbravo.base.exception.OBSecurityException;
 
 /**
- * Enforces MCP tool authorization at execution time.
+ * Enforces MCP tool authorization at execution time. Legacy browser JWT sessions
+ * receive the broad MCP scope set only after JWT validation; role/window access
+ * remains the authoritative operation-level permission check.
  */
 final class McpAuthorizationService {
 

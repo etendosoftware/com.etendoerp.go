@@ -68,7 +68,10 @@ public class McpServlet extends HttpServlet {
   private static final String SERVER_VERSION = "1.0.0";
 
   private static final String CONTENT_TYPE_JSON = "application/json;charset=UTF-8";
-  private static final String LEGACY_JWT_FALLBACK_SCOPES = "neo:read";
+  // Browser sessions use the validated legacy JWT path. RBAC still filters the
+  // catalog and authorizes each operation by the user's role and window access.
+  private static final String LEGACY_JWT_FALLBACK_SCOPES =
+      "neo:read neo:write neo:process neo:report";
 
   // ── CORS ───────────────────────────────────────────────────────────────
 
