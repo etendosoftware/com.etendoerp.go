@@ -31,6 +31,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
@@ -260,6 +261,85 @@ final class NeoHandlerUtils {
     } catch (Exception e) {
       log.warn("Could not enrich {} for lines in {}: {}", fieldName, lineTable, e.getMessage());
     }
+  }
+
+  /**
+   * Runs the whole {@code afterHandle} "enrich every GET row from a batched by-id lookup"
+   * shape, so a handler only supplies the two parts that are actually its own: how to load
+   * the values for a page of ids, and what to write onto a row.
+   *
+   * <p>Extracted because that skeleton — read the data array, bail when it or the previous
+   * result is absent, collect the ids, bail when empty, loop the rows, return
+   * {@code NeoResponse.ok(previousResult.getBody())}, log-and-passthrough on failure — was
+   * byte-identical in three handlers ({@code MatchedInvoiceHandler},
+   * {@code PaymentScheduleDetailHandler}, {@code BinContentsHandler}) and tripped
+   * SonarQube's duplicated-lines-on-new-code gate, the same way
+   * {@link #enrichLinesWithProductCode} was extracted before it.
+   *
+   * <p>Behaviour is exactly what those handlers already did: a row whose id has no entry in
+   * the lookup is skipped untouched, and any exception logs and returns the unmodified
+   * previous result rather than failing the request.
+   *
+   * @param <T>     per-row value type the lookup produces
+   * @param context the current NeoContext
+   * @param lookup  loads the values for all ids on this page, keyed by record id
+   * @param enrich  writes one row's value onto that row; only called when a value exists
+   * @param errorMessage log message used if the enrichment throws
+   * @param log     caller's logger, so the failure is attributed to the real handler
+   * @return the enriched response, or {@code null} when there is nothing to enrich
+   */
+  static <T> NeoResponse enrichGetRowsById(NeoContext context,
+      ThrowingFunction<List<String>, Map<String, T>> lookup,
+      ThrowingBiConsumer<JSONObject, T> enrich, String errorMessage, Logger log) {
+    try {
+      NeoResponse previousResult = context.getPreviousResult();
+      JSONArray dataArr = extractGetDataArray(context);
+      if (dataArr == null || previousResult == null) {
+        return null;
+      }
+      List<String> ids = collectIds(dataArr);
+      if (ids.isEmpty()) {
+        return null;
+      }
+      Map<String, T> valuesById = lookup.apply(ids);
+      for (int i = 0; i < dataArr.length(); i++) {
+        JSONObject rec = dataArr.getJSONObject(i);
+        T value = valuesById.get(rec.optString("id", null));
+        if (value != null) {
+          enrich.accept(rec, value);
+        }
+      }
+      return NeoResponse.ok(previousResult.getBody());
+    } catch (Exception e) {
+      log.error(errorMessage, e);
+      return context.getPreviousResult();
+    }
+  }
+
+  /** {@link java.util.function.Function} that may throw — the JSON/DAL calls here all do. */
+  @FunctionalInterface
+  interface ThrowingFunction<T, R> {
+    /**
+     * Loads the values for a page of ids.
+     *
+     * @param input the argument to apply the function to
+     * @return the function result
+     * @throws JSONException if reading or building the result requires JSON access that fails
+     */
+    R apply(T input) throws JSONException;
+  }
+
+  /** {@link java.util.function.BiConsumer} that may throw — {@code JSONObject#put} does. */
+  @FunctionalInterface
+  interface ThrowingBiConsumer<A, B> {
+    /**
+     * Writes one row's looked-up value onto that row.
+     *
+     * @param first the row being enriched
+     * @param second the value to write onto it
+     * @throws JSONException if {@code JSONObject#put} rejects the value
+     */
+    void accept(A first, B second) throws JSONException;
   }
 
   /**
