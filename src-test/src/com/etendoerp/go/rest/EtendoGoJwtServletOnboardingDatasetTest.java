@@ -34,6 +34,7 @@ import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
+import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingDefaultCustomerService;
@@ -487,6 +488,57 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
   }
 
   @Test
+  public void testEnsureOnboardingDatasetForcesTestModeAfterAdminIdentity() {
+    CountingBaselineService baselineService = new CountingBaselineService();
+    CountingForceTestModeService forceTestModeService = new CountingForceTestModeService();
+    TestServlet servlet = new TestServlet(new SuccessfulImportService(),
+        new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
+        new CountingFiscalDataSetupService(), new CountingDefaultCustomerService(),
+        baselineService);
+    servlet.onboardingForceTestModeService = forceTestModeService;
+    StringWriter output = new StringWriter();
+
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
+        "USER-1", "ROLE-1", null);
+
+    String ndjson = output.toString();
+    assertTrue(ready);
+    assertEquals(1, forceTestModeService.forceCount);
+    assertEquals("CLIENT-1", forceTestModeService.clientId);
+    assertEquals("ORG-1", forceTestModeService.orgId);
+    assertEquals(1, baselineService.registerCount);
+    assertTrue(ndjson.contains("\"step\":\"forceTestMode\""));
+    assertTrue(ndjson.contains("Fiscal test mode configured"));
+    assertTrue(ndjson.indexOf("Admin identity wired")
+        < ndjson.indexOf("Fiscal test mode configured"));
+    assertTrue(ndjson.indexOf("Fiscal test mode configured")
+        < ndjson.indexOf("Data-fix baseline registered"));
+  }
+
+  @Test
+  public void testEnsureOnboardingDatasetSkipsBaselineWhenForceTestModeFails() {
+    CountingBaselineService baselineService = new CountingBaselineService();
+    TestServlet servlet = new TestServlet(new SuccessfulImportService(),
+        new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
+        new CountingFiscalDataSetupService(), new CountingDefaultCustomerService(),
+        baselineService);
+    servlet.onboardingForceTestModeService =
+        new FailingForceTestModeService("broken force test mode");
+    StringWriter output = new StringWriter();
+
+    boolean ready = servlet.ensureOnboardingDataset(new PrintWriter(output), "CLIENT-1", "ORG-1",
+        "USER-1", "ROLE-1", null);
+
+    String ndjson = output.toString();
+    assertFalse(ready);
+    assertEquals(0, baselineService.registerCount);
+    assertTrue(ndjson.contains("\"step\":\"forceTestMode\""));
+    assertTrue(ndjson.contains("\"status\":\"error\""));
+    assertTrue(ndjson.contains("broken force test mode"));
+    assertTrue(ndjson.contains("\"success\":false"));
+  }
+
+  @Test
   public void testEnsureOnboardingDatasetSkipsFiscalDataWhenSequencesFail() {
     CountingFiscalDataSetupService fiscalService = new CountingFiscalDataSetupService();
     TestServlet servlet = new TestServlet(new SuccessfulImportService(),
@@ -562,6 +614,14 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
       // EtendoGoJwtServlet's own field initializer, which throws with no DAL/DB available in this
       // no-database unit test, making every ensureOnboardingDataset() call return false.
       this.onboardingAdminIdentityService = new NoOpAdminIdentityService();
+      // ETP-5117: forceTestModeForFreeTenant also touches the DAL directly (OBDal.getInstance()
+      // reads/writes on Client/Organization/Preference, plus a real TenantPlanService) and is
+      // exercised by its own dedicated unit test (OnboardingForceTestModeServiceTest); stub it to
+      // a no-op here for the same reason as the services above. Without this, the field defaults
+      // to the real service instantiated by EtendoGoJwtServlet's own field initializer, which
+      // throws with no DAL/DB available in this no-database unit test, making every
+      // ensureOnboardingDataset() call return false.
+      this.onboardingForceTestModeService = new NoOpForceTestModeService();
     }
   }
 
@@ -707,6 +767,45 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     @Override
     public void wireAdminIdentity(String clientId, String orgId, String adminUserId,
         String adminRoleId) {
+      throw new OBException(message);
+    }
+  }
+
+  private static class NoOpForceTestModeService extends OnboardingForceTestModeService {
+    @Override
+    public void forceTestModeForFreeTenant(String clientId, String orgId) {
+      // no-op: DAL wiring is covered by OnboardingForceTestModeServiceTest
+    }
+  }
+
+  /**
+   * ETP-5117 — counts {@code forceTestModeForFreeTenant} invocations and captures its arguments,
+   * so the servlet-level wiring (order relative to the other steps, argument pass-through) can be
+   * asserted without touching the DAL.
+   */
+  private static final class CountingForceTestModeService extends NoOpForceTestModeService {
+    private int forceCount;
+    private String clientId;
+    private String orgId;
+
+    @Override
+    public void forceTestModeForFreeTenant(String clientId, String orgId) {
+      forceCount++;
+      this.clientId = clientId;
+      this.orgId = orgId;
+    }
+  }
+
+  /** ETP-5117 — makes {@code forceTestModeForFreeTenant} fail, to test the chain's short-circuit. */
+  private static final class FailingForceTestModeService extends NoOpForceTestModeService {
+    private final String message;
+
+    private FailingForceTestModeService(String message) {
+      this.message = message;
+    }
+
+    @Override
+    public void forceTestModeForFreeTenant(String clientId, String orgId) {
       throw new OBException(message);
     }
   }
