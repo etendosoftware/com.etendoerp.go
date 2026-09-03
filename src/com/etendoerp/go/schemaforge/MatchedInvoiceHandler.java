@@ -25,8 +25,6 @@ import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONArray;
-import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -115,37 +113,19 @@ public class MatchedInvoiceHandler implements NeoHandler {
 
   @Override
   public NeoResponse afterHandle(NeoContext context) {
-    try {
-      NeoResponse previousResult = context.getPreviousResult();
-      JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
-      if (dataArr == null || previousResult == null) {
-        return null;
+    // The extract/collect/guard/loop skeleton lives in NeoHandlerUtils#enrichGetRowsById,
+    // shared with the other by-id enriching handlers; only the query and the per-row writes
+    // below are specific to this window.
+    return NeoHandlerUtils.enrichGetRowsById(context, this::fetchParentIds, (rec, parents) -> {
+      // A null side is left absent rather than written as null: resolveFkNavigation()
+      // treats a missing/blank id as "not navigable" and keeps the plain read-only field.
+      if (parents[0] != null) {
+        rec.put(INVOICE_HEADER_ID, parents[0]);
       }
-      List<String> ids = NeoHandlerUtils.collectIds(dataArr);
-      if (ids.isEmpty()) {
-        return null;
+      if (parents[1] != null) {
+        rec.put(RECEIPT_HEADER_ID, parents[1]);
       }
-      Map<String, String[]> parentIds = fetchParentIds(ids);
-      for (int i = 0; i < dataArr.length(); i++) {
-        JSONObject rec = dataArr.getJSONObject(i);
-        String[] parents = parentIds.get(rec.optString("id", null));
-        if (parents == null) {
-          continue;
-        }
-        // A null side is left absent rather than written as null: resolveFkNavigation()
-        // treats a missing/blank id as "not navigable" and keeps the plain read-only field.
-        if (parents[0] != null) {
-          rec.put(INVOICE_HEADER_ID, parents[0]);
-        }
-        if (parents[1] != null) {
-          rec.put(RECEIPT_HEADER_ID, parents[1]);
-        }
-      }
-      return NeoResponse.ok(previousResult.getBody());
-    } catch (Exception e) {
-      log.error("Error enriching matched purchase invoices with parent document ids", e);
-      return context.getPreviousResult();
-    }
+    }, "Error enriching matched purchase invoices with parent document ids", log);
   }
 
   /**
