@@ -1445,6 +1445,17 @@ class McpToolRouterRouteTest {
     }
   }
 
+  // ── neo_vector_search ──────────────────────────────────────────────────
+
+  @Test
+  @DisplayName("route — neo_vector_search validates required arguments")
+  void vectorSearchMissingArgumentsReturnsErrorContent() throws Exception {
+    JSONObject result = router.route("neo_vector_search", new JSONObject(), READ_SCOPES);
+    assertTrue(result.optBoolean("isError"));
+    assertTrue(result.getJSONArray("content").getJSONObject(0).getString("text")
+        .contains("query and either targets or namespaces are required"));
+  }
+
   // ── docs ────────────────────────────────────────────────────────────────
 
   @Nested
