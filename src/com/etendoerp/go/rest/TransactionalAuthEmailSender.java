@@ -339,8 +339,13 @@ class TransactionalAuthEmailSender {
       OBDal.getInstance().flush();
       OBDal.getInstance().commitAndClose();
       if (response != null && response.getHttpStatus() >= 400) {
-        log.warn("Transactional auth email {} finished with HTTP {}", contractName,
-            response.getHttpStatus());
+        // The contract's own message is the only thing that says WHY it refused — the
+        // observability sink records the status and the metrics, never the reason. Logging just
+        // "HTTP 400" cost a full investigation once (a 400 that turned out to be an unresolved
+        // invite link, indistinguishable from a bad recipient or a missing field): never drop it
+        // again.
+        log.warn("Transactional auth email {} finished with HTTP {}: {}", contractName,
+            response.getHttpStatus(), describeFailure(response));
         return false;
       }
       return response != null;
@@ -355,5 +360,24 @@ class TransactionalAuthEmailSender {
       }
       OBContext.setOBContext(previousContext);
     }
+  }
+
+  /**
+   * Extracts the contract's failure reason from a NEO response for logging.
+   *
+   * @param response the response the email service returned (never {@code null} here)
+   * @return the contract's {@code message}/{@code status}, or the raw body when neither is present
+   */
+  private static String describeFailure(NeoResponse response) {
+    JSONObject body = response.getBody();
+    if (body == null) {
+      return "no response body";
+    }
+    String message = body.optString("message", null);
+    String status = body.optString("status", null);
+    if (StringUtils.isNotBlank(message)) {
+      return StringUtils.isNotBlank(status) ? status + " - " + message : message;
+    }
+    return StringUtils.isNotBlank(status) ? status : body.toString();
   }
 }

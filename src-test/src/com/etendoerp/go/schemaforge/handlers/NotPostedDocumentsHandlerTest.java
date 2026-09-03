@@ -343,8 +343,9 @@ public class NotPostedDocumentsHandlerTest {
    * The 5 document types globally excluded by product decision (ETP-4452) must resolve to their
    * real {@code tableId} via {@link NotPostedDocumentsHandler#DOCUMENT_TYPE_TO_TABLE_ID} (the
    * defensive fix) AND be dropped from the grid because their table is in
-   * {@code APRM_DISABLED_TABLE_IDS} (the exclusion). Before the fix these labels were absent from
-   * the map, so {@code tableId} resolved to {@code null} and the row was never dropped here.
+   * {@code AccountingDocumentTypeSupport.APRM_DISABLED_TABLE_IDS} (the exclusion, ETP-4948:
+   * extracted out of this handler into a shared utility). Before the fix these labels were absent
+   * from the map, so {@code tableId} resolved to {@code null} and the row was never dropped here.
    */
   @Test
   public void buildRowDropsGloballyExcludedBillOfMaterialsProductionRow() throws Exception {
@@ -392,10 +393,10 @@ public class NotPostedDocumentsHandlerTest {
   }
 
   /**
-   * Defensive-fix regression guard: even without going through {@code APRM_DISABLED_TABLE_IDS},
-   * {@code DOCUMENT_TYPE_TO_TABLE_ID} must resolve the real table id for these 5 labels — verified
-   * directly on the map so a future removal from {@code APRM_DISABLED_TYPES} (e.g. exclusion
-   * policy change) does not silently regress the {@code tableId} mapping bug.
+   * Defensive-fix regression guard: even without going through
+   * {@code AccountingDocumentTypeSupport.APRM_DISABLED_TABLE_IDS}, {@code DOCUMENT_TYPE_TO_TABLE_ID}
+   * must resolve the real table id for these 5 labels — verified directly on the map so a future
+   * exclusion-policy change does not silently regress the {@code tableId} mapping bug.
    */
   @Test
   public void documentTypeToTableIdMapsAllFiveGloballyExcludedLabels() {

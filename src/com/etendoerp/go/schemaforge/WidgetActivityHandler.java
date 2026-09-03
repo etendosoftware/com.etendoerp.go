@@ -29,10 +29,12 @@ import javax.inject.Named;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.Role;
 
 /**
  * NeoHandler that returns recent activity from transactional documents
@@ -89,6 +91,10 @@ public class WidgetActivityHandler implements NeoHandler {
       return NeoResponse.error(405, "Method not allowed");
     }
 
+    // ETP-5088 — gated PER ENTRY, not as a whole: this feed mixes sales, purchases and warehouse
+    // movements, and the matrix gives each role a different subset. Resolved before admin mode.
+    Role role = WidgetAccessPolicy.currentRole();
+
     try {
       OBContext.setAdminMode(true);
       try {
@@ -113,6 +119,14 @@ public class WidgetActivityHandler implements NeoHandler {
           String isSoTrx   = String.valueOf(row[6]);
           String recordId  = String.valueOf(row[7]);
 
+          // ETP-5088 — the window this entry belongs to. It was always derivable (doc type +
+          // issotrx) but used only to build the text, which left the payload unable to say what
+          // an entry was about: the frontend could neither gate it nor link to it.
+          String windowSlug = resolveWindowSlug(docType, isSoTrx);
+          if (!WidgetAccessPolicy.canReadSlug(role, windowSlug)) {
+            continue;
+          }
+
           String text = buildDescription(docType, documentNo, docStatus, amount, isSoTrx);
           String type = "CO".equals(docStatus) ? "system" : "note";
 
@@ -122,6 +136,7 @@ public class WidgetActivityHandler implements NeoHandler {
           entry.put("text", text);
           entry.put("timestamp", formatTimestamp(eventTime));
           entry.put("type", type);
+          entry.put("navigation", buildNavigation(windowSlug, recordId));
           data.put(entry);
         }
 
@@ -208,5 +223,50 @@ public class WidgetActivityHandler implements NeoHandler {
     synchronized (ISO_FORMAT) {
       return ISO_FORMAT.format(ts);
     }
+  }
+
+  /**
+   * ETP-5088 — Maps a row of {@link #ACTIVITY_QUERY} to the window slug it belongs to, which is
+   * both the gating key and what makes the entry navigable.
+   *
+   * <p>The query's {@code doc_type} is one of {@code invoice}/{@code order}/{@code shipment}, and
+   * {@code issotrx} splits each into its sales and purchase window. Slugs are the same strings the
+   * frontend and every other widget payload use.</p>
+   *
+   * @param docType the query's {@code doc_type} column
+   * @param isSoTrx the query's {@code issotrx} column ({@code "Y"} for sales)
+   * @return the window slug, or {@code null} for a document type this method does not know — which
+   *         {@link WidgetAccessPolicy#canReadSlug} treats as "deny", so a new, unmapped document
+   *         type is dropped rather than leaked
+   */
+  private String resolveWindowSlug(String docType, String isSoTrx) {
+    boolean isSales = "Y".equals(isSoTrx);
+    if ("invoice".equals(docType)) {
+      return isSales ? WidgetAccessPolicy.SLUG_SALES_INVOICE : WidgetAccessPolicy.SLUG_PURCHASE_INVOICE;
+    }
+    if ("order".equals(docType)) {
+      return isSales ? WidgetAccessPolicy.SLUG_SALES_ORDER : WidgetAccessPolicy.SLUG_PURCHASE_ORDER;
+    }
+    if ("shipment".equals(docType)) {
+      return isSales ? WidgetAccessPolicy.SLUG_GOODS_SHIPMENT : WidgetAccessPolicy.SLUG_GOODS_RECEIPT;
+    }
+    return null;
+  }
+
+  /**
+   * Builds the {@code navigation} object the dashboard uses to open the record behind an entry,
+   * in the same shape every other widget emits ({@code createDashboardNavigation} on the frontend).
+   *
+   * @param windowSlug the resolved window slug
+   * @param recordId the record's ID
+   * @return a {@code {type, window, recordId}} object
+   * @throws JSONException if the object cannot be built
+   */
+  private JSONObject buildNavigation(String windowSlug, String recordId) throws JSONException {
+    JSONObject navigation = new JSONObject();
+    navigation.put("type", "record");
+    navigation.put("window", windowSlug);
+    navigation.put("recordId", recordId);
+    return navigation;
   }
 }
