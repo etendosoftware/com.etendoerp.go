@@ -203,6 +203,48 @@ public class ChartOfAccountsHandlerTest {
 
   @SuppressWarnings("unchecked")
   @Test
+  public void handleReturnsConflictWhenSearchKeyMatchesInactiveExistingAccountOnCreate() throws Exception {
+    // ETP-5101 regression: OBCriteria defaults to active-only filtering. Without
+    // setFilterOnActive(false) on the duplicate-searchKey lookup, an INACTIVE ElementValue
+    // already using this code would be invisible to this pre-check, so the POST would silently
+    // pass validation and only fail later on the raw DB unique constraint (or a generic error)
+    // instead of the intended 409 "Account %s already exists." contract. This mock does not
+    // itself filter by active — it proves the code asks OBCriteria not to.
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    JSONObject body = new JSONObject().put("searchKey", "20000007");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    OBContext obCtx = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(obCtx.getCurrentClient()).thenReturn(client);
+    when(ctx.getObContext()).thenReturn(obCtx);
+
+    ElementValue existingInactive = mock(ElementValue.class); // isActive() defaults to false
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<ElementValue> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(ElementValue.class)).thenReturn(criteria);
+    when(criteria.uniqueResult()).thenReturn(existingInactive);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse resp = handler.handle(ctx);
+
+      assertNotNull("a searchKey matching an INACTIVE existing account must still be rejected as a duplicate",
+          resp);
+      assertEquals(409, resp.getHttpStatus());
+      assertEquals("Account 20000007 already exists.",
+          resp.getBody().getJSONObject("error").getString("message"));
+    }
+
+    verify(criteria).setFilterOnActive(false);
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
   public void handleReturnsNullWhenSearchKeyIsNotDuplicateOnCreate() throws Exception {
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
@@ -1253,6 +1295,28 @@ public class ChartOfAccountsHandlerTest {
     JSONObject entry = invokeToAccountJson(rowWith("Y", "Y", null));
     assertTrue("updated must be JSON null, not absent, when row[7] is null", entry.isNull("updated"));
     assertEquals(JSONObject.NULL, entry.get("updated"));
+  }
+
+  /** A non-null {@code row[7]} shape {@link NeoDateFormat#toCanonical} cannot parse. */
+  private static final String SAMPLE_UPDATED_UNPARSEABLE = "not-a-real-timestamp";
+
+  /**
+   * ETP-5101 regression. {@code NeoDateFormat.toCanonical} returning {@code null} does not mean
+   * "no value" — per that class's own contract (see its class javadoc: "an input it does not
+   * recognise yields {@code null}, and every caller must then pass the original value through
+   * verbatim rather than blank it"), {@code toAccountJson} must fall back to the RAW {@code
+   * row[7]} string when canonicalization fails, never to {@code JSONObject.NULL}. Blanking it
+   * would leave a client with no {@code updated} token to echo back on its next PATCH/PUT,
+   * tripping the mandatory-{@code updated} concurrency guard ({@code missing_updated}) — the
+   * exact bug class ETP-5101 already fixed once, via a different code path (see {@link
+   * #toAccountJsonHandlesPlainStringYValues}).
+   */
+  @Test
+  public void toAccountJsonPassesThroughRawUpdatedWhenUnparseable() throws Exception {
+    JSONObject entry = invokeToAccountJson(rowWith("Y", "Y", SAMPLE_UPDATED_UNPARSEABLE));
+    assertEquals(
+        "an unparseable row[7] must be passed through verbatim as 'updated', not blanked to null",
+        SAMPLE_UPDATED_UNPARSEABLE, entry.getString("updated"));
   }
 
   // ── afterHandle() CRUD POST — ETP-5020 GL Item auto-provisioning (F) ───────

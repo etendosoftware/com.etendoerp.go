@@ -179,6 +179,10 @@ class ChartOfAccountsSaveValidationSupport {
     OBCriteria<ElementValue> criteria = OBDal.getInstance().createCriteria(ElementValue.class);
     criteria.setFilterOnReadableClients(false);
     criteria.setFilterOnReadableOrganization(false);
+    // OBCriteria defaults to active-only, which would miss an inactive ElementValue already
+    // using this code — the POST would then pass this pre-check and fail later on the raw DB
+    // unique constraint (or surface a generic error) instead of the intended 409 contract.
+    criteria.setFilterOnActive(false);
     criteria.add(Restrictions.eq(ElementValue.PROPERTY_CLIENT, obCtx.getCurrentClient()));
     criteria.add(Restrictions.eq(ElementValue.PROPERTY_SEARCHKEY, searchKey));
     criteria.setMaxResults(1);

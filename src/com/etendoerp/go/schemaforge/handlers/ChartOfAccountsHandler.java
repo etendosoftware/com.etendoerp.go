@@ -555,8 +555,14 @@ public class ChartOfAccountsHandler implements NeoHandler {
     entry.put(FIELD_ACTIVE, "Y".equals(String.valueOf(row[6])));
     entry.put("protectedParentLikeSubaccount",
         ChartOfAccountsSaveValidationSupport.isProtectedParentLikeSubaccount(String.valueOf(row[1])) ? "Y" : "N");
-    String canonicalUpdated = row[7] != null ? NeoDateFormat.toCanonical(String.valueOf(row[7]), true) : null;
-    entry.put(FIELD_UPDATED, canonicalUpdated != null ? canonicalUpdated : JSONObject.NULL);
+    // NeoDateFormat.toCanonical returning null does not mean "no value" — its own contract
+    // (see the class javadoc) requires the caller pass the ORIGINAL value through verbatim
+    // rather than blank it, since a client that later PATCHes this record back needs SOME
+    // `updated` token, not a null one that would trip the mandatory-`updated` concurrency guard.
+    String rawUpdated = row[7] != null ? String.valueOf(row[7]) : null;
+    String canonicalUpdated = rawUpdated != null ? NeoDateFormat.toCanonical(rawUpdated, true) : null;
+    String updatedValue = canonicalUpdated != null ? canonicalUpdated : rawUpdated;
+    entry.put(FIELD_UPDATED, updatedValue != null ? updatedValue : JSONObject.NULL);
     return entry;
   }
 
