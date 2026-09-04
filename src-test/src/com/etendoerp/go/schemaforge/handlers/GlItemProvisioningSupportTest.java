@@ -108,6 +108,60 @@ public class GlItemProvisioningSupportTest {
         .anyMatch(c -> c.toString().contains(AccountingCombination.PROPERTY_LOCATIONTOADDRESS)));
     verify(crit).addOrderBy(AccountingCombination.PROPERTY_ID, true);
     verify(crit).setMaxResults(1);
+    // ETP-5101 regression: without this, a subaccount's own cascaded deactivation makes its
+    // natural combination invisible to this lookup — see the method's javadoc.
+    verify(crit).setFilterOnActive(false);
+  }
+
+  // ── findGlItemAccountsByCombination — active-filter regression (ETP-5101) ─────────────────
+
+  /**
+   * ETP-5101 regression: without {@code setFilterOnActive(false)} here, the {@code
+   * GLItemAccounts} row for an already-deactivated subaccount becomes invisible to this
+   * idempotency lookup the moment {@link GlItemProvisioningSupport#setGlItemAccountsActiveForSchema}
+   * correctly deactivates it — the very next rename/edit would then read "nothing provisioned
+   * yet" and mint a duplicate row instead of resyncing the existing one.
+   */
+  @Test
+  public void findGlItemAccountsByCombinationFiltersOnActiveFalse() {
+    AccountingCombination combo = mock(AccountingCombination.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<GLItemAccounts> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(crit);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      support.findGlItemAccountsByCombination(combo);
+    }
+
+    verify(crit).setFilterOnActive(false);
+    verify(crit).setMaxResults(1);
+  }
+
+  // ── findGlItemLinkedToAnyCombinationOf — active-filter regression (ETP-5101) ──────────────
+
+  /**
+   * ETP-5101 regression: this method's inner {@code AccountingCombination} criteria (the
+   * multi-schema idempotency fallback) must ALSO ignore active state — a deactivated
+   * subaccount's combinations must stay findable here too, or a later reactivation / new-schema
+   * pass would mint a second GL Item instead of reusing the existing one.
+   */
+  @Test
+  public void findGlItemLinkedToAnyCombinationOfFiltersOnActiveFalseForComboCriteria() {
+    ElementValue subaccount = mock(ElementValue.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AccountingCombination> comboCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCriteria);
+    when(comboCriteria.list()).thenReturn(Collections.emptyList());
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      support.findGlItemLinkedToAnyCombinationOf(subaccount);
+    }
+
+    verify(comboCriteria).setFilterOnActive(false);
   }
 
   // ── ensureGlItemForSubaccount — guards ─────────────────────────────────────
@@ -161,6 +215,10 @@ public class GlItemProvisioningSupportTest {
     when(subaccount.getClient()).thenReturn(client);
     when(subaccount.getOrganization()).thenReturn(org);
     when(subaccount.getName()).thenReturn("Caja Euros");
+    when(subaccount.getSearchKey()).thenReturn("20000001"); // ETP-5101: code+name composition
+    // ETP-5101: both created records now DERIVE their active state from the subaccount instead of
+    // hardcoding true, so the happy path has to say the subaccount is active for it to stay so.
+    when(subaccount.isActive()).thenReturn(true);
 
     AcctSchema schema = mock(AcctSchema.class);
     AccountingCombination combo = mock(AccountingCombination.class);
@@ -194,7 +252,7 @@ public class GlItemProvisioningSupportTest {
       verify(glItem).setNewOBObject(true);
       verify(glItem).setClient(client);
       verify(glItem).setOrganization(org);
-      verify(glItem).setName("Caja Euros");
+      verify(glItem).setName("20000001-Caja Euros");
       verify(glItem).setActive(true);
       verify(dal).save(glItem);
 
@@ -210,12 +268,237 @@ public class GlItemProvisioningSupportTest {
     }
   }
 
+  // ── ensureGlItemForSubaccount — created records mirror the subaccount's active state ──────
+  //
+  // ETP-5101 review finding (B1). resolveNaturalCombination's setFilterOnActive(false) — added so
+  // active-state sync and rename sync keep working after a subaccount is deactivated — also made
+  // the CREATE path reachable for an inactive, not-yet-provisioned subaccount: hook H
+  // (ChartOfAccountsHandler.syncGlItemNameAfterUpdate) fires on any PATCH/PUT touching
+  // name/searchKey, with no active-state guard upstream. With createGlItem/createGlItemAccounts
+  // hardcoding setActive(true), a plain rename of an INACTIVE subaccount silently minted an
+  // ACTIVE, selectable GL Item (and link) behind it — the very divergence hook G exists to
+  // prevent, just on the create path instead of the update path.
+
+  /**
+   * The bug scenario end-to-end: renaming an inactive, never-provisioned subaccount reaches the
+   * create branch (its natural combination is still findable thanks to
+   * {@code setFilterOnActive(false)}, and no {@code GLItemAccounts} row exists yet), and BOTH the
+   * new {@link GLItem} and its {@link GLItemAccounts} row must come out INACTIVE.
+   */
+  @Test
+  public void ensureGlItemForSubaccountCreatesInactiveRecordsForInactiveSubaccount() {
+    ElementValue subaccount = mock(ElementValue.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(subaccount.getClient()).thenReturn(client);
+    when(subaccount.getOrganization()).thenReturn(org);
+    when(subaccount.getName()).thenReturn("Caja Euros");
+    when(subaccount.getSearchKey()).thenReturn("20000001");
+    when(subaccount.isActive()).thenReturn(false); // deactivated, then renamed (hook H)
+
+    AcctSchema schema = mock(AcctSchema.class);
+    AccountingCombination combo = mock(AccountingCombination.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCrit);
+    // setFilterOnActive(false) keeps the deactivated subaccount's natural combination findable.
+    when(comboCrit.uniqueResult()).thenReturn(combo);
+    when(comboCrit.list()).thenReturn(Collections.emptyList());
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(null); // never provisioned — create branch
+
+    GLItem glItem = mock(GLItem.class);
+    when(glItem.getClient()).thenReturn(client);
+    when(glItem.getOrganization()).thenReturn(org);
+    GLItemAccounts link = mock(GLItemAccounts.class);
+
+    OBProvider obProviderInstance = mock(OBProvider.class);
+    when(obProviderInstance.get(GLItem.class)).thenReturn(glItem);
+    when(obProviderInstance.get(GLItemAccounts.class)).thenReturn(link);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obProvider.when(OBProvider::getInstance).thenReturn(obProviderInstance);
+
+      support.ensureGlItemForSubaccount(subaccount, Collections.singletonList(schema));
+
+      // The GL Item is created, but INACTIVE — never active behind an inactive subaccount.
+      verify(glItem).setActive(false);
+      verify(glItem, never()).setActive(true);
+      verify(dal).save(glItem);
+
+      // Same for the GLItemAccounts link — an active link would leave the account selectable.
+      verify(link).setActive(false);
+      verify(link, never()).setActive(true);
+      verify(dal).save(link);
+    }
+  }
+
+  // ── createGlItem / createGlItemAccounts — focused active-state pins (ETP-5101) ────────────
+
+  @Test
+  public void createGlItemMirrorsInactiveSubaccountActiveState() {
+    ElementValue subaccount = mock(ElementValue.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(subaccount.getClient()).thenReturn(client);
+    when(subaccount.getOrganization()).thenReturn(org);
+    when(subaccount.getName()).thenReturn("Caja Euros");
+    when(subaccount.getSearchKey()).thenReturn("20000001");
+    when(subaccount.isActive()).thenReturn(false);
+
+    GLItem glItem = mock(GLItem.class);
+    OBProvider obProviderInstance = mock(OBProvider.class);
+    when(obProviderInstance.get(GLItem.class)).thenReturn(glItem);
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obProvider.when(OBProvider::getInstance).thenReturn(obProviderInstance);
+
+      GLItem created = support.createGlItem(subaccount);
+
+      assertEquals(glItem, created);
+      verify(glItem).setActive(false);
+      verify(glItem, never()).setActive(true);
+    }
+  }
+
+  @Test
+  public void createGlItemMirrorsActiveSubaccountActiveState() {
+    ElementValue subaccount = mock(ElementValue.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(subaccount.getClient()).thenReturn(client);
+    when(subaccount.getOrganization()).thenReturn(org);
+    when(subaccount.getName()).thenReturn("Caja Euros");
+    when(subaccount.getSearchKey()).thenReturn("20000001");
+    when(subaccount.isActive()).thenReturn(true);
+
+    GLItem glItem = mock(GLItem.class);
+    OBProvider obProviderInstance = mock(OBProvider.class);
+    when(obProviderInstance.get(GLItem.class)).thenReturn(glItem);
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obProvider.when(OBProvider::getInstance).thenReturn(obProviderInstance);
+
+      support.createGlItem(subaccount);
+
+      verify(glItem).setActive(true);
+      verify(glItem, never()).setActive(false);
+    }
+  }
+
+  /**
+   * {@code ElementValue.isActive()} is a {@code Boolean}, so it can legitimately read {@code null}
+   * for a not-yet-flushed object. {@code Boolean.TRUE.equals(...)} makes that resolve to INACTIVE
+   * (fail-closed) rather than throwing or defaulting to active — pinned here so a future rewrite
+   * to {@code subaccount.isActive()} (auto-unboxing) is caught.
+   */
+  @Test
+  public void createGlItemTreatsNullActiveFlagAsInactive() {
+    ElementValue subaccount = mock(ElementValue.class);
+    when(subaccount.getClient()).thenReturn(mock(Client.class));
+    when(subaccount.getOrganization()).thenReturn(mock(Organization.class));
+    when(subaccount.getName()).thenReturn("Caja Euros");
+    when(subaccount.getSearchKey()).thenReturn("20000001");
+    when(subaccount.isActive()).thenReturn(null);
+
+    GLItem glItem = mock(GLItem.class);
+    OBProvider obProviderInstance = mock(OBProvider.class);
+    when(obProviderInstance.get(GLItem.class)).thenReturn(glItem);
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obProvider.when(OBProvider::getInstance).thenReturn(obProviderInstance);
+
+      support.createGlItem(subaccount);
+
+      verify(glItem).setActive(false);
+    }
+  }
+
+  @Test
+  public void createGlItemAccountsMirrorsInactiveSubaccountActiveState() {
+    ElementValue subaccount = mock(ElementValue.class);
+    when(subaccount.isActive()).thenReturn(false);
+    AcctSchema schema = mock(AcctSchema.class);
+    AccountingCombination combo = mock(AccountingCombination.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    GLItem glItem = mock(GLItem.class);
+    when(glItem.getClient()).thenReturn(client);
+    when(glItem.getOrganization()).thenReturn(org);
+
+    GLItemAccounts link = mock(GLItemAccounts.class);
+    OBProvider obProviderInstance = mock(OBProvider.class);
+    when(obProviderInstance.get(GLItemAccounts.class)).thenReturn(link);
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obProvider.when(OBProvider::getInstance).thenReturn(obProviderInstance);
+
+      support.createGlItemAccounts(glItem, schema, combo, subaccount);
+
+      // The link's active state comes from the SUBACCOUNT, not from a hardcoded true (and not
+      // from the GL Item either — the two are provisioned together and must agree).
+      verify(link).setActive(false);
+      verify(link, never()).setActive(true);
+      verify(link).setGLItem(glItem);
+      verify(link).setAccountingSchema(schema);
+      verify(link).setGlitemDebitAcct(combo);
+      verify(link).setGlitemCreditAcct(combo);
+      verify(dal).save(link);
+    }
+  }
+
+  @Test
+  public void createGlItemAccountsMirrorsActiveSubaccountActiveState() {
+    ElementValue subaccount = mock(ElementValue.class);
+    when(subaccount.isActive()).thenReturn(true);
+    AcctSchema schema = mock(AcctSchema.class);
+    AccountingCombination combo = mock(AccountingCombination.class);
+    GLItem glItem = mock(GLItem.class);
+    when(glItem.getClient()).thenReturn(mock(Client.class));
+    when(glItem.getOrganization()).thenReturn(mock(Organization.class));
+
+    GLItemAccounts link = mock(GLItemAccounts.class);
+    OBProvider obProviderInstance = mock(OBProvider.class);
+    when(obProviderInstance.get(GLItemAccounts.class)).thenReturn(link);
+    OBDal dal = mock(OBDal.class);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obProvider.when(OBProvider::getInstance).thenReturn(obProviderInstance);
+
+      support.createGlItemAccounts(glItem, schema, combo, subaccount);
+
+      verify(link).setActive(true);
+      verify(link, never()).setActive(false);
+      verify(dal).save(link);
+    }
+  }
+
   // ── ensureGlItemForSubaccount — idempotency ────────────────────────────────
 
   @Test
   public void ensureGlItemForSubaccountReusesExistingLinkAndSyncsRenamedName() {
     ElementValue subaccount = mock(ElementValue.class);
     when(subaccount.getName()).thenReturn("New Name");
+    when(subaccount.getSearchKey()).thenReturn("30000002"); // ETP-5101: code+name composition
 
     AcctSchema schema = mock(AcctSchema.class);
     AccountingCombination combo = mock(AccountingCombination.class);
@@ -242,7 +525,7 @@ public class GlItemProvisioningSupportTest {
       // Idempotent: no new GLItem/GLItemAccounts minted.
       obProvider.verify(OBProvider::getInstance, never());
       // Rename propagated onto the already-linked GL Item.
-      verify(existingGlItem).setName("New Name");
+      verify(existingGlItem).setName("30000002-New Name");
       verify(dal).save(existingGlItem);
     }
   }
@@ -251,11 +534,13 @@ public class GlItemProvisioningSupportTest {
   public void ensureGlItemForSubaccountDoesNotResaveWhenNameAlreadyMatches() {
     ElementValue subaccount = mock(ElementValue.class);
     when(subaccount.getName()).thenReturn("Same Name");
+    when(subaccount.getSearchKey()).thenReturn("40000003"); // ETP-5101: code+name composition
 
     AcctSchema schema = mock(AcctSchema.class);
     AccountingCombination combo = mock(AccountingCombination.class);
     GLItem existingGlItem = mock(GLItem.class);
-    when(existingGlItem.getName()).thenReturn("Same Name");
+    // Already stores the composed name — nothing to resync.
+    when(existingGlItem.getName()).thenReturn("40000003-Same Name");
     GLItemAccounts existingLink = mock(GLItemAccounts.class);
     when(existingLink.getGLItem()).thenReturn(existingGlItem);
 
@@ -510,6 +795,167 @@ public class GlItemProvisioningSupportTest {
     }
   }
 
+  // ── composeGlItemName — ETP-5101 GL_ITEM_NAME_MAX_LENGTH (60) truncation ──────────────────
+  //
+  // C_Glitem.Name is varchar(60); composeGlItemName must never let the composed "<code>-<name>"
+  // exceed that, and must NEVER truncate the code itself (see class javadoc on
+  // GL_ITEM_NAME_MAX_LENGTH / composeGlItemName). composeGlItemName is a protected static pure
+  // function, so it's exercised directly here (same package); one end-to-end test further below
+  // additionally pins the real GLItem.setName(...) call so a regression in the wiring — not just
+  // the pure function — is also caught.
+
+  @Test
+  public void composeGlItemNameDoesNotTruncateWhenWellUnderLimit() {
+    ElementValue subaccount = mock(ElementValue.class);
+    when(subaccount.getName()).thenReturn("Caja Euros");
+    when(subaccount.getSearchKey()).thenReturn("20000001");
+
+    String composed = GlItemProvisioningSupport.composeGlItemName(subaccount);
+
+    assertEquals("20000001-Caja Euros", composed);
+    assertTrue(composed.length() < 60);
+  }
+
+  @Test
+  public void composeGlItemNameTruncatesLongNameKeepingCodeIntact() {
+    String longName = repeat('A', 80);
+    String code = "20000001"; // 8 chars -> prefix code + "-" = 9 chars -> name budget = 51
+    ElementValue subaccount = mock(ElementValue.class);
+    when(subaccount.getName()).thenReturn(longName);
+    when(subaccount.getSearchKey()).thenReturn(code);
+
+    String composed = GlItemProvisioningSupport.composeGlItemName(subaccount);
+
+    assertEquals(60, composed.length());
+    assertEquals(code + "-" + longName.substring(0, 51), composed);
+    assertTrue("code must survive intact, never truncated", composed.startsWith(code + "-"));
+  }
+
+  @Test
+  public void composeGlItemNameDoesNotTruncateAtExactSixtyCharBoundary() {
+    String code = "20000001"; // prefix code + "-" = 9 chars -> name budget = 51
+    String name = repeat('B', 51); // 51 + 9 = 60 exactly
+    ElementValue subaccount = mock(ElementValue.class);
+    when(subaccount.getName()).thenReturn(name);
+    when(subaccount.getSearchKey()).thenReturn(code);
+
+    String composed = GlItemProvisioningSupport.composeGlItemName(subaccount);
+
+    assertEquals(60, composed.length());
+    assertEquals(code + "-" + name, composed); // full name preserved, nothing cut
+  }
+
+  @Test
+  public void composeGlItemNameTruncatesAtSixtyOneCharsByExactlyOneChar() {
+    String code = "20000001";
+    String name = repeat('C', 52); // 52 + 9 = 61 -> exactly 1 char over the limit
+    ElementValue subaccount = mock(ElementValue.class);
+    when(subaccount.getName()).thenReturn(name);
+    when(subaccount.getSearchKey()).thenReturn(code);
+
+    String composed = GlItemProvisioningSupport.composeGlItemName(subaccount);
+
+    assertEquals(60, composed.length());
+    assertEquals(code + "-" + name.substring(0, 51), composed);
+    assertTrue("code must survive intact at the start, never truncated", composed.startsWith(code));
+  }
+
+  @Test
+  public void composeGlItemNameTruncatesLongNameWhenNoCodePresent() {
+    String longName = repeat('D', 80);
+    ElementValue subaccount = mock(ElementValue.class);
+    when(subaccount.getName()).thenReturn(longName);
+    when(subaccount.getSearchKey()).thenReturn(null);
+
+    String composed = GlItemProvisioningSupport.composeGlItemName(subaccount);
+
+    assertEquals(60, composed.length());
+    assertEquals(longName.substring(0, 60), composed);
+    assertTrue("no trailing space/code artifact from the absent code-append logic",
+        !composed.endsWith(" "));
+  }
+
+  @Test
+  public void composeGlItemNameTruncatesLongNameWhenCodeIsEmptyString() {
+    String longName = repeat('E', 80);
+    ElementValue subaccount = mock(ElementValue.class);
+    when(subaccount.getName()).thenReturn(longName);
+    when(subaccount.getSearchKey()).thenReturn("");
+
+    String composed = GlItemProvisioningSupport.composeGlItemName(subaccount);
+
+    assertEquals(60, composed.length());
+    assertEquals(longName.substring(0, 60), composed);
+  }
+
+  /**
+   * End-to-end pin: {@link GlItemProvisioningSupport#createGlItem} (via
+   * {@link GlItemProvisioningSupport#ensureGlItemForSubaccount}) must actually call
+   * {@code GLItem.setName(...)} with the truncated composed name — not just
+   * {@code composeGlItemName} in isolation — so a regression in the wiring between the two is
+   * also caught, mirroring {@code ensureGlItemForSubaccountCreatesGlItemAndAccountsWhenNoneExist}
+   * above but with a name long enough to require truncation.
+   */
+  @Test
+  public void ensureGlItemForSubaccountTruncatesLongNameToSixtyCharsWhenCreatingGlItem() {
+    ElementValue subaccount = mock(ElementValue.class);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(subaccount.getClient()).thenReturn(client);
+    when(subaccount.getOrganization()).thenReturn(org);
+    String longName = repeat('F', 80);
+    String code = "20000001";
+    when(subaccount.getName()).thenReturn(longName);
+    when(subaccount.getSearchKey()).thenReturn(code);
+
+    AcctSchema schema = mock(AcctSchema.class);
+    AccountingCombination combo = mock(AccountingCombination.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(combo);
+    when(comboCrit.list()).thenReturn(Collections.emptyList());
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(null);
+
+    GLItem glItem = mock(GLItem.class);
+    when(glItem.getClient()).thenReturn(client);
+    when(glItem.getOrganization()).thenReturn(org);
+    GLItemAccounts link = mock(GLItemAccounts.class);
+
+    OBProvider obProviderInstance = mock(OBProvider.class);
+    when(obProviderInstance.get(GLItem.class)).thenReturn(glItem);
+    when(obProviderInstance.get(GLItemAccounts.class)).thenReturn(link);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obProvider.when(OBProvider::getInstance).thenReturn(obProviderInstance);
+
+      support.ensureGlItemForSubaccount(subaccount, Collections.singletonList(schema));
+
+      ArgumentCaptor<String> nameCaptor = ArgumentCaptor.forClass(String.class);
+      verify(glItem).setName(nameCaptor.capture());
+      String expectedName = code + "-" + longName.substring(0, 51);
+      assertEquals(60, nameCaptor.getValue().length());
+      assertEquals(expectedName, nameCaptor.getValue());
+      assertTrue("code must survive intact at the start, never truncated",
+          nameCaptor.getValue().startsWith(code));
+    }
+  }
+
+  /** Builds a {@code length}-char string of {@code c} repeated, without relying on Java 11's {@code String.repeat}. */
+  private static String repeat(char c, int length) {
+    StringBuilder sb = new StringBuilder(length);
+    for (int i = 0; i < length; i++) {
+      sb.append(c);
+    }
+    return sb.toString();
+  }
+
   // ── setGlItemAccountsActiveForSubaccount — deactivate / reactivate ─────────
 
   @Test
@@ -682,5 +1128,132 @@ public class GlItemProvisioningSupportTest {
     // Symmetric guard to ensureGlItemForSubaccountNoOpsWhenSchemasEmpty.
     support.setGlItemAccountsActiveForSubaccount(mock(ElementValue.class), Collections.emptyList(),
         false);
+  }
+
+  // ── Full bug-scenario regression (ETP-5101) ────────────────────────────────
+  //
+  // The other tests above pin the QUERY-level half of the fix (setFilterOnActive(false) is
+  // actually called). This test pins the CALLER-level half: even when resolveNaturalCombination
+  // and findGlItemAccountsByCombination hand back an already-INACTIVE AccountingCombination /
+  // GLItemAccounts row (exactly what an active-filtered query would have hidden, and exactly what
+  // core's deactivation cascade produces — see class javadoc), setGlItemAccountsActiveForSchema
+  // must still treat them as found and proceed to sync, never silently re-derive "no accounting
+  // use" (Case 3) from their inactive state. The two lookup seams are overridden directly,
+  // mirroring OnboardingAccountingWiringServiceTest's TestableService pattern referenced in this
+  // class's own javadoc, so this test is independent of the OBCriteria/setFilterOnActive plumbing
+  // already covered above.
+
+  @Test
+  public void setGlItemAccountsActiveForSchemaSyncsAnAlreadyInactiveLinkFoundDespiteFilter() {
+    ElementValue subaccount = mock(ElementValue.class);
+    AcctSchema schema = mock(AcctSchema.class);
+    AccountingCombination inactiveCombo = mock(AccountingCombination.class);
+    when(inactiveCombo.isActive()).thenReturn(false); // the exact ETP-5101 scenario: the
+        // subaccount's own natural combination cascaded to isactive='N'
+    GLItemAccounts inactiveLink = mock(GLItemAccounts.class);
+    when(inactiveLink.isActive()).thenReturn(false); // already deactivated by an earlier sync
+
+    class TestableSupport extends GlItemProvisioningSupport {
+      @Override
+      protected AccountingCombination resolveNaturalCombination(ElementValue s, AcctSchema sch) {
+        // simulates setFilterOnActive(false) finding it despite isactive='N'
+        return inactiveCombo;
+      }
+
+      @Override
+      protected GLItemAccounts findGlItemAccountsByCombination(AccountingCombination combo) {
+        assertEquals(inactiveCombo, combo);
+        return inactiveLink; // ditto for the GLItemAccounts row
+      }
+    }
+
+    TestableSupport testableSupport = new TestableSupport();
+
+    OBDal dal = mock(OBDal.class);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      // Reactivating: the subaccount comes back active, the link must follow even though both
+      // the combo AND the link were found in an inactive state — neither is treated as absent.
+      testableSupport.setGlItemAccountsActiveForSubaccount(subaccount,
+          Collections.singletonList(schema), true);
+
+      verify(inactiveLink).setActive(true);
+      verify(dal).save(inactiveLink);
+    }
+  }
+
+  // ── ensureGlItemForSchema — multi-schema reuse blast radius (ETP-5101 QA) ─────────────────
+  //
+  // setFilterOnActive(false) on findGlItemLinkedToAnyCombinationOf's inner criteria (added so a
+  // deactivated subaccount's OTHER combinations stay findable for GL Item reuse) means the GL
+  // Item handed back to ensureGlItemForSchema for a NOT-yet-provisioned schema can now be one
+  // discovered via an inactive link on a DIFFERENT schema. This test pins that the NEW
+  // GLItemAccounts row minted for the current schema still derives its active state solely from
+  // the CURRENT subaccount.isActive() read — never from the reused GLItem's own (unrelated,
+  // possibly stale) active flag — so a reused-but-happens-to-be-flagged-active GL Item can never
+  // resurrect an active link behind an inactive subaccount.
+
+  @Test
+  public void ensureGlItemForSchemaDerivesNewLinkActiveStateFromSubaccountNotFromReusedGlItem() {
+    ElementValue subaccount = mock(ElementValue.class);
+    when(subaccount.isActive()).thenReturn(false); // inactive subaccount being provisioned for a
+        // second, newly-active schema
+    AcctSchema newSchema = mock(AcctSchema.class);
+    AccountingCombination comboForNewSchema = mock(AccountingCombination.class);
+
+    // Reused GL Item, found via findGlItemLinkedToAnyCombinationOf's now-active-filter-free scan
+    // of this subaccount's OTHER combinations — deliberately left "active" on its own flag to
+    // prove that flag is never consulted by the new link's active derivation.
+    GLItem reusedGlItem = mock(GLItem.class);
+    when(reusedGlItem.isActive()).thenReturn(true);
+    Client client = mock(Client.class);
+    Organization org = mock(Organization.class);
+    when(reusedGlItem.getClient()).thenReturn(client);
+    when(reusedGlItem.getOrganization()).thenReturn(org);
+
+    GLItemAccounts newLink = mock(GLItemAccounts.class);
+    OBProvider obProviderInstance = mock(OBProvider.class);
+    when(obProviderInstance.get(GLItemAccounts.class)).thenReturn(newLink);
+
+    class TestableSupport extends GlItemProvisioningSupport {
+      @Override
+      protected AccountingCombination resolveNaturalCombination(ElementValue s, AcctSchema sch) {
+        assertEquals(newSchema, sch);
+        return comboForNewSchema;
+      }
+
+      @Override
+      protected GLItemAccounts findGlItemAccountsByCombination(AccountingCombination combo) {
+        return null; // nothing provisioned yet for the current schema
+      }
+
+      @Override
+      protected GLItem findGlItemLinkedToAnyCombinationOf(ElementValue s) {
+        return reusedGlItem; // reuse path: some OTHER schema's link already exists
+      }
+    }
+
+    TestableSupport testableSupport = new TestableSupport();
+
+    OBDal dal = mock(OBDal.class);
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obProvider.when(OBProvider::getInstance).thenReturn(obProviderInstance);
+
+      GLItem result = testableSupport.ensureGlItemForSchema(subaccount, newSchema, null);
+
+      assertEquals(reusedGlItem, result);
+      // No brand-new GLItem was minted — the reused one was threaded through as-is.
+      verify(obProviderInstance, never()).get(GLItem.class);
+      // The reused GLItem's own (stale) active flag was never touched or re-derived.
+      verify(reusedGlItem, never()).setActive(true);
+      verify(reusedGlItem, never()).setActive(false);
+      // The new link mirrors the CURRENT subaccount state (inactive), not the reused GL Item's.
+      verify(newLink).setActive(false);
+      verify(newLink, never()).setActive(true);
+      verify(dal).save(newLink);
+    }
   }
 }
