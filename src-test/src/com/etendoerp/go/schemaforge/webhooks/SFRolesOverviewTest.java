@@ -42,6 +42,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.MockedConstruction;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.client.application.ProcessAccess;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
@@ -91,6 +92,16 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         categoryQuery = mock(NativeQuery.class);
         when(mockSession.createNativeQuery(anyString())).thenReturn(categoryQuery);
         when(categoryQuery.getResultList()).thenReturn(Collections.emptyList());
+
+        // ETP-5071: every role card now also resolves 3 proxy access tiers (2 extra
+        // WindowAccess lookups plus one ProcessAccess lookup — see
+        // SFRolesOverview#mergeProxyAccessTiers) right after its own real-GO-window tier map.
+        // Default the new ProcessAccess criteria to "no grants" so tests that don't care about
+        // it don't need to know about it (mirrors categoryQuery's own default above). Tests
+        // that stub OBCriteria<WindowAccess>'s list() with an exact per-role sequence must
+        // account for the 2 extra WindowAccess.list() calls per role card this introduces.
+        OBCriteria<ProcessAccess> processAccessCriteria = mockCriteria(ProcessAccess.class);
+        when(processAccessCriteria.list()).thenReturn(Collections.emptyList());
     }
 
     // ── mocking helpers ──────────────────────────────────────────────────
