@@ -234,8 +234,12 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String KEY_DESCRIPTION = "description";
   private static final String KEY_PENDING_BALANCE = "pendingBalance";
   private static final String KEY_SUGGESTED = "suggested";
-  /** Candidate matched only within the account's amount/date tolerance — drives the red badge. */
-  private static final String KEY_NEAR_MATCH = "nearMatch";
+  /**
+   * Candidate matched only within the account's amount/date tolerance — drives the red badge.
+   * Defined once in {@link AutoMatchSupport} because the autoMatch groups carry the very same flag:
+   * the candidates panel and the suggestion modal must not disagree on what a near match is called.
+   */
+  private static final String KEY_NEAR_MATCH = AutoMatchSupport.KEY_NEAR_MATCH;
   /** Why an un-reconcile / reactivate could not complete — shown verbatim by the client. */
   static final String KEY_FAILURE_REASON = "failureReason";
   private static final String COL_PARTNER_NAME = "partner_name";
@@ -1059,7 +1063,15 @@ public class ReconciliationHandler implements NeoHandler {
       NeoResponse prepError = ReconciliationFlowSupport.prepareGroup(
           this, account, groupEntry, prepared);
       if (prepError != null) {
-        results.put(prepError.getBody());
+        // Tag the failure with the line it belongs to. results[] is not aligned with the submitted
+        // groups (failures are appended in this pass, successes in the next), and a success entry
+        // already carries statementLineId — without this the client can count failures but cannot
+        // say WHICH suggestion failed, which is the whole point of a per-group result.
+        JSONObject failure = prepError.getBody();
+        if (failure != null && !failure.has(KEY_STATEMENT_LINE_ID)) {
+          failure.put(KEY_STATEMENT_LINE_ID, groupEntry.optString(KEY_STATEMENT_LINE_ID, ""));
+        }
+        results.put(failure);
       }
     }
 

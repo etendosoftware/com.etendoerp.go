@@ -72,6 +72,17 @@ final class AutoMatchSupport {
   static final String KEY_COSTCENTER_ID = "costcenterId";
   static final String KEY_PRODUCT_ID = "productId";
 
+  /**
+   * Marks a group whose operation only matches within the account's amount/date tolerance, so
+   * applying it will also post the leftover to the account's GL Item Difference. Shared with
+   * {@code ReconciliationHandler}'s candidates payload, which uses the same wire name.
+   *
+   * <p>Deliberately a flag of its own rather than "{@code difference != 0}": {@link #buildMultiGroup}
+   * also emits a non-zero {@code difference} for the rounding slack {@link #signalGroupTolerance}
+   * allows on a 1:N group, and that is NOT a near match.
+   */
+  static final String KEY_NEAR_MATCH = "nearMatch";
+
   /** Caps the partner/reference subset search to keep the preview predictable and bounded. */
   private static final int MAX_SIGNAL_SUBSET_SIZE = 12;
   private static final BigDecimal SIGNAL_MATCH_TOLERANCE = new BigDecimal("0.01");
@@ -661,10 +672,18 @@ final class AutoMatchSupport {
         dateTolDays);
     if (nearMatch != null) {
       // findNearMatch already claimed it in usedTxnIds/excludedTxns. WEAK is Core's own vocabulary,
-      // carried for diagnostics only (no consumer reads it); what marks the group as a difference is
-      // the non-zero `difference` field buildStandardGroup emits, which the suggestion modal shows.
-      groups.put(buildStandardGroup(line, nearMatch, FIN_MatchedTransaction.WEAK));
-      return new int[]{1, 0};
+      // carried for diagnostics only; KEY_NEAR_MATCH is the flag consumers read — see its javadoc
+      // for why the non-zero `difference` alone cannot play that role.
+      JSONObject nearMatchGroup = buildStandardGroup(line, nearMatch, FIN_MatchedTransaction.WEAK);
+      nearMatchGroup.put(KEY_NEAR_MATCH, true);
+      groups.put(nearMatchGroup);
+      // An AMOUNT deviation also creates the GL-item movement that absorbs the leftover
+      // (ReconciliationDifferenceSupport.applyInlineDifference), so it counts on both sides —
+      // reporting only the link is what made the modal promise one movement and create two. A
+      // DATE-only near match has a zero difference and creates nothing, so it stays a plain link.
+      boolean postsDifference = new BigDecimal(nearMatchGroup.optString(STATE_DIFFERENCE, "0"))
+          .compareTo(BigDecimal.ZERO) != 0;
+      return new int[]{1, postsDifference ? 1 : 0};
     }
     MatchRuleEngine.MatchResult ruleResult = MatchRuleEngine.evaluate(
         StringUtils.trimToEmpty(line.getDescription()),

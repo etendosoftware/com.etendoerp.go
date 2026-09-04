@@ -1241,6 +1241,96 @@ public class AutoMatchSupportTest {
       assertEquals("the proposed group carries no amount difference",
           0, new BigDecimal(groups.getJSONObject(0).getString("difference"))
               .compareTo(BigDecimal.ZERO));
+      // The flag describes WHY the group was proposed, not what applying it writes: a date-only
+      // near match creates nothing, yet the modal still has to paint it as a difference rather
+      // than as a plain suggestion. Reading `difference != 0` instead would lose exactly this row.
+      assertTrue("a date-only near match is still flagged as one",
+          groups.getJSONObject(0).optBoolean(AutoMatchSupport.KEY_NEAR_MATCH, false));
+    }
+  }
+
+  /**
+   * The AMOUNT half of the near-match preview: a 27.00 line against a 26.62 movement (0.38 = 1.41%,
+   * inside the 5% tolerance) is proposed as a near match AND counted as a creation, because
+   * applying it also posts the 0.38 leftover to the account's GL Item Difference
+   * ({@code ReconciliationDifferenceSupport.applyInlineDifference}).
+   *
+   * <p>Reporting only the link is the bug this asserts against: the modal promised one movement
+   * and the batch created two. The {@code nearMatch} flag is asserted alongside the delta because
+   * both halves feed the same footer — one drives the badge, the other the "will create" count.
+   *
+   * @throws Exception if the DAL stubbing or the JSON assertions fail
+   */
+  @Test
+  public void testMatchFallbackAmountNearMatchIsFlaggedAndCountsAsACreation() throws Exception {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-FB-AMT", LINE_CREDIT, NO_DEBIT, today);
+    FIN_FinaccTransaction deviating = nearTxn(T_NEAR, NEAR_AMOUNT, today);
+
+    Set<String> usedTxnIds = new HashSet<>();
+    List<FIN_FinaccTransaction> excludedTxns = new java.util.ArrayList<>();
+    JSONArray groups = new JSONArray();
+
+    try (MockedStatic<OBDal> obDal =
+        mockUnreconciledPool(Collections.singletonList(deviating))) {
+      int[] delta = AutoMatchSupport.matchFallback(NEAR_ACC, line, usedTxnIds, excludedTxns,
+          Collections.emptyList(), groups, DATE_TOL_DAYS, PCT_FIVE);
+
+      assertEquals("the near match links one operation", 1, delta[0]);
+      assertEquals("the leftover posting is a creation too", 1, delta[1]);
+      assertEquals(1, groups.length());
+
+      JSONObject group = groups.getJSONObject(0);
+      assertTrue("the group is flagged as a near match",
+          group.optBoolean(AutoMatchSupport.KEY_NEAR_MATCH, false));
+      assertEquals("the 0.38 leftover travels on the group", 0,
+          new BigDecimal("0.38").compareTo(new BigDecimal(group.getString("difference"))));
+      assertTrue(usedTxnIds.contains(T_NEAR));
+      assertTrue(excludedTxns.contains(deviating));
+    }
+  }
+
+  /**
+   * <b>The trap {@link AutoMatchSupport#KEY_NEAR_MATCH} exists to avoid.</b> A 1:N signal group is
+   * allowed to close with a non-zero {@code difference} — {@link AutoMatchSupport#signalGroupTolerance}
+   * grants rounding slack on the SUM — and that is NOT a near match: nothing is posted for it, and
+   * the modal must not offer a difference row or bump its create count.
+   *
+   * <p>So a consumer that infers the badge from {@code difference != 0} instead of reading the flag
+   * regresses here: 49.00 + 50.00 against a 100.00 line leaves 1.00 on a group that must come back
+   * unflagged, with a {@code {2, 0}} delta.
+   *
+   * @throws Exception if the DAL stubbing or the JSON assertions fail
+   */
+  @Test
+  public void testMatchFallbackSignalGroupWithRoundingSlackIsNotANearMatch() throws Exception {
+    FIN_BankStatementLine line = bslLine("L-SLACK", "100.00", NO_DEBIT);
+
+    BusinessPartner bp = mock(BusinessPartner.class);
+    lenient().when(bp.getId()).thenReturn("BP-SLACK");
+    // 99.00 against 100.00: a 1.00 gap, inside the 5.00 slack a 5% tolerance grants on the sum.
+    FIN_FinaccTransaction t1 = txnWithPartner("T-S1", "49.00", bp);
+    FIN_FinaccTransaction t2 = txnWithPartner("T-S2", "50.00", bp);
+
+    Set<String> usedTxnIds = new HashSet<>();
+    List<FIN_FinaccTransaction> excludedTxns = new java.util.ArrayList<>();
+    JSONArray groups = new JSONArray();
+
+    try (MockedStatic<OBDal> obDal = mockUnreconciledPool(Arrays.asList(t1, t2))) {
+      int[] delta = AutoMatchSupport.matchFallback("ACC-SLACK", line, usedTxnIds, excludedTxns,
+          Collections.emptyList(), groups, DATE_TOL_DAYS, PCT_FIVE);
+
+      assertEquals("both operations are linked", 2, delta[0]);
+      assertEquals("a 1:N group creates nothing, whatever its rounding slack", 0, delta[1]);
+      assertEquals(1, groups.length());
+
+      JSONObject group = groups.getJSONObject(0);
+      assertEquals("the rounding slack IS carried as a difference", 0,
+          new BigDecimal("1.00").compareTo(new BigDecimal(group.getString("difference"))));
+      assertFalse("a 1:N signal group is never a near match",
+          group.optBoolean(AutoMatchSupport.KEY_NEAR_MATCH, false));
+      assertFalse("and the key is not emitted at all",
+          group.has(AutoMatchSupport.KEY_NEAR_MATCH));
     }
   }
 

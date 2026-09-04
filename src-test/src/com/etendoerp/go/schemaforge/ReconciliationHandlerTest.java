@@ -5254,4 +5254,145 @@ public class ReconciliationHandlerTest {
     verify(handler).matchBankStatementLine(eq(line),
         argThat(ops -> ops.contains("t1") && ops.contains(TRX_DIFF_ID)), eq(rec));
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-4965 QA — every applySuggestions failure names its statement line
+  //
+  // results[] is NOT aligned with the submitted groups: prepareGroup failures are appended in the
+  // first pass, successes in the second, so index i of results is not group i of the request. A
+  // success entry has always carried statementLineId; without the same tag on a failure the modal
+  // can count how many groups failed but not say WHICH — which is the entire point of a per-group
+  // result, and what the "no GL item" toast needs to keep the offending row selected.
+  //
+  // Both rejection shapes are covered, because they are built by different code: the structured
+  // GL_ITEM_REQUIRED body (NeoResponse.error(status, JSONObject)) already carries extra fields,
+  // while a plain guard clause (NeoResponse.error(status, String)) produces a bare {error:{...}}.
+  // Tagging only the shape that happened to be tested is the regression this pair blocks.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /** The entry in {@code results} whose {@code statementLineId} is {@code lineId}, or null. */
+  private static JSONObject resultForLine(JSONArray results, String lineId) throws Exception {
+    for (int i = 0; i < results.length(); i++) {
+      JSONObject entry = results.getJSONObject(i);
+      if (lineId.equals(entry.optString("statementLineId", null))) {
+        return entry;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * A group rejected with the structured {@code GL_ITEM_REQUIRED} body comes back tagged with the
+   * line it belongs to, and with the RIGHT one: the batch also carries a healthy group, so a
+   * hard-coded or first-group value would pass a single-group test and fail here.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testApplySuggestionsGlItemFailureCarriesItsStatementLineId() throws Exception {
+    withFivePercentTolerance();
+    FIN_FinancialAccount account = accountWithoutDifferenceGlItem();
+    // A 0.38 gap, inside tolerance, with no concept to post it to → GL_ITEM_REQUIRED.
+    FIN_BankStatementLine gapLine =
+        lineFor(ACC_ID, new BigDecimal("27.00"), BigDecimal.ZERO, null);
+    when(gapLine.getId()).thenReturn("line-gap");
+    FIN_FinaccTransaction gapTrx = trxFor(ACC_ID, new BigDecimal("26.62"), BigDecimal.ZERO, null);
+    // A second, healthy group so results[] holds a success next to the failure.
+    FIN_BankStatementLine okLine = lineFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, null);
+    when(okLine.getId()).thenReturn("line-ok");
+    FIN_FinaccTransaction okTrx = trxFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, null);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-tagged");
+
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(gapLine).when(handler).loadLine("line-gap");
+    doReturn(okLine).when(handler).loadLine("line-ok");
+    doReturn(gapTrx).when(handler).loadTransaction("t-gap");
+    doReturn(okTrx).when(handler).loadTransaction("t-ok");
+    doNothing().when(handler).tagMatchGroup(any());
+    stubReconciliationCompose(rec, "Success");
+
+    JSONObject body = new JSONObject()
+        .put("financialAccountId", ACC_ID)
+        .put("groups", new JSONArray()
+            .put(new JSONObject()
+                .put("statementLineId", "line-gap")
+                .put("operationIds", new JSONArray().put("t-gap")))
+            .put(new JSONObject()
+                .put("statementLineId", "line-ok")
+                .put("operationIds", new JSONArray().put("t-ok"))));
+
+    NeoResponse response = handler.applySuggestions(body);
+
+    assertEquals(201, response.getHttpStatus());
+    JSONArray results = response.getBody().getJSONObject("response").getJSONObject("data")
+        .getJSONArray("results");
+    assertEquals(2, results.length());
+
+    JSONObject failure = resultForLine(results, "line-gap");
+    assertNotNull("the failed group names its own statement line", failure);
+    assertEquals(CODE_GL_ITEM_REQUIRED, failure.getString("code"));
+    // The healthy group is still identifiable and did not inherit the failure's line.
+    JSONObject success = resultForLine(results, "line-ok");
+    assertNotNull(success);
+    assertEquals("rec-tagged", success.getString("reconciliationId"));
+    assertFalse("a success carries no failure code", success.has("code"));
+  }
+
+  /**
+   * The other rejection shape: an already-reconciled line is refused by a plain guard clause, whose
+   * body is a bare {@code {error:{message,status}}} with no room reserved for the id. It must be
+   * tagged too — a batch that half-fails on stale suggestions is the common case, and the modal
+   * cannot re-select the offending rows from a message string.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testApplySuggestionsPlainRejectionCarriesItsStatementLineId() throws Exception {
+    FIN_FinancialAccount account = accountWithDifferenceGlItem();
+    // Already matched to a transaction → prepareGroup rejects it with a 409 and a bare error body.
+    FIN_FinaccTransaction alreadyMatched =
+        trxFor(ACC_ID, new BigDecimal("30.00"), BigDecimal.ZERO, null);
+    FIN_BankStatementLine staleLine =
+        lineFor(ACC_ID, new BigDecimal("30.00"), BigDecimal.ZERO, alreadyMatched);
+    when(staleLine.getId()).thenReturn("line-stale");
+    FIN_BankStatementLine okLine = lineFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, null);
+    when(okLine.getId()).thenReturn("line-ok");
+    FIN_FinaccTransaction okTrx = trxFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, null);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-stale-batch");
+
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(staleLine).when(handler).loadLine("line-stale");
+    doReturn(okLine).when(handler).loadLine("line-ok");
+    doReturn(okTrx).when(handler).loadTransaction("t-ok");
+    doNothing().when(handler).tagMatchGroup(any());
+    stubReconciliationCompose(rec, "Success");
+
+    JSONObject body = new JSONObject()
+        .put("financialAccountId", ACC_ID)
+        .put("groups", new JSONArray()
+            .put(new JSONObject()
+                .put("statementLineId", "line-stale")
+                .put("operationIds", new JSONArray().put("t-stale")))
+            .put(new JSONObject()
+                .put("statementLineId", "line-ok")
+                .put("operationIds", new JSONArray().put("t-ok"))));
+
+    NeoResponse response = handler.applySuggestions(body);
+
+    assertEquals(201, response.getHttpStatus());
+    JSONArray results = response.getBody().getJSONObject("response").getJSONObject("data")
+        .getJSONArray("results");
+    assertEquals(2, results.length());
+
+    JSONObject failure = resultForLine(results, "line-stale");
+    assertNotNull("a plain guard-clause rejection names its statement line too", failure);
+    assertTrue(failure.getJSONObject("error").getString("message")
+        .contains("already reconciled"));
+    assertNotNull(resultForLine(results, "line-ok"));
+    // The stale line never reached the shared reconciliation.
+    verify(handler, never()).matchBankStatementLine(eq(staleLine), any(), any());
+    verify(handler).matchBankStatementLine(eq(okLine), any(), eq(rec));
+  }
 }
