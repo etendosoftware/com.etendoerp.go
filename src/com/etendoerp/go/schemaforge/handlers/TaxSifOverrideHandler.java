@@ -151,7 +151,7 @@ public class TaxSifOverrideHandler implements NeoHandler {
         // Remaining fields still need the default CRUD to persist them onto c_tax.
         return null;
       }
-      return buildOverrideOnlyResponse(taxId, overrideValues);
+      return buildOverrideOnlyResponse(taxId, context);
     } catch (Exception e) {
       log.error("TaxSifOverrideHandler.handle error for tax {}", taxId, e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
@@ -295,13 +295,43 @@ public class TaxSifOverrideHandler implements NeoHandler {
     }
   }
 
-  private static NeoResponse buildOverrideOnlyResponse(String taxId, Map<String, String> appliedValues)
+  /**
+   * Builds the response for a PATCH/PUT whose body was ENTIRELY consumed by the SIF override
+   * redirect (nothing left for the default CRUD to write onto {@code c_tax}).
+   *
+   * <p>Two things this MUST match, or the header form's dropdown silently goes blank right
+   * after a successful save even though the write itself persisted correctly (ETP-5122
+   * follow-up):
+   * <ul>
+   *   <li>{@code response.data} as a one-element {@link JSONArray} — the same shape
+   *       {@code NeoCrudHandler}'s default PATCH/PUT response uses (SmartClient DataSource
+   *       protocol, see {@code DefaultJsonDataService}), and the shape every frontend save
+   *       path already unwraps via {@code data?.response?.data?.[0]}
+   *       ({@code useEntity.js}'s {@code performSave}, {@code DetailView.jsx}'s inline-row and
+   *       secondary-tab PATCH handlers).</li>
+   *   <li>The EFFECTIVE value (D5 precedence, the same {@link #queryEffectiveValues} /
+   *       {@link #applyEffectiveValues} formula {@link #afterHandle} applies on GET) of ALL 8
+   *       SIF columns — not just the one or two fields that happened to be in THIS particular
+   *       request. A request that only touches {@code tbaiClaveregimeniva} must still answer
+   *       with the effective value of the other 7 columns (each explicitly {@code null} when
+   *       neither {@code c_tax} nor the override carries one), exactly like a GET would,
+   *       instead of silently omitting them.</li>
+   * </ul>
+   */
+  private static NeoResponse buildOverrideOnlyResponse(String taxId, NeoContext context)
       throws JSONException {
+    String organizationId = resolveContextOrganizationId(context);
+    Map<String, Map<String, String>> effectiveByTaxId =
+        queryEffectiveValues(Collections.singletonList(taxId), organizationId);
+    Map<String, String> effective = effectiveByTaxId.getOrDefault(taxId, Collections.emptyMap());
+
     JSONObject row = new JSONObject();
     row.put(FIELD_ID, taxId);
-    for (Map.Entry<String, String> entry : appliedValues.entrySet()) {
-      row.put(entry.getKey(), entry.getValue() == null ? JSONObject.NULL : entry.getValue());
+    for (String jsonKey : SIF_FIELD_TO_COLUMN.keySet()) {
+      String value = effective.get(jsonKey);
+      row.put(jsonKey, value == null ? JSONObject.NULL : value);
     }
+
     JSONArray data = new JSONArray();
     data.put(row);
     JSONObject inner = new JSONObject();

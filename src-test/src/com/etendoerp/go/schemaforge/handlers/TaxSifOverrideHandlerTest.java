@@ -116,6 +116,11 @@ class TaxSifOverrideHandlerTest {
         .thenReturn((NativeQuery) leQuery);
     lenient().when(leQuery.setParameter(anyString(), any())).thenReturn(leQuery);
     lenient().when(leQuery.uniqueResult()).thenReturn(LEGAL_ENTITY_ORG_ID);
+
+    // Default effective-values stub (empty result): buildOverrideOnlyResponse now queries
+    // effective values for EVERY SIF-only PATCH, not just GET. Tests that care about the
+    // overlaid content override this with their own stubEffectiveValuesQuery(...) call.
+    stubEffectiveValuesQuery();
   }
 
   @AfterEach
@@ -154,6 +159,9 @@ class TaxSifOverrideHandlerTest {
   @Test
   void handlePatchWithOnlySifFieldsUpsertsOverrideAndSkipsDefaultCrud() throws Exception {
     NativeQuery<?> upsertQuery = stubUpsertQuery();
+    // The write just landed, so the read-back effective-value query must see it: the same
+    // (c_tax NULL, override "09") precedence queryEffectiveValues/afterHandle always applies.
+    stubEffectiveValuesQuery(row(TAX_ID, "09", null, null, null, null, null, null, null));
     JSONObject body = new JSONObject().put("etvfacVatRegime", "09");
 
     NeoResponse result = handler.handle(patchContext(body).build());
@@ -173,6 +181,54 @@ class TaxSifOverrideHandlerTest {
         .getJSONArray(JsonConstants.RESPONSE_DATA).getJSONObject(0);
     assertEquals(TAX_ID, row.getString("id"));
     assertEquals("09", row.getString("etvfacVatRegime"));
+  }
+
+  /**
+   * ETP-5122 follow-up: a PATCH that only touches ONE of the 8 SIF fields (the common case —
+   * a user edits a single dropdown in the header form and saves) must still answer with the
+   * EFFECTIVE value of ALL 8 SIF columns, not just the one submitted in this request. Before
+   * this fix, {@code buildOverrideOnlyResponse} echoed back only the fields present in {@code
+   * appliedValues}, so the frontend's post-save merge (which overlays {@code response.data[0]}
+   * onto the in-memory record) left the other 7 SIF fields untouched — correct for THOSE 7
+   * (unchanged), but meant a caller relying on this response alone (rather than a follow-up
+   * GET) never saw the effective values it did not itself just write.
+   *
+   * <p>Response shape must also match {@code response.data} as a one-element {@link JSONArray}
+   * — the same shape the default CRUD's PATCH response uses and every frontend save path
+   * already unwraps via {@code data?.response?.data?.[0]}.
+   */
+  @Test
+  void handlePatchWithSingleSifFieldReturnsEffectiveValueOfAllEightFields() throws Exception {
+    stubUpsertQuery();
+    // Effective values after the write: tbaiClaveregimeniva = "04" (just written), the other
+    // 7 columns carry whatever c_tax/override already had — here, a pre-existing override on
+    // etvfacIGICRegime ("03") plus everything else blank, to prove the overlay is NOT limited
+    // to the single field this request touched.
+    stubEffectiveValuesQuery(row(TAX_ID, null, null, "03", null, null, "04", null, null));
+    JSONObject body = new JSONObject().put("tbaiClaveregimeniva", "04");
+
+    NeoResponse result = handler.handle(patchContext(body).build());
+
+    assertTrue(result != null);
+    JSONObject responseObj = result.getBody().getJSONObject(JsonConstants.RESPONSE_RESPONSE);
+    // Same envelope shape as the default CRUD's single-record PATCH response: `data` is an
+    // ARRAY with exactly one element (SmartClient DataSource protocol), never a bare object.
+    JSONArray dataArray = responseObj.getJSONArray(JsonConstants.RESPONSE_DATA);
+    assertEquals(1, dataArray.length());
+    JSONObject row = dataArray.getJSONObject(0);
+
+    assertEquals(TAX_ID, row.getString("id"));
+    // The field actually submitted in this request.
+    assertEquals("04", row.getString("tbaiClaveregimeniva"));
+    // The OTHER 7 SIF fields must also be present with their effective value — not silently
+    // omitted because this particular request didn't touch them.
+    assertEquals("03", row.getString("etvfacIGICRegime"));
+    assertTrue(row.isNull("etvfacVatRegime"));
+    assertTrue(row.isNull("etvfacIPSIRegime"));
+    assertTrue(row.isNull("etvfacExemptionCause"));
+    assertTrue(row.isNull("etvfacCauseNotTaxable"));
+    assertTrue(row.isNull("tbaiNonsubjectcause"));
+    assertTrue(row.isNull("tBAICausaDeExencion"));
   }
 
   /**
