@@ -611,6 +611,160 @@ public class SiiConfigDeactivateHandlerTest {
     }
   }
 
+  // ─── afterHandle(): ETP-5117 follow-up — genuine DELETE unschedule cleanup ──
+
+  /**
+   * A genuine {@code DELETE} (GO's "Eliminar" action) whose config record still resolves via a
+   * primary-key lookup unschedules the auto-send schedule using the record's OWN
+   * client/organization — same record-lookup path already proven for the deactivating-PUT case
+   * in {@link #afterHandlePutDeactivatingUnschedulesUsingRecordLookupWhenConfigSurvives}, now
+   * exercised for the DELETE branch (which needs no {@code isExplicitlyDeactivating} check —
+   * the method itself is unconditionally "this config is going away").
+   */
+  @Test
+  public void afterHandleDeleteUnschedulesUsingRecordLookupWhenConfigStillResolvable()
+      throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    SiiConfigDeactivateHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("DELETE")
+        .recordId(RECORD_ID)
+        .build();
+
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(ORG_ID);
+    AEATSIIConfig config = mock(AEATSIIConfig.class);
+    when(config.getClient()).thenReturn(client);
+    when(config.getOrganization()).thenReturn(org);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(AEATSIIConfig.class), eq(RECORD_ID))).thenReturn(config);
+
+      assertNull(handler.afterHandle(ctx));
+
+      verify(scheduleService).unscheduleAutoSend(CLIENT_ID, ORG_ID,
+          SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+      verify(scheduleService, never())
+          .ensureAutoSendSchedule(any(), any(), any(), any(), any(), any());
+      verify(scheduleService, never()).activateSchedule(any());
+    }
+  }
+
+  /**
+   * The expected/normal DELETE case: by the time {@code afterHandle} runs, GO's real
+   * {@code DELETE} has already removed the record, so the primary-key lookup returns
+   * {@code null} and the cleanup falls back to {@code context.getObContext()}'s current
+   * client/organization — distinct from the record-lookup path exercised above.
+   */
+  @Test
+  public void afterHandleDeleteUnschedulesUsingObContextFallbackWhenConfigRecordIsGone()
+      throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    SiiConfigDeactivateHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    OBContext requestObContext = mock(OBContext.class);
+    Client fallbackClient = mock(Client.class);
+    when(fallbackClient.getId()).thenReturn(CLIENT_ID);
+    Organization fallbackOrg = mock(Organization.class);
+    when(fallbackOrg.getId()).thenReturn(ORG_ID);
+    when(requestObContext.getCurrentClient()).thenReturn(fallbackClient);
+    when(requestObContext.getCurrentOrganization()).thenReturn(fallbackOrg);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("DELETE")
+        .recordId(RECORD_ID)
+        .obContext(requestObContext)
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      // Real DELETE already removed the record — primary-key lookup finds nothing.
+      when(dal.get(eq(AEATSIIConfig.class), eq(RECORD_ID))).thenReturn(null);
+
+      assertNull(handler.afterHandle(ctx));
+
+      verify(scheduleService).unscheduleAutoSend(CLIENT_ID, ORG_ID,
+          SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+    }
+  }
+
+  /**
+   * A DELETE on a config that never had an active auto-send schedule is a clean no-op at the
+   * handler level: {@code unscheduleAutoSend} still fires (the underlying
+   * {@link SiiTbaiAutoSendScheduleService} is responsible for the "nothing scheduled to remove"
+   * case), but the handler itself must not throw and must not attempt any create-side scheduling.
+   */
+  @Test
+  public void afterHandleDeleteIsNoOpWhenConfigNeverHadASchedule() throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    SiiConfigDeactivateHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    OBContext requestObContext = mock(OBContext.class);
+    Client fallbackClient = mock(Client.class);
+    when(fallbackClient.getId()).thenReturn(CLIENT_ID);
+    Organization fallbackOrg = mock(Organization.class);
+    when(fallbackOrg.getId()).thenReturn(ORG_ID);
+    when(requestObContext.getCurrentClient()).thenReturn(fallbackClient);
+    when(requestObContext.getCurrentOrganization()).thenReturn(fallbackOrg);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("DELETE")
+        .recordId(RECORD_ID)
+        .obContext(requestObContext)
+        .build();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(AEATSIIConfig.class), eq(RECORD_ID))).thenReturn(null);
+      // scheduleService.unscheduleAutoSend is a void mock method — it no-ops by default,
+      // standing in for "no schedule existed to remove" at the service layer.
+
+      assertNull(handler.afterHandle(ctx));
+
+      verify(scheduleService).unscheduleAutoSend(CLIENT_ID, ORG_ID,
+          SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
+      verify(scheduleService, never())
+          .ensureAutoSendSchedule(any(), any(), any(), any(), any(), any());
+      verify(scheduleService, never()).activateSchedule(any());
+    }
+  }
+
+  /**
+   * Regression/completeness check on the mutual-exclusivity claim in {@code afterHandle}: an
+   * unrelated method (GET) is neither POST, PUT nor DELETE, so it short-circuits immediately with
+   * no side effects at all — no schedule creation, no cleanup.
+   */
+  @Test
+  public void afterHandleGetMethodShortCircuitsWithNoSideEffects() throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    SiiConfigDeactivateHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    NeoContext ctx = NeoContext.builder().httpMethod("GET").recordId(RECORD_ID).build();
+
+    assertNull(handler.afterHandle(ctx));
+
+    verifyNoInteractions(scheduleService);
+  }
+
   /**
    * A PUT that leaves the config active triggers the auto-send schedule AND the pre-existing
    * {@code INSIISYSTEM='Y'} native-SQL update still runs — regression guard confirming ETP-5117
