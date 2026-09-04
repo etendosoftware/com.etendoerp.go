@@ -185,8 +185,9 @@ public class DalEmailSendLogStoreTest {
 
   @Test
   public void recordSharesTheCallersTransactionInsteadOfCommittingItsOwn() throws Exception {
-    // The audit row written right after this one ends a successful send with commitAndStart();
-    // saving first (and never committing here) is what keeps both rows in the same transaction.
+    // The audit row written right after this one ends a successful send by calling the store's
+    // own commit-and-start method; saving first (and never committing here) is what keeps both
+    // rows in the same transaction.
     new DalEmailSendLogStore(MapRecord::new).recordSend(
         fullHistoryRecord(TransactionalEmailService.STATUS_SENT, null));
 
