@@ -137,8 +137,11 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * a different, related entity — see {@link #FISCAL_MONITOR_PROXY_WINDOW_ID}, {@link
  * #TAX_MODELS_PROXY_WINDOW_ID} and {@link #NOT_POSTED_DOCS_PROXY_PROCESS_ID}'s own javadoc for
  * each mapping and its rationale, and {@link #mergeProxyAccessTiers(Role, Map)} for how it is
- * merged in. These 3 rows never affect a role card's own {@code windows}/{@code windowCount} —
- * only the {@code matrix}.</p>
+ * merged in. Only 2 of the 3 ever add a NEW {@code matrix} row, though — {@code
+ * FISCAL_MONITOR_PROXY_WINDOW_ID} (SII Monitor) already produces its own real row today (see
+ * {@link #buildMatrix(Map, Map)}'s duplicate-id guard), so its proxy access data reaches the
+ * matrix through that pre-existing row instead of a second one. None of the 3 ever affect a role
+ * card's own {@code windows}/{@code windowCount}.</p>
  *
  * <p>The current role is captured once, at the very top of {@link #get(Map, Map)}, before
  * {@link OBContext#setAdminMode()} is entered — the same convention {@link SFListMenu} follows
@@ -708,23 +711,27 @@ public class SFRolesOverview extends BaseWebhookService {
   }
 
   /**
-   * ETP-5071 — merges the 3 proxy access tiers ({@link #FISCAL_MONITOR_PROXY_WINDOW_ID}, {@link
-   * #TAX_MODELS_PROXY_WINDOW_ID}, {@link #NOT_POSTED_DOCS_PROXY_PROCESS_ID}) for {@code role}
-   * into {@code tiers}, in place, right after {@code tiers} has been resolved from {@code role}'s
-   * real Etendo-GO windows — so the {@code matrix}'s 3 synthetic {@link #PROXY_MATRIX_ROWS} rows
-   * get real per-role access data instead of always reading {@link #NONE}.
+   * ETP-5071 — merges the proxy access tiers for {@code role} into {@code tiers}, in place, right
+   * after {@code tiers} has been resolved from {@code role}'s real Etendo-GO windows — so the
+   * {@code matrix}'s synthetic {@link #PROXY_MATRIX_ROWS} rows get real per-role access data
+   * instead of always reading {@link #NONE}.
+   *
+   * <p>Only resolves {@link #TAX_MODELS_PROXY_WINDOW_ID} and {@link
+   * #NOT_POSTED_DOCS_PROXY_PROCESS_ID} — deliberately NOT {@link #FISCAL_MONITOR_PROXY_WINDOW_ID}
+   * (SII Monitor). SII Monitor is a real, separately-exposed Etendo GO window today, so its id is
+   * already a key in {@code goWindowsById} and its tier is already present in {@code tiers} from
+   * the caller's own {@code resolveWindowTierMap(role, goWindowsById.keySet())} call — resolving
+   * it again here would be a redundant, purely wasted DB query (same value, same key), not a new
+   * entry. See {@link #buildMatrix(Map, Map)}'s own "skip a proxy row whose id already exists"
+   * guard for how the matching duplicate {@code matrix} row is avoided on the row-generation side.
    *
    * <p>Never pollutes {@link #windowsJsonFromTierMap(Map, Map)}'s output (each role card's own
    * {@code windows}/{@code windowCount}, which must stay exactly as before this change): {@link
    * #TAX_MODELS_PROXY_WINDOW_ID} and {@link #NOT_POSTED_DOCS_PROXY_PROCESS_ID} are never keys in
    * {@code goWindowsById}, so that method's existing {@code goWindowsById.get(...) == null} skip
-   * already excludes them. {@link #FISCAL_MONITOR_PROXY_WINDOW_ID} (SII Monitor) IS a real,
-   * separately-exposed Etendo GO window today, already included in {@code tiers} by the caller's
-   * own {@code resolveWindowTierMap(role, goWindowsById.keySet())} call — re-resolving it here is
-   * a harmless, idempotent re-derivation of the identical value, not a new entry.</p>
+   * already excludes them.</p>
    */
   private void mergeProxyAccessTiers(Role role, Map<String, String> tiers) {
-    tiers.putAll(resolveWindowTierMap(role, Set.of(FISCAL_MONITOR_PROXY_WINDOW_ID)));
     tiers.putAll(resolveWindowTierMap(role, Set.of(TAX_MODELS_PROXY_WINDOW_ID)));
     tiers.putAll(resolveProcessTierMap(role, NOT_POSTED_DOCS_PROXY_PROCESS_ID));
   }
@@ -824,12 +831,25 @@ public class SFRolesOverview extends BaseWebhookService {
 
   /**
    * Builds the ETP-4907 {@code matrix}: every window in {@code goWindowsById} PLUS (ETP-5071)
-   * the 3 {@link #PROXY_MATRIX_ROWS} synthetic windowless rows, grouped by top-level {@code
-   * AD_Menu} category ({@link #resolveWindowCategories(Set)}), each with a per-role tri-state
-   * {@code access} map built from {@code tierMapsByRoleId} — a role/row pair absent from that
-   * role's tier map resolves to {@link #NONE}. Real windows are adapted to the common {@link
-   * MatrixRow} shape purely for uniform grouping/sorting/rendering with the synthetic rows; their
-   * own id/name/access JSON output is unchanged.
+   * the {@link #PROXY_MATRIX_ROWS} synthetic windowless rows — EXCEPT a proxy row whose id is
+   * already a key in {@code goWindowsById} (see below) — grouped by top-level {@code AD_Menu}
+   * category ({@link #resolveWindowCategories(Set)}), each with a per-role tri-state {@code
+   * access} map built from {@code tierMapsByRoleId} — a role/row pair absent from that role's
+   * tier map resolves to {@link #NONE}. Real windows are adapted to the common {@link MatrixRow}
+   * shape purely for uniform grouping/sorting/rendering with the synthetic rows; their own
+   * id/name/access JSON output is unchanged.
+   *
+   * <p><b>Duplicate-id guard (ETP-5071 fix).</b> {@link #FISCAL_MONITOR_PROXY_WINDOW_ID} (SII
+   * Monitor) IS already a key in {@code goWindowsById} today (it backs its own active,
+   * separately-exposed GO window/spec), so it already produces its own real row from the loop
+   * above. Appending {@code PROXY_MATRIX_ROWS} unconditionally would have added a SECOND row with
+   * the exact same {@code id} — a real collision, since the frontend keys matrix rows by
+   * category+id ({@code buildRowKey} in {@code useRolesOverviewData.js}), so the skip below is
+   * required, not defensive-only. It also generically protects any future proxy id that happens
+   * to coincide with a real exposed window. {@link #TAX_MODELS_PROXY_WINDOW_ID} and {@link
+   * #NOT_POSTED_DOCS_PROXY_PROCESS_ID} are never keys in {@code goWindowsById} (confirmed live,
+   * 2026-09-04 — Tax Report has no active spec; the process id lives in a different id-space
+   * entirely), so they are always appended.</p>
    */
   private JSONObject buildMatrix(Map<String, Window> goWindowsById,
       Map<String, Map<String, String>> tierMapsByRoleId) throws JSONException {
@@ -837,7 +857,11 @@ public class SFRolesOverview extends BaseWebhookService {
     for (Window window : goWindowsById.values()) {
       rows.add(new MatrixRow(window.getId(), window.getName()));
     }
-    rows.addAll(PROXY_MATRIX_ROWS);
+    for (MatrixRow proxyRow : PROXY_MATRIX_ROWS) {
+      if (!goWindowsById.containsKey(proxyRow.id)) {
+        rows.add(proxyRow);
+      }
+    }
 
     // Category lookup includes the 2 window-based proxy ids (SII Monitor, Tax Report) — both are
     // real AD_Window_IDs that may legitimately resolve a classic-AD-menu-tree category via the

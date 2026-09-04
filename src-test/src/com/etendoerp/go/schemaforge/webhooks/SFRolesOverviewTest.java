@@ -1160,6 +1160,50 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         assertEquals("Conversion Rates", windows.getJSONObject(0).getString("name"));
     }
 
+    // ── ETP-5071: proxy access rows ──────────────────────────────────────
+
+    /**
+     * Regression test for a real correctness bug found in review before this shipped: SII
+     * Monitor already backs its own active Etendo-GO window/spec today, so its id is already a
+     * key in {@code goWindowsById} and already produces its own real {@code matrix} row from the
+     * main window loop. Appending the "Fiscal Monitor" proxy row (same id — see {@code
+     * SFRolesOverview#FISCAL_MONITOR_PROXY_WINDOW_ID}) unconditionally would have added a SECOND
+     * row with the identical id — a real collision, since the frontend keys matrix rows by
+     * category+id ({@code buildRowKey} in {@code useRolesOverviewData.js}). Exactly one row for
+     * that id must survive, carrying the real window's own raw name (the frontend's own {@code
+     * menu.json} is responsible for relabeling it to "Fiscal Monitor", not this backend).
+     */
+    @Test
+    @DisplayName("ETP-5071: SII Monitor's real matrix row is not duplicated by its Fiscal Monitor proxy")
+    void testFiscalMonitorProxyDoesNotDuplicateSiiMonitorsRealRow() throws Exception {
+        givenSystemAdminCallerRole();
+
+        // The real SII Monitor window/spec — the exact same id ETP-5071 uses as the "Fiscal
+        // Monitor" proxy row's id.
+        Window siiMonitor = mockWindow("FEF76C3E0F104F06A89AAD15A4A4A35C", "SII Monitor");
+        stubBaselineQueries(standardTenantRoles(), Collections.singletonList(siiMonitor));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONArray categories = result.getJSONObject("matrix").getJSONArray("categories");
+        // categoryQuery defaults to empty (see setUp()) — every row here falls back to "Other".
+        assertEquals(1, categories.length());
+        JSONArray windows = categories.getJSONObject(0).getJSONArray("windows");
+
+        int siiMonitorRowCount = 0;
+        for (int i = 0; i < windows.length(); i++) {
+            if ("FEF76C3E0F104F06A89AAD15A4A4A35C".equals(windows.getJSONObject(i).getString("id"))) {
+                siiMonitorRowCount++;
+                assertEquals("SII Monitor", windows.getJSONObject(i).getString("name"),
+                        "the surviving row must be the real window's own row, not the proxy's fallback name");
+            }
+        }
+        assertEquals(1, siiMonitorRowCount,
+                "SII Monitor's id must appear exactly once in the matrix, never duplicated by its own proxy row");
+    }
+
     // ── exception handling ───────────────────────────────────────────────
 
     @Test
