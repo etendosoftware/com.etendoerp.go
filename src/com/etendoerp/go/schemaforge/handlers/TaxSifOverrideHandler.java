@@ -160,14 +160,23 @@ public class TaxSifOverrideHandler implements NeoHandler {
   }
 
   /**
-   * Overwrites the 8 SIF value properties on every row of a {@code tax} GET response (single
-   * record or list) with the effective value (D5 precedence). Mutates {@code
+   * Overwrites the 8 SIF value properties on every row of a {@code tax} GET/PUT/PATCH response
+   * (single record or list) with the effective value (D5 precedence). Mutates {@code
    * context.getPreviousResult()}'s body in place and returns {@code null} to keep using it.
+   *
+   * <p>PUT/PATCH are covered too, not just GET: a write whose body ALSO carried a plain {@code
+   * c_tax} field falls through to the default CRUD (see {@link #handle}), and that default
+   * response echoes back {@code c_tax}'s own (always blank, by design) SIF columns. Without the
+   * overlay here the frontend's post-save merge would blank the dropdown the user just filled in
+   * — the exact ETP-5122 symptom. Applying the overlay on the write response too keeps a single
+   * source of truth instead of duplicating the precedence formula per response shape.
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
-    if (!TAX_ENTITY_NAME.equals(context.getEntityName())
-        || !METHOD_GET.equalsIgnoreCase(context.getHttpMethod())) {
+    String method = context.getHttpMethod();
+    boolean overlayable = METHOD_GET.equalsIgnoreCase(method)
+        || METHOD_PUT.equalsIgnoreCase(method) || METHOD_PATCH.equalsIgnoreCase(method);
+    if (!TAX_ENTITY_NAME.equals(context.getEntityName()) || !overlayable) {
       return null;
     }
     try {
@@ -186,7 +195,11 @@ public class TaxSifOverrideHandler implements NeoHandler {
       Map<String, Map<String, String>> effectiveByTaxId = queryEffectiveValues(taxIds, organizationId);
       applyEffectiveValues(data, effectiveByTaxId);
     } catch (Exception e) {
-      log.warn("TaxSifOverrideHandler.afterHandle: failed to overlay effective SIF values: {}",
+      // ERROR, not WARN: the overlay failing is never benign — every SIF field silently reverts
+      // to blank in the UI while the stored override is perfectly fine, which is exactly how
+      // the ETP-5122 NonUniqueDiscoveredSqlAliasException stayed invisible. The response is
+      // still returned unmodified (a broken overlay must not turn a working GET into a 500).
+      log.error("TaxSifOverrideHandler.afterHandle: failed to overlay effective SIF values: {}",
           e.getMessage(), e);
     }
     return null;
@@ -395,21 +408,37 @@ public class TaxSifOverrideHandler implements NeoHandler {
       int i = 1;
       for (String jsonKey : SIF_FIELD_TO_COLUMN.keySet()) {
         Object value = row[i++];
-        if (value != null) {
-          values.put(jsonKey, value.toString());
-        }
+        // A null effective value is put EXPLICITLY (LinkedHashMap allows null values), never
+        // skipped: callers render it as a JSON null, which is what makes "user cleared the
+        // dropdown" actually reach the client. Omitting the key instead would leave the
+        // frontend's post-save/GET merge showing the stale pre-clear value.
+        values.put(jsonKey, value != null ? value.toString() : null);
       }
       result.put((String) row[0], values);
     }
     return result;
   }
 
+  /**
+   * <b>Every computed column MUST carry an explicit {@code AS <alias>}.</b> Hibernate's
+   * native-query auto-discovery derives each result alias from the SQL expression itself, so 8
+   * unaliased {@code COALESCE(...)} expressions all resolve to the alias {@code coalesce} and
+   * the query dies with {@code NonUniqueDiscoveredSqlAliasException: Encountered a duplicated
+   * sql alias [coalesce]} — at RUNTIME only, never at compile time and never in a mocked unit
+   * test. That failure is what made the Tax window's SIF dropdowns come back blank in ETP-5122:
+   * {@link #afterHandle} swallows it in its catch-all and silently skips the overlay, so every
+   * one of the 8 fields fell back to {@code c_tax}'s (by design always empty) own column.
+   *
+   * <p>Aliasing each expression back to its own column name keeps the aliases unique and the
+   * result-set column order identical to {@link #SIF_FIELD_TO_COLUMN}'s iteration order, which
+   * {@link #queryEffectiveValues} reads positionally.
+   */
   private static String buildEffectiveValuesSql(boolean withOverride) {
     StringBuilder select = new StringBuilder("t.c_tax_id");
     for (String col : SIF_FIELD_TO_COLUMN.values()) {
       if (withOverride) {
         select.append(", COALESCE(NULLIF(TRIM(t.").append(col).append("), ''), NULLIF(TRIM(ovr.")
-            .append(col).append("), ''))");
+            .append(col).append("), '')) AS ").append(col);
       } else {
         select.append(", t.").append(col);
       }

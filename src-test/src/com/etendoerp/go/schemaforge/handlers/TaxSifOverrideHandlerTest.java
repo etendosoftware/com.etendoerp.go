@@ -33,7 +33,9 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -43,6 +45,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -414,9 +417,158 @@ class TaxSifOverrideHandlerTest {
     assertEquals("E2", rows.getJSONObject(1).getString("etvfacExemptionCause"));
   }
 
+  // ── afterHandle() — PATCH / PUT write responses ─────────────────────────────
+
   /**
-   * A non-{@code tax} entity or a non-GET method must never invoke {@code afterHandle}'s
-   * enrichment logic.
+   * ETP-5122 real-world regression: the user picks a value in a SIF dropdown AND the save
+   * payload also carries a plain {@code c_tax} field, so {@link TaxSifOverrideHandler#handle}
+   * strips the SIF field, upserts it, and returns {@code null} to let the default CRUD write
+   * the rest. That default response echoes back {@code c_tax}'s OWN SIF columns, which are
+   * blank by design (the value only ever lives in {@code etsg_tax_sif_config}) — and the
+   * frontend merges {@code response.data[0]} onto its in-memory record, blanking the dropdown
+   * the user just filled in. {@code afterHandle} must therefore overlay the effective values on
+   * write responses too, not only on GET.
+   */
+  @Test
+  void afterHandlePatchOverlaysEffectiveValueOnDefaultCrudResponse() throws Exception {
+    stubEffectiveValuesQuery(row(TAX_ID, null, null, null, null, null, "04", null, null));
+
+    JSONArray rows = new JSONArray().put(new JSONObject()
+        .put("id", TAX_ID)
+        .put("name", "Entregas IVA 21%")
+        // What the default CRUD echoes back: c_tax's own (always blank) SIF column.
+        .put("tbaiClaveregimeniva", JSONObject.NULL));
+    JSONObject inner = new JSONObject()
+        .put(JsonConstants.RESPONSE_STATUS, 0)
+        .put(JsonConstants.RESPONSE_DATA, rows);
+    JSONObject data = new JSONObject().put(JsonConstants.RESPONSE_RESPONSE, inner);
+
+    NeoContext ctx = NeoContext.builder()
+        .specName("tax").entityName("tax")
+        .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+        .recordId(TAX_ID).obContext(obContext)
+        .previousResult(new NeoResponse(200, data))
+        .build();
+
+    assertNull(handler.afterHandle(ctx));
+    assertEquals("04", rows.getJSONObject(0).getString("tbaiClaveregimeniva"));
+    // Untouched non-SIF fields must survive the overlay.
+    assertEquals("Entregas IVA 21%", rows.getJSONObject(0).getString("name"));
+  }
+
+  /** PUT is covered by the same overlay as PATCH. */
+  @Test
+  void afterHandlePutOverlaysEffectiveValue() throws Exception {
+    stubEffectiveValuesQuery(row(TAX_ID, "09", null, null, null, null, null, null, null));
+
+    JSONObject data = singleRowResponse(TAX_ID);
+    NeoContext ctx = NeoContext.builder()
+        .specName("tax").entityName("tax")
+        .httpMethod("PUT").endpointType(NeoEndpointType.CRUD)
+        .recordId(TAX_ID).obContext(obContext)
+        .previousResult(new NeoResponse(200, data))
+        .build();
+
+    handler.afterHandle(ctx);
+
+    assertEquals("09", data.getJSONObject(JsonConstants.RESPONSE_RESPONSE)
+        .getJSONArray(JsonConstants.RESPONSE_DATA).getJSONObject(0)
+        .getString("etvfacVatRegime"));
+  }
+
+  /**
+   * A SIF field with NO effective value (neither {@code c_tax} nor the override carries one)
+   * must be overlaid as an EXPLICIT JSON null, not silently omitted — otherwise a user who
+   * CLEARS a dropdown gets a response that says nothing about that field, and the frontend's
+   * merge keeps showing the stale pre-clear value.
+   */
+  @Test
+  void afterHandleOverlaysExplicitNullWhenNoEffectiveValue() throws Exception {
+    stubEffectiveValuesQuery(row(TAX_ID, null, null, null, null, null, null, null, null));
+
+    JSONArray rows = new JSONArray().put(new JSONObject()
+        .put("id", TAX_ID)
+        .put("tbaiClaveregimeniva", "04"));
+    JSONObject inner = new JSONObject()
+        .put(JsonConstants.RESPONSE_STATUS, 0)
+        .put(JsonConstants.RESPONSE_DATA, rows);
+    JSONObject data = new JSONObject().put(JsonConstants.RESPONSE_RESPONSE, inner);
+
+    NeoContext ctx = NeoContext.builder()
+        .specName("tax").entityName("tax")
+        .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+        .obContext(obContext)
+        .previousResult(new NeoResponse(200, data))
+        .build();
+
+    handler.afterHandle(ctx);
+
+    JSONObject overlaid = rows.getJSONObject(0);
+    assertTrue(overlaid.has("tbaiClaveregimeniva"));
+    assertTrue(overlaid.isNull("tbaiClaveregimeniva"));
+  }
+
+  // ── Effective-values SQL shape ───────────────────────────────────────────────
+
+  /**
+   * ETP-5122 root cause, as a regression test: the effective-value SELECT builds one {@code
+   * COALESCE(...)} per SIF column, and Hibernate's native-query auto-discovery derives each
+   * result alias FROM THE EXPRESSION. Eight unaliased {@code COALESCE(...)} expressions all
+   * collapse to the alias {@code coalesce}, and the query blows up at runtime with {@code
+   * NonUniqueDiscoveredSqlAliasException: Encountered a duplicated sql alias [coalesce]} —
+   * which {@code afterHandle}'s catch-all swallows, leaving every SIF dropdown blank in the UI
+   * while the stored override is perfectly correct. Each computed column must therefore carry
+   * an explicit, unique {@code AS <alias>}.
+   */
+  @Test
+  void effectiveValuesSqlAliasesEveryComputedColumnUniquely() throws Exception {
+    stubEffectiveValuesQuery(row(TAX_ID, "09", null, null, null, null, null, null, null));
+
+    NeoContext ctx = NeoContext.builder()
+        .specName("tax").entityName("tax")
+        .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+        .obContext(obContext)
+        .previousResult(new NeoResponse(200, singleRowResponse(TAX_ID)))
+        .build();
+    handler.afterHandle(ctx);
+
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    verify(mockSession, org.mockito.Mockito.atLeastOnce())
+        .createNativeQuery(sqlCaptor.capture());
+    String effectiveSql = sqlCaptor.getAllValues().stream()
+        .filter(sql -> sql != null && sql.startsWith("SELECT t.c_tax_id"))
+        .findFirst()
+        .orElseThrow(() -> new AssertionError("effective-values SELECT was never built"));
+
+    String selectClause = effectiveSql.substring(0, effectiveSql.indexOf(" FROM c_tax t"));
+    long coalesceCount = countOccurrences(selectClause, "COALESCE(");
+    assertEquals(8, coalesceCount, "expected one COALESCE per SIF column");
+
+    Set<String> aliases = new HashSet<>();
+    for (String column : Arrays.asList("em_etvfac_vat_regime", "em_etvfac_igic_regime",
+        "em_etvfac_ipsi_regime", "em_etvfac_exemption_cause", "em_etvfac_cause_not_taxable",
+        "em_tbai_claveregimeniva", "em_tbai_nonsubjectcause", "em_tbai_exemptioncause")) {
+      assertTrue(selectClause.contains(") AS " + column),
+          "computed column " + column + " must be explicitly aliased, SQL was: " + selectClause);
+      assertTrue(aliases.add(column), "duplicated alias " + column);
+    }
+    // The alias count must match the COALESCE count: no expression left auto-aliased.
+    assertEquals(coalesceCount, countOccurrences(selectClause, ") AS "));
+  }
+
+  private static long countOccurrences(String haystack, String needle) {
+    long count = 0;
+    int idx = haystack.indexOf(needle);
+    while (idx >= 0) {
+      count++;
+      idx = haystack.indexOf(needle, idx + needle.length());
+    }
+    return count;
+  }
+
+  /**
+   * A non-{@code tax} entity must never invoke {@code afterHandle}'s enrichment logic, whatever
+   * the HTTP method.
    */
   @Test
   void afterHandleSkipsNonTaxEntity() throws Exception {
@@ -425,6 +577,25 @@ class TaxSifOverrideHandlerTest {
         .specName("product").entityName("product")
         .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
         .obContext(obContext)
+        .previousResult(new NeoResponse(200, data))
+        .build();
+
+    assertNull(handler.afterHandle(ctx));
+    verify(mockSession, never()).createNativeQuery(anyString());
+  }
+
+  /**
+   * DELETE (and POST — a create has no {@code c_tax_id} to key the override on yet) must not
+   * trigger the overlay: the write methods {@code afterHandle} covers are exactly PUT and
+   * PATCH, alongside GET.
+   */
+  @Test
+  void afterHandleSkipsDeleteMethod() throws Exception {
+    JSONObject data = singleRowResponse(TAX_ID);
+    NeoContext ctx = NeoContext.builder()
+        .specName("tax").entityName("tax")
+        .httpMethod("DELETE").endpointType(NeoEndpointType.CRUD)
+        .recordId(TAX_ID).obContext(obContext)
         .previousResult(new NeoResponse(200, data))
         .build();
 
