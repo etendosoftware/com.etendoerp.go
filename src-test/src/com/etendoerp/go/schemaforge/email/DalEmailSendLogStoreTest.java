@@ -20,8 +20,8 @@ package com.etendoerp.go.schemaforge.email;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -296,19 +296,23 @@ public class DalEmailSendLogStoreTest {
   public void recordRejectsANullHistoryRecord() {
     DalEmailSendLogStore store = new DalEmailSendLogStore(MapRecord::new);
 
-    NullPointerException error = assertThrows(NullPointerException.class,
-        () -> store.recordSend(null));
-
-    assertEquals("Email send history record cannot be null", error.getMessage());
+    try {
+      store.recordSend(null);
+      fail("Expected NullPointerException");
+    } catch (NullPointerException error) {
+      assertEquals("Email send history record cannot be null", error.getMessage());
+    }
     verify(obDal, never()).save(any());
   }
 
   @Test
   public void constructorRejectsANullRecordSupplier() {
-    NullPointerException error = assertThrows(NullPointerException.class,
-        () -> new DalEmailSendLogStore(null));
-
-    assertEquals("Email send log record supplier cannot be null", error.getMessage());
+    try {
+      new DalEmailSendLogStore(null);
+      fail("Expected NullPointerException");
+    } catch (NullPointerException error) {
+      assertEquals("Email send log record supplier cannot be null", error.getMessage());
+    }
   }
 
   private BaseOBObject savedRecord() {
