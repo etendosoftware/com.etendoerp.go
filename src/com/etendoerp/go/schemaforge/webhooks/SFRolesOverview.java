@@ -34,6 +34,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.NativeQuery;
+import org.openbravo.client.application.Process;
+import org.openbravo.client.application.ProcessAccess;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -125,6 +127,18 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * {@code matrix}'s category names, which are the raw (English) {@code AD_Menu.name} of each
  * window's top-level folder — the frontend is expected to map/translate them, not render them
  * verbatim.</p>
+ *
+ * <p><b>3 windowless {@code matrix} rows (ETP-5071).</b> "Monitor Fiscal", "Modelos Fiscales" and
+ * "Documentos no contabilizados" are real, visible Etendo GO sidebar entries with no {@code
+ * AD_Window_ID} of their own — 3 of the "twelve matrix rows" {@code TemplateRoleWindowAccess}'s
+ * javadoc documents as a known gap. This narrows that gap for exactly these 3 rows (the other ~9
+ * remain unresolved, deliberately out of scope) via a human-chosen proxy: each synthetic row's
+ * access is resolved from a REAL {@code AD_Window_Access}/{@code OBUIAPP_Process_Access} grant on
+ * a different, related entity — see {@link #FISCAL_MONITOR_PROXY_WINDOW_ID}, {@link
+ * #TAX_MODELS_PROXY_WINDOW_ID} and {@link #NOT_POSTED_DOCS_PROXY_PROCESS_ID}'s own javadoc for
+ * each mapping and its rationale, and {@link #mergeProxyAccessTiers(Role, Map)} for how it is
+ * merged in. These 3 rows never affect a role card's own {@code windows}/{@code windowCount} —
+ * only the {@code matrix}.</p>
  *
  * <p>The current role is captured once, at the very top of {@link #get(Map, Map)}, before
  * {@link OBContext#setAdminMode()} is entered — the same convention {@link SFListMenu} follows
@@ -229,6 +243,80 @@ public class SFRolesOverview extends BaseWebhookService {
    * {@code false}, so callers must guard the id before probing this set.
    */
   private static final Set<String> UI_EXCLUDED_WINDOW_IDS = Set.of("6FEBA130CDE24CC09041FFA6117ADFA9");
+
+  /**
+   * ETP-5071 — proxy {@code AD_Window_ID} standing in for "Monitor Fiscal" in the {@code matrix}.
+   *
+   * <p>"Monitor Fiscal" is one of {@code TemplateRoleWindowAccess}'s own documented "twelve
+   * matrix rows... intentionally NOT represented" (see that class's javadoc, and {@code
+   * docs/neo-headless.md} §7 in this module): it is a pure Etendo-GO-native custom page with no
+   * {@code AD_Window_ID} of its own, so it can never appear in {@link
+   * #resolveActiveEtendoGoWindowsById()} or get a real {@link #resolveWindowTierMap(Role, Set)}
+   * entry the way an ordinary window does. Its frontend page internally aggregates data from 3
+   * real classic windows — SII Monitor ({@value}), Monitor Verifactu
+   * ({@code F4675DAB02134762B66881DAE4672AD0}), and TBAI Facturas Enviadas
+   * ({@code 71F24BF89DE748B483BE87594747D6FB}) — and the product owner picked SII Monitor,
+   * arbitrarily but explicitly, as the single representative window whose {@code
+   * AD_Window_Access} grant stands in for "can this role see Monitor Fiscal at all" (any of the
+   * three would have worked equally well per the product owner).
+   *
+   * <p>Spot-checked live against this module's own dev DB (2026-09-04): every role across the
+   * environment that grants access to ANY of the three candidate windows grants IDENTICAL tiers
+   * (full/read-only) on all three — no role was found where they diverge — so SII Monitor is a
+   * safe representative, not merely an arbitrary one.
+   *
+   * <p>This is a deliberately narrow, human-chosen proxy for exactly this one row (ETP-5071) —
+   * NOT a general solution to the other ~9 rows in {@code TemplateRoleWindowAccess}'s "twelve
+   * rows" list, which remain out of scope and unresolved.
+   */
+  private static final String FISCAL_MONITOR_PROXY_WINDOW_ID = "FEF76C3E0F104F06A89AAD15A4A4A35C";
+
+  /**
+   * ETP-5071 — proxy {@code AD_Window_ID} standing in for "Modelos Fiscales" in the {@code
+   * matrix}, same windowless-page situation as {@link #FISCAL_MONITOR_PROXY_WINDOW_ID} (also one
+   * of {@code TemplateRoleWindowAccess}'s "twelve rows"). The product owner chose the Tax Report
+   * window as this row's access proxy.
+   */
+  private static final String TAX_MODELS_PROXY_WINDOW_ID = "3E8FEA1EA7404D979306C9EE7FD2E7E8";
+
+  /**
+   * ETP-5071 — proxy {@code OBUIAPP_Process_ID} standing in for "Documentos no contabilizados" in
+   * the {@code matrix}, same windowless-page situation as {@link
+   * #FISCAL_MONITOR_PROXY_WINDOW_ID} — except this page has no candidate classic WINDOW at all to
+   * proxy through (it is a report-type spec with zero classic AD entity), so its access is
+   * resolved from the real {@code OBUIAPP_Process_Access} grant on the "Not Posted Documents"
+   * process instead. See {@link #resolveProcessTierMap(Role, String)}.
+   */
+  private static final String NOT_POSTED_DOCS_PROXY_PROCESS_ID = "D6AB95CE52D34E1599590526115E26C6";
+
+  /**
+   * A single {@code matrix} row's identity (id + display name) — either a real {@link Window}
+   * (adapted from {@link #resolveActiveEtendoGoWindowsById()}) or one of the {@link
+   * #PROXY_MATRIX_ROWS} synthetic ETP-5071 rows that have no backing {@code Window} entity at
+   * all. {@link #buildMatrix(Map, Map)} groups/sorts/renders both kinds identically once
+   * expressed as this common shape.
+   */
+  private static final class MatrixRow {
+    private final String id;
+    private final String name;
+
+    MatrixRow(String id, String name) {
+      this.id = id;
+      this.name = name;
+    }
+  }
+
+  /**
+   * The 3 ETP-5071 synthetic {@code matrix} rows — see each proxy id constant's own javadoc for
+   * why they exist. Fallback display names only; per the class's existing {@code matrix} javadoc
+   * convention, the frontend's own {@code menu.json} is expected to override both name and
+   * category for a matched id in practice, so these are seen only if that override somehow fails
+   * to apply.
+   */
+  private static final List<MatrixRow> PROXY_MATRIX_ROWS = List.of(
+      new MatrixRow(FISCAL_MONITOR_PROXY_WINDOW_ID, "Fiscal Monitor"),
+      new MatrixRow(TAX_MODELS_PROXY_WINDOW_ID, "Fiscal Models"),
+      new MatrixRow(NOT_POSTED_DOCS_PROXY_PROCESS_ID, "Not Posted Documents"));
 
   /** JSON key for the full window × role permission matrix (ETP-4907). */
   private static final String MATRIX = "matrix";
@@ -376,6 +464,7 @@ public class SFRolesOverview extends BaseWebhookService {
   private void addTenantRoleCard(Role role, Map<String, Window> goWindowsById,
       List<JSONObject> roleCards, Map<String, Map<String, String>> tierMapsByRoleId) throws JSONException {
     Map<String, String> tiers = resolveWindowTierMap(role, goWindowsById.keySet());
+    mergeProxyAccessTiers(role, tiers);
     tierMapsByRoleId.put(role.getId(), tiers);
     roleCards.add(buildRoleCardJson(role, tiers, goWindowsById, SOURCE_TENANT,
         resolveActiveUserIds(role).size()));
@@ -413,6 +502,7 @@ public class SFRolesOverview extends BaseWebhookService {
       List<JSONObject> roleCards, Map<String, Map<String, String>> tierMapsByRoleId,
       Map<String, List<String>> composedTemplateUserIdsByUserId) throws JSONException {
     Map<String, String> tiers = resolveWindowTierMap(tenantRole, goWindowsById.keySet());
+    mergeProxyAccessTiers(tenantRole, tiers);
     tierMapsByRoleId.put(tenantRole.getId(), tiers);
 
     Set<String> userIds = new LinkedHashSet<>(resolveActiveUserIds(tenantRole));
@@ -458,6 +548,7 @@ public class SFRolesOverview extends BaseWebhookService {
 
     int userCount = countUsersComposingTemplate(composed, templateRole.getId());
     Map<String, String> tiers = resolveWindowTierMap(templateRole, goWindowsById.keySet());
+    mergeProxyAccessTiers(templateRole, tiers);
     tierMapsByRoleId.put(templateRole.getId(), tiers);
     roleCards.add(buildRoleCardJson(templateRole, tiers, goWindowsById, SOURCE_SYSTEM_TEMPLATE, userCount));
     return composed;
@@ -617,6 +708,59 @@ public class SFRolesOverview extends BaseWebhookService {
   }
 
   /**
+   * ETP-5071 — merges the 3 proxy access tiers ({@link #FISCAL_MONITOR_PROXY_WINDOW_ID}, {@link
+   * #TAX_MODELS_PROXY_WINDOW_ID}, {@link #NOT_POSTED_DOCS_PROXY_PROCESS_ID}) for {@code role}
+   * into {@code tiers}, in place, right after {@code tiers} has been resolved from {@code role}'s
+   * real Etendo-GO windows — so the {@code matrix}'s 3 synthetic {@link #PROXY_MATRIX_ROWS} rows
+   * get real per-role access data instead of always reading {@link #NONE}.
+   *
+   * <p>Never pollutes {@link #windowsJsonFromTierMap(Map, Map)}'s output (each role card's own
+   * {@code windows}/{@code windowCount}, which must stay exactly as before this change): {@link
+   * #TAX_MODELS_PROXY_WINDOW_ID} and {@link #NOT_POSTED_DOCS_PROXY_PROCESS_ID} are never keys in
+   * {@code goWindowsById}, so that method's existing {@code goWindowsById.get(...) == null} skip
+   * already excludes them. {@link #FISCAL_MONITOR_PROXY_WINDOW_ID} (SII Monitor) IS a real,
+   * separately-exposed Etendo GO window today, already included in {@code tiers} by the caller's
+   * own {@code resolveWindowTierMap(role, goWindowsById.keySet())} call — re-resolving it here is
+   * a harmless, idempotent re-derivation of the identical value, not a new entry.</p>
+   */
+  private void mergeProxyAccessTiers(Role role, Map<String, String> tiers) {
+    tiers.putAll(resolveWindowTierMap(role, Set.of(FISCAL_MONITOR_PROXY_WINDOW_ID)));
+    tiers.putAll(resolveWindowTierMap(role, Set.of(TAX_MODELS_PROXY_WINDOW_ID)));
+    tiers.putAll(resolveProcessTierMap(role, NOT_POSTED_DOCS_PROXY_PROCESS_ID));
+  }
+
+  /**
+   * ETP-5071 — the {@code OBUIAPP_Process_Access} / {@code Process} (OBUIAPP) equivalent of
+   * {@link #resolveWindowTierMap(Role, Set)}, for a single target process id (there is only ever
+   * one here — {@link #NOT_POSTED_DOCS_PROXY_PROCESS_ID} — so no set-intersection is needed the
+   * way a window-id set requires). Same tier logic: {@link #FULL} for {@code IsEditableField =
+   * true}, {@link #READ_ONLY} otherwise. Client/organization filtering is explicitly disabled to
+   * match every other query in this class.
+   *
+   * @return a single-entry map ({@code obuiappProcessId -> tier}), or empty if {@code role} has
+   *     no active grant for it — mirrors {@code resolveWindowTierMap}'s "absent means no grant"
+   *     shape so both can be merged into the same tier map uniformly
+   */
+  @SuppressWarnings("unchecked")
+  private Map<String, String> resolveProcessTierMap(Role role, String obuiappProcessId) {
+    OBCriteria<ProcessAccess> criteria = OBDal.getInstance().createCriteria(ProcessAccess.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ROLE + ".id", role.getId()));
+    criteria.add(Restrictions.eq(ProcessAccess.PROPERTY_ACTIVE, true));
+
+    Map<String, String> tiers = new LinkedHashMap<>();
+    for (ProcessAccess access : (List<ProcessAccess>) criteria.list()) {
+      Process process = access.getObuiappProcess();
+      if (process == null || !obuiappProcessId.equals(process.getId())) {
+        continue;
+      }
+      tiers.put(obuiappProcessId, Boolean.TRUE.equals(access.isEditableField()) ? FULL : READ_ONLY);
+    }
+    return tiers;
+  }
+
+  /**
    * Turns a window-id → tier map into the sorted-by-name {@code windows} JSON array a role card
    * carries.
    */
@@ -679,38 +823,58 @@ public class SFRolesOverview extends BaseWebhookService {
   }
 
   /**
-   * Builds the ETP-4907 {@code matrix}: every window in {@code goWindowsById}, grouped by its
-   * top-level {@code AD_Menu} category ({@link #resolveWindowCategories(Set)}), each with a
-   * per-role tri-state {@code access} map built from {@code tierMapsByRoleId} — a role/window
-   * pair absent from that role's tier map resolves to {@link #NONE}.
+   * Builds the ETP-4907 {@code matrix}: every window in {@code goWindowsById} PLUS (ETP-5071)
+   * the 3 {@link #PROXY_MATRIX_ROWS} synthetic windowless rows, grouped by top-level {@code
+   * AD_Menu} category ({@link #resolveWindowCategories(Set)}), each with a per-role tri-state
+   * {@code access} map built from {@code tierMapsByRoleId} — a role/row pair absent from that
+   * role's tier map resolves to {@link #NONE}. Real windows are adapted to the common {@link
+   * MatrixRow} shape purely for uniform grouping/sorting/rendering with the synthetic rows; their
+   * own id/name/access JSON output is unchanged.
    */
   private JSONObject buildMatrix(Map<String, Window> goWindowsById,
       Map<String, Map<String, String>> tierMapsByRoleId) throws JSONException {
-    Map<String, String> categoryByWindowId = resolveWindowCategories(goWindowsById.keySet());
-
-    Map<String, List<Window>> windowsByCategory = new LinkedHashMap<>();
+    List<MatrixRow> rows = new ArrayList<>();
     for (Window window : goWindowsById.values()) {
-      String category = categoryByWindowId.getOrDefault(window.getId(), OTHER_CATEGORY);
-      windowsByCategory.computeIfAbsent(category, k -> new ArrayList<>()).add(window);
+      rows.add(new MatrixRow(window.getId(), window.getName()));
+    }
+    rows.addAll(PROXY_MATRIX_ROWS);
+
+    // Category lookup includes the 2 window-based proxy ids (SII Monitor, Tax Report) — both are
+    // real AD_Window_IDs that may legitimately resolve a classic-AD-menu-tree category via the
+    // same SQL. NOT_POSTED_DOCS_PROXY_PROCESS_ID is deliberately excluded — it is a process id,
+    // not a window id, so the windowId-keyed SQL cannot resolve a category for it at all; it
+    // falls back to OTHER_CATEGORY below. Whichever category any of these 3 synthetic rows lands
+    // in is functionally irrelevant once the frontend's menu.json override applies (ETP-5071) —
+    // that override always replaces both category and name for a matched id — so this is not
+    // worth over-engineering further.
+    Set<String> categoryLookupIds = new LinkedHashSet<>(goWindowsById.keySet());
+    categoryLookupIds.add(FISCAL_MONITOR_PROXY_WINDOW_ID);
+    categoryLookupIds.add(TAX_MODELS_PROXY_WINDOW_ID);
+    Map<String, String> categoryByWindowId = resolveWindowCategories(categoryLookupIds);
+
+    Map<String, List<MatrixRow>> rowsByCategory = new LinkedHashMap<>();
+    for (MatrixRow row : rows) {
+      String category = categoryByWindowId.getOrDefault(row.id, OTHER_CATEGORY);
+      rowsByCategory.computeIfAbsent(category, k -> new ArrayList<>()).add(row);
     }
 
-    List<String> sortedCategories = new ArrayList<>(windowsByCategory.keySet());
+    List<String> sortedCategories = new ArrayList<>(rowsByCategory.keySet());
     sortedCategories.sort(String.CASE_INSENSITIVE_ORDER);
 
     JSONArray categories = new JSONArray();
     for (String category : sortedCategories) {
-      List<Window> windowsInCategory = windowsByCategory.get(category);
-      windowsInCategory.sort((a, b) -> a.getName().compareToIgnoreCase(b.getName()));
+      List<MatrixRow> rowsInCategory = rowsByCategory.get(category);
+      rowsInCategory.sort((a, b) -> a.name.compareToIgnoreCase(b.name));
 
       JSONArray windowsJson = new JSONArray();
-      for (Window window : windowsInCategory) {
+      for (MatrixRow row : rowsInCategory) {
         JSONObject windowJson = new JSONObject();
-        windowJson.put(ID, window.getId());
-        windowJson.put(NAME, window.getName());
+        windowJson.put(ID, row.id);
+        windowJson.put(NAME, row.name);
 
         JSONObject access = new JSONObject();
         for (Map.Entry<String, Map<String, String>> roleEntry : tierMapsByRoleId.entrySet()) {
-          access.put(roleEntry.getKey(), roleEntry.getValue().getOrDefault(window.getId(), NONE));
+          access.put(roleEntry.getKey(), roleEntry.getValue().getOrDefault(row.id, NONE));
         }
         windowJson.put(ACCESS, access);
         windowsJson.put(windowJson);
