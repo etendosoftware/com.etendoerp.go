@@ -25,6 +25,8 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -44,6 +46,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Criterion;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.provider.OBProvider;
@@ -342,13 +345,10 @@ public class TbaiConfigSequenceHandlerTest {
   }
 
   /**
-   * Unlike GET and non-CRUD endpoints above, a CRUD DELETE is NOT a bare no-op since ETP-5117:
-   * {@code afterHandle} now runs the auto-send schedule cleanup for it (see the dedicated
-   * "genuine DELETE unschedule cleanup" tests below for the full behavior), which enters admin
-   * mode to resolve/remove the schedule before returning {@code null}. This test only asserts
-   * the outer contract (still returns {@code null}, still enters/restores admin mode exactly
-   * once) — kept here alongside its GET/non-CRUD siblings as the endpoint/method guard for
-   * DELETE; the resolution/no-op details are covered separately below.
+   * Since the ETP-5117 follow-up, a CRUD DELETE is a bare {@code afterHandle} no-op again, exactly
+   * like GET and the non-CRUD endpoints above: its auto-send schedule cleanup moved to the
+   * {@code beforeDelete} pre-hook, where the config record still exists and can answer for its own
+   * client/organization. So {@code afterHandle} short-circuits before ever entering admin mode.
    */
   @Test
   public void afterHandleReturnsNullForCrudDeleteMethod() {
@@ -361,17 +361,13 @@ public class TbaiConfigSequenceHandlerTest {
 
     try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-      obCtxMock.when(() -> OBContext.setAdminMode(anyBoolean())).then(inv -> null);
-      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
-
       OBDal obDal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(obDal);
-      when(obDal.get(TbaiConfig.class, RECORD_ID)).thenReturn(null);
 
       assertNull(handler.afterHandle(ctx));
 
-      obCtxMock.verify(() -> OBContext.setAdminMode(anyBoolean()), times(1));
-      obCtxMock.verify(OBContext::restorePreviousMode, times(1));
+      obCtxMock.verify(() -> OBContext.setAdminMode(anyBoolean()), never());
+      verifyNoInteractions(obDal);
     }
   }
 
@@ -1127,17 +1123,400 @@ public class TbaiConfigSequenceHandlerTest {
     }
   }
 
-  // ─── afterHandle: ETP-5117 follow-up — unschedule cleanup on deactivation ───
+  // ─── ETP-5117 follow-up: unschedule cleanup runs in the PRE-hook, record-scoped ──
 
   /**
-   * A deactivating PUT (explicit {@code active=false}) triggers BOTH the auto-send schedule
-   * cleanup AND {@code ensureTbaiSequences} — deliberately additive, not a replacement branch
-   * (see class Javadoc): chaining sequences must survive a pause/resume. This is the key
-   * behavioral difference from {@code SiiConfigDeactivateHandler}, which skips its sequence-like
-   * logic entirely on deactivation.
+   * The organization id a real Etendo GO client-admin session reports: {@code '0'}, the {@code '*'}
+   * org. The acting client-admin role has {@code ad_role.ad_org_id = '0'} and the user carries no
+   * {@code default_ad_org_id}, so {@code OBContext.getCurrentOrganization()} is <em>never</em> the
+   * business organization the config record — and therefore its auto-send schedule — belongs to.
+   * Resolving the cleanup scope from the session is what made this feature silently no-op in live
+   * testing while four rounds of unit tests stayed green, because those tests mocked the session
+   * organization equal to the record's.
+   */
+  private static final String SESSION_ORG_ID = "0";
+
+  /** A session client id deliberately different from the record's, for the same reason. */
+  private static final String SESSION_CLIENT_ID = "session-client-999";
+
+  /** A real business organization id, the kind a config record actually belongs to. */
+  private static final String RECORD_ORG_ID = "C0376D5E8CFA4D4A8870D956E14CE5A4";
+
+  /**
+   * Builds an {@link OBContext} shaped like a real Etendo GO client-admin session: current
+   * organization {@code '0'} (the {@code '*'} org) and a client id different from the record's.
+   * Any test that resolves the cleanup scope from this context instead of from the record proves
+   * nothing — the production bug is precisely that this context does not describe the record.
+   */
+  private static OBContext mockGoClientAdminSessionObContext() {
+    OBContext session = mock(OBContext.class);
+    Client sessionClient = mock(Client.class);
+    when(sessionClient.getId()).thenReturn(SESSION_CLIENT_ID);
+    Organization starOrg = mock(Organization.class);
+    when(starOrg.getId()).thenReturn(SESSION_ORG_ID);
+    when(session.getCurrentClient()).thenReturn(sessionClient);
+    when(session.getCurrentOrganization()).thenReturn(starOrg);
+    return session;
+  }
+
+  /** A {@link TbaiConfig} that answers for its own client/organization. */
+  private static TbaiConfig mockConfigOwnedBy(String clientId, String orgId) {
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(clientId);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(orgId);
+    TbaiConfig config = mock(TbaiConfig.class);
+    when(config.getClient()).thenReturn(client);
+    when(config.getOrganization()).thenReturn(org);
+    return config;
+  }
+
+  /**
+   * THE regression test for the live bug. A deactivating PUT arrives on a GO client-admin session
+   * whose current organization is {@code '0'} and whose current client differs from the record's;
+   * the config record itself belongs to a business organization. The schedule must be removed with
+   * the <b>record's</b> client/organization, and the session's must never be consulted at all.
    */
   @Test
-  public void afterHandlePutDeactivatingTriggersUnscheduleAndStillRunsSequenceAssignment()
+  public void handlePutDeactivatingUnschedulesWithTheRecordScopeNotTheSessionOrg() throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    TbaiConfigSequenceHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    OBContext session = mockGoClientAdminSessionObContext();
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PUT")
+        .requestBody(new JSONObject().put("active", false))
+        .recordId(RECORD_ID)
+        .obContext(session)
+        .build();
+
+    TbaiConfig config = mockConfigOwnedBy(CLIENT_ID, RECORD_ORG_ID);
+    when(config.getTbaisystemdate()).thenReturn(null);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(TbaiConfig.class, RECORD_ID)).thenReturn(config);
+
+      NeoResponse result = handler.handle(ctx);
+
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+
+      // The record's own scope — the only one that can match the schedule row.
+      verify(scheduleService).unscheduleAutoSend(CLIENT_ID, RECORD_ORG_ID,
+          SiiTbaiAutoSendScheduleService.TBAI_PROCESS_SEARCH_KEY);
+      // Never the session's client, never the session's org '0'.
+      verify(scheduleService, never()).unscheduleAutoSend(eq(SESSION_CLIENT_ID), any(), any());
+      verify(scheduleService, never()).unscheduleAutoSend(any(), eq(SESSION_ORG_ID), any());
+      // Stronger still: the session context is not even asked.
+      verify(session, never()).getCurrentOrganization();
+      verify(session, never()).getCurrentClient();
+    }
+  }
+
+  /**
+   * Same regression, DELETE entry point: GO's "Eliminar" action sends a real {@code DELETE}, which
+   * never reaches {@code smartDeactivate}. The {@code beforeDelete} pre-hook must resolve the scope
+   * from the record while it still exists, never from the session's {@code '0'} organization.
+   */
+  @Test
+  public void handleDeleteUnschedulesWithTheRecordScopeNotTheSessionOrg() throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    TbaiConfigSequenceHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    OBContext session = mockGoClientAdminSessionObContext();
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("DELETE")
+        .recordId(RECORD_ID)
+        .obContext(session)
+        .build();
+
+    TbaiConfig config = mockConfigOwnedBy(CLIENT_ID, RECORD_ORG_ID);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(TbaiConfig.class, RECORD_ID)).thenReturn(config);
+
+      // null so NEO's default CRUD still performs the delete.
+      assertNull(handler.handle(ctx));
+
+      verify(scheduleService).unscheduleAutoSend(CLIENT_ID, RECORD_ORG_ID,
+          SiiTbaiAutoSendScheduleService.TBAI_PROCESS_SEARCH_KEY);
+      verify(scheduleService, never()).unscheduleAutoSend(eq(SESSION_CLIENT_ID), any(), any());
+      verify(scheduleService, never()).unscheduleAutoSend(any(), eq(SESSION_ORG_ID), any());
+      verify(session, never()).getCurrentOrganization();
+      verify(session, never()).getCurrentClient();
+    }
+  }
+
+  /**
+   * Deactivating PUT, delete outcome (no adoption date): the schedule is removed <em>before</em>
+   * the record is removed. Ordering is the whole point — after the removal the record can no longer
+   * answer for its client/organization, which is exactly how the old design ended up guessing.
+   */
+  @Test
+  public void handlePutDeactivatingUnschedulesBeforeRemovingTheRecord() throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    TbaiConfigSequenceHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    TbaiConfig config = mockConfigOwnedBy(CLIENT_ID, ORG_ID);
+    when(config.getTbaisystemdate()).thenReturn(null);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(TbaiConfig.class, RECORD_ID)).thenReturn(config);
+
+      NeoResponse result = handler.handle(NeoContext.builder()
+          .httpMethod("PUT")
+          .requestBody(new JSONObject().put("active", false))
+          .recordId(RECORD_ID)
+          .build());
+
+      assertNotNull(result);
+      assertEquals(true, result.getBody().getBoolean("deleted"));
+
+      InOrder ordered = inOrder(scheduleService, obDal);
+      ordered.verify(scheduleService).unscheduleAutoSend(CLIENT_ID, ORG_ID,
+          SiiTbaiAutoSendScheduleService.TBAI_PROCESS_SEARCH_KEY);
+      ordered.verify(obDal).remove(config);
+      ordered.verify(obDal).flush();
+    }
+  }
+
+  /**
+   * Deactivating PUT, fall-through outcome (adoption date set AND TicketBAI invoices exist, so the
+   * record survives and default CRUD deactivates it): the schedule is still removed, and
+   * {@code smartDeactivate} still returns {@code null} so the fall-through happens.
+   */
+  @Test
+  public void handlePutDeactivatingFallThroughStillUnschedulesAndReturnsNull() throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    TbaiConfigSequenceHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    TbaiConfig config = mockConfigOwnedBy(CLIENT_ID, ORG_ID);
+    when(config.getTbaisystemdate()).thenReturn(new Date());
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(TbaiConfig.class, RECORD_ID)).thenReturn(config);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<Invoice> crit = mock(OBCriteria.class);
+      when(obDal.createCriteria(Invoice.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.setProjection(any())).thenReturn(crit);
+      when(crit.uniqueResult()).thenReturn(9L);
+
+      assertNull(handler.handle(NeoContext.builder()
+          .httpMethod("PUT")
+          .requestBody(new JSONObject().put("active", false))
+          .recordId(RECORD_ID)
+          .build()));
+
+      // Both outcomes of smartDeactivate unschedule — this is the fall-through one.
+      verify(scheduleService).unscheduleAutoSend(CLIENT_ID, ORG_ID,
+          SiiTbaiAutoSendScheduleService.TBAI_PROCESS_SEARCH_KEY);
+      verify(obDal, never()).remove(any());
+    }
+  }
+
+  /**
+   * A genuine {@code DELETE} must leave NEO's default CRUD alone: {@code handle()} returns
+   * {@code null} so the hard delete still happens, and the schedule is removed with the record's
+   * own client/organization on the way there.
+   */
+  @Test
+  public void handleDeleteReturnsNullSoDefaultCrudProceedsAndUnschedulesRecordScope()
+      throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    TbaiConfigSequenceHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    TbaiConfig config = mockConfigOwnedBy(CLIENT_ID, ORG_ID);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(TbaiConfig.class, RECORD_ID)).thenReturn(config);
+
+      assertNull(handler.handle(NeoContext.builder()
+          .httpMethod("DELETE")
+          .recordId(RECORD_ID)
+          .build()));
+
+      verify(scheduleService).unscheduleAutoSend(CLIENT_ID, ORG_ID,
+          SiiTbaiAutoSendScheduleService.TBAI_PROCESS_SEARCH_KEY);
+      // The pre-hook never deletes anything itself — default CRUD owns the delete.
+      verify(obDal, never()).remove(any());
+      obCtxMock.verify(OBContext::restorePreviousMode, times(1));
+    }
+  }
+
+  /**
+   * A {@code DELETE} with a blank/absent record id: nothing to look up and nothing to unschedule.
+   * The guard fires before admin mode is even entered, and {@code handle()} still returns
+   * {@code null}.
+   */
+  @Test
+  public void handleDeleteWithBlankRecordIdDoesNothingAtAll() throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    TbaiConfigSequenceHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      assertNull(handler.handle(NeoContext.builder()
+          .httpMethod("DELETE")
+          .recordId("   ")
+          .build()));
+      assertNull(handler.handle(NeoContext.builder().httpMethod("DELETE").build()));
+
+      verifyNoInteractions(scheduleService);
+      verifyNoInteractions(obDal);
+      obCtxMock.verify(() -> OBContext.setAdminMode(anyBoolean()), never());
+    }
+  }
+
+  /**
+   * A {@code DELETE} whose record cannot be loaded (already gone, or invisible to this session):
+   * the cleanup is skipped entirely rather than falling back to a guessed scope. Guessing is the
+   * bug — a wrongly-scoped {@code unscheduleAutoSend} silently matches nothing and hides the
+   * failure. {@code handle()} still returns {@code null}.
+   */
+  @Test
+  public void handleDeleteWithUnloadableRecordNeverGuessesAScope() throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    TbaiConfigSequenceHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    OBContext session = mockGoClientAdminSessionObContext();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(TbaiConfig.class, RECORD_ID)).thenReturn(null);
+
+      assertNull(handler.handle(NeoContext.builder()
+          .httpMethod("DELETE")
+          .recordId(RECORD_ID)
+          .obContext(session)
+          .build()));
+
+      verifyNoInteractions(scheduleService);
+      verify(session, never()).getCurrentOrganization();
+      verify(session, never()).getCurrentClient();
+    }
+  }
+
+  /**
+   * The cleanup is a side effect and must never block the operation the user asked for: when
+   * {@code unscheduleAutoSend} blows up during a {@code DELETE}, the exception is swallowed and
+   * {@code handle()} still returns {@code null} so default CRUD deletes the record.
+   */
+  @Test
+  public void handleDeleteSwallowsUnscheduleFailureAndStillLetsTheDeleteProceed() throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    TbaiConfigSequenceHandler handler = handlerWithScheduleServiceMock(scheduleService);
+    doThrow(new RuntimeException("scheduler down")).when(scheduleService)
+        .unscheduleAutoSend(any(), any(), any());
+
+    TbaiConfig config = mockConfigOwnedBy(CLIENT_ID, ORG_ID);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(TbaiConfig.class, RECORD_ID)).thenReturn(config);
+
+      assertNull(handler.handle(NeoContext.builder()
+          .httpMethod("DELETE")
+          .recordId(RECORD_ID)
+          .build()));
+
+      verify(scheduleService).unscheduleAutoSend(CLIENT_ID, ORG_ID,
+          SiiTbaiAutoSendScheduleService.TBAI_PROCESS_SEARCH_KEY);
+      obCtxMock.verify(OBContext::restorePreviousMode, times(1));
+    }
+  }
+
+  /**
+   * Same swallow contract on the deactivating-PUT entry point: an {@code unscheduleAutoSend}
+   * failure must not abort {@code smartDeactivate} — the record is still deleted and the
+   * {@code {"deleted":true}} response is still returned.
+   */
+  @Test
+  public void handlePutDeactivatingSwallowsUnscheduleFailureAndStillDeletes() throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    TbaiConfigSequenceHandler handler = handlerWithScheduleServiceMock(scheduleService);
+    doThrow(new RuntimeException("scheduler down")).when(scheduleService)
+        .unscheduleAutoSend(any(), any(), any());
+
+    TbaiConfig config = mockConfigOwnedBy(CLIENT_ID, ORG_ID);
+    when(config.getTbaisystemdate()).thenReturn(null);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(TbaiConfig.class, RECORD_ID)).thenReturn(config);
+
+      NeoResponse result = handler.handle(NeoContext.builder()
+          .httpMethod("PUT")
+          .requestBody(new JSONObject().put("active", false))
+          .recordId(RECORD_ID)
+          .build());
+
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+      assertEquals(true, result.getBody().getBoolean("deleted"));
+      verify(obDal).remove(config);
+    }
+  }
+
+  // ─── afterHandle(): no longer unschedules — the pre-hook owns cleanup now ────
+
+  /**
+   * TBAI-specific: a deactivating PUT still runs {@code ensureTbaiSequences} in
+   * {@code afterHandle} — chaining sequences must survive a pause/resume — but it no longer
+   * unschedules there. That cleanup already ran in {@code smartDeactivate}, scoped to the record.
+   * {@code scheduleAutoSendIfActive} also correctly no-ops for a config that resolved inactive.
+   */
+  @Test
+  public void afterHandlePutDeactivatingStillRunsSequenceAssignmentAndNoLongerUnschedules()
       throws Exception {
     SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
     TbaiConfigSequenceHandler handler = handlerWithScheduleServiceMock(scheduleService);
@@ -1147,17 +1526,11 @@ public class TbaiConfigSequenceHandlerTest {
         .httpMethod("PUT")
         .requestBody(new JSONObject().put("active", false))
         .recordId(RECORD_ID)
-        .obContext(mockObContextWithUserAndRole())
+        .obContext(mockGoClientAdminSessionObContext())
         .build();
 
-    Client client = mock(Client.class);
-    when(client.getId()).thenReturn(CLIENT_ID);
-    Organization configOrg = mock(Organization.class);
-    when(configOrg.getId()).thenReturn(ORG_ID);
-    when(configOrg.getName()).thenReturn(ORG_NAME);
-    TbaiConfig config = mock(TbaiConfig.class);
-    when(config.getClient()).thenReturn(client);
-    when(config.getOrganization()).thenReturn(configOrg);
+    TbaiConfig config = mockConfigOwnedBy(CLIENT_ID, ORG_ID);
+    when(config.getOrganization().getName()).thenReturn(ORG_NAME);
     when(config.isActive()).thenReturn(false); // deactivated by the incoming PUT
 
     DocumentType docType = mock(DocumentType.class);
@@ -1194,94 +1567,23 @@ public class TbaiConfigSequenceHandlerTest {
 
       assertNull(handler.afterHandle(ctx));
 
-      // The unschedule cleanup ran (resolveConfigScope's record-lookup path — config resolves).
-      verify(scheduleService).unscheduleAutoSend(CLIENT_ID, ORG_ID,
-          SiiTbaiAutoSendScheduleService.TBAI_PROCESS_SEARCH_KEY);
-
-      // ensureTbaiSequences STILL ran alongside it — both happened, not either/or.
+      // ensureTbaiSequences still ran — the TBAI-specific difference from the SII handler.
       verify(docType).setTbaiAdSequence(sequence);
       verify(obDal).save(docType);
       verify(obDal).save(sequence);
 
-      // scheduleAutoSendIfActive correctly no-ops for a config that resolved inactive.
-      verify(scheduleService, never())
-          .ensureAutoSendSchedule(any(), any(), any(), any(), any(), any());
-      verify(scheduleService, never()).activateSchedule(any());
+      // But afterHandle no longer touches the schedule at all.
+      verifyNoInteractions(scheduleService);
     }
   }
 
   /**
-   * When the TBAI config record is gone (deleted outright by {@code smartDeactivate} — no
-   * invoices were ever sent through it), the cleanup call falls back to
-   * {@code context.getObContext()}'s current client/organization via
-   * {@code resolveConfigScope}, the same helper {@code ensureTbaiSequences} already relies on.
+   * TBAI-specific: a genuine {@code DELETE} returns from {@code afterHandle} without touching the
+   * sequences (the config record is going away, so there is no scope left to assign chaining
+   * sequences to) and without unscheduling — that ran in the {@code beforeDelete} pre-hook.
    */
   @Test
-  public void afterHandlePutDeactivatingUnschedulesUsingObContextFallbackWhenConfigRecordIsGone()
-      throws Exception {
-    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
-    TbaiConfigSequenceHandler handler = handlerWithScheduleServiceMock(scheduleService);
-
-    OBContext requestObContext = mock(OBContext.class);
-    Client fallbackClient = mock(Client.class);
-    when(fallbackClient.getId()).thenReturn(CLIENT_ID);
-    Organization fallbackOrg = mock(Organization.class);
-    when(fallbackOrg.getId()).thenReturn(ORG_ID);
-    when(requestObContext.getCurrentClient()).thenReturn(fallbackClient);
-    when(requestObContext.getCurrentOrganization()).thenReturn(fallbackOrg);
-
-    NeoContext ctx = NeoContext.builder()
-        .endpointType(NeoEndpointType.CRUD)
-        .httpMethod("PUT")
-        .requestBody(new JSONObject().put("active", false))
-        .recordId(RECORD_ID)
-        .obContext(requestObContext)
-        .build();
-
-    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
-        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
-
-      obCtxMock.when(() -> OBContext.setAdminMode(anyBoolean())).then(inv -> null);
-      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
-
-      // Static OBContext.getOBContext() is used by ensureTbaiSequences' natural-tree lookup —
-      // stub it so that path completes cleanly (empty result) instead of masking this test's real
-      // target (the fallback-driven unschedule call) behind a swallowed exception.
-      OBContext staticObContext = mock(OBContext.class);
-      OrganizationStructureProvider osp = mock(OrganizationStructureProvider.class);
-      when(osp.getNaturalTree(ORG_ID)).thenReturn(Collections.singleton(ORG_ID));
-      when(staticObContext.getOrganizationStructureProvider()).thenReturn(osp);
-      obCtxMock.when(OBContext::getOBContext).thenReturn(staticObContext);
-
-      OBDal obDal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
-      // The config record is gone — deleted outright by smartDeactivate (no invoices ever sent).
-      when(obDal.get(TbaiConfig.class, RECORD_ID)).thenReturn(null);
-
-      @SuppressWarnings("unchecked")
-      OBCriteria<DocumentType> criteria = mock(OBCriteria.class);
-      when(obDal.createCriteria(DocumentType.class)).thenReturn(criteria);
-      when(criteria.add(any())).thenReturn(criteria);
-      when(criteria.list()).thenReturn(Collections.emptyList());
-
-      assertNull(handler.afterHandle(ctx));
-
-      verify(scheduleService).unscheduleAutoSend(CLIENT_ID, ORG_ID,
-          SiiTbaiAutoSendScheduleService.TBAI_PROCESS_SEARCH_KEY);
-    }
-  }
-
-  // ─── afterHandle: ETP-5117 follow-up — genuine DELETE unschedule cleanup ────
-
-  /**
-   * A genuine {@code DELETE} unschedules the auto-send schedule using the still-resolvable
-   * config record's own client/organization, AND — the key behavioral difference from the
-   * deactivating-PUT path — returns immediately afterward: {@code ensureTbaiSequences} never
-   * runs, since the config record itself is going away and there is no scope left to
-   * (re)assign chaining sequences to.
-   */
-  @Test
-  public void afterHandleDeleteUnschedulesAutoSendAndSkipsSequenceAssignment() throws Exception {
+  public void afterHandleDeleteSkipsSequenceAssignmentAndNoLongerUnschedules() throws Exception {
     SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
     TbaiConfigSequenceHandler handler = handlerWithScheduleServiceMock(scheduleService);
 
@@ -1289,75 +1591,15 @@ public class TbaiConfigSequenceHandlerTest {
         .endpointType(NeoEndpointType.CRUD)
         .httpMethod("DELETE")
         .recordId(RECORD_ID)
-        .build();
-
-    Client client = mock(Client.class);
-    when(client.getId()).thenReturn(CLIENT_ID);
-    Organization configOrg = mock(Organization.class);
-    when(configOrg.getId()).thenReturn(ORG_ID);
-    TbaiConfig config = mock(TbaiConfig.class);
-    when(config.getClient()).thenReturn(client);
-    when(config.getOrganization()).thenReturn(configOrg);
-
-    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
-        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
-        MockedStatic<OBProvider> obProviderMock = mockStatic(OBProvider.class)) {
-
-      obCtxMock.when(() -> OBContext.setAdminMode(anyBoolean())).then(inv -> null);
-      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
-
-      OBDal obDal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
-      when(obDal.get(TbaiConfig.class, RECORD_ID)).thenReturn(config);
-
-      OBProvider obProvider = mock(OBProvider.class);
-      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
-
-      assertNull(handler.afterHandle(ctx));
-
-      verify(scheduleService).unscheduleAutoSend(CLIENT_ID, ORG_ID,
-          SiiTbaiAutoSendScheduleService.TBAI_PROCESS_SEARCH_KEY);
-
-      // Key behavioral difference from the PUT-deactivate path (which still runs
-      // ensureTbaiSequences — see afterHandlePutDeactivatingTriggersUnscheduleAndStillRunsSequenceAssignment):
-      // a genuine DELETE returns immediately after the unschedule call.
-      verify(obDal, never()).createCriteria(DocumentType.class);
-      verify(obProvider, never()).get(Sequence.class);
-      verify(scheduleService, never())
-          .ensureAutoSendSchedule(any(), any(), any(), any(), any(), any());
-      verify(scheduleService, never()).activateSchedule(any());
-    }
-  }
-
-  /**
-   * A DELETE on a config that never had an active auto-send schedule, and whose scope cannot be
-   * resolved either (record already gone, no {@link NeoContext#getObContext()} carried on this
-   * request), is a clean no-op: no exception, no schedule-service interaction at all, and — same
-   * as every other DELETE — no sequence-assignment attempt.
-   */
-  @Test
-  public void afterHandleDeleteIsNoOpWhenConfigNeverHadScheduleOrScope() throws Exception {
-    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
-    TbaiConfigSequenceHandler handler = handlerWithScheduleServiceMock(scheduleService);
-
-    NeoContext ctx = NeoContext.builder()
-        .endpointType(NeoEndpointType.CRUD)
-        .httpMethod("DELETE")
-        .recordId(RECORD_ID)
+        .obContext(mockGoClientAdminSessionObContext())
         .build();
 
     try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
         MockedStatic<OBProvider> obProviderMock = mockStatic(OBProvider.class)) {
 
-      obCtxMock.when(() -> OBContext.setAdminMode(anyBoolean())).then(inv -> null);
-      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
-
       OBDal obDal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(obDal);
-      // Record already gone (real DELETE completed) and no obContext on this NeoContext either —
-      // resolveConfigScope can't resolve a scope, so the cleanup is a clean no-op.
-      when(obDal.get(TbaiConfig.class, RECORD_ID)).thenReturn(null);
 
       OBProvider obProvider = mock(OBProvider.class);
       obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
@@ -1365,8 +1607,9 @@ public class TbaiConfigSequenceHandlerTest {
       assertNull(handler.afterHandle(ctx));
 
       verifyNoInteractions(scheduleService);
-      verify(obDal, never()).createCriteria(DocumentType.class);
+      verifyNoInteractions(obDal);
       verify(obProvider, never()).get(Sequence.class);
+      obCtxMock.verify(() -> OBContext.setAdminMode(anyBoolean()), never());
     }
   }
 }
