@@ -567,4 +567,76 @@ class AccountIdentityDalHelperTest {
       verify(obDal, never()).save(any());
     }
   }
+
+  @Nested
+  @DisplayName("unlink")
+  class Unlink {
+
+    @Test
+    @DisplayName("deletes the child row and empties the legacy columns that held the same identity")
+    void clearsTheLegacyColumnsItJustRemoved() {
+      Account account = legacyAccount(new Date(1_710_000_000_000L));
+      AccountIdentity row = existingRow(PROVIDER, SUBJECT, account);
+
+      AccountIdentityDalHelper.unlink(row);
+
+      verify(obDal).remove(row);
+      verify(account).set(Account.PROPERTY_AUTHPROVIDER, null);
+      verify(account).set(Account.PROPERTY_EXTERNALSUBJECT, null);
+      verify(account).set(Account.PROPERTY_EXTERNALEMAIL, null);
+      verify(account).set(Account.PROPERTY_LASTSSOLOGIN, null);
+      verify(obDal).save(account);
+      assertNothingCommitted();
+    }
+
+    @Test
+    @DisplayName("the unlinked identity does not come back on the next read")
+    void doesNotResurrectOnTheNextRead() {
+      Account account = legacyAccount(null);
+      AccountIdentity row = existingRow(PROVIDER, SUBJECT, account);
+
+      AccountIdentityDalHelper.unlink(row);
+      // The clearing is what the next read sees; without it the empty child table reads as
+      // "never migrated" and the identity is materialised straight back.
+      when(account.get(Account.PROPERTY_AUTHPROVIDER)).thenReturn(null);
+      when(account.get(Account.PROPERTY_EXTERNALSUBJECT)).thenReturn(null);
+
+      assertTrue(AccountIdentityDalHelper.identitiesFor(account).isEmpty(),
+          "the account must be left with no identity at all");
+      verify(obProvider, never()).get(AccountIdentity.class);
+    }
+
+    @Test
+    @DisplayName("leaves the legacy columns alone when they describe a different identity")
+    void keepsLegacyColumnsOfAnotherIdentity() {
+      Account account = legacyAccount(new Date(1_710_000_000_000L));
+      AccountIdentity row = existingRow("github", "other-subject", account);
+
+      AccountIdentityDalHelper.unlink(row);
+
+      verify(obDal).remove(row);
+      verify(account, never()).set(eq(Account.PROPERTY_AUTHPROVIDER), any());
+      verify(obDal, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("removes a row of an already-migrated account without touching empty columns")
+    void handlesAnAccountWithNoLegacyColumns() {
+      Account account = bareAccount();
+      AccountIdentity row = existingRow(PROVIDER, SUBJECT, account);
+
+      AccountIdentityDalHelper.unlink(row);
+
+      verify(obDal).remove(row);
+      verify(obDal, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("ignores a null identity")
+    void ignoresNull() {
+      AccountIdentityDalHelper.unlink(null);
+      verify(obDal, never()).remove(any());
+      verify(obDal, never()).save(any());
+    }
+  }
 }

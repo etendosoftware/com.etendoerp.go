@@ -48,10 +48,13 @@ import com.etendoerp.go.schemaforge.data.AccountIdentity;
  * methods is "the rows for this account" — so the fallback in {@link #materialiseLegacyIdentity}
  * covers every case. An account migrates on its own, the first time anything touches it.
  *
- * <p><strong>The legacy columns are never written again, and never cleared.</strong> Clearing them
- * would need exactly the script this design avoids, and it would destroy the fallback: an account
- * with no child row <em>and</em> emptied columns has lost its identity, which locks the user out.
- * They retire on their own once no account is left unmigrated.
+ * <p><strong>The legacy columns are never written again, and are cleared in one case only.</strong>
+ * Clearing them wholesale would need exactly the script this design avoids, and it would destroy
+ * the fallback: an account with no child row <em>and</em> emptied columns has lost its identity,
+ * which locks the user out. So they retire on their own once no account is left unmigrated. The one
+ * exception is {@link #unlink}, where the user has asked for that identity to be gone and the
+ * caller has already made sure another sign-in method survives: there, leaving the columns behind
+ * would resurrect the identity on the very next read.
  *
  * <p><strong>Nothing here commits.</strong> The lazy migration saves through the caller's existing
  * transaction rather than opening a commit point of its own, so no call sequence gains a commit it
@@ -254,6 +257,18 @@ final class AccountIdentityDalHelper {
    * provider account again — including back to this very account, which is the most likely thing
    * they would try after an accidental removal.
    *
+   * <p><strong>Clears the legacy columns when they hold this same identity.</strong> They are the
+   * other half of the same fact, and leaving them behind undoes the delete three ways: the next
+   * read finds no child row, concludes the account never migrated and materialises the identity
+   * straight back; an SSO login still resolves through {@link #findAccountByLegacyIdentity}; and
+   * {@code ETGO_Account_SSO_UQ} keeps the provider account pinned here, so it cannot be linked
+   * anywhere else. The class note's "never cleared" is about the passive retirement of a migrated
+   * account's columns — not about an identity the user asked to remove. Removing it has to remove
+   * it everywhere it is written.
+   *
+   * <p>This does not lock anyone out: the caller checks the last-method invariant first, so the
+   * account still has another way in.
+   *
    * <p>Does not commit and does not check the last-method invariant. Both belong to the caller: the
    * invariant has to be evaluated over the account's whole method set inside the same transaction
    * as the delete, which this method cannot see.
@@ -264,7 +279,33 @@ final class AccountIdentityDalHelper {
     if (identity == null) {
       return;
     }
+    clearLegacyColumnsHolding(identity);
     OBDal.getInstance().remove(identity);
+  }
+
+  /**
+   * Empties the account's inline identity columns when they still describe the identity being
+   * unlinked, leaving them untouched when they describe a different one.
+   *
+   * @param identity the identity on its way out
+   */
+  private static void clearLegacyColumnsHolding(AccountIdentity identity) {
+    Account account = identity.getAccount();
+    if (account == null) {
+      return;
+    }
+    String provider = StringUtils.trimToNull((String) account.get(Account.PROPERTY_AUTHPROVIDER));
+    String subject = StringUtils.trimToNull((String) account.get(Account.PROPERTY_EXTERNALSUBJECT));
+    if (!StringUtils.equals(provider, identity.getAuthProvider())
+        || !StringUtils.equals(subject, identity.getExternalSubject())) {
+      return;
+    }
+    account.set(Account.PROPERTY_AUTHPROVIDER, null);
+    account.set(Account.PROPERTY_EXTERNALSUBJECT, null);
+    account.set(Account.PROPERTY_EXTERNALEMAIL, null);
+    account.set(Account.PROPERTY_LASTSSOLOGIN, null);
+    OBDal.getInstance().save(account);
+    log.debug("Cleared the inline SSO columns of an account whose identity was unlinked");
   }
 
   private static AccountIdentity findIdentity(String provider, String subject) {
