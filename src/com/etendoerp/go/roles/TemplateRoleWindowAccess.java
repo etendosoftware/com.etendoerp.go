@@ -121,13 +121,26 @@ public final class TemplateRoleWindowAccess {
         readOnly("192"));                                      // Categoría de contacto — Business Partner Category
   }
 
-  /** Purchasing ("Compras") column of the ETP-4878 matrix — 11 grants. */
+  /**
+   * Purchasing ("Compras") column of the ETP-4878 matrix — 11 grants, plus {@code 107}
+   * (Receipt-Invoice Link, added after the original matrix by ETP-5075).
+   *
+   * <p>Window 107 is granted FULL even though the window's DATA is read-only: its accounting
+   * posting action is invoked as a {@code POST} on the action sub-endpoint, and
+   * {@code NeoRequestRouter} gates every window request through
+   * {@code NeoAccessHelper#hasWindowAccess}, which for a write method requires
+   * {@code AD_Window_Access.IsReadWrite='Y'} — a read-only grant makes the post fail with 403
+   * before process access is even evaluated. The data stays read-only through a separate,
+   * independent gate ({@code ETGO_SF_ENTITY.ISPOST/ISPUT/ISPATCH/ISDELETE='N'}), so FULL here
+   * opens the action channel only, never a CRUD write path.
+   */
   private static List<WindowGrant> purchasingGrants() {
     return list(
         full("123"),                                          // Contactos — Business Partner
         full("181"),                                          // Pedido de compra — Purchase Order
         full("184"),                                          // Albarán de compra — Goods Receipt
         full("183"),                                          // Factura de compra — Purchase Invoice
+        full("107"),                                          // Relación albarán-factura — Receipt-Invoice Link (ETP-5075)
         full("C50A8AEE6F044825B5EF54FAAE76826F"),              // Devolución a proveedor — Return to Vendor
         full("140"),                                          // Producto — Product
         readOnly("144"),                                       // Categoría del producto — Product Category
@@ -137,7 +150,10 @@ public final class TemplateRoleWindowAccess {
         readOnly("192"));                                      // Categoría de contacto — Business Partner Category
   }
 
-  /** Finance ("Financiero") column of the ETP-4878 matrix — 27 grants. */
+  /**
+   * Finance ("Financiero") column of the ETP-4878 matrix — 27 grants, plus {@code 107}
+   * (Receipt-Invoice Link, ETP-5075 — see {@link #purchasingGrants()}).
+   */
   private static List<WindowGrant> financeGrants() {
     return list(
         full("123"),                                          // Contactos — Business Partner
@@ -146,6 +162,7 @@ public final class TemplateRoleWindowAccess {
         full("167"),                                          // Factura de venta — Sales Invoice
         readOnly("181"),                                       // Pedido de compra — Purchase Order
         full("183"),                                          // Factura de compra — Purchase Invoice
+        full("107"),                                          // Relación albarán-factura — Receipt-Invoice Link (ETP-5075)
         full("140"),                                          // Producto — Product
         full("144"),                                          // Categoría del producto — Product Category
         full("168"),                                          // Inventario físico — Physical Inventory

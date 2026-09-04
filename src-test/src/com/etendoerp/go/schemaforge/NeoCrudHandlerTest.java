@@ -3090,6 +3090,29 @@ class NeoCrudHandlerTest {
             any(), any(), any(), any(), any()));
       }
     }
+
+    @Test
+    @DisplayName("Runs the tab-aware document type resolver for every CRUD create path")
+    void runsTabAwareDocumentTypeResolver() throws Exception {
+      Tab adTab = mock(Tab.class);
+      when(adTab.getTabLevel()).thenReturn(0L);
+      JSONObject body = new JSONObject().put("documentType", "quotation");
+      NeoContext context = buildContext("POST", null, adTab,
+          mock(SFEntity.class), body, null);
+
+      try (MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+               Mockito.mockStatic(NeoDefaultsCascadeHelper.class);
+           MockedStatic<DocTypeResolver> docTypeMock =
+               Mockito.mockStatic(DocTypeResolver.class)) {
+        invokePrivate(handler, "executePostCalloutCascade",
+            new Class<?>[] { JSONObject.class, Tab.class, NeoContext.class,
+                String.class, java.util.Set.class },
+            body, adTab, context, null, Collections.emptySet());
+
+        docTypeMock.verify(() -> DocTypeResolver.reapplyDocTypeFromTabFilter(
+            body, adTab, context, Collections.emptySet()));
+      }
+    }
   }
 
   // -------------------------------------------------------------------------

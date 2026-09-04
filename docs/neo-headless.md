@@ -533,6 +533,39 @@ never misread as checked. Those guards exist *because* the backend did not guara
 consolidating them behind a single helper is a follow-up, not part of this change — React still
 talks to endpoints that do not run this post-pass.
 
+#### 4.3.3 Optimistic concurrency — the `updated` field (ETP-5073 / DOC-04)
+
+Every generic CRUD `PUT`/`PATCH` — routed through `NeoCrudHandler`, so this applies to every
+window spec, not one entity — requires the request body to carry the `updated` value the
+corresponding `GET` returned for that record. This lets NEO detect, before the write is applied,
+that nobody else saved the record in between.
+
+| Condition | Status | `error` | Meaning / remedy |
+|---|---|---|---|
+| `updated` absent, blank, or the literal string `"null"` | `400` | `missing_updated` | The caller never read the record, or dropped the field before writing. Re-`GET` the same URL (or `neo_get`) and send its `updated` back verbatim alongside the changed fields. |
+| `updated` present but no longer matches the stored row | `409` | `stale_record` | Someone else saved the record after the caller's read and before this write. Re-read, reapply the intended changes on top of the fresh state, retry. |
+
+Both use the flat `status`/`error`/`detail`/`hint`/`seeAlso` error envelope (same shape as the
+422 in §4.3.1.1) so a caller branches on `error`, never on prose or on status code alone —
+`checkJsonServiceResponse` already answers `409` for an unrelated duplicate-key conflict on the
+same entity, and the two need opposite remedies. The MCP surface documents the same contract to
+agent callers (`McpConstants.ERROR_STALE_RECORD`, `ToolRegistry`'s tool descriptions).
+
+The comparison (`NeoRecordVersion.isStale`) deliberately mirrors core's own optimistic-locking
+check (`JsonToDataConverter#areDatesEqual`, millisecond-insensitive — Postgres keeps microseconds
+on the column while the wire value is formatted to the second) rather than reinventing the
+tolerance. Core's check exists already but is silently skipped whenever the request omits the
+`updated` key entirely — which every write used to do, because `NeoFieldFilter#filterWriteRequest`
+stripped `updated` from every outgoing write before this existed. It answers `false` ("not stale")
+for anything it cannot evaluate (blank token, non-`Traceable` entity, unparseable value), which lets
+core's own check be the final word rather than fabricating a conflict.
+
+**Consequence for any handler with a custom `GET`.** A `NeoHandler` that bypasses the generic
+`DataSourceServlet` read path (native SQL, a hand-built response, …) must still select and return
+`updated` on every list/detail row, or its callers have nothing to echo back — every subsequent
+edit then 400s as `missing_updated` no matter how freshly the record was just read. See §5.3's
+`ChartOfAccountsHandler` example for a concrete case that hit exactly this gap.
+
 ### 4.4 Selectors (FK Dropdowns)
 
 The selector service resolves foreign key references and provides searchable dropdown values.
@@ -1049,6 +1082,31 @@ does not resolve to a readable entity, `405` for any method other than `GET`.
 
 ---
 
+### 4.9a Global Semantic Vector Search Endpoint
+
+```
+GET /sws/neo/vectorsearch?query={text}&namespaces={namespace[,namespace]}&topK=10&metadataFilter={json}
+Authorization: Bearer {token}
+```
+
+This authenticated pseudo-spec delegates embedding and pgvector queries to
+`com.etendoerp.db.extended`'s `VectorSearchService`. `namespaces` is a required,
+comma-separated selection of active, compatible DB Extended sources. The browser never supplies
+tenant scope: DB Extended derives client and organization from `OBContext`; Go maps every requested
+namespace to its AD table and requires the active role to have entity read access before searching.
+
+`query` and `namespaces` are required. `topK` defaults to `10` and is limited to `1..50`.
+`metadataFilter` is optional JSONB containment input for DB Extended. The response is its portable
+`{ namespaces, matches }` payload. Invalid request data returns `400`, unauthorized sources return
+`403`, controlled DB Extended capability/source failures return `422`, and provider failures return
+a sanitized `500`. Only `GET` is supported.
+
+Schema Forge configures its consumer through the Vite contract
+`VITE_VECTOR_SEARCH_NAMESPACES`; leaving it empty disables semantic matches while normal page search
+remains available.
+
+---
+
 ### 4.10 NEO Pseudo-Spec Bridge for Etendo GO's Own Webhooks
 
 ```
@@ -1134,7 +1192,8 @@ specs — not a replacement for this one).
 
 ### 4.12 MCP Tool Ergonomics (Wave 3 — ETP-4601)
 
-The MCP tool layer (`/sws/neo/mcp`, routed by `McpToolRouter`) exposes the same specs described
+The MCP tool layer (`/sws/mcp`, with `/mcp` as the WebMCP-friendly alias, routed by
+`McpToolRouter`) exposes the same specs described
 above to AI agents as JSON-RPC tools (`neo_discover`, `neo_schema`, `neo_create`, `neo_update`, …).
 Wave 3 of the MCP improvements adds three agent-ergonomics features on top of that surface. Each is
 additive and backwards-compatible: an existing caller that ignores the new parameter/field sees the
@@ -1652,15 +1711,32 @@ Responses support custom headers via `withHeader(name, value)`.
 
 **Real-world example — `ChartOfAccountsHandler` GL Item auto-management (ETP-5020):** `schemaforge/handlers/ChartOfAccountsHandler.java` (`@Named("chart-of-accounts")`, wired on the chart-of-accounts spec) keeps Etendo Classic's `C_Glitem` plumbing invisible behind the `C_ElementValue` subaccount UI.
 
-On a successful live `POST` to the chart-of-accounts entity, its `afterHandle` hook reads the created subaccount id from the previous NEO create response, loads the saved `ElementValue`, resolves every active `AcctSchema` for the client, and delegates to `GlItemProvisioningSupport#ensureGlItemForSubaccount`. The support class creates one invisible `C_Glitem` named after the subaccount and one `C_Glitem_Acct` row per active accounting schema, with debit and credit both pointing at the subaccount's natural `C_ValidCombination`.
+On a successful live `POST` to the chart-of-accounts entity, its `afterHandle` hook reads the created subaccount id from the previous NEO create response, loads the saved `ElementValue`, resolves every active `AcctSchema` for the client, and delegates to `GlItemProvisioningSupport#ensureGlItemForSubaccount`. The support class creates one invisible `C_Glitem` and one `C_Glitem_Acct` row per active accounting schema, with debit and credit both pointing at the subaccount's natural `C_ValidCombination`. The GL Item's name is `"<subaccount code>-<subaccount name>"` (`composeGlItemName`, ETP-5101) — the code leads so two subaccounts that happen to share a name still produce distinguishable, sortable GL Items.
 
 The natural combination is looked up, never created by the handler: `C_ELEMENTVALUE_TRG` creates it for leaf accounts, and the support class matches the trigger-shaped row by `Account_ID`, `C_AcctSchema_ID`, and all 11 optional dimensions being null, including `locationFromAddress` and `locationToAddress`. The lookup is deterministic (`ORDER BY id`, max 1). Summary/heading accounts have no natural combination, so they are skipped and no GL Item is created for them.
 
-Idempotency is based on the existing `C_Glitem_Acct` link to that natural combination, not on the GL Item name. This avoids colliding with manually created GL Items that happen to share a name. When a link already exists during provisioning, the existing GL Item is reused and its name is resynchronized from the subaccount. This keeps onboarding re-runs and later provisioning passes aligned without relying on the GL Item name as the idempotency key. If another schema becomes active later, the support scans the subaccount's other natural combinations and reuses the already-created GL Item instead of creating a second one.
+Idempotency is based on the existing `C_Glitem_Acct` link to that natural combination, not on the GL Item name. This avoids colliding with manually created GL Items that happen to share a name. When a link already exists during provisioning, the existing GL Item is reused and its name is resynchronized from the subaccount via the same `composeGlItemName` format — `syncGlItemName` always compares against the composed name, never the bare one, so a rename can never make it drift back to the pre-ETP-5101 bare-name format. This keeps onboarding re-runs and later provisioning passes aligned without relying on the GL Item name as the idempotency key. If another schema becomes active later, the support scans the subaccount's other natural combinations and reuses the already-created GL Item instead of creating a second one.
 
 On successful `PATCH` or `PUT` requests that include `active`, the hook re-reads the saved subaccount state and mirrors it onto any already-provisioned `C_Glitem_Acct.active` rows. Pre-ETP-5020 subaccounts that do not yet have GL Item account links simply no-op on this path.
 
 Both creation and active-state synchronization are best-effort secondary effects: failures are logged and swallowed so they never block the parent NEO save. Failures are also isolated per schema, so one broken accounting schema does not stop the remaining schemas for the same subaccount.
+
+**Hook H — GL Item name resync on rename (afterHandle, CRUD PATCH/PUT — ETP-5101).** Hook G above only mirrors `active`; a second PATCH/PUT hook (`syncGlItemNameAfterUpdate`) covers the composed *name*. When the request body touches `name` or `searchKey`, the handler re-reads the saved subaccount — `OBDal.getInstance().getSession().refresh(subaccount)`, not a plain `OBDal.get()` — and calls `ensureGlItemForSubaccount` again, which recomposes the name from the fresh state via the same `composeGlItemName`/`syncGlItemName` path the original POST uses and rewrites it if it drifted. The explicit `refresh()` matters: the generic CRUD service has already committed the rename by the time `afterHandle` runs, but the managed `ElementValue` instance `OBDal.get()` returns is the *same* Hibernate-session instance the write just went through, and its fields were observed live to not reliably reflect that write — without the refresh, the resync silently reads the pre-rename name/searchKey and does nothing (no exception, just a no-op). Before hook H existed, only the original POST ever refreshed the composed name, so a rename via PUT/PATCH left the GL Item's name silently stale. The natural-combination lookup this hook depends on (`resolveNaturalCombination`) also had to add `setFilterOnActive(false)`: core cascades a subaccount's own deactivation onto its natural `C_ValidCombination` row, and `OBCriteria` defaults to active-only, so without the flag a deactivated subaccount's combination reads as "not found" and every later rename or active-state sync silently no-ops for as long as the subaccount stays inactive.
+
+**`updated` on the custom native-SQL GET paths (ETP-5101).** This handler's list/detail reads (`fetchElementValuesDirectly`/`fetchElementValueByIdDirectly`) bypass the generic `DataSourceServlet` read path entirely, so they are responsible for their own response shape. They now also select and format the `updated` column — through `NeoDateFormat.toCanonical`, since a native-SQL `Timestamp` prints in the raw Postgres shape (`yyyy-MM-dd HH:mm:ss.ffffff`), not the ISO wire format the concurrency check and the client both expect — per the generic optimistic-concurrency contract in §4.3.3. Before this, a chart-of-accounts client had no `updated` value to echo back, so every `PATCH`/`PUT` through this handler — an edit or an active/inactive toggle — was refused as `missing_updated`, regardless of how recently the record had been read.
+
+**Duplicate-code validation — `409` on create (ETP-5101).** `POST`ing a new subaccount whose `searchKey` (the 8-digit PGC code) is already used by another account in the same client is now rejected by `ChartOfAccountsSaveValidationSupport#validateSave` before it reaches the database's own unique constraint, as `409` with the flat `NeoResponse.error(int, String)` envelope:
+
+```json
+{
+  "error": {
+    "message": "Account 43000001 already exists.",
+    "status": 409
+  }
+}
+```
+
+This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.3 — it carries no `error: "stale_record"` discriminator, since it can only ever happen on `POST` (`stale_record` is a `PUT`/`PATCH`-only concept). See `ChartOfAccountsSaveValidationSupport`'s class javadoc for the full save-validation rule list (code format, protected parent-like codes, code-immutability on update); this is the one new rule ETP-5101 added to it. *Known gap, not yet fixed:* the duplicate lookup (`findDuplicateSearchKey`) scopes only on `ElementValue.PROPERTY_CLIENT`, not the actual DB uniqueness pair `(C_Element_ID, VALUE)`, and omits `setFilterOnActive(false)` — so it can both miss a real duplicate and flag a false one relative to the real constraint. Treat the `409` contract above as the intended behavior, not yet a hardened guarantee.
 
 **Real-world example — `TbaiConfigSequenceHandler`** (`schemaforge/handlers/TbaiConfigSequenceHandler.java`, `@Named("tbai-config-sequence-handler")`, wired as the `header` entity's `JAVA_QUALIFIER` for the `tbai-config` spec): a post-hook (`afterHandle`) that runs on every successful `POST`/`PUT` of the TBAI Fiscal Configuration. It walks the config's organization tree — plus organization `*` (id `0`), added explicitly since Document Types are very commonly defined at org `*` and would otherwise be silently excluded (same precedent as `SelectorOrgFilter#buildOrganizationPredicate`) — and finds every **active** `DocumentType` whose backing table is `C_Invoice` — which naturally covers sales invoices (`ARI`), purchase invoices (`API`), and their credit notes (`ARC`/`APC`), since all four share that table. Rather than one sequence per Document Type, it ensures the whole scope shares **exactly one** chaining `Sequence` (prefix `TBAI-`): it reuses one already assigned to any qualifying Document Type in scope, or creates a single new one only if none exists yet. This is the core fiscal-correctness rule — TicketBAI chains invoice numbers with a single scope-wide counter, so independent per-Document-Type sequences could collide. A Document Type that already has a chaining sequence (`EM_Tbai_Ad_Sequence_ID`) is left untouched, so re-saving the config is safe (idempotent). Any error is logged and swallowed: this is a best-effort secondary side effect and must never fail the parent save request.
 

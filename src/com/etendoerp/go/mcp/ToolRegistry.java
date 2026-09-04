@@ -65,6 +65,8 @@ public class ToolRegistry {
 
   /** The JSON-schema {@code required} keyword, kept as one constant so it is not re-typed. */
   private static final String KEY_REQUIRED = "required";
+  /** JSON-schema numeric type used by integer-valued MCP arguments. */
+  private static final String TYPE_INTEGER = "integer";
 
   /**
    * Generate all MCP tools the authenticated user can access.
@@ -83,6 +85,7 @@ public class ToolRegistry {
       // neo_widget wraps the handler-backed business widgets (gap G4, ETP-4284). It is a
       // built-in read tool, not gated on any accessible window spec.
       tools.add(buildWidgetTool());
+      tools.add(buildVectorSearchTool());
     }
 
     // Query all active specs
@@ -175,13 +178,16 @@ public class ToolRegistry {
     // Split the write catalog per method. A spec with one PUT/PATCH entity but no POST or
     // DELETE entity (monitor-verifactu) belongs only in neo_update; a shared "writable"
     // enum would incorrectly advertise it to neo_create and neo_delete.
-    if (McpToolRouterSupport.hasEntityWithMethod(spec, "POST")) {
+    if (McpToolRouterSupport.hasEntityWithMethod(spec, "POST")
+        && NeoAccessUtils.hasWindowAccessForSpec(spec, "POST")) {
       creatableWindowSpecs.add(spec.getName());
     }
-    if (McpToolRouterSupport.hasEntityWithMethod(spec, "PUT")) {
+    if (McpToolRouterSupport.hasEntityWithMethod(spec, "PUT")
+        && NeoAccessUtils.hasWindowAccessForSpec(spec, "PUT")) {
       updatableWindowSpecs.add(spec.getName());
     }
-    if (McpToolRouterSupport.hasEntityWithMethod(spec, "DELETE")) {
+    if (McpToolRouterSupport.hasEntityWithMethod(spec, "DELETE")
+        && NeoAccessUtils.hasWindowAccessForSpec(spec, "DELETE")) {
       deletableWindowSpecs.add(spec.getName());
     }
   }
@@ -278,7 +284,7 @@ public class ToolRegistry {
    */
   public static String resolveSpecName(String toolName, org.codehaus.jettison.json.JSONObject arguments) {
     // Static tools (e.g. docs) are not tied to any spec
-    if ("docs".equals(toolName)) {
+    if ("docs".equals(toolName) || McpConstants.TOOL_NEO_VECTOR_SEARCH.equals(toolName)) {
       return null;
     }
 
@@ -345,7 +351,7 @@ public class ToolRegistry {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("topic", stringProp(
         "Term/topic to search in the Etendo Go docs (e.g. 'finance', 'payment')."));
-    props.put("tokens", intProp(
+    props.put("tokens", numericProp(TYPE_INTEGER,
         "Approximate max size of the returned docs (default 5000, clamped to 500-20000)."));
     props.put("type", stringProp(
         "Response format: 'txt' (default) or 'json'."));
@@ -429,6 +435,26 @@ public class ToolRegistry {
         buildObjectSchema(props, List.of(McpConstants.PARAM_WIDGET)));
   }
 
+  // ── Global vector search tool ─────────────────────────────────────────
+
+  /** Build the read-only DB Extended semantic-search tool. */
+  McpToolDefinition buildVectorSearchTool() {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put(McpConstants.PARAM_QUERY,
+        stringProp("Natural-language search query"));
+    props.put("targets", stringArrayProp(
+        "DB Extended search-target keys to query"));
+    props.put("topK", numericProp(TYPE_INTEGER, "Maximum results (default 10, maximum 50)"));
+    props.put("minScore", numericProp("number", "Minimum similarity score from 0 to 1 (default 0.60)"));
+    props.put("maxScore", numericProp("number", "Maximum similarity score from 0 to 1 (default 1.0)"));
+    return new McpToolDefinition(
+        McpConstants.TOOL_NEO_VECTOR_SEARCH,
+        "Search indexed business records by semantic similarity using DB Extended. "
+            + "Targets are authorized against their physical source entity for the current role. "
+            + "Scores are ranking signals, not confidence probabilities.",
+        buildObjectSchema(props, List.of(McpConstants.PARAM_QUERY, "targets")));
+  }
+
   // ── CRUD tools (registered once with spec enum) ───────────────────────
 
   private McpToolDefinition buildListTool(List<String> specNames) {
@@ -443,8 +469,8 @@ public class ToolRegistry {
             + "(3) named business filter {\"status\": \"<name>\"} — the spec's own hand-authored "
             + "statuses (e.g. \"pending\", \"partial\", \"completed\"). Call neo_schema to see the "
             + "named filters available for a given spec; an unknown name returns the valid list."));
-    props.put("limit", intProp("Maximum number of records to return (default 100)"));
-    props.put("offset", intProp("Number of records to skip for pagination"));
+    props.put("limit", numericProp(TYPE_INTEGER, "Maximum number of records to return (default 100)"));
+    props.put("offset", numericProp(TYPE_INTEGER, "Number of records to skip for pagination"));
     props.put("orderBy", stringProp("Column name to sort by, prefix with '-' for descending"));
     props.put(McpFieldProjection.PARAM_FIELDS, stringArrayProp(
         "Optional projection: return only these field names per row (e.g. "
@@ -799,7 +825,7 @@ public class ToolRegistry {
     Map<String, Object> paramProps = buildProcessParamSchema(spec);
 
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put(McpConstants.PARAM_PARAMETERS, objectPropWithProperties("Process input parameters", paramProps));
+    props.put(McpConstants.PARAM_PARAMETERS, objectProp("Process input parameters", paramProps));
 
     return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()));
   }
@@ -813,7 +839,7 @@ public class ToolRegistry {
    * <p>The parameters used to come from {@code buildProcessParamSchema}, which emits a property
    * only for a field backed by an {@code AD_Column}. Every active report spec has zero
    * {@code ETGO_SF_FIELD} rows — report inputs are not AD columns — so that produced an empty map
-   * and, because {@code objectPropWithProperties} omits the key when the map is empty, a bare
+   * and, because {@code objectProp} omits the key when the map is empty, a bare
    * {@code parameters:{type:"object"}} with no properties and no {@code required} list. An agent
    * had to guess {@code dateFrom} and its date shape, then learn from a 400 that it had guessed
    * wrong. The handler declares the truth, so the schema is built from that instead.</p>
@@ -831,7 +857,7 @@ public class ToolRegistry {
       paramProps.put(param.getName(), reportParamProp(param));
     }
 
-    Map<String, Object> parametersProp = objectPropWithProperties("Report input parameters",
+    Map<String, Object> parametersProp = objectProp("Report input parameters",
         paramProps);
     // An empty `properties` map is itself a statement — "this report takes no inputs" — where an
     // absent one reads as "any object", which is the very ambiguity IMP-19 removes. The shared
@@ -873,7 +899,7 @@ public class ToolRegistry {
       return prop;
     }
     if (NeoReportParam.TYPE_INTEGER.equals(param.getType())) {
-      return intProp(description);
+      return numericProp(TYPE_INTEGER, description);
     }
     if (NeoReportParam.TYPE_BOOLEAN.equals(param.getType())) {
       Map<String, Object> prop = new LinkedHashMap<>();
@@ -950,17 +976,20 @@ public class ToolRegistry {
     return prop;
   }
 
-  private Map<String, Object> intProp(String description) {
+  private Map<String, Object> numericProp(String type, String description) {
     Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", "integer");
+    prop.put("type", type);
     prop.put(McpConstants.KEY_DESCRIPTION, description);
     return prop;
   }
 
-  private Map<String, Object> objectProp(String description) {
+  private Map<String, Object> objectProp(String description, Map<String, Object>... nestedProps) {
     Map<String, Object> prop = new LinkedHashMap<>();
     prop.put("type", McpConstants.TYPE_OBJECT);
     prop.put(McpConstants.KEY_DESCRIPTION, description);
+    if (nestedProps.length > 0 && nestedProps[0] != null && !nestedProps[0].isEmpty()) {
+      prop.put(McpConstants.KEY_PROPERTIES, nestedProps[0]);
+    }
     return prop;
   }
 
@@ -975,16 +1004,6 @@ public class ToolRegistry {
     return prop;
   }
 
-  private Map<String, Object> objectPropWithProperties(String description,
-      Map<String, Object> nestedProps) {
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", McpConstants.TYPE_OBJECT);
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    if (nestedProps != null && !nestedProps.isEmpty()) {
-      prop.put(McpConstants.KEY_PROPERTIES, nestedProps);
-    }
-    return prop;
-  }
 
   // ── Naming helpers ─────────────────────────────────────────────────────
 

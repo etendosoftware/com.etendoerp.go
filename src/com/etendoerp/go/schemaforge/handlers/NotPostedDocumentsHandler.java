@@ -230,6 +230,14 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     DOCUMENT_TYPE_TO_TABLE_ID.put("Landed Cost", "082F967CDF7245EB9A150941F326C45C");                     // M_LandedCost
     DOCUMENT_TYPE_TO_TABLE_ID.put("Landed Cost Cost", "55A984C314FD4C4FB5E7C32DE36BB07B");                // M_LC_Cost
     DOCUMENT_TYPE_TO_TABLE_ID.put("Cost Adjustment", "D022B92163074E5E82449C8E0B5AFDF6");                 // M_CostAdjustment
+    // ETP-5075 — Matched Purchase Invoices (Receipt-Invoice Link) rows reached this grid
+    // via C_ACCTSCHEMA_TABLE (table 472 already has active accounting, so
+    // refListDocumentTypes() already listed "MI" in the filter dropdown) but never had a
+    // row-enrichment entry here, so every row's tableId resolved to null and postRow()
+    // failed client-side with "unknown tableId for Matched Invoice". "Matched Invoice"
+    // (singular) is NoPostedDocumentDS's own raw label for this table — confirmed live,
+    // it is the exact string both the grid badge and that error message render verbatim.
+    DOCUMENT_TYPE_TO_TABLE_ID.put("Matched Invoice", "472");                                              // M_MatchInv
   }
 
   @Inject

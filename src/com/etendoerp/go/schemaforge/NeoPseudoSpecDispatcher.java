@@ -58,13 +58,16 @@ class NeoPseudoSpecDispatcher {
   private final NeoServlet servlet;
   private final BatchService batchService;
   private final NeoSimSearchEndpoint simSearchEndpoint;
+  private final NeoVectorSearchEndpoint vectorSearchEndpoint;
   private final NeoGoWebhookBridge goWebhookBridge;
 
   NeoPseudoSpecDispatcher(NeoServlet servlet, BatchService batchService,
-      NeoSimSearchEndpoint simSearchEndpoint, NeoGoWebhookBridge goWebhookBridge) {
+      NeoSimSearchEndpoint simSearchEndpoint, NeoVectorSearchEndpoint vectorSearchEndpoint,
+      NeoGoWebhookBridge goWebhookBridge) {
     this.servlet = servlet;
     this.batchService = batchService;
     this.simSearchEndpoint = simSearchEndpoint;
+    this.vectorSearchEndpoint = vectorSearchEndpoint;
     this.goWebhookBridge = goWebhookBridge;
   }
 
@@ -89,6 +92,9 @@ class NeoPseudoSpecDispatcher {
     //   NeoSimSearchEndpoint for the authorization-model rationale.
     if ("simsearch".equals(pathInfo.specName)) {
       return dispatchSimSearch(method, request, response);
+    }
+    if ("vectorsearch".equals(pathInfo.specName)) {
+      return dispatchVectorSearch(method, request, response);
     }
 
     // Etendo GO's own webhooks, reached through NEO's own JWT auth instead of the Webhooks
@@ -169,6 +175,17 @@ class NeoPseudoSpecDispatcher {
       return true;
     }
     servlet.writeResponse(response, simSearchEndpoint.handle(request));
+    return true;
+  }
+
+  private boolean dispatchVectorSearch(String method, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (!"GET".equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Vectorsearch endpoint only supports GET");
+      return true;
+    }
+    servlet.writeResponse(response, vectorSearchEndpoint.handle(request));
     return true;
   }
 

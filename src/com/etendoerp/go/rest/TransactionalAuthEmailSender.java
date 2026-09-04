@@ -45,7 +45,10 @@ class TransactionalAuthEmailSender {
   private static final String CONTRACT_NEW_ACCOUNT_INVITEE = "new-account-invitee";
   private static final String CONTRACT_ORGANIZATION_JOINED = "organization-joined";
   private static final String CONTRACT_PASSWORD_CHANGED = "password-changed";
+  private static final String CONTRACT_PASSWORD_ADDED = "password-added";
+  private static final String CONTRACT_AUTH_METHOD_REMOVED = "auth-method-removed";
   private static final String CONTRACT_RESET_PASSWORD = "reset-password";
+  private static final String CONTRACT_SET_PASSWORD = "set-password";
   private static final String CONTRACT_VERIFY_EMAIL = "verify-email";
 
   private final TransactionalEmailService emailService;
@@ -228,6 +231,32 @@ class TransactionalAuthEmailSender {
         expiresAt);
   }
 
+  /**
+   * Sends the set-password email: the same link as a reset, worded for somebody who has no password
+   * yet rather than one who forgot theirs.
+   *
+   * <p>ETP-5115. An account created through an identity provider has no local password, so a reset
+   * request used to skip the send entirely while the screen still said a link had gone out — the
+   * account had no way to recover and no way to give itself one. It gets this instead. The link and
+   * the token are identical to a reset; only the copy differs, because telling someone we received
+   * a request to <em>reset</em> a password they never had is how you make a working flow read like
+   * a bug.
+   *
+   * @param account the account requesting the reset
+   * @param resetTokenHash hash of the issued token, used as the record id
+   * @param resetLink the link that lets the account choose its first password
+   * @param expiresAt when the token stops working; the email states the remaining window and omits
+   *     it when unknown
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendSetPassword(Account account, String resetTokenHash, String resetLink, Date expiresAt) {
+    if (account == null || StringUtils.isBlank(resetTokenHash) || StringUtils.isBlank(resetLink)) {
+      return false;
+    }
+    return sendAccountLink(CONTRACT_SET_PASSWORD, account, resetLink, resetTokenHash, null,
+        expiresAt);
+  }
+
   boolean sendCompanyInvitation(Invitation invitation, String inviteLink) {
     return sendCompanyInvitation(invitation, inviteLink, null);
   }
@@ -247,6 +276,64 @@ class TransactionalAuthEmailSender {
       return sendBestEffort(CONTRACT_COMPANY_INVITATION, body);
     } catch (JSONException e) {
       log.warn("Could not build company-invitation email command", e);
+      return false;
+    }
+  }
+
+  /**
+   * Notifies that a password was added to an account that had none.
+   *
+   * <p>ETP-5115. Separate from {@code password-changed} on purpose: telling somebody their password
+   * "was changed" when they just created their first one reads as though something happened to a
+   * credential they did not have, which is exactly the alarm this mail exists to avoid raising
+   * falsely. Like its sibling it carries a per-send record id so two operations in a row are not
+   * collapsed into one by the duplicate check.
+   *
+   * @param account the account that now has a local password
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendPasswordAdded(Account account) {
+    if (account == null) {
+      return false;
+    }
+    try {
+      JSONObject body = baseCommand(account);
+      addLanguageField(body, null);
+      body.put(EmailContractCommandSupport.FIELD_DATE, Instant.now().toString());
+      body.put(EmailContractCommandSupport.FIELD_RECORD_ID,
+          account.getId() + ":" + java.util.UUID.randomUUID());
+      return sendBestEffort(CONTRACT_PASSWORD_ADDED, body);
+    } catch (JSONException e) {
+      log.warn("Could not build password-added email command", e);
+      return false;
+    }
+  }
+
+  /**
+   * Notifies that a way of signing in was removed from an account.
+   *
+   * <p>ETP-5115. Deliberately does not name which one. The copy is one catalog entry and naming the
+   * method would mean interpolating it, which this contract shape does not carry — and the value of
+   * the notice does not depend on it: what the owner needs to know is that the ways into their
+   * account changed without them, and the remedy is the same either way. Naming it would be an
+   * improvement, not a prerequisite.
+   *
+   * @param account the account a method was removed from
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendAuthMethodRemoved(Account account) {
+    if (account == null) {
+      return false;
+    }
+    try {
+      JSONObject body = baseCommand(account);
+      addLanguageField(body, null);
+      body.put(EmailContractCommandSupport.FIELD_DATE, Instant.now().toString());
+      body.put(EmailContractCommandSupport.FIELD_RECORD_ID,
+          account.getId() + ":" + java.util.UUID.randomUUID());
+      return sendBestEffort(CONTRACT_AUTH_METHOD_REMOVED, body);
+    } catch (JSONException e) {
+      log.warn("Could not build auth-method-removed email command", e);
       return false;
     }
   }
