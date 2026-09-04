@@ -136,6 +136,8 @@ public class BankStatementsHandlerTest {
 
     doReturn(new JSONArray()).when(handler).loadLines("stmt-1");
 
+    // The tenant gate is a seam here so this stays a routing test (ETP-4950).
+    doReturn(true).when(handler).owns(any(), anyString());
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       NeoResponse response = handler.handle(ctx);
       assertEquals(200, response.getHttpStatus());
@@ -174,6 +176,8 @@ public class BankStatementsHandlerTest {
 
     doThrow(new RuntimeException("db boom")).when(handler).loadStatements("acc-1");
 
+    // The tenant gate is a seam here so this stays a routing test (ETP-4950).
+    doReturn(true).when(handler).owns(any(), anyString());
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       NeoResponse response = handler.handle(ctx);
       assertEquals(500, response.getHttpStatus());
@@ -191,6 +195,8 @@ public class BankStatementsHandlerTest {
 
     doThrow(new RuntimeException("boom")).when(handler).loadLines("stmt-1");
 
+    // The tenant gate is a seam here so this stays a routing test (ETP-4950).
+    doReturn(true).when(handler).owns(any(), anyString());
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       NeoResponse response = handler.handle(ctx);
       assertEquals(500, response.getHttpStatus());
@@ -211,6 +217,8 @@ public class BankStatementsHandlerTest {
     rows.put(row);
     doReturn(rows).when(handler).loadStatements("acc-1");
 
+    // The tenant gate is a seam here so this stays a routing test (ETP-4950).
+    doReturn(true).when(handler).owns(any(), anyString());
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       NeoResponse response = handler.handle(ctx);
       assertEquals(200, response.getHttpStatus());

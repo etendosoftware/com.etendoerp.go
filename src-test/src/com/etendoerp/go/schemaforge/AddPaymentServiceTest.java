@@ -60,6 +60,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
@@ -88,6 +89,11 @@ import org.openbravo.service.db.DalConnectionProvider;
 class AddPaymentServiceTest {
 
   private static final String ACCOUNT_ID = "ACC-1";
+  /** The session tenant every mocked entity below belongs to (ETP-4950 ownership guard). */
+  private static final String TENANT_CLIENT = "client-1";
+  private static final String TENANT_ORG = "org-1";
+  /** A client the session may NOT read — used by the tenant-isolation regressions. */
+  private static final String FOREIGN_CLIENT = "client-other";
   private static final String BP_ID = "BP-1";
   private static final String METHOD_ID = "PM-1";
   private static final String PSD_ID = "PSD-1";
@@ -104,6 +110,9 @@ class AddPaymentServiceTest {
 
   private OBDal dal;
   private FIN_FinancialAccount account;
+  /** A client outside the session's readable set, and a row owned by it (ETP-4950 regressions). */
+  private Client foreignClient;
+  private FIN_PaymentScheduleDetail foreignPsd;
   private BusinessPartner bp;
   private Organization org;
   private Currency currency;
@@ -116,6 +125,8 @@ class AddPaymentServiceTest {
   @BeforeEach
   void setUp() {
     account = mock(FIN_FinancialAccount.class);
+    foreignClient = mock(Client.class);
+    foreignPsd = mock(FIN_PaymentScheduleDetail.class);
     bp = mock(BusinessPartner.class);
     org = mock(Organization.class);
     currency = mock(Currency.class);
@@ -141,19 +152,40 @@ class AddPaymentServiceTest {
     // Default: the linked details sum to 18.03 (exact-payment scenario).
     when(payment.getFINPaymentDetailList()).thenReturn(defaultDetails);
 
+    // Every id in the request body is now resolved through TenantOwnership, which hides a row
+    // belonging to another tenant (ETP-4950). So each mocked entity has to look like it belongs to
+    // the session's client, and the session has to advertise that client as readable — Mockito
+    // would otherwise default getReadableClients() to an EMPTY array and every lookup would come
+    // back null, surfacing as "Financial account not found". Built before the surrounding when(),
+    // same reason the comment above gives.
+    Client tenantClient = mock(Client.class);
+    when(tenantClient.getId()).thenReturn(TENANT_CLIENT);
+    when(org.getId()).thenReturn(TENANT_ORG);
+    when(account.getClient()).thenReturn(tenantClient);
+    when(bp.getClient()).thenReturn(tenantClient);
+    when(method.getClient()).thenReturn(tenantClient);
+    when(org.getClient()).thenReturn(tenantClient);
+    when(currency.getClient()).thenReturn(tenantClient);
+    FIN_PaymentScheduleDetail ownedPsd = mock(FIN_PaymentScheduleDetail.class);
+    when(ownedPsd.getClient()).thenReturn(tenantClient);
+    GLItem ownedGlItem = mock(GLItem.class);
+    when(ownedGlItem.getClient()).thenReturn(tenantClient);
+
     obDalMock = mockStatic(OBDal.class);
     dal = mock(OBDal.class);
     obDalMock.when(OBDal::getInstance).thenReturn(dal);
     when(dal.get(eq(FIN_FinancialAccount.class), anyString())).thenReturn(account);
     when(dal.get(eq(BusinessPartner.class), anyString())).thenReturn(bp);
     when(dal.get(eq(FIN_PaymentMethod.class), anyString())).thenReturn(method);
-    when(dal.get(eq(FIN_PaymentScheduleDetail.class), anyString()))
-        .thenReturn(mock(FIN_PaymentScheduleDetail.class));
-    when(dal.get(eq(GLItem.class), anyString())).thenReturn(mock(GLItem.class));
+    when(dal.get(eq(FIN_PaymentScheduleDetail.class), anyString())).thenReturn(ownedPsd);
+    when(dal.get(eq(GLItem.class), anyString())).thenReturn(ownedGlItem);
     when(dal.createCriteria(eq(FinAccPaymentMethod.class))).thenReturn(validCrit);
 
+    OBContext tenantContext = mock(OBContext.class);
+    when(tenantContext.getReadableClients()).thenReturn(new String[] {TENANT_CLIENT});
+    when(tenantContext.getReadableOrganizations()).thenReturn(new String[] {TENANT_ORG});
     obContextMock = mockStatic(OBContext.class);
-    obContextMock.when(OBContext::getOBContext).thenReturn(mock(OBContext.class));
+    obContextMock.when(OBContext::getOBContext).thenReturn(tenantContext);
 
     finUtilityMock = mockStatic(FIN_Utility.class);
     finUtilityMock.when(() -> FIN_Utility.getDocumentType(any(), anyString())).thenReturn(docType);
@@ -332,7 +364,12 @@ class AddPaymentServiceTest {
   @Test
   @DisplayName("organizationId from the movement overrides the account organization")
   void testResolveMovementOrg() throws Exception {
+    // Owned by the session tenant, or TenantOwnership hides it and resolveOrg silently falls back
+    // to the account's own organization (ETP-4950).
+    Client movementOrgClient = mock(Client.class);
+    when(movementOrgClient.getId()).thenReturn(TENANT_CLIENT);
     Organization movementOrg = mock(Organization.class);
+    when(movementOrg.getClient()).thenReturn(movementOrgClient);
     when(dal.get(eq(Organization.class), eq("ORG-9"))).thenReturn(movementOrg);
     JSONObject body = baseBody("18.03")
         .put("organizationId", "ORG-9")
@@ -437,6 +474,53 @@ class AddPaymentServiceTest {
     when(dal.get(eq(FIN_PaymentScheduleDetail.class), anyString())).thenReturn(null);
     JSONObject body = baseBody("18.03").put("selectedInvoices", new JSONObject().put(PSD_ID, 18.03));
     OBException ex = assertThrows(OBException.class, () -> AddPaymentService.doAddPayment(body));
+    assertTrue(ex.getMessage().contains("Invoice installment not found"));
+  }
+
+  /**
+   * A financial account of ANOTHER tenant is reported as missing, so no payment is registered
+   * against it.
+   *
+   * <p>Regression for ETP-4950 / H1: the id arrives in the request body and used to be resolved
+   * with a bare {@code OBDal.get}, which applies no client predicate. Nothing here was a deliberate
+   * guard — isolation happened to fall out of an {@code OBCriteria} three calls later, when the
+   * payment method was resolved. Note the assertion is "not found", not "forbidden": the caller
+   * must not be able to tell a foreign account from a nonexistent one.
+   */
+  @Test
+  @DisplayName("A financial account of another tenant is not found")
+  void testForeignFinancialAccountIsRejected() throws Exception {
+    when(foreignClient.getId()).thenReturn(FOREIGN_CLIENT);
+    when(account.getClient()).thenReturn(foreignClient);
+    JSONObject body = baseBody("18.03").put("selectedInvoices", new JSONObject().put(PSD_ID, 18.03));
+
+    OBException ex = assertThrows(OBException.class, () -> AddPaymentService.doAddPayment(body));
+
+    assertTrue(ex.getMessage().contains("Financial account not found"));
+  }
+
+  /**
+   * An invoice instalment of ANOTHER tenant is reported as missing, so nothing is written against
+   * it.
+   *
+   * <p>Regression for ETP-4950 / H2, the most damaging of the set: the keys of
+   * {@code selectedInvoices} come from the request body, the payment being built is the caller's
+   * own, and {@code FIN_AddPayment.updatePaymentDetail} was reached with the foreign instalment —
+   * so with {@code writeoffs[psdId]=true} the caller forgave the balance of another tenant's
+   * invoice.
+   */
+  @Test
+  @DisplayName("An invoice instalment of another tenant is not found")
+  void testForeignInvoiceInstalmentIsRejected() throws Exception {
+    when(foreignClient.getId()).thenReturn(FOREIGN_CLIENT);
+    when(foreignPsd.getClient()).thenReturn(foreignClient);
+    when(dal.get(eq(FIN_PaymentScheduleDetail.class), anyString())).thenReturn(foreignPsd);
+    JSONObject body = baseBody("18.03")
+        .put("selectedInvoices", new JSONObject().put(PSD_ID, 18.03))
+        .put("writeoffs", new JSONObject().put(PSD_ID, true));
+
+    OBException ex = assertThrows(OBException.class, () -> AddPaymentService.doAddPayment(body));
+
     assertTrue(ex.getMessage().contains("Invoice installment not found"));
   }
 

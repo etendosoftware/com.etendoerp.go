@@ -95,7 +95,7 @@ final class FinancialAccountTransactionsSupport {
     String currencyId = body.optString("currencyId", null);
     return StringUtils.isBlank(currencyId)
         ? fallback
-        : OBDal.getInstance().get(Currency.class, currencyId);
+        : TenantOwnership.loadOwned(Currency.class, currencyId);
   }
 
   /** trxType code → Classic "Transaction Type" label (unknown codes pass through). */
@@ -212,10 +212,19 @@ final class FinancialAccountTransactionsSupport {
     }
   }
 
+  /**
+   * Sets an optional FK from a request-supplied id, ignoring it when it resolves to nothing.
+   *
+   * <p>Resolved through {@link TenantOwnership} because every caller feeds this an id straight from
+   * a request body — contact, GL item, project, cost centre, product. A bare {@code OBDal.get} let a
+   * movement of THIS tenant point at another tenant's master data, and the movements list then read
+   * those rows back through {@code LEFT JOIN}s that carry no client predicate, so the foreign name
+   * came out in the response. An id the caller may not see is treated as absent (ETP-4950).
+   */
   static <T extends BaseOBObject> void attachOptional(String id, Class<T> entityClass,
       Consumer<T> setter) {
     if (StringUtils.isBlank(id)) return;
-    T ref = OBDal.getInstance().get(entityClass, id);
+    T ref = TenantOwnership.loadOwned(entityClass, id);
     if (ref != null) setter.accept(ref);
   }
 
@@ -228,7 +237,9 @@ final class FinancialAccountTransactionsSupport {
       Class<T> entityClass, Consumer<T> setter) {
     if (!body.has(key)) return;
     String id = body.optString(key, null);
-    setter.accept(StringUtils.isBlank(id) ? null : OBDal.getInstance().get(entityClass, id));
+    // Tenant-guarded like attachOptional: a foreign id resolves to null, i.e. "clear", never to
+    // another tenant's row (ETP-4950).
+    setter.accept(StringUtils.isBlank(id) ? null : TenantOwnership.loadOwned(entityClass, id));
   }
 
   /** The bank-statement line currently matched to {@code trx}, or {@code null} when it is unmatched. */

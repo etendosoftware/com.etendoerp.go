@@ -427,7 +427,7 @@ public class ReconciliationHandler implements NeoHandler {
     JSONArray rawLines = new JSONArray();
     // Connection is managed by the DAL's Hibernate Session; don't close it.
     Connection conn = OBDal.getInstance().getConnection();
-    List<MatchRuleEngine.Rule> rules = loadRules(conn, accountId);
+    List<MatchRuleEngine.Rule> rules = loadRules(accountId);
     try (PreparedStatement ps = conn.prepareStatement(sql.toString())) {
       int idx = 1;
       ps.setString(idx++, accountId);
@@ -508,12 +508,20 @@ public class ReconciliationHandler implements NeoHandler {
 
   NeoResponse buildCandidates(String accountId, String lineId, String docType,
       String dateFrom, String dateTo) throws Exception {
+    // Ownership gate: CANDIDATES_SQL and the count queries are scoped by
+    // fin_financial_account_id alone, so an unvalidated id would list another tenant's
+    // unreconciled movements. The sibling entry points (pendingLines, invoiceCandidates,
+    // autoMatch) already resolved the account; this one did not (ETP-4950).
+    if (loadAccount(accountId) == null) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          MSG_ACCOUNT_NOT_FOUND + accountId);
+    }
     FIN_BankStatementLine selectedLine =
         StringUtils.isNotBlank(lineId) ? loadLine(lineId) : null;
-    // A reconciled line is read-only: return ONLY the movement(s) already linked to it (its 1:1
-    // transaction, or every transaction of its 1:N match group) — never the unreconciled pool.
-    if (selectedLine != null && selectedLine.getFinancialAccountTransaction() != null) {
-      return CandidatesSupport.buildLinkedTransactions(lineId);
+    NeoResponse linked =
+        ReconciliationSupport.linkedTransactionsIfReconciled(selectedLine, accountId, lineId);
+    if (linked != null) {
+      return linked;
     }
 
     BigDecimal[] candidateTols = loadTolerances(accountId);
@@ -701,7 +709,7 @@ public class ReconciliationHandler implements NeoHandler {
     if (StringUtils.isBlank(lineId)) {
       return ids;
     }
-    FIN_BankStatementLine line = OBDal.getInstance().get(FIN_BankStatementLine.class, lineId);
+    FIN_BankStatementLine line = TenantOwnership.loadOwned(FIN_BankStatementLine.class, lineId);
     if (line == null) {
       return ids;
     }
@@ -945,8 +953,7 @@ public class ReconciliationHandler implements NeoHandler {
           MSG_ACCOUNT_NOT_FOUND + accountId);
     }
 
-    Connection conn = OBDal.getInstance().getConnection();
-    List<MatchRuleEngine.Rule> rules = loadRules(conn, accountId);
+    List<MatchRuleEngine.Rule> rules = loadRules(accountId);
 
     BigDecimal[] autoTols = loadTolerances(accountId);
     int autoDateTolDays = autoTols[0].intValue();
@@ -1163,6 +1170,7 @@ public class ReconciliationHandler implements NeoHandler {
     // `rec`, `line` and `matched` would all be detached if this ran later. Everything below is
     // re-read afterwards for that reason.
     ReconciliationHandlerSupport.unpostBeforeUndo(rec.getId());
+    // tenant-ok: re-read of an entity already loaded and validated; the id is rec.getId(), not a request id
     rec = OBDal.getInstance().get(FIN_Reconciliation.class, rec.getId());
     line = loadLine(statementLineId);
 
@@ -1457,7 +1465,7 @@ public class ReconciliationHandler implements NeoHandler {
       amount = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
     }
 
-    GLItem glItem = OBDal.getInstance().get(GLItem.class, glItemId);
+    GLItem glItem = TenantOwnership.loadOwned(GLItem.class, glItemId);
     if (glItem == null) {
       throw new OBException("GL item not found: " + glItemId);
     }
@@ -1526,7 +1534,7 @@ public class ReconciliationHandler implements NeoHandler {
   // ---------------------------------------------------------------------------
 
   FIN_FinancialAccount loadAccount(String accountId) {
-    return OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+    return TenantOwnership.loadOwned(FIN_FinancialAccount.class, accountId);
   }
 
   /**
@@ -1557,11 +1565,11 @@ public class ReconciliationHandler implements NeoHandler {
   }
 
   FIN_BankStatementLine loadLine(String lineId) {
-    return OBDal.getInstance().get(FIN_BankStatementLine.class, lineId);
+    return TenantOwnership.loadOwned(FIN_BankStatementLine.class, lineId);
   }
 
   FIN_FinaccTransaction loadTransaction(String transactionId) {
-    return OBDal.getInstance().get(FIN_FinaccTransaction.class, transactionId);
+    return TenantOwnership.loadOwned(FIN_FinaccTransaction.class, transactionId);
   }
 
   FIN_Reconciliation addNewDraftReconciliation(FIN_FinancialAccount account) {
@@ -1693,10 +1701,14 @@ public class ReconciliationHandler implements NeoHandler {
   }
 
   /**
-   * Loads active matching rules from the DB. Package-private for testability.
+   * Loads the active matching rules applicable to the account. Package-private for testability.
+   *
+   * <p>No {@code Connection} parameter any more: the engine goes through the DAL so that the
+   * tenant filter (readable clients / organizations) is applied by the framework and cannot be
+   * omitted by a caller — see {@link MatchRuleEngine#loadRules(String)} (ETP-4950).
    */
-  List<MatchRuleEngine.Rule> loadRules(Connection conn, String accountId) throws Exception {
-    return MatchRuleEngine.loadRules(conn, accountId);
+  List<MatchRuleEngine.Rule> loadRules(String accountId) {
+    return MatchRuleEngine.loadRules(accountId);
   }
 
 }

@@ -80,6 +80,7 @@ public class MatchRuleHandlerTest {
   private static final String F_PROJECT = "project";
   private static final String F_COST_CENTER = "costCenter";
   private static final String F_PRODUCT = "product";
+  private static final String F_BUSINESS_PARTNER = "businessPartner";
 
   private MatchRuleHandler handler;
 
@@ -645,6 +646,52 @@ public class MatchRuleHandlerTest {
       assertEquals("CC-1", b.getString(F_COST_CENTER));
       assertEquals("PR-1", b.getString(F_PRODUCT));
       assertEquals("Bank fee", b.getString("name"));
+    }
+  }
+
+  /**
+   * The contact follows the same gate as the other dimensions: it is dropped when the tenant has
+   * the business-partner dimension switched off.
+   *
+   * <p>On a rule the contact is ASSIGNED to the generated movement, not used to match (the engine
+   * matches on textPattern only), so the Ledger Configuration toggle must govern it. Before
+   * ETP-4950's QA round it was ungated and survived no matter what the user switched off.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testStripInactiveDimensionsDropsTheContactWhenItsDimensionIsInactive()
+      throws Exception {
+    JSONObject b = body(F_BUSINESS_PARTNER, "BP-1", F_PRODUCT, "PR-1", "name", "Bank fee");
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+         MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      stubActive(obContext, mocked, dims(AccountingDimensionsSupport.DIM_PRODUCT));
+
+      handler.stripInactiveDimensions(b);
+
+      assertFalse("an inactive contact dimension must be dropped", b.has(F_BUSINESS_PARTNER));
+      assertEquals("PR-1", b.getString(F_PRODUCT));
+    }
+  }
+
+  /**
+   * The contact survives when its dimension is active.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testStripInactiveDimensionsKeepsTheContactWhenItsDimensionIsActive()
+      throws Exception {
+    JSONObject b = body(F_BUSINESS_PARTNER, "BP-1", "name", "Bank fee");
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+         MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      stubActive(obContext, mocked, dims(AccountingDimensionsSupport.DIM_BPARTNER));
+
+      handler.stripInactiveDimensions(b);
+
+      assertEquals("BP-1", b.getString(F_BUSINESS_PARTNER));
     }
   }
 
