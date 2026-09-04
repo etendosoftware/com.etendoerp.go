@@ -113,7 +113,7 @@ public class DalEmailSendLogStore implements EmailSendLogStore {
   }
 
   @Override
-  public void record(EmailSendHistoryRecord historyRecord) {
+  public void recordSend(EmailSendHistoryRecord historyRecord) {
     Objects.requireNonNull(historyRecord, "Email send history record cannot be null");
     BaseOBObject entry = recordSupplier.get();
     entry.set(PROP_CLIENT, OBContext.getOBContext().getCurrentClient());

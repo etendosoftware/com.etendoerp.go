@@ -82,7 +82,13 @@ public class SFDocumentEmailHistory extends BaseWebhookService {
   static final String ENTITY_EMAIL_SEND_LOG = "ETGO_Email_Send_Log";
 
   static final String PARAM_RECORD_ID = "recordId";
-  static final String PARAM_SPEC_NAME = "specName";
+
+  /**
+   * Deliberately one name for three roles: the optional query parameter, the entity property it
+   * filters on, and the JSON field echoed back. Keeping them literally the same string is the
+   * point — a caller reads the spec name it sent straight back out of the row.
+   */
+  static final String SPEC_NAME = "specName";
 
   private static final String RESULT = "result";
   private static final String ERROR = "error";
@@ -103,7 +109,7 @@ public class SFDocumentEmailHistory extends BaseWebhookService {
     try {
       JSONArray history = new JSONArray();
       for (BaseOBObject entry : findHistory(recordId,
-          StringUtils.trimToNull(parameter.get(PARAM_SPEC_NAME)))) {
+          StringUtils.trimToNull(parameter.get(SPEC_NAME)))) {
         history.put(toJson(entry));
       }
       responseVars.put(RESULT, history.toString());
@@ -122,7 +128,7 @@ public class SFDocumentEmailHistory extends BaseWebhookService {
   private List<BaseOBObject> findHistory(String recordId, String specName) {
     StringBuilder where = new StringBuilder("as h where h.recordID = :recordId");
     if (specName != null) {
-      where.append(" and h.specName = :specName");
+      where.append(" and h." + SPEC_NAME + " = :" + SPEC_NAME);
     }
     where.append(" order by h.sentAt desc");
 
@@ -130,7 +136,7 @@ public class SFDocumentEmailHistory extends BaseWebhookService {
         where.toString());
     query.setNamedParameter(PARAM_RECORD_ID, recordId);
     if (specName != null) {
-      query.setNamedParameter(PARAM_SPEC_NAME, specName);
+      query.setNamedParameter(SPEC_NAME, specName);
     }
     query.setMaxResult(MAX_ROWS);
     return query.list();
@@ -147,7 +153,7 @@ public class SFDocumentEmailHistory extends BaseWebhookService {
     row.put("messageBody", text(entry.get("messageBody")));
     row.put("downloadLink", text(entry.get("downloadLink")));
     row.put("contractName", text(entry.get("contractName")));
-    row.put("specName", text(entry.get("specName")));
+    row.put(SPEC_NAME, text(entry.get(SPEC_NAME)));
     row.put("errorMessage", text(entry.get("errorMessage")));
     row.put("sentBy", senderName(entry));
     return row;

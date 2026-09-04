@@ -31,5 +31,5 @@ public interface EmailSendLogStore {
    *
    * @param historyRecord history entry for a single send attempt
    */
-  void record(EmailSendHistoryRecord historyRecord);
+  void recordSend(EmailSendHistoryRecord historyRecord);
 }

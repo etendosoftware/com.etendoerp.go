@@ -551,7 +551,7 @@ public class TransactionalEmailService {
       return;
     }
     try {
-      sendLogStore.record(EmailSendHistoryRecord.create(context, auditRecord,
+      sendLogStore.recordSend(EmailSendHistoryRecord.create(context, auditRecord,
           contract.get().getSpecName()));
     } catch (RuntimeException e) {
       log.error("Could not record email send history for contract [{}]",

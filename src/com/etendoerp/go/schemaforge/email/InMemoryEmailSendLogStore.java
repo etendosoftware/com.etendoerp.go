@@ -32,7 +32,7 @@ public class InMemoryEmailSendLogStore implements EmailSendLogStore {
   private final List<EmailSendHistoryRecord> historyRecords = new ArrayList<>();
 
   @Override
-  public void record(EmailSendHistoryRecord historyRecord) {
+  public void recordSend(EmailSendHistoryRecord historyRecord) {
     historyRecords.add(historyRecord);
   }
 
