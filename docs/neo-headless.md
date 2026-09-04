@@ -3040,7 +3040,14 @@ asserted by `DalEmailSafetyStoreTest` and left untouched by ETP-5069.
 **Accepted limitation.** The rejection paths that answer before the `EmailSendContext` is built —
 unknown contract, forbidden provider field, failed authorization, unresolved recipient — write no
 audit row today and therefore write no history row either. A send that never got as far as a
-resolved recipient shows nothing in the panel.
+resolved recipient shows nothing in the panel. There is also no retention or purge process for the
+table yet; that was deferred on measured sizing.
+
+Storage mechanics, the write gate, the six-contracts-five-windows asymmetry and the retention
+sizing live in `docs/transactional-email-contracts.md` → *Readable send history (ETP-5069)*; the
+privacy decision and its operational rules live in the functional repo's
+`docs/ops/transactional-email-security.md` → *Email Audit Redaction & Storage Policy*. This section
+stays the reference for the endpoint itself.
 
 ---
 
