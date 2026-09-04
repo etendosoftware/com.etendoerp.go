@@ -303,6 +303,88 @@ public class ProductDefaultsHandlerTest {
   }
 
   @Test
+  public void testHandleForcesStockedAndReturnableFalseOnCreateWhenTypeIsExpense() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("productType", "E")
+        .put("stocked", true)
+        .put("returnable", true);
+
+    NeoResponse result = new ProductDefaultsHandler().handle(postCtx(body, mock(OBContext.class)));
+
+    assertNull(result);
+    assertEquals(false, body.getBoolean("stocked"));
+    assertEquals(false, body.getBoolean("returnable"));
+  }
+
+  @Test
+  public void testHandleForcesStockedAndReturnableFalseOnPatchWhenTypeIsExpense() throws Exception {
+    // The case the frontend alone cannot guarantee: an edit that switches Type to Expense.
+    JSONObject body = new JSONObject()
+        .put("productType", "E")
+        .put("stocked", true)
+        .put("returnable", true);
+
+    NeoResponse result = new ProductDefaultsHandler().handle(patchCtx(body));
+
+    assertNull(result);
+    assertEquals(false, body.getBoolean("stocked"));
+    assertEquals(false, body.getBoolean("returnable"));
+  }
+
+  @Test
+  public void testHandleForcesStockedAndReturnableFalseOnCreateWhenTypeIsResource() throws Exception {
+    JSONObject body = new JSONObject()
+        .put("productType", "R")
+        .put("stocked", true)
+        .put("returnable", true);
+
+    NeoResponse result = new ProductDefaultsHandler().handle(postCtx(body, mock(OBContext.class)));
+
+    assertNull(result);
+    assertEquals(false, body.getBoolean("stocked"));
+    assertEquals(false, body.getBoolean("returnable"));
+  }
+
+  @Test
+  public void testHandleForcesStockedAndReturnableFalseOnPatchWhenTypeIsResource() throws Exception {
+    // The case the frontend alone cannot guarantee: an edit that switches Type to Resource.
+    JSONObject body = new JSONObject()
+        .put("productType", "R")
+        .put("stocked", true)
+        .put("returnable", true);
+
+    NeoResponse result = new ProductDefaultsHandler().handle(patchCtx(body));
+
+    assertNull(result);
+    assertEquals(false, body.getBoolean("stocked"));
+    assertEquals(false, body.getBoolean("returnable"));
+  }
+
+  @Test
+  public void testHandleForcesStockedAndReturnableFalseWhenTypeIsExpenseAndFlagsAbsent()
+      throws Exception {
+    // Flags omitted entirely — must still end up explicitly false, not just "left unset".
+    JSONObject body = new JSONObject().put("productType", "E");
+
+    new ProductDefaultsHandler().handle(postCtx(body, mock(OBContext.class)));
+
+    assertEquals(false, body.getBoolean("stocked"));
+    assertEquals(false, body.getBoolean("returnable"));
+  }
+
+  @Test
+  public void testHandleForcesStockedAndReturnableFalseWhenTypeIsResourceAndFlagsAbsent()
+      throws Exception {
+    // Flags omitted entirely — must still end up explicitly false, not just "left unset".
+    JSONObject body = new JSONObject().put("productType", "R");
+
+    new ProductDefaultsHandler().handle(postCtx(body, mock(OBContext.class)));
+
+    assertEquals(false, body.getBoolean("stocked"));
+    assertEquals(false, body.getBoolean("returnable"));
+  }
+
+  @Test
   public void testHandleLeavesStockedAndReturnableUntouchedForArticleType() throws Exception {
     ProductDefaultsHandler handler = handlerResolving(null, null, null, null);
     JSONObject body = new JSONObject()

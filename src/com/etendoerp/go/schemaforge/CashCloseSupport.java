@@ -507,6 +507,7 @@ final class CashCloseSupport {
       if (current.contains(id)) {
         continue;
       }
+      // tenant-ok: syncMarkedMovements cross-checks every id against the validated account below
       FIN_FinaccTransaction trx = OBDal.getInstance().get(FIN_FinaccTransaction.class, id);
       boolean eligible = trx != null
           && trx.getAccount() != null
@@ -519,6 +520,7 @@ final class CashCloseSupport {
     }
     for (String id : current) {
       if (!wanted.contains(id)) {
+        // tenant-ok: same cross-check against the validated account
         FIN_FinaccTransaction trx = OBDal.getInstance().get(FIN_FinaccTransaction.class, id);
         if (trx != null) {
           unlinkTransaction(trx);

@@ -102,10 +102,11 @@ final class AddPaymentService {
     Date paymentDate = parsePaymentDate(body.optString("paymentDate", ""));
 
     FIN_FinancialAccount account = require(
-        OBDal.getInstance().get(FIN_FinancialAccount.class, body.optString("FIN_Financial_Account_ID", null)),
+        TenantOwnership.loadOwned(FIN_FinancialAccount.class,
+            body.optString("FIN_Financial_Account_ID", null)),
         "Financial account not found");
     BusinessPartner bp = require(
-        OBDal.getInstance().get(BusinessPartner.class, body.optString("bpartnerId", null)),
+        TenantOwnership.loadOwned(BusinessPartner.class, body.optString("bpartnerId", null)),
         "A contact (bpartnerId) is required to register a payment");
     Currency currency = account.getCurrency();
     Organization org = resolveOrg(account, body.optString("organizationId", null));
@@ -239,7 +240,7 @@ final class AddPaymentService {
   /** The movement organization when provided and valid, otherwise the account's. */
   private static Organization resolveOrg(FIN_FinancialAccount account, String organizationId) {
     if (StringUtils.isNotBlank(organizationId)) {
-      Organization movementOrg = OBDal.getInstance().get(Organization.class, organizationId);
+      Organization movementOrg = TenantOwnership.loadOwned(Organization.class, organizationId);
       if (movementOrg != null) {
         return movementOrg;
       }
@@ -269,7 +270,11 @@ final class AddPaymentService {
       if (amt == null || amt.signum() == 0) {
         continue;
       }
-      FIN_PaymentScheduleDetail psd = OBDal.getInstance().get(FIN_PaymentScheduleDetail.class, psdId);
+      // The key comes from the request body and this goes on to write against that installment —
+      // with writeoffs[psdId]=true it would forgive the balance of another tenant's invoice
+      // (ETP-4950). Same guard the reconciliation path applies in ReconciliationFlowSupport.
+      FIN_PaymentScheduleDetail psd =
+          TenantOwnership.loadOwned(FIN_PaymentScheduleDetail.class, psdId);
       if (psd == null) {
         throw new OBException("Invoice installment not found: " + psdId);
       }
@@ -302,7 +307,7 @@ final class AddPaymentService {
       if (StringUtils.isBlank(glItemId) || glAmount.signum() == 0) {
         continue;
       }
-      GLItem glItem = OBDal.getInstance().get(GLItem.class, glItemId);
+      GLItem glItem = TenantOwnership.loadOwned(GLItem.class, glItemId);
       if (glItem == null) {
         throw new OBException("G/L item not found: " + glItemId);
       }
@@ -321,7 +326,8 @@ final class AddPaymentService {
         : FinAccPaymentMethod.PROPERTY_PAYOUTALLOW;
 
     if (StringUtils.isNotBlank(paymentMethodId)) {
-      FIN_PaymentMethod requested = OBDal.getInstance().get(FIN_PaymentMethod.class, paymentMethodId);
+      FIN_PaymentMethod requested =
+          TenantOwnership.loadOwned(FIN_PaymentMethod.class, paymentMethodId);
       if (requested != null && isMethodValid(account, requested, allowProp)) {
         return requested;
       }

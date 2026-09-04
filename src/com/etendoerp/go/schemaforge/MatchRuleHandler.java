@@ -78,6 +78,8 @@ public class MatchRuleHandler extends AbstractNeoHandler {
   private static final String F_TEXT_PATTERN = "textPattern";
   private static final String F_ACCOUNTING_CONCEPT = "accountingConcept";
   private static final String F_PRIORITY = "priority";
+  /** Wire name of the contact field, as declared in the match-rule contract (C_BPartner_ID). */
+  private static final String F_BUSINESS_PARTNER = "businessPartner";
 
   private static final String METHOD_GET = "GET";
   private static final String PARAM_ACTION = "action";
@@ -99,6 +101,16 @@ public class MatchRuleHandler extends AbstractNeoHandler {
     fields.put("project", AccountingDimensionsSupport.DIM_PROJECT);
     fields.put("costCenter", AccountingDimensionsSupport.DIM_COSTCENTER);
     fields.put("product", AccountingDimensionsSupport.DIM_PRODUCT);
+    // The contact is an ASSIGNMENT here, not a matching criterion: the engine only ever matches on
+    // textPattern (see MatchRuleEngine#matches), and c_bpartner_id is copied onto the movement the
+    // rule generates exactly like the other three. So the RULE FORM gates it like them (ETP-4950 QA
+    // round: it was the one toggle in the Accounting Schema that changed nothing).
+    //
+    // Scope of this gate is the rule form only. It deliberately does NOT extend to
+    // AccountingDimensionsSupport#applyRuleDimensions: on a FIN_FinaccTransaction the contact is a
+    // first-class field, always visible in the New Movement wizard, and folding it into
+    // requestsAnyDimension would make every difference posting resolve the dimension configuration.
+    fields.put(F_BUSINESS_PARTNER, AccountingDimensionsSupport.DIM_BPARTNER);
     return fields;
   }
 
