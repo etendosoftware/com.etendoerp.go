@@ -1434,9 +1434,12 @@
   <EM_ETVFAC_INVNOIDART61D><![CDATA[N]]></EM_ETVFAC_INVNOIDART61D>
 </C_DOCTYPE>
 
-<!-- ETP-4737: unified "Factura Rectificativa" (AR side) — replaces AR Credit Memo
+<!-- ETP-4737: unified rectificative invoice (AR side) — replaces AR Credit Memo
      + Return Material Sales Invoice. Document Category = AR Invoice (ARI), not a
-     credit-memo/return variant (Return=No, Credit Memo=No). -->
+     credit-memo/return variant (Return=No, Credit Memo=No).
+     ETP-5079: NAME/PRINTNAME renamed from Spanish "Factura Rectificativa" to English
+     "Corrective Sales Invoice" — every C_DocType base name must be English; the Spanish
+     wording now lives in the es_ES C_DOCTYPE_TRL row. -->
 <C_DOCTYPE>
   <C_DOCTYPE_ID><![CDATA[BCE59BC8A8314D6DA3A4D29943975913]]></C_DOCTYPE_ID>
   <AD_CLIENT_ID><![CDATA[802509E12436405C86BA1FD5B1DF508C]]></AD_CLIENT_ID>
@@ -1446,8 +1449,8 @@
   <CREATEDBY><![CDATA[0]]></CREATEDBY>
   <UPDATED><![CDATA[2026-07-30 15:40:40.693]]></UPDATED>
   <UPDATEDBY><![CDATA[0]]></UPDATEDBY>
-  <NAME><![CDATA[Factura Rectificativa]]></NAME>
-  <PRINTNAME><![CDATA[Factura Rectificativa]]></PRINTNAME>
+  <NAME><![CDATA[Corrective Sales Invoice]]></NAME>
+  <PRINTNAME><![CDATA[Corrective Sales Invoice]]></PRINTNAME>
   <DESCRIPTION><![CDATA[ETP-4737: unified rectificative invoice replacing AR Credit Memo + Return Material Sales Invoice (AR side).]]></DESCRIPTION>
   <DOCBASETYPE><![CDATA[ARI]]></DOCBASETYPE>
   <ISSOTRX><![CDATA[Y]]></ISSOTRX>
@@ -1473,9 +1476,11 @@
   <EM_ETVFAC_REVERSEINVTYPE><![CDATA[I]]></EM_ETVFAC_REVERSEINVTYPE>
 </C_DOCTYPE>
 
-<!-- ETP-4737: unified "Factura Rectificativa (compras)" (AP side) — replaces
-     AP CreditMemo. Document Category = AP Invoice (API), not a credit-memo
-     variant (Return=No, Credit Memo=No). -->
+<!-- ETP-4737: unified rectificative invoice (AP side) — replaces AP CreditMemo.
+     Document Category = AP Invoice (API), not a credit-memo variant
+     (Return=No, Credit Memo=No).
+     ETP-5079: NAME/PRINTNAME renamed from Spanish "Factura Rectificativa (compras)" to
+     English "Corrective Purchase Invoice" — see the AR sibling above. -->
 <C_DOCTYPE>
   <C_DOCTYPE_ID><![CDATA[50F8C3501B8343B99394557DF3D84904]]></C_DOCTYPE_ID>
   <AD_CLIENT_ID><![CDATA[802509E12436405C86BA1FD5B1DF508C]]></AD_CLIENT_ID>
@@ -1485,8 +1490,8 @@
   <CREATEDBY><![CDATA[0]]></CREATEDBY>
   <UPDATED><![CDATA[2026-07-30 15:40:40.693]]></UPDATED>
   <UPDATEDBY><![CDATA[0]]></UPDATEDBY>
-  <NAME><![CDATA[Factura Rectificativa (compras)]]></NAME>
-  <PRINTNAME><![CDATA[Factura Rectificativa (compras)]]></PRINTNAME>
+  <NAME><![CDATA[Corrective Purchase Invoice]]></NAME>
+  <PRINTNAME><![CDATA[Corrective Purchase Invoice]]></PRINTNAME>
   <DESCRIPTION><![CDATA[ETP-4737: unified rectificative invoice replacing AP CreditMemo (AP side).]]></DESCRIPTION>
   <DOCBASETYPE><![CDATA[API]]></DOCBASETYPE>
   <ISSOTRX><![CDATA[N]]></ISSOTRX>

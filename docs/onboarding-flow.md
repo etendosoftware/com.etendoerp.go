@@ -29,18 +29,37 @@ removed, or reordered.
  5. orgReady            — mark the org as ready (AD_ORG.isready = Y)
  6. fiscal              — seed SII descriptions (AEATSII_DESCRIPTION)
  7. orgInfo             — wire org fiscal/address info from the signup form
- 8. customer            — ensure a default customer business partner exists
- 9. bankConnectionSync  — schedule the PSD2 daily bank-statement sync (non-fatal; wired live 2026-06-28)
-10. bpGroupAcctPatch    — patch C_BP_Group_Acct columns the core trigger never populates (ETP-4720)
-11. acctdimVisibility   — force flat accounting-dimension visibility (gap K1, ETP-4854)
-12. baseline            — stamp the tenant's data-fix baseline (registerBaseline; always LAST)
+ 8. bankConnectionSync  — schedule the PSD2 daily bank-statement sync (non-fatal; wired live 2026-06-28)
+ 9. bpGroupAcctPatch    — patch C_BP_Group_Acct columns the core trigger never populates (ETP-4720)
+10. acctdimVisibility   — force flat accounting-dimension visibility (gap K1, ETP-4854)
+11. baseline            — stamp the tenant's data-fix baseline (registerBaseline; always LAST)
 ```
 
-The `orgReady`, `fiscal`, and `customer` steps were added to fix the
-"environment not ready for invoicing" error that occurred when the
-org-accessibility filter hid all org-scoped records because `isready=N`.
+The `orgReady` and `fiscal` steps were added to fix the "environment not ready
+for invoicing" error that occurred when the org-accessibility filter hid all
+org-scoped records because `isready=N`.
 
-Steps 9–11 are corrective/preventive gap-closing steps layered on top of the
+**Removed in ETP-5079 — the `customer` step.** Onboarding used to run a
+`customer` step between `orgInfo` and `bankConnectionSync` that created a
+synthetic "Default Customer" `C_BPARTNER` (search key
+`ONBOARDING_DEFAULT_CUSTOMER`), its address and a "Default Customer Contact"
+`AD_User`, so a demo Sales Invoice had a counterparty. **A new tenant is now
+born with zero business partners.** The service
+(`OnboardingDefaultCustomerService`), its servlet step, its `customer` NDJSON
+progress events and the follow-up
+`OnboardingAccountingWiringService#wireBusinessPartnerAccounts` call it carried
+are all gone. Two consequences worth knowing:
+* `C_BP_Customer_Acct` / `C_BP_Vendor_Acct` are empty on a fresh tenant. That is
+  correct, not a gap: both inserts are set-based over `C_BPartner`, and partners
+  the tenant creates later get their posting rows from Classic's own
+  `c_bpartner_trg`.
+* The SPA's post-onboarding readiness gate must not require a customer. Its
+  `customers` leg was removed in the same ticket
+  (`etendo_schema_forge/tools/app-shell/src/pages/onboarding/onboardingReadiness.js`)
+  — without that change onboarding would finish provisioning and then refuse to
+  let the user into the new environment.
+
+Steps 8–10 are corrective/preventive gap-closing steps layered on top of the
 original five (`accounting`, `periodControl`, `orgInfo` predate them too, ETP
 numbers as noted). `baseline` is always the final step — it stamps
 `ONBOARDING_PROVISIONED_THROUGH` (in `OnboardingBaselineService`) so the
@@ -60,10 +79,20 @@ Imports the curated GOClient sampledata XML files into the target client/org via
 `DataImportService`. The dataset is loaded from the classpath (staged during
 WAR build — see `onboarding-sampledata-packaging.md`).
 
+`validateImportedSeed` fails the onboarding when the imported seed has no
+product, warehouse or price list; `isSeedAlreadyPresent` uses the same three
+counts as the idempotent-resume probe, so a retry after a partial failure
+finishes the job instead of re-importing and duplicating rows. **Financial
+accounts are deliberately NOT part of either check (ETP-5079):** the dataset no
+longer ships the three template accounts, so a zero count is now the normal
+outcome. Keeping them in the gate would fail every onboarding; keeping them in
+the probe would make it permanently `false` and turn every retry into a
+duplicate import. The count is still logged for diagnostics.
+
 ### `OnboardingAccountingWiringService`
 Step 2 (`wire`) creates the client's accounting schema / `C_AcctSchema_Default`
 wiring; a later entry point on the SAME service, `patchBpGroupAcctMissingColumns`
-(step 10), patches 5 `C_BP_Group_Acct` columns left NULL by both the core
+(step 9), patches 5 `C_BP_Group_Acct` columns left NULL by both the core
 trigger and this service's own initial SQL (ETP-4720). See
 `etendo_schema_forge/docs/etendo-ad/onboarding-and-datafixes-map.md` for the
 full root-cause writeup.
@@ -128,12 +157,8 @@ Step 7. Wires the org's fiscal/address information collected on the signup
 form (country, fiscal ID, address) onto the newly created `AD_Org`/legal
 entity.
 
-### `OnboardingDefaultCustomerService`
-Creates a default `C_BPARTNER` customer record if none already exists for the
-org. The default customer is pre-selected on new sales invoice drafts.
-
 ### `OnboardingBankConnectionSyncService`
-Step 9. Intentionally **non-fatal** — always returns `true` and swallows
+Step 8. Intentionally **non-fatal** — always returns `true` and swallows
 errors (logs + `done` "skipped"). Schedules one daily `AD_Process_Request` per
 client that runs PSD2 `Get Bank Statements`, so Salt Edge-connected accounts
 auto-import statements. Has a post-commit companion,
@@ -141,7 +166,7 @@ auto-import statements. Has a post-commit companion,
 inside this chain) because the Quartz scheduler needs a committed row.
 
 ### `OnboardingAcctdimCentrallyMaintainedService`
-Step 11 (`forceFlatAccountingDimensionVisibility`, ETP-4854, gap K1). Backfills
+Step 10 (`forceFlatAccountingDimensionVisibility`, ETP-4854, gap K1). Backfills
 `C_AcctSchema_Element.isactive` per elementtype from the client's current
 effective `AD_Client.<Dim>_Acctdim_*` config, then flips
 `AD_Client.Acctdim_Centrally_Maintained` to `'N'` so the "Dimensiones
@@ -170,7 +195,7 @@ backfill is what makes that flat switch a reliable source for a tenant from birt
 `AccountingDimensionsSupport`'s own class javadoc for the full history.
 
 ### `OnboardingBaselineService`
-Step 12, always last. Stamps the data-fix baseline row (`applied_utc =
+Step 11, always last. Stamps the data-fix baseline row (`applied_utc =
 ONBOARDING_PROVISIONED_THROUGH`, a hardcoded cutoff — NOT `now()`) so the
 corrective data-fix runner knows which fixes a freshly-onboarded tenant
 already has natively and skips them. Single source of truth for the
@@ -185,10 +210,31 @@ names that the import step processes. Key entries and their rationale:
 |-------|--------|
 | `C_BP_TAXCATEGORY` | Referenced by `C_TAX`; must be imported before tax records |
 | `C_TAX` / `C_TAXCATEGORY` | VAT rates required for invoicing |
-| `C_DOCTYPE` | Document types (invoice, order, etc.) |
+| `C_DOCTYPE` | Document types (invoice, order, etc.) — base names are always **English** |
+| `C_DOCTYPE_TRL` | Document-type translations. Added in ETP-5079: without it a tenant got 49 doc types and **zero** translations, so every document type rendered with its English base name whatever the user's language |
 | `C_PAYMENTTERM` | Payment terms required for invoicing |
 | `AD_SEQUENCE` / `GL_CATEGORY` | Document-number sequences and GL categories |
 | `M_COSTING_RULE` | Without a costing rule a new tenant computes cost for zero transactions (`M_Transaction.iscostcalculated` stuck `'N'`); the bundled row seeds a validated Standard rule (ETP-4760) |
+
+A table that is NOT on this list never reaches a tenant, however much its XML
+file contains — `C_BPARTNER`, for instance, is absent, so onboarding creates no
+sample business partners at all. Editing an XML for a non-listed table changes
+nothing for a new tenant.
+
+**Dataset content corrected by ETP-5079.** The bundled data now ships: price
+lists named "Tarifa de venta/compra principal"; a **single** warehouse
+"Almacen Principal" (value `AG`) with one locator; **no** sample products —
+only the internal `ETGO_DTO` "Discount" product the inline-discount feature
+resolves at runtime, which is not sample data and must never be removed; **no**
+default financial accounts (a consequence a tenant must accept: it cannot
+register a payment or receipt until it creates an account itself); 11 document
+sequences whose `STARTNO` equals their `CURRENTNEXT`; and English base names for
+every document type, with the Spanish wording in `C_DOCTYPE_TRL`. Two
+`M_PRODUCT_CATEGORY` rows are kept — `Otros` as the generic starter category and
+`Discounts`, which `ETGO_DTO` requires (`Bebidas` was dropped in ETP-5079) —
+along with all four `FIN_PAYMENTMETHOD` rows. Corrective twin for
+already-provisioned tenants: `R31-document-sequence-startno` in
+`etendo_schema_forge`, which covers the sequences.
 
 ## NDJSON Progress Events
 

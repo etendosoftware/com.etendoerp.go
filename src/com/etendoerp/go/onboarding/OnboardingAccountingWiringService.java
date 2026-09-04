@@ -149,56 +149,6 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
   }
 
   /**
-   * Provisions the per-business-partner posting accounts (Gap A2) once the tenant's business
-   * partners exist.
-   *
-   * <p>This is a SECOND, later entry point on purpose. {@link #wire} runs early in the onboarding
-   * chain (right after the dataset import) so it can provision the {@code *_acct} rows for the
-   * entities the import brings in (BP groups, product categories, products). But the tenant's first
-   * business partner — the default customer — is created by {@code OnboardingDefaultCustomerService}
-   * several steps LATER, and {@code C_BPARTNER} is not part of the imported dataset. If the per-BP
-   * accounts were provisioned only inside {@link #wire}, {@code C_BP_CUSTOMER_ACCT} (and
-   * {@code C_BP_VENDOR_ACCT}) would always be empty for a fresh tenant. The onboarding servlet
-   * therefore calls this method again AFTER {@code ensureDefaultCustomer}, when the customer row
-   * exists and is flushed in the same transaction.
-   *
-   * <p>Both inserts are idempotent ({@code NOT EXISTS} guards), so the earlier no-op run inside
-   * {@link #wire} and this run never collide.
-   *
-   * @param clientId    target client identifier
-   * @param orgId       target organization identifier
-   * @param adminUserId administrator user for DAL context
-   * @param adminRoleId administrator role for DAL context
-   */
-  public void wireBusinessPartnerAccounts(String clientId, String orgId, String adminUserId,
-      String adminRoleId) {
-    validateContext(clientId, orgId, adminUserId, adminRoleId);
-    OBContext previousContext = captureCurrentContext();
-    applyExecutionContext(adminUserId, adminRoleId, clientId, orgId);
-    try {
-      enterAdminMode();
-      try {
-        Client client = resolveClient(clientId);
-        if (client == null) {
-          throw new OBException("Client not found for business-partner accounting: " + clientId);
-        }
-        AcctSchema ledger = resolveImportedLedger(client);
-        if (ledger == null) {
-          throw new OBException("No accounting schema was imported for client " + clientId
-              + "; cannot provision business-partner posting accounts");
-        }
-        runEntityAcctInsert(BP_CUSTOMER_ACCT_SQL, clientId, ledger.getId());
-        runEntityAcctInsert(BP_VENDOR_ACCT_SQL, clientId, ledger.getId());
-        flushChanges();
-      } finally {
-        exitAdminMode();
-      }
-    } finally {
-      restoreExecutionContext(previousContext);
-    }
-  }
-
-  /**
    * Patches any {@code C_BP_Group_Acct} row still missing one of the 5 columns that NEITHER the
    * core {@code c_bp_group_trg()} trigger NOR {@link #BP_GROUP_ACCT_SQL} populate (ETP-4720):
    * {@code WriteOff_Rev_Acct}, {@code DoubtfulDebt_Acct}, {@code BadDebtExpense_Acct},
@@ -217,10 +167,9 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
    * <p>Wired as the LAST provisioning step of the onboarding chain (right before the data-fix
    * baseline is stamped), so it runs after every {@code C_BP_Group} row for the tenant has already
    * been created and after {@code C_AcctSchema_Default} has its own values (both dataset-provisioned
-   * in step 1). A THIRD entry point on this class, after {@link #wire} (right after the dataset
-   * import) and {@link #wireBusinessPartnerAccounts} (after the default customer exists) — unlike
-   * those two, this one needs neither a fresh business partner nor a specific schema id: it patches
-   * every schema the tenant has via one client-scoped statement, exactly like its corrective twin.
+   * in step 1). A SECOND entry point on this class, after {@link #wire} (right after the dataset
+   * import) — unlike that one, this needs no specific schema id: it patches every schema the tenant
+   * has via one client-scoped statement, exactly like its corrective twin.
    *
    * <p>Idempotent: {@code COALESCE} only ever fills a NULL, never overwrites an existing value, and
    * the {@code WHERE} clause skips a row that has nothing left to fix.
@@ -679,11 +628,14 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
    * already has its posting row); those triggers just never fire for the rows the dataset importer
    * inserts with triggers disabled, which is exactly the gap this method backfills (ETP-4565).
    *
-   * <p>NOTE: at this point in the onboarding chain the only business partners are those carried by
-   * the dataset import (none — {@code C_BPARTNER} is not imported), so the customer/vendor inserts
-   * are no-ops here. The default customer is created several steps later; its posting account is
-   * provisioned by {@link #wireBusinessPartnerAccounts}, which the servlet calls after
-   * {@code ensureDefaultCustomer}.
+   * <p>NOTE: a freshly onboarded tenant has NO business partners at all — {@code C_BPARTNER} is not
+   * in {@code OnboardingDatasetDefinition.INCLUDED_TABLES}, and ETP-5079 removed the synthetic
+   * "Default Customer" that onboarding used to create — so the customer/vendor inserts below match
+   * zero rows here. They are kept because both statements are set-based
+   * ({@code INSERT ... SELECT ... FROM c_bpartner WHERE ...}) and therefore cost nothing on an empty
+   * table, and because this method is the single place that provisions posting accounts for any
+   * business partner the dataset ever does carry. Partners the tenant creates later get their
+   * posting rows from Classic's own {@code c_bpartner_trg}.
    *
    * @param client target client
    * @param ledger the accounting schema whose defaults are copied
@@ -1136,8 +1088,9 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
 
   // Warehouse posting accounts (ETP-4565): M_WAREHOUSE is bulk-imported by the dataset importer
   // with triggers disabled (same INCLUDED_TABLES gap as FIN_FINANCIAL_ACCOUNT above), so Classic's
-  // own m_warehouse_trg AFTER INSERT trigger never fires for the bundled template warehouses
-  // ("Almacen GO", "Almacén Secundario"). Column mapping mirrors that trigger one-for-one.
+  // own m_warehouse_trg AFTER INSERT trigger never fires for the bundled template warehouse
+  // ("Almacen Principal" — ETP-5079 reduced the dataset to a single warehouse). Column mapping
+  // mirrors that trigger one-for-one.
   private static final String WAREHOUSE_ACCT_SQL =
       "INSERT INTO m_warehouse_acct ("
       + "  m_warehouse_acct_id, ad_client_id, ad_org_id, isactive, created, createdby, updated,"

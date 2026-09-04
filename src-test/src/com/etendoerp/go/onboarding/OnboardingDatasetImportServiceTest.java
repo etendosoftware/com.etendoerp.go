@@ -186,17 +186,19 @@ public class OnboardingDatasetImportServiceTest {
   }
 
   /**
-   * ETP-4428: the core partial-failure scenario. An import that succeeded for products, warehouses
-   * and price lists but was cut off before creating the financial accounts must NOT be treated as
-   * present, so the retry finishes the job instead of skipping.
+   * ETP-5079: the curated dataset no longer seeds any financial account, so a tenant with products,
+   * warehouses and price lists but zero financial accounts is a COMPLETE seed. Before this ticket
+   * the probe also required a financial account, which would now be permanently false and make
+   * every onboarding retry re-import the dataset (duplicating products, warehouses, price lists).
    */
   @Test
-  @DisplayName("isSeedAlreadyPresent returns false when there are no financial accounts")
-  public void testIsSeedAlreadyPresentFalseWhenNoFinancialAccounts() {
+  @DisplayName("isSeedAlreadyPresent returns true when there are no financial accounts")
+  public void testIsSeedAlreadyPresentTrueWhenNoFinancialAccounts() {
     CountingImportService service = new CountingImportService(1, 1, 1, 0);
 
-    assertFalse(service.isSeedAlreadyPresent(mockClient(CLIENT_ID), mockOrganization(ORGANIZATION_ID)),
-        "A partial import missing only financial accounts must be re-imported, not skipped");
+    assertTrue(service.isSeedAlreadyPresent(mockClient(CLIENT_ID), mockOrganization(ORGANIZATION_ID)),
+        "Financial accounts are no longer part of the curated seed, so their absence must not "
+            + "trigger a re-import");
   }
 
   /**
@@ -236,9 +238,8 @@ public class OnboardingDatasetImportServiceTest {
   }
 
   /**
-   * ETP-4428: exercises the REAL {@code validateImportedSeed} success path (all four counts &gt; 0),
-   * which also runs the real {@code logImportedSeedSummary}. A complete seed must validate without
-   * throwing.
+   * ETP-4428: exercises the REAL {@code validateImportedSeed} success path, which also runs the
+   * real {@code logImportedSeedSummary}. A complete seed must validate without throwing.
    */
   @Test
   @DisplayName("validateImportedSeed passes when every seed entity has visible rows")
@@ -250,21 +251,35 @@ public class OnboardingDatasetImportServiceTest {
   }
 
   /**
-   * ETP-4428: the REAL {@code validateImportedSeed} must reject an incomplete import (here, missing
-   * financial accounts) with a diagnostic that names the empty entity counts, so a broken import
+   * ETP-5079: a tenant with no financial account is now a VALID import — the curated dataset
+   * deliberately stopped seeding "Caja"/"Cuenta de Banco"/"Tarjeta", so keeping them in the gate
+   * would make every single onboarding fail.
+   */
+  @Test
+  @DisplayName("validateImportedSeed passes when the tenant has no financial accounts")
+  public void testValidateImportedSeedPassesWithoutFinancialAccounts() {
+    CountingImportService service = new CountingImportService(1, 1, 1, 0);
+
+    assertDoesNotThrow(() -> service.validateImportedSeed(mockClient(CLIENT_ID),
+        mockOrganization(ORGANIZATION_ID)));
+  }
+
+  /**
+   * ETP-4428: the REAL {@code validateImportedSeed} must still reject an incomplete import (here,
+   * missing price lists) with a diagnostic that names the empty entity counts, so a broken import
    * never passes as successful.
    */
   @Test
   @DisplayName("validateImportedSeed throws with a diagnostic when a seed entity is empty")
   public void testValidateImportedSeedThrowsWhenIncomplete() {
-    CountingImportService service = new CountingImportService(1, 1, 1, 0);
+    CountingImportService service = new CountingImportService(1, 1, 0, 1);
 
     try {
       service.validateImportedSeed(mockClient(CLIENT_ID), mockOrganization(ORGANIZATION_ID));
       fail("Expected an incomplete seed to fail validation");
     } catch (OBException e) {
       assertNotNull(e.getMessage(), "Exception message should not be null");
-      assertTrue(e.getMessage().contains("financialAccounts=0"),
+      assertTrue(e.getMessage().contains("priceLists=0"),
           "The diagnostic must report the empty entity counts");
     }
   }
