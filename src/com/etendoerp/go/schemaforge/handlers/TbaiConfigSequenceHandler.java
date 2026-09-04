@@ -97,33 +97,35 @@ import com.smf.ticketbai.data.TbaiConfig;
  * created while the config is genuinely active. GO-only by design: this never runs for a config
  * saved through Classic UI.
  *
- * <h3>PUT/DELETE afterHandle — auto-send schedule cleanup on deactivation (ETP-5117 follow-up)</h3>
- * <p>The schedule created above must not outlive the config it was created for. When the incoming
- * PUT explicitly sets {@code active=false}, or when GO's UI issues a genuine {@code DELETE} (its
- * "Eliminar" action calls {@code apiFetch(..., { method: 'DELETE' })} — it never sends a PUT with
- * {@code active: false} — see {@code DetailView.jsx}), {@link #afterHandle} now also calls {@link
- * #unscheduleAutoSendForDeactivatedConfig} — covering both outcomes of {@link #smartDeactivate}:
- * the record deleted outright (no invoices were ever sent through it) or deactivated by the
- * default-CRUD fall-through (invoices exist, audit trail preserved). For the deactivating-PUT
- * case this is deliberately additive, not a replacement branch: {@link #ensureTbaiSequences}
- * still runs unconditionally exactly as before (chaining sequences must survive a pause/resume,
- * unaffected by this cleanup), and {@link #scheduleAutoSendIfActive} is simply left to no-op on
- * its own (the config is no longer active by the time it runs). For a genuine DELETE, though,
- * {@link #afterHandle} returns immediately after the unschedule call — the config record itself
- * is going away, so there is no scope left for {@link #ensureTbaiSequences} to (re)assign
- * chaining sequences to; a DELETE needs no {@link #isExplicitlyDeactivating} check the way PUT
- * does, since the method itself is unconditionally "this config is going away." Without the new
- * call, the schedule would keep firing the TicketBAI sending process twice a day for an
- * organization whose fiscal config no longer exists or is no longer active. See {@link
- * #unscheduleAutoSendForDeactivatedConfig} for how client/organization is resolved even though
- * the record may already be gone by the time this hook runs.
- *
- * <p><b>Known gap, not fixed here (ETP-5117):</b> {@link AbstractSmartDeactivationHandler#handle}
- * only intercepts {@code PUT} — a genuine {@code DELETE} never reaches {@link #smartDeactivate}
- * and falls straight through to NEO's default hard-delete CRUD, regardless of whether invoices
- * were ever sent through the config. This is a separate, likely pre-existing (ETP-4785-era) gap
- * in the pre-hook; this fix only guarantees the auto-send schedule always gets cleaned up in
- * {@link #afterHandle} once the DELETE completes.
+ * <h3>PUT/DELETE pre-hook — auto-send schedule cleanup on deactivation (ETP-5117 follow-up)</h3>
+ * <p>The schedule created above must not outlive the config it was created for. Cleanup runs in
+ * the <b>pre-hook</b>, never in {@link #afterHandle}, because it needs the config's <em>own</em>
+ * client/organization and by the time {@code afterHandle} runs the record is typically already
+ * gone. Resolving the scope from the session ({@code OBContext.getCurrentOrganization()}) instead
+ * is not a viable fallback: a GO client-admin role normally has {@code ad_org_id = '0'} (the
+ * {@code '*'} org), which never matches the business organization the schedule was created under,
+ * so the cleanup silently found nothing and no-opped. Two entry points, both resolving the scope
+ * from the record itself:
+ * <ul>
+ *   <li><b>Deactivating PUT</b> ({@code active=false}) — {@link #smartDeactivate} already has the
+ *       loaded config in hand, so it unschedules there in <em>both</em> of its outcomes: the
+ *       record deleted outright (no invoices were ever sent through it) and the default-CRUD
+ *       fall-through (invoices exist, audit trail preserved). {@link #ensureTbaiSequences} is
+ *       unaffected and still runs in {@link #afterHandle} exactly as before — chaining sequences
+ *       must survive a pause/resume — and {@link #scheduleAutoSendIfActive} no-ops on its own
+ *       (the config is no longer active by the time it runs).</li>
+ *   <li><b>Genuine {@code DELETE}</b> — GO's UI "Eliminar" action calls {@code apiFetch(..., {
+ *       method: 'DELETE' })}, it never sends a PUT with {@code active: false} (see {@code
+ *       DetailView.jsx}), and a DELETE never reaches {@link #smartDeactivate}. It is handled by
+ *       {@link #beforeDelete}, the base-class hook that runs while the record still exists and
+ *       then lets the default CRUD delete proceed untouched. {@link #afterHandle} returns
+ *       immediately for a DELETE — the config record is going away, so there is no scope left for
+ *       {@link #ensureTbaiSequences} to (re)assign chaining sequences to. No {@link
+ *       #isExplicitlyDeactivating} check is needed there — the method itself is unconditionally
+ *       "this config is going away."</li>
+ * </ul>
+ * <p>Without this, the schedule would keep firing the TicketBAI sending process twice a day for an
+ * organization whose fiscal config no longer exists or is no longer active.
  *
  * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
  * {@code docs/neo-headless-extensibility.md} §2.2 (this qualifier silently stops being
@@ -136,8 +138,6 @@ public class TbaiConfigSequenceHandler extends AbstractSmartDeactivationHandler 
   private static final Logger log = LogManager.getLogger(TbaiConfigSequenceHandler.class);
 
   private static final String METHOD_POST = "POST";
-
-  private static final String METHOD_DELETE = "DELETE";
 
   private static final String AUTO_SEND_SCHEDULE_DESCRIPTION =
       "Automatic TicketBAI invoice sending (Etendo GO)";
@@ -161,7 +161,10 @@ public class TbaiConfigSequenceHandler extends AbstractSmartDeactivationHandler 
 
   /**
    * Decides between deleting the config record (no invoices sent through it) and letting the
-   * default CRUD deactivate it (invoices exist — audit trail must be preserved).
+   * default CRUD deactivate it (invoices exist — audit trail must be preserved). Either way the
+   * config is on its way out, so the auto-send schedule is removed first, while the record is
+   * still loaded and can answer for its own client/organization — see the "auto-send schedule
+   * cleanup on deactivation" class Javadoc section.
    */
   @Override
   protected NeoResponse smartDeactivate(String recordId) throws JSONException {
@@ -172,6 +175,8 @@ public class TbaiConfigSequenceHandler extends AbstractSmartDeactivationHandler 
 
     Date adoptionDate = config.getTbaisystemdate();
     String orgId = config.getOrganization().getId();
+
+    unscheduleAutoSendFor(config, recordId);
 
     // If the config never entered the fiscal system (adoption date not set), delete directly.
     if (adoptionDate == null) {
@@ -195,6 +200,16 @@ public class TbaiConfigSequenceHandler extends AbstractSmartDeactivationHandler 
   }
 
   /**
+   * Removes the auto-send schedule for a config a genuine {@code DELETE} is about to hard-delete,
+   * while the record still exists and still carries its own client/organization. Returns without
+   * touching the delete itself — see {@link AbstractSmartDeactivationHandler#beforeDelete}.
+   */
+  @Override
+  protected void beforeDelete(NeoContext context, String recordId) {
+    unscheduleAutoSendFor(OBDal.getInstance().get(TbaiConfig.class, recordId), recordId);
+  }
+
+  /**
    * Returns {@code true} if at least one invoice was sent through TicketBAI for the given
    * org with an invoice date on or after {@code since}.
    */
@@ -211,10 +226,11 @@ public class TbaiConfigSequenceHandler extends AbstractSmartDeactivationHandler 
   /**
    * Post-hook: on a successful create/update of the TBAI config, ensures every invoice Document
    * Type in the config's organization tree has a TBAI chaining sequence assigned, and keeps the
-   * twice-a-day auto-send schedule in sync with the config's active flag (create/activate on a
-   * genuinely active save, cleanup on an explicit deactivation or a genuine DELETE) — see class
-   * Javadoc. A genuine DELETE skips sequence assignment entirely (the config record is going
-   * away) and only runs the schedule cleanup.
+   * twice-a-day auto-send schedule in sync with the config's active flag: created/activated on a
+   * genuinely active save. Removal of the schedule is <b>not</b> done here — it runs in the
+   * pre-hook ({@link #smartDeactivate} / {@link #beforeDelete}), see class Javadoc. A genuine
+   * DELETE therefore returns immediately: its cleanup already ran, and the config record is going
+   * away so there is no scope left for sequence assignment.
    *
    * @return always {@code null} — this is a side effect, never a response replacement.
    */
@@ -224,24 +240,19 @@ public class TbaiConfigSequenceHandler extends AbstractSmartDeactivationHandler 
       return null;
     }
     String method = context.getHttpMethod();
-    boolean isPost = METHOD_POST.equalsIgnoreCase(method);
-    boolean isPut = METHOD_PUT.equalsIgnoreCase(method);
-    boolean isDelete = METHOD_DELETE.equalsIgnoreCase(method);
-    if (!isPost && !isPut && !isDelete) {
+    if (METHOD_DELETE.equalsIgnoreCase(method)) {
+      // The auto-send schedule was already removed in the beforeDelete pre-hook, where the config
+      // record still existed and could answer for its own client/organization. The record itself
+      // is going away, so there is no scope left to (re)assign chaining sequences to either —
+      // same as the "record already deleted" guard below.
       return null;
     }
-    if (isDelete || (isPut && isExplicitlyDeactivating(context.getRequestBody()))) {
-      // Additive, not a replacement branch for the deactivating-PUT case — see class Javadoc
-      // "schedule cleanup on deactivation" section. ensureTbaiSequences/scheduleAutoSendIfActive
-      // below still run exactly as before for that request; this call only removes a schedule
-      // that is no longer wanted. For a genuine DELETE, though, the config record itself is
-      // going away — there is no scope left to (re)assign chaining sequences to, so we return
-      // immediately afterward instead, same as the "record already deleted" guard below.
-      unscheduleAutoSendForDeactivatedConfig(context);
-      if (isDelete) {
-        return null;
-      }
+    if (!METHOD_POST.equalsIgnoreCase(method) && !METHOD_PUT.equalsIgnoreCase(method)) {
+      return null;
     }
+    // A deactivating PUT deliberately falls through: its schedule cleanup already ran in
+    // smartDeactivate, ensureTbaiSequences must still run (chaining sequences survive a
+    // pause/resume), and scheduleAutoSendIfActive no-ops on its own for an inactive config.
     // If handle() already deleted the record (smart deactivation), skip sequence assignment.
     NeoResponse preResult = context.getPreviousResult();
     if (preResult != null && preResult.getBody() != null
@@ -263,46 +274,33 @@ public class TbaiConfigSequenceHandler extends AbstractSmartDeactivationHandler 
   }
 
   /**
-   * Removes the auto-send schedule (if any) for a config that a deactivating PUT or a genuine
-   * DELETE just deleted or deactivated (ETP-5117 follow-up) — see the "auto-send schedule
-   * cleanup on deactivation" class Javadoc section.
+   * Removes the auto-send schedule (if any) belonging to {@code config}, scoped to the record's
+   * <b>own</b> client and organization — never the session's, which for a GO client-admin role is
+   * normally organization {@code '0'} (the {@code '*'} org) and would match no schedule at all
+   * (ETP-5117 follow-up; see the "auto-send schedule cleanup on deactivation" class Javadoc
+   * section). Callers therefore must invoke this while the record still exists.
    *
-   * <p><b>Client/organization resolution.</b> Reuses {@link #resolveConfigScope}, always passing
-   * {@link #METHOD_PUT} regardless of the actual incoming method (a deliberate, pre-existing
-   * choice, not new to the DELETE case): it forces {@link #resolveRecordId} down its
-   * {@code context.getRecordId()} branch instead of its POST-response-parsing branch, and {@link
-   * NeoContext#getRecordId()} is populated from the URL path the same way for every HTTP method —
-   * including a genuine DELETE — so this is safe to reuse unchanged here. That gives exactly the
-   * fallback needed: try to load the {@link TbaiConfig} record by id first (a primary-key lookup
-   * is <b>not</b> filtered by {@code Active}, so it still succeeds for the "deactivated by default
-   * CRUD, not deleted" case and returns the config's own, most-precise organization), and only
-   * fall back to {@code context.getObContext()}'s current client/organization when the record
-   * cannot be loaded — the case where {@link #smartDeactivate} deleted it outright (deactivating
-   * PUT, no invoices were ever sent through it) or where a genuine DELETE has already removed the
-   * record via default CRUD by the time this hook runs. That fallback relies on TBAI configs
-   * being per-organization records normally edited from within that same organization's context,
-   * the same assumption {@link #resolveConfigScope} already documents for its own defensive use
-   * on the schedule-creation side.
+   * <p>Non-fatal by design: a cleanup failure is logged at WARN — never at DEBUG, whose
+   * invisibility at the default INFO level is precisely what hid this bug — and never allowed to
+   * fail the delete/deactivate the user asked for.
+   *
+   * @param config   the config being deleted or deactivated, or {@code null} when it could not be
+   *                 loaded (logged at WARN and skipped)
+   * @param recordId the config's primary key, for logging only
    */
-  private void unscheduleAutoSendForDeactivatedConfig(NeoContext context) {
+  private void unscheduleAutoSendFor(TbaiConfig config, String recordId) {
     try {
-      OBContext.setAdminMode(true);
-      try {
-        ConfigScope scope = resolveConfigScope(context, METHOD_PUT);
-        if (scope == null) {
-          log.debug("TbaiConfigSequenceHandler: could not resolve client/organization for the "
-              + "deactivated TBAI config; skipping auto-send schedule cleanup");
-          return;
-        }
-        scheduleService.unscheduleAutoSend(scope.client.getId(), scope.organization.getId(),
-            SiiTbaiAutoSendScheduleService.TBAI_PROCESS_SEARCH_KEY);
-      } finally {
-        OBContext.restorePreviousMode();
+      if (config == null || config.getClient() == null || config.getOrganization() == null) {
+        log.warn("TbaiConfigSequenceHandler: could not resolve client/organization from config "
+            + "record {}; SKIPPING auto-send schedule cleanup — the TicketBAI sending process may "
+            + "keep firing for an organization with no active configuration", recordId);
+        return;
       }
+      scheduleService.unscheduleAutoSend(config.getClient().getId(),
+          config.getOrganization().getId(), SiiTbaiAutoSendScheduleService.TBAI_PROCESS_SEARCH_KEY);
     } catch (Exception e) {
-      // Non-fatal — the deactivate/delete already committed; log and continue.
-      log.warn("TbaiConfigSequenceHandler.afterHandle: could not unschedule auto-send for "
-          + "deactivated config: {}", e.getMessage(), e);
+      log.warn("TbaiConfigSequenceHandler: could not unschedule auto-send for config {}: {}",
+          recordId, e.getMessage(), e);
     }
   }
 

@@ -87,10 +87,15 @@ import org.openbravo.service.db.DalConnectionProvider;
  * Quartz trigger (best-effort, same degraded-but-safe reasoning as {@link #activateSchedule}) and
  * then deactivates the {@code AD_Process_Request} row itself (never deletes it — history/audit is
  * kept, matching this codebase's general preference for deactivation over deletion). It is called
- * from the same two {@code NeoHandler}s' {@code afterHandle} hooks, on the branch where the
- * incoming PUT explicitly sets {@code active=false} — whether {@code smartDeactivate} responded by
- * deleting the fiscal config outright (no invoices ever sent through it) or by letting the request
- * fall through to default CRUD, which deactivates the config while preserving its audit trail.
+ * from the same two {@code NeoHandler}s' <b>pre-hooks</b>, never from {@code afterHandle}: from
+ * {@code smartDeactivate} when the incoming PUT explicitly sets {@code active=false} (covering
+ * both of its outcomes — the fiscal config deleted outright because no invoices were ever sent
+ * through it, and the fall-through to default CRUD that deactivates it while preserving its audit
+ * trail), and from {@code beforeDelete} for a genuine HTTP {@code DELETE}. Running before the
+ * record disappears is what lets the caller pass the config's <b>own</b> {@code clientId}/{@code
+ * orgId}; the session's current organization is not a usable substitute, since a GO client-admin
+ * role normally sits on organization {@code '0'} (the {@code '*'} org) and {@link
+ * #findExistingRequest} would then match nothing and silently no-op.
  */
 public class SiiTbaiAutoSendScheduleService {
 
@@ -235,7 +240,10 @@ public class SiiTbaiAutoSendScheduleService {
       }
       ProcessRequest existing = findExistingRequest(clientId, orgId, process);
       if (existing == null) {
-        log.debug("No active auto-send schedule found for client {} org {} process {} — already "
+        // INFO, not DEBUG: this is a low-frequency lifecycle event, and its invisibility at the
+        // default INFO level is exactly what made a wrongly-scoped cleanup look like dead code
+        // for several rounds of ETP-5117 debugging.
+        log.info("No active auto-send schedule found for client {} org {} process {} — already "
             + "unscheduled, or one was never created", clientId, orgId, processSearchKey);
         return;
       }

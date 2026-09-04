@@ -77,27 +77,30 @@ import com.etendoerp.go.schemaforge.SiiTbaiAutoSendScheduleService;
  * {@link SiiTbaiAutoSendScheduleService} for the full scope/idempotency reasoning. GO-only by
  * design: this never runs for a config saved through Classic UI.
  *
- * <h3>PUT/DELETE afterHandle — auto-send schedule cleanup on deactivation (ETP-5117 follow-up)</h3>
- * <p>The schedule created above must not outlive the config it was created for. When a PUT
- * explicitly sets {@code active=false}, or when GO's UI issues a genuine {@code DELETE} (its
- * "Eliminar" action calls {@code apiFetch(..., { method: 'DELETE' })} — it never sends a PUT with
- * {@code active: false} — see {@code DetailView.jsx}), {@link #afterHandle} now calls {@link
- * #unscheduleAutoSendForDeactivatedConfig} instead of returning immediately — covering both
- * outcomes of {@link #smartDeactivate}: the record deleted outright (no invoices were ever sent
- * through it) or deactivated by the default-CRUD fall-through (invoices exist, audit trail
- * preserved). A DELETE needs no {@link #isExplicitlyDeactivating} check the way PUT does — the
- * method itself is unconditionally "this config is going away." Either way, without this the
- * schedule would keep firing the SII sending process twice a day for an organization whose
- * fiscal config no longer exists or is no longer active. See {@link
- * #unscheduleAutoSendForDeactivatedConfig} for how client/organization is resolved even though
- * the record may already be gone by the time this hook runs.
- *
- * <p><b>Known gap, not fixed here (ETP-5117):</b> {@link AbstractSmartDeactivationHandler#handle}
- * only intercepts {@code PUT} — a genuine {@code DELETE} never reaches {@link #smartDeactivate}
- * and falls straight through to NEO's default hard-delete CRUD, regardless of whether SII
- * invoices were ever sent through the config. This is a separate, likely pre-existing
- * (ETP-4785-era) gap in the pre-hook; this fix only guarantees the auto-send schedule always
- * gets cleaned up in {@link #afterHandle} once the DELETE completes.
+ * <h3>PUT/DELETE pre-hook — auto-send schedule cleanup on deactivation (ETP-5117 follow-up)</h3>
+ * <p>The schedule created above must not outlive the config it was created for. Cleanup runs in
+ * the <b>pre-hook</b>, never in {@link #afterHandle}, because it needs the config's <em>own</em>
+ * client/organization and by the time {@code afterHandle} runs the record is typically already
+ * gone. Resolving the scope from the session ({@code OBContext.getCurrentOrganization()}) instead
+ * is not a viable fallback: a GO client-admin role normally has {@code ad_org_id = '0'} (the
+ * {@code '*'} org), which never matches the business organization the schedule was created under,
+ * so the cleanup silently found nothing and no-opped. Two entry points, both resolving the scope
+ * from the record itself:
+ * <ul>
+ *   <li><b>Deactivating PUT</b> ({@code active=false}) — {@link #smartDeactivate} already has the
+ *       loaded config in hand, so it unschedules there in <em>both</em> of its outcomes: the
+ *       record deleted outright (no invoices were ever sent through it) and the default-CRUD
+ *       fall-through (invoices exist, audit trail preserved).</li>
+ *   <li><b>Genuine {@code DELETE}</b> — GO's UI "Eliminar" action calls {@code apiFetch(..., {
+ *       method: 'DELETE' })}, it never sends a PUT with {@code active: false} (see {@code
+ *       DetailView.jsx}), and a DELETE never reaches {@link #smartDeactivate}. It is handled by
+ *       {@link #beforeDelete}, the base-class hook that runs while the record still exists and
+ *       then lets the default CRUD delete proceed untouched. No {@link #isExplicitlyDeactivating}
+ *       check is needed there — the method itself is unconditionally "this config is going
+ *       away."</li>
+ * </ul>
+ * <p>Without this, the schedule would keep firing the SII sending process twice a day for an
+ * organization whose fiscal config no longer exists or is no longer active.
  *
  * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
  * {@code docs/neo-headless-extensibility.md} §2.2 (this qualifier silently stops being
@@ -110,8 +113,6 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
 
   private static final String METHOD_POST = "POST";
 
-  private static final String METHOD_DELETE = "DELETE";
-
   private static final String AUTO_SEND_SCHEDULE_DESCRIPTION =
       "Automatic SII invoice sending (Etendo GO)";
 
@@ -119,7 +120,10 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
 
   /**
    * Decides between deleting the config record (no invoices sent through it) and letting the
-   * default CRUD deactivate it (invoices exist — audit trail must be preserved).
+   * default CRUD deactivate it (invoices exist — audit trail must be preserved). Either way the
+   * config is on its way out, so the auto-send schedule is removed first, while the record is
+   * still loaded and can answer for its own client/organization — see the "auto-send schedule
+   * cleanup on deactivation" class Javadoc section.
    *
    * @param recordId the primary key of the {@code aeatsii_config} record
    * @return a 200 {@code {"deleted":true}} response when the record was deleted, or
@@ -134,6 +138,8 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
 
     Date adoptionDate = config.getFechaAcogidaSII();
     String orgId = config.getOrganization().getId();
+
+    unscheduleAutoSendFor(config, recordId);
 
     // If the config never entered the fiscal system (no acogida date), delete directly.
     if (adoptionDate == null) {
@@ -157,6 +163,16 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
   }
 
   /**
+   * Removes the auto-send schedule for a config a genuine {@code DELETE} is about to hard-delete,
+   * while the record still exists and still carries its own client/organization. Returns without
+   * touching the delete itself — see {@link AbstractSmartDeactivationHandler#beforeDelete}.
+   */
+  @Override
+  protected void beforeDelete(NeoContext context, String recordId) {
+    unscheduleAutoSendFor(OBDal.getInstance().get(AEATSIIConfig.class, recordId), recordId);
+  }
+
+  /**
    * After a successful create (POST) or non-deactivating update (PUT) of an SII config:
    * <ul>
    *   <li>PUT only — ensures {@code INSIISYSTEM = 'Y'} in the DB so the
@@ -170,19 +186,21 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
    *
    * <p>Deactivation PUTs ({@code active=false}) and genuine DELETEs are skipped entirely — the
    * org flag should be cleared, and a config that is not becoming active must not get a
-   * schedule.
+   * schedule. Their auto-send schedule cleanup runs in the pre-hook ({@link #smartDeactivate} /
+   * {@link #beforeDelete}), not here — see class Javadoc.
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     String method = context.getHttpMethod();
     boolean isPost = METHOD_POST.equalsIgnoreCase(method);
     boolean isPut = METHOD_PUT.equalsIgnoreCase(method);
-    boolean isDelete = METHOD_DELETE.equalsIgnoreCase(method);
-    if (!isPost && !isPut && !isDelete) {
+    if (!isPost && !isPut) {
+      // Includes a genuine DELETE: its schedule cleanup already ran in beforeDelete, where the
+      // config record still existed and could answer for its own client/organization.
       return null;
     }
-    if (isDelete || (isPut && isExplicitlyDeactivating(context.getRequestBody()))) {
-      unscheduleAutoSendForDeactivatedConfig(context);
+    if (isPut && isExplicitlyDeactivating(context.getRequestBody())) {
+      // Cleanup already ran in smartDeactivate, for the same reason. Nothing left to do here.
       return null;
     }
     String recordId = isPut ? context.getRecordId() : resolveCreatedRecordId(context);
@@ -253,67 +271,33 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
   }
 
   /**
-   * Removes the auto-send schedule (if any) for a config that a deactivating PUT or a genuine
-   * DELETE just deleted or deactivated (ETP-5117 follow-up) — see the "auto-send schedule
-   * cleanup on deactivation" class Javadoc section.
+   * Removes the auto-send schedule (if any) belonging to {@code config}, scoped to the record's
+   * <b>own</b> client and organization — never the session's, which for a GO client-admin role is
+   * normally organization {@code '0'} (the {@code '*'} org) and would match no schedule at all
+   * (ETP-5117 follow-up; see the "auto-send schedule cleanup on deactivation" class Javadoc
+   * section). Callers therefore must invoke this while the record still exists.
    *
-   * <p><b>Client/organization resolution.</b> By the time {@link #afterHandle} runs, the record
-   * may already be gone — either {@link #smartDeactivate} deleted it outright (deactivating PUT,
-   * no SII invoices were ever sent through it) or the request was a genuine DELETE (which today
-   * falls straight through to NEO's default hard-delete CRUD — see the class Javadoc "known gap"
-   * note). Two sources are tried, in order:
-   * <ol>
-   *   <li>{@code OBDal.getInstance().get(AEATSIIConfig.class, recordId)} — a primary-key lookup
-   *       is <b>not</b> filtered by {@code Active}, so it still succeeds for the "deactivated by
-   *       default CRUD, not deleted" case and returns the config's own organization, which is
-   *       the most precise source available.</li>
-   *   <li>Only when that lookup returns nothing (the "deleted" case) does this fall back to
-   *       {@code context.getObContext()}'s {@link OBContext#getCurrentClient()}/{@link
-   *       OBContext#getCurrentOrganization()} — the session's client/organization at the time of
-   *       the request. SII configs are per-organization records normally edited from within that
-   *       same organization's context (the same assumption {@code
-   *       TbaiConfigSequenceHandler#resolveConfigScope} already relies on for its own defensive
-   *       fallback), so this is a safe substitute for the one case where the record itself can no
-   *       longer answer the question. Neither {@link NeoContext} nor {@link NeoResponse} carry a
-   *       request-scoped attribute bag that could thread the about-to-be-deleted record's
-   *       client/organization from {@link #smartDeactivate} into this hook, so adding one just
-   *       for this would add more surface than this fallback avoids.</li>
-   * </ol>
+   * <p>Non-fatal by design: a cleanup failure is logged at WARN — never at DEBUG, whose
+   * invisibility at the default INFO level is precisely what hid this bug — and never allowed to
+   * fail the delete/deactivate the user asked for.
+   *
+   * @param config   the config being deleted or deactivated, or {@code null} when it could not be
+   *                 loaded (logged at WARN and skipped)
+   * @param recordId the config's primary key, for logging only
    */
-  private void unscheduleAutoSendForDeactivatedConfig(NeoContext context) {
-    String recordId = context.getRecordId();
+  private void unscheduleAutoSendFor(AEATSIIConfig config, String recordId) {
     try {
-      OBContext.setAdminMode(true);
-      try {
-        String clientId = null;
-        String orgId = null;
-        if (StringUtils.isNotBlank(recordId)) {
-          AEATSIIConfig config = OBDal.getInstance().get(AEATSIIConfig.class, recordId);
-          if (config != null && config.getClient() != null && config.getOrganization() != null) {
-            clientId = config.getClient().getId();
-            orgId = config.getOrganization().getId();
-          }
-        }
-        if (clientId == null || orgId == null) {
-          OBContext obContext = context.getObContext();
-          if (obContext == null || obContext.getCurrentClient() == null
-              || obContext.getCurrentOrganization() == null) {
-            log.debug("SiiConfigDeactivateHandler: could not resolve client/organization for "
-                + "the deactivated config {}; skipping auto-send schedule cleanup", recordId);
-            return;
-          }
-          clientId = obContext.getCurrentClient().getId();
-          orgId = obContext.getCurrentOrganization().getId();
-        }
-        scheduleService.unscheduleAutoSend(clientId, orgId,
-            SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
-      } finally {
-        OBContext.restorePreviousMode();
+      if (config == null || config.getClient() == null || config.getOrganization() == null) {
+        log.warn("SiiConfigDeactivateHandler: could not resolve client/organization from config "
+            + "record {}; SKIPPING auto-send schedule cleanup — the SII sending process may keep "
+            + "firing for an organization with no active configuration", recordId);
+        return;
       }
+      scheduleService.unscheduleAutoSend(config.getClient().getId(),
+          config.getOrganization().getId(), SiiTbaiAutoSendScheduleService.SII_PROCESS_SEARCH_KEY);
     } catch (Exception e) {
-      // Non-fatal — the deactivate/delete already committed; log and continue.
-      log.warn("SiiConfigDeactivateHandler.afterHandle: could not unschedule auto-send for "
-          + "deactivated config {}: {}", recordId, e.getMessage(), e);
+      log.warn("SiiConfigDeactivateHandler: could not unschedule auto-send for config {}: {}",
+          recordId, e.getMessage(), e);
     }
   }
 
