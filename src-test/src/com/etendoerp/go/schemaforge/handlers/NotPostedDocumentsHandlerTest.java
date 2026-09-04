@@ -343,8 +343,9 @@ public class NotPostedDocumentsHandlerTest {
    * The 5 document types globally excluded by product decision (ETP-4452) must resolve to their
    * real {@code tableId} via {@link NotPostedDocumentsHandler#DOCUMENT_TYPE_TO_TABLE_ID} (the
    * defensive fix) AND be dropped from the grid because their table is in
-   * {@code APRM_DISABLED_TABLE_IDS} (the exclusion). Before the fix these labels were absent from
-   * the map, so {@code tableId} resolved to {@code null} and the row was never dropped here.
+   * {@code AccountingDocumentTypeSupport.APRM_DISABLED_TABLE_IDS} (the exclusion, ETP-4948:
+   * extracted out of this handler into a shared utility). Before the fix these labels were absent
+   * from the map, so {@code tableId} resolved to {@code null} and the row was never dropped here.
    */
   @Test
   public void buildRowDropsGloballyExcludedBillOfMaterialsProductionRow() throws Exception {
@@ -392,10 +393,10 @@ public class NotPostedDocumentsHandlerTest {
   }
 
   /**
-   * Defensive-fix regression guard: even without going through {@code APRM_DISABLED_TABLE_IDS},
-   * {@code DOCUMENT_TYPE_TO_TABLE_ID} must resolve the real table id for these 5 labels — verified
-   * directly on the map so a future removal from {@code APRM_DISABLED_TYPES} (e.g. exclusion
-   * policy change) does not silently regress the {@code tableId} mapping bug.
+   * Defensive-fix regression guard: even without going through
+   * {@code AccountingDocumentTypeSupport.APRM_DISABLED_TABLE_IDS}, {@code DOCUMENT_TYPE_TO_TABLE_ID}
+   * must resolve the real table id for these 5 labels — verified directly on the map so a future
+   * exclusion-policy change does not silently regress the {@code tableId} mapping bug.
    */
   @Test
   public void documentTypeToTableIdMapsAllFiveGloballyExcludedLabels() {
@@ -421,6 +422,27 @@ public class NotPostedDocumentsHandlerTest {
 
     assertNotNull(result);
     assertEquals(JSONObject.NULL, result.get("tableId"));
+  }
+
+  /**
+   * ETP-5075 regression guard — before this entry existed, every Matched Purchase Invoices
+   * ("Relación albarán-factura") row in this grid resolved a null tableId despite table 472
+   * (M_MatchInv) already having active accounting (so {@code refListDocumentTypes()} listed
+   * "MI" in the filter dropdown, but the row itself could never be posted:
+   * {@code postRow()} in {@code NotPostedDocumentsPage.jsx} short-circuits client-side with
+   * "unknown tableId for Matched Invoice" whenever {@code tableId} is null).
+   */
+  @Test
+  public void buildRowResolvesTableIdForMatchedInvoice() throws Exception {
+    NotPostedDocumentsHandler handler = new NotPostedDocumentsHandler();
+    Map<String, Object> row = new HashMap<>();
+    row.put("documentType", "Matched Invoice");
+    row.put("documentId", "doc-9");
+
+    JSONObject result = handler.buildRow(row);
+
+    assertNotNull(result);
+    assertEquals("472", result.get("tableId"));
   }
 
   @Test

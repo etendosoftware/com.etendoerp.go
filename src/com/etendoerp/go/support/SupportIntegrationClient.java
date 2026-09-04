@@ -49,6 +49,9 @@ final class SupportIntegrationClient {
   private static final String HEADER_CONTENT_TYPE = "Content-Type";
   private static final String HEADER_AUTHORIZATION = "Authorization";
   private static final String CONTENT_TYPE_JSON = "application/json";
+  private static final String JIRA_ISSUE_PATH = ConfigPropertyReader.readConfigValue(
+      "support.jira.issuePath", "ETGO_SUPPORT_JIRA_ISSUE_PATH", "/rest/api/3/issue/");
+  private static final String AUTH_BASIC_PREFIX = "Basic ";
 
   // Attachment mime types eligible to be forwarded to the ADK model as real inlineData
   // (as opposed to a text placeholder). Scope is images and documents only — no
@@ -318,9 +321,9 @@ final class SupportIntegrationClient {
           "}";
 
       HttpRequest req = HttpRequest.newBuilder()
-          .uri(URI.create(config.getUrl() + "/rest/api/3/issue/" + jiraKey + "/comment"))
+          .uri(URI.create(config.getUrl() + JIRA_ISSUE_PATH + jiraKey + "/comment"))
           .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_JSON)
-          .header(HEADER_AUTHORIZATION, "Basic " + credentials)
+          .header(HEADER_AUTHORIZATION, AUTH_BASIC_PREFIX + credentials)
           .POST(HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
           .timeout(Duration.ofSeconds(10))
           .build();
@@ -380,9 +383,9 @@ final class SupportIntegrationClient {
       String payload = "{\"update\":{\"labels\":[{\"add\":\"csat-" + score + "\"}]}}";
 
       HttpRequest req = HttpRequest.newBuilder()
-          .uri(URI.create(config.getUrl() + "/rest/api/3/issue/" + jiraKey))
+          .uri(URI.create(config.getUrl() + JIRA_ISSUE_PATH + jiraKey))
           .header(HEADER_CONTENT_TYPE, CONTENT_TYPE_JSON)
-          .header(HEADER_AUTHORIZATION, "Basic " + credentials)
+          .header(HEADER_AUTHORIZATION, AUTH_BASIC_PREFIX + credentials)
           .method("PUT", HttpRequest.BodyPublishers.ofString(payload, StandardCharsets.UTF_8))
           .timeout(Duration.ofSeconds(10))
           .build();
@@ -399,5 +402,50 @@ final class SupportIntegrationClient {
     } catch (Exception e) {
       log.warn("Failed to add Jira CSAT label to {}: {}", jiraKey, e.getMessage());
     }
+  }
+
+  /** Returns {@code {emailAddress, displayName}} of the ticket's current assignee — either or
+   * both may be {@code null} if unassigned, the request fails, or (for accounts with private
+   * email visibility, like "Information Etendo") {@code emailAddress} is omitted by Jira
+   * entirely.
+   *
+   * Used by {@code handleSendMessage}'s live re-check: a conversation escalated to a human
+   * can only learn it was reassigned back to the bot from this poll if the assignee-reset
+   * webhook never fires — and that webhook depends on a Jira Automation rule that isn't
+   * always configured or reachable (confirmed: the shared rule pointed at the wrong
+   * environment for weeks). Synchronous/blocking by design, unlike the fire-and-forget writes
+   * elsewhere in this class — the caller needs the answer before deciding whether to forward
+   * the message silently or call the AI. */
+  static String[] getTicketAssignee(String jiraKey) {
+    String[] result = new String[]{null, null};
+    if (jiraKey == null || jiraKey.isEmpty()) return result;
+    JiraConfig config = JiraConfig.fromRuntime();
+    if (!config.isConfigured()) return result;
+    try {
+      String credentials = config.basicAuthCredentials();
+      HttpRequest req = HttpRequest.newBuilder()
+          .uri(URI.create(config.getUrl() + JIRA_ISSUE_PATH + jiraKey + "?fields=assignee"))
+          .header(HEADER_AUTHORIZATION, AUTH_BASIC_PREFIX + credentials)
+          .timeout(Duration.ofSeconds(5))
+          .GET()
+          .build();
+      HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
+      if (resp.statusCode() >= 200 && resp.statusCode() < 300) {
+        JSONObject fields = new JSONObject(resp.body()).optJSONObject("fields");
+        JSONObject assignee = fields != null ? fields.optJSONObject("assignee") : null;
+        if (assignee != null) {
+          result[0] = assignee.optString("emailAddress", null);
+          result[1] = assignee.optString("displayName", null);
+        }
+      } else {
+        log.warn("getTicketAssignee FAILED for {} ← {}", jiraKey, resp.statusCode());
+      }
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      log.warn("Failed to get Jira assignee for {}: {}", jiraKey, e.getMessage());
+    } catch (Exception e) {
+      log.warn("Failed to get Jira assignee for {}: {}", jiraKey, e.getMessage());
+    }
+    return result;
   }
 }

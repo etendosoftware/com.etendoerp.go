@@ -176,6 +176,24 @@ observed dimension visibility. Lockstep corrective twin:
 root-cause and safety analysis:
 `etendo_schema_forge/docs/etendo-ad/onboarding-gaps.md` §K1.
 
+**Runtime consumer, flat-source-only (ETP-5101).** The class this step backfills toward —
+`C_AcctSchema_Element.IsActive`, the "Ledger Configuration" screen's per-dimension switch — is
+also the *only* source `AccountingDimensionsSupport`
+(`src/com/etendoerp/go/schemaforge/AccountingDimensionsSupport.java`) reads at request time for
+every GO consumer of accounting-dimension visibility: `FinancialAccountTransactionsHandler`
+(`enabledDimensions`/`headerDimensions` on the New/Edit Movement UI), `MatchRuleHandler`
+(`GET ?action=activeDimensions` and its save-time dimension filter for the Automatch rule
+catalog), and `ReconciliationHandler` (dimensions assignable on a reconciliation difference
+posting). An earlier version of `AccountingDimensionsSupport` instead read
+`Acctdim_Centrally_Maintained`/`AD_Client_AcctDimension`'s per-document-type matrix, scoped to
+`docBaseType = FAT`, on the theory that a `FIN_Finacc_Transaction` needed the same
+document-type-scoped treatment a real header+lines document gets. That machinery has been
+removed entirely: a `FIN_Finacc_Transaction` is a tab-level-1 line under
+`FIN_Financial_Account`, never a document header, and product direction settled on the same flat,
+per-tenant switch every other GO window already uses — no document-type override. This step's
+backfill is what makes that flat switch a reliable source for a tenant from birth; see
+`AccountingDimensionsSupport`'s own class javadoc for the full history.
+
 ### `OnboardingBaselineService`
 Step 11, always last. Stamps the data-fix baseline row (`applied_utc =
 ONBOARDING_PROVISIONED_THROUGH`, a hardcoded cutoff — NOT `now()`) so the

@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Date;
 import java.util.List;
 import java.util.UUID;
 
@@ -35,10 +36,13 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.User;
 
 import com.etendoerp.go.common.CorsUtils;
+import com.etendoerp.go.schemaforge.data.ETGOSurveyResponse;
 
 /**
  * Survey Config Servlet.
@@ -222,21 +226,38 @@ public class SurveyConfigServlet extends HttpBaseServlet {
       OBContext.setAdminMode();
       try {
         // score/feedback/tags are individually nullable (a CSAT response may have no comment,
-        // a dismissed-then-reopened NPS may have no score yet). Hibernate's generic
-        // setParameter(name, Object) cannot infer a JDBC type from a null value on a native
-        // query, so absent fields are inlined as the SQL literal NULL instead of bound — the
-        // inlined tokens are always one of the two fixed strings below, never request input.
-        NativeQuery<?> insert = OBDal.getInstance().getSession()
-            .createNativeQuery(buildInsertResponseSql(score, feedback, tags));
-        insert.setParameter("id", UUID.randomUUID().toString().replace("-", ""));
-        insert.setParameter("clientId", ctx.getCurrentClient().getId());
-        insert.setParameter("orgId", ctx.getCurrentOrganization().getId());
-        insert.setParameter("actorId", ctx.getUser().getId());
-        insert.setParameter(FIELD_SURVEY_KEY, surveyKey);
-        if (score != null) insert.setParameter(FIELD_SCORE, score);
-        if (feedback != null) insert.setParameter(FIELD_FEEDBACK, feedback);
-        if (tags != null) insert.setParameter(FIELD_TAGS, tags);
-        insert.executeUpdate();
+        // a dismissed-then-reopened NPS may have no score yet) — the DAL stores them as real
+        // NULLs when left unset. Audit stamps (created/updated) are written explicitly rather
+        // than left to the interceptor so they carry the same single request timestamp the
+        // previous now() based insert produced for created/updated/response_date.
+        Date now = new Date();
+        User actor = ctx.getUser();
+
+        ETGOSurveyResponse surveyResponse = OBProvider.getInstance().get(ETGOSurveyResponse.class);
+        surveyResponse.setNewOBObject(true);
+        surveyResponse.setId(UUID.randomUUID().toString().replace("-", ""));
+        surveyResponse.setClient(ctx.getCurrentClient());
+        surveyResponse.setOrganization(ctx.getCurrentOrganization());
+        surveyResponse.setActive(true);
+        surveyResponse.setCreationDate(now);
+        surveyResponse.setUpdated(now);
+        surveyResponse.setCreatedBy(actor);
+        surveyResponse.setUpdatedBy(actor);
+        surveyResponse.setSurveyKey(surveyKey);
+        // ad_user_id is the nullable respondent reference (the FK added alongside the AD
+        // registration), not an id string: it is the very same authenticated user the audit
+        // columns carry, and stays null only if the context somehow has none.
+        surveyResponse.setUser(actor);
+        surveyResponse.setScore(score != null ? Long.valueOf(score.longValue()) : null);
+        surveyResponse.setFeedbackText(feedback);
+        surveyResponse.setTags(tags);
+        surveyResponse.setResponseDate(now);
+        OBDal.getInstance().save(surveyResponse);
+        // Flush inside the try so a constraint violation still surfaces as a 500 here, exactly
+        // as the immediately executed native INSERT did, instead of blowing up at end-of-request
+        // commit after a 201 has already been written. The transaction boundary is unchanged:
+        // the request's own commit still owns it.
+        OBDal.getInstance().flush();
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -252,23 +273,6 @@ public class SurveyConfigServlet extends HttpBaseServlet {
       sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while saving the survey response.");
     }
-  }
-
-  /** Builds the INSERT for one survey response, inlining a fixed {@code NULL} SQL literal (never
-   * request-controlled) for each optional column that has no value, instead of binding null via
-   * {@link NativeQuery#setParameter}. */
-  private static String buildInsertResponseSql(Integer score, String feedback, String tags) {
-    String scoreExpr = score != null ? ":" + FIELD_SCORE : "NULL";
-    String feedbackExpr = feedback != null ? ":" + FIELD_FEEDBACK : "NULL";
-    String tagsExpr = tags != null ? ":" + FIELD_TAGS : "NULL";
-    return "INSERT INTO etgo_survey_response"
-        + " (etgo_survey_response_id, ad_client_id, ad_org_id, isactive,"
-        + "  created, createdby, updated, updatedby,"
-        + "  survey_key, ad_user_id, score, feedback_text, tags, response_date)"
-        + " VALUES"
-        + " (:id, :clientId, :orgId, 'Y',"
-        + "  now(), :actorId, now(), :actorId,"
-        + "  :" + FIELD_SURVEY_KEY + ", :actorId, " + scoreExpr + ", " + feedbackExpr + ", " + tagsExpr + ", now())";
   }
 
   /** Flattens a JSON string array into a comma-separated value for the {@code tags} column (same

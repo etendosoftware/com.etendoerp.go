@@ -20,6 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
@@ -40,6 +41,9 @@ import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.access.Role;
+
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Unit tests for {@link WidgetBestProductsHandler}.
@@ -58,9 +62,20 @@ class WidgetBestProductsHandlerTest {
   private MockedStatic<OBContext> obContextMock;
   private MockedStatic<WidgetQueryHelper> queryHelperMock;
 
+  // ETP-5088 — every widget now resolves the caller's role and gates on AD_Window_Access before
+  // querying. These suites cover the widget's own behaviour, so they grant access and let the
+  // real WidgetAccessPolicy run on top of a mocked NeoAccessHelper; the gate itself is covered by
+  // WidgetAccessPolicyTest and by the per-role denial case at the end of this file.
+  @Mock private Role role;
+  private MockedStatic<NeoAccessHelper> accessHelperMock;
+
   @BeforeEach
   void setUp() {
     handler = new WidgetBestProductsHandler();
+    accessHelperMock = mockStatic(NeoAccessHelper.class);
+    accessHelperMock.when(NeoAccessHelper::resolveCurrentRole).thenReturn(role);
+    accessHelperMock.when(() -> NeoAccessHelper.hasWindowAccess(any(Role.class), anyString(), anyString()))
+        .thenReturn(true);
     obContextMock = mockStatic(OBContext.class);
     queryHelperMock = mockStatic(WidgetQueryHelper.class);
 
@@ -71,6 +86,7 @@ class WidgetBestProductsHandlerTest {
 
   @AfterEach
   void tearDown() {
+    accessHelperMock.close();
     obContextMock.close();
     queryHelperMock.close();
   }

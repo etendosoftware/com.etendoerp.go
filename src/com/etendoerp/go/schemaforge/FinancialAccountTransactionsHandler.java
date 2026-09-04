@@ -31,8 +31,6 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.Date;
 import java.util.Set;
@@ -59,6 +57,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.project.Project;
+
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
 import com.etendoerp.payment.removal.util.TransactionRemovalUtil;
 
@@ -145,13 +145,8 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final String FIELD_PROJECT_ID = "projectId";
   private static final String FIELD_COSTCENTER_ID = "costcenterId";
   private static final String FIELD_PRODUCT_ID = "productId";
-  /** Document base type of finacc transactions — used to resolve header dimensions. */
-  private static final String DOCBASETYPE_FAT = AccountingDimensionsSupport.DOCBASETYPE_FAT;
   /** AD reference backing FIN_Finacc_Transaction.Trxtype (core list: BPD/BPW/BF). */
   private static final String TRXTYPE_REFERENCE_ID = "4EFC9773F30B4ACE97D225BD13CFF8CB";
-  private static final DateTimeFormatter ISO_UTC = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
-      .withZone(ZoneOffset.UTC);
-
   /** JSON keys reused across rows and totals — extracted to satisfy Sonar S1192. */
   private static final String KEY_BALANCE = "balance";
   private static final String KEY_RESPONSE = "response";
@@ -225,7 +220,10 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           + "       cur.iso_code AS currency_iso,"
           + "       (fa.currentbalance"
           + "         - SUM(CASE WHEN ft.trxtype = 'BPD' THEN ft.depositamt ELSE -ft.paymentamt END)"
-          + "             OVER (ORDER BY ft.statementdate ASC, ft.line ASC"
+          // Ordered by the DAY, not the raw timestamp — see the ORDER BY at the end of this
+          // query. The running balance must walk the rows in exactly the display order, or
+          // the Saldo column stops matching the sequence it is shown against.
+          + "             OVER (ORDER BY TO_CHAR(ft.statementdate, 'YYYY-MM-DD') ASC, ft.line ASC"
           + "                   ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING)"
           + "         + (CASE WHEN ft.trxtype = 'BPD' THEN ft.depositamt ELSE -ft.paymentamt END)"
           + "       ) AS balance"
@@ -253,7 +251,15 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
           + "         ON tfa.fin_financial_account_id = tft.fin_financial_account_id"
           + " WHERE ft.fin_financial_account_id = ?"
           + "   AND ft.isactive = 'Y'"
-          + " ORDER BY ft.statementdate DESC, ft.line DESC";
+          // Order by the CALENDAR DAY, never the raw timestamp: statementdate is declared
+          // `Date` in the AD, so any time-of-day in it is noise, not a datum. Sorting on the
+          // raw value let rows that happen to carry a wall-clock time (funds transfers before
+          // ETP-5100 stamped Classic's now()) float above movements created LATER the same day
+          // at 00:00 — the newest row was not on top. Truncating here fixes the rows already
+          // stored that way too, with no data migration. TO_CHAR rather than a cast because
+          // it truncates identically on PostgreSQL and Oracle (Oracle DATE keeps seconds), and
+          // 'YYYY-MM-DD' sorts lexicographically the same as chronologically.
+          + " ORDER BY TO_CHAR(ft.statementdate, 'YYYY-MM-DD') DESC, ft.line DESC";
 
   // The cutoff timestamp (NOW - KPI_WINDOW_DAYS) is computed in Java and bound
   // twice as the first two parameters so the query stays portable across
@@ -341,8 +347,8 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     data.put("transactions", transactions);
     data.put("totals", totals);
     data.put("enabledDimensions", loadEnabledDimensions(accountId));
-    // Dimensions to show in the New Movement header — mirrors Classic's finacc
-    // transaction form (ad_client_acctdimension, docbasetype FAT, show_in_header).
+    // Dimensions to show in the New Movement header — same flat Ledger Configuration source as
+    // enabledDimensions (see loadHeaderDimensions), not a document-type-scoped override.
     data.put("headerDimensions", loadHeaderDimensions(accountId));
     // Transaction types (BPD/BPW/BF) from the AD reference list — not hardcoded.
     data.put("trxTypes", loadTrxTypes());
@@ -439,10 +445,14 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   }
 
   /**
-   * Navigable accounting dimensions active in the client's chart of accounts. This is the coarse,
-   * informational set surfaced as {@code enabledDimensions}; anything that decides whether a
-   * dimension may be <b>edited on a movement header</b> must use {@link #loadHeaderDimensions}
-   * instead, which honours {@code AD_Client.Acctdim_Centrally_Maintained}.
+   * Navigable accounting dimensions active in the client's chart of accounts (the "Ledger
+   * Configuration" screen's per-dimension switches, {@code C_AcctSchema_Element.IsActive}) — the
+   * single source of truth for both {@code enabledDimensions} (informational) and
+   * {@code headerDimensions} (what the New/Edit Movement UI and the automatch rule engine may
+   * actually set — see {@link #loadHeaderDimensions}). ETP-5101 QA direction: a
+   * {@code FIN_Finacc_Transaction} must be governed by the exact same flat, per-tenant switch
+   * every other GO window uses, not a document-type-scoped override — see
+   * {@link AccountingDimensionsSupport}'s class javadoc for the fuller history.
    */
   Set<String> loadActiveDimensionSet(String accountId) throws Exception {
     return AccountingDimensionsSupport.flatActiveDimensionsForAccount(accountId);
@@ -453,15 +463,14 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   }
 
   /**
-   * Dimensions available at the finacc transaction header (docbasetype {@code FAT}) — the set the
-   * New Movement wizard renders and the automatch rule engine propagates. Delegated to
-   * {@link AccountingDimensionsSupport}, which picks the right source of truth depending on
-   * {@code AD_Client.Acctdim_Centrally_Maintained} (see gap K1 / ETP-4854): reading
-   * {@code C_AcctSchema_Element} directly is wrong for centrally-maintained tenants.
+   * Dimensions the New/Edit Movement UI and the automatch rule engine may set on a
+   * {@code FIN_Finacc_Transaction}. Kept as its own method/JSON key ({@code headerDimensions})
+   * for wire-compatibility with the existing frontend contract, but — per
+   * {@link #loadActiveDimensionSet} — it is now exactly {@link #loadEnabledDimensions}: no
+   * separate, document-type-scoped source.
    */
   JSONArray loadHeaderDimensions(String accountId) throws Exception {
-    return AccountingDimensionsSupport.toOrderedArray(
-        AccountingDimensionsSupport.activeHeaderDimensionsForAccount(accountId, DOCBASETYPE_FAT));
+    return loadEnabledDimensions(accountId);
   }
 
   /** Active transaction types (BPD/BPW/BF) from the AD reference list, localized. */
@@ -559,9 +568,14 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
     return totals;
   }
 
+  /**
+   * Canonical NEO wire datetime in the server's own zone. Formatting this through UTC is what
+   * hid every movement created after 21:00 local under a negative offset — see
+   * {@link NeoDateFormat#toWireDateTime} (ETP-5100).
+   */
   private String formatDate(Timestamp ts) {
-    if (ts == null) return "";
-    return ISO_UTC.format(Instant.ofEpochMilli(ts.getTime()));
+    String formatted = NeoDateFormat.toWireDateTime(ts);
+    return formatted == null ? "" : formatted;
   }
 
   static BigDecimal nullSafeBigDecimal(BigDecimal value) {

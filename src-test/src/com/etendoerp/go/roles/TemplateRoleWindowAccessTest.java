@@ -57,6 +57,7 @@ class TemplateRoleWindowAccessTest {
   private static final String WINDOW_SIMPLE_GL_JOURNAL = "B917E8A7B0864ACEA9D941E3B7494E53";
   private static final String WINDOW_CLASSIC_GL_JOURNAL = "132";
   private static final String WINDOW_WAREHOUSE = "139";
+  private static final String WINDOW_MATCHED_PURCHASE_INVOICES = "107";
 
   private static WindowGrant grantFor(List<WindowGrant> grants, String windowId) {
     for (WindowGrant grant : grants) {
@@ -81,8 +82,9 @@ class TemplateRoleWindowAccessTest {
   void financeHasTwentySevenGrantsIncludingTheResolvedSimpleGlJournal() {
     List<WindowGrant> finance = TemplateRoleWindowAccess.byRoleId()
         .get(SystemRoleTemplates.FINANCE_ROLE_ID);
-    assertEquals(27, finance.size(),
-        "Finance's ETP-4878 column has 27 non-dash rows once the 12 windowless rows are excluded");
+    assertEquals(28, finance.size(),
+        "Finance's ETP-4878 column has 27 non-dash rows once the 12 windowless rows are excluded, "
+            + "plus window 107 (Receipt-Invoice Link) added post-matrix by ETP-5075");
 
     WindowGrant glJournalGrant = grantFor(finance, WINDOW_SIMPLE_GL_JOURNAL);
     assertNotNull(glJournalGrant,
@@ -92,6 +94,12 @@ class TemplateRoleWindowAccessTest {
     assertNull(grantFor(finance, WINDOW_CLASSIC_GL_JOURNAL),
         "The classic G/L Journal window (#132) must NEVER be granted — it was the ambiguous, "
             + "un-onboarded candidate the coordinator explicitly ruled out");
+
+    WindowGrant matchedPurchaseInvoicesGrant = grantFor(finance, WINDOW_MATCHED_PURCHASE_INVOICES);
+    assertTrue(matchedPurchaseInvoicesGrant != null && !matchedPurchaseInvoicesGrant.isReadOnly(),
+        "Financiero has FULL access to Relación albarán-factura (ETP-5075): the window's data is "
+            + "read-only, but its posting action is a POST that hasWindowAccess only clears when "
+            + "IsReadWrite='Y' — a read-only grant would 403 the post");
   }
 
   @Test
@@ -105,13 +113,20 @@ class TemplateRoleWindowAccessTest {
   }
 
   @Test
-  void purchasingHasElevenGrants() {
+  void purchasingHasTwelveGrants() {
     List<WindowGrant> purchasing = TemplateRoleWindowAccess.byRoleId()
         .get(SystemRoleTemplates.PURCHASING_ROLE_ID);
-    assertEquals(11, purchasing.size());
+    assertEquals(12, purchasing.size(),
+        "Purchasing's ETP-4878 column has 11 rows, plus window 107 (Receipt-Invoice Link) added "
+            + "post-matrix by ETP-5075");
     WindowGrant contacts = grantFor(purchasing, WINDOW_CONTACTS);
     assertTrue(contacts != null && !contacts.isReadOnly(),
         "Purchasing has full access to Contactos per the matrix");
+
+    WindowGrant matchedPurchaseInvoicesGrant = grantFor(purchasing, WINDOW_MATCHED_PURCHASE_INVOICES);
+    assertTrue(matchedPurchaseInvoicesGrant != null && !matchedPurchaseInvoicesGrant.isReadOnly(),
+        "Compras has FULL access to Relación albarán-factura (ETP-5075) — see financeGrants' "
+            + "assertion for why the posting action requires IsReadWrite='Y'");
   }
 
   @Test
@@ -162,7 +177,10 @@ class TemplateRoleWindowAccessTest {
     for (List<WindowGrant> grants : TemplateRoleWindowAccess.byRoleId().values()) {
       total += grants.size();
     }
-    assertEquals(64, total, "13 (Sales) + 11 (Purchasing) + 27 (Finance) + 13 (Inventory) = 64");
+    assertEquals(66, total,
+        "13 (Sales) + 12 (Purchasing) + 28 (Finance) + 13 (Inventory) = 66 — the +2 over the "
+            + "original 64 is window 107 (Receipt-Invoice Link) added to Purchasing and Finance "
+            + "by ETP-5075");
   }
 
   @Test
@@ -191,10 +209,11 @@ class TemplateRoleWindowAccessTest {
         distinctWindowIds.add(grant.getWindowId());
       }
     }
-    assertEquals(33, distinctWindowIds.size(),
-        "The matrix's 64 grants must resolve to exactly 33 distinct AD_Window_IDs once shared "
+    assertEquals(34, distinctWindowIds.size(),
+        "The matrix's 66 grants must resolve to exactly 34 distinct AD_Window_IDs once shared "
             + "windows (e.g. Contactos, Producto, Tarifa) are counted once, per the class javadoc "
-            + "and EnsureSystemRoleTemplatesScript's own javadoc");
+            + "and EnsureSystemRoleTemplatesScript's own javadoc — the 34th is window 107 "
+            + "(Receipt-Invoice Link), added to both Purchasing and Finance by ETP-5075");
   }
 
   /**

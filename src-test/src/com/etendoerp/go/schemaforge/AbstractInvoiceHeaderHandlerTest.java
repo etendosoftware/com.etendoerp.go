@@ -2487,8 +2487,13 @@ public class AbstractInvoiceHeaderHandlerTest {
     }
   }
 
+  /**
+   * When the invoice currency equals the org currency and no conversion-rate row exists yet
+   * (e.g. a document that was always in the org currency), the SELECT finds nothing and no
+   * DELETE is issued — a true no-op past the initial lookup.
+   */
   @Test
-  public void autoCreateOrUpdate_sameAsOrgCurrency_noop() {
+  public void autoCreateOrUpdate_sameAsOrgCurrency_noExistingRow_noDeleteIssued() throws Exception {
     try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
          MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
@@ -2502,6 +2507,7 @@ public class AbstractInvoiceHeaderHandlerTest {
       Currency currency = mock(Currency.class);
       Organization org = mock(Organization.class);
       when(dal.get(Invoice.class, "inv-same-cur")).thenReturn(invoice);
+      when(invoice.getId()).thenReturn("inv-same-cur");
       when(invoice.getCurrency()).thenReturn(currency);
       when(currency.getId()).thenReturn("eur-id");
       when(invoice.getOrganization()).thenReturn(org);
@@ -2509,9 +2515,80 @@ public class AbstractInvoiceHeaderHandlerTest {
 
       curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
 
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+
+      PreparedStatement findPs = mock(PreparedStatement.class);
+      ResultSet findRs = mock(ResultSet.class);
+      when(findRs.next()).thenReturn(false); // no existing row
+      when(findPs.executeQuery()).thenReturn(findRs);
+      when(conn.prepareStatement(anyString())).thenReturn(findPs);
+
       callAutoCreateOrUpdate("inv-same-cur");
 
-      Mockito.verify(dal, Mockito.never()).getConnection();
+      // Only the SELECT ran — no UPDATE/INSERT/DELETE prepared.
+      verify(conn, times(1)).prepareStatement(anyString());
+    }
+  }
+
+  /**
+   * ETP-4836 QA regression (reported by Emilio Polliotti): switching a foreign currency to
+   * another foreign currency correctly replaces the conversion-rate row, but switching back to
+   * the org currency previously fell into the same-currency branch and returned without ever
+   * touching {@code C_Conversion_Rate_Document} — leaving the row from the earlier foreign
+   * currency stale in the Exchange Rates tab. The fix deletes any existing row for the invoice
+   * once its currency matches the org currency again.
+   */
+  @Test
+  public void autoCreateOrUpdate_sameAsOrgCurrency_existingRow_deletesStaleRow() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<OBCurrencyUtils> curMock = Mockito.mockStatic(OBCurrencyUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Invoice invoice = mock(Invoice.class);
+      Currency currency = mock(Currency.class);
+      Organization org = mock(Organization.class);
+      when(dal.get(Invoice.class, "inv-back-to-org-cur")).thenReturn(invoice);
+      when(invoice.getId()).thenReturn("inv-back-to-org-cur");
+      when(invoice.getCurrency()).thenReturn(currency);
+      when(currency.getId()).thenReturn("eur-id"); // currency just switched back to org's
+      when(invoice.getOrganization()).thenReturn(org);
+      when(org.getId()).thenReturn("org-1");
+
+      curMock.when(() -> OBCurrencyUtils.getOrgCurrency("org-1")).thenReturn("eur-id");
+
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+
+      // One stale row left over from the invoice's earlier foreign-currency (e.g. USD) state.
+      PreparedStatement findPs = mock(PreparedStatement.class);
+      ResultSet findRs = mock(ResultSet.class);
+      when(findRs.next()).thenReturn(true, false);
+      when(findRs.getString(1)).thenReturn("stale-crd-id");
+      when(findPs.executeQuery()).thenReturn(findRs);
+
+      PreparedStatement deletePs = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString()))
+          .thenReturn(findPs)
+          .thenReturn(deletePs);
+
+      callAutoCreateOrUpdate("inv-back-to-org-cur");
+
+      verify(deletePs).setString(eq(1), eq("stale-crd-id"));
+      verify(deletePs).executeUpdate();
+      // SELECT + one DELETE — no UPDATE/INSERT.
+      verify(conn, times(2)).prepareStatement(anyString());
     }
   }
 

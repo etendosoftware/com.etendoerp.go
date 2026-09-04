@@ -56,6 +56,7 @@ public class NeoPseudoSpecDispatcherTest {
   private NeoServlet servlet;
   private BatchService batchService;
   private NeoSimSearchEndpoint simSearchEndpoint;
+  private NeoVectorSearchEndpoint vectorSearchEndpoint;
   private NeoGoWebhookBridge goWebhookBridge;
   private NeoPseudoSpecDispatcher dispatcher;
   private HttpServletRequest request;
@@ -66,8 +67,10 @@ public class NeoPseudoSpecDispatcherTest {
     servlet = mock(NeoServlet.class);
     batchService = mock(BatchService.class);
     simSearchEndpoint = mock(NeoSimSearchEndpoint.class);
+    vectorSearchEndpoint = mock(NeoVectorSearchEndpoint.class);
     goWebhookBridge = mock(NeoGoWebhookBridge.class);
-    dispatcher = new NeoPseudoSpecDispatcher(servlet, batchService, simSearchEndpoint, goWebhookBridge);
+    dispatcher = new NeoPseudoSpecDispatcher(servlet, batchService, simSearchEndpoint,
+        vectorSearchEndpoint, goWebhookBridge);
     request = mock(HttpServletRequest.class);
     response = mock(HttpServletResponse.class);
   }
@@ -139,6 +142,27 @@ public class NeoPseudoSpecDispatcherTest {
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         eq("Simsearch endpoint only supports GET"));
     verify(simSearchEndpoint, never()).handle(any());
+  }
+
+  @Test
+  public void vectorSearchGetWritesEndpointResponse() throws Exception {
+    NeoResponse payload = NeoResponse.ok(new JSONObject());
+    when(vectorSearchEndpoint.handle(request)).thenReturn(payload);
+
+    boolean handled = dispatcher.handle(pathInfo("vectorsearch"), "GET", request, response);
+
+    assertTrue(handled);
+    verify(servlet).writeResponse(response, payload);
+  }
+
+  @Test
+  public void vectorSearchRejectsNonGetMethod() throws Exception {
+    boolean handled = dispatcher.handle(pathInfo("vectorsearch"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Vectorsearch endpoint only supports GET"));
+    verify(vectorSearchEndpoint, never()).handle(any());
   }
 
   // -------------------------------------------------------------------------
