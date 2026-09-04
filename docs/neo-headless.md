@@ -1082,6 +1082,31 @@ does not resolve to a readable entity, `405` for any method other than `GET`.
 
 ---
 
+### 4.9a Global Semantic Vector Search Endpoint
+
+```
+GET /sws/neo/vectorsearch?query={text}&namespaces={namespace[,namespace]}&topK=10&metadataFilter={json}
+Authorization: Bearer {token}
+```
+
+This authenticated pseudo-spec delegates embedding and pgvector queries to
+`com.etendoerp.db.extended`'s `VectorSearchService`. `namespaces` is a required,
+comma-separated selection of active, compatible DB Extended sources. The browser never supplies
+tenant scope: DB Extended derives client and organization from `OBContext`; Go maps every requested
+namespace to its AD table and requires the active role to have entity read access before searching.
+
+`query` and `namespaces` are required. `topK` defaults to `10` and is limited to `1..50`.
+`metadataFilter` is optional JSONB containment input for DB Extended. The response is its portable
+`{ namespaces, matches }` payload. Invalid request data returns `400`, unauthorized sources return
+`403`, controlled DB Extended capability/source failures return `422`, and provider failures return
+a sanitized `500`. Only `GET` is supported.
+
+Schema Forge configures its consumer through the Vite contract
+`VITE_VECTOR_SEARCH_NAMESPACES`; leaving it empty disables semantic matches while normal page search
+remains available.
+
+---
+
 ### 4.10 NEO Pseudo-Spec Bridge for Etendo GO's Own Webhooks
 
 ```
@@ -1167,7 +1192,8 @@ specs — not a replacement for this one).
 
 ### 4.12 MCP Tool Ergonomics (Wave 3 — ETP-4601)
 
-The MCP tool layer (`/sws/neo/mcp`, routed by `McpToolRouter`) exposes the same specs described
+The MCP tool layer (`/sws/mcp`, with `/mcp` as the WebMCP-friendly alias, routed by
+`McpToolRouter`) exposes the same specs described
 above to AI agents as JSON-RPC tools (`neo_discover`, `neo_schema`, `neo_create`, `neo_update`, …).
 Wave 3 of the MCP improvements adds three agent-ergonomics features on top of that surface. Each is
 additive and backwards-compatible: an existing caller that ignores the new parameter/field sees the

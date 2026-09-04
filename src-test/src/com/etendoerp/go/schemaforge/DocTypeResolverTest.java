@@ -73,11 +73,11 @@ class DocTypeResolverTest {
   }
 
   // -------------------------------------------------------------------------
-  // resolveDocBaseType
+  // resolveDocBaseType — every supported transactional document family
   // -------------------------------------------------------------------------
 
   @Nested
-  @DisplayName("resolveDocBaseType")
+  @DisplayName("resolveDocBaseType — all transactional document families")
   class ResolveDocBaseType {
 
     @ParameterizedTest
@@ -98,7 +98,7 @@ class DocTypeResolverTest {
         "C_BANKSTATEMENT, Y, CMB",
         "C_BANKSTATEMENT, N, CMB"
     })
-    @DisplayName("Maps table name and IsSOTrx to correct DocBaseType")
+    @DisplayName("Maps every supported document table and transaction direction to DocBaseType")
     void mapsCorrectly(String tableName, String isSOTrx, String expected) {
       assertEquals(expected, DocTypeResolver.resolveDocBaseType(tableName, isSOTrx));
     }
