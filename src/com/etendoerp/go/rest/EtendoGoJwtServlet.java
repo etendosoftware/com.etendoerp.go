@@ -69,7 +69,6 @@ import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
-import com.etendoerp.go.onboarding.OnboardingDefaultCustomerService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
@@ -178,7 +177,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_SEQUENCES = "sequences";
   private static final String PROGRESS_FISCAL = "fiscal";
   private static final String PROGRESS_ORG_READY = "orgReady";
-  private static final String PROGRESS_CUSTOMER = "customer";
   private static final String PROGRESS_ORG_INFO = "orgInfo";
   private static final String PROGRESS_BASELINE = "baseline";
   private static final String PROGRESS_BANK_CONNECTION_SYNC = "bankConnectionSync";
@@ -236,8 +234,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingFiscalDataSetupService();
   OnboardingOrgInfoService onboardingOrgInfoService =
       new OnboardingOrgInfoService();
-  OnboardingDefaultCustomerService onboardingDefaultCustomerService =
-      new OnboardingDefaultCustomerService();
   OnboardingAcctdimCentrallyMaintainedService onboardingAcctdimCentrallyMaintainedService =
       new OnboardingAcctdimCentrallyMaintainedService();
   OnboardingAdminIdentityService onboardingAdminIdentityService =
@@ -2163,9 +2159,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!wireOrgInfo(writer, clientId, orgId, adminUserId, adminRoleId, requestData)) {
       return false;
     }
-    if (!ensureDefaultCustomer(writer, clientId, orgId, adminUserId, adminRoleId)) {
-      return false;
-    }
     if (!scheduleBankConnectionSync(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
@@ -2332,31 +2325,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String errorMessage = e.getMessage() != null ? e.getMessage()
           : "Organization info setup failed";
       sendProgress(writer, PROGRESS_ORG_INFO, PROGRESS_ERROR, errorMessage);
-      sendFinalResult(writer, false, errorMessage);
-      return false;
-    }
-  }
-
-  boolean ensureDefaultCustomer(PrintWriter writer, String clientId, String orgId,
-      String adminUserId, String adminRoleId) {
-    sendProgress(writer, PROGRESS_CUSTOMER, PROGRESS_IN_PROGRESS,
-        "Creating default customer...");
-    try {
-      onboardingDefaultCustomerService.ensureDefaultCustomer(clientId, orgId, adminUserId,
-          adminRoleId);
-      // A2: provision the per-BP posting accounts now that the default customer exists. wireAccounting
-      // ran earlier (before any business partner existed), so C_BP_CUSTOMER_ACCT would otherwise stay
-      // empty. Idempotent (NOT-EXISTS-guarded), so it runs unconditionally under the reconcile
-      // model (ETP-4428): the ledger it copies defaults from is guaranteed present because
-      // wireAccounting ran earlier in the same chain.
-      onboardingAccountingWiringService.wireBusinessPartnerAccounts(clientId, orgId, adminUserId,
-          adminRoleId);
-      sendProgress(writer, PROGRESS_CUSTOMER, "done", "Default customer ready");
-      return true;
-    } catch (Exception e) {
-      String errorMessage = e.getMessage() != null ? e.getMessage()
-          : "Default customer creation failed";
-      sendProgress(writer, PROGRESS_CUSTOMER, PROGRESS_ERROR, errorMessage);
       sendFinalResult(writer, false, errorMessage);
       return false;
     }

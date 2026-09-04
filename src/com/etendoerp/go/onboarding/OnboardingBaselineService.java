@@ -192,6 +192,31 @@ public class OnboardingBaselineService {
    * scope and remain {@code Y} / present, untouched. Corrective twin:
    * {@code 20260828T140000Z__R29-acctschema-allownegative-revert.sql}. Bumped to R29's own
    * timestamp, {@code 2026-08-28T14:00:00Z}.</p>
+   *
+   * <p><b>2026-09-01 / 2026-09-02 (ETP-5079):</b> <b>deliberately NOT bumped.</b> ETP-5079 corrects
+   * the curated GOClient dataset itself (price-list and warehouse names, sample products and
+   * template financial accounts removed, document sequences given a sane {@code STARTNO},
+   * {@code C_DOCTYPE_TRL} added to {@link OnboardingDatasetDefinition}'s {@code INCLUDED_TABLES}
+   * with real Spanish names, English doc-type base names) and removes the synthetic "Default
+   * Customer" business partner from the provisioning chain. Every one of those makes a NEW tenant
+   * born correct.
+   *
+   * <p>The ticket's corrective {@code .sql} is
+   * {@code 20260902T120000Z__R31-document-sequence-startno}, which realigns the 11 document
+   * sequences' {@code STARTNO}/{@code CURRENTNEXT} on already-provisioned tenants. It warrants no
+   * bump: a newborn tenant already gets correct sequences straight from the corrected
+   * {@code AD_SEQUENCE.xml}, so R31's own {@code @check} returns 0 rows for it and the runner
+   * records a clean {@code SKIPPED_NOT_NEEDED} — the same terminal state a watermark skip produces,
+   * reached by actually looking rather than by date. Reserve CUT bumps for fixes whose
+   * {@code @check} WOULD match on a correctly provisioned new tenant.
+   *
+   * <p>Raising it to either date would be actively harmful: it would push the cutoff past
+   * {@code R30-financial-account-card-ledger-account} ({@code 2026-08-30T12:00:00Z}) and
+   * {@code R29-transfer-link-multicurrency} ({@code 2026-08-31T12:00:00Z}), two fixes that never
+   * bumped it themselves, silently suppressing them for every new tenant — the exact "CUT bump
+   * without its .sql" hazard this constant's own contract forbids. Same reasoning as G1/G4 (see
+   * {@code onboarding-and-datafixes-map.md}): sampledata alone makes new tenants correct, so no
+   * bump is warranted.</p>
    */
   private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-28T14:00:00Z");
 
