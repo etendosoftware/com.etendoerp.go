@@ -183,7 +183,7 @@ public class CashCloseHandler implements NeoHandler {
   // ---------------------------------------------------------------------------
 
   FIN_FinancialAccount loadAccount(String accountId) {
-    return OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+    return TenantOwnership.loadOwned(FIN_FinancialAccount.class, accountId);
   }
 
   /** The account's editable (unprocessed) reconciliation, or {@code null} when there is none. */

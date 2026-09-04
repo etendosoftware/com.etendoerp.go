@@ -22,6 +22,8 @@ import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.LinkedHashMap;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -551,6 +553,13 @@ public class AgingReportHandler implements NeoHandler {
     if (detailData == null) {
       return docsByBp;
     }
+    // AgingDao_data.xsql has no ORDER BY on the document date (confirmed: neither
+    // does AgingScheduleDetailPDF.jrxml declare a sortField), so FieldProvider[] arrives
+    // in whatever order the DB happens to return it — observed neither ascending nor
+    // descending (e.g. 07-08, 10-07, 11-08, 28-10-2025). ETP-4900 asks for oldest-first,
+    // matching what Classic's own report happens to show. Sorted here in Java rather
+    // than the base AgingDao/xsql (core), so the fix stays inside com.etendoerp.go.
+    Map<String, List<JSONObject>> docsByBpUnsorted = new LinkedHashMap<>();
     for (FieldProvider fp : detailData) {
       String amount6 = fp.getField("AMOUNT6");
       if (amount6 != null && !amount6.isEmpty()) {
@@ -558,8 +567,18 @@ public class AgingReportHandler implements NeoHandler {
       }
       String bpId = fp.getField("BPARTNER");
       if (bpId == null) bpId = "";
-      docsByBp.computeIfAbsent(bpId, k -> new JSONArray());
-      docsByBp.get(bpId).put(buildDocRow(fp, activeBuckets));
+      docsByBpUnsorted.computeIfAbsent(bpId, k -> new ArrayList<>()).add(buildDocRow(fp, activeBuckets));
+    }
+    for (Map.Entry<String, List<JSONObject>> entry : docsByBpUnsorted.entrySet()) {
+      List<JSONObject> docs = entry.getValue();
+      // "dateInvoiced" is always yyyy-MM-dd (buildDocRow/DATE_FORMAT), so a plain
+      // lexicographic compare is already a correct chronological ordering.
+      docs.sort(Comparator.comparing(d -> d.optString("dateInvoiced", "")));
+      JSONArray sorted = new JSONArray();
+      for (JSONObject doc : docs) {
+        sorted.put(doc);
+      }
+      docsByBp.put(entry.getKey(), sorted);
     }
     return docsByBp;
   }

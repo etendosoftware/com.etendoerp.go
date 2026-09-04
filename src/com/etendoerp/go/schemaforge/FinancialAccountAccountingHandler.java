@@ -254,8 +254,22 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
     return id;
   }
 
+  /**
+   * The account named by the request, but only when it belongs to the current tenant.
+   *
+   * <p>The id arrives in a query parameter (and, on save, in the body) and this handler both READS
+   * and WRITES the account's accounting configuration — the GL accounts its bank movements post to.
+   * With a bare {@code OBDal.get} (which applies no tenant predicate, unlike {@code OBCriteria}) and
+   * the {@code setAdminMode(true)} this handler runs in, a foreign id let a caller read and rewrite
+   * another tenant's accounting setup, silently: nothing looks wrong in that tenant's UI until its
+   * journal entries come out against accounts somebody else chose (ETP-4950).
+   *
+   * <p>A row of another tenant is reported as "not found", indistinguishable from a genuinely missing
+   * one, so the error cannot be used to probe which ids exist.
+   */
   FIN_FinancialAccount loadAccount(String accountId) {
-    FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+    FIN_FinancialAccount account =
+        TenantOwnership.loadOwned(FIN_FinancialAccount.class, accountId);
     if (account == null) {
       throw new OBException("Financial account not found: " + accountId);
     }
@@ -276,6 +290,7 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
   }
 
   private AccountingCombination resolveCombination(String id, AcctSchema ledger) {
+    // tenant-ok: the combination is then required to belong to the validated account ledger
     AccountingCombination combo = OBDal.getInstance().get(AccountingCombination.class, id);
     if (combo == null) {
       throw new OBException("Accounting combination not found: " + id);
