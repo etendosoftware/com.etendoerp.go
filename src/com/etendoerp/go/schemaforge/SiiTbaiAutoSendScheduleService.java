@@ -108,6 +108,15 @@ public class SiiTbaiAutoSendScheduleService {
   public static final String TBAI_PROCESS_SEARCH_KEY = "RegisterTBAInvoice";
 
   private static final String STATUS_SCHEDULED = "SCH";
+  /**
+   * AD_Process_Request.Status value "Unscheduled" — mirrors
+   * {@code org.openbravo.scheduling.Process.UNSCHEDULED}. Kept as a local literal, matching the
+   * sibling {@link #STATUS_SCHEDULED} above (and {@code OnboardingBankConnectionSyncService}),
+   * rather than importing the core constant: this class already imports
+   * {@link org.openbravo.model.ad.ui.Process} for the AD entity, so referencing the scheduling
+   * {@code Process} would need a fully-qualified name for one of the two constants only.
+   */
+  private static final String STATUS_UNSCHEDULED = "UNS";
   private static final String TIMING_SCHEDULED = "S";
   /** AD_Ref_List value "03 - Hourly" for AD_Process_Request.Frequency. */
   private static final String FREQUENCY_HOURLY = "3";
@@ -219,8 +228,23 @@ public class SiiTbaiAutoSendScheduleService {
    *       "invoices were sent → deactivate, don't delete" branch of {@code smartDeactivate} in
    *       the calling handlers). This is the step that actually guarantees correctness: the row's
    *       own state is what the scheduler consults on its next initialization, so even if step 1
-   *       fails outright, the row is never picked up again afterwards.</li>
+   *       fails outright, the row is never picked up again afterwards. The same write also sets
+   *       the row's {@code Status} to {@link #STATUS_UNSCHEDULED} — see below.</li>
    * </ol>
+   *
+   * <p><b>Why the row's {@code Status} is set here and not left to {@link OBScheduler}.</b>
+   * {@link OBScheduler#unschedule(String, ProcessContext)} does three things in one
+   * exception-swallowing block: remove the Quartz trigger, delete the Quartz job, and only then
+   * update the row's {@code Status} to {@code UNS}. So its status update is reachable only when
+   * the two preceding Quartz calls succeed. In an environment where the scheduler was never
+   * initialized (a SmartTomcat dev setup, for instance) the very first call throws, the catch
+   * swallows it, and the status update never runs — leaving the row at the self-contradictory
+   * {@code Active = N, Status = SCH} that Classic's Process Request window then displays. Setting
+   * {@code Status} ourselves after the best-effort Quartz call makes the row's own state correct
+   * and self-consistent regardless of whether Quartz was reachable, exactly as {@code
+   * Active = false} already is. Ordering is deliberate: Quartz first, so that when it <i>is</i>
+   * alive it still performs the real trigger/job removal (and its own status update); writing
+   * {@code UNS} over {@code UNS} afterwards is idempotent and harmless.
    *
    * @param clientId         target client identifier
    * @param orgId            organization identifier the fiscal config belonged to
@@ -250,10 +274,11 @@ public class SiiTbaiAutoSendScheduleService {
       String requestId = existing.getId();
       unscheduleFromQuartz(requestId, existing.getOpenbravoContext());
       existing.setActive(false);
+      existing.setStatus(STATUS_UNSCHEDULED);
       OBDal.getInstance().save(existing);
       OBDal.getInstance().flush();
-      log.info("Deactivated auto-send schedule {} for client {} org {} process {}", requestId,
-          clientId, orgId, processSearchKey);
+      log.info("Deactivated auto-send schedule {} (status {}) for client {} org {} process {}",
+          requestId, STATUS_UNSCHEDULED, clientId, orgId, processSearchKey);
     } finally {
       OBContext.restorePreviousMode();
     }
