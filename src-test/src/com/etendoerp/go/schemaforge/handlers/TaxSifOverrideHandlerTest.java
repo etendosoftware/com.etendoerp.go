@@ -265,6 +265,39 @@ class TaxSifOverrideHandlerTest {
         argThat(sql -> sql != null && sql.startsWith("INSERT INTO etsg_tax_sif_config")));
   }
 
+  // ── handle() — legal entity organization cannot be resolved ────────────────
+
+  /**
+   * When {@code AD_GET_ORG_LE_BU} returns no legal entity organization (null/blank), the
+   * write MUST fail fast with a clear error instead of silently falling back to the raw
+   * current organization. Every read path filters strictly by the legal entity org, so a
+   * row saved under the raw org would be orphaned — invisible to all readers. No row may be
+   * persisted into {@code etsg_tax_sif_config} in this case.
+   */
+  @Test
+  void handlePatchFailsFastWhenLegalEntityOrgCannotBeResolved() throws Exception {
+    NativeQuery<Object> leQuery = mock(NativeQuery.class);
+    lenient().when(mockSession.createNativeQuery(
+        argThat(sql -> sql != null && sql.contains("ad_get_org_le_bu"))))
+        .thenReturn((NativeQuery) leQuery);
+    lenient().when(leQuery.setParameter(anyString(), any())).thenReturn(leQuery);
+    lenient().when(leQuery.uniqueResult()).thenReturn(null);
+
+    JSONObject body = new JSONObject().put("etvfacVatRegime", "09");
+
+    NeoResponse result = handler.handle(patchContext(body).build());
+
+    assertTrue(result != null);
+    assertEquals(500, result.getHttpStatus());
+    String message = result.getBody().getJSONObject("error").getString("message");
+    assertTrue(message.contains("legal entity"),
+        "Expected error message to explain the legal entity resolution failure, was: " + message);
+
+    // No row must ever be persisted into etsg_tax_sif_config for an unresolved legal entity.
+    verify(mockSession, never()).createNativeQuery(
+        argThat(sql -> sql != null && sql.startsWith("INSERT INTO etsg_tax_sif_config")));
+  }
+
   // ── afterHandle() — GET single record ───────────────────────────────────────
 
   /**

@@ -35,6 +35,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.Session;
 import org.hibernate.query.NativeQuery;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.SequenceIdData;
@@ -153,7 +154,8 @@ public class TaxSifOverrideHandler implements NeoHandler {
       return buildOverrideOnlyResponse(taxId, overrideValues);
     } catch (Exception e) {
       log.error("TaxSifOverrideHandler.handle error for tax {}", taxId, e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Internal Server Error");
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "SIF override upsert failed: " + e.getMessage());
     }
   }
 
@@ -215,13 +217,28 @@ public class TaxSifOverrideHandler implements NeoHandler {
    * {@code (c_tax_id, AD_GET_ORG_LE_BU(currentOrg, 'LE'))}. Only the columns present in {@code
    * values} are written on both INSERT and the ON CONFLICT UPDATE — a sibling column not sent
    * in this request is never touched, whether the row is being created or already exists.
+   *
+   * <p>The legal entity organization MUST resolve. Every read path ({@link
+   * #queryEffectiveValues}, {@code InvoiceLineTaxSifSelectorPolicy#buildSifColumnsSql},
+   * {@code TaxSifConfigResolver#resolve} in {@code com.etendoerp.sif.general}, and the
+   * {@code ETVFAC_ORDER_VFAC_VALIDATION} PL/SQL function) filters strictly by {@code ad_org_id =
+   * ad_get_org_le_bu(:orgId, 'LE')}. Silently falling back to the raw {@code currentOrgId} would
+   * persist a row none of those readers can ever find — an override that "saved" but never takes
+   * effect, with no error anywhere. Failing fast here is deliberate: a visible PATCH failure is
+   * preferable to a silently orphaned row.
+   *
+   * @throws OBException if the legal entity organization cannot be resolved for {@code
+   *                      obContext}'s current organization
    */
   private static void upsertOverride(String taxId, Map<String, String> values, OBContext obContext) {
     Session session = OBDal.getInstance().getSession();
     String currentOrgId = obContext.getCurrentOrganization().getId();
     String leOrgId = resolveLegalEntityOrgId(session, currentOrgId);
     if (StringUtils.isBlank(leOrgId)) {
-      leOrgId = currentOrgId;
+      throw new OBException(
+          "Unable to resolve the legal entity organization for organization " + currentOrgId
+              + " — cannot save the SIF override for tax " + taxId
+              + " (AD_GET_ORG_LE_BU returned no result)");
     }
 
     List<String> presentColumns = new ArrayList<>();
