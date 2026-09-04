@@ -161,10 +161,11 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
       "This movement belongs to a receipt. Delete it from the receipt instead.";
   /**
    * ETP-5111 — the same refusal for {@link #handleReactivate}. Reactivating the bank transaction
-   * on its own would desynchronise it from its {@code FIN_Payment}; the procedure is to remove the
-   * payment from its own window, or to undo only the reconciliation from the Conciliación tab.
-   * Until this ticket the frontend simply hid the action, so this path was unguarded for REST/MCP
-   * callers. Kept in ENGLISH and byte-for-byte in sync with the frontend's
+   * on its own would desynchronise it from its {@code FIN_Payment}; the procedure is the SAME
+   * action on the owning document — reactivate the pago/cobro from its own window, which brings
+   * its bank movement with it. Until this ticket the frontend simply hid the action, so this path
+   * was unguarded for REST/MCP callers. Kept in ENGLISH and byte-for-byte in sync with the
+   * frontend's
    * {@code backendError.paymentMovementNotReactivatable} /
    * {@code backendError.receiptMovementNotReactivatable} keys (lib/backendErrors.js), which match
    * by EXACT text after {@code .trim()} — rewording either silently drops users back to English.
