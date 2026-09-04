@@ -43,6 +43,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.MockedConstruction;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.client.application.Process;
 import org.openbravo.client.application.ProcessAccess;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.model.ad.access.Role;
@@ -198,6 +199,25 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         return row;
     }
 
+    /** Builds a mock {@link Process} (OBUIAPP process) with the given id. */
+    private Process mockProcess(String id) {
+        Process process = mock(Process.class);
+        when(process.getId()).thenReturn(id);
+        return process;
+    }
+
+    /**
+     * Builds a mock {@code ProcessAccess} row — the {@link ProcessAccess}/{@link Process}
+     * (OBUIAPP) equivalent of {@link #mockWindowAccessRow(Window, boolean)}, used by ETP-5071's
+     * {@code resolveProcessTierMap} tests.
+     */
+    private ProcessAccess mockProcessAccessRow(Process process, boolean editable) {
+        ProcessAccess row = mock(ProcessAccess.class);
+        when(row.getObuiappProcess()).thenReturn(process);
+        when(row.isEditableField()).thenReturn(editable);
+        return row;
+    }
+
     private SFSpec mockGoWindowSpec(Window window) {
         SFSpec spec = mock(SFSpec.class);
         when(spec.getADWindow()).thenReturn(window);
@@ -259,6 +279,37 @@ class SFRolesOverviewTest extends BaseWebhookTest {
             if (restriction instanceof SimpleExpression) {
                 SimpleExpression expr = (SimpleExpression) restriction;
                 if ((WindowAccess.PROPERTY_ROLE + ".id").equals(expr.getPropertyName())) {
+                    currentRoleId.set((String) expr.getValue());
+                }
+            }
+            return criteria;
+        }).when(criteria).add(any());
+        when(criteria.list()).thenAnswer(invocation ->
+                rowsByRoleId.getOrDefault(currentRoleId.get(), Collections.emptyList()));
+        return criteria;
+    }
+
+    /**
+     * The {@link ProcessAccess} equivalent of {@link #stubWindowAccessCriteriaKeyedByRole(Map)} —
+     * keys {@code list()}'s return by the {@code ProcessAccess.role.id} restriction {@link
+     * SFRolesOverview#resolveProcessTierMap(Role, String)} adds via {@code
+     * Restrictions.eq(ProcessAccess.PROPERTY_ROLE + ".id", role.getId())}, so a test can grant a
+     * real {@code OBUIAPP_Process_Access} row to exactly one role in a multi-role response without
+     * every other role's (default-empty, per {@code setUp()}) call being misaligned by a
+     * fixed-position {@code thenReturn} sequence.
+     *
+     * <p>Replaces {@code setUp()}'s blanket empty-list default for {@code ProcessAccess} — call
+     * this instead of relying on that default whenever a test needs a real grant on any role.
+     */
+    private OBCriteria<ProcessAccess> stubProcessAccessCriteriaKeyedByRole(
+            Map<String, List<ProcessAccess>> rowsByRoleId) {
+        OBCriteria<ProcessAccess> criteria = mockCriteria(ProcessAccess.class);
+        AtomicReference<String> currentRoleId = new AtomicReference<>();
+        doAnswer(invocation -> {
+            Object restriction = invocation.getArgument(0);
+            if (restriction instanceof SimpleExpression) {
+                SimpleExpression expr = (SimpleExpression) restriction;
+                if ((ProcessAccess.PROPERTY_ROLE + ".id").equals(expr.getPropertyName())) {
                     currentRoleId.set((String) expr.getValue());
                 }
             }
@@ -1276,6 +1327,111 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         }
         assertEquals(1, siiMonitorRowCount,
                 "SII Monitor's id must appear exactly once in the matrix, never duplicated by its own proxy row");
+    }
+
+    /**
+     * Finds the {@code "access"} map of the {@code matrix} row identified by {@code rowId},
+     * searching across every category — used by the {@code resolveProcessTierMap} tests below,
+     * which do not care which category {@link SFRolesOverview#buildMatrix(Map, Map)} bucketed the
+     * row into (categoryQuery defaults to empty in {@code setUp()}, so it is always "Other" here,
+     * but asserting via id search keeps these tests decoupled from that incidental fact).
+     */
+    private JSONObject findMatrixRowAccess(JSONObject result, String rowId) throws Exception {
+        JSONArray categories = result.getJSONObject("matrix").getJSONArray("categories");
+        for (int c = 0; c < categories.length(); c++) {
+            JSONArray windows = categories.getJSONObject(c).getJSONArray("windows");
+            for (int w = 0; w < windows.length(); w++) {
+                JSONObject window = windows.getJSONObject(w);
+                if (rowId.equals(window.getString("id"))) {
+                    return window.getJSONObject("access");
+                }
+            }
+        }
+        throw new AssertionError("matrix row not found: " + rowId);
+    }
+
+    /**
+     * Positive-path regression test for {@link SFRolesOverview#resolveProcessTierMap(Role,
+     * String)}: before this test, every existing test relied on {@code setUp()}'s blanket
+     * {@code processAccessCriteria.list() -> emptyList()} default, so the tri-state logic
+     * ({@code isEditableField() ? FULL : READ_ONLY}) and the id-equality filter inside that
+     * method's loop had only ever run on the empty-list path — a bug there (inverted boolean,
+     * wrong property, wrong id comparison) would have shipped completely undetected.
+     *
+     * <p>Grants Finance an active {@code OBUIAPP_Process_Access} row on {@code
+     * NOT_POSTED_DOCS_PROXY_PROCESS_ID} with {@code isEditableField() == true} and asserts its
+     * "Not Posted Documents" {@code matrix} row resolves to {@link
+     * SFRolesOverview#FULL "full"} for Finance, while every other role (which got no grant, per
+     * {@code setUp()}'s default) still reads {@code "none"}.
+     */
+    @Test
+    @DisplayName("ETP-5071: a role with an editable ProcessAccess grant resolves the proxy row to 'full'")
+    void testResolveProcessTierMapWithEditableGrantResolvesToFull() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
+
+        Process notPostedDocsProcess = mockProcess(NOT_POSTED_DOCS_PROXY_ID);
+        ProcessAccess grant = mockProcessAccessRow(notPostedDocsProcess, true);
+        stubProcessAccessCriteriaKeyedByRole(Map.of(FINANCE_ROLE_ID, Collections.singletonList(grant)));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONObject access = findMatrixRowAccess(result, NOT_POSTED_DOCS_PROXY_ID);
+        assertEquals("full", access.getString(FINANCE_ROLE_ID));
+        assertEquals("none", access.getString(ADMIN_ROLE_ID),
+                "a role with no ProcessAccess grant must still read 'none'");
+        assertEquals("none", access.getString(SALES_ROLE_ID));
+    }
+
+    /**
+     * Same as {@link #testResolveProcessTierMapWithEditableGrantResolvesToFull()} but with {@code
+     * isEditableField() == false} — proves the tri-state logic's other branch, not just that a
+     * grant exists at all.
+     */
+    @Test
+    @DisplayName("ETP-5071: a role with a non-editable ProcessAccess grant resolves the proxy row to 'read-only'")
+    void testResolveProcessTierMapWithReadOnlyGrantResolvesToReadOnly() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
+
+        Process notPostedDocsProcess = mockProcess(NOT_POSTED_DOCS_PROXY_ID);
+        ProcessAccess grant = mockProcessAccessRow(notPostedDocsProcess, false);
+        stubProcessAccessCriteriaKeyedByRole(Map.of(FINANCE_ROLE_ID, Collections.singletonList(grant)));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONObject access = findMatrixRowAccess(result, NOT_POSTED_DOCS_PROXY_ID);
+        assertEquals("read-only", access.getString(FINANCE_ROLE_ID));
+    }
+
+    /**
+     * Proves the id-equality filter inside {@link SFRolesOverview#resolveProcessTierMap(Role,
+     * String)}'s loop: a grant on a DIFFERENT {@code OBUIAPP_Process_ID} (not {@link
+     * SFRolesOverview#NOT_POSTED_DOCS_PROXY_PROCESS_ID}) must be ignored — without the filter, any
+     * active {@code ProcessAccess} row at all (on any process) would incorrectly light up the
+     * "Not Posted Documents" proxy row.
+     */
+    @Test
+    @DisplayName("ETP-5071: a ProcessAccess grant on a different process id does not resolve the proxy row")
+    void testResolveProcessTierMapIgnoresGrantOnDifferentProcessId() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
+
+        Process unrelatedProcess = mockProcess("some-other-process-id");
+        ProcessAccess grant = mockProcessAccessRow(unrelatedProcess, true);
+        stubProcessAccessCriteriaKeyedByRole(Map.of(FINANCE_ROLE_ID, Collections.singletonList(grant)));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONObject access = findMatrixRowAccess(result, NOT_POSTED_DOCS_PROXY_ID);
+        assertEquals("none", access.getString(FINANCE_ROLE_ID),
+                "a grant on an unrelated process id must not resolve the Not Posted Documents proxy row");
     }
 
     // ── exception handling ───────────────────────────────────────────────
