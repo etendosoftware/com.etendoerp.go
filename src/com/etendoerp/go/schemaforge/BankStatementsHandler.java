@@ -700,9 +700,9 @@ public class BankStatementsHandler implements NeoHandler {
       // a statement that is about to vanish.
       BankStatementLineAggregateHandler.suppress();
       FIN_BankStatement statement = requireDraft(body.optString(FIELD_ID, null));
-      // Same predicate as every other PSD2 connection check in this module — see
-      // PaymentRegistrationService, PisPaymentService and FinancialAccountBankConnectionHandler;
-      // keep them in lockstep.
+      // Same predicate as every other PSD2 connection check in this module. It is kept in
+      // lockstep with the copies in the payment-registration, PIS-payment and bank-connection
+      // handlers, so a change to what "connected" means has to touch all of them.
       if (BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED
           .equals(statement.getAccount().getPSD2ConnectionStatus())) {
         return NeoResponse.error(409, MSG_STATEMENT_BANK_CONNECTED);
