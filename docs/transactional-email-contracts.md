@@ -49,6 +49,10 @@ Rejected provider passthrough shape:
 | `EmailSafetyStore` | Checks kill switches, idempotency, throttle counters, and audit capture |
 | `DalEmailSafetyStore` | Runtime DAL-backed safety store for audit, idempotency, throttle counters, and kill switches |
 | `InMemoryEmailSafetyStore` | Test-only process-local implementation for focused executor tests |
+| `EmailSendLogStore` | Captures the readable per-document send history, for contracts that opt in |
+| `DalEmailSendLogStore` | Runtime DAL-backed history store writing `ETGO_Email_Send_Log` rows |
+| `InMemoryEmailSendLogStore` | Test-only process-local implementation for focused executor tests |
+| `EmailSendHistoryRecord` | One history entry, built from the send context and the audit record of the same attempt |
 | `EmailProviderAdapter` | Backend-only boundary to the external provider |
 | `ApiGatewayEmailProviderAdapter` | HTTP adapter for API Gateway-style providers |
 | `EmailProviderConfig` | Reads provider configuration from server-side properties or environment variables |
@@ -155,6 +159,20 @@ The executor builds an `EmailSendContext` after authorization, recipient resolut
 - `EmailThrottleRule.perRecord(max, windowSeconds)`
 
 Rules whose context key is unavailable are skipped, so contracts can share policy helpers across flows where not every dimension applies.
+
+### Readable send history (ETP-5069)
+
+The anti-abuse ledger `ETGO_Email_Safety` is not, and must not become, a readable history. It lives at client 0 (`ACCESSLEVEL` 4), stores every recipient as a SHA-256 hash, and carries no subject and no body — an invariant asserted by `DalEmailSafetyStoreTest` and deliberately left untouched.
+
+`ETGO_Email_Send_Log` is the second, separate ledger that answers the operator's question instead: what was sent from this document, to whom, when, and did it go out. It is a Client/Organization table (`ACCESSLEVEL` 3), so a row carries the real tenant, and it stores recipients, subject, the operator's own message and the download link in clear.
+
+- **Written from one place.** `TransactionalEmailService#recordAudit` is the single choke point all eight audit call sites funnel through, and it runs after the `EmailSendContext` exists — the only point where the readable data and the audit outcome for the same attempt are both in hand. The history row is saved BEFORE `EmailSafetyStore#recordAudit`, so both rows share the transaction the DAL safety store closes with `SessionHandler.commitAndStart()`.
+- **Gated declaratively.** `EmailContract#logsSendHistory()` defaults to `false`; `DefaultDocumentSendEmailContract` overrides it to `true`, so the six document-send contracts opt in automatically and the account/auth family (invitation, reset password, login alert, organization joined) never reaches the table. There is no contract-name list.
+- **No admin mode, and no forced client 0.** `DalEmailSendLogStore` lets DAL fill `AD_Client_ID`/`AD_Org_ID`/`CreatedBy` from the caller's own session. That is what makes the readable-client filter on the read path a genuine access rule, and it makes `CreatedBy` the actual sender — closing the long-standing null-`userId` gap the client-0 ledger has.
+- **`messageBody` is the operator's text, not the rendered email.** The provider's `body` template value is the whole HTML document produced by `EmailLayout.render`; what gets stored is `EmailMessageEdits#getMessage()`, pre-escape. A send that used the contract's default copy stores `null` there and keeps its subject.
+- **Failures are swallowed.** A history row is a convenience; the send and its audit row are not. Every `VARCHAR` value is truncated to its column width before the insert for the same reason.
+- **Read path:** `GET /sws/neo/documentemailhistory?recordId=<id>` — see `docs/neo-headless.md` §8j for the row shape and the access-rule rationale.
+- **Accepted limitation:** the rejection paths that answer before the send context is built (unknown contract, forbidden provider field, failed authorization, unresolved recipient) write no audit row today and therefore write no history row either.
 
 ### Per-environment throttle ceilings
 
