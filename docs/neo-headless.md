@@ -2226,6 +2226,21 @@ Both paths can appear side-by-side within one response (a tenant may have migrat
 
 **`matrix`** additionally covers **every** Etendo GO window — including ones no role in the response can reach at all (`"none"`) — grouped by the window's top-level `AD_Menu` folder (tree `'10'`, the same tree `SFListMenu` walks) via one recursive-CTE native query; a window linked from two different top-level folders deterministically picks the alphabetically-first one, and a window with no resolvable folder falls back to the `"Other"` bucket. Categories are sorted by name; each category's windows are sorted by name.
 
+**Proxy rows for 3 windowless items (ETP-5071).** "Fiscal Monitor", "Fiscal Models", and "Not
+Posted Documents" have no `AD_Window_ID`/`AD_Process_ID` of their own, so none of the query-driven
+resolution above can produce a row for them. `matrix` now appends 3 synthetic rows for these ids,
+each resolving its per-role access via a human-chosen PROXY entity instead — Fiscal Monitor
+through the SII Monitor window's access, Fiscal Models through the Tax Report window's access, and
+Not Posted Documents through a specific process's access — including a duplicate-row guard for the
+case where a proxy (SII Monitor) already produces its own real row from the query above. This is a
+**display-only** resolution scoped entirely to this endpoint's `matrix`/frontend `RolesAccessMatrix`
+consumption; it does not touch `AD_Window_Access` grants, `windows`/`windowCount`, or any
+provisioning path. Full mechanism (exact proxy ids, category-lookup handling, the duplicate guard):
+`SFRolesOverview.java`'s own javadoc (`PROXY_MATRIX_ROWS`, `FISCAL_MONITOR_PROXY_WINDOW_ID`,
+`TAX_MODELS_PROXY_WINDOW_ID`, `NOT_POSTED_DOCS_PROXY_PROCESS_ID`) — not duplicated here. See also
+§8d's "Twelve matrix rows" note below: this proxy resolution is unrelated to (and does not close)
+that separate, provisioning-side gap.
+
 ---
 
 ## 8d. Compose User Roles From Templates (SFAssignUserRoles Webhook, ETP-4852)
@@ -2637,6 +2652,17 @@ mechanism entirely — left for a follow-up ticket. Separately, "Roles", "Usuari
 asistente de IA" DO resolve to real `AD_Window_ID`s but are deliberately granted to none of the
 four templates — the matrix shows "—" for all four non-Admin roles on all three, so they stay
 Admin-only.
+
+> **Scope note (ETP-5071) — this gap is PROVISIONING-side only, not display-side anymore for 3 of
+> these rows.** This paragraph is about `TemplateRoleWindowAccess`/`EnsureSystemRoleTemplatesScript`
+> — whether the 4 system role templates can be GRANTED `AD_Window_Access` for these rows at all.
+> Three of the twelve names listed above — **Documentos no contabilizados**, **Monitor fiscal**,
+> **Modelos fiscales** — are a SEPARATE concern from `SFRolesOverview`'s live "Configuración > Roles"
+> admin screen (§8c above): that screen now shows real, per-role (proxied) access data for these
+> same 3 items via `SFRolesOverview`'s `PROXY_MATRIX_ROWS` mechanism. Do not read this paragraph as
+> meaning those 3 items are "still completely unaddressed" — the display case is resolved; only the
+> underlying template-provisioning grant (can a system role template itself hold a real grant for
+> them) remains open, and is unrelated to what an admin sees on the Roles screen.
 
 **Still open (ETP-4877, unchanged by ETP-4878):** the ~21 existing tenants still holding
 per-client duplicated role copies are untouched by this mechanism (a migration, not a runtime
