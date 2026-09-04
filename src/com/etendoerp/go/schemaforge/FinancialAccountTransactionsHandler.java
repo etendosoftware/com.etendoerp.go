@@ -160,6 +160,20 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
   private static final String MSG_RECEIPT_LINKED_NOT_DELETABLE =
       "This movement belongs to a receipt. Delete it from the receipt instead.";
   /**
+   * ETP-5111 — the same refusal for {@link #handleReactivate}. Reactivating the bank transaction
+   * on its own would desynchronise it from its {@code FIN_Payment}; the procedure is to remove the
+   * payment from its own window, or to undo only the reconciliation from the Conciliación tab.
+   * Until this ticket the frontend simply hid the action, so this path was unguarded for REST/MCP
+   * callers. Kept in ENGLISH and byte-for-byte in sync with the frontend's
+   * {@code backendError.paymentMovementNotReactivatable} /
+   * {@code backendError.receiptMovementNotReactivatable} keys (lib/backendErrors.js), which match
+   * by EXACT text after {@code .trim()} — rewording either silently drops users back to English.
+   */
+  private static final String MSG_PAYMENT_LINKED_NOT_REACTIVATABLE =
+      "This movement belongs to a payment. Reactivate it from the payment instead.";
+  private static final String MSG_RECEIPT_LINKED_NOT_REACTIVATABLE =
+      "This movement belongs to a receipt. Reactivate it from the receipt instead.";
+  /**
    * Business rejection for {@code ?action=delete} with {@code paymentRemoval:false} on an already
    * processed movement (see {@link #handleDelete}). Mirrors core's
    * {@code APRM_FIN_FINACC_TRAN_CHECK_TRG} up-front rather than letting the trigger fire: the
@@ -781,6 +795,15 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
         "Could not reactivate the movement. Please check logs for details.", () -> {
           FIN_FinaccTransaction trx = loadTransactionFromBody(body);
           if (trx == null) return NeoResponse.error(404, MSG_TRANSACTION_NOT_FOUND);
+          // ETP-5111 — a movement that belongs to a FIN_Payment cannot be reactivated from here.
+          // Boxed Boolean: isReceipt() is null on a payment whose flag was never set, so it is
+          // unwrapped rather than dereferenced (same convention as handleDelete's own guard).
+          if (trx.getFinPayment() != null) {
+            return NeoResponse.error(409,
+                Boolean.TRUE.equals(trx.getFinPayment().isReceipt())
+                    ? MSG_RECEIPT_LINKED_NOT_REACTIVATABLE
+                    : MSG_PAYMENT_LINKED_NOT_REACTIVATABLE);
+          }
           FIN_BankStatementLine line = FinancialAccountTransactionsSupport.linkedBankStatementLine(trx);
           TransactionRemovalUtil.reactivate(trx);
           OBDal.getInstance().flush();
