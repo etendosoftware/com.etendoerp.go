@@ -5354,7 +5354,7 @@ public class ReconciliationHandlerTest {
    * @throws Exception if the mocked JDBC interaction fails
    */
   private void stubPendingLinesJdbc() throws Exception {
-    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+    doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
     when(pendingSqlDal.getConnection()).thenReturn(pendingSqlConn);
     when(pendingSqlConn.prepareStatement(anyString())).thenReturn(pendingSqlPs);
     when(pendingSqlConn.createArrayOf(anyString(), any())).thenReturn(null);
