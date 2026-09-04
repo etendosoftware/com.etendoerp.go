@@ -1330,6 +1330,131 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     }
 
     /**
+     * Positive-path regression test for {@link SFRolesOverview#mergeProxyAccessTiers(Role, Map)}'s
+     * window-based proxy call — {@code resolveWindowTierMap(role, Set.of(TAX_MODELS_PROXY_WINDOW_ID))}
+     * — which reuses the already-well-tested {@link SFRolesOverview#resolveWindowTierMap(Role,
+     * java.util.Set)} method, so it is very likely correct, but was completely unverified for this
+     * specific proxy id before this test (mirrors {@link
+     * #testResolveProcessTierMapWithEditableGrantResolvesToFull()}'s rationale for the process-based
+     * proxy).
+     *
+     * <p>Grants Finance an active {@code AD_Window_Access} row on {@code TAX_MODELS_PROXY_WINDOW_ID}
+     * with {@code isEditableField() == true} and asserts its "Fiscal Models" {@code matrix} row
+     * resolves to {@link SFRolesOverview#FULL "full"} for Finance, while every other role (which
+     * got no grant) still reads {@code "none"}.
+     *
+     * <p>The baseline Etendo-GO window set is empty (see {@link #stubBaselineQueries(List, List)}),
+     * so Finance's OWN real-window {@code resolveWindowTierMap} call (whose {@code goWindowIds} is
+     * that empty set) does not pick up this grant either — only the proxy call, whose {@code
+     * goWindowIds} is exactly {@code Set.of(TAX_MODELS_PROXY_WINDOW_ID)}, does — proving the grant
+     * reaches the matrix strictly through the proxy path, not by coincidentally also being a real
+     * exposed window.
+     */
+    @Test
+    @DisplayName("ETP-5071: a role with an editable WindowAccess grant resolves the Tax Models proxy row to 'full'")
+    void testResolveWindowTierMapWithEditableGrantResolvesToFullForTaxModelsProxy() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
+
+        Window taxModelsWindow = mockWindow(TAX_MODELS_PROXY_ID, "Tax Report");
+        WindowAccess grant = mockWindowAccessRow(taxModelsWindow, true);
+        stubWindowAccessCriteriaKeyedByRole(Map.of(FINANCE_ROLE_ID, Collections.singletonList(grant)));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONObject access = findMatrixRowAccess(result, TAX_MODELS_PROXY_ID);
+        assertEquals("full", access.getString(FINANCE_ROLE_ID));
+        assertEquals("none", access.getString(ADMIN_ROLE_ID),
+                "a role with no WindowAccess grant on the Tax Models proxy must still read 'none'");
+        assertEquals("none", access.getString(SALES_ROLE_ID));
+    }
+
+    /**
+     * Same as {@link #testResolveWindowTierMapWithEditableGrantResolvesToFullForTaxModelsProxy()}
+     * but with {@code isEditableField() == false} — proves the tri-state logic's other branch, not
+     * just that a grant exists at all.
+     */
+    @Test
+    @DisplayName("ETP-5071: a role with a non-editable WindowAccess grant resolves the Tax Models proxy row to 'read-only'")
+    void testResolveWindowTierMapWithReadOnlyGrantResolvesToReadOnlyForTaxModelsProxy() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
+
+        Window taxModelsWindow = mockWindow(TAX_MODELS_PROXY_ID, "Tax Report");
+        WindowAccess grant = mockWindowAccessRow(taxModelsWindow, false);
+        stubWindowAccessCriteriaKeyedByRole(Map.of(FINANCE_ROLE_ID, Collections.singletonList(grant)));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONObject access = findMatrixRowAccess(result, TAX_MODELS_PROXY_ID);
+        assertEquals("read-only", access.getString(FINANCE_ROLE_ID));
+    }
+
+    /**
+     * Proves the id-intersection filter inside {@link SFRolesOverview#resolveWindowTierMap(Role,
+     * java.util.Set)}'s loop, for the Tax Models proxy call specifically: a grant on a DIFFERENT
+     * {@code AD_Window_ID} (not {@link SFRolesOverview#TAX_MODELS_PROXY_WINDOW_ID}) must be
+     * ignored — without the filter, any active {@code WindowAccess} row at all (on any window)
+     * would incorrectly light up the "Fiscal Models" proxy row.
+     */
+    @Test
+    @DisplayName("ETP-5071: a WindowAccess grant on a different window id does not resolve the Tax Models proxy row")
+    void testResolveWindowTierMapIgnoresGrantOnDifferentWindowIdForTaxModelsProxy() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
+
+        Window unrelatedWindow = mockWindow("some-other-window-id", "Unrelated Window");
+        WindowAccess grant = mockWindowAccessRow(unrelatedWindow, true);
+        stubWindowAccessCriteriaKeyedByRole(Map.of(FINANCE_ROLE_ID, Collections.singletonList(grant)));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONObject access = findMatrixRowAccess(result, TAX_MODELS_PROXY_ID);
+        assertEquals("none", access.getString(FINANCE_ROLE_ID),
+                "a grant on an unrelated window id must not resolve the Tax Models proxy row");
+    }
+
+    /**
+     * Multi-role check (mirrors the same check QA ran for the process-based proxy): a SINGLE
+     * request/response with two DIFFERENT roles each holding a DIFFERENT grant on the Tax Models
+     * proxy resolves BOTH correctly at once — not merely correct in isolated single-role tests.
+     * {@link #stubWindowAccessCriteriaKeyedByRole(Map)} keys its stub by the {@code role.id}
+     * restriction each role's own {@code WindowAccess.list()} call carries, so this also guards
+     * against a shared-mutable-state bug in that keying (e.g. one role's tier leaking into
+     * another's during the sequential per-role loop in {@code buildRolesOverview}).
+     */
+    @Test
+    @DisplayName("ETP-5071: multiple roles in one response resolve their own independent Tax Models proxy tier")
+    void testResolveWindowTierMapForTaxModelsProxyAcrossMultipleRolesInOneResponse() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
+
+        Window taxModelsWindow = mockWindow(TAX_MODELS_PROXY_ID, "Tax Report");
+        WindowAccess financeGrant = mockWindowAccessRow(taxModelsWindow, true);
+        WindowAccess salesGrant = mockWindowAccessRow(taxModelsWindow, false);
+        stubWindowAccessCriteriaKeyedByRole(Map.of(
+                FINANCE_ROLE_ID, Collections.singletonList(financeGrant),
+                SALES_ROLE_ID, Collections.singletonList(salesGrant)));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONObject access = findMatrixRowAccess(result, TAX_MODELS_PROXY_ID);
+        assertEquals("full", access.getString(FINANCE_ROLE_ID));
+        assertEquals("read-only", access.getString(SALES_ROLE_ID));
+        assertEquals("none", access.getString(ADMIN_ROLE_ID));
+        assertEquals("none", access.getString(PURCHASING_ROLE_ID));
+        assertEquals("none", access.getString(INVENTORY_ROLE_ID));
+    }
+
+    /**
      * Finds the {@code "access"} map of the {@code matrix} row identified by {@code rowId},
      * searching across every category — used by the {@code resolveProcessTierMap} tests below,
      * which do not care which category {@link SFRolesOverview#buildMatrix(Map, Map)} bucketed the
@@ -1432,6 +1557,53 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         JSONObject access = findMatrixRowAccess(result, NOT_POSTED_DOCS_PROXY_ID);
         assertEquals("none", access.getString(FINANCE_ROLE_ID),
                 "a grant on an unrelated process id must not resolve the Not Posted Documents proxy row");
+    }
+
+    /**
+     * Proves {@link SFRolesOverview#buildMatrix(Map, Map)}'s {@code categoryLookupIds} union
+     * actually resolves a REAL non-{@link SFRolesOverview#OTHER_CATEGORY "Other"} category for
+     * {@link SFRolesOverview#TAX_MODELS_PROXY_WINDOW_ID} when the classic-AD-menu-tree SQL
+     * legitimately has one for it — every other test in this class leaves {@code categoryQuery} at
+     * its {@code setUp()} default (empty result), so the Tax Models proxy row has only ever been
+     * seen landing in "Other" by omission, never actually exercising the lookup for its own id.
+     *
+     * <p>{@link SFRolesOverview#FISCAL_MONITOR_PROXY_WINDOW_ID} is also in {@code
+     * categoryLookupIds}, but this test's {@code categoryQuery} stub deliberately has no row for
+     * it (nor for {@link SFRolesOverview#NOT_POSTED_DOCS_PROXY_PROCESS_ID}, which the SQL cannot
+     * resolve at all — it is a process id, not a window id) — both fall back to "Other", which
+     * this test also asserts, so the "Fiscal Reports" bucket is shown to hold ONLY the Tax Models
+     * row, not every proxy row indiscriminately.
+     */
+    @Test
+    @DisplayName("ETP-5071: the Tax Models proxy row resolves a real category, not just the 'Other' fallback")
+    void testTaxModelsProxyResolvesRealCategoryFromMenuTree() throws Exception {
+        givenSystemAdminCallerRole();
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
+
+        Object[] taxModelsCategoryRow = { TAX_MODELS_PROXY_ID, "Fiscal Reports" };
+        when(categoryQuery.getResultList()).thenReturn(Collections.singletonList(taxModelsCategoryRow));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject result = new JSONObject(responseVars.get(RESULT));
+        JSONArray categories = result.getJSONObject("matrix").getJSONArray("categories");
+        // "Fiscal Reports" (Tax Models only) + "Other" (Fiscal Monitor + Not Posted Documents),
+        // sorted case-insensitively ("F" < "O").
+        assertEquals(2, categories.length());
+
+        JSONObject fiscalReports = categories.getJSONObject(0);
+        assertEquals("Fiscal Reports", fiscalReports.getString("name"));
+        JSONArray fiscalReportsWindows = fiscalReports.getJSONArray("windows");
+        assertEquals(1, fiscalReportsWindows.length(),
+                "only the Tax Models proxy row has a category-query match in this test");
+        assertEquals(TAX_MODELS_PROXY_ID, fiscalReportsWindows.getJSONObject(0).getString("id"));
+
+        JSONObject other = categories.getJSONObject(1);
+        assertEquals("Other", other.getString("name"));
+        JSONArray otherWindows = other.getJSONArray("windows");
+        assertEquals(2, otherWindows.length(),
+                "Fiscal Monitor and Not Posted Documents have no category-query match here and fall back to 'Other'");
     }
 
     // ── exception handling ───────────────────────────────────────────────
