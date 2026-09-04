@@ -19,9 +19,11 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -34,9 +36,8 @@ import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.util.Collections;
-import java.util.HashMap;
+import java.util.Date;
 import java.util.List;
-import java.util.Map;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -59,11 +60,14 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
+
+import com.etendoerp.go.schemaforge.data.ETGOSurveyResponse;
 
 /**
  * Unit tests for {@link SurveyConfigServlet}.
@@ -74,6 +78,13 @@ import org.openbravo.model.common.enterprise.Organization;
  * survey/language with their score range), the empty-row cases,
  * internal-error handling (500), and (ETP-4352 GDPR remediation) doPost
  * {@code /response} — persisting a submitted survey response server-side.
+ *
+ * <p>The {@code POST /response} write path is exercised through the DAL
+ * ({@link ETGOSurveyResponse} obtained from {@link OBProvider}, saved and
+ * flushed via {@link OBDal}), not through the native INSERT it replaced: the
+ * assertions therefore check the values stamped on the entity and the
+ * save/flush calls, rather than SQL text and bind parameters. The GET path
+ * still uses native queries and is asserted as such.
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -89,6 +100,19 @@ class SurveyConfigServletTest {
   private OBDal obDal;
   @Mock
   private Session session;
+  @Mock
+  private OBProvider obProvider;
+
+  /** The entity instance {@code OBProvider.getInstance().get(...)} hands back to the servlet, so
+   * every value the write path stamps can be verified as a setter call. */
+  @Mock
+  private ETGOSurveyResponse surveyResponse;
+
+  /** Populated by {@link #authenticatedWithContext} so the tests can assert the entity was
+   * stamped with the very objects carried by the authenticated context. */
+  private Client contextClient;
+  private Organization contextOrganization;
+  private User contextUser;
 
   @Mock
   @SuppressWarnings("rawtypes")
@@ -101,6 +125,7 @@ class SurveyConfigServletTest {
   private NativeQuery cannedQuery;
 
   private MockedStatic<OBDal> obDalMock;
+  private MockedStatic<OBProvider> obProviderMock;
   private MockedStatic<OBContext> obContextMock;
   private MockedStatic<NeoServletSupport> neoSupportMock;
   private MockedStatic<com.etendoerp.go.common.CorsUtils> corsMock;
@@ -118,12 +143,16 @@ class SurveyConfigServletTest {
     when(response.getWriter()).thenReturn(printWriter);
 
     obDalMock = mockStatic(OBDal.class);
+    obProviderMock = mockStatic(OBProvider.class);
     obContextMock = mockStatic(OBContext.class);
     neoSupportMock = mockStatic(NeoServletSupport.class);
     corsMock = mockStatic(com.etendoerp.go.common.CorsUtils.class);
 
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
     when(obDal.getSession()).thenReturn(session);
+
+    obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
+    when(obProvider.get(ETGOSurveyResponse.class)).thenReturn(surveyResponse);
 
     // createNativeQuery() calls happen in order: global settings, survey types, canned responses.
     when(session.createNativeQuery(anyString())).thenReturn(globalQuery, surveyTypesQuery, cannedQuery);
@@ -138,6 +167,7 @@ class SurveyConfigServletTest {
     corsMock.close();
     neoSupportMock.close();
     obContextMock.close();
+    obProviderMock.close();
     obDalMock.close();
   }
 
@@ -152,19 +182,20 @@ class SurveyConfigServletTest {
 
   /** Authenticates the request AND returns a real (mocked) {@link OBContext} carrying
    * client/organization/user, as {@code doPost}'s {@code handleSubmitResponse} needs those to
-   * stamp the inserted {@code etgo_survey_response} row — unlike {@link #authenticated()}, which
-   * returns {@code null} because {@code doGet} never reads the returned context. */
+   * stamp the persisted {@link ETGOSurveyResponse} — unlike {@link #authenticated()}, which
+   * returns {@code null} because {@code doGet} never reads the returned context. The three
+   * objects are also kept in fields so the assertions can compare identity, not just ids. */
   private void authenticatedWithContext(String clientId, String orgId, String userId) throws Exception {
     OBContext ctx = mock(OBContext.class);
-    Client client = mock(Client.class);
-    when(client.getId()).thenReturn(clientId);
-    Organization org = mock(Organization.class);
-    when(org.getId()).thenReturn(orgId);
-    User user = mock(User.class);
-    when(user.getId()).thenReturn(userId);
-    when(ctx.getCurrentClient()).thenReturn(client);
-    when(ctx.getCurrentOrganization()).thenReturn(org);
-    when(ctx.getUser()).thenReturn(user);
+    contextClient = mock(Client.class);
+    when(contextClient.getId()).thenReturn(clientId);
+    contextOrganization = mock(Organization.class);
+    when(contextOrganization.getId()).thenReturn(orgId);
+    contextUser = mock(User.class);
+    when(contextUser.getId()).thenReturn(userId);
+    when(ctx.getCurrentClient()).thenReturn(contextClient);
+    when(ctx.getCurrentOrganization()).thenReturn(contextOrganization);
+    when(ctx.getUser()).thenReturn(contextUser);
     neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any())).thenReturn(ctx);
   }
 
@@ -486,7 +517,8 @@ class SurveyConfigServletTest {
 
       verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
       assertTrue(getResponseBody().contains("Missing required field: surveyKey"));
-      verify(session, never()).createNativeQuery(anyString());
+      verify(obDal, never()).save(any());
+      verify(obDal, never()).flush();
     }
 
     @Test
@@ -511,7 +543,8 @@ class SurveyConfigServletTest {
 
       verify(response).setStatus(HttpServletResponse.SC_BAD_REQUEST);
       assertTrue(getResponseBody().contains("Invalid JSON body"));
-      verify(session, never()).createNativeQuery(anyString());
+      verify(obDal, never()).save(any());
+      verify(obDal, never()).flush();
     }
   }
 
@@ -521,34 +554,79 @@ class SurveyConfigServletTest {
 
   @Nested
   @DisplayName("doPost /response - success")
-  @SuppressWarnings({ "rawtypes", "unchecked" })
   class DoPostSuccessTests {
 
-    private NativeQuery stubInsertQuery() {
-      NativeQuery insertQuery = mock(NativeQuery.class);
-      when(session.createNativeQuery(anyString())).thenReturn(insertQuery);
-      return insertQuery;
-    }
+    @Test
+    @DisplayName("stamps client, organization, user and audit fields from the authenticated context")
+    void stampsContextAndAuditFields() throws Exception {
+      authenticatedWithContext("CLIENT-1", "ORG-1", "USER-1");
+      HttpServletRequest req = requestWithBody("/response", "{\"surveyKey\":\"nps\"}");
 
-    private Map<String, Object> capturedParams(NativeQuery insertQuery) {
-      ArgumentCaptor<String> nameCaptor = ArgumentCaptor.forClass(String.class);
-      ArgumentCaptor<Object> valueCaptor = ArgumentCaptor.forClass(Object.class);
-      verify(insertQuery, org.mockito.Mockito.atLeastOnce())
-          .setParameter(nameCaptor.capture(), valueCaptor.capture());
-      Map<String, Object> params = new HashMap<>();
-      List<String> names = nameCaptor.getAllValues();
-      List<Object> values = valueCaptor.getAllValues();
-      for (int i = 0; i < names.size(); i++) {
-        params.put(names.get(i), values.get(i));
-      }
-      return params;
+      servlet.doPost(req, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_CREATED);
+
+      ArgumentCaptor<Client> clientCaptor = ArgumentCaptor.forClass(Client.class);
+      verify(surveyResponse).setClient(clientCaptor.capture());
+      assertEquals("CLIENT-1", clientCaptor.getValue().getId());
+      assertEquals(contextClient, clientCaptor.getValue());
+
+      ArgumentCaptor<Organization> orgCaptor = ArgumentCaptor.forClass(Organization.class);
+      verify(surveyResponse).setOrganization(orgCaptor.capture());
+      assertEquals("ORG-1", orgCaptor.getValue().getId());
+      assertEquals(contextOrganization, orgCaptor.getValue());
+
+      // ad_user_id (the respondent FK) and both audit stamps are the same authenticated user.
+      verify(surveyResponse).setUser(contextUser);
+      verify(surveyResponse).setCreatedBy(contextUser);
+      verify(surveyResponse).setUpdatedBy(contextUser);
+      verify(surveyResponse).setActive(true);
+      verify(surveyResponse).setNewOBObject(true);
     }
 
     @Test
-    @DisplayName("persists surveyKey, score, feedback and joined tags; returns 201 {status: ok}")
+    @DisplayName("assigns a fresh 32-char dash-free id to the new entity")
+    void assignsDashFreeUuid() throws Exception {
+      authenticatedWithContext("CLIENT-1", "ORG-1", "USER-1");
+      HttpServletRequest req = requestWithBody("/response", "{\"surveyKey\":\"nps\"}");
+
+      servlet.doPost(req, response);
+
+      ArgumentCaptor<String> idCaptor = ArgumentCaptor.forClass(String.class);
+      verify(surveyResponse).setId(idCaptor.capture());
+      String id = idCaptor.getValue();
+      assertNotNull(id);
+      assertEquals(32, id.length());
+      assertFalse(id.contains("-"));
+      assertTrue(id.matches("[0-9a-fA-F]{32}"));
+    }
+
+    @Test
+    @DisplayName("writes created, updated and responseDate from a single non-null request timestamp")
+    void writesSingleRequestTimestamp() throws Exception {
+      authenticatedWithContext("CLIENT-1", "ORG-1", "USER-1");
+      HttpServletRequest req = requestWithBody("/response", "{\"surveyKey\":\"nps\"}");
+
+      servlet.doPost(req, response);
+
+      ArgumentCaptor<Date> createdCaptor = ArgumentCaptor.forClass(Date.class);
+      verify(surveyResponse).setCreationDate(createdCaptor.capture());
+      ArgumentCaptor<Date> updatedCaptor = ArgumentCaptor.forClass(Date.class);
+      verify(surveyResponse).setUpdated(updatedCaptor.capture());
+      ArgumentCaptor<Date> responseDateCaptor = ArgumentCaptor.forClass(Date.class);
+      verify(surveyResponse).setResponseDate(responseDateCaptor.capture());
+
+      assertNotNull(createdCaptor.getValue());
+      assertNotNull(updatedCaptor.getValue());
+      assertNotNull(responseDateCaptor.getValue());
+      assertEquals(createdCaptor.getValue(), updatedCaptor.getValue());
+      assertEquals(createdCaptor.getValue(), responseDateCaptor.getValue());
+    }
+
+    @Test
+    @DisplayName("persists surveyKey, score as Long, feedback and joined tags; returns 201 {status: ok}")
     void happyPathPersistsFullPayload() throws Exception {
       authenticatedWithContext("CLIENT-1", "ORG-1", "USER-1");
-      NativeQuery insertQuery = stubInsertQuery();
       String body = "{\"surveyKey\":\"nps\",\"score\":9,\"feedback\":\"Great tool!\",\"tags\":[\"fast\",\"easy\"]}";
       HttpServletRequest req = requestWithBody("/response", body);
 
@@ -558,93 +636,117 @@ class SurveyConfigServletTest {
       JSONObject result = new JSONObject(getResponseBody());
       assertEquals("ok", result.getString("status"));
 
-      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
-      verify(session).createNativeQuery(sqlCaptor.capture());
-      String sql = sqlCaptor.getValue();
-      assertTrue(sql.contains(":score"));
-      assertTrue(sql.contains(":feedback"));
-      assertTrue(sql.contains(":tags"));
-      assertTrue(sql.contains("etgo_survey_response"));
+      verify(surveyResponse).setSurveyKey("nps");
+      // The column is numeric(10) -> Long, not the Integer the JSON body carries.
+      verify(surveyResponse).setScore(Long.valueOf(9L));
+      verify(surveyResponse).setFeedbackText("Great tool!");
+      verify(surveyResponse).setTags("fast,easy");
 
-      Map<String, Object> params = capturedParams(insertQuery);
-      assertEquals("CLIENT-1", params.get("clientId"));
-      assertEquals("ORG-1", params.get("orgId"));
-      assertEquals("USER-1", params.get("actorId"));
-      assertEquals("nps", params.get("surveyKey"));
-      assertEquals(9, params.get("score"));
-      assertEquals("Great tool!", params.get("feedback"));
-      assertEquals("fast,easy", params.get("tags"));
-
-      verify(insertQuery).executeUpdate();
+      verify(obDal).save(surveyResponse);
+      // Flushed inside the try so a constraint violation surfaces as a 500 rather than at commit.
+      verify(obDal).flush();
     }
 
     @Test
-    @DisplayName("a surveyKey-only payload inlines NULL for score/feedback/tags (no bound parameters "
-        + "for the absent fields) and still returns 201")
-    void minimalPayloadInlinesNullLiterals() throws Exception {
+    @DisplayName("a surveyKey-only payload sets score, feedbackText and tags to real NULLs and still returns 201")
+    void minimalPayloadStoresNulls() throws Exception {
       authenticatedWithContext("CLIENT-1", "ORG-1", "USER-1");
-      NativeQuery insertQuery = stubInsertQuery();
       HttpServletRequest req = requestWithBody("/response", "{\"surveyKey\":\"csat_order\"}");
 
       servlet.doPost(req, response);
 
       verify(response).setStatus(HttpServletResponse.SC_CREATED);
+      verify(surveyResponse).setSurveyKey("csat_order");
+      verify(surveyResponse).setScore(null);
+      verify(surveyResponse).setFeedbackText(null);
+      verify(surveyResponse).setTags(null);
+      verify(obDal).save(surveyResponse);
+      verify(obDal).flush();
+    }
 
-      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
-      verify(session).createNativeQuery(sqlCaptor.capture());
-      String sql = sqlCaptor.getValue();
-      assertFalse(sql.contains(":score"));
-      assertFalse(sql.contains(":feedback"));
-      assertFalse(sql.contains(":tags"));
-      assertTrue(sql.contains("NULL"));
+    @Test
+    @DisplayName("an empty tags array is stored as NULL, not as an empty string")
+    void emptyTagsArrayStoresNull() throws Exception {
+      authenticatedWithContext("CLIENT-1", "ORG-1", "USER-1");
+      HttpServletRequest req = requestWithBody("/response",
+          "{\"surveyKey\":\"nps\",\"tags\":[]}");
 
-      Map<String, Object> params = capturedParams(insertQuery);
-      assertFalse(params.containsKey("score"));
-      assertFalse(params.containsKey("feedback"));
-      assertFalse(params.containsKey("tags"));
-      assertEquals("csat_order", params.get("surveyKey"));
+      servlet.doPost(req, response);
+
+      verify(surveyResponse).setTags(null);
+    }
+
+    @Test
+    @DisplayName("an explicit JSON null score is stored as NULL")
+    void nullScoreStoresNull() throws Exception {
+      authenticatedWithContext("CLIENT-1", "ORG-1", "USER-1");
+      HttpServletRequest req = requestWithBody("/response",
+          "{\"surveyKey\":\"nps\",\"score\":null}");
+
+      servlet.doPost(req, response);
+
+      verify(surveyResponse).setScore(null);
+      verify(response).setStatus(HttpServletResponse.SC_CREATED);
+    }
+
+    @Test
+    @DisplayName("a score of 0 is preserved (not conflated with an absent score)")
+    void zeroScoreIsPreserved() throws Exception {
+      authenticatedWithContext("CLIENT-1", "ORG-1", "USER-1");
+      HttpServletRequest req = requestWithBody("/response",
+          "{\"surveyKey\":\"nps\",\"score\":0}");
+
+      servlet.doPost(req, response);
+
+      verify(surveyResponse).setScore(Long.valueOf(0L));
     }
 
     @Test
     @DisplayName("accepts a trailing slash on /response/")
     void trailingSlashIsAccepted() throws Exception {
       authenticatedWithContext("CLIENT-1", "ORG-1", "USER-1");
-      stubInsertQuery();
       HttpServletRequest req = requestWithBody("/response/", "{\"surveyKey\":\"nps\"}");
 
       servlet.doPost(req, response);
 
       verify(response).setStatus(HttpServletResponse.SC_CREATED);
+      verify(obDal).save(surveyResponse);
     }
 
     @Test
-    @DisplayName("does not bind a feedback parameter when feedback is blank/whitespace-only")
-    void blankFeedbackIsTreatedAsAbsent() throws Exception {
+    @DisplayName("stores NULL feedbackText when feedback is blank/whitespace-only")
+    void blankFeedbackIsStoredAsNull() throws Exception {
       authenticatedWithContext("CLIENT-1", "ORG-1", "USER-1");
-      NativeQuery insertQuery = stubInsertQuery();
       HttpServletRequest req = requestWithBody("/response",
           "{\"surveyKey\":\"nps\",\"feedback\":\"   \"}");
 
       servlet.doPost(req, response);
 
-      Map<String, Object> params = capturedParams(insertQuery);
-      assertFalse(params.containsKey("feedback"));
+      verify(surveyResponse).setFeedbackText(null);
+      verify(response).setStatus(HttpServletResponse.SC_CREATED);
+    }
+
+    @Test
+    @DisplayName("restores the OBContext mode after a successful save")
+    void restoresContextOnSuccess() throws Exception {
+      authenticatedWithContext("CLIENT-1", "ORG-1", "USER-1");
+      HttpServletRequest req = requestWithBody("/response", "{\"surveyKey\":\"nps\"}");
+
+      servlet.doPost(req, response);
+
+      obContextMock.verify(OBContext::restorePreviousMode);
     }
   }
-
-  // ===========================================================================
-  // doPost /response - internal error handling
-  // ===========================================================================
 
   @Nested
   @DisplayName("doPost /response - internal errors")
   class DoPostErrorTests {
 
     @Test
-    @DisplayName("returns 500 when the insert query throws")
-    void internalErrorReturns500() throws Exception {
+    @DisplayName("returns 500 when OBDal.save throws")
+    void saveFailureReturns500() throws Exception {
       authenticatedWithContext("CLIENT-1", "ORG-1", "USER-1");
-      when(session.createNativeQuery(anyString())).thenThrow(new RuntimeException("db down"));
+      doThrow(new RuntimeException("db down")).when(obDal).save(any());
       HttpServletRequest req = requestWithBody("/response", "{\"surveyKey\":\"nps\"}");
 
       servlet.doPost(req, response);
@@ -652,12 +754,60 @@ class SurveyConfigServletTest {
       verify(response).setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
       assertTrue(getResponseBody().contains("An internal error occurred while saving the survey response."));
     }
-  }
 
-  // ===========================================================================
-  // Sanity: JSON round-trip guard (fails loudly if the servlet ever emits
-  // malformed JSON instead of silently passing an empty-body assertion)
-  // ===========================================================================
+    @Test
+    @DisplayName("returns 500 when the flush throws — the whole point of flushing inside the try")
+    void flushFailureReturns500() throws Exception {
+      authenticatedWithContext("CLIENT-1", "ORG-1", "USER-1");
+      doThrow(new RuntimeException("constraint violation")).when(obDal).flush();
+      HttpServletRequest req = requestWithBody("/response", "{\"surveyKey\":\"nps\"}");
+
+      servlet.doPost(req, response);
+
+      verify(obDal).save(surveyResponse);
+      verify(response, never()).setStatus(HttpServletResponse.SC_CREATED);
+      verify(response).setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+      assertTrue(getResponseBody().contains("An internal error occurred while saving the survey response."));
+    }
+
+    @Test
+    @DisplayName("returns 500 when the entity cannot be obtained from OBProvider")
+    void providerFailureReturns500() throws Exception {
+      authenticatedWithContext("CLIENT-1", "ORG-1", "USER-1");
+      when(obProvider.get(ETGOSurveyResponse.class)).thenThrow(new RuntimeException("no such entity"));
+      HttpServletRequest req = requestWithBody("/response", "{\"surveyKey\":\"nps\"}");
+
+      servlet.doPost(req, response);
+
+      verify(obDal, never()).save(any());
+      verify(response).setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+      assertTrue(getResponseBody().contains("An internal error occurred while saving the survey response."));
+    }
+
+    @Test
+    @DisplayName("restores the OBContext mode when the save throws (no admin-mode leak)")
+    void restoresContextWhenSaveThrows() throws Exception {
+      authenticatedWithContext("CLIENT-1", "ORG-1", "USER-1");
+      doThrow(new RuntimeException("db down")).when(obDal).save(any());
+      HttpServletRequest req = requestWithBody("/response", "{\"surveyKey\":\"nps\"}");
+
+      servlet.doPost(req, response);
+
+      obContextMock.verify(OBContext::restorePreviousMode);
+    }
+
+    @Test
+    @DisplayName("restores the OBContext mode when the flush throws")
+    void restoresContextWhenFlushThrows() throws Exception {
+      authenticatedWithContext("CLIENT-1", "ORG-1", "USER-1");
+      doThrow(new RuntimeException("constraint violation")).when(obDal).flush();
+      HttpServletRequest req = requestWithBody("/response", "{\"surveyKey\":\"nps\"}");
+
+      servlet.doPost(req, response);
+
+      obContextMock.verify(OBContext::restorePreviousMode);
+    }
+  }
 
   @Test
   @DisplayName("success response is always parseable JSON")

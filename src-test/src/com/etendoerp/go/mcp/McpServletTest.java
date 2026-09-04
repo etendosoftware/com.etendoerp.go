@@ -23,6 +23,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -31,8 +32,10 @@ import java.io.BufferedReader;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.Callable;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -42,6 +45,8 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.MockedStatic;
+import org.mockito.MockedConstruction;
+import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
@@ -300,6 +305,32 @@ public class McpServletTest {
     JSONObject rpcResponse = new JSONObject(getResponseBody());
     assertEquals(20, rpcResponse.getInt("id"));
     assertNotNull(rpcResponse.get("result"));
+  }
+
+  @Test
+  public void toolsListExecutesWithAuthenticatedTokenContext() throws Exception {
+    McpServlet.AuthIdentity identity =
+        new McpServlet.AuthIdentity("user1", "role1", "client1", "org1", "neo:read");
+    Method handler = McpServlet.class.getDeclaredMethod("handleToolsList",
+        McpServlet.AuthIdentity.class);
+    handler.setAccessible(true);
+
+    try (MockedStatic<McpSessionManager> sessionMock = mockStatic(McpSessionManager.class);
+         MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+         MockedConstruction<ToolRegistry> registryMock = mockConstruction(ToolRegistry.class)) {
+      sessionMock.when(() -> McpSessionManager.executeInContext(
+          eq("user1"), eq("role1"), eq("client1"), eq("org1"),
+          org.mockito.ArgumentMatchers.isNull(),
+          org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()))
+          .thenReturn(new JSONObject().put("tools", new org.codehaus.jettison.json.JSONArray()));
+
+      handler.invoke(servlet, identity);
+
+      sessionMock.verify(() -> McpSessionManager.executeInContext(
+          eq("user1"), eq("role1"), eq("client1"), eq("org1"),
+          org.mockito.ArgumentMatchers.isNull(),
+          org.mockito.ArgumentMatchers.<Callable<JSONObject>>any()));
+    }
   }
 
   @Test

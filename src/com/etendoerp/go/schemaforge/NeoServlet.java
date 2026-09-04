@@ -78,9 +78,11 @@ public class NeoServlet extends HttpBaseServlet {
   final NeoProcessReportEndpoint processReportEndpoint = new NeoProcessReportEndpoint(this);
   private final BatchService batchService = new BatchService(this);
   private final NeoSimSearchEndpoint simSearchEndpoint = new NeoSimSearchEndpoint();
+  private final NeoVectorSearchEndpoint vectorSearchEndpoint = new NeoVectorSearchEndpoint();
   private final NeoGoWebhookBridge goWebhookBridge = new NeoGoWebhookBridge(this);
   private final NeoPseudoSpecDispatcher pseudoSpecDispatcher =
-      new NeoPseudoSpecDispatcher(this, batchService, simSearchEndpoint, goWebhookBridge);
+      new NeoPseudoSpecDispatcher(this, batchService, simSearchEndpoint, vectorSearchEndpoint,
+          goWebhookBridge);
 
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
