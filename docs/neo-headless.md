@@ -1120,12 +1120,14 @@ GET /sws/neo/debuginvitationbypass?Action=forceAccept&Email=<email>       (dev/Q
 GET /sws/neo/debuginvitationbypass?Action=forceStatus&Email=<email>&Status=<status>  (dev/QA only — §8g)
 GET /sws/neo/resendinvitation?AdUserId=<id>                               (§8h)
 GET /sws/neo/promoteuserrole?UserId=<id>&Mode=promote|demote              (§8i)
+GET /sws/neo/documentemailhistory?recordId=<id>[&specName=<spec>]         (§8j)
 Authorization: Bearer {token}
 ```
 
 `NeoGoWebhookBridge` runs `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview`/`SFAssignUserRoles`/
 `SFUserRoleAssignments`/`SFSystemRoleTemplates`/`SFDebugInvitationBypass`/`SFResendInvitation`/
-`SFPromoteUserRole` (§8, §8b, §8c, §8d, §8e, §8f, §8g, §8h, §8i) through NEO's own
+`SFPromoteUserRole`/`SFDocumentEmailHistory` (§8, §8b, §8c, §8d, §8e, §8f, §8g, §8h, §8i, §8j)
+through NEO's own
 JWT authentication instead of the Webhooks module's HTTP dispatch — the same pattern
 `NeoSimSearchEndpoint` (§4.9) already used for `SimSearch`. Each of these pseudo-specs constructs
 the corresponding `BaseWebhookService` and calls its unchanged `get(Map, Map)` method directly;
@@ -1137,13 +1139,16 @@ original `/webhooks/*` paths too — the Webhooks module dispatch was not remove
 `/sws/neo/*` is the path the Go SPA (`tools/app-shell` in `etendo_schema_forge`) actually calls,
 and no `SMFWHE_DEFINEDWEBHOOK_ROLE` grant is required for it. `SFAssignUserRoles` (ETP-4852),
 `SFUserRoleAssignments` (ETP-4906), `SFSystemRoleTemplates` (ETP-4906),
-`SFDebugInvitationBypass` (ETP-4830), `SFResendInvitation` (ETP-4830), and `SFPromoteUserRole`
-(ETP-5019) are `/sws/neo/*`-only — all six were authored after this pattern was already
-established, so none ever had a legacy `/webhooks/*` path to keep.
+`SFDebugInvitationBypass` (ETP-4830), `SFResendInvitation` (ETP-4830), `SFPromoteUserRole`
+(ETP-5019), and `SFDocumentEmailHistory` (ETP-5069) are `/sws/neo/*`-only — all seven were
+authored after this pattern was already established, so none ever had a legacy `/webhooks/*`
+path to keep.
 
 Each webhook's own access rule is unaffected and still enforced inside its `get()` — see
-§8/§8b/§8c/§8d/§8e/§8f/§8g/§8h/§8i for what each one checks (`NeoAccessHelper.isAdminOrClientAdmin`,
-window/process access checks, etc.). Non-`GET` requests get `405`; a webhook that throws gets
+§8/§8b/§8c/§8d/§8e/§8f/§8g/§8h/§8i/§8j for what each one checks
+(`NeoAccessHelper.isAdminOrClientAdmin`, window/process access checks, and — for
+`documentemailhistory` alone — DAL's own readable-client/org filtering, §8j). Non-`GET`
+requests get `405`; a webhook that throws gets
 `500` with the exception message (except `SFAssignUserRoles`'s own expected domain-validation
 rejections, `SFUserRoleAssignments`'s own expected domain rejections, and `SFPromoteUserRole`'s
 own expected domain rejections — see §8d/§8e/§8i for why those are a `200` result instead).
@@ -2950,6 +2955,99 @@ creating a fresh one, the same `createPersonalRole` path `resolveOrCreatePersona
 
 **Frontend counterpart:** Task 4 of this plan (`etendo_schema_forge`) — a thin client calling this
 endpoint with the same `UserId`/`Mode` params, wired to the `user` window's detail-header actions.
+
+---
+
+## 8j. Document Email History (SFDocumentEmailHistory Webhook, ETP-5069)
+
+`SFDocumentEmailHistory` (`GET /sws/neo/documentemailhistory?recordId=<id>[&specName=<spec>]` —
+reached ONLY through the NEO pseudo-spec bridge, §4.10/§4.11; no legacy `/webhooks/*` path, same
+as `SFAssignUserRoles` and every sibling authored after the pattern existed) returns one
+document's readable email send history, newest first. It backs the Emails card in the document
+preview panel (`tools/app-shell/src/windows/custom/shared/preview-cards/EmailsCard.jsx` in
+`etendo_schema_forge`), which until ETP-5069 was a static "no emails sent yet" placeholder even
+immediately after a successful send.
+
+**Access rule: DAL's own client/org filtering, and deliberately NO admin mode.** This is the one
+webhook in the family that neither enters `OBContext.setAdminMode()` nor runs a
+`NeoAccessHelper` role check, and the difference is structural rather than a relaxation.
+`SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview` must capture the caller's role first and then
+enter admin mode because they read client-0 (system-owned) menu and window metadata the caller
+cannot see on their own; having discarded DAL's filtering, they then have to re-implement the
+access decision by hand. `SFDocumentEmailHistory` reads only `ETGO_Email_Send_Log`, a
+Client/Organization table (`ACCESSLEVEL` 3) whose every row carries the sending tenant, so a plain
+`OBDal.createQuery(entityName, where)` is already scoped by `OBQuery`'s
+`filterOnReadableClients`/`filterOnReadableOrganizations` defaults (both `true`) — that filtering
+IS the access rule, and it is strictly stronger than a hand-rolled check. Calling
+`setFilterOnReadableClients(false)` here, or wrapping the read in admin mode, would be the
+security regression. There is also no role gate on purpose: reading the mail that was sent on
+documents you can already see is not an admin-only capability.
+
+**Response.** The bridge's usual envelope — `{"result": "<JSON string>"}`, where `result` is a
+STRING the caller parses, not a nested array — or `{"error": "<message>"}` (HTTP 500) when
+`recordId` is missing or the read fails. Results are capped at 200 rows and ordered by `SENT_AT`
+descending.
+
+```json
+[
+  {
+    "id": "A1B2...",
+    "sentAt": "2026-08-20T09:31:00Z",
+    "status": "SENT",
+    "recipientsTo": ["customer@example.com"],
+    "recipientsCc": [],
+    "subject": "Your invoice INV/0001",
+    "messageBody": "Please find the attached document.",
+    "downloadLink": "https://.../sws/neo/document-download?token=...",
+    "contractName": "sales-invoice-send",
+    "specName": "sales-invoice",
+    "errorMessage": null,
+    "sentBy": "Irina Urricelqui"
+  }
+]
+```
+
+- `sentAt` is an ISO-8601 **instant** (`DateTimeFormatter.ISO_INSTANT`), not a calendar date.
+- `recipientsTo`/`recipientsCc` are always JSON **arrays**. The column stores a joined string so
+  the backoffice window stays readable; the endpoint splits it so no caller has to guess the
+  separator.
+- `status` is one of `TransactionalEmailService`'s `STATUS_*` values — `SENT`,
+  `VALIDATION_FAILED`, `PROVIDER_FAILED`, `UNAUTHORIZED`, `DUPLICATE`, `THROTTLED`, `SUPPRESSED`,
+  `NO_RECIPIENT`. There is **no** `DELIVERY_FAILED` here; that value belongs to
+  `ETGO_INVITATION.STATUS`, a different subsystem.
+- `messageBody` is the operator's own message as they typed it, **not** the provider's rendered
+  `body` (a multi-kilobyte HTML document produced by `EmailLayout.render`). A send that used the
+  contract's default copy has no operator message and reports `null`; its `subject` is still
+  recorded.
+- `sentBy` is the sender's display name, resolved from the row's `CreatedBy`. That column holds
+  the real sending user precisely because `DalEmailSendLogStore` writes **without** admin mode —
+  which also closes the long-standing null-`userId` gap the client-0 anti-abuse ledger has.
+
+**Where the rows come from.** `TransactionalEmailService#recordAudit` — the single choke point all
+eight audit call sites funnel through — writes the history row immediately BEFORE
+`EmailSafetyStore#recordAudit`, so both land in the same transaction (the DAL safety store ends a
+successful send with `SessionHandler.commitAndStart()`). The gate is declarative:
+`EmailContract#logsSendHistory()` defaults to `false` and is overridden `true` once, in
+`DefaultDocumentSendEmailContract`, so the six document-send contracts opt in automatically while
+the account/auth family (invitation, reset password, login alert, organization joined) stays out.
+There is no contract-name list anywhere.
+
+**Two ledgers, on purpose.** `ETGO_Email_Send_Log` (this one) is client-level and readable:
+recipients in clear, subject, operator message, download link. `ETGO_Email_Safety` remains the
+anti-abuse ledger: client 0, SHA-256 recipient hashes, no subject and no body — an invariant
+asserted by `DalEmailSafetyStoreTest` and left untouched by ETP-5069.
+
+**Accepted limitation.** The rejection paths that answer before the `EmailSendContext` is built —
+unknown contract, forbidden provider field, failed authorization, unresolved recipient — write no
+audit row today and therefore write no history row either. A send that never got as far as a
+resolved recipient shows nothing in the panel. There is also no retention or purge process for the
+table yet; that was deferred on measured sizing.
+
+Storage mechanics, the write gate, the six-contracts-five-windows asymmetry and the retention
+sizing live in `docs/transactional-email-contracts.md` → *Readable send history (ETP-5069)*; the
+privacy decision and its operational rules live in the functional repo's
+`docs/ops/transactional-email-security.md` → *Email Audit Redaction & Storage Policy*. This section
+stays the reference for the endpoint itself.
 
 ---
 

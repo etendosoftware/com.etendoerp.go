@@ -106,12 +106,16 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
   private static final String FIELD_SUBJECT = "subject";
   private static final String FIELD_BODY = "body";
 
+  /** Suffix every document-send contract name carries, mirroring the frontend's own rule. */
+  private static final String CONTRACT_NAME_SUFFIX = "-send";
+
   private final String name;
   private final String template;
   private final String documentType;
   private final String documentNumberAlias;
   private final boolean includeAmount;
   private final EmailDocumentRecordResolver documentResolver;
+  private final String specName;
 
   protected DefaultDocumentSendEmailContract(String name, String documentType,
       EmailDocumentRecordResolver documentResolver) {
@@ -133,6 +137,7 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     this.documentNumberAlias = StringUtils.trimToNull(documentNumberAlias);
     this.includeAmount = includeAmount;
     this.documentResolver = Objects.requireNonNull(documentResolver, "documentResolver");
+    this.specName = deriveSpecName(this.name);
   }
 
   /**
@@ -171,9 +176,56 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     }
   }
 
+  /**
+   * Inverts the frontend's {@code `${windowName}-send`} contract-name convention to recover the
+   * window (NEO spec) a contract serves.
+   *
+   * @param contractName contract name, may be {@code null}
+   * @return spec name without the {@code -send} suffix, or {@code null} when there is none
+   */
+  private static String deriveSpecName(String contractName) {
+    return contractName == null || !contractName.endsWith(CONTRACT_NAME_SUFFIX) ? null
+        : StringUtils.trimToNull(
+            contractName.substring(0, contractName.length() - CONTRACT_NAME_SUFFIX.length()));
+  }
+
   @Override
   public String getName() {
     return name;
+  }
+
+  /**
+   * {@inheritDoc}
+   *
+   * <p>Every contract in the document-send family opts in: these are documents a tenant's own
+   * operator emailed to a business partner, and the whole point of ETP-5069 is that the
+   * document's own window can show what was sent, to whom and when. The account/auth contracts
+   * (invitation, reset password, login alert, organization joined) are NOT part of this family
+   * and keep the interface default of {@code false}.</p>
+   */
+  @Override
+  public boolean logsSendHistory() {
+    return true;
+  }
+
+  /**
+   * {@inheritDoc}
+   *
+   * <p>Derived from the contract name rather than declared per subclass, because the frontend
+   * already builds the contract name from the window name the same way — see
+   * {@code resolveDocumentEmailContract(windowName)} in {@code documentEmailSend.js}, which is
+   * literally {@code `${windowName}-send`}. Inverting that one rule here keeps a single
+   * convention instead of a per-contract lookup table that could drift from it.</p>
+   *
+   * <p>The one contract whose name predates the convention is {@code return-to-vendor-send},
+   * whose window is {@code return-to-vendor-shipment}; it therefore derives the spec name
+   * {@code return-to-vendor}, which resolves no window. Harmless today — that window has no send
+   * trigger at all (ETP-4717 removed it precisely because the names disagree) — and the column
+   * is nullable and best-effort. A subclass can override this method if it ever needs to.</p>
+   */
+  @Override
+  public String getSpecName() {
+    return specName;
   }
 
   @Override

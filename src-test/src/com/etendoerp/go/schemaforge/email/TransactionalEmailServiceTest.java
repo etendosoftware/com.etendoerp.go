@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge.email;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.io.IOException;
@@ -43,6 +44,12 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * Unit tests for {@link TransactionalEmailService}.
  */
 public class TransactionalEmailServiceTest {
+
+  /** Subject the history fixture contract puts in the provider request's template data. */
+  private static final String HISTORY_SUBJECT = "Su factura INV/0001";
+
+  /** Signed document link the history fixture contract puts in the same template data. */
+  private static final String HISTORY_DOWNLOAD_LINK = "https://example.test/download/ABC123";
 
   @Test
   public void rejectsProviderPassthroughPayload() throws Exception {
@@ -618,6 +625,238 @@ public class TransactionalEmailServiceTest {
         safetyStore.getAuditRecords().get(0).getStatus());
   }
 
+  // ── ETP-5069: readable per-document send history ────────────────────────────
+
+  @Test
+  public void writesAReadableHistoryRowForASuccessfulDocumentSend() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}")).withMultiRecipientCapabilities();
+    InMemoryEmailSendLogStore sendLogStore = new InMemoryEmailSendLogStore();
+    TransactionalEmailService service = serviceWithHistory(new HistoryDocumentContract(), adapter,
+        new InMemoryEmailSafetyStore(), sendLogStore);
+
+    JSONObject command = new JSONObject();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "ABC123");
+    command.put(EmailContractCommandSupport.FIELD_LANGUAGE, "es_ES");
+
+    NeoResponse response = service.send("history-document-send", command);
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(1, sendLogStore.getHistoryRecords().size());
+    EmailSendHistoryRecord history = sendLogStore.getHistoryRecords().get(0);
+    assertEquals(TransactionalEmailService.STATUS_SENT, history.getStatus());
+    assertEquals("history-document-send", history.getContractName());
+    assertEquals("sales-invoice", history.getSpecName());
+    assertEquals("ABC123", history.getRecordId());
+    assertEquals("es_ES", history.getLanguage());
+    // Subject and download link are read back out of the provider request's template data, which
+    // until ETP-5069 was discarded the moment the gateway call returned.
+    assertEquals(HISTORY_SUBJECT, history.getSubject());
+    assertEquals(HISTORY_DOWNLOAD_LINK, history.getDownloadLink());
+    assertEquals(Arrays.asList("customer@example.com", "billing@example.com"),
+        history.getRecipientsTo());
+    assertEquals(java.util.Collections.singletonList("pm@example.com"),
+        history.getRecipientsCc());
+  }
+
+  @Test
+  public void writesAHistoryRowForAProviderFailure() throws Exception {
+    // Acceptance criterion: a failed send is recorded as failed, never as sent.
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(500, "{}")).withMultiRecipientCapabilities();
+    InMemoryEmailSendLogStore sendLogStore = new InMemoryEmailSendLogStore();
+    TransactionalEmailService service = serviceWithHistory(new HistoryDocumentContract(), adapter,
+        new InMemoryEmailSafetyStore(), sendLogStore);
+
+    NeoResponse response = service.send("history-document-send", new JSONObject());
+
+    assertEquals(502, response.getHttpStatus());
+    assertEquals(1, sendLogStore.getHistoryRecords().size());
+    EmailSendHistoryRecord history = sendLogStore.getHistoryRecords().get(0);
+    assertEquals(TransactionalEmailService.STATUS_PROVIDER_FAILED, history.getStatus());
+    assertEquals("Transactional email provider rejected the request", history.getErrorMessage());
+    // The copy is still recorded: the operator has to see what the failed attempt would have sent.
+    assertEquals(HISTORY_SUBJECT, history.getSubject());
+  }
+
+  @Test
+  public void writesAHistoryRowForAThrottledAttempt() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}")).withMultiRecipientCapabilities();
+    InMemoryEmailSendLogStore sendLogStore = new InMemoryEmailSendLogStore();
+    TransactionalEmailService service = serviceWithHistory(new HistoryThrottleContract(), adapter,
+        new InMemoryEmailSafetyStore(), sendLogStore);
+
+    JSONObject command = new JSONObject();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "ABC123");
+
+    service.send("history-throttle-send", command);
+    NeoResponse throttled = service.send("history-throttle-send", command);
+
+    assertEquals(TransactionalEmailService.HTTP_TOO_MANY_REQUESTS, throttled.getHttpStatus());
+    assertEquals(2, sendLogStore.getHistoryRecords().size());
+    assertEquals(TransactionalEmailService.STATUS_SENT,
+        sendLogStore.getHistoryRecords().get(0).getStatus());
+    assertEquals(TransactionalEmailService.STATUS_THROTTLED,
+        sendLogStore.getHistoryRecords().get(1).getStatus());
+  }
+
+  @Test
+  public void writesAHistoryRowForASuppressedAttempt() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}")).withMultiRecipientCapabilities();
+    InMemoryEmailSafetyStore safetyStore = new InMemoryEmailSafetyStore();
+    safetyStore.suppressAddress("pm@example.com");
+    InMemoryEmailSendLogStore sendLogStore = new InMemoryEmailSendLogStore();
+    TransactionalEmailService service = serviceWithHistory(new HistoryDocumentContract(), adapter,
+        safetyStore, sendLogStore);
+
+    NeoResponse response = service.send("history-document-send", new JSONObject());
+
+    assertEquals(403, response.getHttpStatus());
+    assertFalse(adapter.wasSendCalled());
+    assertEquals(1, sendLogStore.getHistoryRecords().size());
+    assertEquals(TransactionalEmailService.STATUS_SUPPRESSED,
+        sendLogStore.getHistoryRecords().get(0).getStatus());
+  }
+
+  @Test
+  public void writesAHistoryRowForADuplicateAttempt() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}")).withMultiRecipientCapabilities();
+    InMemoryEmailSendLogStore sendLogStore = new InMemoryEmailSendLogStore();
+    TransactionalEmailService service = serviceWithHistory(new HistoryDocumentContract(), adapter,
+        new InMemoryEmailSafetyStore(), sendLogStore);
+
+    JSONObject command = new JSONObject();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "ABC123");
+    command.put(EmailContractCommandSupport.FIELD_IDEMPOTENCY_KEY, "history:ABC123:v1");
+
+    service.send("history-document-send", command);
+    NeoResponse duplicate = service.send("history-document-send", command);
+
+    assertEquals(200, duplicate.getHttpStatus());
+    assertEquals(1, adapter.getSendCount());
+    assertEquals(2, sendLogStore.getHistoryRecords().size());
+    assertEquals(TransactionalEmailService.STATUS_SENT,
+        sendLogStore.getHistoryRecords().get(0).getStatus());
+    assertEquals(TransactionalEmailService.STATUS_DUPLICATE,
+        sendLogStore.getHistoryRecords().get(1).getStatus());
+    assertEquals("history:ABC123:v1",
+        sendLogStore.getHistoryRecords().get(1).getIdempotencyKey());
+  }
+
+  @Test
+  public void writesOneHistoryRowPerAuditedOutcome() throws Exception {
+    // The two ledgers are written from the same choke point, so they can never disagree on how
+    // many attempts happened or on what each one ended as.
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}")).withMultiRecipientCapabilities();
+    InMemoryEmailSafetyStore safetyStore = new InMemoryEmailSafetyStore();
+    InMemoryEmailSendLogStore sendLogStore = new InMemoryEmailSendLogStore();
+    TransactionalEmailService service = serviceWithHistory(new HistoryThrottleContract(), adapter,
+        safetyStore, sendLogStore);
+
+    JSONObject command = new JSONObject();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "ABC123");
+    service.send("history-throttle-send", command);
+    service.send("history-throttle-send", command);
+
+    assertEquals(safetyStore.getAuditRecords().size(), sendLogStore.getHistoryRecords().size());
+    for (int index = 0; index < safetyStore.getAuditRecords().size(); index++) {
+      assertEquals(safetyStore.getAuditRecords().get(index).getStatus(),
+          sendLogStore.getHistoryRecords().get(index).getStatus());
+    }
+  }
+
+  @Test
+  public void writesNoHistoryRowForAContractThatDoesNotLogHistory() throws Exception {
+    // The account/auth family (invitation, reset password, login alert) inherits the interface
+    // default of false: its recipients are platform users and its copy carries single-use links,
+    // so it must never reach the readable table. The anti-abuse ledger is still written.
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}"));
+    InMemoryEmailSafetyStore safetyStore = new InMemoryEmailSafetyStore();
+    InMemoryEmailSendLogStore sendLogStore = new InMemoryEmailSendLogStore();
+    TransactionalEmailService service = serviceWithHistory(new FixtureContract(), adapter,
+        safetyStore, sendLogStore);
+
+    NeoResponse response = service.send("fixture-contract", new JSONObject());
+
+    assertEquals(200, response.getHttpStatus());
+    assertTrue(sendLogStore.getHistoryRecords().isEmpty());
+    assertEquals(1, safetyStore.getAuditRecords().size());
+    assertEquals(TransactionalEmailService.STATUS_SENT,
+        safetyStore.getAuditRecords().get(0).getStatus());
+  }
+
+  @Test
+  public void writesNoHistoryRowForANonLoggingContractThatFails() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(500, "{}"));
+    InMemoryEmailSendLogStore sendLogStore = new InMemoryEmailSendLogStore();
+    TransactionalEmailService service = serviceWithHistory(new FixtureContract(), adapter,
+        new InMemoryEmailSafetyStore(), sendLogStore);
+
+    NeoResponse response = service.send("fixture-contract", new JSONObject());
+
+    assertEquals(502, response.getHttpStatus());
+    assertTrue(sendLogStore.getHistoryRecords().isEmpty());
+  }
+
+  @Test
+  public void capturesTheOperatorsMessageBeforeItIsEscapedForHtml() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}")).withMultiRecipientCapabilities();
+    InMemoryEmailSendLogStore sendLogStore = new InMemoryEmailSendLogStore();
+    TransactionalEmailService service = serviceWithHistory(new HistoryDocumentContract(), adapter,
+        new InMemoryEmailSafetyStore(), sendLogStore);
+
+    JSONObject command = new JSONObject();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "ABC123");
+    command.put("messageEdits", new JSONObject().put("message", "Hola & <b>gracias</b>"));
+
+    service.send("history-document-send", command);
+
+    // What the operator typed, not the rendered multi-kilobyte HTML the provider received.
+    assertEquals("Hola & <b>gracias</b>",
+        sendLogStore.getHistoryRecords().get(0).getMessageBody());
+  }
+
+  @Test
+  public void recordsNoOperatorMessageForADefaultCopySend() throws Exception {
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}")).withMultiRecipientCapabilities();
+    InMemoryEmailSendLogStore sendLogStore = new InMemoryEmailSendLogStore();
+    TransactionalEmailService service = serviceWithHistory(new HistoryDocumentContract(), adapter,
+        new InMemoryEmailSafetyStore(), sendLogStore);
+
+    service.send("history-document-send", new JSONObject());
+
+    EmailSendHistoryRecord history = sendLogStore.getHistoryRecords().get(0);
+    assertNull(history.getMessageBody());
+    // The subject is still recorded, so the card is never empty.
+    assertEquals(HISTORY_SUBJECT, history.getSubject());
+  }
+
+  @Test
+  public void aFailingHistoryStoreNeverCostsTheSend() throws Exception {
+    // A history row is a convenience; the send and its anti-abuse audit row are not.
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}")).withMultiRecipientCapabilities();
+    InMemoryEmailSafetyStore safetyStore = new InMemoryEmailSafetyStore();
+    TransactionalEmailService service = serviceWithHistory(new HistoryDocumentContract(), adapter,
+        safetyStore, historyRecord -> {
+          throw new IllegalStateException("history table is unavailable");
+        });
+
+    NeoResponse response = service.send("history-document-send", new JSONObject());
+
+    assertEquals(200, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_SENT, responseData(response).getString("status"));
+    assertEquals(1, safetyStore.getAuditRecords().size());
+  }
+
   private static JSONObject responseData(NeoResponse response) throws JSONException {
     assertNotNull("Response body should not be null", response.getBody());
     return response.getBody().getJSONObject("response").getJSONObject("data");
@@ -639,6 +878,13 @@ public class TransactionalEmailServiceTest {
       EmailObservabilitySink observabilitySink) {
     return new TransactionalEmailService(new SingleContractRegistry(contract), adapter,
         safetyStore, observabilitySink);
+  }
+
+  private static TransactionalEmailService serviceWithHistory(EmailContract contract,
+      FakeProviderAdapter adapter, InMemoryEmailSafetyStore safetyStore,
+      EmailSendLogStore sendLogStore) {
+    return new TransactionalEmailService(new SingleContractRegistry(contract), adapter,
+        safetyStore, sendLogStore, new LogEmailObservabilitySink());
   }
 
   private static NeoResponse sendAfterStart(TransactionalEmailService service, JSONObject command,
@@ -908,6 +1154,68 @@ public class TransactionalEmailServiceTest {
         EmailRecipientResolution recipient) {
       return EmailContractResolution.ready(new EmailProviderRequest(recipient.getRecipientSet(),
           "fixture-template", new JSONObject(), null));
+    }
+  }
+
+  /**
+   * A document-send contract as far as the history gate is concerned: it opts in, declares a
+   * spec, and puts a subject and a download link in the provider request's template data exactly
+   * the way {@code DefaultDocumentSendEmailContract} does.
+   */
+  private static class HistoryDocumentContract implements EmailContract {
+    @Override
+    public String getName() {
+      return "history-document-send";
+    }
+
+    @Override
+    public boolean logsSendHistory() {
+      return true;
+    }
+
+    @Override
+    public String getSpecName() {
+      return "sales-invoice";
+    }
+
+    @Override
+    public EmailAuthorizationResult authorize(EmailContractCommand command) {
+      return EmailAuthorizationResult.allowed();
+    }
+
+    @Override
+    public EmailRecipientResolution resolveRecipient(EmailContractCommand command) {
+      return EmailRecipientResolution.serverResolved(EmailRecipientSet.of(
+          Arrays.asList("customer@example.com", "billing@example.com"),
+          Arrays.asList("pm@example.com")));
+    }
+
+    @Override
+    public EmailContractResolution resolve(EmailContractCommand command,
+        EmailRecipientResolution recipient) {
+      try {
+        JSONObject data = new JSONObject();
+        data.put("subject", HISTORY_SUBJECT);
+        data.put("download_link", HISTORY_DOWNLOAD_LINK);
+        data.put("body", "<html><body>rendered by the layout</body></html>");
+        return EmailContractResolution.ready(new EmailProviderRequest(recipient.getRecipientSet(),
+            "custom", data, null));
+      } catch (JSONException e) {
+        throw new IllegalStateException("Could not build history fixture email data", e);
+      }
+    }
+  }
+
+  private static class HistoryThrottleContract extends HistoryDocumentContract {
+    @Override
+    public String getName() {
+      return "history-throttle-send";
+    }
+
+    @Override
+    public EmailDeliveryPolicy deliveryPolicy(EmailContractCommand command,
+        EmailRecipientResolution recipient, EmailProviderRequest providerRequest) {
+      return EmailDeliveryPolicy.of(null, Arrays.asList(EmailThrottleRule.perRecord(1, 60)));
     }
   }
 
