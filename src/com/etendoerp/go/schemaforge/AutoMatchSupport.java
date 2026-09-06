@@ -59,6 +59,9 @@ final class AutoMatchSupport {
   private static final String KEY_DATE = "date";
   private static final String KEY_AMOUNT = "amount";
   private static final String KEY_IS_NEW = "isNew";
+  /** Movement description and contact, so a suggestion row is recognisable by more than its number. */
+  private static final String KEY_DESCRIPTION = "description";
+  private static final String KEY_PARTNER_NAME = "partnerName";
   private static final String KEY_GROUP_KEY = "groupKey";
   private static final String KEY_STATEMENT_LINE = "statementLine";
   private static final String KEY_OPERATIONS = "operations";
@@ -274,6 +277,35 @@ final class AutoMatchSupport {
     return nullSafe(t.getDepositAmount()).subtract(nullSafe(t.getPaymentAmount()));
   }
 
+  /**
+   * Whether the transaction differs from the line at all — in amount or in calendar day. A
+   * candidate that matches both exactly is a plain suggestion; only a real deviation is a
+   * "Con diferencia" match, and only an AMOUNT deviation ever posts an accounting entry.
+   */
+  static boolean deviatesFrom(FIN_BankStatementLine line, FIN_FinaccTransaction txn) {
+    BigDecimal target = ReconciliationSupport.nullSafe(line.getCramount())
+        .subtract(ReconciliationSupport.nullSafe(line.getDramount()));
+    if (target.subtract(txnSignedAmount(txn)).signum() != 0) {
+      return true;
+    }
+    return NearMatchSupport.dayDistance(line.getTransactionDate(), txn.getTransactionDate()) != 0;
+  }
+
+  /**
+   * Display name of the transaction's business partner — its own, else the payment's. Same
+   * precedence {@link #partnerKey} uses to GROUP by partner, kept in step so a row cannot be
+   * grouped under one partner and labelled with another.
+   */
+  private static String partnerNameOf(FIN_FinaccTransaction t) {
+    if (t.getBusinessPartner() != null) {
+      return StringUtils.trimToEmpty(t.getBusinessPartner().getName());
+    }
+    if (t.getFinPayment() != null && t.getFinPayment().getBusinessPartner() != null) {
+      return StringUtils.trimToEmpty(t.getFinPayment().getBusinessPartner().getName());
+    }
+    return "";
+  }
+
   private static String partnerKey(FIN_FinaccTransaction t) {
     if (t.getBusinessPartner() != null) {
       return "bp:" + t.getBusinessPartner().getId();
@@ -413,6 +445,17 @@ final class AutoMatchSupport {
         ? new Timestamp(txn.getTransactionDate().getTime()) : null));
     j.put("documentNo",
         txn.getFinPayment() != null ? StringUtils.trimToEmpty(txn.getFinPayment().getDocumentNo()) : "");
+    // A payment number alone ("1000181") identifies nothing to the person approving the batch. The
+    // description is what the Movimientos list shows and what makes the row recognisable
+    // ("Factura Nº : 10000215."); the partner name is the same one the candidates panel displays.
+    // Falls back to the payment's description because a payment-backed transaction usually carries
+    // it there rather than on the transaction itself.
+    String description = StringUtils.trimToEmpty(txn.getDescription());
+    if (StringUtils.isBlank(description) && txn.getFinPayment() != null) {
+      description = StringUtils.trimToEmpty(txn.getFinPayment().getDescription());
+    }
+    j.put(KEY_DESCRIPTION, description);
+    j.put(KEY_PARTNER_NAME, partnerNameOf(txn));
     j.put(KEY_AMOUNT, nullSafe(txn.getDepositAmount()).subtract(nullSafe(txn.getPaymentAmount())));
     j.put(KEY_IS_NEW, false);
     return j;
@@ -528,10 +571,15 @@ final class AutoMatchSupport {
         return STATE_SUGGESTED;
       }
       // The only path that applies the account's amount/date tolerance to a 1:1 match. Runs after
-      // the exact-match branches so a real suggestion is never downgraded to a difference.
-      if (NearMatchSupport.findNearMatch(account.getId(), line, usedTxnIds, excludedTxns,
-          NearMatchSupport.differenceTolerance(target, amtTolPct), dateTolDays) != null) {
-        return STATE_DIFFERENCE;
+      // the exact-match branches so a real suggestion is never downgraded to a difference — and it
+      // can itself return an EXACT hit that Core's narrower pass missed, which is a suggestion too.
+      // Mirrors matchFallback's own labelling, or the left panel's badge would contradict the
+      // automatch modal's for the very same line.
+      FIN_FinaccTransaction nearMatch = NearMatchSupport.findNearMatch(account.getId(), line,
+          usedTxnIds, excludedTxns,
+          NearMatchSupport.differenceTolerance(target, amtTolPct), dateTolDays);
+      if (nearMatch != null) {
+        return deviatesFrom(line, nearMatch) ? STATE_DIFFERENCE : STATE_SUGGESTED;
       }
     }
     String desc = StringUtils.trimToEmpty(line.getDescription());
@@ -644,14 +692,31 @@ final class AutoMatchSupport {
       Set<String> usedTxnIds, List<FIN_FinaccTransaction> excludedTxns,
       List<MatchRuleEngine.Rule> rules, JSONArray groups)
       throws JSONException {
+    // canPostDifferences is moot at 0%: differenceTolerance already collapses to "exact amount
+    // only", so no amount deviation can be proposed either way.
     return matchFallback(accountId, line, usedTxnIds, excludedTxns, rules, groups,
-        DEFAULT_DATE_TOL_DAYS, BigDecimal.ZERO);
+        DEFAULT_DATE_TOL_DAYS, BigDecimal.ZERO, true);
   }
 
   static int[] matchFallback(String accountId, FIN_BankStatementLine line,
       Set<String> usedTxnIds, List<FIN_FinaccTransaction> excludedTxns,
       List<MatchRuleEngine.Rule> rules, JSONArray groups,
       int dateTolDays, BigDecimal amtTolPct) throws JSONException {
+    return matchFallback(accountId, line, usedTxnIds, excludedTxns, rules, groups,
+        dateTolDays, amtTolPct, true);
+  }
+
+  /**
+   * @param canPostDifferences whether the account has a GL Item Difference configured. When it does
+   *     not, an AMOUNT deviation is not proposed at all: applying it would fail, and a suggestion
+   *     the user cannot accept is worse than no suggestion. A date-only deviation posts nothing and
+   *     is always offered — which is why this narrows the tolerance instead of dropping the group
+   *     afterwards, so the candidate is never claimed out of a later line's reach.
+   */
+  static int[] matchFallback(String accountId, FIN_BankStatementLine line,
+      Set<String> usedTxnIds, List<FIN_FinaccTransaction> excludedTxns,
+      List<MatchRuleEngine.Rule> rules, JSONArray groups,
+      int dateTolDays, BigDecimal amtTolPct, boolean canPostDifferences) throws JSONException {
     BigDecimal target = ReconciliationSupport.nullSafe(line.getCramount())
         .subtract(ReconciliationSupport.nullSafe(line.getDramount()));
     BigDecimal amtTol = signalGroupTolerance(target, amtTolPct);
@@ -667,15 +732,26 @@ final class AutoMatchSupport {
     // engine — so this preview proposes groups in exactly the order classifyPendingLine assigns
     // states. Anywhere else and a line with both a 1:N group and a near match would be counted
     // "suggested" in the left panel while the automatch offered it as a difference.
+    // `null` is findNearMatch's own "exact amount only", so an account with nowhere to post the
+    // leftover still gets its date-only matches and never sees one it could not apply.
+    BigDecimal nearMatchTolerance = canPostDifferences
+        ? NearMatchSupport.differenceTolerance(target, amtTolPct)
+        : null;
     FIN_FinaccTransaction nearMatch = NearMatchSupport.findNearMatch(accountId, line,
-        usedTxnIds, excludedTxns, NearMatchSupport.differenceTolerance(target, amtTolPct),
-        dateTolDays);
+        usedTxnIds, excludedTxns, nearMatchTolerance, dateTolDays);
     if (nearMatch != null) {
-      // findNearMatch already claimed it in usedTxnIds/excludedTxns. WEAK is Core's own vocabulary,
-      // carried for diagnostics only; KEY_NEAR_MATCH is the flag consumers read — see its javadoc
-      // for why the non-zero `difference` alone cannot play that role.
-      JSONObject nearMatchGroup = buildStandardGroup(line, nearMatch, FIN_MatchedTransaction.WEAK);
-      nearMatchGroup.put(KEY_NEAR_MATCH, true);
+      // findNearMatch also returns EXACT hits now (same amount, same day) — it has to, or the best
+      // candidate stays invisible whenever Core's narrower pass 1 misses it. Such a hit is not a
+      // difference, so it is labelled as the plain suggestion it is: no KEY_NEAR_MATCH, no red
+      // badge, no difference row, and STRONG rather than Core's WEAK diagnostics vocabulary.
+      boolean deviates = deviatesFrom(line, nearMatch);
+      // findNearMatch already claimed it in usedTxnIds/excludedTxns. KEY_NEAR_MATCH is the flag
+      // consumers read — see its javadoc for why a non-zero `difference` alone cannot play that role.
+      JSONObject nearMatchGroup = buildStandardGroup(line, nearMatch,
+          deviates ? FIN_MatchedTransaction.WEAK : FIN_MatchedTransaction.STRONG);
+      if (deviates) {
+        nearMatchGroup.put(KEY_NEAR_MATCH, true);
+      }
       groups.put(nearMatchGroup);
       // An AMOUNT deviation also creates the GL-item movement that absorbs the leftover
       // (ReconciliationDifferenceSupport.applyInlineDifference), so it counts on both sides —

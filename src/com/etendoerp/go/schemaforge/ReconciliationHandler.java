@@ -955,6 +955,11 @@ public class ReconciliationHandler implements NeoHandler {
     BigDecimal[] autoTols = loadTolerances(accountId);
     int autoDateTolDays = autoTols[0].intValue();
     BigDecimal autoAmtTolPct = autoTols[1];
+    // Without a GL Item Difference there is nowhere to post a leftover, so an amount deviation is
+    // not proposed at all — a mass run cannot ask for an account line by line, and offering a
+    // suggestion that is guaranteed to fail on apply is worse than not offering it.
+    boolean canPostDifferences = StringUtils.isNotBlank(
+        ReconciliationDifferenceSupport.effectiveGlItemId(null, account));
 
     // Collect all pending lines for this account.
     List<FIN_BankStatementLine> pendingLines = loadPendingLines(accountId);
@@ -982,7 +987,7 @@ public class ReconciliationHandler implements NeoHandler {
         opsToLink++;
       } else {
         int[] delta = AutoMatchSupport.matchFallback(accountId, line, usedTxnIds, excludedTxns,
-            rules, groups, autoDateTolDays, autoAmtTolPct);
+            rules, groups, autoDateTolDays, autoAmtTolPct, canPostDifferences);
         opsToLink += delta[0];
         willCreate += delta[1];
       }

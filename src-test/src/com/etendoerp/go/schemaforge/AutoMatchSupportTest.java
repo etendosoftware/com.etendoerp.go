@@ -84,6 +84,14 @@ public class AutoMatchSupportTest {
 
   private static final BigDecimal TOL = new BigDecimal("0.01");
 
+  /** Wire keys {@code txnToJson} emits; the production constants are private to the class. */
+  private static final String KEY_DESCRIPTION = "description";
+  private static final String KEY_PARTNER_NAME = "partnerName";
+  private static final String KEY_MATCH_LEVEL = "matchLevel";
+  private static final String KEY_OPERATIONS = "operations";
+  /** Filler text for fixtures whose description is not what the test is about. */
+  private static final String ANY_DESCRIPTION = "desc";
+
   /** Builds a mock transaction with a deposit-minus-payment net amount and a signal key. */
   private static FIN_FinaccTransaction txn(String id, String amount, String key) {
     FIN_FinaccTransaction t = mock(FIN_FinaccTransaction.class);
@@ -762,7 +770,7 @@ public class AutoMatchSupportTest {
     JSONObject json = AutoMatchSupport.lineToJson(line);
 
     assertEquals("L1", json.getString("id"));
-    assertEquals("Bank fee", json.getString("description"));
+    assertEquals("Bank fee", json.getString(KEY_DESCRIPTION));
     assertEquals("REF-1", json.getString("referenceNo"));
     assertEquals(0, new BigDecimal("100.00").compareTo(new BigDecimal(json.getString("amount"))));
     // Under the old UTC formatter this came out as 2026-09-02T00:43:02Z in UTC-3 — the next
@@ -784,7 +792,7 @@ public class AutoMatchSupportTest {
     JSONObject json = AutoMatchSupport.lineToJson(line);
 
     assertEquals("", json.getString("date"));
-    assertEquals("", json.getString("description"));
+    assertEquals("", json.getString(KEY_DESCRIPTION));
     assertEquals(0, new BigDecimal("-40.00").compareTo(new BigDecimal(json.getString("amount"))));
   }
 
@@ -822,6 +830,94 @@ public class AutoMatchSupportTest {
 
     assertEquals("", json.getString("documentNo"));
     assertEquals(0, new BigDecimal("-20.00").compareTo(new BigDecimal(json.getString("amount"))));
+  }
+
+  // ---------------------------------------------------------------------------
+  // txnToJson — description and partnerName (ETP-4965 round 3)
+  //
+  // A payment number alone ("1000181") identifies nothing to the person approving an automatch
+  // batch: the suggestion row has to carry what the Movimientos list shows. Both fields are always
+  // emitted — never absent — so a consumer can read them unconditionally.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * The transaction's OWN description and business partner win when it has them, and both are
+   * trimmed. The partner precedence deliberately mirrors {@code partnerKey}'s, so a row cannot be
+   * grouped under one partner and labelled with another.
+   */
+  @Test
+  public void testTxnToJsonPrefersTheTransactionsOwnDescriptionAndPartner() throws Exception {
+    FIN_Payment payment = paymentWith(" PAY-1 ", " the payment's own description ",
+        partnerNamed("Payment Partner SL"));
+    FIN_FinaccTransaction t =
+        describedTxn("T-DESC", "  Factura 10000215.  ", partnerNamed("  ACME Corp  "), payment);
+
+    JSONObject json = AutoMatchSupport.txnToJson(t);
+
+    assertEquals("the transaction's own text wins over the payment's",
+        "Factura 10000215.", json.getString(KEY_DESCRIPTION));
+    assertEquals("and so does its own partner", "ACME Corp", json.getString(KEY_PARTNER_NAME));
+  }
+
+  /**
+   * A payment-backed movement usually carries its text on the PAYMENT rather than on itself, so a
+   * blank transaction description falls back to the payment's. Blank, not just null: an
+   * all-whitespace description is exactly as unhelpful in the UI as a missing one.
+   */
+  @Test
+  public void testTxnToJsonFallsBackToThePaymentsDescriptionWhenTheTransactionsIsBlank()
+      throws Exception {
+    FIN_Payment payment = paymentWith("PAY-2", "  Cobro de ACME  ", null);
+    FIN_FinaccTransaction t = describedTxn("T-BLANK", "   ", null, payment);
+
+    JSONObject json = AutoMatchSupport.txnToJson(t);
+
+    assertEquals("Cobro de ACME", json.getString(KEY_DESCRIPTION));
+  }
+
+  /**
+   * Neither side has a description: the key is still emitted, as an empty string. A consumer must
+   * never have to distinguish "absent" from "empty" — and a null here would print "null" in the
+   * suggestion row.
+   */
+  @Test
+  public void testTxnToJsonEmptyDescriptionWhenNeitherSideHasOne() throws Exception {
+    FIN_FinaccTransaction withPayment =
+        describedTxn("T-NONE-1", null, null, paymentWith("PAY-3", null, null));
+    FIN_FinaccTransaction bare = describedTxn("T-NONE-2", null, null, null);
+
+    assertTrue(AutoMatchSupport.txnToJson(withPayment).has(KEY_DESCRIPTION));
+    assertEquals("", AutoMatchSupport.txnToJson(withPayment).getString(KEY_DESCRIPTION));
+    assertEquals("a transaction with no payment at all must not NPE either",
+        "", AutoMatchSupport.txnToJson(bare).getString(KEY_DESCRIPTION));
+  }
+
+  /**
+   * The partner falls back to the PAYMENT's when the transaction carries none — the same precedence
+   * {@code partnerKey} uses for 1:N grouping.
+   */
+  @Test
+  public void testTxnToJsonFallsBackToThePaymentsPartnerWhenTheTransactionHasNone()
+      throws Exception {
+    FIN_Payment payment =
+        paymentWith("PAY-4", ANY_DESCRIPTION, partnerNamed(" Payment Partner SL "));
+    FIN_FinaccTransaction t = describedTxn("T-BP-VIA-PAY", ANY_DESCRIPTION, null, payment);
+
+    assertEquals("Payment Partner SL",
+        AutoMatchSupport.txnToJson(t).getString(KEY_PARTNER_NAME));
+  }
+
+  /** No partner on either side: an empty string, and the key is still present. */
+  @Test
+  public void testTxnToJsonEmptyPartnerNameWhenNeitherSideHasOne() throws Exception {
+    FIN_FinaccTransaction withPayment =
+        describedTxn("T-NOBP-1", ANY_DESCRIPTION, null,
+            paymentWith("PAY-5", ANY_DESCRIPTION, null));
+    FIN_FinaccTransaction bare = describedTxn("T-NOBP-2", ANY_DESCRIPTION, null, null);
+
+    assertTrue(AutoMatchSupport.txnToJson(withPayment).has(KEY_PARTNER_NAME));
+    assertEquals("", AutoMatchSupport.txnToJson(withPayment).getString(KEY_PARTNER_NAME));
+    assertEquals("", AutoMatchSupport.txnToJson(bare).getString(KEY_PARTNER_NAME));
   }
 
   // ---------------------------------------------------------------------------
@@ -1334,6 +1430,253 @@ public class AutoMatchSupportTest {
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-4965 round 3 — the reported 14,52 case, and the labelling that follows from it
+  //
+  // Reported: a 14,52 statement line dated 04/09 was matched against a 14,52 movement dated 01/09
+  // while TWO 14,52 movements dated 04/09 sat unused. Cause: findNearMatch excluded the exact-exact
+  // candidate outright, on the assumption that Core's pass 1 had already claimed it. Core's own
+  // criteria are narrower, so when it does not match, the BEST candidate was invisible and the
+  // line silently got a worse one.
+  //
+  // Two consequences follow, and both are asserted below:
+  //   1. eligibility is the tolerance alone; RANKING picks the winner (gap → date → oldest);
+  //   2. the label is read off the candidate that won, via deviatesFrom — so an exact hit reached
+  //      through this path is a plain suggestion, not a "Con diferencia".
+  //
+  // (2) has to hold in BOTH places that label a line, or the left panel's badge contradicts the
+  // automatch modal's for the very same line. That is what the testClassifyAndMatchFallbackAgree*
+  // pair pins: one fixture, both readers, one verdict.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /** The reported amount: all three candidates carry it, so only the date can rank them. */
+  private static final String REPORTED_AMOUNT = "14.52";
+  private static final String T_SEP01 = "T-01-09";
+  private static final String T_SEP04_EARLY = "T-04-09-08H";
+  private static final String T_SEP04_LATE = "T-04-09-20H";
+
+  /**
+   * <b>THE regression guard for the whole of round 3</b>, end to end through
+   * {@link AutoMatchSupport#matchFallback} — the method that builds what the automatch modal shows.
+   *
+   * <p>A 14,52 line of 04/09 against three 14,52 movements: one of 01/09 (inside the 3-day window)
+   * and two of 04/09. The 04/09 movements are strictly better — zero date distance — and between
+   * them the OLDER one wins. Under the round-1 code all three had a zero amount gap AND the two
+   * same-day ones had a zero date distance too, so all three were rejected as "not a reportable
+   * deviation" except the 01/09 one, which is exactly the wrong answer the user reported.
+   *
+   * <p>The pool order defeats both naive readings at once: the 01/09 movement is offered FIRST (so
+   * "keep the first eligible hit" reproduces the reported bug) and the LATER 04/09 movement
+   * precedes the earlier one (so "keep the first same-day hit" picks the wrong one of the two).
+   * The failure message names the date that was actually picked, because that is the only thing
+   * that tells the two wrong answers apart.
+   *
+   * @throws Exception if the DAL stubbing or the JSON assertions fail
+   */
+  @Test
+  public void testReportedCasePicksTheOlderSameDayMovementNotTheThreeDayOldOne() throws Exception {
+    Date lineDate = dayAt(2026, 9, 4, 12);
+    FIN_BankStatementLine line = datedLine("L-14-52", REPORTED_AMOUNT, NO_DEBIT, lineDate);
+    FIN_FinaccTransaction sep01 = nearTxn(T_SEP01, REPORTED_AMOUNT, dayAt(2026, 9, 1, 15));
+    FIN_FinaccTransaction sep04Early =
+        nearTxn(T_SEP04_EARLY, REPORTED_AMOUNT, dayAt(2026, 9, 4, 8));
+    FIN_FinaccTransaction sep04Late = nearTxn(T_SEP04_LATE, REPORTED_AMOUNT, dayAt(2026, 9, 4, 20));
+
+    Set<String> usedTxnIds = new HashSet<>();
+    List<FIN_FinaccTransaction> excludedTxns = new java.util.ArrayList<>();
+    JSONArray groups = new JSONArray();
+
+    try (MockedStatic<OBDal> obDal =
+        mockUnreconciledPool(Arrays.asList(sep01, sep04Late, sep04Early))) {
+      int[] delta = AutoMatchSupport.matchFallback(NEAR_ACC, line, usedTxnIds, excludedTxns,
+          Collections.emptyList(), groups, DATE_TOL_DAYS, PCT_FIVE);
+
+      assertEquals("exactly one group is proposed for the line", 1, groups.length());
+      JSONObject group = groups.getJSONObject(0);
+      JSONObject op = group.getJSONArray(KEY_OPERATIONS).getJSONObject(0);
+
+      assertEquals("the 14,52 line of 04/09 was matched against the movement dated "
+              + op.getString("date") + ", but the OLDER of the two 04/09 movements must win",
+          T_SEP04_EARLY, op.getString("id"));
+      assertFalse("an exact hit deviates in nothing, so the group carries no nearMatch flag",
+          group.has(AutoMatchSupport.KEY_NEAR_MATCH));
+      assertEquals("nor Core's WEAK diagnostics vocabulary",
+          FIN_MatchedTransaction.STRONG, group.getString(KEY_MATCH_LEVEL));
+      assertEquals("one operation to link", 1, delta[0]);
+      assertEquals("and nothing to create — there is no leftover to post", 0, delta[1]);
+      assertTrue("the winner is claimed by id", usedTxnIds.contains(T_SEP04_EARLY));
+      assertTrue("and fed back to Core's matcher", excludedTxns.contains(sep04Early));
+    }
+  }
+
+  /**
+   * The exact hit as a delta, isolated from the ranking: one candidate, no deviation at all →
+   * {@code {1, 0}}, no {@code nearMatch} key, STRONG. The third row of the delta matrix, whose
+   * other two rows ({@code {1, 1}} for an amount deviation, {@code {1, 0}} for a date-only one) are
+   * asserted just above.
+   *
+   * @throws Exception if the DAL stubbing or the JSON assertions fail
+   */
+  @Test
+  public void testMatchFallbackExactHitIsAPlainSuggestionAndCreatesNothing() throws Exception {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-FB-EXACT", LINE_CREDIT, NO_DEBIT, today);
+    FIN_FinaccTransaction exact = nearTxn(T_NEAR, LINE_CREDIT, today);
+
+    Set<String> usedTxnIds = new HashSet<>();
+    List<FIN_FinaccTransaction> excludedTxns = new java.util.ArrayList<>();
+    JSONArray groups = new JSONArray();
+
+    try (MockedStatic<OBDal> obDal = mockUnreconciledPool(Collections.singletonList(exact))) {
+      int[] delta = AutoMatchSupport.matchFallback(NEAR_ACC, line, usedTxnIds, excludedTxns,
+          Collections.emptyList(), groups, DATE_TOL_DAYS, PCT_FIVE);
+
+      assertEquals("the exact hit links one operation", 1, delta[0]);
+      assertEquals("and creates nothing", 0, delta[1]);
+      JSONObject group = groups.getJSONObject(0);
+      assertFalse(group.has(AutoMatchSupport.KEY_NEAR_MATCH));
+      assertEquals(FIN_MatchedTransaction.STRONG, group.getString(KEY_MATCH_LEVEL));
+      assertEquals("no leftover travels on the group", 0, BigDecimal.ZERO
+          .compareTo(new BigDecimal(group.getString(AutoMatchSupport.STATE_DIFFERENCE))));
+      assertTrue(usedTxnIds.contains(T_NEAR));
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // deviatesFrom — the single predicate both labelling paths read
+  // ---------------------------------------------------------------------------
+
+  /** A 26.62 movement on the line's own date deviates: 0.38 is a real amount gap. */
+  @Test
+  public void testDeviatesFromIsTrueForAnAmountOnlyDeviation() {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-DEV-AMT", LINE_CREDIT, NO_DEBIT, today);
+
+    assertTrue(AutoMatchSupport.deviatesFrom(line, nearTxn(T_NEAR, NEAR_AMOUNT, today)));
+  }
+
+  /**
+   * An exact amount two calendar days away deviates too. It posts nothing when applied — that is a
+   * separate question, decided by the group's {@code difference} — but the match is still not a
+   * plain suggestion, so the badge must say so.
+   */
+  @Test
+  public void testDeviatesFromIsTrueForADateOnlyDeviation() {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-DEV-DATE", LINE_CREDIT, NO_DEBIT, today);
+
+    assertTrue(AutoMatchSupport.deviatesFrom(line,
+        nearTxn(T_NEAR, LINE_CREDIT, daysFrom(today, -2))));
+  }
+
+  /** Both axes off at once is still one boolean: deviating. */
+  @Test
+  public void testDeviatesFromIsTrueWhenBothAxesDeviate() {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-DEV-BOTH", LINE_CREDIT, NO_DEBIT, today);
+
+    assertTrue(AutoMatchSupport.deviatesFrom(line,
+        nearTxn(T_NEAR, NEAR_AMOUNT, daysFrom(today, 2))));
+  }
+
+  /**
+   * Neither axis deviates — the case the whole round-3 change exists to let through. Asserted
+   * twice: once on identical timestamps, and once on two DIFFERENT times of the SAME calendar day.
+   * The date axis is counted in calendar days, and a millisecond reading sneaking back in here
+   * would repaint every imported statement line as "Con diferencia".
+   */
+  @Test
+  public void testDeviatesFromIsFalseWhenNeitherAxisDeviates() {
+    Date today = new Date();
+    FIN_BankStatementLine sameInstant = datedLine("L-NODEV", LINE_CREDIT, NO_DEBIT, today);
+    assertFalse(AutoMatchSupport.deviatesFrom(sameInstant, nearTxn(T_NEAR, LINE_CREDIT, today)));
+
+    FIN_BankStatementLine afternoon =
+        datedLine("L-NODEV-TIME", LINE_CREDIT, NO_DEBIT, dayAt(2026, 8, 28, 13));
+    assertFalse("13:00 and 00:00 of one calendar day are not a date deviation",
+        AutoMatchSupport.deviatesFrom(afternoon,
+            nearTxn(T_NEAR, LINE_CREDIT, dayAt(2026, 8, 28, 0))));
+  }
+
+  // ---------------------------------------------------------------------------
+  // classifyPendingLine <-> matchFallback must label the same pair the same way
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Both labelling paths over ONE fixture. {@code classifyPendingLine} paints the left-panel badge
+   * and {@code matchFallback} builds the automatch modal's group; they reach the near match through
+   * different code and must agree, or the same line reads "Sugerido" in one place and "Con
+   * diferencia" in the other.
+   *
+   * <p>Fresh accumulators per call on purpose: each reader is asked about the line independently,
+   * which is what happens in production (the panel is built by one request and the preview by
+   * another).
+   *
+   * @return the state {@code classifyPendingLine} assigned; the group {@code matchFallback}
+   *     proposed is appended to {@code groups}
+   * @throws Exception if the DAL stubbing or the group building fails
+   */
+  private static String classifyAndPreview(FIN_BankStatementLine line,
+      List<FIN_FinaccTransaction> pool, JSONArray groups) throws Exception {
+    try (MockedConstruction<FIN_MatchingTransaction> mc = mockNoStandardMatch();
+        MockedStatic<OBDal> obDal = mockUnreconciledPool(pool)) {
+      String state = AutoMatchSupport.classifyPendingLine(nearAccount(), line,
+          Collections.emptyList(), DATE_TOL_DAYS, PCT_FIVE, new HashSet<>(),
+          new java.util.ArrayList<>());
+      AutoMatchSupport.matchFallback(NEAR_ACC, line, new HashSet<>(), new java.util.ArrayList<>(),
+          Collections.emptyList(), groups, DATE_TOL_DAYS, PCT_FIVE);
+      return state;
+    }
+  }
+
+  /**
+   * Agreement, exact hit: {@code matchFallback} emits NO {@code nearMatch} flag, so
+   * {@code classifyPendingLine} must say {@code suggested}. Before round 3 the classifier returned
+   * {@code difference} for anything the near-match pass found, whatever it found — which is how a
+   * badge could contradict the modal it is supposed to summarise.
+   *
+   * @throws Exception if the DAL stubbing or the JSON assertions fail
+   */
+  @Test
+  public void testClassifyAndMatchFallbackAgreeOnAnExactHit() throws Exception {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-AGREE-EXACT", LINE_CREDIT, NO_DEBIT, today);
+    JSONArray groups = new JSONArray();
+
+    String state =
+        classifyAndPreview(line, Collections.singletonList(nearTxn(T_NEAR, LINE_CREDIT, today)),
+            groups);
+
+    assertFalse("the modal offers this as a plain suggestion",
+        groups.getJSONObject(0).has(AutoMatchSupport.KEY_NEAR_MATCH));
+    assertEquals("so the left panel must not badge it as a difference",
+        AutoMatchSupport.STATE_SUGGESTED, state);
+  }
+
+  /**
+   * Agreement, amount deviation: {@code matchFallback} DOES flag it, so
+   * {@code classifyPendingLine} must say {@code difference}. The negative twin of the test above —
+   * together they pin the biconditional rather than one direction of it, so "always suggested"
+   * cannot pass both.
+   *
+   * @throws Exception if the DAL stubbing or the JSON assertions fail
+   */
+  @Test
+  public void testClassifyAndMatchFallbackAgreeOnAnAmountDeviation() throws Exception {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-AGREE-AMT", LINE_CREDIT, NO_DEBIT, today);
+    JSONArray groups = new JSONArray();
+
+    String state =
+        classifyAndPreview(line, Collections.singletonList(nearTxn(T_NEAR, NEAR_AMOUNT, today)),
+            groups);
+
+    assertTrue("the modal flags this one as a near match",
+        groups.getJSONObject(0).optBoolean(AutoMatchSupport.KEY_NEAR_MATCH, false));
+    assertEquals("so the left panel must badge it as a difference",
+        AutoMatchSupport.STATE_DIFFERENCE, state);
+  }
+
   // ---------------------------------------------------------------------------
   // signalGroupTolerance (formerly computeAmountTolerance)
   // ---------------------------------------------------------------------------
@@ -1526,6 +1869,12 @@ public class AutoMatchSupportTest {
   //
   // The two tolerances are INDEPENDENT: amount 0% only collapses the third and fourth rows onto
   // "exact amount", it does not switch the second row off. See the pair of 0% tests below.
+  //
+  // ROUND 3 changed how row 1 is REACHED, not what it says. The near-match pass used to skip the
+  // exact-exact candidate entirely, so row 1 could only ever come from Core's pass 1; when Core
+  // missed the pair (its criteria are narrower) the line silently got a worse candidate instead.
+  // The pass now returns exact hits too and the state is read off deviatesFrom, so row 1 has a
+  // second, equally valid route into it — see the testClassifyAndMatchFallbackAgree* pair.
   // ═══════════════════════════════════════════════════════════════════════════
 
   private static final String LINE_CREDIT = "27.00";
@@ -1622,11 +1971,14 @@ public class AutoMatchSupportTest {
 
   /**
    * Matrix row 1 — no deviation at all is a SUGGESTION, not a difference. Core's standard algorithm
-   * finds the pair, so the classifier reports it as suggested and never reaches the near-match pass.
+   * finds the pair here, so the classifier reports it as suggested and never reaches the near-match
+   * pass.
    *
-   * <p>The other half of this row — that {@link NearMatchSupport#findNearMatch} explicitly REJECTS
-   * the exact-exact case, the single exclusion that separates the first two rows of the matrix —
-   * is asserted in {@code NearMatchSupportTest#testExactAmountExactDateIsNeverANearMatch}.
+   * <p>Round 3 added the OTHER way into this row: when Core does NOT find the pair, the near-match
+   * pass returns it and the classifier reads {@link AutoMatchSupport#deviatesFrom} to label it —
+   * still {@code suggested}. That route is asserted in
+   * {@link #testClassifyAndMatchFallbackAgreeOnAnExactHit}; the search-level half is
+   * {@code NearMatchSupportTest#testExactAmountExactDateIsStillReturnedSoRankingCanSeeIt}.
    */
   @Test
   public void testExactAmountExactDateIsSuggested() {
@@ -1892,8 +2244,8 @@ public class AutoMatchSupportTest {
    * side and midnight on the movement side.
    *
    * <p>The unit underneath ({@link NearMatchSupport#dayDistance} returning 0, and the search
-   * refusing to claim the pair) is asserted in
-   * {@code NearMatchSupportTest#testSameCalendarDayDifferentTimesExactAmountIsNeverANearMatch}.
+   * treating the pair as non-deviating) is asserted in
+   * {@code NearMatchSupportTest#testSameCalendarDayDifferentTimesExactAmountDeviatesInNothing}.
    * This test is the half that made the bug visible: the STATE the left panel would have shown.
    */
   @Test
@@ -1903,15 +2255,20 @@ public class AutoMatchSupportTest {
     FIN_BankStatementLine line = datedLine("L-SAMEDAY-EXACT", LINE_CREDIT, NO_DEBIT, lineAfternoon);
     FIN_FinaccTransaction exact = nearTxn(T_NEAR, LINE_CREDIT, movementMidnight);
 
-    // With Core blinded: whatever else the line may be, it is not a difference. (It lands on
-    // pending here only because the mock removes the standard algorithm — the assertion is
-    // deliberately about what the state must NOT be.)
+    // With Core blinded, round 3 makes this a POSITIVE assertion: the near-match pass now returns
+    // the pair (it must, or an exact hit Core missed stays invisible) and labels it from the
+    // deviation it actually has — none. Before round 3 the pass hid the pair and the line fell
+    // through to `pending`, so only "not a difference" could be asserted here.
     try (MockedConstruction<FIN_MatchingTransaction> mc = mockNoStandardMatch();
         MockedStatic<OBDal> obDal = mockUnreconciledPool(Collections.singletonList(exact))) {
+      String state = AutoMatchSupport.classifyPendingLine(nearAccount(), line,
+          Collections.emptyList(), DATE_TOL_DAYS, PCT_FIVE, new HashSet<>(),
+          new java.util.ArrayList<>());
+
       assertNotEquals("a same-day exact match is not a difference",
-          AutoMatchSupport.STATE_DIFFERENCE,
-          AutoMatchSupport.classifyPendingLine(nearAccount(), line, Collections.emptyList(),
-              DATE_TOL_DAYS, PCT_FIVE, new HashSet<>(), new java.util.ArrayList<>()));
+          AutoMatchSupport.STATE_DIFFERENCE, state);
+      assertEquals("it is the plain suggestion the near-match pass found",
+          AutoMatchSupport.STATE_SUGGESTED, state);
     }
 
     // And what it positively is, in production: Core's standard algorithm does find this pair, so
@@ -1957,7 +2314,7 @@ public class AutoMatchSupportTest {
     lenient().when(line.getId()).thenReturn(id);
     lenient().when(line.getCramount()).thenReturn(new BigDecimal(credit));
     lenient().when(line.getDramount()).thenReturn(new BigDecimal(debit));
-    lenient().when(line.getDescription()).thenReturn("desc");
+    lenient().when(line.getDescription()).thenReturn(ANY_DESCRIPTION);
     lenient().when(line.getReferenceNo()).thenReturn("");
     lenient().when(line.getTransactionDate()).thenReturn(null);
     return line;
@@ -1999,6 +2356,41 @@ public class AutoMatchSupportTest {
     lenient().when(t.getFinPayment()).thenReturn(p);
     lenient().when(t.getDepositAmount()).thenReturn(new BigDecimal(amount));
     lenient().when(t.getPaymentAmount()).thenReturn(BigDecimal.ZERO);
+    return t;
+  }
+
+  /** A business partner mock that answers only to {@code getName()}. */
+  private static BusinessPartner partnerNamed(String name) {
+    BusinessPartner bp = mock(BusinessPartner.class);
+    lenient().when(bp.getName()).thenReturn(name);
+    return bp;
+  }
+
+  /** A payment mock carrying a document number, a description and (optionally) a partner. */
+  private static FIN_Payment paymentWith(String documentNo, String description,
+      BusinessPartner bp) {
+    FIN_Payment p = mock(FIN_Payment.class);
+    lenient().when(p.getDocumentNo()).thenReturn(documentNo);
+    lenient().when(p.getDescription()).thenReturn(description);
+    lenient().when(p.getBusinessPartner()).thenReturn(bp);
+    return p;
+  }
+
+  /**
+   * A transaction mock for the {@code txnToJson} description/partner tests: its own description and
+   * partner may each be absent, so the fallback to the payment's can be exercised independently.
+   * A fixed 10.00 deposit keeps the amount out of the way of what these tests are about.
+   */
+  private static FIN_FinaccTransaction describedTxn(String id, String description,
+      BusinessPartner bp, FIN_Payment payment) {
+    FIN_FinaccTransaction t = mock(FIN_FinaccTransaction.class);
+    lenient().when(t.getId()).thenReturn(id);
+    lenient().when(t.getDescription()).thenReturn(description);
+    lenient().when(t.getBusinessPartner()).thenReturn(bp);
+    lenient().when(t.getFinPayment()).thenReturn(payment);
+    lenient().when(t.getDepositAmount()).thenReturn(new BigDecimal("10.00"));
+    lenient().when(t.getPaymentAmount()).thenReturn(BigDecimal.ZERO);
+    lenient().when(t.getTransactionDate()).thenReturn(null);
     return t;
   }
 
