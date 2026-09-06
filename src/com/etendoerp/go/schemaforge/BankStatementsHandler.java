@@ -37,6 +37,7 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.Date;
@@ -52,6 +53,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.advpaymentmngt.utility.FIN_BankStatementImport;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -127,6 +129,7 @@ public class BankStatementsHandler implements NeoHandler {
   private static final String MSG_MISSING_FIELD = "Missing required field: ";
   private static final String MSG_BODY_REQUIRED = "Request body is required";
   private static final String MSG_STATEMENT_NOT_FOUND = "Bank statement not found: ";
+  private static final String MSG_ACCOUNT_NOT_FOUND = "Financial account not found: ";
   private static final String MSG_NOT_DRAFT = "Only draft (unprocessed) statements can be modified";
   private static final String MSG_NOT_PROCESSED = "Only processed statements can be reactivated";
   private static final String MSG_POSTED = "The statement is posted and cannot be reactivated";
@@ -210,7 +213,7 @@ public class BankStatementsHandler implements NeoHandler {
       return UploadInput.fail(NeoResponse.error(400, MSG_MISSING_FIELD + FIELD_CONTENT_BASE64));
     }
 
-    FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+    FIN_FinancialAccount account = TenantOwnership.loadOwned(FIN_FinancialAccount.class, accountId);
     if (account == null) {
       return UploadInput.fail(NeoResponse.error(400, "Financial account not found: " + accountId));
     }
@@ -363,6 +366,12 @@ public class BankStatementsHandler implements NeoHandler {
       return NeoResponse.error(400, "Missing required parameter: " + PARAM_ACCOUNT_ID);
     }
     try (AdminMode ignored = new AdminMode()) {
+      // loadStatements scopes by fin_financial_account_id alone, so the account must be confirmed
+      // to belong to this tenant first — otherwise a foreign id listed that tenant's bank
+      // statements (ETP-4950). Reported as "not found" so ids cannot be probed.
+      if (!owns(FIN_FinancialAccount.class, accountId)) {
+        return NeoResponse.error(400, MSG_ACCOUNT_NOT_FOUND + accountId);
+      }
       return NeoResponse.ok(wrapInEnvelope("statements", loadStatements(accountId)));
     } catch (Exception e) {
       log.error("Error listing bank statements for account {}", accountId, e);
@@ -382,7 +391,20 @@ public class BankStatementsHandler implements NeoHandler {
       return NeoResponse.error(400, "Missing required parameter: statementId");
     }
     try (AdminMode ignored = new AdminMode()) {
-      return NeoResponse.ok(wrapInEnvelope(ACTION_LINES, loadLines(statementIds)));
+      // LINES_SQL is scoped by fin_bankstatement_id alone, so each id has to be confirmed as this
+      // tenant's before it reaches the query (ETP-4950). Foreign or unknown ids are dropped rather
+      // than failing the whole request, which keeps a stale multi-selection working; if nothing
+      // survives, the answer is the same 400 an empty selection gets.
+      List<String> ownedIds = new ArrayList<>();
+      for (String statementId : statementIds) {
+        if (owns(FIN_BankStatement.class, statementId)) {
+          ownedIds.add(statementId);
+        }
+      }
+      if (ownedIds.isEmpty()) {
+        return NeoResponse.error(400, MSG_STATEMENT_NOT_FOUND + statementIds);
+      }
+      return NeoResponse.ok(wrapInEnvelope(ACTION_LINES, loadLines(ownedIds)));
     } catch (Exception e) {
       log.error("Error loading lines for statements {}", statementIds, e);
       return NeoResponse.error(500, "Internal Server Error");
@@ -485,7 +507,7 @@ public class BankStatementsHandler implements NeoHandler {
       if (validation != null) return validation;
 
       String accountId = body.optString(PARAM_ACCOUNT_ID, null);
-      FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+      FIN_FinancialAccount account = TenantOwnership.loadOwned(FIN_FinancialAccount.class, accountId);
       if (account == null) {
         return NeoResponse.error(400, "Financial account not found: " + accountId);
       }
@@ -741,11 +763,22 @@ public class BankStatementsHandler implements NeoHandler {
    * statement does not exist, or it has already been processed. Centralises the
    * checks shared by the process, update and delete actions.
    */
+  /**
+   * True when the row named by {@code id} belongs to the current tenant.
+   *
+   * <p>One seam for both the account and the statement rather than two: this class sits on Sonar's
+   * per-class method limit (java:S1448), and the routing tests only need to express the policy, not
+   * which entity it applies to (ETP-4950).
+   */
+  boolean owns(Class<? extends BaseOBObject> entityClass, String id) {
+    return TenantOwnership.loadOwned(entityClass, id) != null;
+  }
+
   private FIN_BankStatement requireDraft(String id) {
     if (StringUtils.isBlank(id)) {
       throw new OBException(MSG_MISSING_FIELD + FIELD_ID);
     }
-    FIN_BankStatement statement = OBDal.getInstance().get(FIN_BankStatement.class, id);
+    FIN_BankStatement statement = TenantOwnership.loadOwned(FIN_BankStatement.class, id);
     if (statement == null) {
       throw new OBException(MSG_STATEMENT_NOT_FOUND + id);
     }
@@ -779,7 +812,7 @@ public class BankStatementsHandler implements NeoHandler {
     if (StringUtils.isBlank(id)) {
       throw new OBException(MSG_MISSING_FIELD + FIELD_ID);
     }
-    FIN_BankStatement statement = OBDal.getInstance().get(FIN_BankStatement.class, id);
+    FIN_BankStatement statement = TenantOwnership.loadOwned(FIN_BankStatement.class, id);
     if (statement == null) {
       throw new OBException(MSG_STATEMENT_NOT_FOUND + id);
     }
@@ -931,12 +964,12 @@ public class BankStatementsHandler implements NeoHandler {
   private void resolveLineReferences(FIN_BankStatementLine line, JSONObject l) {
     String bpId = l.optString(FIELD_BPARTNER_ID, null);
     if (StringUtils.isNotBlank(bpId)) {
-      BusinessPartner bp = OBDal.getInstance().get(BusinessPartner.class, bpId);
+      BusinessPartner bp = TenantOwnership.loadOwned(BusinessPartner.class, bpId);
       if (bp != null) line.setBusinessPartner(bp);
     }
     String glId = l.optString(FIELD_GLITEM_ID, null);
     if (StringUtils.isNotBlank(glId)) {
-      GLItem gl = OBDal.getInstance().get(GLItem.class, glId);
+      GLItem gl = TenantOwnership.loadOwned(GLItem.class, glId);
       if (gl != null) line.setGLItem(gl);
     }
   }

@@ -25,6 +25,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
@@ -628,6 +629,28 @@ public class ReconciliationDifferenceSupportTest {
     assertEquals(400, response.getHttpStatus());
     assertEquals(ReconciliationHandler.MSG_LINE_NOT_IN_ACCOUNT, errorMessage(response));
     assertNoWrite();
+  }
+
+  /**
+   * A line of another account is never row-locked (ETP-4950 / H6).
+   *
+   * <p>{@code lockStatementLine} is raw SQL scoped by the line id alone, and it used to run BEFORE
+   * the preflight that checks ownership. So a caller could hold a {@code FOR UPDATE} lock on another
+   * tenant's statement line for the length of the request, and tell a foreign-but-existing line from
+   * a nonexistent one by getting a 409 instead of the later rejection. The lock is still taken
+   * before the preflight's state reads — reordering them would reopen the re-match race the lock
+   * exists for — so what changed is that it is only taken once the line is known to be ours.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testLineOfAnotherAccountIsNeverLocked() throws Exception {
+    stubPartialGroup("12.00", null, "0.50", null);
+    doReturn(account).when(handler).loadAccount(OTHER_ACC);
+
+    runAction(body(OTHER_ACC, REM_ID));
+
+    verify(connection, never()).prepareStatement(contains("FOR UPDATE"));
   }
 
   /**

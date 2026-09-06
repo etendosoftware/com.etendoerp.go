@@ -178,13 +178,35 @@ public class FinancialAccountTransactionsHandlerTest {
    * test); without it {@code getOBContext()} returns {@code null} and
    * {@code loadTrxTypes} throws an NPE.
    */
+  private static final String TEST_CLIENT = "client-test";
+  private static final String TEST_ORG = "org-test";
+
   private static void stubContextLanguage(MockedStatic<OBContext> obContextMock) {
     OBContext obCtx = mock(OBContext.class);
     org.openbravo.model.ad.system.Language language =
         mock(org.openbravo.model.ad.system.Language.class);
     when(language.getLanguage()).thenReturn("en_US");
     when(obCtx.getLanguage()).thenReturn(language);
+    // Readable sets, needed since the account id from the request is resolved through
+    // TenantOwnership (ETP-4950). Mockito would otherwise default these to EMPTY arrays, making
+    // every account invisible and turning the reads into a 400.
+    when(obCtx.getReadableClients()).thenReturn(new String[] {TEST_CLIENT});
+    when(obCtx.getReadableOrganizations()).thenReturn(new String[] {TEST_ORG});
     obContextMock.when(OBContext::getOBContext).thenReturn(obCtx);
+  }
+
+  /** A financial account owned by the tenant {@link #stubContextLanguage} pins. */
+  private static FIN_FinancialAccount ownedAccount() {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    org.openbravo.model.ad.system.Client client =
+        mock(org.openbravo.model.ad.system.Client.class);
+    when(client.getId()).thenReturn(TEST_CLIENT);
+    when(account.getClient()).thenReturn(client);
+    org.openbravo.model.common.enterprise.Organization organization =
+        mock(org.openbravo.model.common.enterprise.Organization.class);
+    when(organization.getId()).thenReturn(TEST_ORG);
+    when(account.getOrganization()).thenReturn(organization);
+    return account;
   }
 
   // ── handle() routing ─────────────────────────────────────────────────────
@@ -294,6 +316,11 @@ public class FinancialAccountTransactionsHandlerTest {
       OBDal dal = mock(OBDal.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.getConnection()).thenReturn(conn);
+      // Built BEFORE the when(...) that returns it: ownedAccount() creates and stubs mocks of its
+      // own, and doing that inside an unfinished stubbing call is what Mockito reports as
+      // UnfinishedStubbingException.
+      FIN_FinancialAccount account = ownedAccount();
+      when(dal.get(FIN_FinancialAccount.class, ACCOUNT_ID)).thenReturn(account);
       stubContextLanguage(obContextMock);
 
       NeoResponse response = handler.handle(ctx);
