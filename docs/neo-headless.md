@@ -1095,6 +1095,14 @@ comma-separated selection of active, compatible DB Extended sources. The browser
 tenant scope: DB Extended derives client and organization from `OBContext`; Go maps every requested
 namespace to its AD table and requires the active role to have entity read access before searching.
 
+Alternatively, pass `targets=sales-invoice` to select an active configured search target.
+Authorization resolves sources, targets, and included Schema Forge entities through OBDal.
+Metadata reads use `OBContext.setAdminMode(true)`, preserving client/organization filtering
+and allowing shared system-client configuration. The previous mode is restored in a
+`finally` block before checking window permissions and entity read access as the caller.
+Inactive/missing targets, windows inaccessible to the caller, and metadata belonging to
+another client must remain denied. A matching window must be active and exposed in MCP.
+
 `query` and `namespaces` are required. `topK` defaults to `10` and is limited to `1..50`.
 `metadataFilter` is optional JSONB containment input for DB Extended. The response is its portable
 `{ namespaces, matches }` payload. Invalid request data returns `400`, unauthorized sources return
