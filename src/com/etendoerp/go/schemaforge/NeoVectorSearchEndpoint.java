@@ -16,8 +16,6 @@
  */
 package com.etendoerp.go.schemaforge;
 
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -25,6 +23,13 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import com.etendoerp.db.extended.data.VectorSource;
+import com.etendoerp.db.extended.data.VectorSearchTarget;
+import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.data.SFSpec;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.dal.core.OBContext;
@@ -195,10 +200,9 @@ public class NeoVectorSearchEndpoint {
   private static final class SourceEntityAuthorizer implements NamespaceAuthorizer {
     @Override public boolean isAuthorized(List<String> namespaces) {
       try {
-        DalConnectionProvider connectionProvider = new DalConnectionProvider(false);
         for (String namespace : namespaces) {
-          String tableId = findSourceTableId(connectionProvider, namespace);
-          if (tableId == null || !TargetEntityAuthorizer.hasAuthorizedSchemaForgeWindow(connectionProvider, tableId)) return false;
+          String tableId = findSourceTableId(namespace);
+          if (tableId == null || !TargetEntityAuthorizer.hasAuthorizedSchemaForgeWindow(tableId)) return false;
           Entity entity = ModelProvider.getInstance().getEntityByTableId(tableId);
           if (entity == null) return false;
           OBContext.getOBContext().getEntityAccessChecker().checkReadable(entity);
@@ -206,11 +210,18 @@ public class NeoVectorSearchEndpoint {
         return true;
       } catch (Exception e) { return false; }
     }
-    private static String findSourceTableId(DalConnectionProvider connectionProvider, String namespace) throws Exception {
-      try (PreparedStatement statement = connectionProvider.getPreparedStatement(
-          "SELECT ad_table_id FROM etarc_vector_source WHERE namespace = ? AND isactive = 'Y'")) {
-        statement.setString(1, namespace);
-        try (ResultSet result = statement.executeQuery()) { return result.next() ? result.getString(1) : null; }
+    private static String findSourceTableId(String namespace) {
+      OBContext.setAdminMode(true);
+      try {
+        OBCriteria<VectorSource> criteria = OBDal.getInstance().createCriteria(VectorSource.class);
+        criteria.add(Restrictions.eq(VectorSource.PROPERTY_NAMESPACE, namespace));
+        criteria.add(Restrictions.eq(VectorSource.PROPERTY_ACTIVE, true));
+        criteria.setMaxResults(1);
+        List<VectorSource> sources = criteria.list();
+        return sources.isEmpty() || sources.get(0).getTable() == null
+            ? null : sources.get(0).getTable().getId();
+      } finally {
+        OBContext.restorePreviousMode();
       }
     }
   }
@@ -219,10 +230,9 @@ public class NeoVectorSearchEndpoint {
   private static final class TargetEntityAuthorizer implements NamespaceAuthorizer {
     @Override public boolean isAuthorized(List<String> targets) {
       try {
-        DalConnectionProvider connectionProvider = new DalConnectionProvider(false);
         for (String target : targets) {
-          String tableId = findSourceTableId(connectionProvider, target);
-          if (tableId == null || !hasAuthorizedSchemaForgeWindow(connectionProvider, tableId)) return false;
+          String tableId = findSourceTableId(target);
+          if (tableId == null || !hasAuthorizedSchemaForgeWindow(tableId)) return false;
           Entity entity = ModelProvider.getInstance().getEntityByTableId(tableId);
           if (entity == null) return false;
           OBContext.getOBContext().getEntityAccessChecker().checkReadable(entity);
@@ -230,13 +240,19 @@ public class NeoVectorSearchEndpoint {
         return true;
       } catch (Exception e) { return false; }
     }
-    private static String findSourceTableId(DalConnectionProvider connectionProvider, String target) throws Exception {
-      String sql = "SELECT s.ad_table_id FROM etarc_vector_search_target t JOIN etarc_vector_source s "
-          + "ON s.etarc_vector_source_id=t.etarc_vector_source_id "
-          + "WHERE t.search_key=? AND t.isactive='Y' AND s.isactive='Y'";
-      try (PreparedStatement statement = connectionProvider.getPreparedStatement(sql)) {
-        statement.setString(1, target);
-        try (ResultSet result = statement.executeQuery()) { return result.next() ? result.getString(1) : null; }
+    private static String findSourceTableId(String target) {
+      OBContext.setAdminMode(true);
+      try {
+        OBCriteria<VectorSearchTarget> criteria = OBDal.getInstance().createCriteria(VectorSearchTarget.class);
+        criteria.add(Restrictions.eq(VectorSearchTarget.PROPERTY_SEARCHKEY, target));
+        criteria.add(Restrictions.eq(VectorSearchTarget.PROPERTY_ACTIVE, true));
+        criteria.setMaxResults(1);
+        List<VectorSearchTarget> targets = criteria.list();
+        VectorSource source = targets.isEmpty() ? null : targets.get(0).getEtarcVectorSource();
+        return source == null || !Boolean.TRUE.equals(source.isActive()) || source.getTable() == null
+            ? null : source.getTable().getId();
+      } finally {
+        OBContext.restorePreviousMode();
       }
     }
 
@@ -245,28 +261,32 @@ public class NeoVectorSearchEndpoint {
      * Require an active Schema Forge window for the physical table and apply the same
      * AD_Window_Access decision used by MCP CRUD discovery and execution.
      */
-    private static boolean hasAuthorizedSchemaForgeWindow(DalConnectionProvider connectionProvider,
-        String tableId) throws Exception {
-      String sql = "SELECT DISTINCT spec.ad_window_id "
-          + "FROM etgo_sf_entity entity "
-          + "JOIN etgo_sf_spec spec ON spec.etgo_sf_spec_id=entity.etgo_sf_spec_id "
-          + "JOIN ad_tab tab ON tab.ad_tab_id=entity.ad_tab_id "
-          + "WHERE tab.ad_table_id=? AND entity.ad_client_id=? AND spec.ad_client_id=? "
-          + "AND entity.isactive='Y' AND entity.isincluded='Y' "
-          + "AND spec.isactive='Y' AND spec.showinmcp='Y' AND spec.spec_type='W' "
-          + "AND spec.ad_window_id IS NOT NULL";
-      try (PreparedStatement statement = connectionProvider.getPreparedStatement(sql)) {
-        statement.setString(1, tableId);
-        String clientId = OBContext.getOBContext().getCurrentClient().getId();
-        statement.setString(2, clientId);
-        statement.setString(3, clientId);
-        try (ResultSet result = statement.executeQuery()) {
-          while (result.next()) {
-            if (NeoAccessHelper.hasWindowAccess(result.getString(1), "GET")) return true;
-          }
-          return false;
+    private static boolean hasAuthorizedSchemaForgeWindow(String tableId) {
+      List<String> windowIds = new ArrayList<>();
+      OBContext.setAdminMode(true);
+      try {
+        OBCriteria<SFEntity> criteria = OBDal.getInstance().createCriteria(SFEntity.class);
+        criteria.createAlias(SFEntity.PROPERTY_ADTAB, "tab");
+        criteria.createAlias(SFEntity.PROPERTY_ETGOSFSPEC, "spec");
+        criteria.add(Restrictions.in("spec.client.id",
+            (Object[]) OBContext.getOBContext().getReadableClients()));
+        criteria.add(Restrictions.eq("tab.table.id", tableId));
+        criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
+        criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
+        criteria.add(Restrictions.eq("spec." + SFSpec.PROPERTY_ISACTIVE, true));
+        criteria.add(Restrictions.eq("spec." + SFSpec.PROPERTY_SHOWINMCP, true));
+        criteria.add(Restrictions.eq("spec." + SFSpec.PROPERTY_SPECTYPE, "W"));
+        criteria.add(Restrictions.isNotNull("spec." + SFSpec.PROPERTY_ADWINDOW));
+        for (SFEntity entity : criteria.list()) {
+          windowIds.add(entity.getETGOSFSpec().getADWindow().getId());
         }
+      } finally {
+        OBContext.restorePreviousMode();
       }
+      for (String windowId : windowIds) {
+        if (NeoAccessHelper.hasWindowAccess(windowId, "GET")) return true;
+      }
+      return false;
     }
   }
 }
