@@ -234,8 +234,12 @@ public class ReconciliationHandler implements NeoHandler {
   private static final String KEY_DESCRIPTION = "description";
   private static final String KEY_PENDING_BALANCE = "pendingBalance";
   private static final String KEY_SUGGESTED = "suggested";
-  /** Candidate matched only within the account's amount/date tolerance — drives the red badge. */
-  private static final String KEY_NEAR_MATCH = "nearMatch";
+  /**
+   * Candidate matched only within the account's amount/date tolerance — drives the red badge.
+   * Defined once in {@link AutoMatchSupport} because the autoMatch groups carry the very same flag:
+   * the candidates panel and the suggestion modal must not disagree on what a near match is called.
+   */
+  private static final String KEY_NEAR_MATCH = AutoMatchSupport.KEY_NEAR_MATCH;
   /** Why an un-reconcile / reactivate could not complete — shown verbatim by the client. */
   static final String KEY_FAILURE_REASON = "failureReason";
   private static final String COL_PARTNER_NAME = "partner_name";
@@ -549,7 +553,7 @@ public class ReconciliationHandler implements NeoHandler {
       BigDecimal lineTarget = nullSafe(selectedLine.getCramount())
           .subtract(nullSafe(selectedLine.getDramount()));
       BigDecimal candidateAmtTol =
-          AutoMatchSupport.signalGroupTolerance(lineTarget, candidateAmtTolPct);
+          MatchTolerances.signalGroupTolerance(lineTarget, candidateAmtTolPct);
       for (FIN_FinaccTransaction t : AutoMatchSupport.findSignalGroup(
           accountId, selectedLine, new HashSet<>(), candidateAmtTol, candidateDateTolDays)) {
         suggestedIds.add(t.getId());
@@ -968,6 +972,14 @@ public class ReconciliationHandler implements NeoHandler {
     BigDecimal[] autoTols = loadTolerances(accountId);
     int autoDateTolDays = autoTols[0].intValue();
     BigDecimal autoAmtTolPct = autoTols[1];
+    // Without a GL Item Difference there is nowhere to post a leftover, so an amount deviation is
+    // not proposed at all — a mass run cannot ask for an account line by line, and offering a
+    // suggestion that is guaranteed to fail on apply is worse than not offering it.
+    boolean canPostDifferences = StringUtils.isNotBlank(
+        ReconciliationDifferenceSupport.effectiveGlItemId(null, account));
+    // Resolved once for the whole run: the same account governs every line in the loop below.
+    AutoMatchSupport.MatchSettings matchSettings =
+        new AutoMatchSupport.MatchSettings(autoDateTolDays, autoAmtTolPct, canPostDifferences);
 
     // Collect all pending lines for this account.
     List<FIN_BankStatementLine> pendingLines = loadPendingLines(accountId);
@@ -995,7 +1007,7 @@ public class ReconciliationHandler implements NeoHandler {
         opsToLink++;
       } else {
         int[] delta = AutoMatchSupport.matchFallback(accountId, line, usedTxnIds, excludedTxns,
-            rules, groups, autoDateTolDays, autoAmtTolPct);
+            rules, groups, matchSettings);
         opsToLink += delta[0];
         willCreate += delta[1];
       }
@@ -1039,7 +1051,7 @@ public class ReconciliationHandler implements NeoHandler {
    * Commits every accepted automatch group in ONE {@code FIN_Reconciliation} document — Core's own
    * "one reconciliation per statement" model, instead of a header per statement line. Two passes:
    * <ol>
-   *   <li>{@link ReconciliationFlowSupport#prepareGroup} validates every group (line exists, not
+   *   <li>{@link ReconciliationFlowSupport#prepareAllGroups} validates every group (line exists, not
    *       already reconciled, invoice payments created, operations within the line amount) — an
    *       invalid group is reported in {@code results[]} without ever touching the shared
    *       reconciliation;</li>
@@ -1068,17 +1080,7 @@ public class ReconciliationHandler implements NeoHandler {
 
     JSONArray results = new JSONArray();
     List<PreparedGroup> prepared = new ArrayList<>();
-    for (int i = 0; i < groupsJson.length(); i++) {
-      JSONObject groupEntry = groupsJson.optJSONObject(i);
-      if (groupEntry == null) {
-        continue;
-      }
-      NeoResponse prepError = ReconciliationFlowSupport.prepareGroup(
-          this, account, groupEntry, prepared);
-      if (prepError != null) {
-        results.put(prepError.getBody());
-      }
-    }
+    ReconciliationFlowSupport.prepareAllGroups(this, account, groupsJson, prepared, results);
 
     // Matching every prepared group into the shared reconciliation and processing it once lives in
     // ReconciliationHandlerSupport — extracted so this method's cognitive complexity stays under the

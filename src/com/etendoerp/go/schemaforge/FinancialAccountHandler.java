@@ -171,6 +171,15 @@ public class FinancialAccountHandler implements NeoHandler {
   /** Archived-vs-active flag. {@code Isactive} has no ETGO_SF_FIELD row on this entity, so the
    *  generic CRUD response would not carry it — but the list's "Inactivas" filter needs it. */
   private static final String FIELD_ACTIVE = "active";
+  /**
+   * The account's difference GL item, under the SAME flat names the {@code financial-accounts-page}
+   * R spec emits. The W record carries the raw DAL property ({@code aprmGlitemDiff}) instead, so
+   * without these the edit modal opened from the Cuentas LIST rendered an empty "Cuenta contable"
+   * for an account that has one — while the same modal opened from the account DETAIL, which still
+   * reads the R spec, showed it correctly.
+   */
+  private static final String FIELD_GL_ITEM_DIFFERENCE_ID = "glItemDifferenceId";
+  private static final String FIELD_GL_ITEM_DIFFERENCE_NAME = "glItemDifferenceName";
   /** Lowercase alias of the contract's {@code iBAN}. The contract name is a mechanical
    *  derivation of the AD column ({@code Iban} → {@code iBAN}) and cannot be overridden from
    *  decisions.json, so the list-friendly spelling is aliased here. */
@@ -482,6 +491,8 @@ public class FinancialAccountHandler implements NeoHandler {
     rec.put(FIELD_IS_DEFAULT, row.isDefault);
     rec.put(FIELD_MASKED_PAN, row.maskedPan);
     rec.put(FIELD_ACTIVE, row.active);
+    rec.put(FIELD_GL_ITEM_DIFFERENCE_ID, row.glItemDifferenceId);
+    rec.put(FIELD_GL_ITEM_DIFFERENCE_NAME, row.glItemDifferenceName);
     return id;
   }
 
@@ -826,7 +837,7 @@ public class FinancialAccountHandler implements NeoHandler {
    * <p>Enforced here and not only in the edit modal because this is a generic W spec: anything
    * holding a token can PUT {@code eTGOAmountTolerance} straight at the entity. The value is read as
    * a PERCENTAGE of the statement line by both the automatch engine
-   * ({@code AutoMatchSupport.signalGroupTolerance}) and the difference posting
+   * ({@code MatchTolerances.signalGroupTolerance}) and the difference posting
    * ({@code ReconciliationDifferenceSupport.differenceLimit}); at 100 % or more the latter's gate
    * would authorise posting an entire statement line of any size to a G/L item, so this is a
    * boundary, not a nicety.
