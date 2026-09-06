@@ -837,7 +837,7 @@ public class FinancialAccountHandler implements NeoHandler {
    * <p>Enforced here and not only in the edit modal because this is a generic W spec: anything
    * holding a token can PUT {@code eTGOAmountTolerance} straight at the entity. The value is read as
    * a PERCENTAGE of the statement line by both the automatch engine
-   * ({@code AutoMatchSupport.signalGroupTolerance}) and the difference posting
+   * ({@code MatchTolerances.signalGroupTolerance}) and the difference posting
    * ({@code ReconciliationDifferenceSupport.differenceLimit}); at 100 % or more the latter's gate
    * would authorise posting an entire statement line of any size to a G/L item, so this is a
    * boundary, not a nicety.

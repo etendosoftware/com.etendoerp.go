@@ -45,7 +45,7 @@ final class NearMatchSupport {
    * <p>Returns {@code null} when {@code pct} is absent or non-positive: 0% means the AMOUNT
    * dimension is disabled, not that the feature is off — see {@link #findNearMatch}, which still
    * searches with a zero-gap requirement. Deliberately unlike
-   * {@link AutoMatchSupport#signalGroupTolerance}, which reads the very same
+   * {@link MatchTolerances#signalGroupTolerance}, which reads the very same
    * {@code EM_ETGO_Amount_Tolerance} column with the opposite convention because it is only
    * rounding slack for a 1:N sum and authorises no accounting entry. Two names for two purposes:
    * never swap them. No floor here either, for the same reason.
@@ -69,7 +69,7 @@ final class NearMatchSupport {
    * other. It used to be skipped, on the assumption that pass 1 (Core's standard algorithm) had
    * already claimed it; Core's criteria are narrower, so when it does not match, skipping hid the
    * best candidate and the line was handed a worse one. This method only ranks; the CALLER labels
-   * the result from the deviation it actually has ({@link AutoMatchSupport#deviatesFrom}), so an
+   * the result from the deviation it actually has ({@link MatchTolerances#deviatesFrom}), so an
    * exact hit is still reported as a plain suggestion and never as a difference.
    *
    * <p><b>Accumulator contract.</b> {@code usedTxnIds} and {@code excludedTxns} are shared across

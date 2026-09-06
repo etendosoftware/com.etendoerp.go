@@ -553,7 +553,7 @@ public class ReconciliationHandler implements NeoHandler {
       BigDecimal lineTarget = nullSafe(selectedLine.getCramount())
           .subtract(nullSafe(selectedLine.getDramount()));
       BigDecimal candidateAmtTol =
-          AutoMatchSupport.signalGroupTolerance(lineTarget, candidateAmtTolPct);
+          MatchTolerances.signalGroupTolerance(lineTarget, candidateAmtTolPct);
       for (FIN_FinaccTransaction t : AutoMatchSupport.findSignalGroup(
           accountId, selectedLine, new HashSet<>(), candidateAmtTol, candidateDateTolDays)) {
         suggestedIds.add(t.getId());
@@ -1051,7 +1051,7 @@ public class ReconciliationHandler implements NeoHandler {
    * Commits every accepted automatch group in ONE {@code FIN_Reconciliation} document — Core's own
    * "one reconciliation per statement" model, instead of a header per statement line. Two passes:
    * <ol>
-   *   <li>{@link ReconciliationFlowSupport#prepareGroup} validates every group (line exists, not
+   *   <li>{@link ReconciliationFlowSupport#prepareAllGroups} validates every group (line exists, not
    *       already reconciled, invoice payments created, operations within the line amount) — an
    *       invalid group is reported in {@code results[]} without ever touching the shared
    *       reconciliation;</li>
@@ -1080,25 +1080,7 @@ public class ReconciliationHandler implements NeoHandler {
 
     JSONArray results = new JSONArray();
     List<PreparedGroup> prepared = new ArrayList<>();
-    for (int i = 0; i < groupsJson.length(); i++) {
-      JSONObject groupEntry = groupsJson.optJSONObject(i);
-      if (groupEntry == null) {
-        continue;
-      }
-      NeoResponse prepError = ReconciliationFlowSupport.prepareGroup(
-          this, account, groupEntry, prepared);
-      if (prepError != null) {
-        // Tag the failure with the line it belongs to. results[] is not aligned with the submitted
-        // groups (failures are appended in this pass, successes in the next), and a success entry
-        // already carries statementLineId — without this the client can count failures but cannot
-        // say WHICH suggestion failed, which is the whole point of a per-group result.
-        JSONObject failure = prepError.getBody();
-        if (failure != null && !failure.has(KEY_STATEMENT_LINE_ID)) {
-          failure.put(KEY_STATEMENT_LINE_ID, groupEntry.optString(KEY_STATEMENT_LINE_ID, ""));
-        }
-        results.put(failure);
-      }
-    }
+    ReconciliationFlowSupport.prepareAllGroups(this, account, groupsJson, prepared, results);
 
     // Matching every prepared group into the shared reconciliation and processing it once lives in
     // ReconciliationHandlerSupport — extracted so this method's cognitive complexity stays under the

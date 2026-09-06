@@ -119,7 +119,7 @@ public class NearMatchSupportTest {
 
   /**
    * <b>Cross-class contrast, half one of two.</b> {@link NearMatchSupport#differenceTolerance} and
-   * {@link AutoMatchSupport#signalGroupTolerance} read the SAME {@code EM_ETGO_Amount_Tolerance}
+   * {@link MatchTolerances#signalGroupTolerance} read the SAME {@code EM_ETGO_Amount_Tolerance}
    * column with deliberately opposite conventions, and the split of ETP-4965 put them in two
    * different classes — which makes them easier, not harder, to confuse. Asserting the divergence
    * explicitly is the point: collapsing them back into one method is the support trap the rename
@@ -135,11 +135,11 @@ public class NearMatchSupportTest {
     BigDecimal target = new BigDecimal("27.00");
     // 0% → one cent of rounding slack for a 1:N SUM, but nothing may be POSTED.
     assertEquals(0, new BigDecimal("0.01")
-        .compareTo(AutoMatchSupport.signalGroupTolerance(target, BigDecimal.ZERO)));
+        .compareTo(MatchTolerances.signalGroupTolerance(target, BigDecimal.ZERO)));
     assertNull(NearMatchSupport.differenceTolerance(target, BigDecimal.ZERO));
     // A percentage below the floor is raised to 0.01 for the sum, but NOT for the posting gate.
     assertEquals(0, new BigDecimal("0.01")
-        .compareTo(AutoMatchSupport.signalGroupTolerance(target, new BigDecimal("0.001"))));
+        .compareTo(MatchTolerances.signalGroupTolerance(target, new BigDecimal("0.001"))));
     assertEquals(0, BigDecimal.ZERO
         .compareTo(NearMatchSupport.differenceTolerance(target, new BigDecimal("0.001"))));
   }
@@ -178,7 +178,7 @@ public class NearMatchSupportTest {
 
   /**
    * <b>Matrix row 1, as reworked in round 3.</b> The exact-exact candidate is RETURNED by the
-   * search — the label is decided afterwards, by {@link AutoMatchSupport#deviatesFrom}, not by
+   * search — the label is decided afterwards, by {@link MatchTolerances#deviatesFrom}, not by
    * hiding the candidate.
    *
    * <p>It used to be excluded here, on the assumption that Core's pass 1 had already claimed it.
@@ -205,7 +205,7 @@ public class NearMatchSupportTest {
           picked);
       assertEquals(T_NEAR, picked.getId());
       assertFalse("and it deviates in nothing, so the caller labels it a plain suggestion",
-          AutoMatchSupport.deviatesFrom(line, picked));
+          MatchTolerances.deviatesFrom(line, picked));
     }
   }
 
@@ -608,7 +608,7 @@ public class NearMatchSupportTest {
   // through the search — the direct assertion says what the number is, the behavioural one says
   // what it costs to get it wrong, and it was the behavioural half that caught the reported bug.
   //
-  // NOTE: they say nothing about AutoMatchSupport.withinDateWindow, which still measures N days as
+  // NOTE: they say nothing about MatchTolerances.withinDateWindow, which still measures N days as
   // N x 24h. That is pre-existing, shared with findSignalGroup/standardMatch, and out of this
   // ticket's scope. Every date pair used here sits comfortably inside the 3-day window under EITHER
   // reading, so fixing that window later cannot break these tests.
@@ -659,7 +659,7 @@ public class NearMatchSupportTest {
    * statement side and midnight on the movement side.
    *
    * <p>Round 3 moved WHERE this is decided, not WHAT is decided: the search now returns the pair
-   * and {@link AutoMatchSupport#deviatesFrom} is what must read zero deviation on it. Both halves
+   * and {@link MatchTolerances#deviatesFrom} is what must read zero deviation on it. Both halves
    * are asserted, since a millisecond reading sneaking back into either one produces the same
    * user-visible bug. The classifier half — the same pair read through {@code classifyPendingLine},
    * where the state is painted — is asserted in {@code AutoMatchSupportTest}.
@@ -680,7 +680,7 @@ public class NearMatchSupportTest {
 
       assertNotNull("the pair is a candidate — the time component is not a deviation", picked);
       assertFalse("13 hours inside one calendar day must not read as a date deviation",
-          AutoMatchSupport.deviatesFrom(line, picked));
+          MatchTolerances.deviatesFrom(line, picked));
     }
   }
 
@@ -775,7 +775,7 @@ public class NearMatchSupportTest {
 
       assertNotNull("a missing date does not disqualify a candidate", picked);
       assertFalse("no date means no date deviation, so an exact amount deviates in nothing",
-          AutoMatchSupport.deviatesFrom(line, picked));
+          MatchTolerances.deviatesFrom(line, picked));
     }
 
     FIN_FinaccTransaction undatedNear = nearTxn("T-UNDATED-NEAR", NEAR_AMOUNT, null);

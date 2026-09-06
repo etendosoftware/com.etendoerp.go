@@ -288,6 +288,42 @@ final class ReconciliationFlowSupport {
    * the Sonar per-class method-count limit (java:S1448); every DAL seam still runs on the caller's
    * {@code handler} instance, so behavior — and test stubbing — is unchanged.
    */
+  /**
+   * Runs {@link #prepareGroup} over every submitted group, collecting the ones that pass into
+   * {@code prepared} and appending each rejection to {@code results}. Nothing here touches a
+   * {@code FIN_Reconciliation}: an invalid group must be reported without disturbing the shared
+   * document the accepted ones will be matched into.
+   *
+   * <p>Each failure is tagged with the line it came from. {@code results[]} is not aligned with the
+   * submitted groups — failures are appended in this pass and successes in the next — and a success
+   * entry already carries {@code statementLineId}; without the tag the client can count failures but
+   * cannot say WHICH suggestion failed, which is the whole point of a per-group result.
+   *
+   * <p>Extracted from {@code ReconciliationHandler.applySuggestions} so that method stays under the
+   * Sonar cognitive-complexity limit (java:S3776); behavior is unchanged, and every DAL seam still
+   * runs on the caller's {@code handler} instance.
+   */
+  static void prepareAllGroups(ReconciliationHandler handler, FIN_FinancialAccount account,
+      JSONArray groupsJson, List<ReconciliationHandler.PreparedGroup> prepared, JSONArray results)
+      throws Exception {
+    for (int i = 0; i < groupsJson.length(); i++) {
+      JSONObject groupEntry = groupsJson.optJSONObject(i);
+      if (groupEntry == null) {
+        continue;
+      }
+      NeoResponse prepError = prepareGroup(handler, account, groupEntry, prepared);
+      if (prepError == null) {
+        continue;
+      }
+      JSONObject failure = prepError.getBody();
+      if (failure != null && !failure.has(ReconciliationHandler.KEY_STATEMENT_LINE_ID)) {
+        failure.put(ReconciliationHandler.KEY_STATEMENT_LINE_ID,
+            groupEntry.optString(ReconciliationHandler.KEY_STATEMENT_LINE_ID, ""));
+      }
+      results.put(failure);
+    }
+  }
+
   static NeoResponse prepareGroup(ReconciliationHandler handler, FIN_FinancialAccount account,
       JSONObject groupEntry, List<ReconciliationHandler.PreparedGroup> out) throws Exception {
     String statementLineId = groupEntry.optString(ReconciliationHandler.KEY_STATEMENT_LINE_ID, null);

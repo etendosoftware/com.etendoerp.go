@@ -1441,7 +1441,7 @@ public class AutoMatchSupportTest {
 
   /**
    * <b>The trap {@link AutoMatchSupport#KEY_NEAR_MATCH} exists to avoid.</b> A 1:N signal group is
-   * allowed to close with a non-zero {@code difference} — {@link AutoMatchSupport#signalGroupTolerance}
+   * allowed to close with a non-zero {@code difference} — {@link MatchTolerances#signalGroupTolerance}
    * grants rounding slack on the SUM — and that is NOT a near match: nothing is posted for it, and
    * the modal must not offer a difference row or bump its create count.
    *
@@ -1605,7 +1605,7 @@ public class AutoMatchSupportTest {
     Date today = new Date();
     FIN_BankStatementLine line = datedLine("L-DEV-AMT", LINE_CREDIT, NO_DEBIT, today);
 
-    assertTrue(AutoMatchSupport.deviatesFrom(line, nearTxn(T_NEAR, NEAR_AMOUNT, today)));
+    assertTrue(MatchTolerances.deviatesFrom(line, nearTxn(T_NEAR, NEAR_AMOUNT, today)));
   }
 
   /**
@@ -1618,7 +1618,7 @@ public class AutoMatchSupportTest {
     Date today = new Date();
     FIN_BankStatementLine line = datedLine("L-DEV-DATE", LINE_CREDIT, NO_DEBIT, today);
 
-    assertTrue(AutoMatchSupport.deviatesFrom(line,
+    assertTrue(MatchTolerances.deviatesFrom(line,
         nearTxn(T_NEAR, LINE_CREDIT, daysFrom(today, -2))));
   }
 
@@ -1628,7 +1628,7 @@ public class AutoMatchSupportTest {
     Date today = new Date();
     FIN_BankStatementLine line = datedLine("L-DEV-BOTH", LINE_CREDIT, NO_DEBIT, today);
 
-    assertTrue(AutoMatchSupport.deviatesFrom(line,
+    assertTrue(MatchTolerances.deviatesFrom(line,
         nearTxn(T_NEAR, NEAR_AMOUNT, daysFrom(today, 2))));
   }
 
@@ -1642,12 +1642,12 @@ public class AutoMatchSupportTest {
   public void testDeviatesFromIsFalseWhenNeitherAxisDeviates() {
     Date today = new Date();
     FIN_BankStatementLine sameInstant = datedLine("L-NODEV", LINE_CREDIT, NO_DEBIT, today);
-    assertFalse(AutoMatchSupport.deviatesFrom(sameInstant, nearTxn(T_NEAR, LINE_CREDIT, today)));
+    assertFalse(MatchTolerances.deviatesFrom(sameInstant, nearTxn(T_NEAR, LINE_CREDIT, today)));
 
     FIN_BankStatementLine afternoon =
         datedLine("L-NODEV-TIME", LINE_CREDIT, NO_DEBIT, dayAt(2026, 8, 28, 13));
     assertFalse("13:00 and 00:00 of one calendar day are not a date deviation",
-        AutoMatchSupport.deviatesFrom(afternoon,
+        MatchTolerances.deviatesFrom(afternoon,
             nearTxn(T_NEAR, LINE_CREDIT, dayAt(2026, 8, 28, 0))));
   }
 
@@ -1740,7 +1740,7 @@ public class AutoMatchSupportTest {
    */
   @Test
   public void testSignalGroupToleranceZeroPctReturnsFloor() {
-    BigDecimal result = AutoMatchSupport.signalGroupTolerance(
+    BigDecimal result = MatchTolerances.signalGroupTolerance(
         new BigDecimal("100.00"), BigDecimal.ZERO);
     assertEquals(0, new BigDecimal("0.01").compareTo(result));
   }
@@ -1750,7 +1750,7 @@ public class AutoMatchSupportTest {
    */
   @Test
   public void testSignalGroupTolerance2PctOf100Returns2() {
-    BigDecimal result = AutoMatchSupport.signalGroupTolerance(
+    BigDecimal result = MatchTolerances.signalGroupTolerance(
         new BigDecimal("100.00"), new BigDecimal("2"));
     assertEquals(0, new BigDecimal("2.00").compareTo(result));
   }
@@ -1760,7 +1760,7 @@ public class AutoMatchSupportTest {
    */
   @Test
   public void testSignalGroupTolerance10PctOf50Returns5() {
-    BigDecimal result = AutoMatchSupport.signalGroupTolerance(
+    BigDecimal result = MatchTolerances.signalGroupTolerance(
         new BigDecimal("50.00"), new BigDecimal("10"));
     assertEquals(0, new BigDecimal("5.00").compareTo(result));
   }
@@ -1770,13 +1770,13 @@ public class AutoMatchSupportTest {
    */
   @Test
   public void testSignalGroupToleranceNullPctReturnsFloor() {
-    BigDecimal result = AutoMatchSupport.signalGroupTolerance(
+    BigDecimal result = MatchTolerances.signalGroupTolerance(
         new BigDecimal("100.00"), null);
     assertEquals(0, new BigDecimal("0.01").compareTo(result));
   }
 
   /**
-   * <b>Cross-class contrast, half two of two.</b> {@link AutoMatchSupport#signalGroupTolerance} and
+   * <b>Cross-class contrast, half two of two.</b> {@link MatchTolerances#signalGroupTolerance} and
    * {@link NearMatchSupport#differenceTolerance} read the SAME {@code EM_ETGO_Amount_Tolerance}
    * column with deliberately opposite conventions, and the ETP-4965 split put them in two different
    * classes — which makes them easier, not harder, to confuse. Asserting the divergence explicitly
@@ -1795,11 +1795,11 @@ public class AutoMatchSupportTest {
     BigDecimal target = new BigDecimal("27.00");
     // 0% → one cent of rounding slack for a 1:N SUM here, but nothing may be POSTED there.
     assertEquals(0, new BigDecimal("0.01")
-        .compareTo(AutoMatchSupport.signalGroupTolerance(target, BigDecimal.ZERO)));
+        .compareTo(MatchTolerances.signalGroupTolerance(target, BigDecimal.ZERO)));
     assertNull(NearMatchSupport.differenceTolerance(target, BigDecimal.ZERO));
     // A percentage below the floor is raised to 0.01 for the sum, but NOT for the posting gate.
     assertEquals(0, new BigDecimal("0.01")
-        .compareTo(AutoMatchSupport.signalGroupTolerance(target, new BigDecimal("0.001"))));
+        .compareTo(MatchTolerances.signalGroupTolerance(target, new BigDecimal("0.001"))));
     assertEquals(0, BigDecimal.ZERO
         .compareTo(NearMatchSupport.differenceTolerance(target, new BigDecimal("0.001"))));
   }
@@ -1817,7 +1817,7 @@ public class AutoMatchSupportTest {
     Date base = cal.getTime();
     cal.add(Calendar.DAY_OF_MONTH, 2);
     Date plus2 = cal.getTime();
-    assertTrue(AutoMatchSupport.withinDateWindow(base, plus2, 3));
+    assertTrue(MatchTolerances.withinDateWindow(base, plus2, 3));
   }
 
   /**
@@ -1829,7 +1829,7 @@ public class AutoMatchSupportTest {
     Date base = cal.getTime();
     cal.add(Calendar.DAY_OF_MONTH, 4);
     Date plus4 = cal.getTime();
-    assertFalse(AutoMatchSupport.withinDateWindow(base, plus4, 3));
+    assertFalse(MatchTolerances.withinDateWindow(base, plus4, 3));
   }
 
   /**
@@ -1838,7 +1838,7 @@ public class AutoMatchSupportTest {
   @Test
   public void testWithinDateWindowSameDateZeroDaysWindow() {
     Date same = new Date();
-    assertTrue(AutoMatchSupport.withinDateWindow(same, same, 0));
+    assertTrue(MatchTolerances.withinDateWindow(same, same, 0));
   }
 
   /**
@@ -1846,9 +1846,9 @@ public class AutoMatchSupportTest {
    */
   @Test
   public void testWithinDateWindowNullDateAlwaysTrue() {
-    assertTrue(AutoMatchSupport.withinDateWindow(null, new Date(), 3));
-    assertTrue(AutoMatchSupport.withinDateWindow(new Date(), null, 3));
-    assertTrue(AutoMatchSupport.withinDateWindow(null, null, 3));
+    assertTrue(MatchTolerances.withinDateWindow(null, new Date(), 3));
+    assertTrue(MatchTolerances.withinDateWindow(new Date(), null, 3));
+    assertTrue(MatchTolerances.withinDateWindow(null, null, 3));
   }
 
   // ---------------------------------------------------------------------------
@@ -2028,7 +2028,7 @@ public class AutoMatchSupportTest {
    * pass.
    *
    * <p>Round 3 added the OTHER way into this row: when Core does NOT find the pair, the near-match
-   * pass returns it and the classifier reads {@link AutoMatchSupport#deviatesFrom} to label it —
+   * pass returns it and the classifier reads {@link MatchTolerances#deviatesFrom} to label it —
    * still {@code suggested}. That route is asserted in
    * {@link #testClassifyAndMatchFallbackAgreeOnAnExactHit}; the search-level half is
    * {@code NearMatchSupportTest#testExactAmountExactDateIsStillReturnedSoRankingCanSeeIt}.

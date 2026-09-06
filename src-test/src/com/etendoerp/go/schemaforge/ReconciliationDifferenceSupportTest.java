@@ -302,7 +302,7 @@ public class ReconciliationDifferenceSupportTest {
 
   /**
    * A zero / negative / unset percentage disables the action (limit 0) — the deliberate divergence
-   * from {@code AutoMatchSupport.signalGroupTolerance}, which reads the same column as "one cent".
+   * from {@code MatchTolerances.signalGroupTolerance}, which reads the same column as "one cent".
    */
   @Test
   public void testDifferenceLimitZeroWhenPercentageUnsetOrNonPositive() {

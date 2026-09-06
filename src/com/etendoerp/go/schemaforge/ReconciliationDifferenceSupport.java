@@ -68,7 +68,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * <p><b>Tolerance semantics — deliberate divergence, documented on purpose.</b> The gate reuses the
  * per-account {@code EM_ETGO_Amount_Tolerance} percentage, and reads an unset/zero percentage as
  * "no difference may be posted", i.e. the action is inert until an administrator configures it.
- * Note that {@code AutoMatchSupport.signalGroupTolerance} reads the SAME column with the opposite
+ * Note that {@code MatchTolerances.signalGroupTolerance} reads the SAME column with the opposite
  * convention (zero means "one cent of slack, never zero"). Two meanings for one field is a support
  * trap, so the 400 message spells out the configured percentage and the resulting limit.
  */

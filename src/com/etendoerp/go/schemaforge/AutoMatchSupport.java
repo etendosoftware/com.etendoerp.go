@@ -83,14 +83,13 @@ final class AutoMatchSupport {
    * {@code ReconciliationHandler}'s candidates payload, which uses the same wire name.
    *
    * <p>Deliberately a flag of its own rather than "{@code difference != 0}": {@link #buildMultiGroup}
-   * also emits a non-zero {@code difference} for the rounding slack {@link #signalGroupTolerance}
+   * also emits a non-zero {@code difference} for the rounding slack {@link MatchTolerances#signalGroupTolerance}
    * allows on a 1:N group, and that is NOT a near match.
    */
   static final String KEY_NEAR_MATCH = "nearMatch";
 
   /** Caps the partner/reference subset search to keep the preview predictable and bounded. */
   private static final int MAX_SIGNAL_SUBSET_SIZE = 12;
-  private static final BigDecimal SIGNAL_MATCH_TOLERANCE = new BigDecimal("0.01");
   static final int DEFAULT_DATE_TOL_DAYS = 3;
 
   private AutoMatchSupport() {
@@ -153,39 +152,11 @@ final class AutoMatchSupport {
       }
       BigDecimal amt = nullSafe(t.getDepositAmount()).subtract(nullSafe(t.getPaymentAmount()));
       if (amt.signum() == target.signum()
-          && withinDateWindow(lineDate, t.getTransactionDate(), dateToleranceDays)) {
+          && MatchTolerances.withinDateWindow(lineDate, t.getTransactionDate(), dateToleranceDays)) {
         pool.add(t);
       }
     }
     return pool;
-  }
-
-  /** Returns true if the difference between {@code a} and {@code b} is within {@code days}. */
-  static boolean withinDateWindow(java.util.Date a, java.util.Date b, int days) {
-    if (a == null || b == null) {
-      return true;
-    }
-    long diffMs = Math.abs(a.getTime() - b.getTime());
-    return diffMs <= days * 86_400_000L;
-  }
-
-  /**
-   * Rounding slack for a 1:N signal-group SUM, as max(SIGNAL_MATCH_TOLERANCE, abs(target) *
-   * pct/100). A zero {@code pct} yields the one-cent floor rather than disabling anything, because
-   * summing several transactions legitimately drifts by a cent and nothing is POSTED on this path —
-   * the group either sums to the line or it does not.
-   *
-   * <p><b>Not a posting threshold.</b> {@link NearMatchSupport#differenceTolerance} reads the very same
-   * {@code EM_ETGO_Amount_Tolerance} column with the opposite convention (0 disables) because it
-   * decides whether an accounting entry is created. Two names for two purposes: never swap them.
-   */
-  static BigDecimal signalGroupTolerance(BigDecimal target, BigDecimal pct) {
-    if (pct == null || pct.signum() == 0) {
-      return SIGNAL_MATCH_TOLERANCE;
-    }
-    BigDecimal derived = target.abs().multiply(pct)
-        .divide(BigDecimal.valueOf(100), 2, java.math.RoundingMode.HALF_UP);
-    return derived.max(SIGNAL_MATCH_TOLERANCE);
   }
 
   /**
@@ -277,20 +248,6 @@ final class AutoMatchSupport {
 
   static BigDecimal txnSignedAmount(FIN_FinaccTransaction t) {
     return nullSafe(t.getDepositAmount()).subtract(nullSafe(t.getPaymentAmount()));
-  }
-
-  /**
-   * Whether the transaction differs from the line at all — in amount or in calendar day. A
-   * candidate that matches both exactly is a plain suggestion; only a real deviation is a
-   * "Con diferencia" match, and only an AMOUNT deviation ever posts an accounting entry.
-   */
-  static boolean deviatesFrom(FIN_BankStatementLine line, FIN_FinaccTransaction txn) {
-    BigDecimal target = ReconciliationSupport.nullSafe(line.getCramount())
-        .subtract(ReconciliationSupport.nullSafe(line.getDramount()));
-    if (target.subtract(txnSignedAmount(txn)).signum() != 0) {
-      return true;
-    }
-    return NearMatchSupport.dayDistance(line.getTransactionDate(), txn.getTransactionDate()) != 0;
   }
 
   /**
@@ -567,7 +524,7 @@ final class AutoMatchSupport {
     }
     if (account != null && StringUtils.isNotBlank(account.getId())) {
       BigDecimal target = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
-      BigDecimal amtTol = signalGroupTolerance(target, amtTolPct);
+      BigDecimal amtTol = MatchTolerances.signalGroupTolerance(target, amtTolPct);
       List<FIN_FinaccTransaction> signalGroup =
           findSignalGroup(account.getId(), line, usedTxnIds, amtTol, dateTolDays);
       if (!signalGroup.isEmpty()) {
@@ -584,7 +541,7 @@ final class AutoMatchSupport {
           usedTxnIds, excludedTxns,
           NearMatchSupport.differenceTolerance(target, amtTolPct), dateTolDays);
       if (nearMatch != null) {
-        return deviatesFrom(line, nearMatch) ? STATE_DIFFERENCE : STATE_SUGGESTED;
+        return MatchTolerances.deviatesFrom(line, nearMatch) ? STATE_DIFFERENCE : STATE_SUGGESTED;
       }
     }
     String desc = StringUtils.trimToEmpty(line.getDescription());
@@ -628,7 +585,7 @@ final class AutoMatchSupport {
       FIN_MatchedTransaction matched = matcher.match(line, excluded);
       if (matched != null && matched.getTransaction() != null
           && !FIN_MatchedTransaction.NOMATCH.equals(matched.getMatchLevel())
-          && withinDateWindow(line.getTransactionDate(),
+          && MatchTolerances.withinDateWindow(line.getTransactionDate(),
               matched.getTransaction().getTransactionDate(), dateTolDays)) {
         return matched;
       }
@@ -762,7 +719,7 @@ final class AutoMatchSupport {
     boolean canPostDifferences = settings.canPostDifferences;
     BigDecimal target = ReconciliationSupport.nullSafe(line.getCramount())
         .subtract(ReconciliationSupport.nullSafe(line.getDramount()));
-    BigDecimal amtTol = signalGroupTolerance(target, amtTolPct);
+    BigDecimal amtTol = MatchTolerances.signalGroupTolerance(target, amtTolPct);
     List<FIN_FinaccTransaction> signalGroup =
         findSignalGroup(accountId, line, usedTxnIds, amtTol, dateTolDays);
     if (!signalGroup.isEmpty()) {
@@ -787,7 +744,7 @@ final class AutoMatchSupport {
       // candidate stays invisible whenever Core's narrower pass 1 misses it. Such a hit is not a
       // difference, so it is labelled as the plain suggestion it is: no KEY_NEAR_MATCH, no red
       // badge, no difference row, and STRONG rather than Core's WEAK diagnostics vocabulary.
-      boolean deviates = deviatesFrom(line, nearMatch);
+      boolean deviates = MatchTolerances.deviatesFrom(line, nearMatch);
       // findNearMatch already claimed it in usedTxnIds/excludedTxns. KEY_NEAR_MATCH is the flag
       // consumers read — see its javadoc for why a non-zero `difference` alone cannot play that role.
       JSONObject nearMatchGroup = buildStandardGroup(line, nearMatch,
