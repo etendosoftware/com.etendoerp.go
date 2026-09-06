@@ -73,6 +73,12 @@ import org.openbravo.model.common.invoice.Invoice;
  *       (recordId is null).</li>
  *   <li>{@code afterHandle()} total-discount adjustment for draft invoices (grandTotalAmount /
  *       outstandingAmount), inherited from {@link AbstractInvoiceHeaderHandler}.</li>
+ *   <li>{@code afterHandle()} tbaiSyncEstado injection in both list and detail mode, and its
+ *       absence on the write path (ETP-5087: Batuz writes purchase-invoice sync rows to the
+ *       same {@code tbai_syncinvoice} table the sales flow reads).</li>
+ *   <li>{@code afterHandle()} {@link SifSubRecordAttachments} wiring — detail-only, absent from
+ *       list and write responses (ETP-5087: without it the SIF tab of a purchase invoice sent to
+ *       Batuz had no sub-record id and showed neither request nor response XML).</li>
  *   <li>DB error resilience in enrichLinkedReceipts.</li>
  * </ul>
  */
@@ -282,6 +288,226 @@ public class PurchaseInvoiceHeaderHandlerTest {
       JSONArray receipts = enrichedRec.getJSONArray("linkedReceipts");
       assertEquals(1, receipts.length());
       assertEquals("receipt-001", receipts.getJSONObject(0).getString("id"));
+    }
+  }
+
+  // ── afterHandle — tbaiSyncEstado injection (ETP-5087) ────────────────────
+
+  /**
+   * ETP-5087: purchase invoices sent to Batuz write to the same {@code tbai_syncinvoice} table
+   * the sales flow uses, so {@code afterHandle} must run {@link TbaiSyncStatusInjector} over the
+   * GET response exactly as {@code SalesInvoiceHeaderHandler} does. Before the fix the injector
+   * was never called on the AP side and the frontend showed a default "Pendiente" badge even for
+   * invoices Batuz had rejected.
+   *
+   * <p>The static {@code inject} is stubbed to apply a fixture map through the real
+   * {@code applyTbaiMap}, so the assertion proves both that the injector is invoked with the
+   * response data array and that the estado lands on the records.
+   */
+  @Test
+  public void afterHandle_listMode_injectsTbaiSyncEstado() throws Exception {
+    JSONArray data = new JSONArray()
+        .put(new JSONObject().put("id", "pinv-1").put("documentNo", "PI-001"))
+        .put(new JSONObject().put("id", "pinv-2").put("documentNo", "PI-002"));
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    Map<String, String> tbaiMap = new HashMap<>();
+    tbaiMap.put("pinv-1", "Rechazado");
+    tbaiMap.put("pinv-2", "Recibido");
+
+    try (MockedStatic<TbaiSyncStatusInjector> tbaiMock =
+             Mockito.mockStatic(TbaiSyncStatusInjector.class)) {
+      tbaiMock.when(() -> TbaiSyncStatusInjector.applyTbaiMap(any(), any())).thenCallRealMethod();
+      tbaiMock.when(() -> TbaiSyncStatusInjector.inject(any())).thenAnswer(inv -> {
+        TbaiSyncStatusInjector.applyTbaiMap(inv.getArgument(0), tbaiMap);
+        return null;
+      });
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      tbaiMock.verify(() -> TbaiSyncStatusInjector.inject(data));
+      JSONArray resultData = result.getBody().getJSONObject("response").getJSONArray("data");
+      assertEquals("Rechazado", resultData.getJSONObject(0).getString("tbaiSyncEstado"));
+      assertEquals("Recibido", resultData.getJSONObject(1).getString("tbaiSyncEstado"));
+    }
+  }
+
+  /**
+   * ETP-5087: the injection must also run in detail view (recordId set), after the detail-only
+   * enrichments — the "Batuz" badge on the AP invoice detail page reads the same field.
+   */
+  @Test
+  public void afterHandle_singleRecord_injectsTbaiSyncEstado() throws Exception {
+    JSONArray data = new JSONArray().put(new JSONObject().put("id", "pinv-detail"));
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .recordId("pinv-detail")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<TbaiSyncStatusInjector> tbaiMock =
+             Mockito.mockStatic(TbaiSyncStatusInjector.class)) {
+      OBDal roInst = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(roInst);
+      dalMock.when(OBDal::getInstance).thenReturn(roInst);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(roInst.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(any())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      tbaiMock.when(() -> TbaiSyncStatusInjector.applyTbaiMap(any(), any())).thenCallRealMethod();
+      tbaiMock.when(() -> TbaiSyncStatusInjector.inject(any())).thenAnswer(inv -> {
+        TbaiSyncStatusInjector.applyTbaiMap(inv.getArgument(0),
+            java.util.Collections.singletonMap("pinv-detail", "Error"));
+        return null;
+      });
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      tbaiMock.verify(() -> TbaiSyncStatusInjector.inject(data));
+      JSONObject rec = result.getBody()
+          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("Error", rec.getString("tbaiSyncEstado"));
+    }
+  }
+
+  /**
+   * ETP-5087: the injection is a GET-only enrichment — a save must never pay for a
+   * {@code tbai_syncinvoice} round-trip, and must never stamp a {@code tbaiSyncEstado} captured
+   * before the write onto the response. On POST/PUT/PATCH {@code afterHandle} bails out at the
+   * {@code extractGetDataArray() == null} guard long before reaching the injector.
+   *
+   * <p>Today that holds only as a structural consequence of where the guard sits;
+   * {@code afterHandle_nonGet_returnsNull} pins the return value but says nothing about the
+   * injector. This test pins the interaction itself, so a future refactor that hoists the
+   * injection above the guard fails here instead of silently adding a query (and a stale estado)
+   * to every purchase-invoice save.
+   */
+  @Test
+  public void afterHandle_writeMethods_neverInjectTbaiSyncEstado() {
+    try (MockedStatic<TbaiSyncStatusInjector> tbaiMock =
+             Mockito.mockStatic(TbaiSyncStatusInjector.class)) {
+      for (String writeMethod : new String[] { "POST", "PUT", "PATCH" }) {
+        NeoContext ctx = NeoContext.builder().httpMethod(writeMethod).build();
+        assertNull(handler.afterHandle(ctx));
+      }
+      tbaiMock.verifyNoInteractions();
+    }
+  }
+
+  // ── afterHandle — SifSubRecordAttachments wiring (ETP-5087) ──────────────
+
+  /**
+   * ETP-5087: the SIF tab of a PURCHASE invoice sent to Batuz showed neither the request nor the
+   * response XML. Same root cause as the {@code tbaiSyncEstado} gap above — the call lived only in
+   * {@code SalesInvoiceHeaderHandler#afterHandle}, so AP detail responses never carried
+   * {@code tbaiSyncInvoiceId} (nor {@code aeatsiiFacturaId} / {@code invoiceVerifactuId}) and the
+   * frontend had no sub-record id to point the attachments endpoint at.
+   *
+   * <p>The static {@code enrich} is stubbed to write fixture ids into the record it receives, so
+   * the assertions prove both that it is invoked with the detail record and the C_Invoice id, and
+   * that whatever it writes survives into the response body.
+   */
+  @Test
+  public void afterHandle_singleRecord_injectsSifSubRecordAttachmentIds() throws Exception {
+    JSONObject rec = new JSONObject().put("id", "pinv-detail");
+    JSONArray data = new JSONArray().put(rec);
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .recordId("pinv-detail")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<SifSubRecordAttachments> sifMock =
+             Mockito.mockStatic(SifSubRecordAttachments.class)) {
+      OBDal roInst = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(roInst);
+      dalMock.when(OBDal::getInstance).thenReturn(roInst);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(roInst.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(any())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      sifMock.when(() -> SifSubRecordAttachments.enrich(any(), anyString())).thenAnswer(inv -> {
+        JSONObject target = inv.getArgument(0);
+        target.put("tbaiSyncInvoiceId", "tbai-sync-001");
+        target.put("aeatsiiFacturaId", "sii-fact-001");
+        target.put("invoiceVerifactuId", "vfac-001");
+        return null;
+      });
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      sifMock.verify(() -> SifSubRecordAttachments.enrich(rec, "pinv-detail"));
+      JSONObject enriched = result.getBody()
+          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("tbai-sync-001", enriched.getString("tbaiSyncInvoiceId"));
+      assertEquals("sii-fact-001", enriched.getString("aeatsiiFacturaId"));
+      assertEquals("vfac-001", enriched.getString("invoiceVerifactuId"));
+    }
+  }
+
+  /**
+   * ETP-5087 / ETP-4888: the sub-record ids are a detail-only enrichment — a list GET must never
+   * carry them, and must never pay for the three extra queries per row. Mirrors
+   * {@code SalesInvoiceHeaderHandlerTest#testSifSubRecordAttachmentsNotCalledForListView}.
+   */
+  @Test
+  public void afterHandle_listMode_doesNotInjectSifSubRecordAttachmentIds() throws Exception {
+    JSONArray data = new JSONArray()
+        .put(new JSONObject().put("id", "pinv-1"))
+        .put(new JSONObject().put("id", "pinv-2"));
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = getCtx(); // recordId = null — list view
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    try (MockedStatic<SifSubRecordAttachments> sifMock =
+             Mockito.mockStatic(SifSubRecordAttachments.class)) {
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      sifMock.verifyNoInteractions();
+      JSONArray resultData = result.getBody().getJSONObject("response").getJSONArray("data");
+      for (int i = 0; i < resultData.length(); i++) {
+        JSONObject resultRec = resultData.getJSONObject(i);
+        assertFalse(resultRec.has("aeatsiiFacturaId"));
+        assertFalse(resultRec.has("tbaiSyncInvoiceId"));
+        assertFalse(resultRec.has("invoiceVerifactuId"));
+      }
+    }
+  }
+
+  /**
+   * ETP-5087: like the {@code tbaiSyncEstado} injection, the sub-record lookup is GET-only — a
+   * save must never pay for three fiscal-table round-trips. Pins the interaction so a refactor
+   * that hoists the enrichment above the {@code extractGetDataArray() == null} guard fails here.
+   */
+  @Test
+  public void afterHandle_writeMethods_neverInjectSifSubRecordAttachmentIds() {
+    try (MockedStatic<SifSubRecordAttachments> sifMock =
+             Mockito.mockStatic(SifSubRecordAttachments.class)) {
+      for (String writeMethod : new String[] { "POST", "PUT", "PATCH" }) {
+        NeoContext ctx = NeoContext.builder().httpMethod(writeMethod).build();
+        assertNull(handler.afterHandle(ctx));
+      }
+      sifMock.verifyNoInteractions();
     }
   }
 

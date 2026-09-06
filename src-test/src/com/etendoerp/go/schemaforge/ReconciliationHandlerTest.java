@@ -67,7 +67,9 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
+import org.mockito.Mock;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
@@ -206,9 +208,9 @@ public class ReconciliationHandlerTest {
     ResultSet rs = mock(ResultSet.class);
     when(rs.next()).thenReturn(false);
 
-    // loadRules runs its OWN prepareStatement against the same mocked connection; stub the spy
+    // loadRules now goes through the DAL, not this mocked connection; stub the spy
     // seam so setString(1, ACC_ID) is only invoked once (by the main query).
-    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+    doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
         MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
@@ -251,9 +253,9 @@ public class ReconciliationHandlerTest {
     when(rs.getString("description")).thenReturn("DESC1", "DESC2");
     when(rs.getBigDecimal("amount")).thenReturn(new BigDecimal("100.00"), new BigDecimal("19.51"));
 
-    // loadRules runs its OWN prepareStatement against the same mocked connection; stub the spy
+    // loadRules now goes through the DAL, not this mocked connection; stub the spy
     // seam so it does not consume the shared rs.next() sequence reserved for the main query.
-    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+    doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
         MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
@@ -296,9 +298,9 @@ public class ReconciliationHandlerTest {
     // Same non-blank group id → the two rows must merge into the first occurrence.
     when(rs.getString("match_group_id")).thenReturn("G1", "G1");
 
-    // loadRules runs its OWN prepareStatement against the same mocked connection; stub the spy
+    // loadRules now goes through the DAL, not this mocked connection; stub the spy
     // seam so it does not consume the shared rs.next() sequence reserved for the main query.
-    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+    doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
         // The envelope's draftReconciliationCount goes through ReconciliationRemovalUtil; mock it so
@@ -352,6 +354,8 @@ public class ReconciliationHandlerTest {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
       stubConnection(dal, ps, rs);
+      // loadRules now goes through the DAL, not this mocked connection; stub the spy seam.
+      doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
 
       handler.buildPendingLines(ACC_ID, CLIENT_ID, new HashSet<>(Arrays.asList(ORG_ID)), filters);
 
@@ -383,9 +387,9 @@ public class ReconciliationHandlerTest {
     ResultSet rs = mock(ResultSet.class);
     when(rs.next()).thenReturn(false);
 
-    // loadRules runs its OWN prepareStatement against the same mocked connection; stub the spy seam
+    // loadRules now goes through the DAL, not this mocked connection; stub the spy seam
     // so it does not consume the shared rs.next() sequence reserved for the main query.
-    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+    doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
         MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
@@ -429,9 +433,9 @@ public class ReconciliationHandlerTest {
     when(account.getId()).thenReturn(ACC_ID);
     doReturn(account).when(handler).loadAccount(ACC_ID);
 
-    // loadRules runs its OWN prepareStatement against the same mocked connection; stub the spy seam
+    // loadRules now goes through the DAL, not this mocked connection; stub the spy seam
     // so it does not consume the shared rs.next() sequence reserved for the main query.
-    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+    doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
         MockedStatic<ReconciliationRemovalUtil> recUtil = mockStatic(ReconciliationRemovalUtil.class)) {
@@ -486,6 +490,8 @@ public class ReconciliationHandlerTest {
       obDal.when(OBDal::getInstance).thenReturn(dal);
       stubConnection(dal, ps, rs);
 
+      // buildCandidates now resolves the account for the ownership gate (ETP-4950).
+      doReturn(mock(FIN_FinancialAccount.class)).when(handler).loadAccount(ACC_ID);
       NeoResponse response = handler.buildCandidates(ACC_ID, LINE_ID, null, null, null);
 
       JSONArray candidates =
@@ -515,6 +521,8 @@ public class ReconciliationHandlerTest {
       obDal.when(OBDal::getInstance).thenReturn(dal);
       stubConnection(dal, ps, rs);
 
+      // buildCandidates now resolves the account for the ownership gate (ETP-4950).
+      doReturn(mock(FIN_FinancialAccount.class)).when(handler).loadAccount(ACC_ID);
       handler.buildCandidates(ACC_ID, LINE_ID, "payments", null, null);
 
       // The account id is the first bound parameter these days, followed by the four
@@ -541,6 +549,7 @@ public class ReconciliationHandlerTest {
   public void testSuggestedTransactionIdsNoAlgorithmReturnsEmpty() {
     FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     when(account.getMatchingAlgorithm()).thenReturn(null);
     doReturn(account).when(handler).loadAccount(ACC_ID);
 
@@ -640,6 +649,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testReconcileGroupHappy1to1() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
     FIN_FinaccTransaction trx = trxFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
     FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
@@ -670,6 +680,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testReconcileGroupHappy1toN() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("150.00"), BigDecimal.ZERO, null);
     FIN_FinaccTransaction t1 = trxFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
     FIN_FinaccTransaction t2 = trxFor(ACC_ID, new BigDecimal("50.00"), BigDecimal.ZERO, null);
@@ -701,6 +712,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testReconcileGroupSingleOperationPartialMatchTagsMatchGroup() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
     FIN_FinaccTransaction trx = trxFor(ACC_ID, new BigDecimal("53.24"), BigDecimal.ZERO, null);
     FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
@@ -750,6 +762,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testReconcileGroupWrongAccountReturns400() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
     FIN_FinaccTransaction trx = trxFor(OTHER_ACC, new BigDecimal("100.00"), BigDecimal.ZERO, null);
 
@@ -797,6 +810,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testReconcileGroupAlreadyReconciledReturns409() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
     FIN_Reconciliation existing = mock(FIN_Reconciliation.class);
     FIN_FinaccTransaction trx = trxFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, existing);
@@ -818,6 +832,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testReconcileGroupLineAlreadyReconciledReturns409() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_FinaccTransaction alreadyMatched = mock(FIN_FinaccTransaction.class);
     FIN_BankStatementLine line =
         lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, alreadyMatched);
@@ -881,6 +896,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testReconcileGroupProcessErrorRollsBackTo400() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
     FIN_FinaccTransaction trx = trxFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
     FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
@@ -963,11 +979,12 @@ public class ReconciliationHandlerTest {
 
     // classifyPendingLine calls OBDal.get for the line, then checks the account's algorithm.
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     when(account.getMatchingAlgorithm()).thenReturn(null);
 
-    // loadRules runs its OWN prepareStatement against the same mocked connection; stub the spy
+    // loadRules now goes through the DAL, not this mocked connection; stub the spy
     // seam so it does not consume the shared rs.next() sequence reserved for the main query.
-    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+    doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
 
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
@@ -1019,6 +1036,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testCreateTransactionForRulePositiveAmountUsesBPD() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
     Organization org = mock(Organization.class);
     when(line.getOrganization()).thenReturn(org);
@@ -1081,6 +1099,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testCreateTransactionForRuleNegativeAmountUsesBPW() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
     Organization org = mock(Organization.class);
     when(line.getOrganization()).thenReturn(org);
@@ -1194,6 +1213,7 @@ public class ReconciliationHandlerTest {
     MatchingAlgorithm algo = mock(MatchingAlgorithm.class);
     when(algo.getJavaClassName()).thenReturn("com.example.Algo");
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     when(account.getMatchingAlgorithm()).thenReturn(algo);
     doReturn(account).when(handler).loadAccount(ACC_ID);
 
@@ -1240,6 +1260,7 @@ public class ReconciliationHandlerTest {
     MatchingAlgorithm algo = mock(MatchingAlgorithm.class);
     when(algo.getJavaClassName()).thenReturn("com.example.Algo");
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     when(account.getMatchingAlgorithm()).thenReturn(algo);
     doReturn(account).when(handler).loadAccount(ACC_ID);
 
@@ -1295,6 +1316,8 @@ public class ReconciliationHandlerTest {
               anyInt()))
           .thenReturn(Arrays.asList(g1));
 
+      // buildCandidates now resolves the account for the ownership gate (ETP-4950).
+      doReturn(mock(FIN_FinancialAccount.class)).when(handler).loadAccount(ACC_ID);
       NeoResponse response = handler.buildCandidates(ACC_ID, LINE_ID, null, null, null);
 
       JSONArray candidates =
@@ -1325,8 +1348,9 @@ public class ReconciliationHandlerTest {
   @Test
   public void testBuildAutoMatch1to1StandardGroup() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     doReturn(account).when(handler).loadAccount(ACC_ID);
-    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+    doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
 
     FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
     when(line.getId()).thenReturn("l1");
@@ -1376,12 +1400,13 @@ public class ReconciliationHandlerTest {
   @Test
   public void testBuildAutoMatchRuleFallbackCreatesGroup() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     doReturn(account).when(handler).loadAccount(ACC_ID);
 
     MatchRuleEngine.Rule rule = new MatchRuleEngine.Rule("R1", "Fee Rule", 10,
         MatchRuleEngine.COND_CONTAINS, "commission",
         new MatchRuleEngine.RuleOptions("GL-1", "BP-1", null, null, null, null), 0L);
-    doReturn(Collections.singletonList(rule)).when(handler).loadRules(any(), eq(ACC_ID));
+    doReturn(Collections.singletonList(rule)).when(handler).loadRules(eq(ACC_ID));
 
     FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
     when(line.getId()).thenReturn("l1");
@@ -1439,6 +1464,7 @@ public class ReconciliationHandlerTest {
     MatchingAlgorithm algo = mock(MatchingAlgorithm.class);
     when(algo.getJavaClassName()).thenReturn("com.example.Algo");
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     when(account.getMatchingAlgorithm()).thenReturn(algo);
     return account;
   }
@@ -1506,7 +1532,7 @@ public class ReconciliationHandlerTest {
   public void testBuildAutoMatchTwoLinesSameAmountProduceTwoGroups() throws Exception {
     FIN_FinancialAccount account = accountWithMatchingAlgorithm();
     doReturn(account).when(handler).loadAccount(ACC_ID);
-    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+    doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
 
     FIN_BankStatementLine l1 = autoMatchLine("l1", "1.00");
     FIN_BankStatementLine l2 = autoMatchLine("l2", "1.00");
@@ -1549,7 +1575,7 @@ public class ReconciliationHandlerTest {
   public void testBuildAutoMatchThreeLinesSameAmountProduceThreeGroups() throws Exception {
     FIN_FinancialAccount account = accountWithMatchingAlgorithm();
     doReturn(account).when(handler).loadAccount(ACC_ID);
-    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+    doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
 
     FIN_BankStatementLine l1 = autoMatchLine("l1", "50.00");
     FIN_BankStatementLine l2 = autoMatchLine("l2", "50.00");
@@ -1599,7 +1625,7 @@ public class ReconciliationHandlerTest {
   public void testBuildAutoMatchMixedAmountsOnlyDuplicatesMultiply() throws Exception {
     FIN_FinancialAccount account = accountWithMatchingAlgorithm();
     doReturn(account).when(handler).loadAccount(ACC_ID);
-    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+    doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
 
     FIN_BankStatementLine lUnique = autoMatchLine("lUnique", "30.00");
     FIN_BankStatementLine lDup1 = autoMatchLine("lDup1", "10.00");
@@ -1658,7 +1684,7 @@ public class ReconciliationHandlerTest {
   public void testBuildAutoMatchExhaustedCandidatesLeavesLaterLineUnsuggested() throws Exception {
     FIN_FinancialAccount account = accountWithMatchingAlgorithm();
     doReturn(account).when(handler).loadAccount(ACC_ID);
-    doReturn(Collections.emptyList()).when(handler).loadRules(any(), eq(ACC_ID));
+    doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
 
     FIN_BankStatementLine l1 = autoMatchLine("l1", "1.00");
     FIN_BankStatementLine l2 = autoMatchLine("l2", "1.00");
@@ -1776,6 +1802,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testApplySuggestionsGroupLineAlreadyReconciledRecorded() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_FinaccTransaction already = mock(FIN_FinaccTransaction.class);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("10.00"), BigDecimal.ZERO, already);
 
@@ -1809,6 +1836,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testApplySuggestionsGroupMissingLineIdRecordsError() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     doReturn(account).when(handler).loadAccount(ACC_ID);
 
     JSONObject group = new JSONObject().put("operationIds", new JSONArray().put("t1"));
@@ -1828,6 +1856,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testApplySuggestionsGroupNoOperationsRecordsError() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("10.00"), BigDecimal.ZERO, null);
     doReturn(account).when(handler).loadAccount(ACC_ID);
     doReturn(line).when(handler).loadLine(LINE_ID);
@@ -1848,20 +1877,23 @@ public class ReconciliationHandlerTest {
 
   // ── loadPendingLines / loadRules seams ────────────────────────────────────────
 
-  /** loadRules delegates to the engine and returns its rules. */
+  /**
+   * loadRules delegates to the engine, passing the account through and returning its rules.
+   *
+   * <p>The seam no longer takes a {@code Connection}: since ETP-4950 the engine loads through the
+   * DAL so the readable-client / readable-organization filter is applied by the framework and cannot
+   * be skipped by a caller.
+   */
   @Test
-  public void testLoadRulesDelegatesToEngine() throws Exception {
-    Connection conn = mock(Connection.class);
-    PreparedStatement ps = mock(PreparedStatement.class);
-    ResultSet rs = mock(ResultSet.class);
-    when(conn.prepareStatement(anyString())).thenReturn(ps);
-    when(ps.executeQuery()).thenReturn(rs);
-    when(rs.next()).thenReturn(false);
+  public void testLoadRulesDelegatesToEngine() {
+    try (MockedStatic<MatchRuleEngine> engine = mockStatic(MatchRuleEngine.class)) {
+      engine.when(() -> MatchRuleEngine.loadRules(ACC_ID)).thenReturn(Collections.emptyList());
 
-    List<MatchRuleEngine.Rule> rules = handler.loadRules(conn, ACC_ID);
+      List<MatchRuleEngine.Rule> rules = handler.loadRules(ACC_ID);
 
-    assertTrue(rules.isEmpty());
-    verify(ps).setString(1, ACC_ID);
+      assertTrue(rules.isEmpty());
+      engine.verify(() -> MatchRuleEngine.loadRules(ACC_ID));
+    }
   }
 
   /** loadPendingLines binds the account id and returns the session query results. */
@@ -1895,6 +1927,7 @@ public class ReconciliationHandlerTest {
    */
   private FIN_FinancialAccount accountWithClientOrg(String clientId, String orgId) {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     Client client = mock(Client.class);
     when(client.getId()).thenReturn(clientId);
     Organization org = mock(Organization.class);
@@ -2085,6 +2118,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testReconcileGroupWithInvoiceCreatesPaymentAndReconciles() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
     when(line.getTransactionDate()).thenReturn(null);
     FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
@@ -2144,6 +2178,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testReconcileGroupWithInvoiceInsufficientOutstandingReturns400() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     // Line needs 100.00 but the selected installment has 0 outstanding → nothing consumed → reject.
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
     when(line.getTransactionDate()).thenReturn(null);
@@ -2205,6 +2240,7 @@ public class ReconciliationHandlerTest {
   public void testReconcileGroupWithInvoicePartialCoverageReconcilesRemainderPending()
       throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
     when(line.getTransactionDate()).thenReturn(null);
     FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
@@ -2297,6 +2333,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testGetOrCreateDraftReconciliationReusesExistingDraft() {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_Reconciliation existingDraft = mock(FIN_Reconciliation.class);
 
     try (MockedStatic<TransactionsDao> dao = mockStatic(TransactionsDao.class)) {
@@ -2316,6 +2353,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testGetOrCreateDraftReconciliationCreatesWhenNoneOpen() {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_Reconciliation fresh = mock(FIN_Reconciliation.class);
     doReturn(fresh).when(handler).addNewDraftReconciliation(account);
 
@@ -2512,6 +2550,7 @@ public class ReconciliationHandlerTest {
    */
   private FIN_Reconciliation reconciledLineSetup() {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
     when(rec.getId()).thenReturn("rec-react");
     Client client = mock(Client.class);
@@ -2598,6 +2637,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testReactivatePartialCoverageDetachesOnlyClickedLineTransactions() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
     when(rec.getId()).thenReturn("rec-shared");
     Client client = mock(Client.class);
@@ -2677,6 +2717,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testReactivateUnpostsFirstAndUndoesTheReReadReconciliation() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_FinaccTransaction staleTrx = txnWithId("T1");
     FIN_FinaccTransaction freshTrx = txnWithId("T1");
     FIN_Reconciliation staleRec = recWith("rec-react", staleTrx);
@@ -2807,6 +2848,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testReactivateLineNotReconciledReturns409() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     // matched == null → line is not reconciled.
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
     doReturn(account).when(handler).loadAccount(ACC_ID);
@@ -2831,6 +2873,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testReactivateLineNotLinkedToReconciliationReturns409() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     // trx != null but trx.getReconciliation() == null.
     FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
     when(trx.getReconciliation()).thenReturn(null);
@@ -3080,6 +3123,7 @@ public class ReconciliationHandlerTest {
   /** Stubs {@code loadAccount}/{@code loadLine} (line belongs to ACC_ID) + {@code loadTransaction}. */
   private FIN_FinancialAccount wireLoads(FIN_FinaccTransaction... loadable) {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO,
         loadable.length > 0 ? loadable[0] : null);
     doReturn(account).when(handler).loadAccount(ACC_ID);
@@ -3761,6 +3805,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testRemoveOperationTransactionNotReconciledReturns409() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_FinaccTransaction trx = mock(FIN_FinaccTransaction.class);
     when(trx.getId()).thenReturn("T1");
     when(trx.getReconciliation()).thenReturn(null);
@@ -3785,6 +3830,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testRemoveOperationTransactionOfAnotherAccountReturns400() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_FinaccTransaction trx = txnWithId("T1");
     FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
     when(rec.getId()).thenReturn("rec-1");
@@ -4396,6 +4442,8 @@ public class ReconciliationHandlerTest {
     try (MockedStatic<CandidatesSupport> cs = mockStatic(CandidatesSupport.class)) {
       cs.when(() -> CandidatesSupport.buildLinkedTransactions(LINE_ID)).thenReturn(expected);
 
+      // buildCandidates now resolves the account for the ownership gate (ETP-4950).
+      doReturn(mock(FIN_FinancialAccount.class)).when(handler).loadAccount(ACC_ID);
       NeoResponse response = handler.buildCandidates(ACC_ID, LINE_ID, null, null, null);
 
       // Reaching this line without an NPE/exception from an unmocked OBDal SQL path already proves
@@ -4420,6 +4468,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testReconcileGroupStillRejectsUnprocessedDraftLinkedLineWith409() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_Reconciliation draft = mock(FIN_Reconciliation.class);
     when(draft.isProcessed()).thenReturn(false);
     FIN_FinaccTransaction matched = mock(FIN_FinaccTransaction.class);
@@ -4446,6 +4495,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testReconcileGroupStillRejectsProcessedReconciliationWith409() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_Reconciliation processed = mock(FIN_Reconciliation.class);
     when(processed.isProcessed()).thenReturn(true);
     FIN_FinaccTransaction matched = mock(FIN_FinaccTransaction.class);
@@ -4474,6 +4524,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testApplySuggestionsStillRecordsAlreadyReconciledForProcessedRec() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_Reconciliation processed = mock(FIN_Reconciliation.class);
     when(processed.isProcessed()).thenReturn(true);
     FIN_FinaccTransaction matched = mock(FIN_FinaccTransaction.class);
@@ -4510,6 +4561,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testReconcileGroupStillRejectsOperationOnAnotherReconciliation() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
     doReturn(account).when(handler).loadAccount(ACC_ID);
     doReturn(line).when(handler).loadLine(LINE_ID);
@@ -4660,6 +4712,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testUndoReconciliationRestoresNotClearedStatusByDirection() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
 
     // 1) inflow stuck wrong: deposit 25.30, payment 0, status PWNC → must be re-set to RDNC.
@@ -4739,6 +4792,7 @@ public class ReconciliationHandlerTest {
   @Test
   public void testUndoReconciliationContinuesAfterOneReversalFailure() throws Exception {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
     FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
 
     // 1) auto-created transaction whose payment reversal FAILS (Core throws mid-flow).
@@ -5398,5 +5452,200 @@ public class ReconciliationHandlerTest {
     // The stale line never reached the shared reconciliation.
     verify(handler, never()).matchBankStatementLine(eq(staleLine), any(), any());
     verify(handler).matchBankStatementLine(eq(okLine), any(), eq(rec));
+  }
+
+  // ── ETP-5121: a reconciled line survives its statement's reactivation ─────
+  //
+  // "Reactivar" on a processed bank statement only clears FIN_BankStatement.Processed (see
+  // BankStatementsHandler.reactivateStatement, whose own invariant is covered by
+  // BankStatementsHandlerTest): it does NOT clear
+  // FIN_BankStatementLine.FIN_FinAcc_Transaction_ID, and it does not detach that transaction from
+  // its FIN_Reconciliation. So a line that was reconciled before the reactivation is still
+  // genuinely reconciled afterwards, and has to keep showing under the panel's "reconciled"
+  // filter. PENDING_LINES_SQL used to gate the WHOLE query on bs.processed = 'Y', which dropped
+  // EVERY line of a reactivated statement — the reconciled one disappeared from the panel under
+  // any filter, and with it the only way to un-reconcile it from the UI.
+  //
+  // This suite drives a mocked ResultSet, so it is structurally BLIND to the WHERE clause: a
+  // ResultSet stub happily returns rows the real query would have filtered out. The first two
+  // tests therefore assert the SHAPE of the SQL the handler actually hands to the JDBC driver,
+  // which is the only place the regression is observable without a database.
+
+  /** Whitespace-collapsed gate that must replace the unconditional {@code bs.processed = 'Y'}. */
+  private static final String SQL_PROCESSED_GATE_WITH_RECONCILED_EXCEPTION =
+      "AND (bs.processed = 'Y' OR (bsl.fin_finacc_transaction_id IS NOT NULL "
+          + "AND COALESCE(rec.processed, 'N') = 'Y'))";
+  /** The pre-ETP-5121 unconditional gate — its presence IS the regression. */
+  private static final String SQL_UNCONDITIONAL_PROCESSED_GATE =
+      "AND bs.processed = 'Y' AND bs.fin_financial_account_id = ?";
+  /** The join the reconciled-line exception reads {@code rec.processed} through. */
+  private static final String SQL_RECONCILIATION_JOIN =
+      "LEFT JOIN fin_reconciliation rec ON rec.fin_reconciliation_id = ft.fin_reconciliation_id";
+  /** Start of the {@code bs.processed} gate, in whitespace-collapsed form. */
+  private static final String SQL_GATE_START = "AND (bs.processed";
+  /** First predicate after the gate, used to bound it when slicing the WHERE clause. */
+  private static final String SQL_GATE_END = "AND bs.fin_financial_account_id";
+
+  @Mock private Connection pendingSqlConn;
+  @Mock private PreparedStatement pendingSqlPs;
+  @Mock private ResultSet pendingSqlRs;
+  @Mock private OBDal pendingSqlDal;
+
+  /**
+   * Wires the class-level JDBC mocks so {@code buildPendingLines} runs offline, and stubs
+   * {@code loadRules} away so the main query is the ONLY {@code prepareStatement} call (the rules
+   * query would otherwise share the same connection mock and break the capture).
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  private void stubPendingLinesJdbc() throws Exception {
+    doReturn(Collections.emptyList()).when(handler).loadRules(eq(ACC_ID));
+    when(pendingSqlDal.getConnection()).thenReturn(pendingSqlConn);
+    when(pendingSqlConn.prepareStatement(anyString())).thenReturn(pendingSqlPs);
+    when(pendingSqlConn.createArrayOf(anyString(), any())).thenReturn(null);
+    when(pendingSqlPs.executeQuery()).thenReturn(pendingSqlRs);
+  }
+
+  /**
+   * Runs {@code buildPendingLines} against the class-level JDBC mocks.
+   *
+   * @return the envelope's {@code data} object
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  private JSONObject runPendingLines() throws Exception {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<ReconciliationRemovalUtil> recUtil =
+            mockStatic(ReconciliationRemovalUtil.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(pendingSqlDal);
+      recUtil.when(() -> ReconciliationRemovalUtil.getDraftReconciliation(any()))
+          .thenReturn(Collections.emptyList());
+      NeoResponse response = handler.buildPendingLines(ACC_ID, CLIENT_ID,
+          new HashSet<>(Arrays.asList(ORG_ID)), Collections.emptyMap());
+      assertEquals(200, response.getHttpStatus());
+      return response.getBody().getJSONObject("response").getJSONObject("data");
+    }
+  }
+
+  /**
+   * Captures the query the handler prepared, with every run of whitespace collapsed to a single
+   * space so the assertions do not depend on the source's string-concatenation indentation.
+   *
+   * @return the whitespace-normalised SQL
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  private String capturedPendingLinesSql() throws Exception {
+    ArgumentCaptor<String> sql = ArgumentCaptor.forClass(String.class);
+    verify(pendingSqlConn).prepareStatement(sql.capture());
+    return sql.getValue().replaceAll("\\s+", " ").trim();
+  }
+
+  /**
+   * The reconciled-line exception must be part of the {@code bs.processed} gate: without it, every
+   * line of a statement returned to draft is filtered out of {@code pendingLines} and the panel
+   * loses the reconciled one entirely (ETP-5121).
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testPendingLinesSqlKeepsReconciledLinesOfAReactivatedStatement() throws Exception {
+    stubPendingLinesJdbc();
+    when(pendingSqlRs.next()).thenReturn(false);
+
+    runPendingLines();
+
+    String sql = capturedPendingLinesSql();
+    assertTrue("the processed gate must carry the already-reconciled exception (ETP-5121); got: "
+        + sql, sql.contains(SQL_PROCESSED_GATE_WITH_RECONCILED_EXCEPTION));
+    assertFalse("bs.processed = 'Y' must NOT gate the whole query: a reactivated statement "
+            + "(processed = 'N') would drop its reconciled lines from the panel (ETP-5121)",
+        sql.contains(SQL_UNCONDITIONAL_PROCESSED_GATE));
+  }
+
+  /**
+   * The exception is deliberately NARROW: it requires a PROCESSED reconciliation, exactly like the
+   * {@code line_status = 'reconciled'} label a few lines above it in the same query. A line whose
+   * reconciliation is back in DRAFT is functionally un-confirmed, so it must keep falling back to
+   * the pending pool instead of being dragged in by a mere transaction link.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testPendingLinesSqlExceptionRequiresAProcessedReconciliation() throws Exception {
+    stubPendingLinesJdbc();
+    when(pendingSqlRs.next()).thenReturn(false);
+
+    runPendingLines();
+
+    String sql = capturedPendingLinesSql();
+    int from = sql.indexOf(SQL_GATE_START);
+    int to = sql.indexOf(SQL_GATE_END);
+    assertTrue("the bs.processed gate must still be present and precede the account filter; got: "
+        + sql, from >= 0 && to > from);
+    String gate = sql.substring(from, to);
+
+    assertTrue("the exception must require a linked transaction: " + gate,
+        gate.contains("bsl.fin_finacc_transaction_id IS NOT NULL"));
+    assertTrue("the exception must require the reconciliation to be PROCESSED, so a line whose "
+        + "reconciliation is back in draft stays pending: " + gate,
+        gate.contains("COALESCE(rec.processed, 'N') = 'Y'"));
+    // The predicate is unreadable without the join that exposes rec.processed.
+    assertTrue("the reconciliation join must remain in the query: " + sql,
+        sql.contains(SQL_RECONCILIATION_JOIN));
+    // Same predicate on the SELECT side — the exception mirrors the reconciled label by design, so
+    // the WHERE clause can never admit a line the SELECT would label 'pending'.
+    assertTrue("line_status must keep labelling a draft reconciliation as pending: " + sql,
+        sql.contains("OR COALESCE(rec.processed, 'N') = 'N' THEN 'pending'"));
+  }
+
+  /**
+   * Row-mapping half of CP-1: a {@code line_status = 'reconciled'} row keeps
+   * {@code matched}/{@code reconcileStatus}/{@code state} = reconciled and is counted in its own
+   * bucket, so the panel's "Conciliadas" chip reads 1 and its filter has a row to show. A pending
+   * row alongside it must not be dragged into that bucket.
+   *
+   * <p>The mocked ResultSet is what the FIXED query hands back for a statement that is still
+   * processed. Note the gate's exception is narrow on purpose: once the statement is reactivated
+   * only the reconciled row comes back — the unmatched sibling is genuinely not reconcilable while
+   * its statement is a draft. That filtering is asserted by the two SQL-shape tests above; this
+   * one owns the mapping.
+   *
+   * @throws Exception if the mocked JDBC interaction fails
+   */
+  @Test
+  public void testPendingLinesLabelsAndCountsAReconciledRowSeparately() throws Exception {
+    stubPendingLinesJdbc();
+    when(pendingSqlRs.next()).thenReturn(true, true, false);
+    when(pendingSqlRs.getString("fin_bankstatementline_id")).thenReturn("line-rec", "line-pend");
+    when(pendingSqlRs.getTimestamp("datetrx")).thenReturn(null);
+    when(pendingSqlRs.getString("description")).thenReturn("Cobro conciliado", "Cargo suelto");
+    when(pendingSqlRs.getBigDecimal("amount"))
+        .thenReturn(new BigDecimal("100.00"), new BigDecimal("40.00"));
+    // The reconciled line still points at its transaction, and that transaction still hangs off a
+    // PROCESSED reconciliation — the state a statement "Reactivar" leaves behind untouched.
+    when(pendingSqlRs.getString("line_status")).thenReturn("reconciled", "pending");
+    when(pendingSqlRs.getString("fin_finacc_transaction_id")).thenReturn("trx-1", null);
+    when(pendingSqlRs.getString("draft_reconciliation_id")).thenReturn("", "");
+    when(pendingSqlRs.getString("match_group_id")).thenReturn("", "");
+
+    JSONObject data = runPendingLines();
+
+    JSONArray lines = data.getJSONArray("lines");
+    assertEquals("both rows must be listed", 2, lines.length());
+
+    JSONObject reconciled = lines.getJSONObject(0);
+    assertTrue("the pre-existing reconciliation is untouched by the reactivation",
+        reconciled.getBoolean("matched"));
+    assertEquals("RECONCILED", reconciled.getString("reconcileStatus"));
+    assertEquals("reconciled", reconciled.getString("state"));
+
+    JSONObject pending = lines.getJSONObject(1);
+    assertFalse("the unmatched line must not be reported as reconciled",
+        pending.getBoolean("matched"));
+    assertEquals("PENDING", pending.getString("reconcileStatus"));
+
+    // The filter chips are driven by these counts, so the "Conciliadas" chip must show 1, not 0.
+    JSONObject counts = data.getJSONObject(ReconciliationHandler.KEY_COUNTS);
+    assertEquals(2, counts.getInt("all"));
+    assertEquals(1, counts.getInt("reconciled"));
   }
 }

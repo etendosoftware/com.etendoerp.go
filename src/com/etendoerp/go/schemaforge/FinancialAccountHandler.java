@@ -939,14 +939,16 @@ public class FinancialAccountHandler implements NeoHandler {
   }
 
   Currency loadCurrency(String currencyId) {
+    // tenant-ok: C_Currency is system reference data (client 0), it carries no tenant
     return OBDal.getInstance().get(Currency.class, currencyId);
   }
 
   FIN_FinancialAccount loadAccount(String accountId) {
-    return OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+    return TenantOwnership.loadOwned(FIN_FinancialAccount.class, accountId);
   }
 
   Country loadCountry(String countryId) {
+    // tenant-ok: C_Country is system reference data (client 0), it carries no tenant
     return OBDal.getInstance().get(Country.class, countryId);
   }
 

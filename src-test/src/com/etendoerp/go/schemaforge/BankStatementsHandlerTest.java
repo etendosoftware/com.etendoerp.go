@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -27,10 +28,12 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -52,6 +55,8 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.InOrder;
+import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
@@ -61,7 +66,9 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
+import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 
 /**
  * Unit tests for {@link BankStatementsHandler}.
@@ -136,6 +143,8 @@ public class BankStatementsHandlerTest {
 
     doReturn(new JSONArray()).when(handler).loadLines("stmt-1");
 
+    // The tenant gate is a seam here so this stays a routing test (ETP-4950).
+    doReturn(true).when(handler).owns(any(), anyString());
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       NeoResponse response = handler.handle(ctx);
       assertEquals(200, response.getHttpStatus());
@@ -174,6 +183,8 @@ public class BankStatementsHandlerTest {
 
     doThrow(new RuntimeException("db boom")).when(handler).loadStatements("acc-1");
 
+    // The tenant gate is a seam here so this stays a routing test (ETP-4950).
+    doReturn(true).when(handler).owns(any(), anyString());
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       NeoResponse response = handler.handle(ctx);
       assertEquals(500, response.getHttpStatus());
@@ -191,6 +202,8 @@ public class BankStatementsHandlerTest {
 
     doThrow(new RuntimeException("boom")).when(handler).loadLines("stmt-1");
 
+    // The tenant gate is a seam here so this stays a routing test (ETP-4950).
+    doReturn(true).when(handler).owns(any(), anyString());
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       NeoResponse response = handler.handle(ctx);
       assertEquals(500, response.getHttpStatus());
@@ -211,6 +224,8 @@ public class BankStatementsHandlerTest {
     rows.put(row);
     doReturn(rows).when(handler).loadStatements("acc-1");
 
+    // The tenant gate is a seam here so this stays a routing test (ETP-4950).
+    doReturn(true).when(handler).owns(any(), anyString());
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       NeoResponse response = handler.handle(ctx);
       assertEquals(200, response.getHttpStatus());
@@ -1521,5 +1536,88 @@ public class BankStatementsHandlerTest {
       NeoResponse r = handler.handle(postCtx(ctx, "update"));
       assertEquals(400, r.getHttpStatus());
     }
+  }
+
+  // ── ETP-5121: reactivating a statement must not undo its reconciliations ──
+  //
+  // Every reactivate test above stubs reactivateStatement away (doNothing), so its BODY was never
+  // exercised. That body is the invariant ETP-5121's PENDING_LINES_SQL fix rests on: returning a
+  // statement to draft flips FIN_BankStatement.Processed and APRM's process selector, and NOTHING
+  // else — it never clears FIN_BankStatementLine.FIN_FinAcc_Transaction_ID and never detaches that
+  // transaction from its FIN_Reconciliation. Hence a line reconciled before the reactivation is
+  // still genuinely reconciled afterwards, which is exactly why the reconciliation panel has to
+  // keep listing it (see ReconciliationHandlerTest's PENDING_LINES_SQL shape tests). If this
+  // invariant ever changed — if reactivate started reversing reconciliations — that SQL exception
+  // would become wrong, and these tests are what would say so.
+
+  /** APRM process-selector value a reactivated statement goes back to. */
+  private static final String APRM_SELECTOR_PROCESS = "P";
+
+  @Mock private FIN_BankStatement reactivatedStatement;
+  @Mock private FIN_BankStatementLine reconciledLine;
+  @Mock private FIN_FinaccTransaction linkedTransaction;
+  @Mock private FIN_Reconciliation processedReconciliation;
+  @Mock private OBDal reactivateDal;
+
+  /**
+   * The whole of {@code reactivateStatement}: {@code ProcessNow} is raised around the change (so
+   * core's own bank-statement triggers stand down), {@code Processed} is cleared, and both APRM
+   * process selectors go back to "P". Each step is persisted rather than only mutated in memory.
+   */
+  @Test
+  public void testReactivateStatementOnlyReturnsTheHeaderToDraft() {
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(reactivateDal);
+
+      handler.reactivateStatement(reactivatedStatement);
+
+      InOrder order = inOrder(reactivatedStatement);
+      order.verify(reactivatedStatement).setProcessNow(true);
+      order.verify(reactivatedStatement).setProcessed(false);
+      order.verify(reactivatedStatement).setProcessNow(false);
+      verify(reactivatedStatement).setAPRMProcessBankStatement(APRM_SELECTOR_PROCESS);
+      verify(reactivatedStatement).setAPRMProcessBankStatementForce(APRM_SELECTOR_PROCESS);
+      verify(reactivateDal, times(3)).save(reactivatedStatement);
+      verify(reactivateDal, times(2)).flush();
+      // Nothing else on the header is touched — in particular the posting flag.
+      verify(reactivatedStatement, never()).setPosted(anyString());
+    }
+  }
+
+  /**
+   * The invariant the ETP-5121 SQL fix depends on: a matched line of the statement keeps BOTH links
+   * of the reconciliation chain (line to transaction, transaction to reconciliation) and the
+   * reconciliation itself stays processed. {@code reactivateStatement} does not even read the line
+   * collection.
+   */
+  @Test
+  public void testReactivateStatementKeepsTheReconciledLineChainIntact() {
+    when(reconciledLine.getFinancialAccountTransaction()).thenReturn(linkedTransaction);
+    when(linkedTransaction.getReconciliation()).thenReturn(processedReconciliation);
+    when(processedReconciliation.isProcessed()).thenReturn(true);
+    when(reactivatedStatement.getFINBankStatementLineList())
+        .thenReturn(Collections.singletonList(reconciledLine));
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(reactivateDal);
+
+      handler.reactivateStatement(reactivatedStatement);
+    }
+
+    // The line keeps pointing at its transaction, and the transaction at its reconciliation.
+    verify(reconciledLine, never()).setFinancialAccountTransaction(any());
+    verify(linkedTransaction, never()).setReconciliation(any());
+    verify(processedReconciliation, never()).setProcessed(false);
+    assertSame("the line to transaction link must survive the reactivation",
+        linkedTransaction, reconciledLine.getFinancialAccountTransaction());
+    assertSame("the transaction to reconciliation link must survive the reactivation",
+        processedReconciliation, linkedTransaction.getReconciliation());
+    assertTrue("the reconciliation must stay processed, which is what keeps the line reconciled",
+        processedReconciliation.isProcessed());
+    // It does not even look at the lines: reactivation is a header-only operation.
+    verify(reactivatedStatement, never()).getFINBankStatementLineList();
+    // And it never touches the line at all, so APRM_FIN_BNKSTM_LINE_CHECK_TRG has nothing to
+    // reject (the ETP-4921 finding this builds on).
+    verify(reconciledLine, never()).setBankStatement(any());
   }
 }

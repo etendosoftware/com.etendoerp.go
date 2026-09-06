@@ -30,6 +30,7 @@ import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -56,12 +57,15 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchedTransaction;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchingTransaction;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
+
+import com.etendoerp.go.schemaforge.data.MatchRule;
 
 /**
  * Unit tests for {@link AutoMatchSupport} — covers {@link AutoMatchSupport#matchByKey} (the 1:N
@@ -1085,33 +1089,82 @@ public class AutoMatchSupportTest {
     }
   }
 
-  /** incrementMatchCount issues the UPDATE bound to the rule id. */
+  /**
+   * incrementMatchCount bumps the counter through the DAL and saves the rule.
+   *
+   * <p>It used to be a raw {@code UPDATE ... WHERE etgo_match_rule_id = ?}. The id arrives in the
+   * request body and that statement had no {@code ad_client_id} predicate, so it bumped another
+   * tenant's counter; going through {@link OBCriteria} gets the readable-client filter for free
+   * (ETP-4950).
+   */
   @Test
-  public void testIncrementMatchCountExecutesUpdate() throws Exception {
+  @SuppressWarnings("unchecked")
+  public void testIncrementMatchCountBumpsTheCounterThroughTheDal() {
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
+      OBCriteria<MatchRule> criteria = mock(OBCriteria.class);
+      MatchRule rule = mock(MatchRule.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      when(dal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(dal.createCriteria(MatchRule.class)).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(rule);
+      when(rule.getMatchCount()).thenReturn(4L);
 
       AutoMatchSupport.incrementMatchCount("R1");
 
-      verify(ps).setString(1, "R1");
-      verify(ps).executeUpdate();
+      verify(rule).setMatchCount(5L);
+      verify(dal).save(rule);
+    }
+  }
+
+  /** A null counter starts from zero rather than throwing on unboxing. */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testIncrementMatchCountTreatsNullCounterAsZero() {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      OBCriteria<MatchRule> criteria = mock(OBCriteria.class);
+      MatchRule rule = mock(MatchRule.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.createCriteria(MatchRule.class)).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(rule);
+      when(rule.getMatchCount()).thenReturn(null);
+
+      AutoMatchSupport.incrementMatchCount("R1");
+
+      verify(rule).setMatchCount(1L);
+    }
+  }
+
+  /**
+   * A rule the current tenant cannot see is left alone — nothing is saved. This is the tenant-leak
+   * guard: the DAL filters the criteria by readable client, so a foreign rule id resolves to null.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testIncrementMatchCountSkipsARuleTheTenantCannotSee() {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      OBCriteria<MatchRule> criteria = mock(OBCriteria.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.createCriteria(MatchRule.class)).thenReturn(criteria);
+      when(criteria.setMaxResults(1)).thenReturn(criteria);
+      when(criteria.uniqueResult()).thenReturn(null);
+
+      AutoMatchSupport.incrementMatchCount("FOREIGN-RULE");
+
+      verify(dal, never()).save(any());
     }
   }
 
   /** incrementMatchCount swallows DB errors (best-effort, never throws). */
   @Test
-  public void testIncrementMatchCountSwallowsError() throws Exception {
+  public void testIncrementMatchCountSwallowsError() {
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      Connection conn = mock(Connection.class);
-      when(dal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(anyString())).thenThrow(new java.sql.SQLException("boom"));
+      when(dal.createCriteria(MatchRule.class)).thenThrow(new IllegalStateException("boom"));
 
       // Must not throw.
       AutoMatchSupport.incrementMatchCount("R1");
