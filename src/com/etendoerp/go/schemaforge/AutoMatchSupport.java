@@ -699,6 +699,32 @@ final class AutoMatchSupport {
   }
 
   /**
+   * The account-derived configuration one matching pass runs under.
+   *
+   * <p>These three travel together — {@code buildAutoMatch} resolves all of them from the same
+   * account before it loops over the pending lines — so they are one value rather than three more
+   * positional arguments on an already long signature (Sonar java:S107).
+   */
+  static final class MatchSettings {
+    final int dateTolDays;
+    final BigDecimal amtTolPct;
+    /**
+     * Whether the account has a GL Item Difference configured. When it does not, an AMOUNT
+     * deviation is not proposed at all: applying it would fail, and a suggestion the user cannot
+     * accept is worse than no suggestion. A date-only deviation posts nothing and is always
+     * offered — which is why this narrows the near-match tolerance instead of dropping the group
+     * afterwards, so the candidate is never claimed out of a later line's reach.
+     */
+    final boolean canPostDifferences;
+
+    MatchSettings(int dateTolDays, BigDecimal amtTolPct, boolean canPostDifferences) {
+      this.dateTolDays = dateTolDays;
+      this.amtTolPct = amtTolPct;
+      this.canPostDifferences = canPostDifferences;
+    }
+  }
+
+  /**
    * Passes 1b (1:N signal grouping) and 2 (rule engine) of the autoMatch preview — evaluated only
    * when the standard 1:1 algorithm did not match. Appends any group it finds to {@code groups} and
    * marks the consumed transactions in {@code usedTxnIds}/{@code excludedTxns} — the latter is fed
@@ -713,7 +739,7 @@ final class AutoMatchSupport {
     // canPostDifferences is moot at 0%: differenceTolerance already collapses to "exact amount
     // only", so no amount deviation can be proposed either way.
     return matchFallback(accountId, line, usedTxnIds, excludedTxns, rules, groups,
-        DEFAULT_DATE_TOL_DAYS, BigDecimal.ZERO, true);
+        new MatchSettings(DEFAULT_DATE_TOL_DAYS, BigDecimal.ZERO, true));
   }
 
   static int[] matchFallback(String accountId, FIN_BankStatementLine line,
@@ -721,20 +747,19 @@ final class AutoMatchSupport {
       List<MatchRuleEngine.Rule> rules, JSONArray groups,
       int dateTolDays, BigDecimal amtTolPct) throws JSONException {
     return matchFallback(accountId, line, usedTxnIds, excludedTxns, rules, groups,
-        dateTolDays, amtTolPct, true);
+        new MatchSettings(dateTolDays, amtTolPct, true));
   }
 
   /**
-   * @param canPostDifferences whether the account has a GL Item Difference configured. When it does
-   *     not, an AMOUNT deviation is not proposed at all: applying it would fail, and a suggestion
-   *     the user cannot accept is worse than no suggestion. A date-only deviation posts nothing and
-   *     is always offered — which is why this narrows the tolerance instead of dropping the group
-   *     afterwards, so the candidate is never claimed out of a later line's reach.
+   * @param settings the account-derived configuration this pass runs under
    */
   static int[] matchFallback(String accountId, FIN_BankStatementLine line,
       Set<String> usedTxnIds, List<FIN_FinaccTransaction> excludedTxns,
       List<MatchRuleEngine.Rule> rules, JSONArray groups,
-      int dateTolDays, BigDecimal amtTolPct, boolean canPostDifferences) throws JSONException {
+      MatchSettings settings) throws JSONException {
+    int dateTolDays = settings.dateTolDays;
+    BigDecimal amtTolPct = settings.amtTolPct;
+    boolean canPostDifferences = settings.canPostDifferences;
     BigDecimal target = ReconciliationSupport.nullSafe(line.getCramount())
         .subtract(ReconciliationSupport.nullSafe(line.getDramount()));
     BigDecimal amtTol = signalGroupTolerance(target, amtTolPct);

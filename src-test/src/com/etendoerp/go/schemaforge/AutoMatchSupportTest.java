@@ -1492,10 +1492,10 @@ public class AutoMatchSupportTest {
   // criteria are narrower, so when it does not match, the BEST candidate was invisible and the
   // line silently got a worse one.
   //
-  // Two consequences follow, and both are asserted below:
-  //   1. eligibility is the tolerance alone; RANKING picks the winner (gap → date → oldest);
-  //   2. the label is read off the candidate that won, via deviatesFrom — so an exact hit reached
-  //      through this path is a plain suggestion, not a "Con diferencia".
+  // Two consequences follow, and both are asserted below. First, eligibility is the tolerance
+  // alone, and RANKING picks the winner: smallest amount gap, then closest date, then oldest.
+  // Second, the label is read off the candidate that won, via deviatesFrom, so an exact hit
+  // reached through this path is a plain suggestion rather than a "Con diferencia".
   //
   // (2) has to hold in BOTH places that label a line, or the left panel's badge contradicts the
   // automatch modal's for the very same line. That is what the testClassifyAndMatchFallbackAgree*

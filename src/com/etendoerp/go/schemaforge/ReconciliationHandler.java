@@ -977,6 +977,9 @@ public class ReconciliationHandler implements NeoHandler {
     // suggestion that is guaranteed to fail on apply is worse than not offering it.
     boolean canPostDifferences = StringUtils.isNotBlank(
         ReconciliationDifferenceSupport.effectiveGlItemId(null, account));
+    // Resolved once for the whole run: the same account governs every line in the loop below.
+    AutoMatchSupport.MatchSettings matchSettings =
+        new AutoMatchSupport.MatchSettings(autoDateTolDays, autoAmtTolPct, canPostDifferences);
 
     // Collect all pending lines for this account.
     List<FIN_BankStatementLine> pendingLines = loadPendingLines(accountId);
@@ -1004,7 +1007,7 @@ public class ReconciliationHandler implements NeoHandler {
         opsToLink++;
       } else {
         int[] delta = AutoMatchSupport.matchFallback(accountId, line, usedTxnIds, excludedTxns,
-            rules, groups, autoDateTolDays, autoAmtTolPct, canPostDifferences);
+            rules, groups, matchSettings);
         opsToLink += delta[0];
         willCreate += delta[1];
       }

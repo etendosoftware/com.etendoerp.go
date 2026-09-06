@@ -24,7 +24,6 @@ import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -1437,11 +1436,10 @@ public class ReconciliationHandlerTest {
       // NearMatchSupport.findNearMatch reads its candidate pool through
       // AutoMatchSupport.loadUnreconciledSameSign, which this MockedStatic answers with an empty
       // list. If that loader ever moves out of AutoMatchSupport, stub NearMatchSupport here too.
-      // Nine arguments: buildAutoMatch calls the overload carrying `canPostDifferences` (ETP-4965).
-      // Stubbing the 8-arg one instead does not fail loudly — the call simply misses the stub and
-      // Mockito hands back a null int[], which then NPEs on `delta[0]` inside buildAutoMatch.
-      ams.when(() -> AutoMatchSupport.matchFallback(any(), any(), any(), any(), any(), any(),
-              anyInt(), any(), anyBoolean()))
+      // Seven arguments: buildAutoMatch calls the overload taking a MatchSettings. Stubbing a
+      // different arity does not fail loudly — the call simply misses the stub and Mockito hands
+      // back a null int[], which then NPEs on `delta[0]` inside buildAutoMatch, far from the cause.
+      ams.when(() -> AutoMatchSupport.matchFallback(any(), any(), any(), any(), any(), any(), any()))
           .thenCallRealMethod();
       // No 1:N signal group → forces the rule-engine branch.
       ams.when(() -> AutoMatchSupport.findSignalGroup(any(), any(), any(), any(), anyInt()))
