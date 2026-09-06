@@ -312,15 +312,14 @@ final class ReconciliationFlowSupport {
         continue;
       }
       NeoResponse prepError = prepareGroup(handler, account, groupEntry, prepared);
-      if (prepError == null) {
-        continue;
+      if (prepError != null) {
+        JSONObject failure = prepError.getBody();
+        if (failure != null && !failure.has(ReconciliationHandler.KEY_STATEMENT_LINE_ID)) {
+          failure.put(ReconciliationHandler.KEY_STATEMENT_LINE_ID,
+              groupEntry.optString(ReconciliationHandler.KEY_STATEMENT_LINE_ID, ""));
+        }
+        results.put(failure);
       }
-      JSONObject failure = prepError.getBody();
-      if (failure != null && !failure.has(ReconciliationHandler.KEY_STATEMENT_LINE_ID)) {
-        failure.put(ReconciliationHandler.KEY_STATEMENT_LINE_ID,
-            groupEntry.optString(ReconciliationHandler.KEY_STATEMENT_LINE_ID, ""));
-      }
-      results.put(failure);
     }
   }
 
