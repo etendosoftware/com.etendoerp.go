@@ -228,6 +228,8 @@ public class NeoVectorSearchEndpoint {
 
   /** Applies the same entity read authorization to a target's configured physical source. */
   private static final class TargetEntityAuthorizer implements NamespaceAuthorizer {
+    private static final String SPEC_PROPERTY_PREFIX = "spec.";
+
     @Override public boolean isAuthorized(List<String> targets) {
       try {
         for (String target : targets) {
@@ -273,10 +275,10 @@ public class NeoVectorSearchEndpoint {
         criteria.add(Restrictions.eq("tab.table.id", tableId));
         criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISACTIVE, true));
         criteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));
-        criteria.add(Restrictions.eq("spec." + SFSpec.PROPERTY_ISACTIVE, true));
-        criteria.add(Restrictions.eq("spec." + SFSpec.PROPERTY_SHOWINMCP, true));
-        criteria.add(Restrictions.eq("spec." + SFSpec.PROPERTY_SPECTYPE, "W"));
-        criteria.add(Restrictions.isNotNull("spec." + SFSpec.PROPERTY_ADWINDOW));
+        criteria.add(Restrictions.eq(SPEC_PROPERTY_PREFIX + SFSpec.PROPERTY_ISACTIVE, true));
+        criteria.add(Restrictions.eq(SPEC_PROPERTY_PREFIX + SFSpec.PROPERTY_SHOWINMCP, true));
+        criteria.add(Restrictions.eq(SPEC_PROPERTY_PREFIX + SFSpec.PROPERTY_SPECTYPE, "W"));
+        criteria.add(Restrictions.isNotNull(SPEC_PROPERTY_PREFIX + SFSpec.PROPERTY_ADWINDOW));
         for (SFEntity entity : criteria.list()) {
           windowIds.add(entity.getETGOSFSpec().getADWindow().getId());
         }
