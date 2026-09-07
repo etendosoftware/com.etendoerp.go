@@ -211,15 +211,30 @@ public class AgingReportHandler implements NeoHandler {
   @Override
   public NeoResponse handle(NeoContext context) {
     String method = context.getHttpMethod();
-    // The gate must match the side actually being served. Only POST carries a body — and
-    // therefore a recOrPay value — so every other method (including GET's describeReport,
-    // which is side-agnostic) keeps gating on the receivables process, exactly as before this
-    // fix. This used to be a single hardcoded receivables check regardless of recOrPay, so a
-    // POST with recOrPay=PAYABLES from a role with ONLY the receivables grant (or vice versa)
-    // was silently let through — the payables process id was never actually consulted.
-    String gatedProcessId = "POST".equals(method)
-        ? resolveGatedProcessId(context.getRequestBody())
-        : AGING_RECEIVABLE_PROCESS_ID;
+    // The gate must match the side actually being served. POST carries recOrPay in its body;
+    // GET (describeReport) has no body but CAN carry query params (NeoContext#getQueryParams),
+    // so it resolves recOrPay from there instead — same param name, same "absent → RECEIVABLES"
+    // default as POST/executeReport, so a bare GET with no query param keeps behaving exactly as
+    // before this fix. Only these two methods ever reach a real report side; any other method
+    // (DELETE/PUT, both 405 below) keeps the receivables default, since it never touches either
+    // process.
+    //
+    // Before this fix, GET always hardcoded the receivables process regardless of recOrPay, so a
+    // role granted ONLY the payables process got a 403 on describeReport even though that call
+    // returns no real financial data (static parameter descriptions) and — had the correct side
+    // been consulted — the role legitimately has access to it.
+    String gatedProcessId;
+    if ("POST".equals(method)) {
+      gatedProcessId = resolveGatedProcessId(context.getRequestBody());
+    } else if ("GET".equals(method)) {
+      Map<String, String> queryParams = context.getQueryParams();
+      String recOrPay = queryParams == null
+          ? REC_OR_PAY_RECEIVABLES
+          : queryParams.getOrDefault(PARAM_REC_OR_PAY, REC_OR_PAY_RECEIVABLES);
+      gatedProcessId = resolveGatedProcessId(recOrPay);
+    } else {
+      gatedProcessId = AGING_RECEIVABLE_PROCESS_ID;
+    }
     if (!NeoAccessHelper.hasObuiappProcessAccess(gatedProcessId)) {
       return NeoResponse.error(403, "Access denied");
     }
@@ -233,9 +248,9 @@ public class AgingReportHandler implements NeoHandler {
   }
 
   /**
-   * Resolves which OBUIAPP process this request's {@code recOrPay} must be gated on. Mirrors
-   * {@link #executeReport}'s own {@code recOrPay} default (RECEIVABLES) so the gate and the
-   * actual query always agree on which side is being served.
+   * Resolves which OBUIAPP process a POST request's {@code recOrPay} body param must be gated
+   * on. Mirrors {@link #executeReport}'s own {@code recOrPay} default (RECEIVABLES) so the gate
+   * and the actual query always agree on which side is being served.
    *
    * @param body the POST request body, or {@code null} (the 400 for a missing body is raised
    *     later in {@link #executeReport}, after the gate — a missing body still defaults to
@@ -246,6 +261,19 @@ public class AgingReportHandler implements NeoHandler {
     String recOrPay = body == null
         ? REC_OR_PAY_RECEIVABLES
         : body.optString(PARAM_REC_OR_PAY, REC_OR_PAY_RECEIVABLES);
+    return resolveGatedProcessId(recOrPay);
+  }
+
+  /**
+   * Resolves which OBUIAPP process a request must be gated on, given an already-resolved
+   * {@code recOrPay} value (from either a POST body or a GET query param — see {@link #handle}).
+   *
+   * @param recOrPay {@code RECEIVABLES} or {@code PAYABLES} (case-insensitive); any other value,
+   *     including {@code null}, resolves to RECEIVABLES — the same default {@link #executeReport}
+   *     applies
+   * @return the receivables or payables OBUIAPP process id, matching {@code recOrPay}
+   */
+  private static String resolveGatedProcessId(String recOrPay) {
     return REC_OR_PAY_PAYABLES.equalsIgnoreCase(recOrPay)
         ? AGING_PAYABLE_PROCESS_ID
         : AGING_RECEIVABLE_PROCESS_ID;
