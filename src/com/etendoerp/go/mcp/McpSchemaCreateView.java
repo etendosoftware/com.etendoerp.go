@@ -237,10 +237,16 @@ final class McpSchemaCreateView {
    * <p>ETP-5184. The prompt was reaching {@code neo_discover} only, and discover is a catalogue an
    * agent reads once; {@code view:"create"} is what it reads immediately before writing. When the
    * entity is handler-backed, the prompt is the only place the divergence between the advertised
-   * contract and the one the handler implements can be stated — {@code contacts/locationAddress}
-   * advertises {@code locationAddress} as a required Search field while its handler creates the
-   * {@code C_Location} itself and discards whatever id was sent. Omitting the key when the column
-   * is blank keeps the response byte-for-byte as before for the 285 entities that carry no prompt.
+   * contract and the one the handler implements can be stated. Its two current consumers are
+   * {@code contacts/bankAccount} and {@code financial-account/account}, both of which use it to
+   * separate a contact's own bank account from the company's — the mix-up an agent makes unaided.
+   *
+   * <p>Note that {@code contacts/locationAddress}, the case that motivated ETP-5184, is
+   * <b>not</b> served by this path: its guidance lives on {@code ETGO_SF_FIELD.AGENT_PROMPT} for
+   * the {@code C_Location_ID} field and reaches the response through
+   * {@code McpSchemaFieldBuilder}'s per-field {@code addAgentPrompt}, which predates this change.
+   * Omitting the key when the column is blank keeps the response byte-for-byte as before for the
+   * 285 entities that carry no prompt.
    *
    * @param agentPrompt the entity's curated guidance, or {@code null}/blank to omit the key
    */

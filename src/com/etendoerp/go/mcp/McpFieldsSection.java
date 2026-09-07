@@ -68,19 +68,24 @@ import org.codehaus.jettison.json.JSONObject;
  * {@code C_Location}, and {@code bp-location/bpLocation} is the only entity mapping that table.</p>
  *
  * <p>Backfilling {@code VISIBILITY} would have been the deeper fix, and it is the one to make
- * eventually — for the 18 entities with this gap, not just this one. It was not taken here because
+ * eventually — and it is not a tail: <b>130 of the 242 active entities that advertise POST or PUT
+ * publish no field that passes the method gate at all</b> (128 of them carry no curated visibility
+ * on any field, and 10 have no {@code ETGO_SF_FIELD} row whatsoever). Sizing that backfill as a
+ * handful of entities, as an earlier revision of this javadoc and of commit {@code 3a6535d5} did
+ * with the figure "18", understates it by roughly sevenfold. It was not taken here because
  * that column is read by the REST and React layers too, so a backfill changes the shared contract
  * for every existing consumer. This section is the deliberately low-risk path: it is read by the MCP
  * and nothing else ({@code MCP_CONFIG} has no reader outside {@code com.etendoerp.go.mcp}), so the
  * shared contract is untouched and the blast radius is one entity. {@code reason} is mandatory
  * precisely so that this trade-off stays written down on the row that makes it.</p>
  *
- * <h2>One resolver, three readers</h2>
- * <p>An override that only the first reader honoured would be worse than no override. Three places
+ * <h2>One resolver, every reader</h2>
+ * <p>An override that only the first reader honoured would be worse than no override. Four places
  * derive these properties from {@code SFField} independently — {@code neo_schema}'s field metadata,
- * {@code neo_selectors}' editable-property set and the resource provider's field list — and they do
- * not agree by construction. {@link McpFieldView} is the single resolver all three go through, so
- * "editable" means the same thing in every response.</p>
+ * {@code neo_selectors}' editable-property set, the resource provider's field list and the
+ * {@code view:"summary"} projection — and they do not agree by construction. {@link McpFieldView}
+ * is the single resolver all of them go through, so "editable" means the same thing in every
+ * response. {@code McpFieldViewSingleResolverCallSiteTest} fails the build if one stops.</p>
  */
 final class McpFieldsSection {
 
