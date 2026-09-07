@@ -83,8 +83,8 @@ class McpFieldViewSingleResolverCallSiteTest {
       Pattern.compile("McpFieldView\\s*\\.\\s*of\\s*\\(");
 
   /**
-   * A curation property read straight off the {@code SFField} loop variable — the shape each of
-   * these three methods used before ETP-5184, and the shape a regression would take.
+   * A curation property read straight off the {@code SFField} loop variable — the shape all four
+   * readers used before ETP-5184, and the shape a regression would take.
    */
   private static final Pattern RAW_FIELD_READ = Pattern.compile(
       "\\b(sfField|field)\\s*\\.\\s*(getVisibility|isReadOnly|isBusinessCritical)\\s*\\(");
