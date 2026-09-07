@@ -353,7 +353,7 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("184"),                                          // Albarán de compra — Goods Receipt
         full("183"),                                          // Factura de compra — Purchase Invoice
         full("107"),                                          // Relación albarán-factura — Receipt-Invoice Link (ETP-5075)
-        full("C50A8AEE6F044825B5EF54FAAE76826F"),              // Devolución a proveedor — Return to Vendor
+        full("273673D2ED914C399A6C51DB758BE0F9"),              // Devolución a proveedor — Return to Vendor Shipment (ETP-5116, corrects the dead C50A8AEE window)
         full("140"),                                          // Producto — Product
         readOnly("144"),                                       // Categoría del producto — Product Category
         full("6F8F913FA60F4CBD93DC1D3AA696E76E"),              // Pago — Payment Out
@@ -434,7 +434,7 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("FF808081330213E60133021822E40007"),              // Albarán de devolución — Return from Customer
         readOnly("181"),                                       // Pedido de compra — Purchase Order
         full("184"),                                          // Albarán de compra — Goods Receipt
-        full("C50A8AEE6F044825B5EF54FAAE76826F"),              // Devolución a proveedor — Return to Vendor
+        full("273673D2ED914C399A6C51DB758BE0F9"),              // Devolución a proveedor — Return to Vendor Shipment (ETP-5116, corrects the dead C50A8AEE window)
         full("140"),                                          // Producto — Product
         full("144"),                                          // Categoría del producto — Product Category
         full("168"),                                          // Inventario físico — Physical Inventory

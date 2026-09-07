@@ -68,6 +68,8 @@ class TemplateRoleWindowAccessTest {
   private static final String WINDOW_FINANCIAL_REPORTS = "D647D118F5014D00AF47A636B2CD0DD3";
   private static final String WINDOW_SMART_SCAN = "33705E0F52874D91B0BB2FF8BB648B8E";
   private static final String WINDOW_INVENTORY_STOCK_REPORT = "6346B88619F948F9A42224BDB0B239FA";
+  private static final String WINDOW_RETURN_TO_VENDOR_SHIPMENT = "273673D2ED914C399A6C51DB758BE0F9";
+  private static final String WINDOW_RETURN_TO_VENDOR_DEAD = "C50A8AEE6F044825B5EF54FAAE76826F";
 
   private static WindowGrant grantFor(List<WindowGrant> grants, String windowId) {
     for (WindowGrant grant : grants) {
@@ -150,7 +152,7 @@ class TemplateRoleWindowAccessTest {
   }
 
   @Test
-  void salesHasTwelveGrantsAndNoPaymentOutOrPhysicalInventoryAccess() {
+  void salesHasThirteenGrantsAndNoPaymentOutOrPhysicalInventoryAccess() {
     List<WindowGrant> sales = TemplateRoleWindowAccess.byRoleId()
         .get(SystemRoleTemplates.SALES_ROLE_ID);
     assertEquals(13, sales.size(),
@@ -298,6 +300,36 @@ class TemplateRoleWindowAccessTest {
         "ETP-5116: Financiero must have NO access to Categoría del producto — the previous "
             + "full(\"144\") grant was an over-grant and has been removed");
     assertTrue(inventoryGrant != null && !inventoryGrant.isReadOnly());
+  }
+
+  /**
+   * QA (Sentinel, ETP-4878/pre-existing bug caught during ETP-5116 QA) — {@code
+   * C50A8AEE6F044825B5EF54FAAE76826F} was granted for both Compras and Almacén with the comment
+   * "Devolución a proveedor — Return to Vendor", but that {@code AD_Window_ID} has no live
+   * frontend spec (no {@code decisions.json}, not wired into {@code menu.json}) — a dead
+   * artifact. The window users actually open for this workflow is {@code
+   * return-to-vendor-shipment} ({@code 273673D2ED914C399A6C51DB758BE0F9}, confirmed live via a
+   * real generated page calling {@code useWindowAccess} and a {@code menu.json} entry). This
+   * locks in the correction: both roles must grant the live id, full access, and never the dead
+   * one, with no change to either role's total grant count (a correction, not an addition).
+   */
+  @Test
+  void purchasingAndInventoryGrantTheLiveReturnToVendorShipmentWindowNotTheDeadOne() {
+    Map<String, List<WindowGrant>> byRoleId = TemplateRoleWindowAccess.byRoleId();
+
+    List<WindowGrant> purchasing = byRoleId.get(SystemRoleTemplates.PURCHASING_ROLE_ID);
+    WindowGrant purchasingGrant = grantFor(purchasing, WINDOW_RETURN_TO_VENDOR_SHIPMENT);
+    assertTrue(purchasingGrant != null && !purchasingGrant.isReadOnly(),
+        "ETP-5116: Compras must have FULL access to the live Return to Vendor Shipment window");
+    assertNull(grantFor(purchasing, WINDOW_RETURN_TO_VENDOR_DEAD),
+        "ETP-5116: Compras must NOT reference the dead Return to Vendor window id anymore");
+
+    List<WindowGrant> inventory = byRoleId.get(SystemRoleTemplates.INVENTORY_ROLE_ID);
+    WindowGrant inventoryGrant = grantFor(inventory, WINDOW_RETURN_TO_VENDOR_SHIPMENT);
+    assertTrue(inventoryGrant != null && !inventoryGrant.isReadOnly(),
+        "ETP-5116: Almacén must have FULL access to the live Return to Vendor Shipment window");
+    assertNull(grantFor(inventory, WINDOW_RETURN_TO_VENDOR_DEAD),
+        "ETP-5116: Almacén must NOT reference the dead Return to Vendor window id anymore");
   }
 
   @Test
