@@ -77,16 +77,16 @@ public final class NeoImageHelper {
   private static final byte[] MAGIC_JPEG = { (byte) 0xFF, (byte) 0xD8, (byte) 0xFF };
 
   /**
-   * The single answer to every unusable upload token. One sentence for unknown, expired, forged and
-   * already-used alike — see {@link #handleUploadTicketRequest} for why they must not be
-   * distinguishable.
-   */
-  /**
    * Path of the ticketed upload endpoint, relative to the NEO servlet mount — the single source of
    * truth for it. {@code NeoServlet} routes on this prefix and {@code McpImageTools} advertises the
    * URL built from it; a literal in each would let the advertised URL drift from the served route,
    * and the only symptom would be an agent PUTting to a 404.
    */
+  // java:S1075 asks for this to come from configuration. It must not: the path is this module's own
+  // servlet route, part of the protocol every NEO client already speaks, and a deployment that
+  // changed it would simply 404. The half that does vary by deployment — the public base and the
+  // context path — is resolved from configuration in McpImageTools.buildUploadUrl.
+  @SuppressWarnings("java:S1075")
   public static final String UPLOAD_TICKET_PATH = "/image/upload/";
 
   /**
@@ -96,6 +96,11 @@ public final class NeoImageHelper {
    */
   public static final String REASON_TOO_LARGE = "too_large";
 
+  /**
+   * The single answer to every unusable upload token. One sentence for unknown, expired, forged and
+   * already-used alike — see {@link #handleUploadTicketRequest} for why they must not be
+   * distinguishable.
+   */
   static final String INVALID_UPLOAD_LINK_MESSAGE =
       "This upload link is not valid, has already been used, or has expired. Request a new one with "
       + "neo_request_image_upload.";
@@ -118,6 +123,9 @@ public final class NeoImageHelper {
     private final String reason;
 
     /**
+     * Builds a rejection an MCP tool or an HTTP endpoint can answer with directly: the reason picks
+     * the status or the remedy, the message is what the caller is told.
+     *
      * @param reason  machine-readable reason: {@code empty}, {@code too_large},
      *                {@code unsupported_mime}, {@code mime_mismatch} or {@code malformed_base64}
      * @param message the sentence handed to the caller. Every reason here is caller-correctable, so
@@ -322,6 +330,12 @@ public final class NeoImageHelper {
    * @param data the image bytes; {@code null} or empty yields {@code null}
    * @return {@code {width, height}}, or {@code null} when the bytes cannot be decoded.
    */
+  // java:S1168 asks for an empty array instead of null. Here null is the contract, not an oversight:
+  // it means "no dimensions to report", which describeImage acts on with `if (dimensions != null)`
+  // to omit width/height from the JSON entirely. An empty array would need that identical check, so
+  // the rule would buy nothing and a caller reading dimensions[0] would then get an exception
+  // instead of an obvious NPE. Any change here is a signature change with callers — not a lint fix.
+  @SuppressWarnings("java:S1168")
   public static int[] readDimensions(byte[] data) {
     if (data == null || data.length == 0) {
       return null;
