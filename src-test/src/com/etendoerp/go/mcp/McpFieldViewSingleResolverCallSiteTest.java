@@ -269,7 +269,9 @@ class McpFieldViewSingleResolverCallSiteTest {
     assertEquals("editable", view.getVisibility());
     assertFalse(view.isReadOnly());
     assertTrue(view.isEditable());
-    // summaryFields' one: the fixture leaves it false, so the view must not invent a true.
+    // summaryFields' one: this fixture's override says nothing about businessCritical and the row
+    // says false, so the view must not invent a true. The override's own effect on it is
+    // aBusinessCriticalOverrideIsHonoured below, where row and override deliberately disagree.
     assertFalse(view.isBusinessCritical());
 
     // And the same field narrowed: no reader can be left on the pre-override answer.
@@ -280,20 +282,76 @@ class McpFieldViewSingleResolverCallSiteTest {
   }
 
   /**
+   * {@code businessCritical} is overridable, and {@code summaryFields} is the reader that now
+   * consumes it — {@code view:"summary"} on {@code neo_list}/{@code neo_get}. That reader has no
+   * behavioural test of its own (it needs a {@code ModelProvider} entity and a live DAL), so the
+   * capability it gained is pinned here, at the seam it gained it through.
+   *
+   * <p>Every fixture below has the row and the override <b>disagree</b>, which is what makes the
+   * assertions about the override rather than about the fixture: a row and an override that agree
+   * would pass whichever of the two the resolver actually read. The third case is the control —
+   * with the override silent, the row's own value must come through, so the first two cannot be
+   * passing merely because the resolver ignores the row entirely.</p>
+   */
+  @Test
+  @DisplayName("a businessCritical override is honoured in both directions, and the row still "
+      + "stands when the override is silent")
+  void aBusinessCriticalOverrideIsHonoured() {
+    // Row says false, override says true: a true answer can only have come from the override.
+    assertTrue(McpFieldView.of(overriddenField("editable", Boolean.FALSE, Boolean.TRUE))
+        .isBusinessCritical());
+
+    // The other direction, which nothing covered: the override demotes a row that says true.
+    assertFalse(McpFieldView.of(overriddenField("editable", Boolean.TRUE, Boolean.FALSE))
+        .isBusinessCritical());
+
+    // Control: override silent, row true — the row is genuinely being read.
+    assertTrue(McpFieldView.of(overriddenField("editable", Boolean.TRUE, null))
+        .isBusinessCritical());
+
+    // And the override must not disturb the properties the other three readers consume.
+    McpFieldView promoted = McpFieldView.of(overriddenField("editable", Boolean.FALSE,
+        Boolean.TRUE));
+    assertEquals("editable", promoted.getVisibility());
+    assertFalse(promoted.isReadOnly());
+    assertTrue(promoted.isEditable());
+  }
+
+  /**
    * A field whose {@code VISIBILITY} column is {@code NULL} — the bp-location shape — with an
    * entity-level {@code fields} override reclassifying it.
    */
   private SFField overriddenField(String visibility) {
+    return overriddenField(visibility, Boolean.FALSE, null);
+  }
+
+  /**
+   * The same shape, with {@code businessCritical} controllable on both sides of the override.
+   *
+   * @param visibility               the visibility the override declares
+   * @param rowBusinessCritical      the {@code ISBUSINESSCRITICAL} column on the row itself
+   * @param overrideBusinessCritical the value the override declares, or {@code null} to leave the
+   *                                 key out — which is not the same as a declared {@code false}
+   */
+  private SFField overriddenField(String visibility, Boolean rowBusinessCritical,
+      Boolean overrideBusinessCritical) {
+    // The id doubles as the McpConfigCache key, so it has to vary with the payload.
+    String id = visibility + "-" + rowBusinessCritical + "-" + overrideBusinessCritical;
     SFField field = mock(SFField.class);
-    when(field.getId()).thenReturn("call-site-field-" + visibility);
+    when(field.getId()).thenReturn("call-site-field-" + id);
     when(field.getVisibility()).thenReturn(null);
     when(field.isIncluded()).thenReturn(Boolean.TRUE);
     when(field.isReadOnly()).thenReturn(Boolean.FALSE);
-    when(field.isBusinessCritical()).thenReturn(Boolean.FALSE);
+    when(field.isBusinessCritical()).thenReturn(rowBusinessCritical);
+
+    StringBuilder keys = new StringBuilder("\"visibility\":\"" + visibility + "\",");
+    if (overrideBusinessCritical != null) {
+      keys.append("\"businessCritical\":").append(overrideBusinessCritical).append(',');
+    }
     SFEntity entity = mock(SFEntity.class);
-    when(entity.getId()).thenReturn("call-site-entity-" + visibility);
-    when(entity.get(SFEntity.PROPERTY_MCPCONFIG)).thenReturn("{\"fields\":{\"visibility\":\""
-        + visibility + "\",\"reason\":\"call-site fixture\"}}");
+    when(entity.getId()).thenReturn("call-site-entity-" + id);
+    when(entity.get(SFEntity.PROPERTY_MCPCONFIG)).thenReturn(
+        "{\"fields\":{" + keys + "\"reason\":\"call-site fixture\"}}");
     when(field.getETGOSFEntity()).thenReturn(entity);
     return field;
   }
