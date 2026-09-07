@@ -122,18 +122,21 @@ final class McpSchemaCreateView {
    * whose default expression reads from the parent record (the parent's warehouse for a storage
    * bin, its price-list version, its running line number) — it does not error, the field is simply
    * absent from {@code confirm}. Passing {@code parentId} is what resolves them. This is additive
-   * text only; the {@code required}/{@code optional} split above is unaffected — the parent FK
+   * text only; the {@code required}/{@code optional} split above is unaffected. {@code parentId}
    * itself does not appear there because {@code view:"create"} lists only fields the schema
-   * describes as belonging to this entity, and the parent FK is always required regardless.</p>
+   * describes as belonging to this entity — the parent is named by {@code parentId} on both
+   * {@code neo_defaults} and {@code neo_create}, never by its own foreign key, which the server
+   * does not read to load the parent record.</p>
    */
   static final String CHILD_ENTITY_HINT_SUFFIX =
-      " This is a child/line entity: before calling neo_create, call neo_defaults with "
-      + "parentId set to the parent record's id — parent-dependent defaults (e.g. a storage bin "
-      + "scoped to the parent's warehouse, a price-list version, a line number) are resolved only "
-      + "when parentId is given; omitting it does not error, it just leaves those fields absent. "
-      + "Also send the parent foreign key itself among your neo_create fields (e.g. physInventory "
-      + "on inventoryLine, salesOrder on sales-order/lines) — it is required even though it is not "
-      + "listed above.";
+      " This is a child/line entity: pass parentId — the parent record's id — on neo_create, and "
+      + "on neo_defaults before it. Fields whose default reads from the parent (a storage bin "
+      + "scoped to the parent's warehouse, a price-list version, a running line number, a date or "
+      + "warehouse inherited from the parent document) are resolved only from parentId; omitting "
+      + "it does not error, it just leaves those fields absent. Do NOT name the parent by its own "
+      + "foreign key instead (salesOrder on sales-order/lines, physInventory on inventoryLine): "
+      + "the server loads the parent record only from parentId, so that form silently persists a "
+      + "record with parent-derived fields left null. Send parentId, not the parent FK.";
 
   /** @return {@code true} when {@code view} requests the create-shaped projection. */
   static boolean isCreateView(String view) {
