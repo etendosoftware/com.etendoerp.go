@@ -691,6 +691,7 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
   protected void provisionEntityPostingAccounts(Client client, AcctSchema ledger) {
     String clientId = client.getId();
     String schemaId = ledger.getId();
+    backfillInvoicePriceVarianceDefault(clientId, schemaId);
     runEntityAcctInsert(BP_GROUP_ACCT_SQL, clientId, schemaId);
     ensureAcreedorPrepaymentAccount(clientId, schemaId);
     overrideAcreedorGroupAccounts(clientId, schemaId);
@@ -701,6 +702,64 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
     runEntityAcctInsert(TAX_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(FIN_FINANCIAL_ACCOUNT_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(WAREHOUSE_ACCT_SQL, clientId, schemaId);
+  }
+
+  /**
+   * Preventive front for ETP-5075 gap A8: backfills {@code C_ACCTSCHEMA_DEFAULT.
+   * P_InvoicePriceVariance_Acct} from that same row's {@code P_Expense_Acct} when the imported
+   * dataset left it {@code NULL} — confirmed true of every dataset-import chart family in this
+   * fleet at authoring time except the one non-imported demo schema that happens to already carry
+   * a dedicated variance account.
+   *
+   * <p>{@code DocMatchInv} (the accounting engine for {@code M_MatchInv}, "Relación
+   * albarán-factura") requests this account ONLY when a match's invoiced amount differs from its
+   * receipt's costed amount — most matches never hit this, which is why an unconfigured chart goes
+   * unnoticed until a real price difference occurs, then fails to post with a misleadingly
+   * BP/BP-Group-flavored "Account could not be found." (see
+   * {@link #patchBpGroupAcctMissingColumns}'s sibling javadoc and
+   * {@code DocumentPostingService#enrichWithFailingEntity} in this same module for that unrelated
+   * enrichment). {@code ProductInfo#getAccount} resolves this account EXCLUSIVELY from {@code
+   * M_PRODUCT_ACCT} for any line that carries a product (every real purchase-invoice-match line),
+   * with NO fallback to this schema-level default once a product has its own posting row — so this
+   * step alone does not, by itself, fix an EXISTING tenant's EXISTING products (that correction is
+   * the corrective {@code R34-invoice-price-variance-backfill} data-fix, which directly backfills
+   * {@code M_PRODUCT_ACCT}/{@code M_PRODUCT_CATEGORY_ACCT} for tenants provisioned before this
+   * method existed). What THIS step buys a brand-new tenant is that {@link
+   * #PRODUCT_CATEGORY_ACCT_SQL}/{@link #PRODUCT_ACCT_SQL} — which already copy {@code
+   * d.p_invoicepricevariance_acct} from this table into every product/category row at creation
+   * time — now copy a real account instead of propagating the same NULL forward. Must run before
+   * both of those, which is why it is the first statement in {@link
+   * #provisionEntityPostingAccounts}.
+   *
+   * <p>Deliberately copies {@code P_Expense_Acct} rather than pointing at a new dedicated account:
+   * confirmed live via the "Pérdidas y Ganancias" (P&L) report that GOClient's own Spanish-PGC-style
+   * chart ("Árbol de cuentas GO") has no such account at all — its whole "Aprovisionamientos" group
+   * only ever shows {@code 600 - Compras de mercaderías}/{@code 610 - Variación de existencias},
+   * unlike an Anglo-Saxon-style chart (e.g. the F&B International Group US Dollar demo schema),
+   * whose P&L shows a full COGS breakdown including a dedicated {@code 5610 - Invoice price
+   * variance} sibling of {@code 5360 - Product Expense}. Verified live: posting a previously-failing
+   * {@code M_MatchInv} record after wiring both to the same account (GOClient's {@code 60000000})
+   * produced a balanced 3-line entry — the usual 2 lines plus the variance amount landing as a
+   * THIRD line in that very same account.
+   *
+   * <p>{@code P_PurchasePriceVariance_Acct} (the sibling column for {@code
+   * ProductInfo.ACCTTYPE_P_PPV}) is deliberately NOT touched here: its Classic UI field on this same
+   * tab is {@code isactive='N'} (Etendo turned it off), and no purchasing document class in core
+   * ever requests {@code ACCTTYPE_P_PPV} — wiring a column nothing reads and the UI does not even
+   * expose would be unexplained noise for whoever reads this schema's config later.
+   *
+   * @param clientId target client identifier
+   * @param schemaId the accounting schema whose default is backfilled
+   */
+  protected void backfillInvoicePriceVarianceDefault(String clientId, String schemaId) {
+    int rows = OBDal.getInstance().getSession()
+        .createNativeQuery(ACCTSCHEMA_DEFAULT_IPV_BACKFILL_SQL)
+        .setParameter(PARAM_CLIENT_ID, clientId)
+        .setParameter("schemaId", schemaId)
+        .executeUpdate();
+    if (rows > 0 && log.isDebugEnabled()) {
+      log.debug("Backfilled Invoice Price Variance default for client {}", clientId);
+    }
   }
 
   /**
@@ -1025,6 +1084,20 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
       + "WHERE g.ad_client_id = :clientId AND d.c_acctschema_id = :schemaId "
       + "  AND NOT EXISTS (SELECT 1 FROM c_bp_group_acct a"
       + "    WHERE a.c_bp_group_id = g.c_bp_group_id AND a.c_acctschema_id = :schemaId)";
+
+  /**
+   * Backfills {@code C_ACCTSCHEMA_DEFAULT.P_InvoicePriceVariance_Acct} from that SAME row's
+   * {@code P_Expense_Acct} when the imported dataset's own copy left it {@code NULL} — ETP-5075
+   * gap A8. Must run BEFORE {@link #PRODUCT_CATEGORY_ACCT_SQL}/{@link #PRODUCT_ACCT_SQL} below,
+   * which already copy {@code d.p_invoicepricevariance_acct} from this table into every new
+   * product/category at creation time — fixing the source here is what makes that existing
+   * copy-down cover this column too, for a brand-new tenant, with no change to those two INSERTs.
+   */
+  private static final String ACCTSCHEMA_DEFAULT_IPV_BACKFILL_SQL =
+      "UPDATE c_acctschema_default d"
+      + " SET p_invoicepricevariance_acct = d.p_expense_acct, updated = now(), updatedby = '0'"
+      + " WHERE d.ad_client_id = :clientId AND d.c_acctschema_id = :schemaId"
+      + "   AND d.p_invoicepricevariance_acct IS NULL AND d.p_expense_acct IS NOT NULL";
 
   private static final String PRODUCT_CATEGORY_ACCT_SQL =
       "INSERT INTO m_product_category_acct ("
