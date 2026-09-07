@@ -1129,12 +1129,7 @@ public class McpToolRouter {
     // getParentEntity() can be null even for a RESOLVED scope — the parent tab exists and the FK is
     // identified, but that tab is not an included entity of this spec, so there is no name the
     // agent could call. Say "the parent record" rather than the literal "null".
-    String parentHint = parentScope.requiredVerbs().isEmpty() ? ""
-        : "This is a child entity: pass parentId (the id of the "
-            + (parentScope.getParentEntity() == null ? "parent"
-                : "'" + parentScope.getParentEntity() + "'")
-            + " record) on " + String.join(", ", parentScope.requiredVerbs())
-            + " — there is no global list of these records to read without it. ";
+    String parentHint = buildParentHint(parentScope);
     entitySchema.put("hint", parentHint
         + "Call neo_schema with view:\"create\" to get only the fields you may send, already split "
         + "into required/optional — this full response is far larger than you need. "
@@ -1163,6 +1158,29 @@ public class McpToolRouter {
    * @param fieldsArray the full, undecorated field array (before any {@code view}/{@code fields}
    *     narrowing) so a caller's whitelist request does not skew the entity-wide answer
    */
+  /**
+   * The sentence {@code neo_schema}'s hint opens with for a child entity, or empty for a header.
+   *
+   * <p>Extracted from an inline nested ternary (java:S3358). {@code getParentEntity()} can be null
+   * even for a resolved child — the parent tab exists and the FK is identified, but that tab is not
+   * an included entity of this spec, so there is no name the agent could call. Say "the parent
+   * record" rather than the literal "null".</p>
+   *
+   * @param scope the entity's resolved parent scope
+   * @return the hint sentence, ending in a space, or {@code ""} when no parent key is required
+   */
+  private static String buildParentHint(McpParentScope.Scope scope) {
+    List<String> required = scope.requiredVerbs();
+    if (required.isEmpty()) {
+      return "";
+    }
+    String parent = scope.getParentEntity() == null ? "parent"
+        : "'" + scope.getParentEntity() + "'";
+    return "This is a child entity: pass parentId (the id of the " + parent + " record) on "
+        + String.join(", ", required)
+        + " — there is no global list of these records to read without it. ";
+  }
+
   private static boolean hasAnyAgentSuppliableField(JSONArray fieldsArray) {
     if (fieldsArray == null) {
       return false;

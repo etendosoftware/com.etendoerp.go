@@ -287,28 +287,56 @@ final class McpParentScope {
     return resolveChild(entity, tab, resolved.section(McpParentSection.NAME).orElse(null));
   }
 
-  private static Scope resolveChild(SFEntity entity, Tab tab, JSONObject config) {
-    Set<String> optional = McpParentSection.optionalVerbs(config);
-    String reason = McpParentSection.reason(config);
-    Tab parentTab = parentTabOf(tab);
-    Entity dalEntity = entityOf(tab);
+  /**
+   * The inputs every resolution branch needs, gathered once.
+   *
+   * <p>These seven travelled as seven parameters through {@code sameRecordScope},
+   * {@code declaredScope} and {@code heuristicScope}, which put the last two over Sonar's
+   * java:S107 limit. They are not an arbitrary bundle — they are the entity, where it sits, and
+   * what it declares, which is the whole input to the question "how is this addressed". Carrying
+   * them as one value also means a new input is added in one place rather than in four
+   * signatures.</p>
+   */
+  private static final class Resolution {
+    private final SFEntity entity;
+    private final Tab tab;
+    private final Tab parentTab;
+    private final Entity dalEntity;
+    private final JSONObject config;
+    private final Set<String> optional;
+    private final String reason;
 
-    if (dalEntity == null) {
-      return unresolvable(tab, "its table has no DAL entity", optional, reason);
+    private Resolution(SFEntity entity, Tab tab, Tab parentTab, Entity dalEntity,
+        JSONObject config) {
+      this.entity = entity;
+      this.tab = tab;
+      this.parentTab = parentTab;
+      this.dalEntity = dalEntity;
+      this.config = config;
+      this.optional = McpParentSection.optionalVerbs(config);
+      this.reason = McpParentSection.reason(config);
     }
-    Scope unparented = unparentedScope(entity, parentTab, config, reason);
+  }
+
+  private static Scope resolveChild(SFEntity entity, Tab tab, JSONObject config) {
+    Resolution r = new Resolution(entity, tab, parentTabOf(tab), entityOf(tab), config);
+
+    if (r.dalEntity == null) {
+      return unresolvable(tab, "its table has no DAL entity", r.optional, r.reason);
+    }
+    Scope unparented = unparentedScope(r);
     if (unparented != null) {
       return unparented;
     }
-    Scope sameRecord = sameRecordScope(entity, tab, parentTab, config, optional, reason);
+    Scope sameRecord = sameRecordScope(r);
     if (sameRecord != null) {
       return sameRecord;
     }
     String declared = McpParentSection.declaredField(config);
     if (declared != null) {
-      return declaredScope(entity, tab, parentTab, dalEntity, declared, config, optional, reason);
+      return declaredScope(r, declared);
     }
-    return heuristicScope(entity, tab, parentTab, dalEntity, config, optional, reason);
+    return heuristicScope(r);
   }
 
   /**
@@ -329,21 +357,20 @@ final class McpParentScope {
    *
    * @return the scope, or {@code null} when the mode was not declared
    */
-  private static Scope unparentedScope(SFEntity entity, Tab parentTab, JSONObject config,
-      String reason) {
-    if (!McpParentSection.isUnparented(config)) {
+  private static Scope unparentedScope(Resolution r) {
+    if (!McpParentSection.isUnparented(r.config)) {
       return null;
     }
-    List<String> writes = advertisedWrites(entity);
+    List<String> writes = advertisedWrites(r.entity);
     if (!writes.isEmpty()) {
-      return new Scope(Kind.UNRESOLVABLE, null, null, Set.of(), reason,
+      return new Scope(Kind.UNRESOLVABLE, null, null, Set.of(), r.reason,
           "MCP_CONFIG declares mode '" + McpParentSection.MODE_UNPARENTED + "' but entity '"
-              + entity.getName() + "' advertises " + writes + ". A record whose parent cannot be "
+              + r.entity.getName() + "' advertises " + writes + ". A record whose parent cannot be "
               + "named cannot be written without creating an orphan — either turn those methods "
               + "off or declare a parent.field");
     }
-    return new Scope(Kind.UNPARENTED, null, parentEntityName(entity, parentTab, config),
-        Set.of(), reason, null);
+    return new Scope(Kind.UNPARENTED, null, parentEntityName(r.entity, r.parentTab, r.config),
+        Set.of(), r.reason, null);
   }
 
   /**
@@ -377,43 +404,41 @@ final class McpParentScope {
    * "no parent-link column" and be withheld. A declaration that contradicts the model is refused,
    * because {@code sameRecord} is a claim about the model, not a preference.</p>
    */
-  private static Scope sameRecordScope(SFEntity entity, Tab tab, Tab parentTab, JSONObject config,
-      Set<String> optional, String reason) {
-    boolean declared = McpParentSection.isSameRecord(config);
-    boolean actual = parentTab != null && sameTable(tab, parentTab);
+  private static Scope sameRecordScope(Resolution r) {
+    boolean declared = McpParentSection.isSameRecord(r.config);
+    boolean actual = r.parentTab != null && sameTable(r.tab, r.parentTab);
     if (declared && !actual) {
-      return unresolvable(tab,
+      return unresolvable(r.tab,
           "MCP_CONFIG declares mode 'sameRecord' but this tab's table differs from its parent's",
-          optional, reason);
+          r.optional, r.reason);
     }
     if (!actual) {
       return null;
     }
-    return new Scope(Kind.SAME_RECORD, null, parentEntityName(entity, parentTab, config),
-        optional, reason, null);
+    return new Scope(Kind.SAME_RECORD, null, parentEntityName(r.entity, r.parentTab, r.config),
+        r.optional, r.reason, null);
   }
 
   /** Steps 3: an explicit {@code parent.field} wins over the heuristic. */
-  private static Scope declaredScope(SFEntity entity, Tab tab, Tab parentTab, Entity dalEntity,
-      String declared, JSONObject config, Set<String> optional, String reason) {
-    Property property = resolveProperty(dalEntity, declared);
+  private static Scope declaredScope(Resolution r, String declared) {
+    Property property = resolveProperty(r.dalEntity, declared);
     if (property == null) {
-      return unresolvable(tab, "MCP_CONFIG parent.field '" + declared
-          + "' matches no property or column of " + dalEntity.getName(), optional, reason);
+      return unresolvable(r.tab, "MCP_CONFIG parent.field '" + declared
+          + "' matches no property or column of " + r.dalEntity.getName(), r.optional, r.reason);
     }
     if (property.isPrimitive() || property.getTargetEntity() == null) {
-      return unresolvable(tab, "MCP_CONFIG parent.field '" + declared
-          + "' is not a foreign key — filtering by parent needs a reference", optional, reason);
+      return unresolvable(r.tab, "MCP_CONFIG parent.field '" + declared
+          + "' is not a foreign key — filtering by parent needs a reference", r.optional, r.reason);
     }
     // Deliberately not an error when it disagrees with the SEQNO parent: the 17 mismatched
     // entities are exactly the case where the declaration is meant to override the heuristic.
-    if (parentTab != null && !targetsTableOf(property, parentTab)) {
+    if (r.parentTab != null && !targetsTableOf(property, r.parentTab)) {
       log.debug("Entity {} declares parent.field {} pointing at {}, not the tab parent {}",
-          entity.getName(), declared, property.getTargetEntity().getName(),
-          parentTab.getTable().getDBTableName());
+          r.entity.getName(), declared, property.getTargetEntity().getName(),
+          r.parentTab.getTable().getDBTableName());
     }
     return new Scope(Kind.RESOLVED, property.getName(),
-        parentEntityName(entity, parentTab, config), optional, reason, null);
+        parentEntityName(r.entity, r.parentTab, r.config), r.optional, r.reason, null);
   }
 
   /**
@@ -422,30 +447,29 @@ final class McpParentScope {
    * <p>Matching by target table rather than by position is the fix for the 30 multi-link entities:
    * "the first column in the list" is whatever {@code getADColumnList()} happens to return.</p>
    */
-  private static Scope heuristicScope(SFEntity entity, Tab tab, Tab parentTab, Entity dalEntity,
-      JSONObject config, Set<String> optional, String reason) {
-    if (parentTab == null) {
-      return unresolvable(tab, "its parent tab could not be resolved", optional, reason);
+  private static Scope heuristicScope(Resolution r) {
+    if (r.parentTab == null) {
+      return unresolvable(r.tab, "its parent tab could not be resolved", r.optional, r.reason);
     }
-    List<Property> candidates = parentLinkProperties(tab, dalEntity);
+    List<Property> candidates = parentLinkProperties(r.tab, r.dalEntity);
     if (candidates.isEmpty()) {
-      return unresolvable(tab, "it declares no active parent-link column. Set MCP_CONFIG "
+      return unresolvable(r.tab, "it declares no active parent-link column. Set MCP_CONFIG "
           + "parent.field to the property that links it to '"
-          + parentTab.getTable().getDBTableName() + "'", optional, reason);
+          + r.parentTab.getTable().getDBTableName() + "'", r.optional, r.reason);
     }
     for (Property candidate : candidates) {
-      if (targetsTableOf(candidate, parentTab)) {
+      if (targetsTableOf(candidate, r.parentTab)) {
         return new Scope(Kind.RESOLVED, candidate.getName(),
-            parentEntityName(entity, parentTab, config), optional, reason, null);
+            parentEntityName(r.entity, r.parentTab, r.config), r.optional, r.reason, null);
       }
     }
     List<String> names = new ArrayList<>();
     for (Property candidate : candidates) {
       names.add(candidate.getName());
     }
-    return unresolvable(tab, "none of its parent-link fields " + names + " points at the parent tab "
-        + "table '" + parentTab.getTable().getDBTableName() + "'. Set MCP_CONFIG parent.field to "
-        + "the correct one", optional, reason);
+    return unresolvable(r.tab, "none of its parent-link fields " + names + " points at the parent tab "
+        + "table '" + r.parentTab.getTable().getDBTableName() + "'. Set MCP_CONFIG parent.field to "
+        + "the correct one", r.optional, r.reason);
   }
 
   private static Scope unresolvable(Tab tab, String why, Set<String> optional, String reason) {

@@ -306,23 +306,39 @@ final class McpEntityConfig {
     }
   }
 
+  /**
+   * The body of one declared section, or {@code null} having recorded why it is unusable.
+   *
+   * <p>Extracted so {@link #collectSections} has a single exit per iteration (java:S135). Both
+   * rejections are payload shape, not section semantics: a name no section is registered under,
+   * and a value that is not an object. The section's own validator judges everything past that.</p>
+   */
+  private static JSONObject usableBody(Level level, JSONObject payload, String sectionName,
+      List<String> problems) {
+    if (!SECTIONS.containsKey(sectionName)) {
+      problems.add(level.name + "-level MCP_CONFIG declares unknown section '" + sectionName
+          + "'. Known sections: " + knownSectionNames());
+      return null;
+    }
+    JSONObject body = payload.optJSONObject(sectionName);
+    if (body == null) {
+      problems.add(level.name + SECTION_PREFIX + sectionName + "' must be a JSON object");
+    }
+    return body;
+  }
+
+  /** Repeated in three problem messages; Sonar java:S1192 and one place to change the wording. */
+  private static final String SECTION_PREFIX = "-level MCP_CONFIG section '";
+
   /** Validate every section of one payload and file its body under the section name. */
   private static void collectSections(Level level, JSONObject payload,
       Map<String, List<JSONObject>> bodies, List<String> problems) {
     for (String sectionName : keysOf(payload)) {
-      McpConfigSection section = SECTIONS.get(sectionName);
-      if (section == null) {
-        problems.add(level.name + "-level MCP_CONFIG declares unknown section '" + sectionName
-            + "'. Known sections: " + knownSectionNames());
-        continue;
-      }
-      JSONObject body = payload.optJSONObject(sectionName);
+      JSONObject body = usableBody(level, payload, sectionName, problems);
       if (body == null) {
-        problems.add(level.name + "-level MCP_CONFIG section '" + sectionName
-            + "' must be a JSON object");
         continue;
       }
-      List<String> sectionProblems = validateBody(level, section, body);
+      List<String> sectionProblems = validateBody(level, SECTIONS.get(sectionName), body);
       if (!sectionProblems.isEmpty()) {
         problems.addAll(sectionProblems);
         continue;
@@ -340,13 +356,13 @@ final class McpEntityConfig {
       }
     }
     if (!unknown.isEmpty()) {
-      return Collections.singletonList(level.name + "-level MCP_CONFIG section '"
+      return Collections.singletonList(level.name + SECTION_PREFIX
           + section.getName() + "' has unknown key(s) " + unknown
           + ". Allowed: " + new ArrayList<>(section.getAllowedKeys()));
     }
     List<String> problems = new ArrayList<>();
     for (String problem : section.validate(body)) {
-      problems.add(level.name + "-level MCP_CONFIG section '" + section.getName() + "': " + problem);
+      problems.add(level.name + SECTION_PREFIX + section.getName() + "': " + problem);
     }
     return problems;
   }
@@ -376,16 +392,16 @@ final class McpEntityConfig {
    * that would hide a real model problem — and hide it in the quietest possible way, since the
    * caller would see an unconfigured record and carry on.</p>
    *
-   * @param record the SchemaForge record to read
+   * @param target the SchemaForge record to read
    * @return the raw column text, or {@code null} when unset or unreadable
    */
-  private static String rawConfig(BaseOBObject record) {
+  private static String rawConfig(BaseOBObject target) {
     try {
-      Object value = record.get(PROPERTY_MCP_CONFIG);
+      Object value = target.get(PROPERTY_MCP_CONFIG);
       return value == null ? null : String.valueOf(value);
     } catch (RuntimeException e) {
       log.error("Could not read {} on {} — every MCP_CONFIG payload on this record is being "
-          + "ignored", PROPERTY_MCP_CONFIG, record.getEntityName(), e);
+          + "ignored", PROPERTY_MCP_CONFIG, target.getEntityName(), e);
       return null;
     }
   }

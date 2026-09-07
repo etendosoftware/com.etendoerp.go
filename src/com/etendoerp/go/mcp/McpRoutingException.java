@@ -43,21 +43,27 @@ class McpRoutingException extends OBException {
 
   private static final long serialVersionUID = 1L;
 
+  /** Repeated by three factories; Sonar java:S1192 and one place to reword it. */
+  private static final String RETRY_WITH_AVAILABLE = "Retry with one of the names in 'available'.";
+
   private final int status;
   private final String errorCode;
   private final String field;
   private final List<String> available;
   private final String hint;
   private final String seeAlso;
-  private final JSONObject extras;
+  /**
+   * Extra envelope keys this failure carries beyond the IMP-5 shape, or {@code null}.
+   *
+   * <p>Not a constructor parameter: an eighth one crossed Sonar's java:S107 limit, and the honest
+   * reading is that it does not belong with the other seven. Those describe the failure itself;
+   * this carries whatever the caller needs to correct it, which today is only {@code parentEntity}
+   * and {@code parentField}. Set through {@link #withExtras} at the one factory that has any.</p>
+   */
+  private JSONObject extras;
 
   private McpRoutingException(String detail, int status, String errorCode, String field,
       List<String> available, String hint, String seeAlso) {
-    this(detail, status, errorCode, field, available, hint, seeAlso, null);
-  }
-
-  private McpRoutingException(String detail, int status, String errorCode, String field,
-      List<String> available, String hint, String seeAlso, JSONObject extras) {
     super(detail);
     this.status = status;
     this.errorCode = errorCode;
@@ -65,7 +71,17 @@ class McpRoutingException extends OBException {
     this.available = available == null ? List.of() : List.copyOf(available);
     this.hint = hint;
     this.seeAlso = seeAlso;
-    this.extras = extras;
+  }
+
+  /**
+   * Attach extra envelope keys and return {@code this}, so a factory reads as one expression.
+   *
+   * @param extraKeys the keys to merge into {@link #toEnvelope()}
+   * @return this exception
+   */
+  private McpRoutingException withExtras(JSONObject extraKeys) {
+    this.extras = extraKeys;
+    return this;
   }
 
   /**
@@ -107,7 +123,7 @@ class McpRoutingException extends OBException {
         available,
         available.isEmpty()
             ? "This spec exposes no entities. Call neo_discover to find one that does."
-            : "Retry with one of the names in 'available'.",
+            : RETRY_WITH_AVAILABLE,
         McpConstants.SEE_ALSO_READING);
   }
 
@@ -162,7 +178,7 @@ class McpRoutingException extends OBException {
     return new McpRoutingException(
         "Unknown status '" + status + "' for entity '" + entityName + "'",
         McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION, "status", available,
-        "Retry with one of the names in 'available'.", McpConstants.SEE_ALSO_READING);
+        RETRY_WITH_AVAILABLE, McpConstants.SEE_ALSO_READING);
   }
 
   /**
@@ -203,7 +219,7 @@ class McpRoutingException extends OBException {
         truncated
             ? "Retry with one of the names in 'available'. That list is truncated — call "
                 + "neo_schema for this entity to see every filterable field."
-            : "Retry with one of the names in 'available'.",
+            : RETRY_WITH_AVAILABLE,
         McpConstants.SEE_ALSO_READING);
   }
 
@@ -283,7 +299,7 @@ class McpRoutingException extends OBException {
             ? "Look up the parent record, then pass its id as parentId."
             : "Call neo_list(spec:'" + specName + "', entity:'" + parentEntity
                 + "') to find the parent first, then repeat this call with parentId:'<thatId>'.",
-        McpConstants.SEE_ALSO_READING, extras);
+        McpConstants.SEE_ALSO_READING).withExtras(extras);
   }
 
   static McpRoutingException missingArgument(String detail, String field) {

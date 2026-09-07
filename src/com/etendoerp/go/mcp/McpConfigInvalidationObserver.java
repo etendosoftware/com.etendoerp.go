@@ -56,23 +56,25 @@ public class McpConfigInvalidationObserver extends EntityPersistenceEventObserve
 
   private static final Logger log = LogManager.getLogger(McpConfigInvalidationObserver.class);
 
-  private static Entity[] entities;
-
   /**
    * The three SchemaForge tables that carry {@code MCP_CONFIG}.
    *
-   * <p>Resolved lazily and cached, as core's own observers do: {@code ModelProvider} is not
-   * available while CDI is constructing beans at startup.</p>
+   * <p>Initialised in the static initialiser, which is what core's own observers do — see
+   * {@code FIN_PaymentEventListener}. An earlier revision resolved this lazily inside
+   * {@link #getObservedEntities()} and claimed in a comment that core did the same; core does the
+   * opposite, and the claim was wrong. Lazily assigning a static field from an instance method is
+   * also a data race in a bean CDI may instantiate more than once (java:S2696): two threads can
+   * publish two arrays, and an unsynchronised reference write can be seen partially constructed.
+   * The contents are fixed and known at class-init time, so there is nothing to defer.</p>
    */
+  private static final Entity[] ENTITIES = {
+      ModelProvider.getInstance().getEntity(SFSpec.ENTITY_NAME),
+      ModelProvider.getInstance().getEntity(SFEntity.ENTITY_NAME),
+      ModelProvider.getInstance().getEntity(SFField.ENTITY_NAME) };
+
   @Override
   protected Entity[] getObservedEntities() {
-    if (entities == null) {
-      entities = new Entity[] {
-          ModelProvider.getInstance().getEntity(SFSpec.ENTITY_NAME),
-          ModelProvider.getInstance().getEntity(SFEntity.ENTITY_NAME),
-          ModelProvider.getInstance().getEntity(SFField.ENTITY_NAME) };
-    }
-    return entities;
+    return ENTITIES;
   }
 
   /**
@@ -117,15 +119,15 @@ public class McpConfigInvalidationObserver extends EntityPersistenceEventObserve
     if (!isValidEvent(event)) {
       return;
     }
-    BaseOBObject record = event.getTargetInstance();
-    if (record == null) {
+    BaseOBObject target = event.getTargetInstance();
+    if (target == null) {
       return;
     }
-    if (SFSpec.ENTITY_NAME.equals(record.getEntityName())) {
-      log.debug("Spec {} changed — clearing MCP config caches", record.getId());
+    if (SFSpec.ENTITY_NAME.equals(target.getEntityName())) {
+      log.debug("Spec {} changed — clearing MCP config caches", target.getId());
       McpConfigCache.invalidateAll();
       return;
     }
-    McpConfigCache.invalidateConfig((String) record.getId());
+    McpConfigCache.invalidateConfig((String) target.getId());
   }
 }
