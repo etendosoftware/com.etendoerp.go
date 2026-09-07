@@ -1968,7 +1968,9 @@ NEO Headless enforces security at multiple levels:
 
 **Report spec access control (ETP-4596):** `NeoAccessHelper.hasReportSpecAccess(SFSpec, String)` is the single gate now shared by all 4 access-check call sites that previously either skipped `SPEC_TYPE = 'R'` report specs entirely or fell through a `spec.getProcess() == null` guard that was always true for them — `NeoRequestRouter.handleReportSpecRequest` (the real HTTP data-access gate, which previously had zero check), `NeoDiscoveryHelper.isSpecAccessible`, `McpToolRouterSupport.hasSpecAccess`, and `ToolRegistry`. It checks a linked `AD_Process`/`OBUIAPP_Process` first when the spec has one (delegating to items 5/6 above), else falls back to the same constituent-window check from item 4, keyed off each active/included `SFEntity`'s `AD_TAB_ID`. Five of the 8 report specs now have `AD_TAB_ID` populated and gate on the classic "Financial Account" window (`AD_Window_ID=94EAA455D2644E04AB25D93BE5157B6D`): `financial-accounts-page`, `financial-account-transactions`, `bank-statements`, `bank-reconciliation`, `financial-account-bank-connection`. Verified end-to-end against real roles: `403` for a role lacking Financial Account window access, `200` for a role that has it; discovery listing correctly excludes these specs for an unauthorized role while still showing them to an authorized one.
 
-**Known limitations (ETP-4596):** two report specs — `tax-report` and `inventory-stock-report` — are wired to neither a classic `AD_Process` nor a populated `AD_TAB_ID` yet, so they still hit `hasReportSpecAccess`'s permissive fallback and remain reachable by any authenticated role regardless of `AD_Window_Access`. Closing this needs a functional decision on their process/window mapping (pending, tracked separately); once linked, they gate with zero further code changes. Unrelated to access control: `bank-reconciliation`'s handler currently returns `500` for correctly-authorized roles due to a pre-existing `ReconciliationHandler` dispatch bug ("No AD_Tab linked to entity") — the RBAC gate added above is confirmed correct for it; the report itself is separately non-functional today even for authorized users.
+**Known limitations (ETP-4596):** one report spec — `tax-report` — is wired to neither a classic `AD_Process` nor a populated `AD_TAB_ID` yet, so it still hits `hasReportSpecAccess`'s permissive fallback and remains reachable by any authenticated role regardless of `AD_Window_Access`. Closing this needs a functional decision on its process/window mapping (pending, tracked separately); once linked, it gates with zero further code changes. Unrelated to access control: `bank-reconciliation`'s handler currently returns `500` for correctly-authorized roles due to a pre-existing `ReconciliationHandler` dispatch bug ("No AD_Tab linked to entity") — the RBAC gate added above is confirmed correct for it; the report itself is separately non-functional today even for authorized users.
+
+**`inventory-stock-report` is no longer on this list — resolved by a still-later ETP-5116 pass.** Same underlying gap as above (no `AD_Process`, no `AD_TAB_ID`, so `hasReportSpecAccess`'s discovery-listing fallback still applies), but this one was confirmed over-permissive in **production** — every authenticated role, including ones that should have none, could retrieve this data — so it was closed at the handler level directly rather than waiting on the generic mechanism: a brand-new pseudo-`AD_Window` (`6346B88619F948F9A42224BDB0B239FA`, 0 tabs, permission anchor only) was created, `TemplateRoleWindowAccess` grants it to Compras/Financiero/Almacén (not Ventas), and `InventoryStockReportHandler#handle` now calls `NeoAccessHelper.hasWindowAccess` on that window id explicitly at the top of the method — a real, explicit gate, not a proxy hoping the discovery-listing fallback happens to line up. The MCP tool-discovery/listing path is unaffected (still permissive, a separate and smaller informational-leak issue, tracked separately) — only the actual data-serving `handle()` call is now denied.
 
 ---
 
@@ -2679,18 +2681,17 @@ shared `com.etendoerp.go.roles.overlap` package (`ActiveTemplateInheritance`,
 loud `ConstraintViolationException` — see `ObuiappProcessAccessOverlapCorruptionGuard`'s own
 class/method javadoc for the full detail.
 
-**Four matrix rows remain a documented, deliberate gap — not yet implementable (down from six as
-of a later ETP-5116 pass).** Every one of them has NO `AD_Window_ID` at all backing it in this
+**Three matrix rows remain a documented, deliberate gap — not yet implementable (down from six as
+of the ETP-5116 arc).** Every one of them has NO `AD_Window_ID` at all backing it in this
 environment (either a pure custom/aggregate Schema Forge page with zero classic-AD entity, or a
 report-type spec whose access resolves via a different, non-window mechanism), so
 `AD_Window_Access` cannot express a grant for it at all: **Inicio (Dashboard)**, **Favoritos**,
-**Copilot (Asistente IA)**, **Informes de inventario**. Full per-row resolution detail (which
-spec/artifact was checked, why it has no window) lives in `EnsureSystemRoleTemplatesScript`'s own
-class javadoc. Closing this gap needs either building the missing AD entity/spec first, or a
-different grant mechanism entirely — left for a follow-up ticket. Separately, "Roles", "Usuario",
-and "Conectar asistente de IA" DO resolve to real `AD_Window_ID`s but are deliberately granted to
-none of the four templates — the matrix shows "—" for all four non-Admin roles on all three, so
-they stay Admin-only.
+**Copilot (Asistente IA)**. Full per-row resolution detail (which spec/artifact was checked, why
+it has no window) lives in `EnsureSystemRoleTemplatesScript`'s own class javadoc. Closing this gap
+needs either building the missing AD entity/spec first, or a different grant mechanism entirely —
+left for a follow-up ticket. Separately, "Roles", "Usuario", and "Conectar asistente de IA" DO
+resolve to real `AD_Window_ID`s but are deliberately granted to none of the four templates — the
+matrix shows "—" for all four non-Admin roles on all three, so they stay Admin-only.
 
 **"Informes financieros" and "Escaneo inteligente" are off this list too — resolved by a later
 ETP-5116 pass, via two brand-new pseudo-`AD_Window` records created specifically as permission
@@ -2703,6 +2704,24 @@ everyone once real access control exists, replacing what was previously just a c
 `hidden: true` in the frontend menu with zero real enforcement. Admin needs no explicit row for
 either: `NeoAccessHelper#isAdminOrClientAdmin` already bypasses window-access checks entirely for
 the System Administrator role and any per-client `is_client_admin='Y'` role.
+
+**"Informes de inventario" is off this list too — resolved by a still-later ETP-5116 pass, the
+same brand-new-pseudo-`AD_Window` pattern as the two rows above (`6346B88619F948F9A42224BDB0B239FA`,
+0 tabs, permission anchor only), but unlike them this one closes a CONFIRMED production
+over-permission rather than a merely-theoretical one.** `inventory-stock-report` is a raw-SQL
+`spec_type='R'` report handler (`InventoryStockReportHandler`) with no linked `AD_Process` and no
+`AD_TAB_ID` anywhere, so every authenticated role — including ones that should have none — could
+retrieve this data in production: `NeoAccessHelper#hasReportSpecAccess` falls through to its
+documented permissive default when there is no combination data to check at all, and the handler
+itself made zero access-control calls of its own. Per the v2 target matrix this window is granted
+FULL to Compras, Financiero and Almacén — Ventas gets nothing. Because the window/grant alone
+protects nothing for a spec whose data-serving path never consulted it,
+`InventoryStockReportHandler#handle` was ALSO given an explicit `NeoAccessHelper.hasWindowAccess`
+gate on this same window id, at the very top of the method — the actual security fix; the window
+and its grants are the permission anchor the gate checks against, not a fix on their own. The
+MCP tool-discovery/listing path for this spec may still surface it as discoverable (the same
+permissive fallback still applies there) — a known, separate, smaller informational-leak issue,
+out of scope for this pass. Admin needs no explicit row, same bypass rationale as above.
 
 **"Documentos no contabilizados", "Informe Antigüedad de Cobros" and "Informe Antigüedad de
 Pagos" are off this list — resolved by this ETP-5116 pass, but via the new standalone-process

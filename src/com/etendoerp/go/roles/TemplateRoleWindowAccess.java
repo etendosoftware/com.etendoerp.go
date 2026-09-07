@@ -42,14 +42,13 @@ import java.util.Map;
  * truth for everything else ({@code UserRoleCompositionService}, the webhooks, and this class's
  * own tests).</p>
  *
- * <p><b>Four matrix rows are intentionally NOT represented here — known gap (down from six as of
- * this later ETP-5116 pass).</b> Every excluded row has NO {@code AD_Window_ID} at all backing it
- * (either a pure custom/aggregate Schema Forge page with zero classic-AD entity, or a report-type
- * spec whose access is resolved via a different, non-window mechanism): Inicio (Dashboard),
- * Favoritos, Copilot (Asistente IA), Informes de inventario. See {@code
- * EnsureSystemRoleTemplatesScript}'s class javadoc for the full per-row resolution detail, and
- * {@code docs/neo-headless.md} in this module for the research dispatch's complete mapping
- * table.</p>
+ * <p><b>Three matrix rows are intentionally NOT represented here — known gap (down from four as of
+ * this still-later ETP-5116 pass).</b> Every excluded row has NO {@code AD_Window_ID} at all
+ * backing it (either a pure custom/aggregate Schema Forge page with zero classic-AD entity, or a
+ * report-type spec whose access is resolved via a different, non-window mechanism): Inicio
+ * (Dashboard), Favoritos, Copilot (Asistente IA). See {@code EnsureSystemRoleTemplatesScript}'s
+ * class javadoc for the full per-row resolution detail, and {@code docs/neo-headless.md} in this
+ * module for the research dispatch's complete mapping table.</p>
  *
  * <p><b>"Monitor fiscal" and "Modelos fiscales" were originally in that windowless-gap list too,
  * but ETP-5116 resolved both for Finance via a proxy grant</b> onto a different, real classic
@@ -111,6 +110,21 @@ import java.util.Map;
  * entirely for the System Administrator role ({@code "0"}) and any per-client {@code
  * is_client_admin='Y'} role, confirmed by reading that method directly rather than assumed —
  * consistent with this class staying "Admin stays client-level, out of scope" throughout.</p>
+ *
+ * <p><b>"Informes de inventario" was also in that windowless-gap list — a raw-SQL report handler
+ * ({@code InventoryStockReportHandler}, {@code spec_type='R'}) with no linked {@code AD_Process}
+ * and no {@code AD_TAB_ID} anywhere, confirmed over-permissive in production: every authenticated
+ * role could retrieve this data because {@code NeoAccessHelper#hasReportSpecAccess} falls through
+ * to its documented permissive default when there is no combination data to check at all.</b> A
+ * still-later ETP-5116 pass resolved it the same way as "Informes financieros"/"Escaneo
+ * inteligente" above — via a brand-new pseudo-{@code AD_Window} permission anchor ({@code
+ * 6346B88619F948F9A42224BDB0B239FA}, 0 tabs, never opened directly) — but the grant alone protects
+ * nothing here: unlike a real window, this spec's data is served entirely by {@code
+ * InventoryStockReportHandler#handle}, which makes zero access-control calls of its own, so the
+ * handler was ALSO given an explicit {@code NeoAccessHelper#hasWindowAccess} gate on this same
+ * window id (see that class). Per the v2 target matrix this window is granted FULL to Compras,
+ * Financiero and Almacén — NOT Ventas, which gets nothing. Admin needs no explicit row, same
+ * bypass rationale as above.</p>
  */
 public final class TemplateRoleWindowAccess {
 
@@ -176,10 +190,13 @@ public final class TemplateRoleWindowAccess {
   }
 
   /**
-   * Purchasing ("Compras") column of the ETP-4878 matrix — 12 grants: 11 from the original
+   * Purchasing ("Compras") column of the ETP-4878 matrix — 14 grants: 11 from the original
    * matrix, plus {@code 107} (Receipt-Invoice Link, added after the original matrix by
    * ETP-5075), plus {@code full("33705E0F52874D91B0BB2FF8BB648B8E")} — Smart Scan, granted to
-   * all four non-Admin templates per this later ETP-5116 pass, see class javadoc.
+   * all four non-Admin templates per a later ETP-5116 pass, plus {@code
+   * full("6346B88619F948F9A42224BDB0B239FA")} — Informes de inventario / Inventory Stock Report,
+   * granted to Compras/Financiero/Almacén (NOT Ventas) per a still-later ETP-5116 pass, see class
+   * javadoc.
    *
    * <p>Window 107 is granted FULL even though the window's DATA is read-only: its accounting
    * posting action is invoked as a {@code POST} on the action sub-endpoint, and
@@ -204,11 +221,12 @@ public final class TemplateRoleWindowAccess {
         full("146"),                                          // Tarifa — Price List
         readOnly("141"),                                       // Condiciones de pago — Payment Term
         readOnly("192"),                                       // Categoría de contacto — Business Partner Category
-        full("33705E0F52874D91B0BB2FF8BB648B8E"));             // Escaneo inteligente — Smart Scan (ETP-5116)
+        full("33705E0F52874D91B0BB2FF8BB648B8E"),              // Escaneo inteligente — Smart Scan (ETP-5116)
+        full("6346B88619F948F9A42224BDB0B239FA"));             // Informes de inventario — Inventory Stock Report (ETP-5116)
   }
 
   /**
-   * Finance ("Financiero") column of the ETP-4878 matrix — 33 grants: 25 from the original ticket
+   * Finance ("Financiero") column of the ETP-4878 matrix — 34 grants: 25 from the original ticket
    * matrix (27 minus the two ETP-5116 over-grants removed below — Categoría del producto /
    * Product Category and Inventario físico / Physical Inventory, neither of which Financiero
    * should have access to), plus {@code 107} (Receipt-Invoice Link, ETP-5075 — see {@link
@@ -219,10 +237,12 @@ public final class TemplateRoleWindowAccess {
    * access control — SII Configuration ({@code C1D3A2A017AC4B82B9FEE6F4D2A0C55A}), TBAI
    * Configuration ({@code C327DE215AC945F69363905840118177}), and Verifactu Configuration
    * ({@code 27A453FA86974745977672F1A8DCCEFF}) — so all three are granted directly, unlike the
-   * proxy pattern above — and 2 more ETP-5116 grants from this later pass: "Informes financieros"
-   * / Financial Reports ({@code D647D118F5014D00AF47A636B2CD0DD3}, Financiero-only) and
-   * "Escaneo inteligente" / Smart Scan ({@code 33705E0F52874D91B0BB2FF8BB648B8E}, shared with
-   * every other non-Admin template — see class javadoc).
+   * proxy pattern above — 2 more ETP-5116 grants from a later pass: "Informes financieros" /
+   * Financial Reports ({@code D647D118F5014D00AF47A636B2CD0DD3}, Financiero-only) and "Escaneo
+   * inteligente" / Smart Scan ({@code 33705E0F52874D91B0BB2FF8BB648B8E}, shared with every other
+   * non-Admin template), and 1 more grant from a still-later ETP-5116 pass: "Informes de
+   * inventario" / Inventory Stock Report ({@code 6346B88619F948F9A42224BDB0B239FA}, shared with
+   * Compras/Almacén, NOT Ventas — see class javadoc).
    */
   private static List<WindowGrant> financeGrants() {
     return list(
@@ -258,13 +278,17 @@ public final class TemplateRoleWindowAccess {
         full("C327DE215AC945F69363905840118177"),              // TBAI Configuration — "Configuración fiscal" (ETP-5116)
         full("27A453FA86974745977672F1A8DCCEFF"),              // Verifactu Configuration — "Configuración fiscal" (ETP-5116)
         full("D647D118F5014D00AF47A636B2CD0DD3"),              // Informes financieros — Financial Reports (ETP-5116, Financiero-only)
-        full("33705E0F52874D91B0BB2FF8BB648B8E"));             // Escaneo inteligente — Smart Scan (ETP-5116)
+        full("33705E0F52874D91B0BB2FF8BB648B8E"),              // Escaneo inteligente — Smart Scan (ETP-5116)
+        full("6346B88619F948F9A42224BDB0B239FA"));             // Informes de inventario — Inventory Stock Report (ETP-5116)
   }
 
   /**
-   * Inventory ("Almacén") column of the ETP-4878 matrix — 14 grants: 13 from the original matrix,
+   * Inventory ("Almacén") column of the ETP-4878 matrix — 15 grants: 13 from the original matrix,
    * plus {@code full("33705E0F52874D91B0BB2FF8BB648B8E")} — Smart Scan, granted to all four
-   * non-Admin templates per this later ETP-5116 pass, see class javadoc.
+   * non-Admin templates per a later ETP-5116 pass, plus {@code
+   * full("6346B88619F948F9A42224BDB0B239FA")} — Informes de inventario / Inventory Stock Report,
+   * granted to Compras/Financiero/Almacén (NOT Ventas) per a still-later ETP-5116 pass, see class
+   * javadoc.
    */
   private static List<WindowGrant> inventoryGrants() {
     return list(
@@ -281,7 +305,8 @@ public final class TemplateRoleWindowAccess {
         full("170"),                                          // Movimiento entre almacenes — Goods Movements
         full("800076"),                                       // Consumo interno — Internal Consumption
         full("139"),                                          // Almacén — Warehouse and Storage Bins
-        full("33705E0F52874D91B0BB2FF8BB648B8E"));             // Escaneo inteligente — Smart Scan (ETP-5116)
+        full("33705E0F52874D91B0BB2FF8BB648B8E"),              // Escaneo inteligente — Smart Scan (ETP-5116)
+        full("6346B88619F948F9A42224BDB0B239FA"));             // Informes de inventario — Inventory Stock Report (ETP-5116)
   }
 
   private static List<WindowGrant> list(WindowGrant... grants) {
