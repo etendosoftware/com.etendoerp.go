@@ -555,7 +555,7 @@ public class McpToolRouter {
     if (filteredBody.has(McpConstants.PARAM_PARENT_ID)) {
       parentIdValue = filteredBody.getString(McpConstants.PARAM_PARENT_ID);
       filteredBody.remove(McpConstants.PARAM_PARENT_ID);
-      McpWriteRequestSupport.resolveParentFK(adTab, filteredBody, parentIdValue, log);
+      McpWriteRequestSupport.resolveParentFK(adTab, filteredBody, parentIdValue, log, sfEntity);
     }
 
     // Inject mandatory defaults
@@ -592,6 +592,14 @@ public class McpToolRouter {
     // userProvided is the pre-defaults snapshot, so it is the only reliable witness of whether the
     // agent actually chose a uOM.
     injectLineUomIfApplicable(filteredBody, dalEntity, userProvided.has(FIELD_UOM));
+
+    // ETP-5184: and the same witness decides whether the agent chose a price. The callout cannot
+    // derive one here — its price inputs are the product selector's aux values, which the shared
+    // create path resolves without any price-list context — so a line created through MCP comes out
+    // at 0. Resolve it from the parent document's price list instead. See McpLinePriceInjector for
+    // why this compensation lives in the MCP layer rather than in the shared path.
+    McpLinePriceInjector.injectIfMissing(filteredBody, dalEntity, sfEntity,
+        NeoCrudHelper.snapshotBodyFields(userProvided), log);
 
     // Fix FK sentinel values: "0" is a UI-level sentinel (means "not yet set") that can't
     // go through the DAL as an entity reference. Replace with a real value from the body
@@ -968,6 +976,10 @@ public class McpToolRouter {
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableName(adTab.getTable().getDBTableName());
 
+    // ETP-5184: resolved once, ahead of the view dispatch, because view:"create" returns early and
+    // needs the same answer the full response publishes.
+    McpParentScope.Scope parentScope = McpParentScope.forEntity(sfEntity);
+
     McpSchemaFieldBuilder.FieldMetadata fieldMetadata =
         McpSchemaFieldBuilder.loadFieldMetadata(sfEntity);
     Map<String, String> promptByColumnId =
@@ -1001,7 +1013,11 @@ public class McpToolRouter {
     // required/optional. 157 fields / 62 kB on sales-invoice/header collapses to the handful that
     // are the agent's to decide — the full response exceeds the client's token limit outright.
     if (McpSchemaCreateView.isCreateView(view)) {
-      boolean isChildEntity = adTab.getTabLevel() != null && adTab.getTabLevel() > 0;
+      // ETP-5184: ask the scope, not the tab level. tabLevel > 0 also catches the entities that
+      // share their parent's record (contacts/customer and friends are all C_BPartner, 1:1), where
+      // telling the agent to pass a parentId would send it looking for an argument that does not
+      // apply. requiresParentFor("create") is the precise question the hint answers.
+      boolean isChildEntity = parentScope.requiresParentFor(McpParentSection.VERB_CREATE);
       return wrapAsTextContent(McpSchemaCreateView
           .buildResponse(specName, entityName, fieldsArray,
               serverDefaultedNames(specName, entityName, adTab, sfEntity), isChildEntity)
@@ -1044,6 +1060,12 @@ public class McpToolRouter {
     }
     entitySchema.put("methods", methods);
 
+    // ETP-5184: how this entity is addressed, in the same keys neo_discover uses — isChild,
+    // parentEntity, parentField, parentRequiredFor. neo_schema is where an agent goes to learn how
+    // to call something, so it is the one place the parent requirement must not be a surprise
+    // discovered by getting a 422. Emitted only for child entities; a header tab adds nothing.
+    McpParentScope.publishInto(entitySchema, parentScope);
+
     // Named business filters (ETP-4601): advertise the spec's hand-authored status filters,
     // each keyed by name, so the agent can discover them instead of guessing. Only the
     // name/label/description are exposed — the HQL where fragment stays server-side.
@@ -1064,8 +1086,14 @@ public class McpToolRouter {
     // readOnly:true for a reason visibility does not spell out; read visibility first. A
     // read-only field is not necessarily a dead end: when its value is derived from another
     // entity, `writableVia` names where to set it instead of silently giving up.
-    entitySchema.put("hint",
-        "Call neo_schema with view:\"create\" to get only the fields you may send, already split "
+    // ETP-5184: said in prose as well as in parentRequiredFor, because this hint is the paragraph
+    // an agent actually reads before its first call on an unfamiliar entity.
+    String parentHint = parentScope.requiredVerbs().isEmpty() ? ""
+        : "This is a child entity: pass parentId (the id of a '" + parentScope.getParentEntity()
+            + "' record) on " + String.join(", ", parentScope.requiredVerbs())
+            + " — there is no global list of these records to read without it. ";
+    entitySchema.put("hint", parentHint
+        + "Call neo_schema with view:\"create\" to get only the fields you may send, already split "
         + "into required/optional — this full response is far larger than you need. "
         + "Fields with userRequired=true: MUST be provided in neo_create. "
         + "Fields with visibility=system are auto-derived by Etendo callouts — omit them. "
