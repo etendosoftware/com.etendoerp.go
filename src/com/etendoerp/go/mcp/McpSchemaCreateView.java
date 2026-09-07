@@ -255,30 +255,7 @@ final class McpSchemaCreateView {
       throws JSONException {
     JSONArray required = new JSONArray();
     JSONArray optional = new JSONArray();
-    Set<String> resolved = serverResolved == null ? Set.of() : serverResolved;
-    if (fields != null) {
-      for (int i = 0; i < fields.length(); i++) {
-        JSONObject field = fields.optJSONObject(i);
-        // Buttons are actions, not payload — they belong to view:"actions" (IMP-6).
-        if (field == null || McpActionsView.TYPE_BUTTON.equals(field.optString("type", null))
-            || !McpSchemaFieldBuilder.isAgentSuppliable(field)) {
-          continue;
-        }
-        JSONObject emitted = slim(field);
-        // Guard the null name explicitly: Set.of() throws on contains(null).
-        String name = field.optString(KEY_NAME, null);
-        if (name != null && resolved.contains(name)) {
-          // Distinguish "optional because nobody needs it" from "optional because the server fills
-          // it" — the second is the one the agent must not ask the user about.
-          emitted.put(KEY_SERVER_DEFAULTED, true);
-          optional.put(emitted);
-        } else if (field.optBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED, false)) {
-          required.put(emitted);
-        } else {
-          optional.put(emitted);
-        }
-      }
-    }
+    partitionFields(fields, serverResolved, required, optional);
     JSONObject response = new JSONObject();
     response.put("spec", specName);
     response.put("entity", entityName);
@@ -291,6 +268,50 @@ final class McpSchemaCreateView {
     response.put("optionalCount", optional.length());
     response.put("hint", isChildEntity ? CREATE_HINT + CHILD_ENTITY_HINT_SUFFIX : CREATE_HINT);
     return response;
+  }
+
+  /**
+   * Splits the schema fields an agent may supply into the {@code required} and {@code optional}
+   * arrays, appending to whichever the field belongs to. Extracted from
+   * {@link #buildResponse(String, String, JSONArray, Set, boolean, String)}, which is otherwise
+   * one method holding both the partitioning rules and the response assembly; the rules are the
+   * half that carries the branching, and they are what this class's tests exercise field by field.
+   *
+   * <p>Three rules, in precedence order: buttons and non-agent-suppliable descriptors are dropped
+   * entirely; a field {@code neo_defaults} resolves is {@code optional} and flagged
+   * {@code serverDefaulted}, however mandatory AD says it is; otherwise the static
+   * {@code userRequired} rule decides. Both arrays are mutated in place rather than returned as a
+   * pair, because the caller already owns them and a wrapper type would exist only to be unpacked.
+   *
+   * @param serverResolved may be {@code null}, treated as empty
+   */
+  private static void partitionFields(JSONArray fields, Set<String> serverResolved,
+      JSONArray required, JSONArray optional) throws JSONException {
+    if (fields == null) {
+      return;
+    }
+    Set<String> resolved = serverResolved == null ? Set.of() : serverResolved;
+    for (int i = 0; i < fields.length(); i++) {
+      JSONObject field = fields.optJSONObject(i);
+      // Buttons are actions, not payload — they belong to view:"actions" (IMP-6).
+      if (field == null || McpActionsView.TYPE_BUTTON.equals(field.optString("type", null))
+          || !McpSchemaFieldBuilder.isAgentSuppliable(field)) {
+        continue;
+      }
+      JSONObject emitted = slim(field);
+      // Guard the null name explicitly: Set.of() throws on contains(null).
+      String name = field.optString(KEY_NAME, null);
+      if (name != null && resolved.contains(name)) {
+        // Distinguish "optional because nobody needs it" from "optional because the server fills
+        // it" — the second is the one the agent must not ask the user about.
+        emitted.put(KEY_SERVER_DEFAULTED, true);
+        optional.put(emitted);
+      } else if (field.optBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED, false)) {
+        required.put(emitted);
+      } else {
+        optional.put(emitted);
+      }
+    }
   }
 
   /**
