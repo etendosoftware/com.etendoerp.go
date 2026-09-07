@@ -6073,6 +6073,7 @@
 <!--0E16E6D0425045E3BBB19206ED0E376F-->  <JAVA_QUALIFIER><![CDATA[locationAddress]]></JAVA_QUALIFIER>
 <!--0E16E6D0425045E3BBB19206ED0E376F-->  <SEQNO><![CDATA[120]]></SEQNO>
 <!--0E16E6D0425045E3BBB19206ED0E376F-->  <VISIBILITY><![CDATA[editable]]></VISIBILITY>
+<!--0E16E6D0425045E3BBB19206ED0E376F-->  <AGENT_PROMPT><![CDATA[This entity's handler creates the C_Location itself and IGNORES any id sent here. Send the address fields instead: country, addressLine1, cityName, postalCode, regionName. A value is still required here to pass the generic mandatory-field check, and any valid location id is accepted and discarded.]]></AGENT_PROMPT>
 <!--0E16E6D0425045E3BBB19206ED0E376F-->  <ISBUSINESSCRITICAL><![CDATA[N]]></ISBUSINESSCRITICAL>
 <!--0E16E6D0425045E3BBB19206ED0E376F--></ETGO_SF_FIELD>
 

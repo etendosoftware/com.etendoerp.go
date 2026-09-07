@@ -1003,6 +1003,13 @@ public class McpToolRouter {
     // ETP-5184: resolved once, ahead of the view dispatch, because view:"create" returns early and
     // needs the same answer the full response publishes.
     McpParentScope.Scope parentScope = McpParentScope.forEntity(sfEntity);
+    // ETP-5184: the entity-level agentPrompt (ETGO_SF_ENTITY.AGENT_PROMPT) used to reach
+    // neo_discover only, and discover is the catalogue an agent reads once at the start of a
+    // session. neo_schema is what it reads immediately before writing, so guidance that only lives
+    // in discover is guidance the agent has already paged out. Resolved here, ahead of the view
+    // dispatch, because view:"create" returns early and needs the same value. Trimmed and
+    // blank-checked exactly as McpSupportInternals does, so an empty column emits no key.
+    String entityAgentPrompt = StringUtils.trimToNull(sfEntity.getAgentPrompt());
 
     McpSchemaFieldBuilder.FieldMetadata fieldMetadata =
         McpSchemaFieldBuilder.loadFieldMetadata(sfEntity);
@@ -1044,7 +1051,8 @@ public class McpToolRouter {
       boolean isChildEntity = parentScope.requiresParentFor(McpParentSection.VERB_CREATE);
       return wrapAsTextContent(McpSchemaCreateView
           .buildResponse(specName, entityName, fieldsArray,
-              serverDefaultedNames(specName, entityName, adTab, sfEntity), isChildEntity)
+              serverDefaultedNames(specName, entityName, adTab, sfEntity), isChildEntity,
+              entityAgentPrompt)
           .toString(2));
     }
     // IMP-12: fields:[…] — an explicit whitelist, for an agent that already knows what it wants.
@@ -1059,6 +1067,12 @@ public class McpToolRouter {
     entitySchema.put("spec", specName);
     entitySchema.put("entity", entityName);
     entitySchema.put("table", adTab.getTable().getDBTableName());
+    // ETP-5184: alongside spec/entity/table rather than buried near the hint — for a
+    // handler-backed entity this is the only place the AD-derived contract below can be
+    // contradicted, so it must be read before the field list, not after it.
+    if (entityAgentPrompt != null) {
+      entitySchema.put("agentPrompt", entityAgentPrompt);
+    }
 
     // Methods from SFEntity config
     JSONArray methods = new JSONArray();

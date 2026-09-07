@@ -69,6 +69,8 @@ final class McpSchemaCreateView {
 
   private static final String KEY_NAME = "name";
   private static final String KEY_REQUIRED = "required";
+  /** ETP-5184: entity-level curated guidance, mirrored from {@code neo_discover}. */
+  private static final String KEY_AGENT_PROMPT = "agentPrompt";
   private static final String KEY_OPTIONAL = "optional";
 
   /**
@@ -225,6 +227,26 @@ final class McpSchemaCreateView {
    */
   static JSONObject buildResponse(String specName, String entityName, JSONArray fields,
       Set<String> serverResolved, boolean isChildEntity) throws JSONException {
+    return buildResponse(specName, entityName, fields, serverResolved, isChildEntity, null);
+  }
+
+  /**
+   * Same as {@link #buildResponse(String, String, JSONArray, Set, boolean)}, plus the entity-level
+   * {@code agentPrompt} from {@code ETGO_SF_ENTITY.AGENT_PROMPT}.
+   *
+   * <p>ETP-5184. The prompt was reaching {@code neo_discover} only, and discover is a catalogue an
+   * agent reads once; {@code view:"create"} is what it reads immediately before writing. When the
+   * entity is handler-backed, the prompt is the only place the divergence between the advertised
+   * contract and the one the handler implements can be stated — {@code contacts/locationAddress}
+   * advertises {@code locationAddress} as a required Search field while its handler creates the
+   * {@code C_Location} itself and discards whatever id was sent. Omitting the key when the column
+   * is blank keeps the response byte-for-byte as before for the 285 entities that carry no prompt.
+   *
+   * @param agentPrompt the entity's curated guidance, or {@code null}/blank to omit the key
+   */
+  static JSONObject buildResponse(String specName, String entityName, JSONArray fields,
+      Set<String> serverResolved, boolean isChildEntity, String agentPrompt)
+      throws JSONException {
     JSONArray required = new JSONArray();
     JSONArray optional = new JSONArray();
     Set<String> resolved = serverResolved == null ? Set.of() : serverResolved;
@@ -254,6 +276,9 @@ final class McpSchemaCreateView {
     JSONObject response = new JSONObject();
     response.put("spec", specName);
     response.put("entity", entityName);
+    if (agentPrompt != null && !agentPrompt.trim().isEmpty()) {
+      response.put(KEY_AGENT_PROMPT, agentPrompt.trim());
+    }
     response.put(KEY_REQUIRED, required);
     response.put(KEY_OPTIONAL, optional);
     response.put("requiredCount", required.length());

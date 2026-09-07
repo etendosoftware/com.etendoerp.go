@@ -1639,6 +1639,42 @@ first reader would have `neo_schema` and `neo_selectors` contradicting each othe
 field. A field that neither the row nor the override classifies still reports **no** `visibility`
 key, exactly as before.
 
+##### Entity-level `AGENT_PROMPT` — a sibling column, not an `MCP_CONFIG` section
+
+`ETGO_SF_ENTITY.AGENT_PROMPT` is curated free text: whatever an agent must know about this entity
+that the AD dictionary cannot express. It is not part of `MCP_CONFIG` (it predates it, ETP-4278) and
+it is not validated — it is prose handed to the model verbatim, trimmed, and omitted entirely when
+the column is blank so the 285 entities without one stay byte-for-byte lean.
+
+It is now emitted by **both** discovery tools, from the same trim/blank check:
+
+| Tool | Where |
+|---|---|
+| `neo_discover` | `McpSupportInternals` — per-entity item, key `agentPrompt` |
+| `neo_schema` (full) | `McpToolRouter.handleSchema` — alongside `spec`/`entity`/`table`, ahead of `fields` |
+| `neo_schema` with `view:"create"` | `McpSchemaCreateView.buildResponse` — after `entity`, before `required` |
+
+ETP-5184 added the last two. `neo_discover` is a catalogue an agent reads once at the start of a
+session; `neo_schema` is what it reads immediately before writing, so guidance that lived only in
+discover was guidance already paged out by the time it mattered.
+
+**Why it earns its place on a handler-backed entity.** For the 92 of 287 active entities that carry
+a `JAVA_QUALIFIER`, a `NeoHandler` may implement a contract other than the one `neo_schema` derives
+from the dictionary, and the prompt is currently the only place that divergence can be stated.
+`contacts/locationAddress` is the worked example: `view:"create"` advertises `locationAddress` as a
+**required** Search field, while `ContactsLocationAddressHandler` creates the `C_Location` itself and
+discards whatever id was sent (a live create passing an existing location id came back holding a
+brand-new one). The fields the handler actually reads — `addressLine1`, `cityName`, `country`,
+`postalCode`, `regionName` — belong to `C_Location`, a different table, so they are absent from that
+entity's schema and undiscoverable. Omitting the id fails the generic mandatory-field check with a
+422; sending it without address fields fails with a constraint violation. Only "a throwaway id plus
+the address fields" works, and nothing in the machine-readable contract says so — hence the prompt.
+
+Making the schema itself tell the truth is the deeper fix and is proposed, not implemented, in
+`schema_forge/docs/plans/2026-09-07-mcp-handler-contract-section.md` (a `handlerContract`
+`MCP_CONFIG` section). It touches `validateMandatoryFields`, the write gate for the whole MCP, so it
+was deferred to its own cycle.
+
 ---
 
 ### 4.13 Image Fields and Image Upload (ETP-5184)
