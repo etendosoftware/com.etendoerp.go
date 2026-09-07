@@ -24,9 +24,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.regex.Pattern;
 
 import org.junit.jupiter.api.AfterEach;
@@ -67,23 +65,18 @@ import com.etendoerp.go.schemaforge.data.SFField;
 class McpFieldViewSingleResolverCallSiteTest {
 
   /**
-   * The readers ETP-5184 unified, as {@code source file#method name}. Keyed by file <i>and</i>
-   * method because {@code McpQuerySupport} contributes two of them.
+   * The readers ETP-5184 unified, as {@code {source file, method name}} pairs.
+   *
+   * <p>A list rather than a map keyed by file: {@code McpQuerySupport} contributes two readers, and
+   * under a map a third one added without a disambiguating key would silently <i>replace</i> a
+   * sibling — the size would still be four and the displaced reader would quietly stop being
+   * guarded. A guard whose whole purpose is not being mute must not be able to lose an entry.</p>
    */
-  private static final Map<String, String> READERS = new LinkedHashMap<>();
-
-  static {
-    READERS.put("com/etendoerp/go/mcp/McpSchemaFieldBuilder.java", "loadFieldMetadata");
-    READERS.put("com/etendoerp/go/mcp/McpQuerySupport.java", "editablePropertyNames");
-    READERS.put("com/etendoerp/go/mcp/McpQuerySupport.java#summaryFields", "summaryFields");
-    READERS.put("com/etendoerp/go/mcp/McpResourceProvider.java", "buildFieldsArray");
-  }
-
-  /** Strips the disambiguating {@code #method} suffix a key may carry. */
-  private static String sourceFileOf(String key) {
-    int hash = key.indexOf('#');
-    return hash < 0 ? key : key.substring(0, hash);
-  }
+  private static final List<String[]> READERS = List.of(
+      new String[] { "com/etendoerp/go/mcp/McpSchemaFieldBuilder.java", "loadFieldMetadata" },
+      new String[] { "com/etendoerp/go/mcp/McpQuerySupport.java", "editablePropertyNames" },
+      new String[] { "com/etendoerp/go/mcp/McpQuerySupport.java", "summaryFields" },
+      new String[] { "com/etendoerp/go/mcp/McpResourceProvider.java", "buildFieldsArray" });
 
   /** The one resolver every reader must go through. */
   private static final Pattern RESOLVER_CALL =
@@ -115,10 +108,9 @@ class McpFieldViewSingleResolverCallSiteTest {
   @DisplayName("every reader resolves through McpFieldView and none reads SFField raw")
   void everyReaderRoutesThroughTheResolver() {
     List<String> violations = new ArrayList<>();
-    for (Map.Entry<String, String> reader : READERS.entrySet()) {
-      String method = reader.getValue();
-      String body = McpSourceScanner.methodBody(
-          McpSourceScanner.read(sourceFileOf(reader.getKey())), method);
+    for (String[] reader : READERS) {
+      String method = reader[1];
+      String body = McpSourceScanner.methodBody(McpSourceScanner.read(reader[0]), method);
       if (!RESOLVER_CALL.matcher(body).find()) {
         violations.add(method + " does not call McpFieldView.of(...)");
       }
@@ -139,14 +131,14 @@ class McpFieldViewSingleResolverCallSiteTest {
       + "not passing")
   void theScanStillResolvesEveryReader() {
     assertEquals(4, READERS.size(), "ETP-5184 unified exactly four readers");
-    for (Map.Entry<String, String> reader : READERS.entrySet()) {
-      String body = McpSourceScanner.methodBody(
-          McpSourceScanner.read(sourceFileOf(reader.getKey())), reader.getValue());
+    for (String[] reader : READERS) {
+      String method = reader[1];
+      String body = McpSourceScanner.methodBody(McpSourceScanner.read(reader[0]), method);
       assertTrue(body.length() > 100,
-          reader.getValue() + " was resolved to a body of " + body.length() + " chars, which means"
+          method + " was resolved to a body of " + body.length() + " chars, which means"
               + " the extractor matched the wrong thing — fix this test, not the source");
       assertTrue(body.contains("SFField"),
-          reader.getValue() + " no longer mentions SFField, so the guard above has nothing left to"
+          method + " no longer mentions SFField, so the guard above has nothing left to"
               + " check — the reader was probably refactored elsewhere");
     }
   }
