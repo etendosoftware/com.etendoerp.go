@@ -364,12 +364,62 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     if (regionId != null) {
       geoLoc.setRegion(OBDal.getInstance().get(Region.class, regionId));
     } else if (regionName != null) {
-      geoLoc.setRegion(resolveRegionByName(regionName, geoLoc.getCountry()));
+      applyRegionName(regionName, geoLoc);
     } else if (body.has(FIELD_REGION)) {
       // Only the id field clears. `regionName` is set-if-provided: a blank one means "this file
       // says nothing about the province", never "erase it". Clearing stays an explicit
       // `region: null`, which is what the Location modal's selector sends.
       geoLoc.setRegion(null);
+    }
+  }
+
+  /**
+   * Writes a free-text region name onto {@code geoLoc}, as an FK when the country defines
+   * regions and as C_Location's own {@code RegionName} column when it does not.
+   *
+   * <p>ETP-5184. Before this the only outcome was the FK: {@link #resolveRegionByName} either
+   * found a {@link Region} of the payload's country or threw. That is right for a country whose
+   * regions are loaded — a name that is none of them is a data error — but it made an address in
+   * a country with no C_Region rows impossible to save. A live Argentine address failed with
+   * {@code The region "Cordoba" does not exist in Argentina.}: C_Country.HasRegion is {@code 'N'}
+   * for Argentina and no region row hangs off it, so no province could ever resolve, and the
+   * province was rejected outright rather than stored.
+   *
+   * <p>{@code C_Location.RegionName} is Etendo's own home for exactly this case — Classic hides
+   * the region selector and shows the free-text field when a country has {@code HasRegion = 'N'}
+   * — so filling it is the modelled behaviour, not a workaround.
+   *
+   * <p>The strict path is unchanged where it means something. The fallback is entered only when
+   * the country is known AND declares no regions; a country that does define regions still
+   * refuses an unknown name, and a payload with a region name but no country still refuses,
+   * because "does this country have regions" is unanswerable without the country. Under that
+   * guard the only reachable failure is "does not exist" (with no region rows there is nothing
+   * to be ambiguous about), so the {@code catch} cannot silence an ambiguity.
+   *
+   * <p><b>The two columns are kept mutually exclusive.</b> Whichever one this write fills, the
+   * other is cleared: an FK to Madrid sitting next to a {@code RegionName} of "Cordoba" is a
+   * record that answers the same question two ways, and every reader (display name, print,
+   * export) would be free to pick either. Nothing is lost by clearing — both columns are written
+   * from this single {@code regionName} input, so the value being cleared is a stale answer to
+   * the same question, superseded by the one just resolved. Clearing the stale FK matters most
+   * on the update path: an address moved from Spain to Argentina would otherwise keep pointing
+   * at a Spanish province while its free text says Cordoba.
+   */
+  private static void applyRegionName(String regionName,
+      org.openbravo.model.common.geography.Location geoLoc) {
+    Country country = geoLoc.getCountry();
+    boolean countryWithoutRegions = country != null && !Boolean.TRUE.equals(country.isHasRegions());
+    try {
+      geoLoc.setRegion(resolveRegionByName(regionName, country));
+      geoLoc.setRegionName(null);
+    } catch (OBException e) {
+      if (!countryWithoutRegions) {
+        throw e;
+      }
+      log.debug("Region '{}' not modelled in {}; storing it as C_Location.RegionName free text",
+          regionName, country.getName());
+      geoLoc.setRegion(null);
+      geoLoc.setRegionName(regionName);
     }
   }
 
