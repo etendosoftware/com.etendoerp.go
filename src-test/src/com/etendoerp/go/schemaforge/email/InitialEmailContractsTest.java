@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge.email;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -43,6 +44,9 @@ import org.openbravo.base.session.OBPropertiesProvider;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.email.contracts.CoreEmailContractProvider;
+import com.etendoerp.go.schemaforge.email.contracts.GoodsShipmentSendEmailContract;
+import com.etendoerp.go.schemaforge.email.contracts.PurchaseOrderSendEmailContract;
+import com.etendoerp.go.schemaforge.email.contracts.ReturnToVendorSendEmailContract;
 import com.etendoerp.go.schemaforge.email.contracts.SalesInvoiceSendEmailContract;
 import com.etendoerp.go.schemaforge.email.contracts.SalesOrderSendEmailContract;
 import com.etendoerp.go.schemaforge.email.contracts.SalesQuotationSendEmailContract;
@@ -80,6 +84,46 @@ public class InitialEmailContractsTest {
     assertTrue(registry.find("sales-quotation-send").isPresent());
     assertFalse(registry.find("custom").isPresent());
     assertFalse(registry.find("support-custom-email").isPresent());
+  }
+
+  // ── ETP-5069: the readable-history gate, contract by contract ───────────────
+
+  @Test
+  public void everyDocumentSendContractLogsReadableHistoryUnderItsOwnSpec() {
+    // The six windows whose send button an operator can press. The recipients are the tenant's
+    // own business partners and the copy is the tenant's own, so the readable table is the right
+    // trade — and the document's window is where the history has to show up.
+    EmailDocumentRecordResolver resolver = recordId -> Optional.empty();
+
+    assertLogsHistoryUnderSpec(new SalesInvoiceSendEmailContract(resolver), "sales-invoice");
+    assertLogsHistoryUnderSpec(new SalesOrderSendEmailContract(resolver), "sales-order");
+    assertLogsHistoryUnderSpec(new SalesQuotationSendEmailContract(resolver), "sales-quotation");
+    assertLogsHistoryUnderSpec(new PurchaseOrderSendEmailContract(resolver), "purchase-order");
+    assertLogsHistoryUnderSpec(new GoodsShipmentSendEmailContract(resolver), "goods-shipment");
+    // Known naming quirk: the window is return-to-vendor-shipment, so the derived spec resolves
+    // no window. The column is nullable and best effort, and the history row is still written.
+    assertLogsHistoryUnderSpec(new ReturnToVendorSendEmailContract(resolver), "return-to-vendor");
+  }
+
+  @Test
+  public void accountAndAuthContractsNeverReachTheReadableHistory() {
+    // Their recipients are platform users and their copy carries single-use links, so they keep
+    // the interface default. The anti-abuse ledger still records every one of them.
+    DefaultEmailContractRegistry registry = DefaultEmailContractRegistry.create(
+        fixtureProviders());
+
+    for (String contractName : Arrays.asList("reset-password", "new-account", "set-password",
+        "environment-ready", "password-changed", "login-alert", "company-invitation")) {
+      EmailContract contract = registry.find(contractName).orElseThrow(
+          () -> new AssertionError("contract not registered: " + contractName));
+      assertFalse(contractName + " must not log readable history", contract.logsSendHistory());
+      assertNull(contractName + " must not declare a spec", contract.getSpecName());
+    }
+  }
+
+  private static void assertLogsHistoryUnderSpec(EmailContract contract, String expectedSpec) {
+    assertTrue(contract.getName() + " must log readable history", contract.logsSendHistory());
+    assertEquals(expectedSpec, contract.getSpecName());
   }
 
   @Test
