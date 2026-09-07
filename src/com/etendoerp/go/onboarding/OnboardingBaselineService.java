@@ -222,6 +222,34 @@ public class OnboardingBaselineService {
    * fronts now converge on byte-identical GL Item names (verified 0 mismatches across all 294
    * previously-blocked GOClient rows) — so no subaccount is skipped anymore; {@code @report} now
    * lists which names actually got shortened, for operator visibility.</p>
+   *
+   * <p><b>2026-09-02 (ETP-5079):</b> this ticket did NOT bump the constant; the value above comes
+   * from ETP-5101. ETP-5079 corrects the curated GOClient dataset itself (price-list and warehouse
+   * names, sample products and template financial accounts removed, document sequences given a sane
+   * {@code STARTNO}, {@code C_DOCTYPE_TRL} and {@code M_PRODUCT_CATEGORY_TRL} added to {@link
+   * OnboardingDatasetDefinition}'s {@code INCLUDED_TABLES} with real Spanish names, English base
+   * names throughout) and removes the synthetic "Default Customer" business partner from the
+   * provisioning chain. Every one of those makes a NEW tenant born correct.
+   *
+   * <p>Its corrective {@code .sql} is {@code 20260902T120000Z__R31-document-sequence-startno},
+   * which realigns the 11 document sequences' {@code STARTNO}/{@code CURRENTNEXT} on
+   * already-provisioned tenants. It warrants no bump of its own: a newborn tenant already gets
+   * correct sequences straight from the corrected {@code AD_SEQUENCE.xml}, so R31's {@code @check}
+   * returns 0 rows for it and the runner records a clean {@code SKIPPED_NOT_NEEDED} — the same
+   * terminal state a watermark skip produces, reached by actually looking rather than by date.
+   * Reserve CUT bumps for fixes whose {@code @check} WOULD match on a correctly provisioned new
+   * tenant. Same reasoning as G1/G4 (see {@code onboarding-and-datafixes-map.md}): sampledata alone
+   * makes new tenants correct, so no bump is warranted.
+   *
+   * <p>Note for anyone auditing the ETP-5101 bump above against the fixes it now skips: it moves
+   * the cutoff past {@code R30-financial-account-card-ledger-account} (2026-08-30) and {@code
+   * R29-transfer-link-multicurrency} (2026-08-31), neither of which bumped it themselves. That is
+   * harmless, and deliberately so — both are corrective twins whose preventive front already
+   * shipped, so both are no-ops on a newborn tenant. R30 says as much in its own header ("the
+   * preventive front (Task 5, ETP-4872) already shipped this for NEW tenants via the GOClient
+   * onboarding sampledata"), and R29-transfer states it outright: "new tenants are born correct via
+   * the sampledata above". The "CUT bump without its .sql" hazard this constant's contract forbids
+   * is about skipping fixes that WOULD still match — not these.</p>
    */
   private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-09-01T14:00:00Z");
 

@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -29,6 +30,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 
 import java.math.BigDecimal;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
@@ -117,7 +119,7 @@ public class NearMatchSupportTest {
 
   /**
    * <b>Cross-class contrast, half one of two.</b> {@link NearMatchSupport#differenceTolerance} and
-   * {@link AutoMatchSupport#signalGroupTolerance} read the SAME {@code EM_ETGO_Amount_Tolerance}
+   * {@link MatchTolerances#signalGroupTolerance} read the SAME {@code EM_ETGO_Amount_Tolerance}
    * column with deliberately opposite conventions, and the split of ETP-4965 put them in two
    * different classes — which makes them easier, not harder, to confuse. Asserting the divergence
    * explicitly is the point: collapsing them back into one method is the support trap the rename
@@ -133,11 +135,11 @@ public class NearMatchSupportTest {
     BigDecimal target = new BigDecimal("27.00");
     // 0% → one cent of rounding slack for a 1:N SUM, but nothing may be POSTED.
     assertEquals(0, new BigDecimal("0.01")
-        .compareTo(AutoMatchSupport.signalGroupTolerance(target, BigDecimal.ZERO)));
+        .compareTo(MatchTolerances.signalGroupTolerance(target, BigDecimal.ZERO)));
     assertNull(NearMatchSupport.differenceTolerance(target, BigDecimal.ZERO));
     // A percentage below the floor is raised to 0.01 for the sum, but NOT for the posting gate.
     assertEquals(0, new BigDecimal("0.01")
-        .compareTo(AutoMatchSupport.signalGroupTolerance(target, new BigDecimal("0.001"))));
+        .compareTo(MatchTolerances.signalGroupTolerance(target, new BigDecimal("0.001"))));
     assertEquals(0, BigDecimal.ZERO
         .compareTo(NearMatchSupport.differenceTolerance(target, new BigDecimal("0.001"))));
   }
@@ -175,24 +177,35 @@ public class NearMatchSupportTest {
   // ---------------------------------------------------------------------------
 
   /**
-   * Matrix row 1 — no deviation at all is a SUGGESTION, not a difference, and
-   * {@link NearMatchSupport#findNearMatch} must explicitly reject the exact-exact case. That single
-   * exclusion is what separates the first two rows of the matrix; without it every plain 1:1 match
-   * would land in "Con diferencia" and the filter would stop meaning anything.
+   * <b>Matrix row 1, as reworked in round 3.</b> The exact-exact candidate is RETURNED by the
+   * search — the label is decided afterwards, by {@link MatchTolerances#deviatesFrom}, not by
+   * hiding the candidate.
    *
-   * <p>The classifier half of this row (Core finds the pair, so the line reads "suggested") lives in
-   * {@code AutoMatchSupportTest#testExactAmountExactDateIsSuggested}.
+   * <p>It used to be excluded here, on the assumption that Core's pass 1 had already claimed it.
+   * Core's criteria are narrower (exact date AND a corroborating reference), so when it does not
+   * match, that exclusion silently hid the BEST candidate and handed the line to a worse one — the
+   * 14,52 case this ticket's round 3 came from. Eligibility is now the tolerance gate alone; see
+   * {@link #testExactCandidateBeatsADateDeviatingOne} for the consequence that motivated it.
+   *
+   * <p>The classifier half of this row (the line still reads "suggested", never "difference") lives
+   * in {@code AutoMatchSupportTest#testExactAmountExactDateIsSuggested} and in the
+   * {@code testClassifyAndMatchFallbackAgree*} pair.
    */
   @Test
-  public void testExactAmountExactDateIsNeverANearMatch() {
+  public void testExactAmountExactDateIsStillReturnedSoRankingCanSeeIt() {
     Date today = new Date();
     FIN_BankStatementLine line = datedLine("L-EXACT", LINE_CREDIT, NO_DEBIT, today);
     FIN_FinaccTransaction exact = nearTxn(T_NEAR, LINE_CREDIT, today);
 
     try (MockedStatic<OBDal> obDal = mockUnreconciledPool(Collections.singletonList(exact))) {
-      assertNull("an exact-exact 1:1 is a suggestion, never a near-match",
-          NearMatchSupport.findNearMatch(NEAR_ACC, line, new HashSet<>(), new ArrayList<>(),
-              nearTolerance(), DATE_TOL_DAYS));
+      FIN_FinaccTransaction picked = NearMatchSupport.findNearMatch(NEAR_ACC, line, new HashSet<>(),
+          new ArrayList<>(), nearTolerance(), DATE_TOL_DAYS);
+
+      assertNotNull("an exact hit Core missed must still be findable — hiding it is the bug",
+          picked);
+      assertEquals(T_NEAR, picked.getId());
+      assertFalse("and it deviates in nothing, so the caller labels it a plain suggestion",
+          MatchTolerances.deviatesFrom(line, picked));
     }
   }
 
@@ -429,6 +442,158 @@ public class NearMatchSupportTest {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-4965 round 3 — RANKING is what picks the winner, not eligibility
+  //
+  // Round 1 gated the search on "is this deviation worth reporting", which excluded the exact-exact
+  // candidate outright on the assumption that Core's pass 1 had already claimed it. Core's criteria
+  // are narrower — exact date AND a corroborating reference — so whenever it does not match, that
+  // exclusion hid the BEST candidate and the line silently got a worse one.
+  //
+  // Eligibility is now the amount tolerance alone (plus the pool's own sign/date filtering) and the
+  // ORDER decides: smaller amount gap → smaller date distance → older transaction date. The five
+  // tests below pin one comparison each, so a failure names which rung of the ladder broke.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /**
+   * <b>The round-3 regression, at the search level.</b> An exact candidate must beat one that
+   * deviates only in date. Under the old {@code isReportableDeviation} gate the exact one was not
+   * even eligible, so the date-deviating movement won by default — which is precisely how a 14,52
+   * line of 04/09 ended up matched against a 14,52 movement of 01/09.
+   */
+  @Test
+  public void testExactCandidateBeatsADateDeviatingOne() {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-EXACT-WINS", LINE_CREDIT, NO_DEBIT, today);
+    FIN_FinaccTransaction dateDeviating = nearTxn("T-DATE-DEV", LINE_CREDIT, daysFrom(today, -2));
+    FIN_FinaccTransaction exact = nearTxn("T-EXACT", LINE_CREDIT, today);
+
+    // Pool order deliberately offers the WORSE candidate first, so "keep the first hit" fails here.
+    try (MockedStatic<OBDal> obDal =
+        mockUnreconciledPool(Arrays.asList(dateDeviating, exact))) {
+      FIN_FinaccTransaction picked = NearMatchSupport.findNearMatch(NEAR_ACC, line,
+          new HashSet<>(), new ArrayList<>(), nearTolerance(), DATE_TOL_DAYS);
+
+      assertNotNull(picked);
+      assertEquals("the same-day exact movement must win over the 2-day-old one; got " + at(picked),
+          "T-EXACT", picked.getId());
+    }
+  }
+
+  /**
+   * The amount axis OUTRANKS the date axis. A 26.90 movement two days away (gap 0.10) beats a
+   * 26.62 movement on the line's own date (gap 0.38): a smaller amount deviation means a smaller
+   * accounting entry, and the date is only the tie-break underneath it.
+   */
+  @Test
+  public void testSmallerAmountGapBeatsACloserDate() {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-GAP-FIRST", LINE_CREDIT, NO_DEBIT, today);
+    FIN_FinaccTransaction sameDayBigGap = nearTxn("T-SAMEDAY-038", NEAR_AMOUNT, today);
+    FIN_FinaccTransaction farDaySmallGap = nearTxn("T-2DAYS-010", "26.90", daysFrom(today, -2));
+
+    try (MockedStatic<OBDal> obDal =
+        mockUnreconciledPool(Arrays.asList(sameDayBigGap, farDaySmallGap))) {
+      FIN_FinaccTransaction picked = NearMatchSupport.findNearMatch(NEAR_ACC, line,
+          new HashSet<>(), new ArrayList<>(), nearTolerance(), DATE_TOL_DAYS);
+
+      assertNotNull(picked);
+      assertEquals("a 0.10 gap two days away beats a 0.38 gap on the same day; got " + at(picked),
+          "T-2DAYS-010", picked.getId());
+    }
+  }
+
+  /**
+   * <b>The third tie-break, added in round 3.</b> Two candidates identical on BOTH ranked axes —
+   * same amount, same calendar day — used to be resolved by whichever the pool happened to yield
+   * first, an answer that could change between two runs over unchanged data. The OLDER transaction
+   * wins now: it matches how the rest of the reconciliation allocates (oldest first) and it is
+   * stable.
+   *
+   * <p>Asserted in both pool orders, because an order-dependent winner is exactly the defect this
+   * tie-break removes and one ordering alone cannot see it.
+   */
+  @Test
+  public void testFullTieIsBrokenByTheOlderTransactionDate() {
+    Date lineNoon = dayAt(2026, 8, 28, 12);
+    FIN_BankStatementLine line = datedLine("L-FULL-TIE", LINE_CREDIT, NO_DEBIT, lineNoon);
+    FIN_FinaccTransaction morning = nearTxn("T-08H", LINE_CREDIT, dayAt(2026, 8, 28, 8));
+    FIN_FinaccTransaction evening = nearTxn("T-20H", LINE_CREDIT, dayAt(2026, 8, 28, 20));
+
+    // The premise, asserted rather than assumed: nothing but the timestamp can separate these two.
+    assertEquals(0L, NearMatchSupport.dayDistance(lineNoon, morning.getTransactionDate()));
+    assertEquals(0L, NearMatchSupport.dayDistance(lineNoon, evening.getTransactionDate()));
+
+    for (List<FIN_FinaccTransaction> pool
+        : Arrays.asList(Arrays.asList(evening, morning), Arrays.asList(morning, evening))) {
+      try (MockedStatic<OBDal> obDal = mockUnreconciledPool(pool)) {
+        FIN_FinaccTransaction picked = NearMatchSupport.findNearMatch(NEAR_ACC, line,
+            new HashSet<>(), new ArrayList<>(), nearTolerance(), DATE_TOL_DAYS);
+
+        assertNotNull(picked);
+        assertEquals("on a full tie the OLDER movement wins, in either pool order; got "
+            + at(picked), "T-08H", picked.getId());
+      }
+    }
+  }
+
+  /**
+   * A candidate past the amount tolerance is not merely outranked, it is not a candidate at all: a
+   * 20.00 movement deviates by 7.00 from the 27.00 line, far past the 1.35 limit, and must lose to
+   * an eligible 26.62 even though it sits earlier in the pool.
+   *
+   * <p>Distinct from {@link #testAmountOutsideToleranceIsNeverANearMatch}, which proves the lone
+   * out-of-tolerance candidate yields nothing. This one proves the gate still runs when there IS
+   * something to rank — the case a ranking-only refactor could drop.
+   */
+  @Test
+  public void testCandidateOutsideTheAmountToleranceLosesToAnEligibleOne() {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-OUT-VS-IN", LINE_CREDIT, NO_DEBIT, today);
+    FIN_FinaccTransaction outOfTolerance = nearTxn("T-20-00", "20.00", today);
+    FIN_FinaccTransaction eligible = nearTxn(T_NEAR, NEAR_AMOUNT, daysFrom(today, -2));
+
+    try (MockedStatic<OBDal> obDal =
+        mockUnreconciledPool(Arrays.asList(outOfTolerance, eligible))) {
+      FIN_FinaccTransaction picked = NearMatchSupport.findNearMatch(NEAR_ACC, line,
+          new HashSet<>(), new ArrayList<>(), nearTolerance(), DATE_TOL_DAYS);
+
+      assertNotNull(picked);
+      assertEquals("a 7.00 gap is out of tolerance whatever its date; got " + at(picked),
+          T_NEAR, picked.getId());
+    }
+  }
+
+  /**
+   * The date window is a hard bound, not a preference: an EXACT amount 4 days away with a 3-day
+   * tolerance is never returned, however perfect the amount is. Enforced by the pool loader
+   * ({@code loadUnreconciledSameSign}), which is why the mock stubs Hibernate rather than the
+   * loader — the real filtering has to run for this to mean anything.
+   */
+  @Test
+  public void testCandidateOutsideTheDateWindowIsNeverReturned() {
+    Date today = new Date();
+    FIN_BankStatementLine line = datedLine("L-OUT-WINDOW", LINE_CREDIT, NO_DEBIT, today);
+    FIN_FinaccTransaction fourDaysLater = nearTxn(T_NEAR, LINE_CREDIT, daysFrom(today, 4));
+
+    try (MockedStatic<OBDal> obDal =
+        mockUnreconciledPool(Collections.singletonList(fourDaysLater))) {
+      assertNull("4 days is outside a 3-day window — an exact amount does not buy an exception",
+          NearMatchSupport.findNearMatch(NEAR_ACC, line, new HashSet<>(), new ArrayList<>(),
+              nearTolerance(), DATE_TOL_DAYS));
+    }
+  }
+
+  /** Renders the picked candidate's own date, so a ranking failure names what was chosen. */
+  private static String at(FIN_FinaccTransaction txn) {
+    if (txn == null) {
+      return "nothing";
+    }
+    Date date = txn.getTransactionDate();
+    return txn.getId() + " dated "
+        + (date == null ? "(no date)" : new SimpleDateFormat("dd/MM/yyyy HH:mm").format(date));
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // ETP-4965 — the date axis is CALENDAR DAYS, not elapsed milliseconds
   //
   // Every date column this feature reads is a timestamp, not a date: FIN_BankStatementLine.datetrx,
@@ -443,7 +608,7 @@ public class NearMatchSupportTest {
   // through the search — the direct assertion says what the number is, the behavioural one says
   // what it costs to get it wrong, and it was the behavioural half that caught the reported bug.
   //
-  // NOTE: they say nothing about AutoMatchSupport.withinDateWindow, which still measures N days as
+  // NOTE: they say nothing about MatchTolerances.withinDateWindow, which still measures N days as
   // N x 24h. That is pre-existing, shared with findSignalGroup/standardMatch, and out of this
   // ticket's scope. Every date pair used here sits comfortably inside the 3-day window under EITHER
   // reading, so fixing that window later cannot break these tests.
@@ -488,17 +653,19 @@ public class NearMatchSupportTest {
   /**
    * <b>Regression, matrix row 1.</b> A statement line at 13:00 and its movement at 00:00 of the
    * SAME calendar day, for the very same amount, are ZERO days apart — a plain suggestion. Measured
-   * in millis they are 13 hours apart, which reads as a date deviation and hands the exact match
-   * over to {@code findNearMatch}: the line then shows "Con diferencia" for a match that deviates
-   * in nothing at all, and the filter stops meaning what its name says. Nothing in the timestamps
-   * is unusual — importers routinely stamp a real time on the statement side and midnight on the
-   * movement side.
+   * in millis they are 13 hours apart, which reads as a date deviation: the line then shows "Con
+   * diferencia" for a match that deviates in nothing at all, and the filter stops meaning what its
+   * name says. Nothing in the timestamps is unusual — importers routinely stamp a real time on the
+   * statement side and midnight on the movement side.
    *
-   * <p>The classifier half — the same pair read through {@code classifyPendingLine}, where the
-   * user-visible state is decided — is asserted in {@code AutoMatchSupportTest}.
+   * <p>Round 3 moved WHERE this is decided, not WHAT is decided: the search now returns the pair
+   * and {@link MatchTolerances#deviatesFrom} is what must read zero deviation on it. Both halves
+   * are asserted, since a millisecond reading sneaking back into either one produces the same
+   * user-visible bug. The classifier half — the same pair read through {@code classifyPendingLine},
+   * where the state is painted — is asserted in {@code AutoMatchSupportTest}.
    */
   @Test
-  public void testSameCalendarDayDifferentTimesExactAmountIsNeverANearMatch() {
+  public void testSameCalendarDayDifferentTimesExactAmountDeviatesInNothing() {
     Date lineAfternoon = dayAt(2026, 8, 28, 13);
     Date movementMidnight = dayAt(2026, 8, 28, 0);
     FIN_BankStatementLine line = datedLine("L-SAMEDAY-EXACT", LINE_CREDIT, NO_DEBIT, lineAfternoon);
@@ -508,10 +675,12 @@ public class NearMatchSupportTest {
         0L, NearMatchSupport.dayDistance(lineAfternoon, movementMidnight));
 
     try (MockedStatic<OBDal> obDal = mockUnreconciledPool(Collections.singletonList(exact))) {
-      assertNull("zero days apart plus an exact amount is an exact-exact match, which must never "
-              + "be claimed as a near match",
-          NearMatchSupport.findNearMatch(NEAR_ACC, line, new HashSet<>(), new ArrayList<>(),
-              nearTolerance(), DATE_TOL_DAYS));
+      FIN_FinaccTransaction picked = NearMatchSupport.findNearMatch(NEAR_ACC, line, new HashSet<>(),
+          new ArrayList<>(), nearTolerance(), DATE_TOL_DAYS);
+
+      assertNotNull("the pair is a candidate — the time component is not a deviation", picked);
+      assertFalse("13 hours inside one calendar day must not read as a date deviation",
+          MatchTolerances.deviatesFrom(line, picked));
     }
   }
 
@@ -586,23 +755,27 @@ public class NearMatchSupportTest {
 
   /**
    * The null-date convention as the search sees it. An undated movement yields a zero day distance,
-   * i.e. "same day", so an exact amount makes it an exact-exact match and it is never offered as a
-   * difference.
+   * i.e. "same day", so an exact amount makes it a NON-deviating candidate: findable, but reported
+   * as a plain suggestion rather than a difference. An undated row carries no evidence of a date
+   * deviation, and reporting one would invent it.
    *
    * <p>That convention is a floor, not an off switch — the second half asserts that a null date
    * still lets a genuine AMOUNT deviation surface.
    */
   @Test
-  public void testNullTransactionDateWithExactAmountIsNeverANearMatch() {
+  public void testNullTransactionDateWithExactAmountDeviatesInNothing() {
     Date lineDate = dayAt(2026, 8, 28, 11);
     FIN_BankStatementLine line = datedLine("L-NULL-DATE", LINE_CREDIT, NO_DEBIT, lineDate);
     FIN_FinaccTransaction undatedExact = nearTxn("T-UNDATED-EXACT", LINE_CREDIT, null);
 
     try (MockedStatic<OBDal> obDal =
         mockUnreconciledPool(Collections.singletonList(undatedExact))) {
-      assertNull("no date means no date deviation, so an exact amount is an exact-exact match",
-          NearMatchSupport.findNearMatch(NEAR_ACC, line, new HashSet<>(), new ArrayList<>(),
-              nearTolerance(), DATE_TOL_DAYS));
+      FIN_FinaccTransaction picked = NearMatchSupport.findNearMatch(NEAR_ACC, line, new HashSet<>(),
+          new ArrayList<>(), nearTolerance(), DATE_TOL_DAYS);
+
+      assertNotNull("a missing date does not disqualify a candidate", picked);
+      assertFalse("no date means no date deviation, so an exact amount deviates in nothing",
+          MatchTolerances.deviatesFrom(line, picked));
     }
 
     FIN_FinaccTransaction undatedNear = nearTxn("T-UNDATED-NEAR", NEAR_AMOUNT, null);
