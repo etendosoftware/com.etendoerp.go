@@ -241,6 +241,34 @@ class NeoFieldFilterTest {
     }
 
     @Test
+    @DisplayName("keeps 'created' although no window can declare it (ETP-5122)")
+    void preservesCreatedAuditKey() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id"));
+      NeoFieldFilter filter = activeFilter(included, included);
+
+      JSONObject row = new JSONObject();
+      row.put("id", "1");
+      row.put("created", "2026-08-24T12:15:30+02:00");
+      row.put("createdBy", "100");
+
+      JSONArray data = new JSONArray();
+      data.put(row);
+      JSONObject wrapper = new JSONObject()
+          .put("response", new JSONObject().put("data", data));
+
+      filter.filterGetResponse(wrapper);
+
+      JSONObject filtered = wrapper.getJSONObject("response")
+          .getJSONArray("data").getJSONObject(0);
+      // Rationale: created is an AD column rather than an AD field, so it can never appear in
+      // the ETGO_SF_FIELD configuration, yet the client needs it for date-of-creation
+      // eligibility checks (e.g. Verifactu eligibility by invoice creation date).
+      assertEquals("2026-08-24T12:15:30+02:00", filtered.getString("created"));
+      // Only that one key is exempted, so the rest of the audit block stays filtered out.
+      assertFalse(filtered.has("createdBy"));
+    }
+
+    @Test
     void renamesPropertiesToApiKeysInGetResponse() throws Exception {
       Set<String> included = new HashSet<>(Set.of("id", "priceActual"));
       Map<String, String> propToApi = new HashMap<>();
@@ -338,6 +366,23 @@ class NeoFieldFilterTest {
       // The read-path exemption must not leak into the write path: letting a client set its
       // own 'updated' would let it defeat the very staleness check the exemption exists for.
       assertFalse(result.has("updated"));
+    }
+
+    @Test
+    @DisplayName("'created' is readable but never writable")
+    void stripsCreatedFromWriteBody() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id"));
+      NeoFieldFilter filter = activeFilter(included, included);
+
+      JSONObject body = new JSONObject()
+          .put("id", "1")
+          .put("created", "1999-01-01T00:00:00+00:00");
+
+      JSONObject result = filter.filterWriteRequest(body);
+      assertTrue(result.has("id"));
+      // The read-path exemption must not leak into the write path: a client must never be able
+      // to set its own 'created'.
+      assertFalse(result.has("created"));
     }
 
     @Test
@@ -447,9 +492,9 @@ class NeoFieldFilterTest {
           Collections.emptyMap(), propToApiKey);
 
       // The DAL name "dateAcct" must NOT appear: the caller never sees it, so asking for it is
-      // as wrong as asking for a field that does not exist. "updated" DOES appear: it is served
-      // unconditionally on the read path (ETP-5073).
-      assertEquals(Optional.of(Set.of("id", "documentNo", "accountingDate", "updated")),
+      // as wrong as asking for a field that does not exist. "updated"/"created" DO appear: they
+      // are served unconditionally on the read path (ETP-5073, ETP-5122).
+      assertEquals(Optional.of(Set.of("id", "documentNo", "accountingDate", "updated", "created")),
           filter.emittableResponseKeys());
     }
 
@@ -464,6 +509,18 @@ class NeoFieldFilterTest {
       // its value. Declaring it here keeps that array honest; the write path is unaffected.
       Set<String> emittable = filter.emittableResponseKeys().orElseThrow();
       assertTrue(emittable.contains("updated"));
+    }
+
+    @Test
+    @DisplayName("'created' is emittable even though no window can declare it (ETP-5122)")
+    void createdAlwaysReadableKeyIsEmittable() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "name"));
+      NeoFieldFilter filter = activeFilter(included, included);
+
+      // Regression: filterGetResponse serves "created", but emittableResponseKeys would omit it
+      // unless ALWAYS_READABLE_KEYS declares it — same reasoning as "updated" (ETP-5073).
+      Set<String> emittable = filter.emittableResponseKeys().orElseThrow();
+      assertTrue(emittable.contains("created"));
     }
 
     @Test

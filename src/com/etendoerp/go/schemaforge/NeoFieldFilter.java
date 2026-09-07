@@ -57,21 +57,25 @@ public class NeoFieldFilter {
   /**
    * Audit keys a GET response always carries, whatever {@code ETGO_SF_FIELD} says.
    *
-   * <p>{@code updated} is an AD <i>column</i> on every table but not an AD <i>field</i>, so
-   * {@code push-to-neo} cannot register it and no window can opt into it — yet the client needs
-   * it to tell a cached rendering of a record from a stale one (ETP-4787: the preview serves the
-   * marked attachment, which had no way of knowing the record had changed underneath it).
+   * <p>{@code updated} and {@code created} are AD <i>columns</i> on every table but not AD
+   * <i>fields</i>, so {@code push-to-neo} cannot register them and no window can opt into them —
+   * yet clients need them. {@code updated} lets the client tell a cached rendering of a record
+   * from a stale one (ETP-4787: the preview serves the marked attachment, which had no way of
+   * knowing the record had changed underneath it). {@code created} is needed for
+   * date-of-creation eligibility checks (ETP-5122: Verifactu eligibility by invoice creation
+   * date) — without this entry it was silently stripped here regardless of what
+   * {@code decisions.json}/{@code ETGO_SF_FIELD.VISIBILITY} declared for it.
    *
    * <p>Read side only, deliberately: this set is NOT unioned into {@code includedFields}, because
    * that same set gates {@link #filterCreateRequest}, and a client must never be able to write
-   * its own {@code updated}.
+   * its own {@code updated}/{@code created}.
    *
    * <p>Two read-side consumers, and both must stay in agreement: {@link #filterGetResponse} keeps
    * these keys in the payload, and {@link #emittableResponseKeys} declares them available so the
    * MCP field-projection validator does not call a served field unknown (ETP-5073). Anything added
    * here is therefore automatically honest on both, which is why the literal lives in one place.
    */
-  private static final Set<String> ALWAYS_READABLE_KEYS = Set.of("updated");
+  private static final Set<String> ALWAYS_READABLE_KEYS = Set.of("updated", "created");
 
   /**
    * Set of DAL property names that are included (IsIncluded=Y).
@@ -434,7 +438,7 @@ public class NeoFieldFilter {
    * that teaches the consuming agent to distrust the array or to stop asking for a field that
    * works. Unioned HERE, on the read side only, and never into {@code includedFields} or
    * {@code writableFields}: {@code ALWAYS_READABLE_KEYS} also gates {@link #filterCreateRequest},
-   * and a client must still never be able to write its own {@code updated}.
+   * and a client must still never be able to write its own {@code updated}/{@code created}.
    *
    * @return {@link Optional#of} the emittable response keys, or {@link Optional#empty()} when this
    *     filter is inactive (no {@code ETGO_SF_FIELD} config), in which case the response is
