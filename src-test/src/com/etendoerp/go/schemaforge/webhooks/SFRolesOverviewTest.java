@@ -1285,6 +1285,73 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         assertEquals("Conversion Rates", windows.getJSONObject(0).getString("name"));
     }
 
+    // ── ETP-5116: fiscal-family duplicate rows excluded ──────────────────
+
+    /**
+     * ETP-5116 (QA fix) — "Fiscal Monitor" and "Fiscal Configuration" each aggregate 3 classic
+     * windows into a single Etendo Go page, with a human-chosen representative window standing
+     * in for the whole page in the {@code matrix} (SII Monitor / SII Configuration). The other 2
+     * windows of each trio must never surface as their OWN separate matrix rows — confirmed live
+     * via a QA screenshot for the "Fiscal Monitor" pair — while the representatives keep
+     * producing their own real row. Mirrors {@link #testUiExcludedWindowNeverReachesTheResponse}'s
+     * shape for the pre-existing ETP-5068 exclusion, extended to also assert the representatives
+     * survive.
+     */
+    @Test
+    @DisplayName("ETP-5116: fiscal-family duplicate windows never appear as their own matrix rows, but their representatives do")
+    void testFiscalFamilyDuplicateWindowsAreExcludedButRepresentativesSurvive() throws Exception {
+        givenSystemAdminCallerRole();
+
+        Window siiMonitor = mockWindow(FISCAL_MONITOR_PROXY_ID, "SII Monitor");
+        Window monitorVerifactu = mockWindow("F4675DAB02134762B66881DAE4672AD0", "Monitor Verifactu");
+        Window tbaiFacturas = mockWindow("71F24BF89DE748B483BE87594747D6FB", "TBAI Facturas Enviadas");
+        Window siiConfig = mockWindow("C1D3A2A017AC4B82B9FEE6F4D2A0C55A", "SII Configuration");
+        Window tbaiConfig = mockWindow("C327DE215AC945F69363905840118177", "Configuración TBAI");
+        Window verifactuConfig = mockWindow("27A453FA86974745977672F1A8DCCEFF", "Configuración Verifactu");
+
+        stubBaselineQueries(standardTenantRoles(), Arrays.asList(
+                siiMonitor, monitorVerifactu, tbaiFacturas, siiConfig, tbaiConfig, verifactuConfig));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        assertNull(responseVars.get(ERROR));
+        String rawResult = responseVars.get(RESULT);
+        // Blunt but decisive, same convention as ETP-5068's own exclusion test: the excluded ids
+        // must not appear ANYWHERE in the payload, whichever structure a future refactor adds
+        // them to.
+        assertFalse(rawResult.contains("F4675DAB02134762B66881DAE4672AD0"),
+                "Monitor Verifactu must not appear anywhere in the response");
+        assertFalse(rawResult.contains("71F24BF89DE748B483BE87594747D6FB"),
+                "TBAI Facturas Enviadas must not appear anywhere in the response");
+        assertFalse(rawResult.contains("C327DE215AC945F69363905840118177"),
+                "Configuración TBAI must not appear anywhere in the response");
+        assertFalse(rawResult.contains("27A453FA86974745977672F1A8DCCEFF"),
+                "Configuración Verifactu must not appear anywhere in the response");
+
+        JSONObject result = new JSONObject(rawResult);
+        JSONArray categories = result.getJSONObject("matrix").getJSONArray("categories");
+        // categoryQuery defaults to empty (see setUp()) — every row here falls back to "Other":
+        // siiMonitor + siiConfig (the 2 real, non-excluded windows) plus the 2 ETP-5071 proxy
+        // rows never backed by an active spec here (Fiscal Models, Not Posted Documents) —
+        // Fiscal Monitor's own proxy id collides with siiMonitor's real id and is skipped by
+        // buildMatrix's pre-existing duplicate-id guard.
+        assertEquals(1, categories.length());
+        JSONArray windows = categories.getJSONObject(0).getJSONArray("windows");
+        assertEquals(4, windows.length());
+
+        java.util.Set<String> windowIds = new java.util.HashSet<>();
+        for (int i = 0; i < windows.length(); i++) {
+            windowIds.add(windows.getJSONObject(i).getString("id"));
+        }
+        assertTrue(windowIds.contains(FISCAL_MONITOR_PROXY_ID), "SII Monitor's own row must survive");
+        assertTrue(windowIds.contains("C1D3A2A017AC4B82B9FEE6F4D2A0C55A"),
+                "SII Configuration's own row must survive");
+        assertFalse(windowIds.contains("F4675DAB02134762B66881DAE4672AD0"));
+        assertFalse(windowIds.contains("71F24BF89DE748B483BE87594747D6FB"));
+        assertFalse(windowIds.contains("C327DE215AC945F69363905840118177"));
+        assertFalse(windowIds.contains("27A453FA86974745977672F1A8DCCEFF"));
+    }
+
     // ── ETP-5071: proxy access rows ──────────────────────────────────────
 
     /**

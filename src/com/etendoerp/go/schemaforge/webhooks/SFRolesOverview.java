@@ -242,10 +242,38 @@ public class SFRolesOverview extends BaseWebhookService {
    * not in {@code SFListMenu}, whose tree must keep reporting the native AD menu as-is for its
    * other consumers.
    *
+   * <p>ETP-5116 (QA fix) — 2 fiscal-family GO pages each aggregate 3 classic windows into a
+   * single Etendo Go page, with the product owner picking ONE of the three as the row's
+   * representative (its {@code AD_Window_Access} grant stands in for the whole page — same
+   * mechanism as {@link #FISCAL_MONITOR_PROXY_WINDOW_ID}'s own rationale). The other two of each
+   * trio are classic windows that Etendo GO still exposes their own active {@code SPEC_TYPE =
+   * 'W'} spec for, so absent this exclusion they would ALSO surface as their own separate
+   * {@code matrix} rows next to the representative — confirmed live via a QA screenshot for the
+   * first pair below:
+   * <ul>
+   *   <li>"Fiscal Monitor" — representative is SII Monitor ({@link
+   *   #FISCAL_MONITOR_PROXY_WINDOW_ID}, already handled by the duplicate-id guard in {@link
+   *   #buildMatrix(Map, Map)} and left untouched here); the 2 excluded duplicates are Monitor
+   *   Verifactu ({@code F4675DAB02134762B66881DAE4672AD0}) and TBAI Facturas Enviadas
+   *   ({@code 71F24BF89DE748B483BE87594747D6FB}).</li>
+   *   <li>"Fiscal Configuration" — part of this same ticket's own new grants, which is what made
+   *   this row newly visible/relevant. Representative is SII Configuration
+   *   ({@code C1D3A2A017AC4B82B9FEE6F4D2A0C55A}, a human decision — not itself added here, it
+   *   keeps producing its own real row, wired into the frontend's {@code menu.json} via a
+   *   parallel {@code etendo_schema_forge} change); the 2 excluded duplicates are Configuración
+   *   TBAI ({@code C327DE215AC945F69363905840118177}) and Configuración Verifactu
+   *   ({@code 27A453FA86974745977672F1A8DCCEFF}).</li>
+   * </ul>
+   *
    * <p>Note {@code Set.of(...)} rejects {@code contains(null)} with an NPE rather than returning
    * {@code false}, so callers must guard the id before probing this set.
    */
-  private static final Set<String> UI_EXCLUDED_WINDOW_IDS = Set.of("6FEBA130CDE24CC09041FFA6117ADFA9");
+  private static final Set<String> UI_EXCLUDED_WINDOW_IDS = Set.of(
+      "6FEBA130CDE24CC09041FFA6117ADFA9",
+      "F4675DAB02134762B66881DAE4672AD0",
+      "71F24BF89DE748B483BE87594747D6FB",
+      "C327DE215AC945F69363905840118177",
+      "27A453FA86974745977672F1A8DCCEFF");
 
   /**
    * ETP-5071 — proxy {@code AD_Window_ID} standing in for "Monitor Fiscal" in the {@code matrix}.
