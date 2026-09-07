@@ -146,12 +146,13 @@ public class OnboardingDatasetNormalizerTest {
   }
 
   /**
-   * Regression guard for ETP-4761 (gap I1): both bundled GOClient locators must ship with
+   * Regression guard for ETP-4761 (gap I1): every bundled GOClient locator must ship with
    * {@code M_INVENTORYSTATUS_ID = '2'} ("Available", {@code OVERISSUE='N'}) so a freshly onboarded
    * tenant cannot post negative stock from day one. The prior value, {@code '0'}
    * ("Undefined-OverIssue", {@code OVERISSUE='Y'}), is the root cause documented in
    * {@code docs/etendo-ad/onboarding-gaps.md} §I1 — assert it is gone, not merely that '2' appears,
-   * so a partial revert (only one of the two locators fixed) still fails this test.
+   * so a partial revert still fails this test. (ETP-5079 reduced the dataset to a single locator,
+   * {@code AG-0-0-0} of "Almacen Principal"; the assertion is deliberately count-agnostic.)
    */
   @Test
   public void testNormalizerLocatorsDefaultToAvailableInventoryStatus() {
@@ -207,8 +208,11 @@ public class OnboardingDatasetNormalizerTest {
   public void testNormalizerKeepsSharedSetupContent() {
     String xml = pathBackedNormalizer().buildDatasetXml();
 
-    assertTrue(xml.contains("Agua"));
-    assertTrue(xml.contains("Cuenta de Banco"));
+    // ETP-5079 removed the four sample products and the three template financial accounts from the
+    // dataset, so this test no longer asserts on "Agua"/"Cuenta de Banco". The shared setup content
+    // it actually guards is the price lists, payment terms and payment methods.
+    assertTrue(xml.contains("Tarifa de venta principal"));
+    assertTrue(xml.contains("Tarifa de compra principal"));
     assertTrue(xml.contains("30 Días"));
     assertTrue(xml.contains("Inmediato"));
     assertTrue(xml.contains("Efectivo"));
@@ -216,6 +220,81 @@ public class OnboardingDatasetNormalizerTest {
     // commit 73d412c8, referencedata/sampledata/GOClient/C_BP_GROUP.xml) as part of adding the
     // "Acreedor" BP category; assert on the current bundled content.
     assertTrue(xml.contains("Cliente"));
+  }
+
+  /**
+   * Regression guard for ETP-5079 — the corrected initial dataset. A freshly onboarded tenant must
+   * NOT be born with the sample products, the second warehouse or the template financial accounts,
+   * while the pieces the runtime actually depends on must survive: the internal {@code ETGO_DTO}
+   * "Discount" product (resolved at runtime for inline discounts) and the single warehouse
+   * "Almacen Principal".
+   */
+  @Test
+  public void testNormalizerShipsCorrectedInitialDataset() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    // Sample products and their price rows are gone...
+    assertFalse(xml.contains("Agua"));
+    assertFalse(xml.contains("Cerveza"));
+    assertFalse(xml.contains("Fernet"));
+    assertFalse(xml.contains("Queso Sardo"));
+    // ...but the internal discount product is NOT sample data and must stay: TotalDiscountService
+    // requires it to exist before the discount feature is used, and it is invisible in the UI
+    // anyway because its category is flagged EM_Etgo_IsSystemCategory='Y'.
+    assertTrue(xml.contains("ETGO_DTO"));
+
+    // Product categories: exactly two survive. "Bebidas" was dropped (ETP-5079, after inspecting
+    // the FranOB2 tenant); the starter category stays, and "Discounts" is required by ETGO_DTO.
+    // The starter category was also renamed as part of ETP-5079 — English base name and VALUE
+    // "Generic", with the Spanish "Genérico" moved into a real M_PRODUCT_CATEGORY_TRL row, the
+    // same English-base-plus-translation convention this ticket applied to document types.
+    //
+    // It is still asserted BY ID rather than by name, and that reason has not weakened: an ID is
+    // the only handle that cannot be satisfied by a coincidental string somewhere else in the
+    // dataset. The old name Otros used to collide with the Spanish chart of accounts in
+    // C_ELEMENTVALUE. The new Generic and Generico are far less collision-prone, but a name
+    // assertion would still pass on a row that merely mentions the word, and it would break
+    // again on the next rename.
+    assertFalse(xml.contains("Bebidas"));
+    assertTrue("starter product category (M_Product_Category EBAE46FD...) missing",
+        xml.contains("EBAE46FD129049DEB26B948E160C6AD8"));
+    assertTrue("Discounts category (required by ETGO_DTO) missing", xml.contains("Discounts"));
+    // The rename itself. "Generic" is safe to assert as a bare substring: across the whole GOClient
+    // sampledata it occurs in M_PRODUCT_CATEGORY.xml and nowhere else. "Otros" is deliberately NOT
+    // asserted absent — it legitimately survives in the Spanish chart of accounts (C_ELEMENTVALUE
+    // and C_ELEMENTVALUE_TRL), which is the same collision that made the ID the right handle above.
+    assertTrue("starter product category must ship its English base name",
+        xml.contains("Generic"));
+    // The es_ES translation is asserted through the TRL ELEMENT, not through the string "Genérico":
+    // that word also names the A_ASSET_GROUP row, which is an included table, so a substring
+    // assertion would stay green with M_PRODUCT_CATEGORY_TRL.xml deleted. The element tag comes
+    // from the entity name (toLowerCamel of the table), so it can only be emitted by the category
+    // translation file being normalized into the dataset.
+    assertTrue("M_PRODUCT_CATEGORY_TRL.xml must be normalized into the dataset",
+        xml.contains("<mProductCategoryTrl"));
+    // ...and shipping the row is only half the claim: without the table in the import allowlist the
+    // es_ES name never reaches a tenant and the category renders as "Generic" for a Spanish user.
+    // That is the exact trap C_DOCTYPE_TRL fell into (ETP-5079).
+    assertTrue("M_PRODUCT_CATEGORY_TRL must be an included table",
+        OnboardingDatasetDefinition.getIncludedTables().contains("M_PRODUCT_CATEGORY_TRL"));
+
+    // Exactly one warehouse, renamed; the secondary one and its locator are gone.
+    assertTrue(xml.contains("Almacen Principal"));
+    assertFalse(xml.contains("Almacen GO"));
+    assertFalse(xml.contains("Almacén Secundario"));
+    assertFalse(xml.contains("AS-0-0-0"));
+
+    // No default financial accounts: a tenant creates its own.
+    assertFalse(xml.contains("Cuenta de Banco"));
+    // ...while the payment methods themselves are kept.
+    assertTrue(xml.contains("Transferencia bancaria"));
+
+    // Document types are English-named and carry real Spanish translations. ("Factura
+    // Rectificativa" itself is deliberately NOT asserted absent: it now legitimately appears as the
+    // es_ES C_DOCTYPE_TRL translation of "Corrective Sales Invoice".)
+    assertTrue(xml.contains("Corrective Sales Invoice"));
+    assertTrue(xml.contains("Corrective Purchase Invoice"));
+    assertTrue(OnboardingDatasetDefinition.getIncludedTables().contains("C_DOCTYPE_TRL"));
   }
 
   /** Verifies that user-scoped sales representative columns are stripped from product rows. */
@@ -258,7 +337,7 @@ public class OnboardingDatasetNormalizerTest {
     String xml = classpathBackedNormalizer().buildDatasetXml();
 
     assertTrue(xml.contains("<Openbravo"));
-    assertTrue(xml.contains("Almacen GO"));
+    assertTrue(xml.contains("Almacen Principal"));
     assertFalse(xml.contains("<AD_CLIENT>"));
   }
 

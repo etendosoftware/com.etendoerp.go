@@ -61,6 +61,11 @@ public final class OnboardingDatasetDefinition {
       "C_BP_TAXCATEGORY",
       "C_CALENDAR",
       "C_DOCTYPE",
+      // ETP-5079: C_DOCTYPE_TRL was missing from this allowlist, so a new tenant got 49 doc
+      // types and ZERO translations — every document type rendered with its English base
+      // name regardless of the user's language. Importing it here is what makes the es_ES
+      // names in GOClient/C_DOCTYPE_TRL.xml actually reach the tenant.
+      "C_DOCTYPE_TRL",
       "C_ELEMENT",
       "C_ELEMENTVALUE",
       "C_ELEMENTVALUE_TRL",
@@ -89,6 +94,12 @@ public final class OnboardingDatasetDefinition {
       "M_PRODUCT",
       "M_PRODUCTPRICE",
       "M_PRODUCT_CATEGORY",
+      // ETP-5079 follow-up: same trap C_DOCTYPE_TRL fell into above. M_PRODUCT_CATEGORY_TRL
+      // exists as a table and the dataset now ships GOClient/M_PRODUCT_CATEGORY_TRL.xml, but
+      // without this entry the es_ES name would never reach a tenant and the category would
+      // render as its English base name ("Generic") for a Spanish user. Shipping a translation
+      // row and importing it are two different claims — make both.
+      "M_PRODUCT_CATEGORY_TRL",
       "M_WAREHOUSE"
   );
 
