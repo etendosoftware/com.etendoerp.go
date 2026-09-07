@@ -72,6 +72,9 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
   /** Native-query bind-parameter name for the target client id, reused across this class's SQL. */
   private static final String PARAM_CLIENT_ID = "clientId";
 
+  /** Native-query bind-parameter name for the target accounting schema id, reused across this class's SQL. */
+  private static final String PARAM_SCHEMA_ID = "schemaId";
+
   /**
    * Source AD_Tree id of GOClient's chart-of-accounts (EV) tree as it ships in the bundled
    * {@code AD_TREENODE.xml}. The hierarchy is read from this tree only; the org-specific orphan tree
@@ -707,7 +710,7 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
     int rows = OBDal.getInstance().getSession()
         .createNativeQuery(ACCTSCHEMA_DEFAULT_IPV_BACKFILL_SQL)
         .setParameter(PARAM_CLIENT_ID, clientId)
-        .setParameter("schemaId", schemaId)
+        .setParameter(PARAM_SCHEMA_ID, schemaId)
         .executeUpdate();
     if (rows > 0 && log.isDebugEnabled()) {
       log.debug("Backfilled Invoice Price Variance default for client {}", clientId);
@@ -759,7 +762,7 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
     int rows = OBDal.getInstance().getSession()
         .createNativeQuery(ACREEDOR_GROUP_ACCT_OVERRIDE_SQL)
         .setParameter(PARAM_CLIENT_ID, clientId)
-        .setParameter("schemaId", schemaId)
+        .setParameter(PARAM_SCHEMA_ID, schemaId)
         .setParameter("liabilityAcctValue", ACREEDOR_LIABILITY_ACCT_VALUE)
         .setParameter("notInvoicedReceivablesAcctValue", ACREEDOR_NOT_INVOICED_RECEIVABLES_ACCT_VALUE)
         .setParameter("prepaymentAcctValue", ACREEDOR_PREPAYMENT_ACCT_VALUE)
@@ -825,7 +828,7 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
     int rows = OBDal.getInstance().getSession()
         .createNativeQuery(sql)
         .setParameter(PARAM_CLIENT_ID, clientId)
-        .setParameter("schemaId", schemaId)
+        .setParameter(PARAM_SCHEMA_ID, schemaId)
         .executeUpdate();
     if (rows > 0 && log.isDebugEnabled()) {
       log.debug("Provisioned {} posting-account row(s) for client {}", rows, clientId);
