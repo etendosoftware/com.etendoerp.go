@@ -296,6 +296,57 @@ class ContactsLocationAddressParentAndRegionTest {
       verify(geoLoc, never()).setRegionName("Cordoba");
     }
 
+    /**
+     * Clearing the province must clear <b>both</b> representations of it. This is the branch the
+     * Location modal's selector actually sends when a user empties the province field, and it was
+     * the most user-visible of the three: with the free text left behind, the contacts export's
+     * {@code COALESCE(C_Region.name, C_Location.regionname)} kept rendering the old province, so
+     * the clear looked like a no-op to whoever performed it.
+     *
+     * <p>Both wire shapes reach this branch, and that is verified rather than assumed:
+     * Jettison's {@code JSONObject.NULL.toString()} is the literal {@code "null"}, which
+     * {@code nullIfEmpty} maps to {@code null}, while {@code has(key)} stays {@code true} because
+     * the key is still in the map. So {@code region: null} and {@code region: ""} both land here,
+     * and neither is confused with an absent key — an absent {@code region} must leave the
+     * province alone.
+     */
+    @Test
+    @DisplayName("clearing the region by id clears the FK and the stale free text, for both an "
+        + "empty string and a JSON null")
+    void clearingTheRegionClearsBothColumns() throws Exception {
+      for (Object cleared : new Object[] { "", JSONObject.NULL }) {
+        Location geoLoc = mock(Location.class);
+        // The record as the free-text fallback left it: no FK, province in RegionName.
+        when(geoLoc.getRegion()).thenReturn(null);
+        when(geoLoc.getRegionName()).thenReturn("Cordoba");
+
+        JSONObject body = new JSONObject();
+        body.put("region", cleared);
+        applyGeoLocFields(body, geoLoc);
+
+        verify(geoLoc).setRegion(null);
+        verify(geoLoc).setRegionName(null);
+        verify(geoLoc, never()).setRegionName("Cordoba");
+      }
+    }
+
+    @Test
+    @DisplayName("an absent region key leaves both columns alone — clearing must be explicit")
+    void anAbsentRegionKeyClearsNothing() throws Exception {
+      // The other half of the same contract: only a present-and-empty `region` clears. A payload
+      // that says nothing about the province (a partial update, an import column that is not in
+      // the file) must not erase one already on the record.
+      Location geoLoc = mock(Location.class);
+      when(geoLoc.getRegionName()).thenReturn("Cordoba");
+
+      JSONObject body = new JSONObject();
+      body.put("cityName", "Rosario");
+      applyGeoLocFields(body, geoLoc);
+
+      verify(geoLoc, never()).setRegion(any());
+      verify(geoLoc, never()).setRegionName(any());
+    }
+
     @Test
     @DisplayName("a name that resolves sets the FK and clears the free-text column")
     void resolvedNameSetsTheFkAndClearsTheText() throws Exception {
