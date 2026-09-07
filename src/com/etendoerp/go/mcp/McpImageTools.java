@@ -18,6 +18,7 @@
 package com.etendoerp.go.mcp;
 
 import java.time.Instant;
+import java.util.Locale;
 import java.util.Optional;
 
 import org.apache.commons.lang3.StringUtils;
@@ -92,7 +93,7 @@ final class McpImageTools {
         McpArgumentUtils.optionalString(args, PARAM_NAME), DEFAULT_IMAGE_NAME);
     String mimeType = StringUtils.trimToNull(
         McpArgumentUtils.optionalString(args, PARAM_MIME_TYPE));
-    if (mimeType != null && !NeoImageHelper.ALLOWED_MIME_TYPES.contains(mimeType.toLowerCase())) {
+    if (mimeType != null && !NeoImageHelper.ALLOWED_MIME_TYPES.contains(mimeType.toLowerCase(Locale.ROOT))) {
       return errorEnvelope(McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION,
           "'" + PARAM_MIME_TYPE + "' must be one of "
               + String.join(", ", NeoImageHelper.ALLOWED_MIME_TYPES) + ", or omitted.",
