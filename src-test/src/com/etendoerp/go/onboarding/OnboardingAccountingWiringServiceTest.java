@@ -204,59 +204,6 @@ public class OnboardingAccountingWiringServiceTest {
   }
 
   // ---------------------------------------------------------------------------------------------
-  // wireBusinessPartnerAccounts()
-  // ---------------------------------------------------------------------------------------------
-
-  @Test
-  public void testWireBusinessPartnerAccountsFailsWhenClientIdMissing() {
-    try {
-      new TestableService().wireBusinessPartnerAccounts(null, "ORG-1", "USER-1", "ROLE-1");
-      fail("Expected OBException for missing client");
-    } catch (OBException e) {
-      assertTrue(e.getMessage().contains("Missing client"));
-    }
-  }
-
-  @Test
-  public void testWireBusinessPartnerAccountsFailsWhenClientNotFound() {
-    TestableService service = new TestableService();
-    service.clientMissing = true;
-
-    try {
-      service.wireBusinessPartnerAccounts("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
-      fail("Expected OBException for missing client");
-    } catch (OBException e) {
-      assertTrue(e.getMessage().contains("Client not found for business-partner accounting"));
-    }
-  }
-
-  @Test
-  public void testWireBusinessPartnerAccountsFailsWhenNoLedgerImported() {
-    TestableService service = new TestableService();
-    service.ledgerMissing = true;
-
-    try {
-      service.wireBusinessPartnerAccounts("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
-      fail("Expected OBException for missing accounting schema");
-    } catch (OBException e) {
-      assertTrue(e.getMessage().contains("cannot provision business-partner posting accounts"));
-    }
-  }
-
-  @Test
-  public void testWireBusinessPartnerAccountsRunsTwoInsertsFlushesAndRestoresContext() {
-    OBContext previous = mock(OBContext.class);
-    OBContext.setOBContext(previous);
-
-    TestableService service = new TestableService();
-    service.wireBusinessPartnerAccounts("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
-
-    assertEquals("exactly two posting-account inserts", 2, service.acctInserts.size());
-    assertTrue("wireBusinessPartnerAccounts() must flush", service.flushed);
-    assertSame("must restore the previous context", previous, OBContext.getOBContext());
-  }
-
-  // ---------------------------------------------------------------------------------------------
   // patchBpGroupAcctMissingColumns() — ETP-4720, preventive twin of R21-bp-group-acct-remaining-columns.sql
   // ---------------------------------------------------------------------------------------------
 
@@ -299,7 +246,7 @@ public class OnboardingAccountingWiringServiceTest {
 
   @Test
   public void testPatchBpGroupAcctMissingColumnsDoesNotResolveClientOrLedger() {
-    // Unlike wire()/wireBusinessPartnerAccounts(), this method needs neither a Client entity nor a
+    // Unlike wire(), this method needs neither a Client entity nor a
     // resolved AcctSchema — it patches every schema the tenant has via one client-scoped statement
     // (see the corrective R21 fix it mirrors). Prove that by leaving clientMissing/ledgerMissing
     // set and confirming no exception is thrown (those seams are never consulted).
@@ -352,8 +299,11 @@ public class OnboardingAccountingWiringServiceTest {
    * {@code warehouse}: {@code FIN_FINANCIAL_ACCOUNT} and {@code M_WAREHOUSE} are bulk-imported by
    * the onboarding dataset importer (triggers disabled during that import — see
    * {@code OnboardingDatasetDefinition.INCLUDED_TABLES}), so their native {@code _trg} triggers
-   * never fire for the bundled template rows ("Caja"/"Cuenta de Banco"/"Tarjeta",
-   * "Almacen GO"/"Almacén Secundario"). Every other included entity in this same method
+   * never fire for the bundled template rows. (ETP-5079 later removed the three template financial
+   * accounts from the dataset entirely and reduced the warehouses to a single "Almacen Principal",
+   * so the FIN_Financial_Account_Acct backfill is now a no-op on a freshly onboarded tenant and
+   * only matters for accounts the tenant creates itself.) Every other included entity in this same
+   * method
    * (BP group, product category, BP customer/vendor, product, tax) already gets a matching
    * backfill {@code runEntityAcctInsert} call right here; {@code FIN_Financial_Account_Acct} and
    * {@code M_Warehouse_Acct} do not, which is the gap this ticket closes.
