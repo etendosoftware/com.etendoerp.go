@@ -155,22 +155,35 @@ final class McpImageFieldSupport {
       bodyKeys.add(String.valueOf(keys.next()));
     }
     for (String key : bodyKeys) {
-      if (!imageKeys.contains(key)) {
-        continue;
-      }
-      String value = StringUtils.trimToNull(body.optString(key, null));
-      if (value == null) {
-        continue;
-      }
-      String reason = rejectionReason(value);
-      if (reason != null) {
-        JSONObject item = new JSONObject();
-        item.put("field", key);
-        item.put("reason", reason);
-        rejected.put(item);
+      JSONObject rejection = rejectionFor(body, key, imageKeys);
+      if (rejection != null) {
+        rejected.put(rejection);
       }
     }
     return rejected.length() == 0 ? null : buildInvalidImageReferenceError(rejected);
+  }
+
+  /**
+   * @return the {@code {field, reason}} entry for {@code key}, or {@code null} when the key is not
+   *     image-typed, carries no value (clearing an image is legitimate) or carries a usable id
+   */
+  private static JSONObject rejectionFor(JSONObject body, String key, Set<String> imageKeys)
+      throws JSONException {
+    if (!imageKeys.contains(key)) {
+      return null;
+    }
+    String value = StringUtils.trimToNull(body.optString(key, null));
+    if (value == null) {
+      return null;
+    }
+    String reason = rejectionReason(value);
+    if (reason == null) {
+      return null;
+    }
+    JSONObject item = new JSONObject();
+    item.put("field", key);
+    item.put("reason", reason);
+    return item;
   }
 
   /**
@@ -210,24 +223,29 @@ final class McpImageFieldSupport {
   private static Set<String> imageFieldKeys(Tab adTab, Entity dalEntity) {
     Set<String> keys = new HashSet<>();
     for (Column col : adTab.getTable().getADColumnList()) {
-      String refId = col.getReference() == null ? null : (String) col.getReference().getId();
-      if (!col.isActive() || !isImageReference(refId)) {
-        continue;
-      }
-      keys.add(col.getDBColumnName());
-      if (dalEntity == null) {
-        continue;
-      }
-      try {
-        Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
-        if (prop != null) {
-          keys.add(prop.getName());
-        }
-      } catch (Exception ignored) {
-        // Column not mappable to a DAL property — the DB column name alone is enough.
-      }
+      collectImageKeys(col, dalEntity, keys);
     }
     return keys;
+  }
+
+  /** Adds {@code col}'s key aliases to {@code keys} when it is an active image column. */
+  private static void collectImageKeys(Column col, Entity dalEntity, Set<String> keys) {
+    String refId = col.getReference() == null ? null : (String) col.getReference().getId();
+    if (!col.isActive() || !isImageReference(refId)) {
+      return;
+    }
+    keys.add(col.getDBColumnName());
+    if (dalEntity == null) {
+      return;
+    }
+    try {
+      Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
+      if (prop != null) {
+        keys.add(prop.getName());
+      }
+    } catch (Exception ignored) {
+      // Column not mappable to a DAL property — the DB column name alone is enough.
+    }
   }
 
   /**
