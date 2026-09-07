@@ -40,6 +40,49 @@ final class McpConstants {
   /** Parent/header record context used to resolve child MCP selectors. */
   static final String PARAM_PARENT_CONTEXT = "parentContext";
   static final String TYPE_STRING = "string";
+  /**
+   * The MCP field type of an {@code Image BLOB} AD column (ETP-5184).
+   *
+   * <p>Before this existed, {@link McpSchemaFieldBuilder#mapColumnType} had no case for the
+   * {@code Image BLOB} reference, so the column fell through to {@code default → "string"} and
+   * {@code neo_schema} advertised it as an ordinary text field. An agent then either wrote a bogus
+   * string (an FK violation from the DAL, with no hint of what the column really holds) or inlined a
+   * base64 payload — which is not what the column stores and costs ~100k output tokens for a 130 KB
+   * image. The type exists so the field can describe itself; see
+   * {@link McpImageFieldSupport#IMAGE_FIELD_HINT}.
+   */
+  static final String TYPE_IMAGE = "image";
+  /**
+   * {@code AD_Reference_ID} of the {@code Image BLOB} reference — an FK column pointing at
+   * {@code AD_Image}, whose bytes live in {@code AD_Image.BinaryData}. Live editable instances today:
+   * {@code M_Product.AD_Image_ID} and {@code AD_OrgInfo.Your_Company_Document_Image}; support is
+   * keyed off this reference alone, so enabling any other image column needs no new code.
+   */
+  static final String REF_IMAGE_BLOB = "4AA6C3BE9D3B4D84A3B80489505A23E5";
+  /** JSON-schema {@code format} advertised for an {@link #TYPE_IMAGE} field. */
+  static final String FORMAT_IMAGE_ID = "etendo-image-id";
+  /** Tool name of the base64 fallback upload (ETP-5184, capped at {@link #IMAGE_BASE64_MAX_BYTES}). */
+  static final String TOOL_NEO_UPLOAD_IMAGE = "neo_upload_image";
+  /** Tool name of the primary, out-of-band upload-ticket tool (ETP-5184). */
+  static final String TOOL_NEO_REQUEST_IMAGE_UPLOAD = "neo_request_image_upload";
+  /** Tool name of the read-only ticket-status lookup (ETP-5184). */
+  static final String TOOL_NEO_GET_IMAGE_UPLOAD = "neo_get_image_upload";
+  /**
+   * Hard cap on the DECODED size of {@link #TOOL_NEO_UPLOAD_IMAGE}'s {@code data_base64}.
+   *
+   * <p>Deliberately far below the servlet endpoint's 10 MB: these bytes are model output, generated
+   * token by token at roughly 1.4 characters per token, so 100 KB of image costs about 100k output
+   * tokens. The cap is low on purpose, so nobody discovers that cost by paying it — over the cap the
+   * error names {@link #TOOL_NEO_REQUEST_IMAGE_UPLOAD}, which moves the bytes out of the
+   * conversation entirely.
+   */
+  static final int IMAGE_BASE64_MAX_BYTES = 256 * 1024;
+  /**
+   * Machine-detectable error code for a value written to an {@link #TYPE_IMAGE} field that is not an
+   * existing {@code AD_Image} id (ETP-5184). Distinct from {@link #ERROR_VALIDATION} so an agent can
+   * key on "this needs an upload first" rather than parsing the prose.
+   */
+  static final String ERROR_INVALID_IMAGE_REFERENCE = "invalid_image_reference";
   static final String TYPE_OBJECT = "object";
   static final String KEY_PROPERTIES = "properties";
   static final String KEY_DESCRIPTION = "description";
