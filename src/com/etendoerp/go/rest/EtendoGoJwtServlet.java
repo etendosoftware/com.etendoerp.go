@@ -1650,6 +1650,32 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * ETP-5117: applies the side effects of a paid upgrade once {@code handleOnboarding}'s paywall
+   * has approved the request — marks the tenant productive and, only on success, reverts any
+   * {@code ETSG_ForceTestMode} override (see {@link #revertTestModeForProductiveTenantBestEffort}).
+   * Joins the onboarding transaction, so a successful marker commits with the tenant. Still
+   * best-effort in the revert direction, mirroring {@code markProductive} itself: commercial/fiscal
+   * -config metadata must never abort an otherwise-successful paid signup. A failed marker is only
+   * logged — "paid but demo" is the symptom ETP-4966 was reported as, and this line is what makes it
+   * searchable instead of indistinguishable from a marker that was never attempted.
+   *
+   * @param clientId the tenant just created/resolved
+   * @param starOrgId the tenant's "*" organization id, required by {@code markProductive}
+   * @param clientName the onboarding request's client name, used only for the failure log line
+   * @param accountEmail the account driving onboarding, masked in the failure log line
+   */
+  private void applyPaidUpgradeSideEffects(String clientId, String starOrgId, String clientName,
+      String accountEmail) {
+    if (!tenantPlanService.markProductive(clientId, starOrgId)) {
+      log.error("Paid environment '{}' (client {}) for account {} could not be marked as plan "
+          + "'{}' and will read back as free", clientName, clientId,
+          maskEmail(accountEmail), TenantPlanService.PLAN_PRODUCTIVE);
+    } else {
+      revertTestModeForProductiveTenantBestEffort(clientId);
+    }
+  }
+
+  /**
    * GET /sws/go/environments
    * Header: Authorization: Bearer <session_token>
    * Returns 200 with environments linked to the account, each carrying its plan
@@ -1866,13 +1892,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // symptom ETP-4966 was reported as, and this line is what makes it searchable instead of
       // indistinguishable from a marker that was never attempted.
       if (paidUpgrade) {
-        if (!tenantPlanService.markProductive(clientId, adminContext.starOrgId)) {
-          log.error("Paid environment '{}' (client {}) for account {} could not be marked as plan "
-              + "'{}' and will read back as free", onboardingRequest.clientName, clientId,
-              maskEmail(accountEmail), TenantPlanService.PLAN_PRODUCTIVE);
-        } else {
-          revertTestModeForProductiveTenantBestEffort(clientId);
-        }
+        applyPaidUpgradeSideEffects(clientId, adminContext.starOrgId, onboardingRequest.clientName,
+            accountEmail);
       }
 
       // The returned flag (created vs. already-existing) is no longer used to gate downstream
