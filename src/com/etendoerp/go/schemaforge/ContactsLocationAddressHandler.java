@@ -374,6 +374,10 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       // says nothing about the province", never "erase it". Clearing stays an explicit
       // `region: null`, which is what the Location modal's selector sends.
       geoLoc.setRegion(null);
+      // Clearing the province clears BOTH representations of it. Leaving the free text behind made
+      // the clear look like a no-op: the contacts export reads
+      // COALESCE(C_Region.name, C_Location.regionname) and kept rendering the old province.
+      geoLoc.setRegionName(null);
     }
   }
 
