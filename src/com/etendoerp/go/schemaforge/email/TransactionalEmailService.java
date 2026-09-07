@@ -78,6 +78,7 @@ public class TransactionalEmailService {
   private final EmailContractRegistry contractRegistry;
   private final EmailProviderAdapter providerAdapter;
   private final EmailSafetyStore safetyStore;
+  private final EmailSendLogStore sendLogStore;
   private final EmailObservabilitySink observabilitySink;
 
   /**
@@ -85,7 +86,7 @@ public class TransactionalEmailService {
    */
   public TransactionalEmailService() {
     this(DefaultEmailContractRegistry.createDefault(), new ApiGatewayEmailProviderAdapter(),
-        new DalEmailSafetyStore(), new LogEmailObservabilitySink());
+        new DalEmailSafetyStore(), new DalEmailSendLogStore(), new LogEmailObservabilitySink());
   }
 
   /**
@@ -97,7 +98,7 @@ public class TransactionalEmailService {
   public TransactionalEmailService(EmailContractRegistry contractRegistry,
       EmailProviderAdapter providerAdapter) {
     this(contractRegistry, providerAdapter, new InMemoryEmailSafetyStore(),
-        new LogEmailObservabilitySink());
+        new InMemoryEmailSendLogStore(), new LogEmailObservabilitySink());
   }
 
   /**
@@ -109,7 +110,8 @@ public class TransactionalEmailService {
    */
   public TransactionalEmailService(EmailContractRegistry contractRegistry,
       EmailProviderAdapter providerAdapter, EmailSafetyStore safetyStore) {
-    this(contractRegistry, providerAdapter, safetyStore, new LogEmailObservabilitySink());
+    this(contractRegistry, providerAdapter, safetyStore, new InMemoryEmailSendLogStore(),
+        new LogEmailObservabilitySink());
   }
 
   /**
@@ -124,11 +126,30 @@ public class TransactionalEmailService {
   TransactionalEmailService(EmailContractRegistry contractRegistry,
       EmailProviderAdapter providerAdapter, EmailSafetyStore safetyStore,
       EmailObservabilitySink observabilitySink) {
+    this(contractRegistry, providerAdapter, safetyStore, new InMemoryEmailSendLogStore(),
+        observabilitySink);
+  }
+
+  /**
+   * Creates an executor with explicit registry, provider adapter, safety store, send history
+   * store, and observability sink.
+   *
+   * @param contractRegistry registry that resolves server-side email contracts
+   * @param providerAdapter backend-only provider adapter
+   * @param safetyStore anti-abuse, idempotency, kill-switch, and audit store
+   * @param sendLogStore readable per-document send history store
+   * @param observabilitySink redacted event sink for metrics/logging
+   */
+  TransactionalEmailService(EmailContractRegistry contractRegistry,
+      EmailProviderAdapter providerAdapter, EmailSafetyStore safetyStore,
+      EmailSendLogStore sendLogStore, EmailObservabilitySink observabilitySink) {
     this.contractRegistry = Objects.requireNonNull(contractRegistry,
         "Email contract registry cannot be null");
     this.providerAdapter = Objects.requireNonNull(providerAdapter,
         "Email provider adapter cannot be null");
     this.safetyStore = Objects.requireNonNull(safetyStore, "Email safety store cannot be null");
+    this.sendLogStore = Objects.requireNonNull(sendLogStore,
+        "Email send log store cannot be null");
     this.observabilitySink = Objects.requireNonNull(observabilitySink,
         "Email observability sink cannot be null");
   }
@@ -484,10 +505,58 @@ public class TransactionalEmailService {
     }
   }
 
+  /**
+   * Records one send outcome in both ledgers.
+   *
+   * <p>This is the single choke point every audited outcome funnels through, and it runs after
+   * the {@link EmailSendContext} is built, so it is also the only place where the readable
+   * history has everything it needs (recipients in clear, the resolved subject, the operator's
+   * message, the download link) and the anti-abuse ledger's own status/message for the very same
+   * attempt. Writing both from here keeps the two rows from ever disagreeing.</p>
+   *
+   * <p>Order matters: the history row is saved BEFORE {@link EmailSafetyStore#recordAudit},
+   * because the DAL implementation of the latter ends a successful send with
+   * {@code SessionHandler.commitAndStart()}. Saving first puts both rows in that same
+   * transaction, so a send is never left with an audit row and no history row.</p>
+   *
+   * <p>Known limitation (ETP-5069, accepted): the rejection paths that answer before the send
+   * context exists — an unknown contract, a forbidden provider field, a failed authorization, an
+   * unresolved recipient — write no audit row today and therefore write no history row either.
+   * A document whose send never got as far as a resolved recipient shows nothing in its history
+   * panel.</p>
+   */
   private void recordAudit(EmailSendContext context, String idempotencyKey, int httpStatus,
       String status, String message, Integer providerStatus, boolean duplicate) {
-    safetyStore.recordAudit(EmailAuditRecord.create(context, idempotencyKey, httpStatus, status,
-        message, providerStatus, duplicate));
+    EmailAuditRecord auditRecord = EmailAuditRecord.create(context, idempotencyKey, httpStatus,
+        status, message, providerStatus, duplicate);
+    recordSendHistory(context, auditRecord);
+    safetyStore.recordAudit(auditRecord);
+  }
+
+  /**
+   * Writes the readable per-document history row, for the contracts that declare they want one.
+   *
+   * <p>The gate is {@link EmailContract#logsSendHistory()}, resolved from the registry rather
+   * than from a contract-name list kept here: the six document-send contracts inherit
+   * {@code true} from {@code DefaultDocumentSendEmailContract}, and the account/auth contracts
+   * inherit the interface default of {@code false}, so adding a contract never means remembering
+   * to edit this class.</p>
+   *
+   * <p>Failures are swallowed. A history row is a convenience for the operator; the send and its
+   * anti-abuse audit row are not, and neither is ever worth losing to it.</p>
+   */
+  private void recordSendHistory(EmailSendContext context, EmailAuditRecord auditRecord) {
+    Optional<EmailContract> contract = contractRegistry.find(context.getContractName());
+    if (!contract.isPresent() || !contract.get().logsSendHistory()) {
+      return;
+    }
+    try {
+      sendLogStore.recordSend(EmailSendHistoryRecord.create(context, auditRecord,
+          contract.get().getSpecName()));
+    } catch (RuntimeException e) {
+      log.error("Could not record email send history for contract [{}]",
+          context.getContractName(), e);
+    }
   }
 
   private NeoResponse observedResponse(long startedAtNanos, EmailContractCommand command,
