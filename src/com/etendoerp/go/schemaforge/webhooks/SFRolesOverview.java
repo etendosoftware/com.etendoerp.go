@@ -265,6 +265,33 @@ public class SFRolesOverview extends BaseWebhookService {
    *   ({@code 27A453FA86974745977672F1A8DCCEFF}).</li>
    * </ul>
    *
+   * <p>ETP-5116 (QA fix, second pass) — 5 more rows confirmed live via DB lookup plus a cross
+   * check against {@code etendo_schema_forge}'s {@code menu.json}/{@code artifacts/} (none of the
+   * 5 appears there, confirming none has an independent live Etendo Go page):
+   * <ul>
+   *   <li>"End Year Close" ({@code B5673F73F613496C8BEA22FB55E4E1E4}) — a year-end-closing action
+   *   that lives inside the Fiscal Calendar window ({@code AD_Window_ID = 117}, a real classic
+   *   window Financiero already has full access to), not independently reachable.</li>
+   *   <li>"Location" ({@code 121}) — Etendo's classic embedded address/location reference window,
+   *   used inside many other windows (Business Partner, Warehouse, etc.), never its own
+   *   independent page.</li>
+   *   <li>"Transaction Type" ({@code 82922976BB524D1BAA3CF8462B9219FE}) — same situation, a
+   *   classic embedded reference window, not independent.</li>
+   *   <li>"Return to Vendor" ({@code C50A8AEE6F044825B5EF54FAAE76826F}) — the dead window
+   *   {@code TemplateRoleWindowAccess} stopped granting in this same ticket (see that class's
+   *   {@code purchasingGrants()}/{@code inventoryGrants()}); this is the pure display-side
+   *   cleanup, since a live environment can still show residual/stale tiers for it until {@code
+   *   EnsureSystemRoleTemplatesScript} is reconciled there. Its live replacement, "Return to
+   *   Vendor Shipment" ({@code 273673D2ED914C399A6C51DB758BE0F9}), is the one that shows
+   *   instead.</li>
+   *   <li>"Return from Customer" ({@code FF808081330213E60133021822E40007}) — same reasoning as
+   *   above, the other dead window this ticket stopped granting. Its live replacement, "Return
+   *   Receipt" ({@code 123271B9AD60469BAE8A924841456B63}), is the one that shows instead.</li>
+   * </ul>
+   * Location and Transaction Type are generic reference windows embedded in many places, not a
+   * 1:1 duplicate pair like the other three above — there is no single "representative" window to
+   * point to for either of them.
+   *
    * <p>Note {@code Set.of(...)} rejects {@code contains(null)} with an NPE rather than returning
    * {@code false}, so callers must guard the id before probing this set.
    */
@@ -273,7 +300,12 @@ public class SFRolesOverview extends BaseWebhookService {
       "F4675DAB02134762B66881DAE4672AD0",
       "71F24BF89DE748B483BE87594747D6FB",
       "C327DE215AC945F69363905840118177",
-      "27A453FA86974745977672F1A8DCCEFF");
+      "27A453FA86974745977672F1A8DCCEFF",
+      "B5673F73F613496C8BEA22FB55E4E1E4",
+      "121",
+      "82922976BB524D1BAA3CF8462B9219FE",
+      "C50A8AEE6F044825B5EF54FAAE76826F",
+      "FF808081330213E60133021822E40007");
 
   /**
    * ETP-5071 — proxy {@code AD_Window_ID} standing in for "Monitor Fiscal" in the {@code matrix}.
