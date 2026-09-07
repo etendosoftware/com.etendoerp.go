@@ -49,9 +49,15 @@ class McpRoutingException extends OBException {
   private final List<String> available;
   private final String hint;
   private final String seeAlso;
+  private final JSONObject extras;
 
   private McpRoutingException(String detail, int status, String errorCode, String field,
       List<String> available, String hint, String seeAlso) {
+    this(detail, status, errorCode, field, available, hint, seeAlso, null);
+  }
+
+  private McpRoutingException(String detail, int status, String errorCode, String field,
+      List<String> available, String hint, String seeAlso, JSONObject extras) {
     super(detail);
     this.status = status;
     this.errorCode = errorCode;
@@ -59,6 +65,7 @@ class McpRoutingException extends OBException {
     this.available = available == null ? List.of() : List.copyOf(available);
     this.hint = hint;
     this.seeAlso = seeAlso;
+    this.extras = extras;
   }
 
   /**
@@ -165,6 +172,120 @@ class McpRoutingException extends OBException {
    * @param field  the argument name, or {@code null} when the whole argument object is missing
    * @return the exception to throw
    */
+  /**
+   * A filter key resolved to no property on the entity (ETP-5184).
+   *
+   * <p>Before this, {@code appendEqualityCondition} and {@code appendOperatorConditions} each
+   * logged the unresolved key at WARN and returned — dropping that one condition and running the
+   * query with whatever conditions remained. Filtering on a single misspelled key therefore
+   * answered 200 with the whole table, which an agent cannot tell apart from a filter that legally
+   * matched everything. Two call sites, one silent drop each; both now throw this.</p>
+   *
+   * <p>{@code available} is capped at {@link McpConstants#MAX_AVAILABLE_NAMES}: enough to reveal a
+   * typo, not enough to bill the caller for a 150-property entity. The hint names {@code
+   * neo_schema} for the full list when the cap bites.</p>
+   *
+   * @param key        the filter key that matched no property
+   * @param entityName the entity the filter was aimed at, for the message
+   * @param available  the filterable property names; caller need not pre-sort or pre-truncate
+   * @return the exception to throw
+   */
+  static McpRoutingException unknownFilterField(String key, String entityName,
+      List<String> available) {
+    List<String> names = available == null ? List.of() : available;
+    boolean truncated = names.size() > McpConstants.MAX_AVAILABLE_NAMES;
+    if (truncated) {
+      names = names.subList(0, McpConstants.MAX_AVAILABLE_NAMES);
+    }
+    return new McpRoutingException(
+        "Unknown filter field '" + key + "' on entity '" + entityName + "'",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_UNKNOWN_FILTER_FIELD, key, names,
+        truncated
+            ? "Retry with one of the names in 'available'. That list is truncated — call "
+                + "neo_schema for this entity to see every filterable field."
+            : "Retry with one of the names in 'available'.",
+        McpConstants.SEE_ALSO_READING);
+  }
+
+  /**
+   * A filter used a range operator that is not one of the recognized keys (ETP-5184).
+   *
+   * <p>Third of the three silent drops in {@code appendOperatorConditions}: an unrecognized
+   * operator was logged and skipped, so {@code {"amount":{"greaterThan":100}}} ran as no condition
+   * at all and returned every row — a 200 that looks like a successful narrowing.</p>
+   *
+   * @param key       the filter key the operator was written under
+   * @param operator  the operator key that matched nothing
+   * @param available the recognized operator keys
+   * @return the exception to throw
+   */
+  static McpRoutingException unknownFilterOperator(String key, String operator,
+      List<String> available) {
+    return new McpRoutingException(
+        "Unknown filter operator '" + operator + "' on key '" + key + "'",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_UNKNOWN_FILTER_FIELD, key, available,
+        "Retry with one of the operators in 'available'.", McpConstants.SEE_ALSO_READING);
+  }
+
+  /**
+   * A filter used a recognized operator but gave it a value of the wrong shape (ETP-5184).
+   *
+   * <p>Only {@code between} can currently fail this way — it needs a two-element array, and a
+   * one-element or non-array value used to be logged and the condition dropped.</p>
+   *
+   * @param key      the filter key
+   * @param operator the operator whose value was malformed
+   * @param expected one clause describing the shape that was expected
+   * @return the exception to throw
+   */
+  static McpRoutingException malformedFilterOperator(String key, String operator, String expected) {
+    return new McpRoutingException(
+        "Filter '" + key + "' operator '" + operator + "' has a malformed value: " + expected,
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION, key, List.of(),
+        "Correct the operator's value and retry.", McpConstants.SEE_ALSO_READING);
+  }
+
+  /**
+   * A call on a child entity did not name its parent record (ETP-5184).
+   *
+   * <p>The detail is written for an agent that does not know Etendo's data model: it says why there
+   * is no global list to return, not merely that an argument is missing. {@code parentEntity} and
+   * {@code parentField} ride along as {@code extras} so the correction is mechanical rather than a
+   * second round of discovery.</p>
+   *
+   * @param specName    the spec being called, used to phrase the follow-up {@code neo_list}
+   * @param entityName  the child entity
+   * @param parentEntity the parent entity's name, or {@code null} when it could not be named
+   * @param parentField the DAL property holding the parent link, or {@code null}
+   * @return the exception to throw
+   */
+  static McpRoutingException parentRequired(String specName, String entityName,
+      String parentEntity, String parentField) {
+    String parent = parentEntity == null ? "its parent" : parentEntity;
+    JSONObject extras = new JSONObject();
+    try {
+      if (parentEntity != null) {
+        extras.put("parentEntity", parentEntity);
+      }
+      if (parentField != null) {
+        extras.put("parentField", parentField);
+      }
+    } catch (JSONException ignored) {
+      // Putting a non-null String under a constant key cannot fail; nothing to recover from.
+    }
+    return new McpRoutingException(
+        "'" + entityName + "' is a child entity of '" + specName
+            + "'. In Etendo you browse its records inside one parent record — there is no global "
+            + "list. Pass parentId with the id of the parent " + parent + " record.",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_PARENT_REQUIRED,
+        McpConstants.PARAM_PARENT_ID, List.of(),
+        parentEntity == null
+            ? "Look up the parent record, then pass its id as parentId."
+            : "Call neo_list(spec:'" + specName + "', entity:'" + parentEntity
+                + "') to find the parent first, then repeat this call with parentId:'<thatId>'.",
+        McpConstants.SEE_ALSO_READING, extras);
+  }
+
   static McpRoutingException missingArgument(String detail, String field) {
     return new McpRoutingException(detail, McpConstants.STATUS_UNPROCESSABLE,
         McpConstants.ERROR_VALIDATION, field, List.of(),
@@ -194,6 +315,13 @@ class McpRoutingException extends OBException {
     }
     if (seeAlso != null) {
       envelope.put(McpConstants.KEY_SEE_ALSO, seeAlso);
+    }
+    if (extras != null) {
+      java.util.Iterator<String> keys = extras.keys();
+      while (keys.hasNext()) {
+        String key = keys.next();
+        envelope.put(key, extras.get(key));
+      }
     }
     return envelope;
   }

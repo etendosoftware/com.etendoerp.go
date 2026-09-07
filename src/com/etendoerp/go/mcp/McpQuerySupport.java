@@ -60,6 +60,16 @@ final class McpQuerySupport {
    *       listing the valid ones in {@code available}, while an entity that declares no named filters
    *       falls back to treating {@code status} as a plain column.</li>
    * </ul>
+   *
+   * <p><b>ETP-5184: no filter is ever dropped in silence.</b> An unresolvable key, an unknown
+   * operator, and a malformed {@code between} value each used to be logged at WARN and skipped,
+   * leaving the query to run with whatever conditions survived. Filtering on one misspelled key
+   * therefore answered 200 with the entire table — and from the caller's side that is
+   * indistinguishable from a filter that legitimately matched everything, so nothing prompted a
+   * retry. All three now raise a 422 naming the correction. A caller that means "no filter" says so
+   * by sending no filter.</p>
+   *
+   * @throws McpRoutingException 422 when any filter key, operator, or operator value is not usable
    */
   static String buildWhereFromFilters(JSONObject filters, Tab adTab, SFEntity sfEntity,
       org.apache.logging.log4j.Logger log) throws JSONException {
@@ -79,17 +89,31 @@ final class McpQuerySupport {
         continue;
       }
       if (value instanceof JSONObject) {
-        appendOperatorConditions(where, dalEntity, key, (JSONObject) value, log);
+        appendOperatorConditions(where, dalEntity, sfEntity, key, (JSONObject) value);
       } else {
-        appendEqualityCondition(where, dalEntity, key, value, log);
+        appendEqualityCondition(where, dalEntity, sfEntity, key, value);
       }
     }
     return where.length() > 0 ? where.toString() : null;
   }
 
-  /** Resolve a filter key to a DAL property, tolerating both column names and property names. */
-  private static Property resolveFilterProperty(Entity dalEntity, String key,
-      org.apache.logging.log4j.Logger log) {
+  /**
+   * Resolve a filter key to a DAL property, tolerating both column names and property names.
+   *
+   * <p>ETP-5184: an unresolvable key now throws instead of returning {@code null}. It used to be
+   * logged at WARN by each caller and the condition dropped, so a query filtering on one misspelled
+   * key ran with the remaining conditions — or with none at all — and answered 200 with the whole
+   * table. That is indistinguishable, from the agent's side, from a filter that legitimately
+   * matched everything, which is exactly the failure that made a child-entity list look like it had
+   * returned the right thing. Silence was the bug; the correction is one word, so name it.</p>
+   *
+   * @param dalEntity the DAL entity the filter is aimed at
+   * @param sfEntity  the SchemaForge entity, used to list the filterable names on the failure path
+   * @param key       the filter key as the caller spelled it
+   * @return the resolved property, never {@code null}
+   * @throws McpRoutingException 422 {@code unknown_filter_field}, naming the keys that would work
+   */
+  private static Property resolveFilterProperty(Entity dalEntity, SFEntity sfEntity, String key) {
     Property byColumn = dalEntity.getPropertyByColumnName(key, false);
     if (byColumn != null) {
       return byColumn;
@@ -97,19 +121,56 @@ final class McpQuerySupport {
     try {
       return dalEntity.getProperty(key);
     } catch (Exception ignored) {
-      log.debug("Filter column '{}' not found in entity, skipping", key);
-      return null;
+      throw McpRoutingException.unknownFilterField(key,
+          sfEntity == null ? dalEntity.getName() : sfEntity.getName(),
+          filterablePropertyNames(sfEntity, dalEntity));
     }
+  }
+
+  /**
+   * The property names a caller may filter on, for the {@code available} list of an unknown-key
+   * refusal (ETP-5184).
+   *
+   * <p>Scoped to the entity's included {@code ETGO_SF_FIELD} rows rather than every DAL property:
+   * a name the spec excluded is not an answer, and offering it would send the agent to a second
+   * 422. Read-only fields stay in — being unable to write a value has never stopped anyone from
+   * filtering on it. Sorted so the list reads the same way twice, and computed only on the failure
+   * path, so the happy path pays nothing for it.</p>
+   *
+   * @param sfEntity  the SchemaForge entity; {@code null} falls back to the DAL property list
+   * @param dalEntity the DAL entity, for mapping columns to property names
+   * @return the sorted filterable names, possibly empty, never {@code null}
+   */
+  private static java.util.List<String> filterablePropertyNames(SFEntity sfEntity,
+      Entity dalEntity) {
+    java.util.SortedSet<String> names = new java.util.TreeSet<>();
+    if (sfEntity == null) {
+      for (Property prop : dalEntity.getProperties()) {
+        names.add(prop.getName());
+      }
+      return new java.util.ArrayList<>(names);
+    }
+    OBCriteria<SFField> crit = OBDal.getInstance().createCriteria(SFField.class);
+    crit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
+    crit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
+    crit.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
+    for (SFField sfField : crit.list()) {
+      Column col = sfField.getADColumn();
+      if (col == null) {
+        continue;
+      }
+      Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
+      if (prop != null) {
+        names.add(prop.getName());
+      }
+    }
+    return new java.util.ArrayList<>(names);
   }
 
   /** Append {@code e.prop = value} (or {@code e.prop.id = 'value'} for a FK), type-aware. */
   private static void appendEqualityCondition(StringBuilder where, Entity dalEntity,
-      String key, Object value, org.apache.logging.log4j.Logger log) {
-    Property prop = resolveFilterProperty(dalEntity, key, log);
-    if (prop == null) {
-      log.warn("Filter key '{}' could not be resolved to a DAL property, ignoring", key);
-      return;
-    }
+      SFEntity sfEntity, String key, Object value) {
+    Property prop = resolveFilterProperty(dalEntity, sfEntity, key);
     appendAnd(where);
     if (!prop.isPrimitive()) {
       where.append("e.").append(prop.getName()).append(".id=")
@@ -122,12 +183,8 @@ final class McpQuerySupport {
 
   /** Append one HQL comparison per range operator found in {@code operators}. */
   private static void appendOperatorConditions(StringBuilder where, Entity dalEntity,
-      String key, JSONObject operators, org.apache.logging.log4j.Logger log) throws JSONException {
-    Property prop = resolveFilterProperty(dalEntity, key, log);
-    if (prop == null) {
-      log.warn("Filter key '{}' could not be resolved to a DAL property, ignoring", key);
-      return;
-    }
+      SFEntity sfEntity, String key, JSONObject operators) throws JSONException {
+    Property prop = resolveFilterProperty(dalEntity, sfEntity, key);
     Class<?> type = prop.isPrimitive() ? prop.getPrimitiveObjectType() : String.class;
     java.util.Iterator<String> ops = operators.keys();
     while (ops.hasNext()) {
@@ -135,23 +192,26 @@ final class McpQuerySupport {
       if (McpBusinessFilters.OP_BETWEEN.equals(op)) {
         JSONArray bounds = operators.optJSONArray(op);
         if (bounds == null || bounds.length() != 2) {
-          log.warn("Filter '{}' between operator needs a [from, to] array, ignoring", key);
-        } else {
-          appendAnd(where);
-          where.append("e.").append(prop.getName()).append(" between ")
-              .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), bounds.get(0)))
-              .append(" and ")
-              .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), bounds.get(1)));
+          // ETP-5184: same silent-drop shape as an unknown key. A malformed between used to be
+          // logged and skipped, so `{"amount":{"between":[100]}}` answered 200 with every row —
+          // the opposite of the narrowing the caller asked for.
+          throw McpRoutingException.malformedFilterOperator(key, op,
+              "the 'between' operator takes a two-element [from, to] array");
         }
+        appendAnd(where);
+        where.append("e.").append(prop.getName()).append(" between ")
+            .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), bounds.get(0)))
+            .append(" and ")
+            .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), bounds.get(1)));
       } else {
         String sql = McpBusinessFilters.operatorToSql(op);
         if (sql == null) {
-          log.warn("Filter '{}' has unknown operator '{}', ignoring", key, op);
-        } else {
-          appendAnd(where);
-          where.append("e.").append(prop.getName()).append(' ').append(sql).append(' ')
-              .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), operators.get(op)));
+          throw McpRoutingException.unknownFilterOperator(key, op,
+              McpBusinessFilters.operatorKeys());
         }
+        appendAnd(where);
+        where.append("e.").append(prop.getName()).append(' ').append(sql).append(' ')
+            .append(McpBusinessFilters.formatHqlValue(type, prop.isPrimitive(), operators.get(op)));
       }
     }
   }

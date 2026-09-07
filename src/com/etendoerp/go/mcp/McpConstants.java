@@ -110,6 +110,29 @@ final class McpConstants {
   static final String ERROR_SERVER = "server_error";
   /** Machine-detectable error code for a write on an entity whose method flag is off (IMP-15). */
   static final String ERROR_METHOD_NOT_ALLOWED = "method_not_allowed";
+  /**
+   * Machine-detectable error code for a filter key that resolves to no property on the entity
+   * (ETP-5184). Distinct from {@link #ERROR_VALIDATION} because the fix is specific and known:
+   * the key is wrong, and {@code available} names the ones that would have worked.
+   *
+   * <p>This case used to be logged and dropped. A caller filtering on a misspelled key therefore
+   * got an unfiltered result set with a 200 on it — the worst possible answer, because it is
+   * indistinguishable from "the filter matched everything". This is the same failure shape that
+   * made {@code neo_list} on a child entity return every row in the table.</p>
+   */
+  static final String ERROR_UNKNOWN_FILTER_FIELD = "unknown_filter_field";
+  /**
+   * Machine-detectable error code for a call on a child entity that did not name its parent
+   * (ETP-5184). In Etendo a child record is only ever browsed inside one parent record — there is
+   * no global list — so a child call without {@code parentId} has no correct answer to give.
+   */
+  static final String ERROR_PARENT_REQUIRED = "parent_required";
+  /**
+   * How many names an {@code available} list may carry before it is truncated (ETP-5184). Twenty
+   * is enough for the agent to spot its own typo; a wide entity has 150+ properties and dumping
+   * them all turns a one-line correction into a context bill.
+   */
+  static final int MAX_AVAILABLE_NAMES = 20;
   /** HTTP-style status for a not-found result (IMP-5). */
   static final int STATUS_NOT_FOUND = 404;
   /** HTTP-style status for a validation failure on a write (IMP-5). */

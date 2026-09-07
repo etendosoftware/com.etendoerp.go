@@ -916,6 +916,18 @@ public class McpToolRouter {
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
+    // ETP-5184: neo_defaults on a child entity without parentId does not fail — it silently omits
+    // every field whose default expression reads from the parent (the parent's warehouse, its
+    // price-list version, its next line number). The agent then sends a create built on defaults
+    // that were never resolved, and the create is the thing that fails, one call too late and with
+    // a message about the wrong field. Refuse here instead, where the fix is a single argument.
+    McpParentScope.Scope parentScope = McpParentScope.forEntity(sfEntity);
+    if (parentScope.requiresParentFor(McpParentSection.VERB_CREATE)
+        && StringUtils.isBlank(parentId)) {
+      throw McpRoutingException.parentRequired(specName, entityName,
+          parentScope.getParentEntity(), parentScope.getParentField());
+    }
+
     NeoContext ctx = NeoContext.builder()
         .specName(specName)
         .entityName(entityName)
@@ -1100,9 +1112,14 @@ public class McpToolRouter {
     // entity, `writableVia` names where to set it instead of silently giving up.
     // ETP-5184: said in prose as well as in parentRequiredFor, because this hint is the paragraph
     // an agent actually reads before its first call on an unfamiliar entity.
+    // getParentEntity() can be null even for a RESOLVED scope — the parent tab exists and the FK is
+    // identified, but that tab is not an included entity of this spec, so there is no name the
+    // agent could call. Say "the parent record" rather than the literal "null".
     String parentHint = parentScope.requiredVerbs().isEmpty() ? ""
-        : "This is a child entity: pass parentId (the id of a '" + parentScope.getParentEntity()
-            + "' record) on " + String.join(", ", parentScope.requiredVerbs())
+        : "This is a child entity: pass parentId (the id of the "
+            + (parentScope.getParentEntity() == null ? "parent"
+                : "'" + parentScope.getParentEntity() + "'")
+            + " record) on " + String.join(", ", parentScope.requiredVerbs())
             + " — there is no global list of these records to read without it. ";
     entitySchema.put("hint", parentHint
         + "Call neo_schema with view:\"create\" to get only the fields you may send, already split "
