@@ -327,14 +327,18 @@ public final class NeoImageHelper {
    * understands is reported as absent rather than as an error, because the dimensions are
    * informational.
    *
+   * <p><b>Why the null return is suppressed rather than fixed.</b> Sonar's java:S1168 asks for an
+   * empty array here. The null is the contract, not an oversight: it means there are no dimensions
+   * to report, and {@link #describeImage} tests for it to omit the width and height from the JSON
+   * entirely. An empty array would need that identical test, so the rule would buy nothing, and a
+   * caller that indexed into the result would trade an obvious null-pointer failure for an
+   * out-of-bounds one. A better shape exists — a small dimensions type returned as an
+   * {@link java.util.Optional} — but this method is public and static, so that is a signature
+   * change with callers, not a lint fix.</p>
+   *
    * @param data the image bytes; {@code null} or empty yields {@code null}
    * @return {@code {width, height}}, or {@code null} when the bytes cannot be decoded.
    */
-  // java:S1168 asks for an empty array instead of null. Here null is the contract, not an oversight:
-  // it means "no dimensions to report", which describeImage acts on with `if (dimensions != null)`
-  // to omit width/height from the JSON entirely. An empty array would need that identical check, so
-  // the rule would buy nothing and a caller reading dimensions[0] would then get an exception
-  // instead of an obvious NPE. Any change here is a signature change with callers — not a lint fix.
   @SuppressWarnings("java:S1168")
   public static int[] readDimensions(byte[] data) {
     if (data == null || data.length == 0) {
