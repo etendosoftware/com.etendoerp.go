@@ -17,6 +17,10 @@
 
 package com.etendoerp.go.mcp;
 
+import static com.etendoerp.go.mcp.McpToolResponses.buildRoutingErrorBody;
+import static com.etendoerp.go.mcp.McpToolResponses.buildUnexpectedErrorBody;
+import static com.etendoerp.go.mcp.McpToolResponses.imageToolResult;
+
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -52,7 +56,6 @@ import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoCommercialLinePolicy;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
-import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.util.NeoReportContract;
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -202,49 +205,6 @@ public class McpToolRouter {
         McpArgumentUtils.optionalString(arguments, "maxScore"), null);
     String body = response.getBody() == null ? "{}" : response.getBody().toString();
     return response.getHttpStatus() >= 400 ? wrapAsErrorContent(body) : wrapAsTextContent(body);
-  }
-
-  /**
-   * Render a routing failure, falling back to the old prose line only if the envelope cannot be
-   * serialised (ETP-4793 / IMP-17).
-   */
-  private String buildRoutingErrorBody(McpRoutingException e, String toolName) {
-    try {
-      JSONObject envelope = e.toEnvelope();
-      envelope.put(McpConstants.KEY_TOOL, toolName);
-      return envelope.toString(2);
-    } catch (JSONException jsonEx) {
-      log.error("Could not build routing error envelope for '{}'", toolName, jsonEx);
-      return "Error executing " + toolName + ": " + e.getMessage();
-    }
-  }
-
-  /**
-   * Render anything else thrown out of a tool call as the IMP-5 envelope (ETP-4793 / IMP-17).
-   *
-   * <p>This is the last leak IMP-5 left open: every unanticipated failure came back as the bare line
-   * {@code "Error executing neo_list: …"} (evidence C14), so an agent could not tell a mistake it
-   * could fix from a server fault it could not, and had to parse prose to find out. The code is
-   * deliberately {@code server_error} rather than {@code validation_error}: if the router could have
-   * told the caller what to change, one of the typed paths above would already have done it, and
-   * inviting a retry-with-corrections here would send the agent round a loop that cannot terminate.
-   * The message is sanitised on the way out — an unexpected failure is exactly where a DB internal
-   * or a row dump would otherwise reach the client.</p>
-   */
-  private String buildUnexpectedErrorBody(String toolName, Exception e) {
-    try {
-      JSONObject envelope = new JSONObject();
-      envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_SERVER_ERROR);
-      envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_SERVER);
-      envelope.put(McpConstants.KEY_DETAIL, NeoErrorSanitizer.sanitize(e));
-      envelope.put(McpConstants.KEY_TOOL, toolName);
-      envelope.put(McpConstants.KEY_HINT, "This is a server-side failure, not a bad request — "
-          + "re-sending the same call with corrected values will not help.");
-      return envelope.toString(2);
-    } catch (JSONException jsonEx) {
-      log.error("Could not build error envelope for '{}'", toolName, jsonEx);
-      return "Error executing " + toolName + ": " + e.getMessage();
-    }
   }
 
   // ── docs (Context7 documentation lookup) ──────────────────────────────
@@ -1711,16 +1671,6 @@ public class McpToolRouter {
       default:
         return HTTP_METHOD_GET;
     }
-  }
-
-  /**
-   * ETP-5184: an image tool reports a rejection through the same error-content channel every other
-   * MCP write uses, so an agent detects the failure the same way regardless of which tool produced
-   * it. The envelope itself already carries {@code status}/{@code error}/{@code hint}.
-   */
-  private JSONObject imageToolResult(JSONObject body) throws JSONException {
-    boolean failed = body.has(McpConstants.KEY_ERROR);
-    return failed ? wrapAsErrorContent(body.toString(2)) : wrapAsTextContent(body.toString(2));
   }
 
   // ── MCP content formatting ────────────────────────────────────────────
