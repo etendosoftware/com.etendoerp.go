@@ -22,25 +22,39 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
+import org.junit.After;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.financialmgmt.gl.GLItem;
+
+import com.etendoerp.go.schemaforge.data.MatchRule;
 
 /**
- * Unit tests for {@link MatchRuleEngine}. All tests are pure (no DB, no mocks) — they exercise
- * the text-matching and evaluation logic directly.
+ * Unit tests for {@link MatchRuleEngine}. The text-matching and evaluation logic is exercised
+ * directly (pure, no mocks); {@code loadRules} is covered against a mocked {@link OBCriteria}.
  */
 public class MatchRuleEngineTest {
+
+  /**
+   * Releases the inline mock-maker references created during the test. Without this they
+   * accumulate across the module's single test JVM and push the fork past its heap cap.
+   */
+  @After
+  public void clearMocks() {
+    Mockito.framework().clearInlineMocks();
+  }
 
   // ---------------------------------------------------------------------------
   // Helpers
@@ -322,37 +336,30 @@ public class MatchRuleEngineTest {
   }
 
   // ---------------------------------------------------------------------------
-  // loadRules — JDBC ResultSet mapping
+  // loadRules — DAL entity mapping
   // ---------------------------------------------------------------------------
 
   /**
-   * loadRules maps each ResultSet row into a Rule, trims text fields, binds the account id, and
-   * preserves the DB fetch order.
+   * loadRules maps each persisted rule onto a Rule, trims text fields, and preserves the query
+   * order.
    *
-   * @throws Exception if the mocked JDBC interaction fails
+   * <p>Since ETP-4950 this loads through the DAL instead of raw JDBC. That is what makes the rules
+   * tenant-scoped: {@code OBCriteria} adds the readable-client / readable-organization predicates by
+   * itself, so no caller can forget them — the previous hand-written SQL had no {@code ad_client_id}
+   * filter at all and leaked every tenant's global rules into every other tenant's Automatch.
    */
   @Test
-  public void testLoadRulesMapsRowsAndBindsAccount() throws Exception {
-    Connection conn = mock(Connection.class);
-    PreparedStatement ps = mock(PreparedStatement.class);
-    ResultSet rs = mock(ResultSet.class);
-    when(conn.prepareStatement(anyString())).thenReturn(ps);
-    when(ps.executeQuery()).thenReturn(rs);
-    when(rs.next()).thenReturn(true, true, false);
-    when(rs.getString("etgo_match_rule_id")).thenReturn("R1", "R2");
-    when(rs.getString("name")).thenReturn("  Fee Rule  ", "Transfer Rule");
-    when(rs.getInt("priority")).thenReturn(10, 20);
-    when(rs.getString("textcondition")).thenReturn(" C ", "S");
-    when(rs.getString("textpattern")).thenReturn(" commission ", "transfer");
-    when(rs.getString("c_glitem_id")).thenReturn("GL-1", null);
-    when(rs.getString("c_bpartner_id")).thenReturn("BP-1", null);
-    when(rs.getString("etgo_transaction_type_id")).thenReturn(null, null);
-    when(rs.getString("c_project_id")).thenReturn(null, null);
-    when(rs.getString("c_costcenter_id")).thenReturn(null, null);
-    when(rs.getString("m_product_id")).thenReturn(null, null);
-    when(rs.getLong("matchcount")).thenReturn(3L, 0L);
+  public void testLoadRulesMapsEntitiesOntoRules() {
+    // Build the referenced mocks BEFORE the when(...) that returns them: creating a mock inside an
+    // unfinished stubbing call is what Mockito reports as UnfinishedStubbingException.
+    GLItem concept = glItem("GL-1");
+    BusinessPartner partner = bpartner("BP-1");
+    MatchRule first = ruleRow("R1", "  Fee Rule  ", 10L, " C ", " commission ", 3L);
+    when(first.getAccountingConcept()).thenReturn(concept);
+    when(first.getBusinessPartner()).thenReturn(partner);
+    MatchRule second = ruleRow("R2", "Transfer Rule", 20L, "S", "transfer", 0L);
 
-    List<MatchRuleEngine.Rule> rules = MatchRuleEngine.loadRules(conn, "ACC-1");
+    List<MatchRuleEngine.Rule> rules = loadWith(Arrays.asList(first, second), "ACC-1");
 
     assertEquals(2, rules.size());
     assertEquals("R1", rules.get(0).id);
@@ -364,27 +371,79 @@ public class MatchRuleEngineTest {
     assertEquals(3L, rules.get(0).matchCount);
     assertEquals("R2", rules.get(1).id);
     assertEquals(20, rules.get(1).priority);
-    verify(ps).setString(1, "ACC-1");
   }
 
-  /**
-   * A blank account id is bound as an empty string (global-only rule load) and an empty ResultSet
-   * yields an empty list.
-   *
-   * @throws Exception if the mocked JDBC interaction fails
-   */
+  /** Every optional FK left unset maps to a null id rather than blowing up. */
   @Test
-  public void testLoadRulesBlankAccountBindsEmptyStringAndEmptyResultSet() throws Exception {
-    Connection conn = mock(Connection.class);
-    PreparedStatement ps = mock(PreparedStatement.class);
-    ResultSet rs = mock(ResultSet.class);
-    when(conn.prepareStatement(anyString())).thenReturn(ps);
-    when(ps.executeQuery()).thenReturn(rs);
-    when(rs.next()).thenReturn(false);
+  public void testLoadRulesLeavesUnsetForeignKeysNull() {
+    MatchRule row = ruleRow("R1", "Fee", 10L, "C", "fee", 0L);
 
-    List<MatchRuleEngine.Rule> rules = MatchRuleEngine.loadRules(conn, "  ");
+    List<MatchRuleEngine.Rule> rules = loadWith(Collections.singletonList(row), "ACC-1");
 
-    assertTrue(rules.isEmpty());
-    verify(ps).setString(1, "");
+    assertEquals(1, rules.size());
+    assertNull(rules.get(0).glItemId);
+    assertNull(rules.get(0).bpartnerId);
+    assertNull(rules.get(0).transactionTypeId);
+    assertNull(rules.get(0).projectId);
+    assertNull(rules.get(0).costCenterId);
+    assertNull(rules.get(0).productId);
+  }
+
+  /** A null priority or match count degrades to zero instead of throwing on unboxing. */
+  @Test
+  public void testLoadRulesTreatsNullPriorityAndMatchCountAsZero() {
+    MatchRule row = ruleRow("R1", "Fee", null, "C", "fee", null);
+
+    List<MatchRuleEngine.Rule> rules = loadWith(Collections.singletonList(row), "ACC-1");
+
+    assertEquals(0, rules.get(0).priority);
+    assertEquals(0L, rules.get(0).matchCount);
+  }
+
+  /** An empty result yields an empty list. */
+  @Test
+  public void testLoadRulesReturnsEmptyListWhenNothingMatches() {
+    assertTrue(loadWith(Collections.emptyList(), "  ").isEmpty());
+  }
+
+  // ---------------------------------------------------------------------------
+  // loadRules helpers
+  // ---------------------------------------------------------------------------
+
+  /** Runs loadRules against a criteria stubbed to return {@code rows}. */
+  @SuppressWarnings("unchecked")
+  private static List<MatchRuleEngine.Rule> loadWith(List<MatchRule> rows, String accountId) {
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      OBCriteria<MatchRule> criteria = mock(OBCriteria.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.createCriteria(MatchRule.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(rows);
+      return MatchRuleEngine.loadRules(accountId);
+    }
+  }
+
+  private static MatchRule ruleRow(String id, String name, Long priority, String condition,
+      String pattern, Long matchCount) {
+    MatchRule row = mock(MatchRule.class);
+    when(row.getId()).thenReturn(id);
+    when(row.getName()).thenReturn(name);
+    when(row.getPriority()).thenReturn(priority);
+    when(row.getTextCondition()).thenReturn(condition);
+    when(row.getTextPattern()).thenReturn(pattern);
+    when(row.getMatchCount()).thenReturn(matchCount);
+    return row;
+  }
+
+  private static GLItem glItem(String id) {
+    GLItem item = mock(GLItem.class);
+    when(item.getId()).thenReturn(id);
+    return item;
+  }
+
+  private static BusinessPartner bpartner(String id) {
+    BusinessPartner partner = mock(BusinessPartner.class);
+    when(partner.getId()).thenReturn(id);
+    return partner;
   }
 }

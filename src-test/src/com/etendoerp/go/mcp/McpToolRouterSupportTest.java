@@ -54,6 +54,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.NeoActionSurface;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
@@ -165,6 +166,34 @@ class McpToolRouterSupportTest {
 
     assertFalse(discovered.getBoolean("readOnly"));
     assertTrue(arrayContains(discovered.getJSONArray("methods"), "POST"));
+  }
+
+  @Test
+  @DisplayName("neo_discover hides mutation methods denied by the role's window access")
+  void discoverHidesMutationMethodsForReadOnlyWindowRole() throws Exception {
+    SFEntity entity = writableEntity("sales-quotation");
+    Window window = mock(Window.class);
+    Tab tab = mock(Tab.class);
+    when(window.getId()).thenReturn("SALES_WINDOW");
+    when(tab.getWindow()).thenReturn(window);
+    when(entity.getADTab()).thenReturn(tab);
+
+    try (MockedStatic<NeoAccessUtils> accessMock = mockStatic(NeoAccessUtils.class)) {
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("SALES_WINDOW", "POST"))
+          .thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("SALES_WINDOW", "PUT"))
+          .thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("SALES_WINDOW", "PATCH"))
+          .thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccess("SALES_WINDOW", "DELETE"))
+          .thenReturn(false);
+
+      JSONObject discovered = McpSupportInternals.buildDiscoverEntity(entity);
+
+      assertTrue(discovered.getBoolean("readOnly"));
+      assertEquals(1, discovered.getJSONArray("methods").length());
+      assertTrue(arrayContains(discovered.getJSONArray("methods"), "GET"));
+    }
   }
 
   @Test

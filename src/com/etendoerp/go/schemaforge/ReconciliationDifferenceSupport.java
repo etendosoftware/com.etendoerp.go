@@ -135,11 +135,20 @@ final class ReconciliationDifferenceSupport {
           "financialAccountId and statementLineId are required");
     }
 
-    // Serialize concurrent postings on this row BEFORE anything else. Core does not reject a
-    // re-match: APRM_MatchingUtility silently unmatches the previous one, so two racing requests
-    // would leave an orphan processed transaction. A lock is not a data write, so this stays inside
-    // the read-only phase.
-    if (!lockStatementLine(lineId)) {
+    // Serialize concurrent postings on this row BEFORE anything reads its state. Core does not
+    // reject a re-match: APRM_MatchingUtility silently unmatches the previous one, so two racing
+    // requests would leave an orphan processed transaction. Ordering the preflight first would
+    // reopen that race (read state → someone else matches → we act on stale state). A lock is not a
+    // data write, so this stays inside the read-only phase.
+    //
+    // The lock is only ever taken on a line this tenant owns. lockStatementLine is raw SQL scoped
+    // by the line id alone, so locking unconditionally let a caller hold a row lock on another
+    // tenant's statement line for the length of the request (ETP-4950). When the line is not ours
+    // we simply skip the lock — there is nothing of ours to serialize — and let the preflight below
+    // produce its usual rejection, so the response codes are unchanged.
+    FIN_BankStatementLine owned = handler.loadLine(lineId);
+    boolean ownsLine = owned != null && belongsToAccount(owned, accountId);
+    if (ownsLine && !lockStatementLine(lineId)) {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT, MSG_LOCK_BUSY);
     }
 
@@ -302,7 +311,7 @@ final class ReconciliationDifferenceSupport {
     // Only a client-supplied id needs an existence check: the account-derived one is a live
     // reference that cannot dangle.
     if (StringUtils.isNotBlank(requestedGlItemId)
-        && OBDal.getInstance().get(GLItem.class, requestedGlItemId) == null) {
+        && TenantOwnership.loadOwned(GLItem.class, requestedGlItemId) == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "GL item not found: " + requestedGlItemId);
     }
@@ -437,7 +446,7 @@ final class ReconciliationDifferenceSupport {
       return label;
     }
     GLItem glItem = StringUtils.isNotBlank(glItemId)
-        ? OBDal.getInstance().get(GLItem.class, glItemId) : null;
+        ? TenantOwnership.loadOwned(GLItem.class, glItemId) : null;
     return glItem != null ? glItem.getName() : null;
   }
 
