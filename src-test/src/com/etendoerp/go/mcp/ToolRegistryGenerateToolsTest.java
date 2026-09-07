@@ -224,12 +224,13 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       List<String> names = toolNames(tools);
-      // Read access always yields neo_discover + docs + neo_widget when no specs exist
-      // (neo_widget is a built-in read tool, ETP-4284).
+      // Read access always yields neo_discover + docs + neo_widget + neo_vector_search when no
+      // specs exist. These are built-in read tools (ETP-4284 / ETP-5123).
       assertTrue(names.contains("neo_discover"));
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
-      assertEquals(3, tools.size());
+      assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
+      assertEquals(4, tools.size());
     }
 
     @Test
@@ -331,14 +332,16 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(tools);
 
       // No CRUD tools since there are no accessible window specs; only the
-      // read-scope baseline tools (neo_discover + docs + neo_widget) are present.
+      // read-scope baseline tools (neo_discover + docs + neo_widget + neo_vector_search) are
+      // present.
       assertFalse(names.contains("neo_list"));
       assertFalse(names.contains("neo_get"));
       assertFalse(names.contains("neo_create"));
       assertTrue(names.contains("neo_discover"));
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
-      assertEquals(3, tools.size());
+      assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
+      assertEquals(4, tools.size());
     }
 
     @Test
@@ -364,14 +367,16 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(tools);
 
       // No CRUD tools since there are no accessible window specs; only the
-      // read-scope baseline tools (neo_discover + docs + neo_widget) are present.
+      // read-scope baseline tools (neo_discover + docs + neo_widget + neo_vector_search) are
+      // present.
       assertFalse(names.contains("neo_list"));
       assertFalse(names.contains("neo_get"));
       assertFalse(names.contains("neo_create"));
       assertTrue(names.contains("neo_discover"));
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
-      assertEquals(3, tools.size());
+      assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
+      assertEquals(4, tools.size());
     }
 
     @Test
@@ -470,7 +475,7 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(tools);
 
       // No window specs => no CRUD/window tools. Only the read-scope baseline
-      // tools (neo_discover + docs + neo_widget) are present.
+      // tools (neo_discover + docs + neo_widget + neo_vector_search) are present.
       assertFalse(names.contains("neo_list"));
       assertFalse(names.contains("neo_create"));
       assertFalse(names.contains("neo_update"));
@@ -478,7 +483,8 @@ class ToolRegistryGenerateToolsTest {
       assertTrue(names.contains("neo_discover"));
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
-      assertEquals(3, tools.size());
+      assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
+      assertEquals(4, tools.size());
     }
   }
 
@@ -1588,6 +1594,55 @@ class ToolRegistryGenerateToolsTest {
           assertFalse(writeEnum.contains(SPEC_MONITOR),
               writeTool + " must not offer a read-only spec as a target");
         }
+      }
+    }
+
+    @Test
+    @DisplayName("write catalog hides denied sales routes while keeping authorized purchase routes")
+    void writeCatalogUsesWindowWriteAccessForSalesAndPurchase() {
+      SFSpec sales = createWindowSpecWithWindow("sales-quotation", "sales-window");
+      SFSpec purchase = createWindowSpecWithWindow("purchase-order", "purchase-window");
+      mockSpecCriteria(List.of(sales, purchase));
+
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(sales, "GET"))
+          .thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(purchase, "GET"))
+          .thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(sales, "POST"))
+          .thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(sales, "PUT"))
+          .thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(sales, "DELETE"))
+          .thenReturn(false);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(purchase, "POST"))
+          .thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(purchase, "PUT"))
+          .thenReturn(true);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(purchase, "DELETE"))
+          .thenReturn(true);
+
+      try (MockedStatic<McpToolRouterSupport> supportMock = mockStatic(McpToolRouterSupport.class)) {
+        supportMock.when(() -> McpToolRouterSupport.isCatalogExcludedSpec(any())).thenReturn(false);
+        for (SFSpec spec : List.of(sales, purchase)) {
+          supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(spec, "POST"))
+              .thenReturn(true);
+          supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(spec, "PUT"))
+              .thenReturn(true);
+          supportMock.when(() -> McpToolRouterSupport.hasEntityWithMethod(spec, "DELETE"))
+              .thenReturn(true);
+        }
+
+        List<McpToolDefinition> tools =
+            registry.generateTools(scopesOf("neo:read", "neo:write"));
+
+        assertTrue(specEnumOf(tools, "neo_list").contains("sales-quotation"));
+        assertTrue(specEnumOf(tools, "neo_list").contains("purchase-order"));
+        assertFalse(specEnumOf(tools, "neo_create").contains("sales-quotation"));
+        assertFalse(specEnumOf(tools, "neo_update").contains("sales-quotation"));
+        assertFalse(specEnumOf(tools, "neo_delete").contains("sales-quotation"));
+        assertTrue(specEnumOf(tools, "neo_create").contains("purchase-order"));
+        assertTrue(specEnumOf(tools, "neo_update").contains("purchase-order"));
+        assertTrue(specEnumOf(tools, "neo_delete").contains("purchase-order"));
       }
     }
 

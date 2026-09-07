@@ -146,6 +146,11 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   private static final String DEFAULT_PROVIDER_COUNTRY = "ES";
   private static final String MSG_ACCOUNT_NOT_FOUND = "Financial account not found";
   private static final String MSG_MISSING = "Missing required parameter: ";
+  // ETP-5104. Kept as a fixed English literal, like its two siblings above: the SPA maps it to a
+  // localized label through tools/app-shell/src/lib/backendErrors.js, so the wording here is a wire
+  // contract — rewording it silently un-translates the toast.
+  private static final String MSG_IMPORT_RANGE_INVALID =
+      "The import from date cannot be later than the import to date";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -698,13 +703,27 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     if (finAcc == null) {
       return NeoResponse.error(404, MSG_ACCOUNT_NOT_FOUND);
     }
+    // ETP-5104. Resolved and validated BEFORE anything is written to the entity, on the pair the
+    // request would RESULT in: a body may carry only one of the two bounds, in which case the other
+    // keeps its stored value and is just as much part of the range being saved. Applying the
+    // setters first and rejecting afterwards would not work — `finAcc` is a managed instance, so
+    // Hibernate's dirty checking would flush the rejected values at commit anyway.
+    Date importFrom = body.has(KEY_IMPORT_FROM_DATE)
+        ? FinancialAccountBankConnectionSupport.parseDate(
+            FinancialAccountBankConnectionSupport.bodyString(body, KEY_IMPORT_FROM_DATE))
+        : finAcc.getPSD2ImportFromDate();
+    Date importTo = body.has(KEY_IMPORT_TO_DATE)
+        ? FinancialAccountBankConnectionSupport.parseDate(
+            FinancialAccountBankConnectionSupport.bodyString(body, KEY_IMPORT_TO_DATE))
+        : finAcc.getPSD2ImportToDate();
+    if (FinancialAccountBankConnectionSupport.isImportRangeInvalid(importFrom, importTo)) {
+      return NeoResponse.error(400, MSG_IMPORT_RANGE_INVALID);
+    }
     if (body.has(KEY_IMPORT_FROM_DATE)) {
-      finAcc.setPSD2ImportFromDate(FinancialAccountBankConnectionSupport.parseDate(
-          FinancialAccountBankConnectionSupport.bodyString(body, KEY_IMPORT_FROM_DATE)));
+      finAcc.setPSD2ImportFromDate(importFrom);
     }
     if (body.has(KEY_IMPORT_TO_DATE)) {
-      finAcc.setPSD2ImportToDate(FinancialAccountBankConnectionSupport.parseDate(
-          FinancialAccountBankConnectionSupport.bodyString(body, KEY_IMPORT_TO_DATE)));
+      finAcc.setPSD2ImportToDate(importTo);
     }
     if (body.has(KEY_STATEMENT_GROUPING)) {
       finAcc.setPSD2StatementFrequency(
@@ -785,11 +804,25 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     return OBContext.getOBContext().getCurrentClient();
   }
 
+  /**
+   * The account named by the request, but only when it belongs to the current tenant.
+   *
+   * <p>Single choke point for all nine actions of this handler ({@code status}, {@code accounts},
+   * {@code connect}, {@code link}, {@code reconnect}, {@code reconnect-callback},
+   * {@code disconnect}, {@code sync}, {@code import-settings}), every one of which takes the id from
+   * a query parameter or the body and runs under the {@code setAdminMode(true)} opened above. A bare
+   * {@code OBDal.get} applies no tenant predicate, so a foreign id used to leak PSD2 data straight
+   * off the entity — connection status, the Salt Edge account id, the masked card number and the
+   * import window — and made the outbound Salt Edge calls run under the API key of the account's
+   * OWNER rather than the caller's (ETP-4950).
+   *
+   * <p>The write actions were not silently corrupting data: a flush on another client's row is
+   * rejected by {@code SecurityChecker} (admin mode with {@code doOrgClientAccessCheck} still on),
+   * so they failed with a 500. That protection is implicit and one refactor away from breaking, and
+   * the 500 itself was an existence oracle — hence the explicit guard here.
+   */
   FIN_FinancialAccount loadAccount(String accountId) {
-    if (StringUtils.isBlank(accountId)) {
-      return null;
-    }
-    return OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+    return TenantOwnership.loadOwned(FIN_FinancialAccount.class, accountId);
   }
 
   void doRollbackAndClose() {

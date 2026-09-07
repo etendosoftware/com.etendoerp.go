@@ -48,6 +48,8 @@ import org.junit.runner.RunWith;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.model.ad.system.Client;
 
 
 /**
@@ -72,12 +74,13 @@ public class MatchRuleHandlerTest {
   private static final int SERVER_ERROR = HttpServletResponse.SC_INTERNAL_SERVER_ERROR; // 500
 
   private static final String SPEC = "match-rule";
-  private static final String FAT = AccountingDimensionsSupport.DOCBASETYPE_FAT;
+  private static final String CLIENT_ID = "CLI-1";
 
   /** Wire field names of the three accounting dimensions a rule can carry. */
   private static final String F_PROJECT = "project";
   private static final String F_COST_CENTER = "costCenter";
   private static final String F_PRODUCT = "product";
+  private static final String F_BUSINESS_PARTNER = "businessPartner";
 
   private MatchRuleHandler handler;
 
@@ -453,10 +456,24 @@ public class MatchRuleHandlerTest {
     return new HashSet<>(Arrays.asList(keys));
   }
 
-  /** Pins the tenant's active FAT header dimensions for the duration of the mocked static. */
-  private static void stubActive(MockedStatic<AccountingDimensionsSupport> mocked,
-      Set<String> active) {
-    mocked.when(() -> AccountingDimensionsSupport.activeHeaderDimensionsForCurrentClient(FAT))
+  /** Stubs {@code OBContext.getOBContext().getCurrentClient().getId()} to return {@link #CLIENT_ID}. */
+  private static void stubCurrentClient(MockedStatic<OBContext> obContext) {
+    OBContext ctx = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    when(ctx.getCurrentClient()).thenReturn(client);
+    obContext.when(OBContext::getOBContext).thenReturn(ctx);
+  }
+
+  /**
+   * Pins the tenant's active flat dimensions for the duration of the mocked statics — both the
+   * current-client resolution ({@code OBContext}) and the dimension lookup itself
+   * ({@code AccountingDimensionsSupport.flatActiveDimensionsForClient}).
+   */
+  private static void stubActive(MockedStatic<OBContext> obContext,
+      MockedStatic<AccountingDimensionsSupport> mocked, Set<String> active) {
+    stubCurrentClient(obContext);
+    mocked.when(() -> AccountingDimensionsSupport.flatActiveDimensionsForClient(CLIENT_ID))
         .thenReturn(active);
   }
 
@@ -476,9 +493,10 @@ public class MatchRuleHandlerTest {
    */
   @Test
   public void testBuildActiveDimensionsListsActiveKeysInCanonicalOrder() throws Exception {
-    try (MockedStatic<AccountingDimensionsSupport> mocked =
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+         MockedStatic<AccountingDimensionsSupport> mocked =
              mockStatic(AccountingDimensionsSupport.class)) {
-      stubActive(mocked, dims(AccountingDimensionsSupport.DIM_PRODUCT,
+      stubActive(obContext, mocked, dims(AccountingDimensionsSupport.DIM_PRODUCT,
           AccountingDimensionsSupport.DIM_PROJECT,
           AccountingDimensionsSupport.DIM_ORGANIZATION));
 
@@ -504,9 +522,10 @@ public class MatchRuleHandlerTest {
    */
   @Test
   public void testBuildActiveDimensionsOmitsInactiveDimensions() throws Exception {
-    try (MockedStatic<AccountingDimensionsSupport> mocked =
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+         MockedStatic<AccountingDimensionsSupport> mocked =
              mockStatic(AccountingDimensionsSupport.class)) {
-      stubActive(mocked, Collections.singleton(AccountingDimensionsSupport.DIM_COSTCENTER));
+      stubActive(obContext, mocked, Collections.singleton(AccountingDimensionsSupport.DIM_COSTCENTER));
 
       JSONArray arr = dimensionsOf(quietSpy().buildActiveDimensions());
 
@@ -523,9 +542,10 @@ public class MatchRuleHandlerTest {
    */
   @Test
   public void testBuildActiveDimensionsReturnsAnEmptyArrayWhenNothingIsActive() throws Exception {
-    try (MockedStatic<AccountingDimensionsSupport> mocked =
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+         MockedStatic<AccountingDimensionsSupport> mocked =
              mockStatic(AccountingDimensionsSupport.class)) {
-      stubActive(mocked, Collections.emptySet());
+      stubActive(obContext, mocked, Collections.emptySet());
 
       assertEquals(0, dimensionsOf(quietSpy().buildActiveDimensions()).length());
     }
@@ -534,9 +554,11 @@ public class MatchRuleHandlerTest {
   /** An unreadable accounting configuration surfaces as a 500, with admin mode still released. */
   @Test
   public void testBuildActiveDimensionsReturns500WhenResolutionThrows() {
-    try (MockedStatic<AccountingDimensionsSupport> mocked =
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+         MockedStatic<AccountingDimensionsSupport> mocked =
              mockStatic(AccountingDimensionsSupport.class)) {
-      mocked.when(() -> AccountingDimensionsSupport.activeHeaderDimensionsForCurrentClient(FAT))
+      stubCurrentClient(obContext);
+      mocked.when(() -> AccountingDimensionsSupport.flatActiveDimensionsForClient(CLIENT_ID))
           .thenThrow(new IllegalStateException("no accounting schema"));
 
       MatchRuleHandler spyHandler = quietSpy();
@@ -553,9 +575,10 @@ public class MatchRuleHandlerTest {
    */
   @Test
   public void testHandleRoutesTheActiveDimensionsAction() throws Exception {
-    try (MockedStatic<AccountingDimensionsSupport> mocked =
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+         MockedStatic<AccountingDimensionsSupport> mocked =
              mockStatic(AccountingDimensionsSupport.class)) {
-      stubActive(mocked, Collections.singleton(AccountingDimensionsSupport.DIM_PROJECT));
+      stubActive(obContext, mocked, Collections.singleton(AccountingDimensionsSupport.DIM_PROJECT));
 
       NeoResponse response = quietSpy().handle(getActionCtx("activeDimensions"));
 
@@ -611,9 +634,10 @@ public class MatchRuleHandlerTest {
   public void testStripInactiveDimensionsDropsOnlyTheInactiveFields() throws Exception {
     JSONObject b = body(F_PROJECT, "PJ-1", F_COST_CENTER, "CC-1", F_PRODUCT, "PR-1",
         "name", "Bank fee");
-    try (MockedStatic<AccountingDimensionsSupport> mocked =
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+         MockedStatic<AccountingDimensionsSupport> mocked =
              mockStatic(AccountingDimensionsSupport.class)) {
-      stubActive(mocked, dims(AccountingDimensionsSupport.DIM_COSTCENTER,
+      stubActive(obContext, mocked, dims(AccountingDimensionsSupport.DIM_COSTCENTER,
           AccountingDimensionsSupport.DIM_PRODUCT));
 
       handler.stripInactiveDimensions(b);
@@ -626,6 +650,52 @@ public class MatchRuleHandlerTest {
   }
 
   /**
+   * The contact follows the same gate as the other dimensions: it is dropped when the tenant has
+   * the business-partner dimension switched off.
+   *
+   * <p>On a rule the contact is ASSIGNED to the generated movement, not used to match (the engine
+   * matches on textPattern only), so the Ledger Configuration toggle must govern it. Before
+   * ETP-4950's QA round it was ungated and survived no matter what the user switched off.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testStripInactiveDimensionsDropsTheContactWhenItsDimensionIsInactive()
+      throws Exception {
+    JSONObject b = body(F_BUSINESS_PARTNER, "BP-1", F_PRODUCT, "PR-1", "name", "Bank fee");
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+         MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      stubActive(obContext, mocked, dims(AccountingDimensionsSupport.DIM_PRODUCT));
+
+      handler.stripInactiveDimensions(b);
+
+      assertFalse("an inactive contact dimension must be dropped", b.has(F_BUSINESS_PARTNER));
+      assertEquals("PR-1", b.getString(F_PRODUCT));
+    }
+  }
+
+  /**
+   * The contact survives when its dimension is active.
+   *
+   * @throws Exception if the JSON plumbing fails
+   */
+  @Test
+  public void testStripInactiveDimensionsKeepsTheContactWhenItsDimensionIsActive()
+      throws Exception {
+    JSONObject b = body(F_BUSINESS_PARTNER, "BP-1", "name", "Bank fee");
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+         MockedStatic<AccountingDimensionsSupport> mocked =
+             mockStatic(AccountingDimensionsSupport.class)) {
+      stubActive(obContext, mocked, dims(AccountingDimensionsSupport.DIM_BPARTNER));
+
+      handler.stripInactiveDimensions(b);
+
+      assertEquals("BP-1", b.getString(F_BUSINESS_PARTNER));
+    }
+  }
+
+  /**
    * With no dimension active, all three fields are dropped and nothing else is touched.
    *
    * @throws Exception if the JSON plumbing fails
@@ -634,9 +704,10 @@ public class MatchRuleHandlerTest {
   public void testStripInactiveDimensionsDropsAllThreeWhenNoneIsActive() throws Exception {
     JSONObject b = body(F_PROJECT, "PJ-1", F_COST_CENTER, "CC-1", F_PRODUCT, "PR-1",
         "textPattern", "COMM");
-    try (MockedStatic<AccountingDimensionsSupport> mocked =
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+         MockedStatic<AccountingDimensionsSupport> mocked =
              mockStatic(AccountingDimensionsSupport.class)) {
-      stubActive(mocked, Collections.emptySet());
+      stubActive(obContext, mocked, Collections.emptySet());
 
       handler.stripInactiveDimensions(b);
 
@@ -675,9 +746,11 @@ public class MatchRuleHandlerTest {
   @Test
   public void testStripInactiveDimensionsFailsOpenAndKeepsTheBodyIntact() throws Exception {
     JSONObject b = body(F_PROJECT, "PJ-1", F_COST_CENTER, "CC-1", F_PRODUCT, "PR-1");
-    try (MockedStatic<AccountingDimensionsSupport> mocked =
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+         MockedStatic<AccountingDimensionsSupport> mocked =
              mockStatic(AccountingDimensionsSupport.class)) {
-      mocked.when(() -> AccountingDimensionsSupport.activeHeaderDimensionsForCurrentClient(FAT))
+      stubCurrentClient(obContext);
+      mocked.when(() -> AccountingDimensionsSupport.flatActiveDimensionsForClient(CLIENT_ID))
           .thenThrow(new IllegalStateException("no accounting schema"));
 
       handler.stripInactiveDimensions(b);
@@ -697,9 +770,10 @@ public class MatchRuleHandlerTest {
   @Test
   public void testStripInactiveDimensionsDropsAnInactiveFieldEvenWhenBlank() throws Exception {
     JSONObject b = body(F_PROJECT, "");
-    try (MockedStatic<AccountingDimensionsSupport> mocked =
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+         MockedStatic<AccountingDimensionsSupport> mocked =
              mockStatic(AccountingDimensionsSupport.class)) {
-      stubActive(mocked, Collections.singleton(AccountingDimensionsSupport.DIM_PRODUCT));
+      stubActive(obContext, mocked, Collections.singleton(AccountingDimensionsSupport.DIM_PRODUCT));
 
       handler.stripInactiveDimensions(b);
 
@@ -723,9 +797,10 @@ public class MatchRuleHandlerTest {
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getHttpMethod()).thenReturn("POST");
 
-    try (MockedStatic<AccountingDimensionsSupport> mocked =
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+         MockedStatic<AccountingDimensionsSupport> mocked =
              mockStatic(AccountingDimensionsSupport.class)) {
-      stubActive(mocked, Collections.singleton(AccountingDimensionsSupport.DIM_COSTCENTER));
+      stubActive(obContext, mocked, Collections.singleton(AccountingDimensionsSupport.DIM_COSTCENTER));
 
       assertNull(handler.validateWrite(ctx, b));
       assertFalse(b.has(F_PROJECT));
@@ -745,9 +820,10 @@ public class MatchRuleHandlerTest {
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getHttpMethod()).thenReturn("PATCH");
 
-    try (MockedStatic<AccountingDimensionsSupport> mocked =
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+         MockedStatic<AccountingDimensionsSupport> mocked =
              mockStatic(AccountingDimensionsSupport.class)) {
-      stubActive(mocked, Collections.emptySet());
+      stubActive(obContext, mocked, Collections.emptySet());
 
       assertNull(handler.validateWrite(ctx, b));
       assertFalse(b.has(F_PROJECT));
@@ -767,9 +843,10 @@ public class MatchRuleHandlerTest {
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getHttpMethod()).thenReturn("POST");
 
-    try (MockedStatic<AccountingDimensionsSupport> mocked =
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+         MockedStatic<AccountingDimensionsSupport> mocked =
              mockStatic(AccountingDimensionsSupport.class)) {
-      stubActive(mocked, Collections.emptySet());
+      stubActive(obContext, mocked, Collections.emptySet());
 
       // A valid priority is supplied on purpose, so the 400 can only come from the blank
       // name — otherwise validatePriority would reject first and this test would pass

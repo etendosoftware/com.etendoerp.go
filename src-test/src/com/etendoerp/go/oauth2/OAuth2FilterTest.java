@@ -40,6 +40,7 @@ import java.sql.Timestamp;
 import java.util.Map;
 
 import javax.servlet.FilterChain;
+import javax.servlet.annotation.WebFilter;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
@@ -91,6 +92,16 @@ class OAuth2FilterTest {
 
   private StringWriter responseBody;
   private PrintWriter printWriter;
+
+  @Test
+  @DisplayName("protects both canonical and WebMCP-friendly MCP mappings")
+  void mcpFilterCoversBothEndpoints() {
+    WebFilter annotation = OAuth2Filter.class.getAnnotation(WebFilter.class);
+
+    assertNotNull(annotation);
+    assertTrue(java.util.Arrays.asList(annotation.urlPatterns()).contains("/sws/mcp"));
+    assertTrue(java.util.Arrays.asList(annotation.urlPatterns()).contains("/mcp"));
+  }
 
   @BeforeEach
   void setUp() throws Exception {
