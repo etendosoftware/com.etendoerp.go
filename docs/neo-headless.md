@@ -75,6 +75,7 @@ Top-level specification record. Each spec maps to either an AD_Window (CRUD) or 
 | `AD_WINDOW_ID` | VARCHAR (FK) | Required when `SPEC_TYPE = 'W'`. |
 | `AD_PROCESS_ID` | VARCHAR (FK) | Required when `SPEC_TYPE = 'P'`. |
 | `AD_MODULE_ID` | VARCHAR (FK) | Module that owns this spec. |
+| `MCP_CONFIG` | VARCHAR | JSON, MCP-only configuration. See §4.12.6. |
 | `ISACTIVE` | CHAR(1) | Only active specs are served. |
 | `AD_CLIENT_ID` | VARCHAR (FK) | Standard Etendo audit column. |
 | `AD_ORG_ID` | VARCHAR (FK) | Standard Etendo audit column. |
@@ -99,6 +100,7 @@ Represents a tab (for window specs) or the process itself (for process specs) wi
 | `ISDELETE` | CHAR(1) | Enable DELETE. |
 | `JAVA_QUALIFIER` | VARCHAR | CDI `@Named` qualifier for a custom `NeoHandler`. |
 | `SEQNO` | NUMERIC | Display/processing order. |
+| `MCP_CONFIG` | VARCHAR | JSON, MCP-only configuration (`parent`, `fields`). See §4.12.6. |
 | `AD_MODULE_ID` | VARCHAR (FK) | Module that owns this entity. |
 
 ### ETGO_SF_FIELD
@@ -114,7 +116,10 @@ Represents a column (for window specs) or a process parameter (for process specs
 | `ISREADONLY` | CHAR(1) | Field-level read-only flag. |
 | `DEFAULTVALUE` | VARCHAR | Default value override. For process specs, stores the parameter default. |
 | `JAVA_QUALIFIER` | VARCHAR | For process specs: stores the parameter DB column name. |
+| `VISIBILITY` | VARCHAR | Curated `editable`/`readOnly`/`system`/`discarded`. Frequently `NULL`; the REST layer does not gate on it, the MCP does. See §4.12.6. |
+| `ISBUSINESSCRITICAL` | CHAR(1) | Marks the field part of the entity's curated summary. |
 | `SEQNO` | NUMERIC | Display/processing order. |
+| `MCP_CONFIG` | VARCHAR | JSON, MCP-only configuration (`fields`). See §4.12.6. |
 | `AD_MODULE_ID` | VARCHAR (FK) | Module that owns this field. |
 
 ### ETGO_PREVIEW_FILE
@@ -1552,6 +1557,87 @@ set omitted it, so `fields:["name","updated"]` returned `updated` in `data` **an
 `unknownFields` — a response contradicting itself, which for an agent consumer is worse than no
 signal at all. The set is now unioned into `emittableResponseKeys()` only: `updated` stays
 unwritable, and a client that sends it on a create is still filtered/rejected exactly as before.
+
+#### 4.12.6 `MCP_CONFIG` — the MCP's own configuration column (ETP-5184)
+
+`ETGO_SF_SPEC`, `ETGO_SF_ENTITY` and `ETGO_SF_FIELD` each carry an `MCP_CONFIG` text column holding
+a JSON object that maps **section name → section body**. It is the MCP's private configuration
+layer: nothing outside `src/com/etendoerp/go/mcp/` reads it, so a value written here changes what
+agents are offered and leaves the REST and React contracts untouched.
+
+Resolution is a chain, `spec` → `entity` → `field`, merged by `McpEntityConfig`. Each section
+declares how its levels combine — `REPLACE` (the most specific level that defines the section wins
+outright) or `ADDITIVE` (every level contributes). Both current sections are `REPLACE`.
+
+Sections are registered in `McpConfigSections.ensureRegistered()`, and `McpEntityConfig` calls that
+before it parses anything. **An unknown section name, or an unknown key inside a known section, is
+an error, not a value that is quietly dropped** — for this column an absent key means
+"unconfigured", which for a section that gates access is the permissive answer, so a typo must not
+be indistinguishable from an omission. Problems are reported through `neo_discover` rather than
+thrown, and a body that failed validation is never acted on.
+
+Adding a section is one class plus one line in `McpConfigSections` — no model change and no AD
+metadata.
+
+**Registered sections:**
+
+| Section | Level | Purpose |
+|---|---|---|
+| `parent` | entity | How a child entity identifies its parent, and for which verbs the parent key is required (`field`, `entity`, `optionalFor`, `mode`, `reason`). See §6. |
+| `fields` | spec / entity / field | Reclassifies the MCP's view of field curation — `visibility`, `readOnly`, `businessCritical`, `reason`. |
+
+##### The `fields` section
+
+```json
+{
+  "fields": {
+    "visibility": "editable",
+    "readOnly": false,
+    "businessCritical": true,
+    "reason": "why the shared curation is wrong for agent use"
+  }
+}
+```
+
+- `visibility` — one of `editable`, `readOnly`, `system`, `discarded`. An unknown value is a
+  validation error.
+- `readOnly`, `businessCritical` — JSON booleans, unquoted. An absent key is *not* a configured
+  `false`: it leaves the `ETGO_SF_FIELD` value standing.
+- `reason` — **mandatory** whenever the section is present, and non-blank. Every row of this section
+  asserts that the shared curation is wrong for agent use; that claim has to be auditable on the row
+  that makes it.
+- An empty section body is a validation error — remove the section instead.
+
+Written at entity level it reclassifies every field of that entity at once; at field level it
+reclassifies one.
+
+**It reclassifies curation, never permissions.** Curation decides whether `neo_schema` advertises a
+field and whether `McpToolRouter` publishes `POST`/`PUT` for the entity at all. Whether a role may
+actually write a column on a record is settled downstream by the DAL and `NeoCrudHandler`, exactly
+as before — an AD-level non-writable column still fails. The override widens what is *offered*, not
+what is *allowed*.
+
+**Why it exists.** `McpToolRouter` publishes a write verb for an entity only if at least one field
+is agent-suppliable (`McpSchemaFieldBuilder.isAgentSuppliable`: `visibility == "editable"` and not
+read-only). All ten `ETGO_SF_FIELD` rows for `C_Location` carry `VISIBILITY = NULL` — a curation
+omission, not a decision — so `bp-location/bpLocation` advertised `["GET","DELETE"]` despite
+`ISPOST = 'Y'` and `ISPUT = 'Y'`, and since it is the only entity mapping `C_Location`, no
+business-partner address could be created through an agent at all (`contacts/locationAddress`
+requires an existing `C_Location_ID`).
+
+Backfilling `VISIBILITY` is the deeper fix and the one to make eventually — 18 entities share this
+gap. It was not taken here because that column is read by the REST and React layers too, so a
+backfill changes the shared contract for every existing consumer. The override is the deliberately
+low-risk path: MCP-only, blast radius of one entity. Only `bpLocation` carries it today.
+
+**One resolver, three readers.** `McpFieldView.of(SFField)` applies the resolved section and is the
+single source of `visibility` / `readOnly` / `businessCritical` / `isEditable` for all three places
+that previously derived them independently — `McpSchemaFieldBuilder.loadFieldMetadata`
+(`neo_schema`), `McpQuerySupport.editablePropertyNames` (`neo_selectors`, which computed its own
+`isIncluded && !isReadOnly`) and `McpResourceProvider`. Without it an override honoured by only the
+first reader would have `neo_schema` and `neo_selectors` contradicting each other about the same
+field. A field that neither the row nor the override classifies still reports **no** `visibility`
+key, exactly as before.
 
 ---
 

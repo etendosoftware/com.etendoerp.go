@@ -53,6 +53,7 @@ final class McpConfigSections {
       return;
     }
     McpEntityConfig.register(McpParentSection.declaration());
+    McpEntityConfig.register(McpFieldsSection.declaration());
     REGISTERED.set(true);
   }
 

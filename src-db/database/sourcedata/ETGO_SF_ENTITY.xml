@@ -2260,6 +2260,7 @@
 <!--643B950E1F62480D87DD5D0C2437139A-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--643B950E1F62480D87DD5D0C2437139A-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--643B950E1F62480D87DD5D0C2437139A-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--643B950E1F62480D87DD5D0C2437139A-->  <MCP_CONFIG><![CDATA[{"fields":{"visibility":"editable","reason":"C_Location's ETGO_SF_FIELD rows carry no visibility. The REST layer does not gate on it, but the MCP method gate does, so POST/PUT are stripped and no address can be created through the agent. Classified MCP-side to leave the shared contract untouched."}}]]></MCP_CONFIG>
 <!--643B950E1F62480D87DD5D0C2437139A--></ETGO_SF_ENTITY>
 
 <!--65BF1DFD362B4F1CB6FEC60DB7030CF5--><ETGO_SF_ENTITY>

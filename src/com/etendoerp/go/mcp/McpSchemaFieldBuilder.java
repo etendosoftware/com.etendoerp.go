@@ -66,6 +66,8 @@ final class McpSchemaFieldBuilder {
   /** The {@code visibility} VALUE {@code "readOnly"} — deliberately distinct from
    *  {@link #KEY_READ_ONLY}, the JSON key, even though the two strings coincide. */
   static final String VISIBILITY_READ_ONLY = "readOnly";
+  /** The {@code visibility} value for a field the server derives — never the agent's to send. */
+  static final String VISIBILITY_SYSTEM = "system";
   static final String VISIBILITY_DISCARDED = "discarded";
   static final String TYPE_BUTTON = McpActionsView.TYPE_BUTTON;
   static final String KEY_INVOKE_VIA = "invokeVia";
@@ -180,13 +182,16 @@ final class McpSchemaFieldBuilder {
         continue;
       }
       String colId = (String) adCol.getId();
-      String visibility = sfField.getVisibility();
-      if (visibility != null && !visibility.trim().isEmpty()) {
-        visibilityByColumnId.put(colId, visibility.trim());
+      // Effective curation, not the raw row: the MCP_CONFIG "fields" section may reclassify it.
+      // A field neither the row nor the override classifies keeps an ABSENT visibility here, which
+      // is what addVisibility() has always emitted for it - see McpFieldView.getVisibility().
+      McpFieldView view = McpFieldView.of(sfField);
+      String visibility = view.getVisibility();
+      if (StringUtils.isNotBlank(visibility)) {
+        visibilityByColumnId.put(colId, visibility);
       }
-      Boolean isBusinessCritical = sfField.isBusinessCritical();
-      businessCriticalByColumnId.put(colId, Boolean.TRUE.equals(isBusinessCritical));
-      readOnlyByColumnId.put(colId, Boolean.TRUE.equals(sfField.isReadOnly()));
+      businessCriticalByColumnId.put(colId, view.isBusinessCritical());
+      readOnlyByColumnId.put(colId, view.isReadOnly());
     }
     return new FieldMetadata(visibilityByColumnId, businessCriticalByColumnId, readOnlyByColumnId);
   }

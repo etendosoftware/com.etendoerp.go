@@ -261,11 +261,12 @@ final class McpQuerySupport {
    * the entity or its DAL model cannot be resolved, which makes the grouped view degrade to
    * "everything is systemManaged" rather than fail.
    *
-   * <p>The Schema Forge {@code visibility} decision (editable/readOnly/system/discarded) is never
-   * stored on {@code ETGO_SF_FIELD} as a literal string — {@code push-to-neo} maps it to the
-   * {@code isIncluded}/{@code isReadOnly} booleans (editable = {@code isIncluded && !isReadOnly}).
-   * Reading a nonexistent {@code visibility} column left this set empty for every spec, so we derive
-   * editability from those two populated flags instead.
+   * <p>{@code push-to-neo} maps the Schema Forge {@code visibility} decision
+   * (editable/readOnly/system/discarded) to the {@code isIncluded}/{@code isReadOnly} booleans
+   * (editable = {@code isIncluded && !isReadOnly}), and for many specs that is all that is
+   * populated — the {@code VISIBILITY} column itself is frequently {@code NULL}. Editability is
+   * therefore resolved through {@link McpFieldView}, which falls back to those two booleans when no
+   * visibility is curated and honours the {@code MCP_CONFIG} {@code fields} override when one is.
    */
   static java.util.Set<String> editablePropertyNames(SFEntity sfEntity, Tab adTab) {
     java.util.Set<String> result = new java.util.HashSet<>();
@@ -279,12 +280,12 @@ final class McpQuerySupport {
     crit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
     for (SFField sfField : crit.list()) {
       Column col = sfField.getADColumn();
-      // editable = included in the spec and not read-only. Mirrors mapVisibility() in
-      // push-to-neo.js: editable is the only visibility yielding isIncluded='Y', isReadOnly='N'
-      // (readOnly/system are included but read-only; discarded is excluded).
-      boolean editable = Boolean.TRUE.equals(sfField.isIncluded())
-          && !Boolean.TRUE.equals(sfField.isReadOnly());
-      if (col == null || !editable) {
+      // One resolver for every reader (ETP-5184): McpFieldView keeps this derivation - included in
+      // the spec and not read-only, mirroring mapVisibility() in push-to-neo.js, where editable is
+      // the only visibility yielding isIncluded='Y', isReadOnly='N' - and prefers the curated
+      // visibility string wherever one exists, including one the MCP_CONFIG "fields" section
+      // supplies. neo_schema and neo_selectors can no longer disagree about the same field.
+      if (col == null || !McpFieldView.of(sfField).isEditable()) {
         continue;
       }
       Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
