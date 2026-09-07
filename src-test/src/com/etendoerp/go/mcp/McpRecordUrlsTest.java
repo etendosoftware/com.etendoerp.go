@@ -48,6 +48,9 @@ import org.openbravo.model.ad.ui.Tab;
  * {@code localhost:3100}) survived the suite and was only caught by a 405 against the running
  * instance.</p>
  */
+// Test methods live in the @Nested inner classes below; S2187 only inspects
+// the outer class for @Test methods, hence the suppression.
+@SuppressWarnings("java:S2187")
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class McpRecordUrlsTest {

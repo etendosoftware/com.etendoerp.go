@@ -60,6 +60,9 @@ import com.etendoerp.go.schemaforge.util.NeoImageUploadTickets;
  * cheap path and the 256 KB cap, so the guidance an agent reads cannot drift away from the
  * validation the server actually enforces.
  */
+// Test methods live in the @Nested inner classes below; S2187 only inspects
+// the outer class for @Test methods, hence the suppression.
+@SuppressWarnings("java:S2187")
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class McpImageToolsTest {
