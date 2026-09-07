@@ -247,12 +247,11 @@ class ContactsLocationAddressParentAndRegionTest {
   class RegionName {
 
     @Test
-    @DisplayName("an explicit region id is used as the FK and the name is never resolved")
+    @DisplayName("an explicit region id wins, clears the free text, and never resolves the name")
     void explicitRegionIdWins() throws Exception {
       // Every existing caller (the address modal's selector) sends an id, and it must keep
-      // winning. NOTE: this branch does not clear C_Location.RegionName, so it is the one path
-      // where both columns can end up populated — reported rather than asserted here, since
-      // pinning it either way would be a decision this test is not entitled to make.
+      // winning. It must also clear the free-text column: this branch used to leave RegionName
+      // alone, which was the one path that could leave both columns populated.
       Region madrid = mock(Region.class);
       when(obDal.get(Region.class, "region-id")).thenReturn(madrid);
       Location geoLoc = mock(Location.class);
@@ -263,7 +262,38 @@ class ContactsLocationAddressParentAndRegionTest {
       applyGeoLocFields(body, geoLoc);
 
       verify(geoLoc).setRegion(madrid);
+      verify(geoLoc).setRegionName(null);
+      verify(geoLoc, never()).setRegionName("Cordoba");
       verify(obDal, never()).createQuery(eq(Region.class), anyString());
+    }
+
+    /**
+     * The concrete state the fix prevents: a record whose {@code RegionName} was filled by the
+     * free-text fallback (an Argentine address, no {@code C_Region} rows) is later edited from the
+     * Location modal, whose selector sends a {@code region} id. Both columns populated is a record
+     * that answers the same question two ways, and the contacts export's
+     * {@code COALESCE(C_Region.name, C_Location.regionname)} would then pick whichever it likes —
+     * so the assertion is that the stale free text is cleared, not merely that the FK is set.
+     */
+    @Test
+    @DisplayName("a record carrying free text from the fallback does not keep both columns when a "
+        + "selector id arrives")
+    void aSelectorIdSupersedesTheStaleFreeText() throws Exception {
+      Region madrid = mock(Region.class);
+      when(obDal.get(Region.class, "madrid-id")).thenReturn(madrid);
+      Location geoLoc = mock(Location.class);
+      // The record as the fallback left it: free text set, no FK.
+      when(geoLoc.getRegionName()).thenReturn("Cordoba");
+      when(geoLoc.getRegion()).thenReturn(null);
+
+      JSONObject body = new JSONObject();
+      body.put("region", "madrid-id");
+      applyGeoLocFields(body, geoLoc);
+
+      verify(geoLoc).setRegion(madrid);
+      verify(geoLoc).setRegionName(null);
+      // Nothing must re-assert the superseded value, whatever order the writes happen in.
+      verify(geoLoc, never()).setRegionName("Cordoba");
     }
 
     @Test
