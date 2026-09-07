@@ -102,6 +102,12 @@ public final class NeoImageHelper {
      *  {@code mime_mismatch} or {@code malformed_base64}. */
     private final String reason;
 
+    /**
+     * @param reason  machine-readable reason: {@code empty}, {@code too_large},
+     *                {@code unsupported_mime}, {@code mime_mismatch} or {@code malformed_base64}
+     * @param message the sentence handed to the caller. Every reason here is caller-correctable, so
+     *                this is expected to say what to change and retry with
+     */
     public ImageValidationException(String reason, String message) {
       super(message);
       this.reason = reason;
@@ -113,6 +119,10 @@ public final class NeoImageHelper {
   }
 
   /**
+   * Detects what an image payload really is, from its leading magic bytes.
+   *
+   * @param data the raw bytes; {@code null}, or shorter than the magic sequence, yields
+   *     {@code null}
    * @return the MIME type the bytes actually are ({@link #MIME_PNG} / {@link #MIME_JPEG}), or
    *     {@code null} when they are neither. Magic bytes only — the caller's declared MIME is never
    *     trusted, because a lying {@code mime_type} is exactly how an arbitrary blob would get stored
@@ -181,7 +191,16 @@ public final class NeoImageHelper {
    * <p>{@code maxBytes} is pre-checked against the ENCODED length (base64 inflates by 4/3) so a
    * caller cannot make the server materialise a huge array just to have it rejected.
    *
-   * @throws ImageValidationException with reason {@code malformed_base64} or {@code too_large}
+   * @param dataBase64    the base64 text, with or without a {@code data:...;base64,} prefix;
+   *                      whitespace is stripped before decoding
+   * @param maxBytes      hard cap on the DECODED size, pre-checked against the encoded length
+   * @param overCapAdvice appended to the too-large message, to route the caller somewhere that
+   *                      accepts the file (the ticketed PUT, for the MCP base64 path)
+   * @return the decoded bytes. Their type is NOT checked here — call
+   *     {@link #validateImageBytes} for that
+   * @throws ImageValidationException with reason {@code empty} when nothing was sent,
+   *     {@code too_large} when the payload is over the cap, or {@code malformed_base64} when it
+   *     does not decode
    */
   public static byte[] decodeBase64Image(String dataBase64, int maxBytes, String overCapAdvice) {
     String payload = StringUtils.trimToNull(dataBase64);
@@ -215,6 +234,9 @@ public final class NeoImageHelper {
    * base64 tool and the ticket endpoint cannot drift apart. No validation here — see the class
    * javadoc for why.
    *
+   * @param name     name for the row; blank falls back to {@code "image"}
+   * @param mimeType MIME type to record; blank falls back to {@link #MIME_PNG}
+   * @param data     the image bytes, stored as-is
    * @return the persisted image, with its generated id available
    */
   public static Image createImage(String name, String mimeType, byte[] data) {
@@ -229,6 +251,13 @@ public final class NeoImageHelper {
    * <p>The ticket endpoint needs this overload: it runs unauthenticated (the token is the
    * credential), so there is no session context to read the scope from — the scope comes from the
    * ticket that was issued to an authenticated MCP session.
+   *
+   * @param name         name for the row; blank falls back to {@code "image"}
+   * @param mimeType     MIME type to record; blank falls back to {@link #MIME_PNG}
+   * @param data         the image bytes, stored as-is
+   * @param client       client the row is created in
+   * @param organization organization the row is created in
+   * @return the persisted and flushed image, with its generated id available
    */
   public static Image createImage(String name, String mimeType, byte[] data, Client client,
       Organization organization) {
@@ -249,6 +278,12 @@ public final class NeoImageHelper {
    *
    * <p>{@code width}/{@code height} are omitted rather than guessed when {@code ImageIO} cannot read
    * the stream: they are informational, and a wrong dimension is worse than an absent one.
+   *
+   * @param image the persisted row, read for its id, name and MIME type
+   * @param data  the bytes that were stored, used for {@code bytes} and for the dimension probe;
+   *              {@code null} reports {@code bytes: 0} and omits the dimensions
+   * @return the response body described above
+   * @throws JSONException if a value cannot be written into the body
    */
   public static JSONObject describeImage(Image image, byte[] data) throws JSONException {
     JSONObject result = new JSONObject();
@@ -264,7 +299,14 @@ public final class NeoImageHelper {
     return result;
   }
 
-  /** @return {@code {width, height}}, or {@code null} when the bytes cannot be decoded. */
+  /**
+   * Probes an image's pixel dimensions with {@link ImageIO}, without throwing: a payload no reader
+   * understands is reported as absent rather than as an error, because the dimensions are
+   * informational.
+   *
+   * @param data the image bytes; {@code null} or empty yields {@code null}
+   * @return {@code {width, height}}, or {@code null} when the bytes cannot be decoded.
+   */
   public static int[] readDimensions(byte[] data) {
     if (data == null || data.length == 0) {
       return null;
@@ -378,7 +420,13 @@ public final class NeoImageHelper {
    * it would also make a Tomcat restart (which drops the in-memory store) look different from an
    * expiry, when the agent's remedy — request another ticket — is identical.
    *
-   * @param token the path segment after {@code /image/upload/}
+   * @param token    the path segment after {@code /image/upload/}
+   * @param method   the HTTP method; anything but {@code "PUT"} is answered 405 without touching
+   *                 the ticket
+   * @param request  the request whose body is the raw file bytes — not base64, not multipart
+   * @param response the response the created image's description, or the error, is written to
+   * @throws IOException if writing the response fails. Failures while reading the body or creating
+   *     the row do not propagate: they release the ticket and are answered as an error status
    */
   public static void handleUploadTicketRequest(String token, String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
