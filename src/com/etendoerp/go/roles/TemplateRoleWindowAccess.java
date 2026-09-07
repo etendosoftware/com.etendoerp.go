@@ -132,6 +132,20 @@ public final class TemplateRoleWindowAccess {
     // constants holder
   }
 
+  /**
+   * {@code AD_Window_ID} for the "Escaneo inteligente" / Smart Scan pseudo-window permission
+   * anchor (ETP-5116) — granted to all four non-Admin templates. See class javadoc ("Informes
+   * financieros" and "Escaneo inteligente" paragraph) for why this window exists.
+   */
+  private static final String SMART_SCAN_WINDOW_ID = "33705E0F52874D91B0BB2FF8BB648B8E";
+
+  /**
+   * {@code AD_Window_ID} for the "Informes de inventario" / Inventory Stock Report pseudo-window
+   * permission anchor (ETP-5116) — granted to Compras/Financiero/Almacén, NOT Ventas. See class
+   * javadoc ("Informes de inventario" paragraph) for why this window exists.
+   */
+  private static final String INVENTORY_STOCK_REPORT_WINDOW_ID = "6346B88619F948F9A42224BDB0B239FA";
+
   /** One window grant: the window id and whether it is read-only ("R") vs. full ("✓") access. */
   public static final class WindowGrant {
     private final String windowId;
@@ -186,7 +200,7 @@ public final class TemplateRoleWindowAccess {
         full("146"),                                           // Tarifa — Price List
         readOnly("141"),                                       // Condiciones de pago — Payment Term
         readOnly("192"),                                       // Categoría de contacto — Business Partner Category
-        full("33705E0F52874D91B0BB2FF8BB648B8E"));             // Escaneo inteligente — Smart Scan (ETP-5116)
+        full(SMART_SCAN_WINDOW_ID));             // Escaneo inteligente — Smart Scan (ETP-5116)
   }
 
   /**
@@ -221,8 +235,8 @@ public final class TemplateRoleWindowAccess {
         full("146"),                                          // Tarifa — Price List
         readOnly("141"),                                       // Condiciones de pago — Payment Term
         readOnly("192"),                                       // Categoría de contacto — Business Partner Category
-        full("33705E0F52874D91B0BB2FF8BB648B8E"),              // Escaneo inteligente — Smart Scan (ETP-5116)
-        full("6346B88619F948F9A42224BDB0B239FA"));             // Informes de inventario — Inventory Stock Report (ETP-5116)
+        full(SMART_SCAN_WINDOW_ID),              // Escaneo inteligente — Smart Scan (ETP-5116)
+        full(INVENTORY_STOCK_REPORT_WINDOW_ID));             // Informes de inventario — Inventory Stock Report (ETP-5116)
   }
 
   /**
@@ -278,8 +292,8 @@ public final class TemplateRoleWindowAccess {
         full("C327DE215AC945F69363905840118177"),              // TBAI Configuration — "Configuración fiscal" (ETP-5116)
         full("27A453FA86974745977672F1A8DCCEFF"),              // Verifactu Configuration — "Configuración fiscal" (ETP-5116)
         full("D647D118F5014D00AF47A636B2CD0DD3"),              // Informes financieros — Financial Reports (ETP-5116, Financiero-only)
-        full("33705E0F52874D91B0BB2FF8BB648B8E"),              // Escaneo inteligente — Smart Scan (ETP-5116)
-        full("6346B88619F948F9A42224BDB0B239FA"));             // Informes de inventario — Inventory Stock Report (ETP-5116)
+        full(SMART_SCAN_WINDOW_ID),              // Escaneo inteligente — Smart Scan (ETP-5116)
+        full(INVENTORY_STOCK_REPORT_WINDOW_ID));             // Informes de inventario — Inventory Stock Report (ETP-5116)
   }
 
   /**
@@ -305,8 +319,8 @@ public final class TemplateRoleWindowAccess {
         full("170"),                                          // Movimiento entre almacenes — Goods Movements
         full("800076"),                                       // Consumo interno — Internal Consumption
         full("139"),                                          // Almacén — Warehouse and Storage Bins
-        full("33705E0F52874D91B0BB2FF8BB648B8E"),              // Escaneo inteligente — Smart Scan (ETP-5116)
-        full("6346B88619F948F9A42224BDB0B239FA"));             // Informes de inventario — Inventory Stock Report (ETP-5116)
+        full(SMART_SCAN_WINDOW_ID),              // Escaneo inteligente — Smart Scan (ETP-5116)
+        full(INVENTORY_STOCK_REPORT_WINDOW_ID));             // Informes de inventario — Inventory Stock Report (ETP-5116)
   }
 
   private static List<WindowGrant> list(WindowGrant... grants) {

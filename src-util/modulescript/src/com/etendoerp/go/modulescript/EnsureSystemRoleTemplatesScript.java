@@ -265,6 +265,22 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
   private static final String PURCHASING_ROLE_ID = "5E279F5102F9410F9B8CCBA424741F46";
   private static final String INVENTORY_ROLE_ID = "73581A7B4F414A2C9059C83CE7BE97BF";
 
+  /**
+   * {@code AD_Window_ID} for the "Escaneo inteligente" / Smart Scan pseudo-window permission
+   * anchor (ETP-5116) — granted to all four non-Admin templates. Inlined copy of
+   * {@code TemplateRoleWindowAccess#SMART_SCAN_WINDOW_ID} — see that class's javadoc for why this
+   * window exists.
+   */
+  private static final String SMART_SCAN_WINDOW_ID = "33705E0F52874D91B0BB2FF8BB648B8E";
+
+  /**
+   * {@code AD_Window_ID} for the "Informes de inventario" / Inventory Stock Report pseudo-window
+   * permission anchor (ETP-5116) — granted to Compras/Financiero/Almacén, NOT Ventas. Inlined
+   * copy of {@code TemplateRoleWindowAccess#INVENTORY_STOCK_REPORT_WINDOW_ID} — see that class's
+   * javadoc for why this window exists.
+   */
+  private static final String INVENTORY_STOCK_REPORT_WINDOW_ID = "6346B88619F948F9A42224BDB0B239FA";
+
   /** English names for the role INSERT, keyed by the literal ids above. */
   private static final Map<String, String> ROLE_NAMES_BY_ID = namesByRoleId();
 
@@ -330,7 +346,7 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("146"),                                           // Tarifa — Price List
         readOnly("141"),                                       // Condiciones de pago — Payment Term
         readOnly("192"),                                       // Categoría de contacto — Business Partner Category
-        full("33705E0F52874D91B0BB2FF8BB648B8E"));             // Escaneo inteligente — Smart Scan (ETP-5116)
+        full(SMART_SCAN_WINDOW_ID));             // Escaneo inteligente — Smart Scan (ETP-5116)
   }
 
   /**
@@ -360,8 +376,8 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("146"),                                          // Tarifa — Price List
         readOnly("141"),                                       // Condiciones de pago — Payment Term
         readOnly("192"),                                       // Categoría de contacto — Business Partner Category
-        full("33705E0F52874D91B0BB2FF8BB648B8E"),              // Escaneo inteligente — Smart Scan (ETP-5116)
-        full("6346B88619F948F9A42224BDB0B239FA"));             // Informes de inventario — Inventory Stock Report (ETP-5116)
+        full(SMART_SCAN_WINDOW_ID),              // Escaneo inteligente — Smart Scan (ETP-5116)
+        full(INVENTORY_STOCK_REPORT_WINDOW_ID));             // Informes de inventario — Inventory Stock Report (ETP-5116)
   }
 
   /**
@@ -414,8 +430,8 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("C327DE215AC945F69363905840118177"),              // TBAI Configuration — "Configuración fiscal" (ETP-5116)
         full("27A453FA86974745977672F1A8DCCEFF"),              // Verifactu Configuration — "Configuración fiscal" (ETP-5116)
         full("D647D118F5014D00AF47A636B2CD0DD3"),              // Informes financieros — Financial Reports (ETP-5116, Financiero-only)
-        full("33705E0F52874D91B0BB2FF8BB648B8E"),              // Escaneo inteligente — Smart Scan (ETP-5116)
-        full("6346B88619F948F9A42224BDB0B239FA"));             // Informes de inventario — Inventory Stock Report (ETP-5116)
+        full(SMART_SCAN_WINDOW_ID),              // Escaneo inteligente — Smart Scan (ETP-5116)
+        full(INVENTORY_STOCK_REPORT_WINDOW_ID));             // Informes de inventario — Inventory Stock Report (ETP-5116)
   }
 
   /**
@@ -441,8 +457,8 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("170"),                                          // Movimiento entre almacenes — Goods Movements
         full("800076"),                                       // Consumo interno — Internal Consumption
         full("139"),                                          // Almacén — Warehouse and Storage Bins
-        full("33705E0F52874D91B0BB2FF8BB648B8E"),              // Escaneo inteligente — Smart Scan (ETP-5116)
-        full("6346B88619F948F9A42224BDB0B239FA"));             // Informes de inventario — Inventory Stock Report (ETP-5116)
+        full(SMART_SCAN_WINDOW_ID),              // Escaneo inteligente — Smart Scan (ETP-5116)
+        full(INVENTORY_STOCK_REPORT_WINDOW_ID));             // Informes de inventario — Inventory Stock Report (ETP-5116)
   }
 
   /**
