@@ -107,7 +107,7 @@ import org.openbravo.modulescript.ModuleScript;
  *
  * <p><b>ETP-4830 item #6.3 — process/report access, mechanical follow-up to the window matrix
  * above.</b> A real-DB audit found all four templates had ZERO {@code AD_Process_Access}/
- * {@code obuiapp_process_access} rows despite the (then-64, now 65 after ETP-5075/ETP-5116) window
+ * {@code obuiapp_process_access} rows despite the (then-64, now 76 after ETP-5075/ETP-5116) window
  * grants — a composed user could open
  * a window but not click any action button on it. {@link #reconcileProcessAccess} closes this
  * for every window a role has FULL access to: every classic/OBUIAPP process reachable as a

@@ -45,7 +45,7 @@ import com.etendoerp.go.roles.TemplateRoleWindowAccess.WindowGrant;
  * Ventas/Compras/Financiero/Almacén matrix, cross-referenced against the research dispatch's
  * resolved {@code AD_Window_ID} mapping (ETP-5116 later removed 2 over-grants and added 2 new
  * proxy grants — see the affected tests below). See {@link TemplateRoleWindowAccess}'s own
- * javadoc for the full per-role breakdown and the 10 deferred, windowless matrix rows this suite
+ * javadoc for the full per-role breakdown and the 3 deferred, windowless matrix rows this suite
  * does not (and should never) reference.</p>
  */
 class TemplateRoleWindowAccessTest {
@@ -93,7 +93,7 @@ class TemplateRoleWindowAccessTest {
   }
 
   @Test
-  void financeHasTwentySevenGrantsIncludingTheResolvedSimpleGlJournal() {
+  void financeHasThirtyFourGrantsIncludingTheResolvedSimpleGlJournal() {
     List<WindowGrant> finance = TemplateRoleWindowAccess.byRoleId()
         .get(SystemRoleTemplates.FINANCE_ROLE_ID);
     assertEquals(34, finance.size(),
@@ -170,7 +170,7 @@ class TemplateRoleWindowAccessTest {
   }
 
   @Test
-  void purchasingHasTwelveGrants() {
+  void purchasingHasFourteenGrants() {
     List<WindowGrant> purchasing = TemplateRoleWindowAccess.byRoleId()
         .get(SystemRoleTemplates.PURCHASING_ROLE_ID);
     assertEquals(14, purchasing.size(),
@@ -188,7 +188,7 @@ class TemplateRoleWindowAccessTest {
   }
 
   @Test
-  void inventoryHasThirteenGrantsWithReadOnlySalesOrderAndFullWarehouse() {
+  void inventoryHasFifteenGrantsWithReadOnlySalesOrderAndFullWarehouse() {
     List<WindowGrant> inventory = TemplateRoleWindowAccess.byRoleId()
         .get(SystemRoleTemplates.INVENTORY_ROLE_ID);
     assertEquals(15, inventory.size(),
@@ -423,7 +423,7 @@ class TemplateRoleWindowAccessTest {
    * shared by Purchasing/Finance/Inventory but counted once) = 42.</p>
    */
   @Test
-  void thirtySixDistinctWindowIdsAreCoveredAcrossAllFourRoles() {
+  void fortyTwoDistinctWindowIdsAreCoveredAcrossAllFourRoles() {
     Set<String> distinctWindowIds = new TreeSet<>();
     for (List<WindowGrant> grants : TemplateRoleWindowAccess.byRoleId().values()) {
       for (WindowGrant grant : grants) {
