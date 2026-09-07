@@ -17,10 +17,6 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.math.BigDecimal;
-import java.sql.Connection;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -36,19 +32,25 @@ import java.util.regex.PatternSyntaxException;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.structure.BaseOBObject;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+
+import com.etendoerp.go.schemaforge.data.MatchRule;
 
 /**
  * Stateless engine that evaluates active {@code ETGO_MATCH_RULE} records against a bank-statement
  * line's text and returns the best-matching rule (primary suggestion) plus any lower-priority
  * alternatives.
  *
- * <p>Rules are loaded from the database via raw SQL so no generated-entity compilation is needed.
- * The evaluation order is ascending {@code priority} (lower value = higher importance); the first
- * rule whose pattern matches wins. Ties in priority are broken by insertion order (DB fetch order).
+ * <p>Rules are loaded through the DAL ({@link #loadRules(String)}), which scopes them to the current
+ * tenant. The evaluation order is ascending {@code priority} (lower value = higher importance); the
+ * first rule whose pattern matches wins. Ties in priority are broken by rule id.
  *
  * <p>Usage:
  * <pre>
- *   List&lt;MatchRuleEngine.Rule&gt; rules = MatchRuleEngine.loadRules(conn, accountId);
+ *   List&lt;MatchRuleEngine.Rule&gt; rules = MatchRuleEngine.loadRules(accountId);
  *   MatchRuleEngine.MatchResult result = MatchRuleEngine.evaluate(description, reference, partner, rules);
  *   if (result.isMatched()) { ... }
  * </pre>
@@ -80,69 +82,76 @@ final class MatchRuleEngine {
   // SQL
   // ---------------------------------------------------------------------------
 
-  /**
-   * Loads active rules for the given account, ordered by ascending priority.
-   * When {@code accountId} is blank, rules scoped to any account are returned (global).
-   * When a specific {@code accountId} is provided, returns rules where
-   * {@code fin_financial_account_id IS NULL} (global) OR equals the given account, so both
-   * global and account-specific rules are evaluated.
-   */
-  private static final String LOAD_RULES_SQL =
-      "SELECT mr.etgo_match_rule_id,"
-          + "       mr.name,"
-          + "       mr.priority,"
-          + "       mr.textcondition,"
-          + "       mr.textpattern,"
-          + "       mr.c_glitem_id,"
-          + "       mr.c_bpartner_id,"
-          + "       mr.etgo_transaction_type_id,"
-          + "       mr.c_project_id,"
-          + "       mr.c_costcenter_id,"
-          + "       mr.m_product_id,"
-          + "       mr.matchcount"
-          + "  FROM etgo_match_rule mr"
-          + " WHERE mr.isactive = 'Y'"
-          + "   AND (mr.fin_financial_account_id IS NULL OR mr.fin_financial_account_id = ?)"
-          + " ORDER BY mr.priority ASC, mr.etgo_match_rule_id ASC"; // NOSONAR java:S2077 — built from constants only
-
   // ---------------------------------------------------------------------------
   // Public API
   // ---------------------------------------------------------------------------
 
   /**
-   * Loads active rules from the database.
+   * Loads the active rules applicable to {@code accountId}, ordered by ascending priority.
    *
-   * @param conn      the JDBC connection (from {@code OBDal.getInstance().getConnection()})
+   * <p>A rule with no financial account is "global" — it applies to every account <b>of its own
+   * tenant</b>. When {@code accountId} is blank only those global rules are returned.
+   *
+   * <p><b>Tenant scoping (ETP-4950).</b> This runs through the DAL on purpose. Until this change it
+   * was a raw JDBC {@code SELECT} whose {@code WHERE} filtered on {@code isactive} and the financial
+   * account but <b>not</b> on {@code ad_client_id} / {@code ad_org_id} — so a global rule of ANY
+   * tenant was loaded for EVERY account of EVERY tenant, and Automatch happily matched statement
+   * lines against a rule the user could not even see (the window's list goes through the generic NEO
+   * CRUD, which is DAL-backed and therefore was correctly isolated all along). {@link OBCriteria}
+   * adds {@code client.id in (readableClients)} and {@code organization.id in (readableOrganizations)}
+   * itself, so the filter cannot be forgotten by a caller, and it is applied even under
+   * {@code OBContext.setAdminMode(true)} — which this whole reconciliation path runs in — because the
+   * admin-mode guard in {@code OBCriteria} only skips the entity-access check, not these predicates.
+   *
+   * <p>Reading a catalog of this module through the DAL is also what every other entity here does
+   * ({@code SFSpec}, {@code SFEntity}, {@code SFField}, {@code ETGOTransactionType}, …); the raw-JDBC
+   * queries in this package are the multi-join reporting ones over Core tables.
+   *
    * @param accountId the financial account id, or blank to load only global rules
-   * @return ordered list of rules (ascending priority)
-   * @throws Exception if the query fails
+   * @return ordered list of rules (ascending priority, id as tie-breaker)
    */
-  static List<Rule> loadRules(Connection conn, String accountId) throws Exception {
+  static List<Rule> loadRules(String accountId) {
+    OBCriteria<MatchRule> criteria = OBDal.getInstance().createCriteria(MatchRule.class);
+    criteria.add(Restrictions.eq(MatchRule.PROPERTY_ACTIVE, true));
+    if (StringUtils.isBlank(accountId)) {
+      criteria.add(Restrictions.isNull(MatchRule.PROPERTY_FINANCIALACCOUNT));
+    } else {
+      criteria.add(Restrictions.or(
+          Restrictions.isNull(MatchRule.PROPERTY_FINANCIALACCOUNT),
+          Restrictions.eq(MatchRule.PROPERTY_FINANCIALACCOUNT + ".id", accountId)));
+    }
+    criteria.addOrderBy(MatchRule.PROPERTY_PRIORITY, true);
+    criteria.addOrderBy(MatchRule.PROPERTY_ID, true);
+
     List<Rule> rules = new ArrayList<>();
-    String effectiveAccountId = StringUtils.isBlank(accountId) ? "" : accountId;
-    try (PreparedStatement ps = conn.prepareStatement(LOAD_RULES_SQL)) {
-      ps.setString(1, effectiveAccountId);
-      try (ResultSet rs = ps.executeQuery()) {
-        while (rs.next()) {
-          RuleOptions opts = new RuleOptions(
-              rs.getString("c_glitem_id"),
-              rs.getString("c_bpartner_id"),
-              rs.getString("etgo_transaction_type_id"),
-              rs.getString("c_project_id"),
-              rs.getString("c_costcenter_id"),
-              rs.getString("m_product_id"));
-          rules.add(new Rule(
-              rs.getString("etgo_match_rule_id"),
-              StringUtils.trimToEmpty(rs.getString("name")),
-              rs.getInt("priority"),
-              StringUtils.trimToEmpty(rs.getString("textcondition")),
-              StringUtils.trimToEmpty(rs.getString("textpattern")),
-              opts,
-              rs.getLong("matchcount")));
-        }
-      }
+    for (MatchRule row : criteria.list()) {
+      rules.add(toRule(row));
     }
     return rules;
+  }
+
+  /** Maps a persisted rule onto the immutable value object the engine evaluates. */
+  private static Rule toRule(MatchRule row) {
+    RuleOptions opts = new RuleOptions(
+        idOf(row.getAccountingConcept()),
+        idOf(row.getBusinessPartner()),
+        idOf(row.getTransactionType()),
+        idOf(row.getProject()),
+        idOf(row.getCostCenter()),
+        idOf(row.getProduct()));
+    return new Rule(
+        row.getId(),
+        StringUtils.trimToEmpty(row.getName()),
+        row.getPriority() == null ? 0 : row.getPriority().intValue(),
+        StringUtils.trimToEmpty(row.getTextCondition()),
+        StringUtils.trimToEmpty(row.getTextPattern()),
+        opts,
+        row.getMatchCount() == null ? 0L : row.getMatchCount());
+  }
+
+  /** Id of an optional FK, or {@code null} when it is not set. */
+  private static String idOf(BaseOBObject reference) {
+    return reference == null ? null : (String) reference.getId();
   }
 
   /**

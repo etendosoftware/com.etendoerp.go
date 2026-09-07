@@ -18,7 +18,6 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
-import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
@@ -37,13 +36,16 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchedTransaction;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchingTransaction;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
+import com.etendoerp.go.schemaforge.data.MatchRule;
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
 /**
@@ -441,6 +443,7 @@ final class AutoMatchSupport {
   /** Loads the line by id and classifies it; returns {@code pending} when the line is gone. */
   static String classifyPendingLine(FIN_FinancialAccount account, String lineId,
       List<MatchRuleEngine.Rule> rules) {
+    // tenant-ok: lineId comes from PENDING_LINES_SQL, already scoped by client and org
     FIN_BankStatementLine line = OBDal.getInstance().get(FIN_BankStatementLine.class, lineId);
     if (line == null) {
       return STATE_PENDING;
@@ -450,6 +453,7 @@ final class AutoMatchSupport {
 
   static String classifyPendingLine(FIN_FinancialAccount account, String lineId,
       List<MatchRuleEngine.Rule> rules, int dateTolDays, BigDecimal amtTolPct) {
+    // tenant-ok: same, lineId originates in the scoped pending-lines query
     FIN_BankStatementLine line = OBDal.getInstance().get(FIN_BankStatementLine.class, lineId);
     if (line == null) {
       return STATE_PENDING;
@@ -465,6 +469,7 @@ final class AutoMatchSupport {
   static String classifyPendingLine(FIN_FinancialAccount account, String lineId,
       List<MatchRuleEngine.Rule> rules, int dateTolDays, BigDecimal amtTolPct,
       Set<String> usedTxnIds, List<FIN_FinaccTransaction> excludedTxns) {
+    // tenant-ok: same, lineId originates in the scoped pending-lines query
     FIN_BankStatementLine line = OBDal.getInstance().get(FIN_BankStatementLine.class, lineId);
     if (line == null) {
       return STATE_PENDING;
@@ -593,15 +598,28 @@ final class AutoMatchSupport {
     }
   }
 
-  /** Increments {@code ETGO_MATCH_RULE.matchcount} for the given rule id. Best-effort (non-fatal). */
+  /**
+   * Increments the rule's match counter. Best-effort (non-fatal).
+   *
+   * <p>Goes through the DAL rather than a raw {@code UPDATE ... WHERE etgo_match_rule_id = ?}: the
+   * id arrives in the request body, and the hand-written statement had no {@code ad_client_id}
+   * predicate, so it happily bumped the counter of another tenant's rule. {@link OBCriteria} adds the
+   * readable-client / readable-organization filter itself, so a foreign id simply matches nothing
+   * (ETP-4950).
+   */
   static void incrementMatchCount(String ruleId) {
     try {
-      Connection conn = OBDal.getInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(
-          "UPDATE etgo_match_rule SET matchcount = matchcount + 1 WHERE etgo_match_rule_id = ?")) { // NOSONAR java:S2077
-        ps.setString(1, ruleId);
-        ps.executeUpdate();
+      OBCriteria<MatchRule> criteria = OBDal.getInstance().createCriteria(MatchRule.class);
+      criteria.add(Restrictions.eq(MatchRule.PROPERTY_ID, ruleId));
+      criteria.setMaxResults(1);
+      MatchRule rule = (MatchRule) criteria.uniqueResult();
+      if (rule == null) {
+        log.warn("Rule {} is not visible for the current tenant; matchCount not incremented", ruleId);
+        return;
       }
+      long current = rule.getMatchCount() == null ? 0L : rule.getMatchCount();
+      rule.setMatchCount(current + 1);
+      OBDal.getInstance().save(rule);
     } catch (Exception e) {
       log.warn("Could not increment matchCount for rule {}", ruleId, e);
     }

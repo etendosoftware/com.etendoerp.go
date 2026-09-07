@@ -62,14 +62,15 @@ import org.openbravo.model.financialmgmt.tax.TaxCategory;
  * {@code em_etgo_issystemcategory = 'Y'} from GET responses — see
  * {@link #hideSystemCategoryProducts}.
  *
- * <p>ETP-4943: also forces {@code stocked}/{@code returnable} to {@code false} whenever a
- * request declares {@code productType = "S"} (Service) — see
- * {@link #enforceServiceProductNotStockable}. Runs on both POST and PATCH, unlike the
+ * <p>ETP-4943 / ETP-5091: also forces {@code stocked}/{@code returnable} to {@code false}
+ * whenever a request declares {@code productType} as Service ({@code "S"}), Expense
+ * ({@code "E"}, "Gasto") or Resource ({@code "R"}, "Recurso") — see
+ * {@link #enforceNonStockableProductTypes}. Runs on both POST and PATCH, unlike the
  * uOM/taxCategory defaulting above (POST-only): the frontend's own auto-correction
  * (`ProductAdditionalInfoPanel.jsx`) only fires while the "Additional Info" tab is mounted, so a
- * user who sets the type to Service on the "General" tab and saves immediately never triggers
- * it. This is the authoritative enforcement; the frontend one is a same-session UX nicety, not
- * the guarantee.
+ * user who sets the type to one of these on the "General" tab and saves immediately never
+ * triggers it. This is the authoritative enforcement; the frontend one is a same-session UX
+ * nicety, not the guarantee.
  */
 @Named("productDefaultsHandler")
 public class ProductDefaultsHandler implements NeoHandler {
@@ -86,7 +87,9 @@ public class ProductDefaultsHandler implements NeoHandler {
   private static final String FIELD_PRODUCT_TYPE = "productType";
   private static final String FIELD_STOCKED = "stocked";
   private static final String FIELD_RETURNABLE = "returnable";
-  private static final String PRODUCT_TYPE_SERVICE = "S";
+  // ETP-4943 (Service) / ETP-5091 (Expense, Resource) — none of these product types have a
+  // physical existence in inventory.
+  private static final Set<String> NON_STOCKABLE_PRODUCT_TYPES = Set.of("S", "E", "R");
   private static final String FIELD_TOTAL_ROWS = "totalRows";
   private static final String FIELD_END_ROW = "endRow";
   private static final String SYSTEM_CLIENT_ID = "0";
@@ -107,9 +110,9 @@ public class ProductDefaultsHandler implements NeoHandler {
       return null;
     }
     try {
-      enforceServiceProductNotStockable(body);
+      enforceNonStockableProductTypes(body);
     } catch (Exception e) {
-      log.error("product pre-hook: failed to enforce Service product stock flags", e);
+      log.error("product pre-hook: failed to enforce non-stockable product type stock flags", e);
     }
     if (isCreate) {
       try {
@@ -127,17 +130,18 @@ public class ProductDefaultsHandler implements NeoHandler {
   }
 
   /**
-   * ETP-4943: a Service product has no physical existence, so it can never be stocked or
-   * returnable. Forces both flags to {@code false} whenever the request itself declares
-   * {@code productType = "S"} — whether or not the caller sent a value for them, so an omitted
-   * flag can't silently resolve to {@code true} downstream. Deliberately scoped to requests that
-   * mention {@code productType}: a PATCH that edits something else on an already-Service product
-   * (e.g. weight) and never touches the type is left alone — resolving the persisted type would
-   * need a DB lookup, out of scope for this ticket's reported cases (all of which change
-   * {@code productType} in the same request).
+   * ETP-4943 / ETP-5091: Service, Expense and Resource products have no physical existence, so
+   * none of them can ever be stocked or returnable. Forces both flags to {@code false} whenever
+   * the request itself declares {@code productType} as one of {@link #NON_STOCKABLE_PRODUCT_TYPES}
+   * — whether or not the caller sent a value for them, so an omitted flag can't silently resolve
+   * to {@code true} downstream. Deliberately scoped to requests that mention {@code productType}:
+   * a PATCH that edits something else on an already-non-stockable product (e.g. weight) and never
+   * touches the type is left alone — resolving the persisted type would need a DB lookup, out of
+   * scope for this ticket's reported cases (all of which change {@code productType} in the same
+   * request).
    */
-  private static void enforceServiceProductNotStockable(JSONObject body) throws JSONException {
-    if (!PRODUCT_TYPE_SERVICE.equals(body.optString(FIELD_PRODUCT_TYPE, null))) {
+  private static void enforceNonStockableProductTypes(JSONObject body) throws JSONException {
+    if (!NON_STOCKABLE_PRODUCT_TYPES.contains(body.optString(FIELD_PRODUCT_TYPE, null))) {
       return;
     }
     body.put(FIELD_STOCKED, false);
