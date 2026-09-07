@@ -136,9 +136,20 @@ import org.openbravo.modulescript.ModuleScript;
  *       not one window.</li>
  *   <li><b>Informe Antigüedad de Cobros</b> — {@code aging-receivable} spec exists (type R) but
  *       has neither {@code ad_window_id} nor {@code ad_tab_id}; same report-access-mechanism gap
- *       as ETP-4596.</li>
+ *       as ETP-4596. A fresh ETP-5116 investigation confirmed the SAME resolution shape as
+ *       "Documentos no contabilizados" above: Ventas needs FULL access to the real, confirmed
+ *       OBUIAPP process {@code 0D37A9F6109549DEB058373EF2DAEB6A} (Receivables Aging Schedule) via
+ *       {@code OBUIAPP_Process_Access}, but {@code AD_Menu} row
+ *       {@code CC226771DE354AEEAA5D69F696F1A676} has {@code ad_window_id} null — no window to
+ *       proxy through, and {@link #reconcileProcessAccess} still has no standalone-process-id
+ *       mechanism. Blocked on the same missing mechanism, not on finding the target id.</li>
  *   <li><b>Informe Antigüedad de Pagos</b> — no {@code ETGO_SF_SPEC} row exists at all (only a
- *       jsreport template artifact); more severe than its sibling above.</li>
+ *       jsreport template artifact); more severe than its sibling above. Same ETP-5116
+ *       investigation: Compras needs FULL access to OBUIAPP process
+ *       {@code EB4C4053F3B94A17A08D1DD7E89CEB7E} (Payables Aging Schedule, confirmed via
+ *       {@code AD_Menu} row {@code B6D984F9FEFB412D827A37BACF2F1D66}, also
+ *       {@code ad_window_id} null), and Financiero needs FULL access to BOTH aging processes —
+ *       all three grants blocked on the exact same standalone-process-id gap.</li>
  *   <li><b>Escaneo inteligente</b> — {@code smart-scan} artifact is an aggregate/custom route
  *       page ({@code /smart-scan}); no {@code ad_window}/{@code ad_menu} entry whatsoever.</li>
  *   <li><b>Configuración fiscal</b> — {@code fiscal-config} artifact is {@code category:

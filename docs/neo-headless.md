@@ -2682,7 +2682,15 @@ for all four non-Admin roles on all three, so they stay Admin-only.
 > `EnsureSystemRoleTemplatesScript#reconcileProcessAccess` only ever DERIVES process access from a
 > role's FULL window grants — it has no mechanism to reconcile a standalone process id that isn't
 > reachable as a button on any granted window. Closing it needs that mechanism designed first, not
-> just the target id (which is already known).
+> just the target id (which is already known). **A fresh ETP-5116 investigation found Informe
+> Antigüedad de Cobros/Pagos hit the exact same gap:** `AgingReportHandler`'s own access gate was
+> ALSO found to be a real bug — hardcoded to the receivables OBUIAPP process regardless of the
+> request's `recOrPay`, so a payables request never actually checked payables access — and that
+> bug is now fixed (the gate branches on `recOrPay`). But the target grants (Ventas → receivables
+> process, Compras → payables process, Financiero → both) remain blocked on the identical missing
+> mechanism: both processes are real, confirmed OBUIAPP process ids with no backing `AD_Window` at
+> all (`AD_Menu.ad_window_id` is null on both "Receivables Aging Schedule" and "Payables Aging
+> Schedule"), so there is no window to proxy through either.
 
 **Still open (ETP-4877, unchanged by ETP-4878):** the ~21 existing tenants still holding
 per-client duplicated role copies are untouched by this mechanism (a migration, not a runtime

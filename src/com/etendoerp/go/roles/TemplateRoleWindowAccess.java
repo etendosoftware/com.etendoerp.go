@@ -69,7 +69,15 @@ import java.util.Map;
  * EnsureSystemRoleTemplatesScript#reconcileProcessAccess} only ever DERIVES process access from a
  * role's FULL window grants (button-linked processes on that window's tabs); it has no mechanism
  * to reconcile a standalone process id with no backing window. Populating this row requires
- * designing that mechanism first — deliberately left out of this matrix until that design lands.</p>
+ * designing that mechanism first — deliberately left out of this matrix until that design lands.
+ * "Informe Antigüedad de Cobros"/"Informe Antigüedad de Pagos" hit this exact same gap under a
+ * fresh ETP-5116 investigation: both {@code AgingReportHandler} OBUIAPP process ids
+ * (Receivables {@code 0D37A9F6109549DEB058373EF2DAEB6A}, Payables
+ * {@code EB4C4053F3B94A17A08D1DD7E89CEB7E}) are real, confirmed via the same
+ * {@code AD_Menu.em_obuiapp_process_id} FK chain, but neither {@code AD_Menu} row has an
+ * {@code ad_window_id} either — so the target Ventas/Compras/Financiero grants from that
+ * investigation are equally blocked on the same missing standalone-process-reconciliation
+ * mechanism, not on any missing id.</p>
  *
  * <p><b>"Roles", "Usuario", and "Conectar asistente de IA" resolve to real {@code AD_Window_ID}s
  * but are deliberately absent from every role's grant list below</b> — the ticket's matrix shows
