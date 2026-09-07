@@ -323,7 +323,7 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("143"),                                           // Pedido de venta — Sales Order
         full("169"),                                           // Albarán de venta — Goods Shipment
         full("167"),                                           // Factura de venta — Sales Invoice
-        full("FF808081330213E60133021822E40007"),              // Albarán de devolución — Return from Customer
+        full("123271B9AD60469BAE8A924841456B63"),              // Albarán de devolución — Return Receipt (ETP-5116, corrects the dead FF808081... window)
         full("140"),                                           // Producto — Product
         readOnly("144"),                                       // Categoría del producto — Product Category
         full("E547CE89D4C04429B6340FFA44E70716"),              // Cobro — Payment In
@@ -431,7 +431,7 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         readOnly("123"),                                      // Contactos — Business Partner
         readOnly("143"),                                       // Pedido de venta — Sales Order
         full("169"),                                          // Albarán de venta — Goods Shipment
-        full("FF808081330213E60133021822E40007"),              // Albarán de devolución — Return from Customer
+        full("123271B9AD60469BAE8A924841456B63"),              // Albarán de devolución — Return Receipt (ETP-5116, corrects the dead FF808081... window)
         readOnly("181"),                                       // Pedido de compra — Purchase Order
         full("184"),                                          // Albarán de compra — Goods Receipt
         full("273673D2ED914C399A6C51DB758BE0F9"),              // Devolución a proveedor — Return to Vendor Shipment (ETP-5116, corrects the dead C50A8AEE window)

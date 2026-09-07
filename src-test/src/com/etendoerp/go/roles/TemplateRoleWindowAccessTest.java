@@ -70,6 +70,8 @@ class TemplateRoleWindowAccessTest {
   private static final String WINDOW_INVENTORY_STOCK_REPORT = "6346B88619F948F9A42224BDB0B239FA";
   private static final String WINDOW_RETURN_TO_VENDOR_SHIPMENT = "273673D2ED914C399A6C51DB758BE0F9";
   private static final String WINDOW_RETURN_TO_VENDOR_DEAD = "C50A8AEE6F044825B5EF54FAAE76826F";
+  private static final String WINDOW_RETURN_RECEIPT = "123271B9AD60469BAE8A924841456B63";
+  private static final String WINDOW_RETURN_FROM_CUSTOMER_DEAD = "FF808081330213E60133021822E40007";
 
   private static WindowGrant grantFor(List<WindowGrant> grants, String windowId) {
     for (WindowGrant grant : grants) {
@@ -330,6 +332,37 @@ class TemplateRoleWindowAccessTest {
         "ETP-5116: Almacén must have FULL access to the live Return to Vendor Shipment window");
     assertNull(grantFor(inventory, WINDOW_RETURN_TO_VENDOR_DEAD),
         "ETP-5116: Almacén must NOT reference the dead Return to Vendor window id anymore");
+  }
+
+  /**
+   * QA (Sentinel, same bug class as {@link
+   * #purchasingAndInventoryGrantTheLiveReturnToVendorShipmentWindowNotTheDeadOne}, ETP-5116) —
+   * {@code FF808081330213E60133021822E40007} was granted for both Ventas and Almacén with the
+   * comment "Albarán de devolución — Return from Customer", but that {@code AD_Window_ID} has no
+   * live frontend spec (no {@code decisions.json}, not wired into {@code menu.json}) — a dead
+   * artifact. The window users actually open for this workflow is {@code
+   * return-material-receipt} ({@code 123271B9AD60469BAE8A924841456B63}, label "Return Receipt",
+   * confirmed live via {@code etendo_schema_forge}'s {@code decisions.json}/{@code menu.json}).
+   * This locks in the correction: both roles must grant the live id, full access, and never the
+   * dead one, with no change to either role's total grant count (a correction, not an addition).
+   */
+  @Test
+  void salesAndInventoryGrantTheLiveReturnReceiptWindowNotTheDeadOne() {
+    Map<String, List<WindowGrant>> byRoleId = TemplateRoleWindowAccess.byRoleId();
+
+    List<WindowGrant> sales = byRoleId.get(SystemRoleTemplates.SALES_ROLE_ID);
+    WindowGrant salesGrant = grantFor(sales, WINDOW_RETURN_RECEIPT);
+    assertTrue(salesGrant != null && !salesGrant.isReadOnly(),
+        "ETP-5116: Ventas must have FULL access to the live Return Receipt window");
+    assertNull(grantFor(sales, WINDOW_RETURN_FROM_CUSTOMER_DEAD),
+        "ETP-5116: Ventas must NOT reference the dead Return from Customer window id anymore");
+
+    List<WindowGrant> inventory = byRoleId.get(SystemRoleTemplates.INVENTORY_ROLE_ID);
+    WindowGrant inventoryGrant = grantFor(inventory, WINDOW_RETURN_RECEIPT);
+    assertTrue(inventoryGrant != null && !inventoryGrant.isReadOnly(),
+        "ETP-5116: Almacén must have FULL access to the live Return Receipt window");
+    assertNull(grantFor(inventory, WINDOW_RETURN_FROM_CUSTOMER_DEAD),
+        "ETP-5116: Almacén must NOT reference the dead Return from Customer window id anymore");
   }
 
   @Test
