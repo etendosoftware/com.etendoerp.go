@@ -110,9 +110,11 @@ class CalloutRequestBuilder {
         && Boolean.TRUE.equals(adTab.getWindow().isSalesTransaction()) ? "Y" : "N";
     params.put("isSOTrx", new String[]{ isSOTrx });
     // NOTE: inpmWarehouseId is intentionally NOT set here from session.
-    // It will be injected by injectParentTabParams (parent record's warehouse) when available,
-    // and fall back to the session warehouse only if the parent record has no warehouse.
-    // Setting it here first would block the parent injection guard (!params.containsKey).
+    // It is injected by injectParentTabParams (parent record's warehouse) when available, and
+    // falls back to the session warehouse only if the parent record has no warehouse.
+    // Setting it here first would block the parent injection guard (!params.containsKey) —
+    // and so does calling fillMissingColumnDefaults before injectParentTabParams, which is why
+    // the order of those two calls below is load-bearing. See the comment there.
 
     // Build column lookup maps once (for form-state mapping, default-filling, aux-value resolution)
     ColumnLookupMaps maps = buildColumnLookupMaps(adTab);
@@ -122,13 +124,26 @@ class CalloutRequestBuilder {
     // Keep org context authoritative: avoid stale/inconsistent AD_Org_ID from formState.
     params.put("inpadOrgId", new String[]{ normalizedOrgId });
 
-    // Fill missing columns with their AD defaults so callouts see all fields
-    fillMissingColumnDefaults(adTab, obCtx, maps.columns, params);
-
     // For child tabs, inject the parent record ID and fields (including the parent's warehouse).
-    // This must run before the session-warehouse fallback so that the parent's M_Warehouse_ID
-    // takes precedence over the user's session warehouse.
+    // This MUST run before fillMissingColumnDefaults: both write the same inp* keys and the loser
+    // is whoever runs second, because each guards on !params.containsKey. The precedence the
+    // callouts need is:
+    //
+    //     client-submitted body  >  parent record  >  child AD default  >  session
+    //
+    // Classic sends every header field when it runs a child-tab callout, so the parent's value IS
+    // what the form carries. Running the generic default pass first inverted that (ETP-5184 D-7):
+    // every column present on both the child and the header froze at the child's value, and since
+    // those child defaults are window-context references (@DateOrdered@, @M_Warehouse_ID@,
+    // @C_BPartner_Location_ID@) that resolve to EMPTY here — NEO has no window context, only
+    // OBContext — the parent value was discarded in favour of "" or the session warehouse.
+    // Consequence: SL_Order_Product received an empty inpcBpartnerLocationId, C_GetTax got a NULL
+    // ship-to location, and fell through to its "any tax flagged IsDefault" branch — a silently
+    // wrong tax rate on every order line created through NEO or MCP.
     injectParentTabParams(adTab, formState, params);
+
+    // Fill whatever the body and the parent record did not provide with the child's AD defaults.
+    fillMissingColumnDefaults(adTab, obCtx, maps.columns, params);
 
     // Session warehouse fallback: only used when no parent record provided a warehouse.
     if (!params.containsKey("inpmWarehouseId") && obCtx.getWarehouse() != null) {
