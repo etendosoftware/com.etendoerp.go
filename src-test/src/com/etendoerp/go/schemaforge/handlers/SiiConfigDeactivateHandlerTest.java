@@ -30,6 +30,7 @@ import static org.mockito.Mockito.when;
 
 import java.util.Date;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.MockedStatic;
@@ -184,6 +185,134 @@ public class SiiConfigDeactivateHandlerTest {
     assertNull(handler.afterHandle(NeoContext.builder().httpMethod("PUT").recordId(RECORD_ID).build()));
     assertNull(handler.afterHandle(NeoContext.builder().httpMethod("POST").build()));
     assertNull(handler.afterHandle(NeoContext.builder().httpMethod("GET").build()));
+  }
+
+  // ─── afterHandle(): REDEME forced to 'N' (ETP-5122) ──────────────────────────
+
+  /**
+   * PUT (non-deactivating save): {@code REDEME} must be forced to {@code false} on the DAL
+   * entity and persisted, regardless of what the request body carried — here the body
+   * explicitly (and maliciously) sets {@code redeme: true}, simulating a client that bypasses
+   * the hidden-field frontend and posts the raw field directly.
+   */
+  @Test
+  public void afterHandlePutForcesRedemeFalseEvenWhenRequestBodyRequestsTrue() throws Exception {
+    SiiConfigDeactivateHandler handler = new SiiConfigDeactivateHandler();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      org.hibernate.Session session = mock(org.hibernate.Session.class);
+      @SuppressWarnings("unchecked")
+      org.hibernate.query.NativeQuery<Object> nativeQuery = mock(org.hibernate.query.NativeQuery.class);
+      when(dal.getSession()).thenReturn(session);
+      when(session.createNativeQuery(Mockito.anyString())).thenReturn((org.hibernate.query.NativeQuery) nativeQuery);
+      when(nativeQuery.setParameter(Mockito.anyString(), Mockito.any())).thenReturn(nativeQuery);
+
+      AEATSIIConfig config = mock(AEATSIIConfig.class);
+      when(dal.get(eq(AEATSIIConfig.class), eq(RECORD_ID))).thenReturn(config);
+
+      NeoResponse result = handler.afterHandle(NeoContext.builder()
+          .httpMethod("PUT")
+          .requestBody(new JSONObject().put("redeme", true))
+          .recordId(RECORD_ID)
+          .build());
+
+      assertNull(result);
+      verify(config).setRedeme(false);
+      verify(dal).save(config);
+      verify(nativeQuery).executeUpdate();
+    }
+  }
+
+  /**
+   * A deactivating PUT ({@code active=false}) must skip the REDEME fixup entirely, same as it
+   * already skips INSIISYSTEM.
+   */
+  @Test
+  public void afterHandleSkipsRedemeFixupWhenDeactivating() throws Exception {
+    SiiConfigDeactivateHandler handler = new SiiConfigDeactivateHandler();
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse result = handler.afterHandle(NeoContext.builder()
+          .httpMethod("PUT")
+          .requestBody(new JSONObject().put("active", false))
+          .recordId(RECORD_ID)
+          .build());
+
+      assertNull(result);
+      verify(dal, never()).get(eq(AEATSIIConfig.class), Mockito.anyString());
+    }
+  }
+
+  /**
+   * POST (create): {@code REDEME} must be forced to {@code false} on the newly created record,
+   * whose id is resolved from the generic CRUD response envelope
+   * ({@code response.data[0].id}) since {@code NeoContext#getRecordId()} is not populated for
+   * a create.
+   */
+  @Test
+  public void afterHandlePostForcesRedemeFalseOnCreate() throws Exception {
+    SiiConfigDeactivateHandler handler = new SiiConfigDeactivateHandler();
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      AEATSIIConfig config = mock(AEATSIIConfig.class);
+      when(dal.get(eq(AEATSIIConfig.class), eq(RECORD_ID))).thenReturn(config);
+
+      JSONObject createdRecord = new JSONObject().put("id", RECORD_ID);
+      JSONArray data = new JSONArray();
+      data.put(createdRecord);
+      JSONObject response = new JSONObject().put("data", data);
+      JSONObject previousBody = new JSONObject().put("response", response);
+      NeoResponse previousResult = NeoResponse.ok(previousBody);
+
+      NeoResponse result = handler.afterHandle(NeoContext.builder()
+          .httpMethod("POST")
+          .previousResult(previousResult)
+          .build());
+
+      assertNull(result);
+      verify(config).setRedeme(false);
+      verify(dal).save(config);
+    }
+  }
+
+  /**
+   * POST with no resolvable created id (e.g. previous result missing or malformed) must be a
+   * no-op — no DAL/OBContext interaction at all.
+   */
+  @Test
+  public void afterHandlePostDoesNothingWhenCreatedIdCannotBeResolved() {
+    SiiConfigDeactivateHandler handler = new SiiConfigDeactivateHandler();
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse result = handler.afterHandle(NeoContext.builder()
+          .httpMethod("POST")
+          .build());
+
+      assertNull(result);
+      verify(dal, never()).get(eq(AEATSIIConfig.class), Mockito.anyString());
+    }
   }
 
   // ─── smartDeactivate(): config not found ─────────────────────────────────────

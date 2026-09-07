@@ -24,6 +24,7 @@ import javax.inject.Named;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Projections;
@@ -67,6 +68,14 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * so the {@code AEATSII_CHECK_SIFS_CONFIGS_TRG} trigger marks the org as having an active SII
  * config. This column is not mapped in the generated {@link AEATSIIConfig} entity class and
  * defaults to {@code 'N'}, so without this hook every PUT would clear the org flag.
+ *
+ * <h3>REDEME forced to 'N' (ETP-5122)</h3>
+ * <p>{@code REDEME} ("Subject in REDEME") is hidden from the Etendo GO SII configuration UI —
+ * the frontend never sends it. The backend never trusts that, though: on every successful
+ * non-deactivating save (POST create <em>and</em> PUT update) this handler forces
+ * {@code REDEME = 'N'} via {@link AEATSIIConfig#setRedeme}, regardless of what the request
+ * body carried (or omitted). Unlike {@code INSIISYSTEM}, {@code redeme} IS mapped in the
+ * generated {@link AEATSIIConfig} entity class, so the DAL setter is used instead of native SQL.
  *
  * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
  * {@code docs/neo-headless-extensibility.md} §2.2 (this qualifier silently stops being
@@ -117,16 +126,28 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
   }
 
   /**
-   * After a successful PUT that saves an active SII config, ensures {@code INSIISYSTEM = 'Y'}
-   * in the DB so the {@code AEATSII_CHECK_SIFS_CONFIGS_TRG} trigger correctly marks the org's
-   * {@code em_etsg_has_sii_config} flag.
+   * After a successful save, applies the forced-field fixups that must never depend on the
+   * request body:
    *
-   * <p>Deactivation PUTs ({@code active=false}) are skipped — the org flag should be cleared
-   * when the config is deactivated.
+   * <ul>
+   *   <li><b>POST</b> (create): forces {@code REDEME = 'N'} on the newly created record.</li>
+   *   <li><b>PUT</b> (update, non-deactivating): forces {@code REDEME = 'N'} and ensures
+   *       {@code INSIISYSTEM = 'Y'} in the DB so the {@code AEATSII_CHECK_SIFS_CONFIGS_TRG}
+   *       trigger correctly marks the org's {@code em_etsg_has_sii_config} flag.</li>
+   * </ul>
+   *
+   * <p>Deactivation PUTs ({@code active=false}) are skipped entirely — the org flag should be
+   * cleared when the config is deactivated, and {@code REDEME} no longer matters for a record
+   * that is being turned off.
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
-    if (!"PUT".equalsIgnoreCase(context.getHttpMethod())) {
+    String httpMethod = context.getHttpMethod();
+    if ("POST".equalsIgnoreCase(httpMethod)) {
+      forceRedemeOnCreate(context);
+      return null;
+    }
+    if (!"PUT".equalsIgnoreCase(httpMethod)) {
       return null;
     }
     // Skip when this PUT is deactivating the record; the trigger should clear the org flag.
@@ -142,15 +163,68 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
       OBContext.setAdminMode(true);
       try {
         setInSiiSystemY(recordId);
+        setRedemeN(recordId);
       } finally {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
       // Non-fatal — the save already committed; log and continue.
-      log.warn("SiiConfigDeactivateHandler.afterHandle: could not set INSIISYSTEM='Y' for {}: {}",
+      log.warn("SiiConfigDeactivateHandler.afterHandle: could not apply forced field fixups for {}: {}",
           recordId, e.getMessage(), e);
     }
     return null;
+  }
+
+  /**
+   * Forces {@code REDEME = 'N'} on a just-created {@code AEATSII_CONFIG} record. Resolves the
+   * new record's id from the POST response envelope, since {@link NeoContext#getRecordId()} is
+   * only populated for path-addressed requests (PUT/DELETE), not for a create.
+   */
+  private void forceRedemeOnCreate(NeoContext context) {
+    String recordId = extractCreatedId(context);
+    if (StringUtils.isBlank(recordId)) {
+      return;
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        setRedemeN(recordId);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      // Non-fatal — the save already committed; log and continue.
+      log.warn("SiiConfigDeactivateHandler.afterHandle: could not force REDEME='N' on create for {}: {}",
+          recordId, e.getMessage(), e);
+    }
+  }
+
+  /**
+   * Reads the persisted record id from the generic CRUD POST response envelope
+   * ({@code response.data[0].id}) — {@code DefaultJsonDataService} always serializes a create's
+   * {@code data} as a one-element {@code JSONArray}.
+   *
+   * @param context the current NeoContext; only {@code getPreviousResult()} is used
+   * @return the created record's id, or {@code null} if it could not be resolved
+   */
+  private String extractCreatedId(NeoContext context) {
+    NeoResponse prev = context.getPreviousResult();
+    if (prev == null || prev.getBody() == null) {
+      return null;
+    }
+    JSONObject response = prev.getBody().optJSONObject("response");
+    if (response == null) {
+      return null;
+    }
+    JSONArray data = response.optJSONArray("data");
+    if (data == null || data.length() == 0) {
+      return null;
+    }
+    try {
+      return StringUtils.trimToNull(data.getJSONObject(0).optString("id", null));
+    } catch (JSONException e) {
+      return null;
+    }
   }
 
   /**
@@ -171,6 +245,29 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
         .setParameter("id", recordId)
         .executeUpdate();
     log.info("SiiConfigDeactivateHandler: set INSIISYSTEM='Y' for config {}", recordId);
+  }
+
+  /**
+   * Forces {@code REDEME = 'N'} for the given {@code AEATSII_CONFIG} record. Unlike
+   * {@code INSIISYSTEM}, {@code redeme} IS mapped in the generated {@link AEATSIIConfig} entity
+   * (see {@link AEATSIIConfig#setRedeme}), so the DAL setter is used instead of native SQL — no
+   * flush ordering concern here since it goes through the same Hibernate session as the CRUD
+   * write that just committed.
+   *
+   * @param recordId primary key of the {@code AEATSII_CONFIG} row to update
+   */
+  private void setRedemeN(String recordId) {
+    AEATSIIConfig config = OBDal.getInstance().get(AEATSIIConfig.class, recordId);
+    if (config == null) {
+      return;
+    }
+    // Always force to false — never trust the current value, whatever it is (true, false, or
+    // even null on a legacy row) — the field is hidden from the UI and must never be anything
+    // other than 'N'.
+    config.setRedeme(false);
+    OBDal.getInstance().save(config);
+    OBDal.getInstance().flush();
+    log.info("SiiConfigDeactivateHandler: forced REDEME='N' for config {}", recordId);
   }
 
   /**
