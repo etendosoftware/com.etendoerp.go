@@ -72,18 +72,22 @@ import org.openbravo.modulescript.ModuleScript;
  * <p><b>ETP-4878 — real permission matrix (supersedes the old 2-window-per-role smoke test).</b>
  * Each template now carries the full window-access matrix from the ticket (Ventas/Compras/
  * Financiero/Almacén columns; "Admin" stays client-level and is out of scope). Grant counts:
- * Sales 12, Purchasing 12, Finance 28, Inventory 13 (65 grants, 36 distinct windows, some shared
+ * Sales 12, Purchasing 12, Finance 31, Inventory 13 (68 grants, 39 distinct windows, some shared
  * across more than one role at different access levels — e.g. "Categoría del producto" is
  * read-only for Sales/Purchasing but full for Finance/Inventory); ETP-5075 added window 107
  * (Receipt-Invoice Link, read-only) to Purchasing and Finance, +1 grant each over the original
  * matrix. ETP-5116 then (a) removed 2 known over-grants — {@code full("168")} (Inventario
  * físico) from BOTH Sales and Finance, and {@code full("144")} (Categoría del producto) from
- * Finance — since neither role should have had that access, and (b) added 2 new proxy grants to
+ * Finance — since neither role should have had that access, (b) added 2 new proxy grants to
  * Finance for the previously-windowless "Monitor fiscal"/"Modelos fiscales" rows (SII Monitor,
  * {@code FEF76C3E0F104F06A89AAD15A4A4A35C}, and Tax Report, {@code 3E8FEA1EA7404D979306C9EE7FD2E7E8}
- * — same two proxy ids {@code SFRolesOverview} already uses for its own read-side resolution).
- * Net effect: Sales -1 grant, Finance unchanged (2 removed, 2 added), 2 new distinct windows.
- * "Asientos manuales" resolves to the
+ * — same two proxy ids {@code SFRolesOverview} already uses for its own read-side resolution), and
+ * (c), in a later ETP-5116 pass, added 3 more direct (non-proxy) grants to Finance for
+ * "Configuración fiscal" — SII Configuration ({@code C1D3A2A017AC4B82B9FEE6F4D2A0C55A}), TBAI
+ * Configuration ({@code C327DE215AC945F69363905840118177}), and Verifactu Configuration
+ * ({@code 27A453FA86974745977672F1A8DCCEFF}), a product decision confirming that label maps to
+ * exactly those 3 real sibling windows. Net effect: Sales -1 grant, Finance +3 net (2 removed, 5
+ * added), 5 new distinct windows. "Asientos manuales" resolves to the
  * <b>Simple G/L Journal</b> window ({@code B917E8A7B0864ACEA9D941E3B7494E53}), not the classic
  * {@code G/L Journal} (window {@code 132}, which literally carries the ES label "Asientos
  * manuales" but has no Schema Forge spec at all) — a human call on an otherwise genuinely
@@ -104,15 +108,17 @@ import org.openbravo.modulescript.ModuleScript;
  * not tied to any window button remain a separate, known gap. See that method's own javadoc for
  * the full rule and rationale.</p>
  *
- * <p><b>Ten matrix rows are deliberately NOT implemented — known gap, follow-up ticket
+ * <p><b>Nine matrix rows are deliberately NOT implemented — known gap, follow-up ticket
  * pending.</b> Every one of these has NO {@code AD_Window_ID} at all backing it (either a pure
  * custom/aggregate Schema Forge page with zero classic-AD entity, or a report-type spec whose
  * access is resolved via a different, non-window mechanism) — {@code AD_Window_Access} cannot
  * express a grant against something that has no window. "Monitor fiscal" and "Modelos fiscales"
  * used to be on this list too, but ETP-5116 resolved both for Finance via a window PROXY grant
- * (SII Monitor / Tax Report — see {@code TemplateRoleWindowAccess}'s own javadoc), so they are no
- * longer windowless gaps. Listed here so the remaining gap is visible from the class that would
- * otherwise silently look complete:
+ * (SII Monitor / Tax Report — see {@code TemplateRoleWindowAccess}'s own javadoc), and
+ * "Configuración fiscal" used to be here too but a later ETP-5116 pass resolved it for Finance via
+ * 3 DIRECT (non-proxy) grants onto its real sibling windows (SII/TBAI/Verifactu Configuration —
+ * see that same javadoc), so none of the three are windowless gaps anymore. Listed here so the
+ * remaining gap is visible from the class that would otherwise silently look complete:
  * <ul>
  *   <li><b>Inicio (Dashboard)</b> — {@code dashboard} spec is pure widget-handler qualifiers, no
  *       {@code ad_tab_id}/{@code ad_window_id} anywhere.</li>
@@ -152,8 +158,6 @@ import org.openbravo.modulescript.ModuleScript;
  *       all three grants blocked on the exact same standalone-process-id gap.</li>
  *   <li><b>Escaneo inteligente</b> — {@code smart-scan} artifact is an aggregate/custom route
  *       page ({@code /smart-scan}); no {@code ad_window}/{@code ad_menu} entry whatsoever.</li>
- *   <li><b>Configuración fiscal</b> — {@code fiscal-config} artifact is {@code category:
- *       "configuration"}, {@code entities: {}}; not in {@code ETGO_SF_SPEC}.</li>
  * </ul>
  * See {@code docs/neo-headless.md} (in this module) for the same list with the research
  * dispatch's full resolution table. Populating these 10 requires either building the missing AD
@@ -295,13 +299,14 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
   }
 
   /**
-   * Finance ("Financiero") column of the ETP-4878 matrix — 28 grants: 25 from the original ticket
+   * Finance ("Financiero") column of the ETP-4878 matrix — 31 grants: 25 from the original ticket
    * matrix (27 minus the two ETP-5116 over-grants removed below — Categoría del producto /
    * Product Category and Inventario físico / Physical Inventory, neither of which Financiero
    * should have access to), plus {@code 107} (Receipt-Invoice Link, ETP-5075 — see {@link
-   * #purchasingGrants()}) and 2 new ETP-5116 proxy grants (SII Monitor and Tax Report — see the
-   * class javadoc's "Monitor fiscal"/"Modelos fiscales" note). Inlined copy of {@code
-   * TemplateRoleWindowAccess#financeGrants()}.
+   * #purchasingGrants()}), 2 ETP-5116 proxy grants (SII Monitor and Tax Report — see the class
+   * javadoc's "Monitor fiscal"/"Modelos fiscales" note), and 3 more ETP-5116 grants for
+   * "Configuración fiscal" (SII/TBAI/Verifactu Configuration — see the class javadoc's own note).
+   * Inlined copy of {@code TemplateRoleWindowAccess#financeGrants()}.
    */
   private static List<WindowGrant> financeGrants() {
     return List.of(
@@ -332,7 +337,10 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("192"),                                          // Categoría de contacto — Business Partner Category
         full("6FEBA130CDE24CC09041FFA6117ADFA9"),             // Registro descarga tipos de cambio — Conversion Rate Downloader Log
         full("FEF76C3E0F104F06A89AAD15A4A4A35C"),              // SII Monitor — proxies "Monitor Fiscal" (ETP-5116)
-        full("3E8FEA1EA7404D979306C9EE7FD2E7E8"));             // Tax Report — proxies "Modelos Fiscales" (ETP-5116)
+        full("3E8FEA1EA7404D979306C9EE7FD2E7E8"),              // Tax Report — proxies "Modelos Fiscales" (ETP-5116)
+        full("C1D3A2A017AC4B82B9FEE6F4D2A0C55A"),              // SII Configuration — "Configuración fiscal" (ETP-5116)
+        full("C327DE215AC945F69363905840118177"),              // TBAI Configuration — "Configuración fiscal" (ETP-5116)
+        full("27A453FA86974745977672F1A8DCCEFF"));             // Verifactu Configuration — "Configuración fiscal" (ETP-5116)
   }
 
   /**

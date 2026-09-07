@@ -2251,7 +2251,7 @@ consumption; it does not touch `AD_Window_Access` grants, `windows`/`windowCount
 provisioning path. Full mechanism (exact proxy ids, category-lookup handling, the duplicate guard):
 `SFRolesOverview.java`'s own javadoc (`PROXY_MATRIX_ROWS`, `FISCAL_MONITOR_PROXY_WINDOW_ID`,
 `TAX_MODELS_PROXY_WINDOW_ID`, `NOT_POSTED_DOCS_PROXY_PROCESS_ID`) — not duplicated here. See also
-§8d's "Ten matrix rows" note below: this proxy resolution is unrelated to (and does not close)
+§8d's "Nine matrix rows" note below: this proxy resolution is unrelated to (and does not close)
 that separate, provisioning-side gap — as of ETP-5116, 2 of these 3 windowless items (Monitor
 fiscal, Modelos fiscales) DO also have a real provisioning-side grant now (see that note), but
 Not Posted Documents still does not.
@@ -2653,44 +2653,48 @@ shared `com.etendoerp.go.roles.overlap` package (`ActiveTemplateInheritance`,
 loud `ConstraintViolationException` — see `ObuiappProcessAccessOverlapCorruptionGuard`'s own
 class/method javadoc for the full detail.
 
-**Ten matrix rows are a documented, deliberate gap — not yet implementable.** Every one of
+**Nine matrix rows are a documented, deliberate gap — not yet implementable.** Every one of
 them has NO `AD_Window_ID` at all backing it in this environment (either a pure custom/aggregate
 Schema Forge page with zero classic-AD entity, or a report-type spec whose access resolves via a
 different, non-window mechanism), so `AD_Window_Access` cannot express a grant for it at all:
 **Inicio (Dashboard)**, **Favoritos**, **Copilot (Asistente IA)**, **Documentos no
 contabilizados**, **Informes de inventario**, **Informes financieros**, **Informe Antigüedad de
-Cobros**, **Informe Antigüedad de Pagos**, **Escaneo inteligente**, **Configuración fiscal**. Full
-per-row resolution detail (which spec/artifact was checked, why it has no window) lives in
+Cobros**, **Informe Antigüedad de Pagos**, **Escaneo inteligente**. Full per-row resolution detail
+(which spec/artifact was checked, why it has no window) lives in
 `EnsureSystemRoleTemplatesScript`'s own class javadoc. Closing this gap needs either building the
 missing AD entity/spec first, or a different grant mechanism entirely — left for a follow-up
 ticket. Separately, "Roles", "Usuario", and "Conectar asistente de IA" DO resolve to real
 `AD_Window_ID`s but are deliberately granted to none of the four templates — the matrix shows "—"
 for all four non-Admin roles on all three, so they stay Admin-only.
 
-> **Scope note (ETP-5071/ETP-5116) — this gap is PROVISIONING-side, and is now down to ONE of the
-> 3 originally-proxied rows.** This paragraph is about `TemplateRoleWindowAccess`/
-> `EnsureSystemRoleTemplatesScript` — whether the 4 system role templates can be GRANTED
-> `AD_Window_Access`/`OBUIAPP_Process_Access` for these rows at all. Of the three names ETP-5071
-> first proxied on the DISPLAY side (`SFRolesOverview`'s "Configuración > Roles" admin screen, §8c
-> above, via `PROXY_MATRIX_ROWS`) — **Documentos no contabilizados**, **Monitor fiscal**,
-> **Modelos fiscales** — ETP-5116 closed the provisioning-side gap for the latter two: Finance now
-> holds a real `AD_Window_Access` grant on the same two proxy windows (SII Monitor, Tax Report) via
-> `TemplateRoleWindowAccess#financeGrants()`, so they are OFF this ten-row list entirely (see the
-> class's own javadoc). **Documentos no contabilizados remains open** — its target is a standalone
-> `OBUIAPP_Process_Access` grant (process `D6AB95CE52D34E1599590526115E26C6`, the same id
-> `SFRolesOverview` already proxies for display) with no backing window at all, and
-> `EnsureSystemRoleTemplatesScript#reconcileProcessAccess` only ever DERIVES process access from a
-> role's FULL window grants — it has no mechanism to reconcile a standalone process id that isn't
-> reachable as a button on any granted window. Closing it needs that mechanism designed first, not
-> just the target id (which is already known). **A fresh ETP-5116 investigation found Informe
-> Antigüedad de Cobros/Pagos hit the exact same gap:** `AgingReportHandler`'s own access gate was
-> ALSO found to be a real bug — hardcoded to the receivables OBUIAPP process regardless of the
-> request's `recOrPay`, so a payables request never actually checked payables access — and that
-> bug is now fixed (the gate branches on `recOrPay`). But the target grants (Ventas → receivables
-> process, Compras → payables process, Financiero → both) remain blocked on the identical missing
-> mechanism: both processes are real, confirmed OBUIAPP process ids with no backing `AD_Window` at
-> all (`AD_Menu.ad_window_id` is null on both "Receivables Aging Schedule" and "Payables Aging
-> Schedule"), so there is no window to proxy through either.
+> **Scope note (ETP-5071/ETP-5116) — this gap is PROVISIONING-side, and is now down to
+> Documentos no contabilizados plus the 2 Informe Antigüedad rows.** This paragraph is about
+> `TemplateRoleWindowAccess`/`EnsureSystemRoleTemplatesScript` — whether the 4 system role
+> templates can be GRANTED `AD_Window_Access`/`OBUIAPP_Process_Access` for these rows at all. Of
+> the three names ETP-5071 first proxied on the DISPLAY side (`SFRolesOverview`'s
+> "Configuración > Roles" admin screen, §8c above, via `PROXY_MATRIX_ROWS`) — **Documentos no
+> contabilizados**, **Monitor fiscal**, **Modelos fiscales** — ETP-5116 closed the
+> provisioning-side gap for the latter two: Finance now holds a real `AD_Window_Access` grant on
+> the same two proxy windows (SII Monitor, Tax Report) via
+> `TemplateRoleWindowAccess#financeGrants()`, so they are OFF this row list entirely (see the
+> class's own javadoc). A LATER ETP-5116 pass separately closed **Configuración fiscal** too — not
+> via a proxy but via 3 DIRECT grants onto its real sibling windows (SII/TBAI/Verifactu
+> Configuration, product decision), so it is off this list as well. **Documentos no contabilizados
+> remains open** — its target is a standalone `OBUIAPP_Process_Access` grant (process
+> `D6AB95CE52D34E1599590526115E26C6`, the same id `SFRolesOverview` already proxies for display)
+> with no backing window at all, and `EnsureSystemRoleTemplatesScript#reconcileProcessAccess` only
+> ever DERIVES process access from a role's FULL window grants — it has no mechanism to reconcile
+> a standalone process id that isn't reachable as a button on any granted window. Closing it needs
+> that mechanism designed first, not just the target id (which is already known). **A fresh
+> ETP-5116 investigation found Informe Antigüedad de Cobros/Pagos hit the exact same gap:**
+> `AgingReportHandler`'s own access gate was ALSO found to be a real bug — hardcoded to the
+> receivables OBUIAPP process regardless of the request's `recOrPay`, so a payables request never
+> actually checked payables access — and that bug is now fixed (the gate branches on `recOrPay`).
+> But the target grants (Ventas → receivables process, Compras → payables process, Financiero →
+> both) remain blocked on the identical missing mechanism: both processes are real, confirmed
+> OBUIAPP process ids with no backing `AD_Window` at all (`AD_Menu.ad_window_id` is null on both
+> "Receivables Aging Schedule" and "Payables Aging Schedule"), so there is no window to proxy
+> through either.
 
 **Still open (ETP-4877, unchanged by ETP-4878):** the ~21 existing tenants still holding
 per-client duplicated role copies are untouched by this mechanism (a migration, not a runtime

@@ -42,12 +42,12 @@ import java.util.Map;
  * truth for everything else ({@code UserRoleCompositionService}, the webhooks, and this class's
  * own tests).</p>
  *
- * <p><b>Ten matrix rows are intentionally NOT represented here — known gap.</b> Every excluded
+ * <p><b>Nine matrix rows are intentionally NOT represented here — known gap.</b> Every excluded
  * row has NO {@code AD_Window_ID} at all backing it (either a pure custom/aggregate Schema Forge
  * page with zero classic-AD entity, or a report-type spec whose access is resolved via a
  * different, non-window mechanism): Inicio (Dashboard), Favoritos, Copilot (Asistente IA),
  * Documentos no contabilizados, Informes de inventario, Informes financieros, Informe Antigüedad
- * de Cobros, Informe Antigüedad de Pagos, Escaneo inteligente, Configuración fiscal. See
+ * de Cobros, Informe Antigüedad de Pagos, Escaneo inteligente. See
  * {@code EnsureSystemRoleTemplatesScript}'s class javadoc for the full per-row resolution detail,
  * and {@code docs/neo-headless.md} in this module for the research dispatch's complete mapping
  * table.</p>
@@ -61,6 +61,16 @@ import java.util.Map;
  * the same pattern {@code SFRolesOverview} already uses for its own read-side resolution (see
  * that class's {@code FISCAL_MONITOR_PROXY_WINDOW_ID}/{@code TAX_MODELS_PROXY_WINDOW_ID}, the
  * same two ids).</p>
+ *
+ * <p><b>"Configuración fiscal" was also in that windowless-gap list, and ETP-5116 resolved it for
+ * Finance too — but as a direct grant of 3 real sibling windows, not a single proxy.</b> Confirmed
+ * by the user as a product decision: the label has no spec/menu of its own, but maps to 3 windows
+ * that already have full working window-level access control — SII Configuration
+ * ({@code C1D3A2A017AC4B82B9FEE6F4D2A0C55A}), TBAI Configuration
+ * ({@code C327DE215AC945F69363905840118177}), and Verifactu Configuration
+ * ({@code 27A453FA86974745977672F1A8DCCEFF}). Unlike "Monitor fiscal"/"Modelos fiscales" above,
+ * this is not a stand-in for a windowless page — these 3 windows ARE what "Configuración fiscal"
+ * refers to, so all 3 are granted directly.</p>
  *
  * <p><b>"Documentos no contabilizados" remains unresolved here — ETP-5116 investigation, not a new
  * gap.</b> Financiero needs FULL access to process {@code D6AB95CE52D34E1599590526115E26C6} via
@@ -179,12 +189,18 @@ public final class TemplateRoleWindowAccess {
   }
 
   /**
-   * Finance ("Financiero") column of the ETP-4878 matrix — 28 grants: 25 from the original ticket
+   * Finance ("Financiero") column of the ETP-4878 matrix — 31 grants: 25 from the original ticket
    * matrix (27 minus the two ETP-5116 over-grants removed below — Categoría del producto /
    * Product Category and Inventario físico / Physical Inventory, neither of which Financiero
    * should have access to), plus {@code 107} (Receipt-Invoice Link, ETP-5075 — see {@link
-   * #purchasingGrants()}) and 2 new ETP-5116 proxy grants (SII Monitor and Tax Report — see the
-   * class javadoc's "Monitor fiscal"/"Modelos fiscales" note).
+   * #purchasingGrants()}), 2 ETP-5116 proxy grants (SII Monitor and Tax Report — see the class
+   * javadoc's "Monitor fiscal"/"Modelos fiscales" note), and 3 more ETP-5116 grants for
+   * "Configuración fiscal" — a product decision, not a proxy: that label has no single spec/menu
+   * of its own, but maps to 3 real sibling windows that already have full working window-level
+   * access control — SII Configuration ({@code C1D3A2A017AC4B82B9FEE6F4D2A0C55A}), TBAI
+   * Configuration ({@code C327DE215AC945F69363905840118177}), and Verifactu Configuration
+   * ({@code 27A453FA86974745977672F1A8DCCEFF}) — so all three are granted directly, unlike the
+   * proxy pattern above.
    */
   private static List<WindowGrant> financeGrants() {
     return list(
@@ -215,7 +231,10 @@ public final class TemplateRoleWindowAccess {
         full("192"),                                          // Categoría de contacto — Business Partner Category
         full("6FEBA130CDE24CC09041FFA6117ADFA9"),             // Registro descarga tipos de cambio — Conversion Rate Downloader Log
         full("FEF76C3E0F104F06A89AAD15A4A4A35C"),              // SII Monitor — proxies "Monitor Fiscal" (ETP-5116)
-        full("3E8FEA1EA7404D979306C9EE7FD2E7E8"));             // Tax Report — proxies "Modelos Fiscales" (ETP-5116)
+        full("3E8FEA1EA7404D979306C9EE7FD2E7E8"),              // Tax Report — proxies "Modelos Fiscales" (ETP-5116)
+        full("C1D3A2A017AC4B82B9FEE6F4D2A0C55A"),              // SII Configuration — "Configuración fiscal" (ETP-5116)
+        full("C327DE215AC945F69363905840118177"),              // TBAI Configuration — "Configuración fiscal" (ETP-5116)
+        full("27A453FA86974745977672F1A8DCCEFF"));             // Verifactu Configuration — "Configuración fiscal" (ETP-5116)
   }
 
   /** Inventory ("Almacén") column of the ETP-4878 matrix — 13 grants. */

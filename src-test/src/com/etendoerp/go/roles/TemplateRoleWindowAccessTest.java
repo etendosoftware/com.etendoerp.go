@@ -62,6 +62,9 @@ class TemplateRoleWindowAccessTest {
   private static final String WINDOW_PHYSICAL_INVENTORY = "168";
   private static final String WINDOW_SII_MONITOR = "FEF76C3E0F104F06A89AAD15A4A4A35C";
   private static final String WINDOW_TAX_REPORT = "3E8FEA1EA7404D979306C9EE7FD2E7E8";
+  private static final String WINDOW_SII_CONFIG = "C1D3A2A017AC4B82B9FEE6F4D2A0C55A";
+  private static final String WINDOW_TBAI_CONFIG = "C327DE215AC945F69363905840118177";
+  private static final String WINDOW_VERIFACTU_CONFIG = "27A453FA86974745977672F1A8DCCEFF";
 
   private static WindowGrant grantFor(List<WindowGrant> grants, String windowId) {
     for (WindowGrant grant : grants) {
@@ -86,11 +89,12 @@ class TemplateRoleWindowAccessTest {
   void financeHasTwentySevenGrantsIncludingTheResolvedSimpleGlJournal() {
     List<WindowGrant> finance = TemplateRoleWindowAccess.byRoleId()
         .get(SystemRoleTemplates.FINANCE_ROLE_ID);
-    assertEquals(28, finance.size(),
+    assertEquals(31, finance.size(),
         "Finance's ETP-4878 column has 25 non-dash rows once the 12 windowless rows and the 2 "
             + "ETP-5116 over-grants (Categoría del producto, Inventario físico) are excluded, plus "
-            + "window 107 (Receipt-Invoice Link, ETP-5075) and 2 ETP-5116 proxy grants (SII "
-            + "Monitor, Tax Report)");
+            + "window 107 (Receipt-Invoice Link, ETP-5075), 2 ETP-5116 proxy grants (SII "
+            + "Monitor, Tax Report), and 3 more ETP-5116 direct grants for Configuración fiscal "
+            + "(SII/TBAI/Verifactu Configuration)");
 
     WindowGrant glJournalGrant = grantFor(finance, WINDOW_SIMPLE_GL_JOURNAL);
     assertNotNull(glJournalGrant,
@@ -123,6 +127,21 @@ class TemplateRoleWindowAccessTest {
     assertTrue(taxReportGrant != null && !taxReportGrant.isReadOnly(),
         "ETP-5116: Financiero has FULL access to the Tax Report window, proxying the windowless "
             + "\"Modelos fiscales\" row");
+
+    WindowGrant siiConfigGrant = grantFor(finance, WINDOW_SII_CONFIG);
+    assertTrue(siiConfigGrant != null && !siiConfigGrant.isReadOnly(),
+        "ETP-5116: Financiero has FULL access to SII Configuration — one of the 3 real windows "
+            + "\"Configuración fiscal\" maps to (product decision)");
+
+    WindowGrant tbaiConfigGrant = grantFor(finance, WINDOW_TBAI_CONFIG);
+    assertTrue(tbaiConfigGrant != null && !tbaiConfigGrant.isReadOnly(),
+        "ETP-5116: Financiero has FULL access to TBAI Configuration — one of the 3 real windows "
+            + "\"Configuración fiscal\" maps to (product decision)");
+
+    WindowGrant verifactuConfigGrant = grantFor(finance, WINDOW_VERIFACTU_CONFIG);
+    assertTrue(verifactuConfigGrant != null && !verifactuConfigGrant.isReadOnly(),
+        "ETP-5116: Financiero has FULL access to Verifactu Configuration — one of the 3 real "
+            + "windows \"Configuración fiscal\" maps to (product decision)");
   }
 
   @Test
@@ -207,12 +226,13 @@ class TemplateRoleWindowAccessTest {
     for (List<WindowGrant> grants : TemplateRoleWindowAccess.byRoleId().values()) {
       total += grants.size();
     }
-    assertEquals(65, total,
-        "12 (Sales) + 12 (Purchasing) + 28 (Finance) + 13 (Inventory) = 65 — from the original "
+    assertEquals(68, total,
+        "12 (Sales) + 12 (Purchasing) + 31 (Finance) + 13 (Inventory) = 68 — from the original "
             + "64: +2 for window 107 (Receipt-Invoice Link) added to Purchasing and Finance by "
-            + "ETP-5075, then ETP-5116 removed 1 net grant (Sales -1 for dropping full(\"168\"); "
-            + "Finance unchanged at +2/-2 for the 144/168 over-grant removals and the 2 new SII "
-            + "Monitor/Tax Report proxy grants)");
+            + "ETP-5075, then ETP-5116 removed 1 net grant (Sales -1 for dropping full(\"168\")) "
+            + "and added 3 net to Finance (+2/-2 for the 144/168 over-grant removals and the 2 "
+            + "new SII Monitor/Tax Report proxy grants, then +3 more for the direct Configuración "
+            + "fiscal grants — SII/TBAI/Verifactu Configuration)");
   }
 
   @Test
@@ -233,10 +253,10 @@ class TemplateRoleWindowAccessTest {
    * documented number so a future matrix edit that silently drifts from it is caught here instead
    * of only being caught by someone re-reading the javadoc by hand.
    *
-   * <p>ETP-5116 update: 34 distinct windows (33 + window 107 from ETP-5075) plus 2 brand-new
-   * proxy windows (SII Monitor, Tax Report) = 36. The removed over-grants (144, 168) did not
-   * change the distinct count since both windows remain granted elsewhere (144 via Sales/
-   * Purchasing/Inventory; 168 via Inventory).</p>
+   * <p>ETP-5116 update: 34 distinct windows (33 + window 107 from ETP-5075) plus 2 proxy windows
+   * (SII Monitor, Tax Report) plus 3 more direct windows (SII/TBAI/Verifactu Configuration) = 39.
+   * The removed over-grants (144, 168) did not change the distinct count since both windows
+   * remain granted elsewhere (144 via Sales/Purchasing/Inventory; 168 via Inventory).</p>
    */
   @Test
   void thirtySixDistinctWindowIdsAreCoveredAcrossAllFourRoles() {
@@ -246,11 +266,12 @@ class TemplateRoleWindowAccessTest {
         distinctWindowIds.add(grant.getWindowId());
       }
     }
-    assertEquals(36, distinctWindowIds.size(),
-        "The matrix's 65 grants must resolve to exactly 36 distinct AD_Window_IDs once shared "
+    assertEquals(39, distinctWindowIds.size(),
+        "The matrix's 68 grants must resolve to exactly 39 distinct AD_Window_IDs once shared "
             + "windows (e.g. Contactos, Producto, Tarifa) are counted once — 34 from ETP-4878/"
-            + "ETP-5075 (window 107 added to both Purchasing and Finance), plus 2 new ETP-5116 "
-            + "proxy windows (SII Monitor, Tax Report) added to Finance");
+            + "ETP-5075 (window 107 added to both Purchasing and Finance), plus 2 ETP-5116 proxy "
+            + "windows (SII Monitor, Tax Report) and 3 more ETP-5116 direct windows (SII/TBAI/"
+            + "Verifactu Configuration), all added to Finance");
   }
 
   /**
