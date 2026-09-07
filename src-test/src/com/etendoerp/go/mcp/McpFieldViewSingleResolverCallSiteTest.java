@@ -139,17 +139,27 @@ class McpFieldViewSingleResolverCallSiteTest {
         + CURATION_PROPERTIES + ")\\s*\\(");
   }
 
+  /**
+   * Restore the real section registry around every test.
+   *
+   * <p>Other test classes in this package clear {@code McpEntityConfig}'s registrations without
+   * resetting the bootstrap flag, which would leave {@code ensureRegistered()} a no-op and make
+   * the real {@code fields} section read as unknown. Resetting both the flag and the parse cache
+   * is needed <b>before</b> each test, so this class always resolves against the real sections,
+   * and <b>after</b> each test — including the last — so this class does not leave its own
+   * registry behind for whatever runs next.
+   *
+   * <p><b>One method carrying both annotations, deliberately.</b> The two callbacks need the
+   * identical body, and as two methods that is Sonar S4144 (identical implementations) with
+   * nothing to extract. JUnit discovers before-each and after-each with independent
+   * {@code findAnnotatedMethods} scans and validates only that a lifecycle method is
+   * {@code void}, non-{@code private} and non-{@code static}
+   * ({@code LifecycleMethodUtils}), so a method annotated with both appears in both lists and is
+   * invoked as both — same isolation, no duplication. Please do not split it back into two.
+   */
   @BeforeEach
-  void registerRealSections() {
-    // Other test classes in this package clear McpEntityConfig's registrations without resetting
-    // the bootstrap flag, which would leave ensureRegistered() a no-op and make the real 'fields'
-    // section read as unknown. Reset both so this class always resolves against the real sections.
-    McpConfigSections.resetForTests();
-    McpConfigCache.invalidateAll();
-  }
-
   @AfterEach
-  void clean() {
+  void isolateSectionRegistry() {
     McpConfigSections.resetForTests();
     McpConfigCache.invalidateAll();
   }
