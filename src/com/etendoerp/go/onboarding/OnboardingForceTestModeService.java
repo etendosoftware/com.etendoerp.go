@@ -129,6 +129,10 @@ public class OnboardingForceTestModeService {
 
   private final TenantPlanService tenantPlanService;
 
+  /**
+   * Delegates to the package-private test-injection constructor with a real
+   * {@link TenantPlanService}.
+   */
   public OnboardingForceTestModeService() {
     this(new TenantPlanService());
   }

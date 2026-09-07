@@ -1631,6 +1631,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * ETP-5117: a tenant converting to productive must stop overriding the System-level
+   * ETSG_ForceTestMode default (e.g. a tenant that started as Demo and got its own row via
+   * {@link OnboardingForceTestModeService}). Same best-effort philosophy as {@code
+   * markProductive} itself — commercial/fiscal-config metadata, never allowed to abort an
+   * otherwise-successful paid signup. See {@link OnboardingForceTestModeService}'s own javadoc
+   * ("The reverse direction") for why this needs its own service call, not a one-liner.
+   *
+   * @param clientId the tenant just marked productive
+   */
+  private void revertTestModeForProductiveTenantBestEffort(String clientId) {
+    try {
+      onboardingForceTestModeService.revertTestModeForProductiveTenant(clientId);
+    } catch (RuntimeException e) {
+      log.error("Could not revert ETSG_ForceTestMode for now-productive tenant '{}': {}",
+          clientId, e.getMessage(), e);
+    }
+  }
+
+  /**
    * GET /sws/go/environments
    * Header: Authorization: Bearer <session_token>
    * Returns 200 with environments linked to the account, each carrying its plan
@@ -1852,18 +1871,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
               + "'{}' and will read back as free", onboardingRequest.clientName, clientId,
               maskEmail(accountEmail), TenantPlanService.PLAN_PRODUCTIVE);
         } else {
-          // ETP-5117: a tenant converting to productive must stop overriding the System-level
-          // ETSG_ForceTestMode default (e.g. a tenant that started as Demo and got its own row
-          // via OnboardingForceTestModeService). Same best-effort philosophy as markProductive
-          // itself just above — commercial/fiscal-config metadata, never allowed to abort an
-          // otherwise-successful paid signup. See OnboardingForceTestModeService's own javadoc
-          // ("The reverse direction") for why this needs its own service call, not a one-liner.
-          try {
-            onboardingForceTestModeService.revertTestModeForProductiveTenant(clientId);
-          } catch (RuntimeException e) {
-            log.error("Could not revert ETSG_ForceTestMode for now-productive tenant '{}': {}",
-                clientId, e.getMessage(), e);
-          }
+          revertTestModeForProductiveTenantBestEffort(clientId);
         }
       }
 
