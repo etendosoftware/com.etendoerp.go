@@ -98,10 +98,15 @@ class McpImageToolsTest {
   /** Runs {@code body} with a live ticket store and a fixed session context. */
   private static <T> T withSession(NeoImageUploadTickets store, ThrowingSupplier<T> body)
       throws Exception {
+    // Built BEFORE the static stubbing starts, and deliberately so: sessionContext() stubs four
+    // mocks of its own, and doing that inside `contextMock.when(...).thenReturn(...)` — between the
+    // when() and the thenReturn() — is the misuse Mockito reports as UnfinishedStubbingException
+    // ("you are stubbing the behaviour of another mock before 'thenReturn' is completed").
+    OBContext session = sessionContext();
     try (MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
         MockedStatic<NeoImageUploadTickets> ticketsMock = mockStatic(NeoImageUploadTickets.class,
             org.mockito.Mockito.CALLS_REAL_METHODS)) {
-      contextMock.when(OBContext::getOBContext).thenReturn(sessionContext());
+      contextMock.when(OBContext::getOBContext).thenReturn(session);
       ticketsMock.when(NeoImageUploadTickets::getInstance).thenReturn(store);
       return body.get();
     }
