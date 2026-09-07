@@ -1683,6 +1683,14 @@ entity's schema and undiscoverable. Omitting the id fails the generic mandatory-
 422; sending it without address fields fails with a constraint violation. Only "a throwaway id plus
 the address fields" works, and nothing in the machine-readable contract says so — hence the prompt.
 
+Note which level serves that example, because the two are easy to conflate: `contacts/locationAddress`
+is fixed by a **field**-level prompt on `ETGO_SF_FIELD.AGENT_PROMPT` for `C_Location_ID`, which
+predates ETP-5184 and reaches the response through `McpSchemaFieldBuilder`'s per-field
+`addAgentPrompt`. The **entity**-level prompt ETP-5184 added to `neo_schema` is a separate path with
+its own two consumers — `contacts/bankAccount` and `financial-account/account`, both disambiguating
+a contact's own bank account from the company's. `contacts/locationAddress` carries no entity-level
+prompt at all.
+
 Making the schema itself tell the truth is the deeper fix and is proposed, not implemented, in
 `schema_forge/docs/plans/2026-09-07-mcp-handler-contract-section.md` (a `handlerContract`
 `MCP_CONFIG` section). It touches `validateMandatoryFields`, the write gate for the whole MCP, so it
