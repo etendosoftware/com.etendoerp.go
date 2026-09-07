@@ -46,12 +46,12 @@ import com.etendoerp.go.schemaforge.data.SFField;
  * now go through this class, and there is exactly one answer per field.</p>
  *
  * <h2>What "editable" means here</h2>
- * <p>{@link #isEditable()} keeps {@code neo_selectors}' original meaning when nothing is
- * configured — {@code isIncluded && !isReadOnly}, which is what {@code push-to-neo.js} writes for
- * the {@code editable} visibility — and switches to the curated string as soon as a
- * {@code visibility} is available, from the {@code SFField} row or from the override. The two
- * agree wherever curation is complete; where it is not, the explicit value wins over the
- * derivation, which is the whole point.</p>
+ * <p>{@link #isEditable()} keeps {@code neo_selectors}' original meaning —
+ * {@code isIncluded && !isReadOnly}, which is what {@code push-to-neo.js} writes for the
+ * {@code editable} visibility — and adds the curated string as a further requirement wherever one
+ * is available, from the {@code SFField} row or from the override. The two agree wherever curation
+ * is complete; where it is not, the classification narrows the derivation but never widens it. See
+ * {@link #isEditable()} on why an override may reclassify a field but not include one.</p>
  *
  * <h2>Curation, not permission</h2>
  * <p>Nothing here is an access decision. These values shape what the MCP <em>offers</em> the agent;
@@ -149,13 +149,36 @@ final class McpFieldView {
   /**
    * Whether the agent may supply this field.
    *
-   * @return {@code true} when the curated visibility says {@code editable}, or — with no visibility
-   *         curated either way — when the field is included in the spec and not read-only
+   * <p><b>{@code ISINCLUDED} and {@code VISIBILITY} are different axes, and this section may only
+   * move one of them.</b> {@code ISINCLUDED} answers "is this field part of the MCP surface at
+   * all"; {@code VISIBILITY} answers "how is it classified once it is". The {@code fields} section
+   * is a <em>classification</em> override, so it must never silently flip <em>inclusion</em> —
+   * widening the surface is {@code ISINCLUDED}'s job and belongs in the shared contract, not in an
+   * MCP-side override. Hence {@code included} is required in both branches: an entity-level
+   * {@code visibility:"editable"} reclassifies the fields the spec already exposes and leaves the
+   * excluded ones excluded. Without that term, {@code bp-location/bpLocation}'s override promoted
+   * all ten {@code C_Location} rows, primary key included ({@code C_Location_ID} is mandatory and
+   * {@code AD_Column.isUpdateable = 'N'}), where the spec includes six.</p>
+   *
+   * <p>The term costs nothing on today's data — all 1040 {@code VISIBILITY = 'editable'} rows in
+   * the instance already carry {@code ISINCLUDED = 'Y'}, and no row exists in either combination
+   * where the visibility branch and the fallback disagree.</p>
+   *
+   * <p><b>Scope.</b> The one consumer of this is {@link McpQuerySupport#editablePropertyNames},
+   * read by {@code McpToolRouter} for {@link McpDefaultsView#apply} — the {@code neo_defaults}
+   * grouped/minimal split between {@code confirm} and {@code systemManaged}. It is purely
+   * presentational and gates no write. The create path does not consult {@code isIncluded} at all
+   * ({@code mapFieldsToDalProperties} takes only the tab and maps names to DAL properties), so an
+   * {@code ISINCLUDED = 'N'} column such as {@code C_Location.RegionName} stays writable through
+   * {@code neo_create} either way.</p>
+   *
+   * @return {@code true} when the field is included in the spec, is not read-only, and is either
+   *         curated {@code editable} or carries no curated visibility at all
    */
   boolean isEditable() {
-    if (visibility != null) {
-      return McpSchemaFieldBuilder.VISIBILITY_EDITABLE.equals(visibility) && !readOnly;
+    if (!included || readOnly) {
+      return false;
     }
-    return included && !readOnly;
+    return visibility == null || McpSchemaFieldBuilder.VISIBILITY_EDITABLE.equals(visibility);
   }
 }
