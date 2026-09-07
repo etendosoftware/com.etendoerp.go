@@ -52,6 +52,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.common.geography.Location;
 import org.openbravo.model.common.geography.Region;
@@ -95,6 +96,7 @@ class ContactsLocationAddressParentAndRegionTest {
   private ContactsLocationAddressHandler handler;
 
   private OBDal obDal;
+  private OBProvider obProvider;
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBContext> obContextMock;
   private MockedStatic<OBProvider> obProviderMock;
@@ -103,14 +105,15 @@ class ContactsLocationAddressParentAndRegionTest {
   @BeforeEach
   void setUp() {
     handler = new ContactsLocationAddressHandler();
-    obDal = mock(OBDal.class);
     obDalMock = mockStatic(OBDal.class);
     obContextMock = mockStatic(OBContext.class);
     obProviderMock = mockStatic(OBProvider.class);
     sessionHandlerMock = mockStatic(SessionHandler.class);
 
+    obDal = mock(OBDal.class);
+    obProvider = mock(OBProvider.class);
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
-    obProviderMock.when(OBProvider::getInstance).thenReturn(mock(OBProvider.class));
+    obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
     sessionHandlerMock.when(SessionHandler::getInstance).thenReturn(mock(SessionHandler.class));
   }
 
@@ -473,6 +476,108 @@ class ContactsLocationAddressParentAndRegionTest {
       applyGeoLocFields(body, geoLoc);
 
       verify(geoLoc).setRegionName("Cordoba");
+    }
+  }
+
+  @Nested
+  @DisplayName("an unresolvable explicit region id is fatal and writes nothing")
+  class UnresolvableRegionId {
+
+    /**
+     * {@code OBDal.get} answers {@code null} for an id that does not exist and nothing validates
+     * the id before this, so the write used to put that {@code null} through and clear <b>both</b>
+     * columns: a caller that guessed a region id — an MCP agent, typically — got a 200 back with
+     * the province silently gone, and on an Argentine address the free text erased with it.
+     */
+    @Test
+    @DisplayName("it throws, naming the id, with the same message shape as the free-text path")
+    void itThrowsNamingTheId() throws Exception {
+      Location geoLoc = mock(Location.class);
+      when(obDal.get(Region.class, "ghost-region")).thenReturn(null);
+
+      JSONObject body = new JSONObject();
+      body.put("region", "ghost-region");
+
+      OBException thrown = assertThrows(OBException.class, () -> applyGeoLocFields(body, geoLoc));
+      // One message factory for all region refusals, so an operator reading a failing import row
+      // sees the offending value named the same way whatever the cause.
+      assertEquals("The region \"ghost-region\" does not exist.", thrown.getMessage());
+    }
+
+    @Test
+    @DisplayName("neither column is written — not even to null")
+    void neitherColumnIsWritten() throws Exception {
+      // The property the whole error-path change rests on, and it is not observable from the
+      // exception: a throw that had already cleared one column would leave the record in the
+      // state the refusal exists to prevent. `never()` with any(), not with isNull(), because
+      // "called with null" and "called at all" are different failures and both are wrong here.
+      Location geoLoc = mock(Location.class);
+      when(geoLoc.getRegionName()).thenReturn("Cordoba");
+      when(obDal.get(Region.class, "ghost-region")).thenReturn(null);
+
+      JSONObject body = new JSONObject();
+      body.put("region", "ghost-region");
+
+      assertThrows(OBException.class, () -> applyGeoLocFields(body, geoLoc));
+      verify(geoLoc, never()).setRegion(any());
+      verify(geoLoc, never()).setRegionName(any());
+    }
+
+    @Test
+    @DisplayName("nothing is persisted on the create path — the throw precedes every save")
+    void nothingIsPersistedOnCreate() throws Exception {
+      // Reaches the real handler rather than the private writer, because "precedes persistence"
+      // is a claim about the order of two calls in handleCreate, not about the writer.
+      BusinessPartner bp = mock(BusinessPartner.class);
+      when(bp.getClient()).thenReturn(mock(Client.class));
+      when(bp.getOrganization()).thenReturn(mock(Organization.class));
+      when(obDal.get(BusinessPartner.class, QUERY_BP)).thenReturn(bp);
+      Location geoLoc = mock(Location.class);
+      when(obProvider.get(Location.class)).thenReturn(geoLoc);
+      when(obDal.get(Region.class, "ghost-region")).thenReturn(null);
+
+      JSONObject body = new JSONObject();
+      body.put("region", "ghost-region");
+      NeoResponse response = handler.handle(post(body, params(QUERY_BP)));
+
+      assertNotNull(response);
+      verify(obDal, never()).save(any());
+      verify(geoLoc, never()).setRegion(any());
+      verify(geoLoc, never()).setRegionName(any());
+      // The caller has to be told which value was rejected, or a failing import row is unfixable.
+      assertTrue(response.getBody().toString().contains("ghost-region"),
+          "the refusal must survive the handler's error wrapper: " + response.getBody());
+    }
+
+    /**
+     * Precedence, confirmed from the source before being pinned: the {@code regionId != null}
+     * branch is entered on the id alone and {@code regionName} is only reached in its
+     * {@code else}, and the source states the intent — "an explicit id still wins … regionName is
+     * the import's entry point", with an unresolvable region being "an error, never a partial
+     * write". So an unresolvable id must not quietly fall through to a name that happens to
+     * resolve: that would write a province the caller never asked for while ignoring the one it
+     * did ask for, and report success.
+     */
+    @Test
+    @DisplayName("a resolvable regionName alongside it does not rescue the request")
+    void aResolvableNameDoesNotRescueABadId() throws Exception {
+      Country spain = mockCountry("Spain", Boolean.TRUE);
+      Location geoLoc = mock(Location.class);
+      when(geoLoc.getCountry()).thenReturn(spain);
+      when(obDal.get(Region.class, "ghost-region")).thenReturn(null);
+      stubRegionsOfCountry(Collections.singletonList(mockRegion("MADRID", "T1")));
+      stubCurrentClient("T1");
+
+      JSONObject body = new JSONObject();
+      body.put("region", "ghost-region");
+      body.put("regionName", "Madrid");
+
+      OBException thrown = assertThrows(OBException.class, () -> applyGeoLocFields(body, geoLoc));
+      assertTrue(thrown.getMessage().contains("ghost-region"),
+          "the id is what was rejected, so the id is what the message must name");
+      verify(geoLoc, never()).setRegion(any());
+      verify(geoLoc, never()).setRegionName(any());
+      verify(obDal, never()).createQuery(eq(Region.class), anyString());
     }
   }
 
