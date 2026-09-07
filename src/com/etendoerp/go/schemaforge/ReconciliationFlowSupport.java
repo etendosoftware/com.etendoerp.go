@@ -126,7 +126,8 @@ final class ReconciliationFlowSupport {
     if (StringUtils.isBlank(paymentMethodId)) {
       return null;
     }
-    FIN_PaymentMethod method = OBDal.getInstance().get(FIN_PaymentMethod.class, paymentMethodId);
+    // Tenant guard: the id comes from the request body (ETP-4950).
+    FIN_PaymentMethod method = TenantOwnership.loadOwned(FIN_PaymentMethod.class, paymentMethodId);
     if (method == null) {
       throw new OBException("Payment method not found: " + paymentMethodId);
     }
@@ -164,8 +165,11 @@ final class ReconciliationFlowSupport {
       return new SettlementOutcome(remaining, NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "invoiceId and scheduleId are required for each invoice"));
     }
-    Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
-    FIN_PaymentSchedule schedule = OBDal.getInstance().get(FIN_PaymentSchedule.class, scheduleId);
+    // Both ids come from the request body and this method goes on to register a REAL payment
+    // against them, so a foreign id must resolve to nothing rather than to another tenant's
+    // invoice (ETP-4950).
+    Invoice invoice = TenantOwnership.loadOwned(Invoice.class, invoiceId);
+    FIN_PaymentSchedule schedule = TenantOwnership.loadOwned(FIN_PaymentSchedule.class, scheduleId);
     if (invoice == null || schedule == null) {
       return new SettlementOutcome(remaining, NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
           "Invoice or payment schedule not found: " + invoiceId));
@@ -292,7 +296,12 @@ final class ReconciliationFlowSupport {
     }
 
     FIN_BankStatementLine line = handler.loadLine(statementLineId);
-    if (line == null) {
+    // Ownership: the line must belong to the account this batch is reconciling. Every other entry
+    // point already did this — reconcileGroup, reactivate, reactivateSelected and
+    // reconcileDifference. applySuggestions was the one path that skipped it, so a line from
+    // another account, another tenant's included, could be matched in against transactions of this
+    // one. See ETP-4950.
+    if (line == null || !ReconciliationSupport.belongsToAccount(line, account.getId())) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
           ReconciliationHandler.MSG_STATEMENT_LINE_NOT_FOUND + statementLineId);
     }
