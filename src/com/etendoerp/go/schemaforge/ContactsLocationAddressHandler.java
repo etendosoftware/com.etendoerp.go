@@ -363,6 +363,10 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     String regionName = StringUtils.trimToNull(nullIfEmpty(body.optString(FIELD_REGION_NAME, null)));
     if (regionId != null) {
       geoLoc.setRegion(OBDal.getInstance().get(Region.class, regionId));
+      // The two region columns are mutually exclusive: a record whose RegionName was filled by
+      // the free-text fallback and is later edited with a selector must not keep both, or the
+      // contacts export's COALESCE(C_Region.name, C_Location.regionname) picks arbitrarily.
+      geoLoc.setRegionName(null);
     } else if (regionName != null) {
       applyRegionName(regionName, geoLoc);
     } else if (body.has(FIELD_REGION)) {
