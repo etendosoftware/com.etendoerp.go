@@ -65,8 +65,21 @@ final class McpImageTools {
   static final String PARAM_DATA_BASE64 = "data_base64";
   static final String PARAM_TOKEN = "token";
 
-  /** Relative path of the ticketed upload endpoint; joined to {@code context.url} when known. */
-  static final String UPLOAD_PATH = "/sws/neo/image/upload/";
+  /**
+   * Mount of the NEO servlet inside the web context, as registered in {@code AD_MODEL_OBJECT}. Not
+   * configurable and not meant to be: it is part of the protocol every NEO client already speaks,
+   * and the only deployment-varying half of the URL — the public base and the context path — is
+   * resolved from configuration in {@link #buildUploadUrl}.
+   */
+  private static final String NEO_SERVLET_PATH = "/sws/neo";
+
+  /**
+   * Relative path of the ticketed upload endpoint; joined to the resolved base in
+   * {@link #buildUploadUrl}. The endpoint half comes from {@link NeoImageHelper#UPLOAD_TICKET_PATH},
+   * the same constant {@code NeoServlet} routes on, so the URL handed to an agent cannot drift from
+   * the route that serves it.
+   */
+  static final String UPLOAD_PATH = NEO_SERVLET_PATH + NeoImageHelper.UPLOAD_TICKET_PATH;
   private static final String OPENBRAVO_CONTEXT_URL = "context.url";
   private static final String OPENBRAVO_CONTEXT_NAME = "context.name";
   private static final String KEY_UPLOAD_URL = "uploadUrl";
@@ -246,7 +259,7 @@ final class McpImageTools {
   /** The remedy that goes with each validation reason — one sentence the agent can act on. */
   private static String hintFor(String reason) {
     switch (reason) {
-      case "too_large":
+      case NeoImageHelper.REASON_TOO_LARGE:
         return OVER_CAP_ADVICE;
       case "unsupported_mime":
         return "Convert the image to PNG or JPEG and resend it.";

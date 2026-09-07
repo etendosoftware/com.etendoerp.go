@@ -54,7 +54,7 @@ public class NeoServlet extends HttpBaseServlet {
   private static final String METHOD_PUT = "PUT";
   private static final String DOCUMENT_DOWNLOAD_PREFIX = "/document-download/";
   /** Unauthenticated one-shot MCP image-upload endpoint (ETP-5184); the token is the credential. */
-  private static final String IMAGE_UPLOAD_PREFIX = "/image/upload/";
+  private static final String IMAGE_UPLOAD_PREFIX = NeoImageHelper.UPLOAD_TICKET_PATH;
   static final String ERR_ENTITY_NOT_FOUND = "Entity not found: ";
   static final String ERR_NO_LINKED_TAB = "Entity has no linked AD_Tab: ";
   public static final String ACTION_REQUEST_BODY_ATTR = "neo.action.requestBody";

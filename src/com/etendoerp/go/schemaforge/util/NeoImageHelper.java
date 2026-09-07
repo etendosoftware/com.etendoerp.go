@@ -81,6 +81,21 @@ public final class NeoImageHelper {
    * already-used alike — see {@link #handleUploadTicketRequest} for why they must not be
    * distinguishable.
    */
+  /**
+   * Path of the ticketed upload endpoint, relative to the NEO servlet mount — the single source of
+   * truth for it. {@code NeoServlet} routes on this prefix and {@code McpImageTools} advertises the
+   * URL built from it; a literal in each would let the advertised URL drift from the served route,
+   * and the only symptom would be an agent PUTting to a 404.
+   */
+  public static final String UPLOAD_TICKET_PATH = "/image/upload/";
+
+  /**
+   * The one {@link ImageValidationException#getReason() reason} callers branch on: it is the only
+   * validation failure that maps to a different HTTP status (413 rather than 400), so the string is
+   * both thrown and compared and must not drift between the two.
+   */
+  public static final String REASON_TOO_LARGE = "too_large";
+
   static final String INVALID_UPLOAD_LINK_MESSAGE =
       "This upload link is not valid, has already been used, or has expired. Request a new one with "
       + "neo_request_image_upload.";
@@ -166,7 +181,7 @@ public final class NeoImageHelper {
       throw new ImageValidationException("empty", "No image bytes were received.");
     }
     if (data.length > maxBytes) {
-      throw new ImageValidationException("too_large", "The image is " + data.length
+      throw new ImageValidationException(REASON_TOO_LARGE, "The image is " + data.length
           + " bytes, over the " + maxBytes + "-byte limit of this path. "
           + StringUtils.defaultString(overCapAdvice));
     }
@@ -214,8 +229,8 @@ public final class NeoImageHelper {
     }
     payload = payload.replaceAll("\\s", "");
     // 4 base64 chars carry 3 bytes; reject before allocating when the encoding alone is over cap.
-    if ((long) payload.length() / 4L * 3L > maxBytes) {
-      throw new ImageValidationException("too_large", "The base64 payload decodes to more than the "
+    if (payload.length() / 4L * 3L > maxBytes) {
+      throw new ImageValidationException(REASON_TOO_LARGE, "The base64 payload decodes to more than the "
           + maxBytes + "-byte limit of this path. " + StringUtils.defaultString(overCapAdvice));
     }
     try {
@@ -447,7 +462,7 @@ public final class NeoImageHelper {
       // A rejected payload must not burn the ticket: the remedy is to PUT the right file to the
       // same URL, and forcing a new ticket for a fixable mistake would cost the agent a round trip.
       tickets.release(token);
-      sendError(response, e.getReason().equals("too_large")
+      sendError(response, REASON_TOO_LARGE.equals(e.getReason())
           ? HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE
           : HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {
@@ -464,7 +479,7 @@ public final class NeoImageHelper {
       throws Exception {
     byte[] data = request.getInputStream().readNBytes(MAX_IMAGE_SIZE_BYTES + 1);
     if (data.length > MAX_IMAGE_SIZE_BYTES) {
-      throw new ImageValidationException("too_large",
+      throw new ImageValidationException(REASON_TOO_LARGE,
           "The uploaded file exceeds the " + MAX_IMAGE_SIZE_BYTES + "-byte limit.");
     }
     String mimeType = validateImageBytes(data, ticket.getMimeType(), MAX_IMAGE_SIZE_BYTES,
