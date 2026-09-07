@@ -98,11 +98,12 @@ class McpRecordUrlsTest {
   }
 
   private JSONObject singleRecordResult(String id) throws Exception {
-    JSONObject record = new JSONObject();
-    record.put("id", id);
-    record.put("documentNo", "SO/0001");
+    // Not `record`: restricted identifier since Java 16 (S6213).
+    JSONObject recordJson = new JSONObject();
+    recordJson.put("id", id);
+    recordJson.put("documentNo", "SO/0001");
     JSONArray data = new JSONArray();
-    data.put(record);
+    data.put(recordJson);
     JSONObject flat = new JSONObject();
     flat.put("data", data);
     return flat;

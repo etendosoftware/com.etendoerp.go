@@ -69,10 +69,14 @@ class McpImageFieldSupportTest {
    * Builds a tab carrying one image column plus one ordinary text column, so every test also proves
    * the guard leaves non-image fields alone.
    *
+   * <p>DB column names only: a {@code Tab} models the AD side, where columns are identified by
+   * {@code getDBColumnName()}. The DAL property a column maps to belongs to the {@code Entity},
+   * which {@link #entityMapping} builds — so this helper took a {@code propertyName} it could not
+   * use, making its call site read as if it constrained the mapping (S1172).
+   *
    * @param dbColumnName the image column's DB name
-   * @param propertyName the DAL property it maps to
    */
-  private static Tab tabWithImageColumn(String dbColumnName, String propertyName) {
+  private static Tab tabWithImageColumn(String dbColumnName) {
     Reference imageRef = mock(Reference.class);
     when(imageRef.getId()).thenReturn(McpConstants.REF_IMAGE_BLOB);
     Column imageColumn = mock(Column.class);
@@ -105,7 +109,7 @@ class McpImageFieldSupportTest {
   /** Runs {@code validateImageFields} with {@code EXISTING_IMAGE_ID} as the only known image row. */
   private static JSONObject validate(JSONObject body, String dbColumnName, String propertyName)
       throws Exception {
-    Tab tab = tabWithImageColumn(dbColumnName, propertyName);
+    Tab tab = tabWithImageColumn(dbColumnName);
     Entity entity = entityMapping(dbColumnName, propertyName);
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       OBDal obDal = mock(OBDal.class);
