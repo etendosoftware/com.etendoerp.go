@@ -17,8 +17,10 @@
 package com.etendoerp.go.schemaforge;
 
 import java.io.BufferedReader;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -200,8 +202,24 @@ class FiscalDeclCrudHandler {
     String model    = body.getString("model");
     long   year     = body.getLong("year");
     String period   = body.getString(PERIOD_KEY);
-    String declType = "com".equals(body.optString("type")) ? "C" : "O";
+    String requestedDeclType = "com".equals(body.optString("type")) ? "C" : "O";
     String status   = body.has(STATUS_KEY) ? body.getString(STATUS_KEY) : DEFAULT_STATUS;
+
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    String orgId    = OBContext.getOBContext().getCurrentOrganization().getId();
+    // ETP-5187 — a 2nd (or later) declaration for the same model/year/period used to 500 on
+    // ETGO_FISCAL_DECL_UQ (unique on client/org/model/year/period/DECL_TYPE) because the frontend
+    // never sent a differentiator and every declaration defaulted to DECL_TYPE='O'. See
+    // resolveAvailableDeclType for the resolution rule and its known 2-declarations-per-period
+    // ceiling (DECL_TYPE is a VARCHAR(1) CHECKed to 'O'/'C' — widening it is a separate schema
+    // change, out of scope here).
+    String declType = resolveAvailableDeclType(clientId, orgId, model, year, period, requestedDeclType);
+    if (declType == null) {
+      servlet.sendError(response, HttpServletResponse.SC_CONFLICT,
+          "A declaration already exists for " + model + " " + year + "/" + period
+              + " in both available slots (ordinaria and complementaria).");
+      return;
+    }
 
     BaseOBObject decl = (BaseOBObject) OBProvider.getInstance().get(ENTITY_FISCAL_DECL);
     decl.set(PROPERTY_CLIENT, OBContext.getOBContext().getCurrentClient());
@@ -219,6 +237,53 @@ class FiscalDeclCrudHandler {
 
     response.setStatus(HttpServletResponse.SC_CREATED);
     response.getWriter().write(created.toString());
+  }
+
+  /**
+   * Resolves a {@code DECL_TYPE} value that will not collide with {@code ETGO_FISCAL_DECL_UQ}
+   * (unique on {@code AD_CLIENT_ID, AD_ORG_ID, MODEL, FISCAL_YEAR, PERIOD, DECL_TYPE}) for the
+   * given natural key (ETP-5187 — "allow a new declaration for an already-declared period, warn
+   * instead of blocking"). Before this, {@code handleDeclPost} always wrote {@code DECL_TYPE='O'}
+   * (the frontend never sends a differentiator), so any 2nd declaration for the same
+   * model/year/period 500'd on the unique-constraint violation the moment the period picker
+   * (previously disabled for exactly this reason — see {@code NewDeclModal} in
+   * {@code FmOverlays.jsx}) stopped blocking the user from selecting it.
+   *
+   * <p>{@code DECL_TYPE} is a {@code VARCHAR(1)} column CHECKed to exactly {@code 'O'}/{@code 'C'}
+   * ({@code ETGO_FISCAL_DECL.xml}) — there is no other ordinal/sequence column on this table to
+   * repurpose, and widening the column/check is a separate, larger schema change intentionally
+   * left out of this fix's scope. That leaves exactly 2 usable slots per natural key: this method
+   * returns the requested type when it is still free, falls back to the other single-char value
+   * when it is not, and returns {@code null} only when BOTH are already taken (a 3rd declaration
+   * for the same period) — {@link #handleDeclPost} turns that into a 409 rather than a raw
+   * unique-constraint 500. A 3rd+ declaration for the same period is a known, accepted limitation
+   * of this fix, not a regression it introduces (that case has never worked).
+   *
+   * @return the resolved {@code DECL_TYPE}, or {@code null} if no free slot remains.
+   */
+  private String resolveAvailableDeclType(String clientId, String orgId, String model, long year,
+      String period, String requestedType) {
+    OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY_FISCAL_DECL,
+        "client.id = :clientId and organization.id = :orgId and " + PROPERTY_FISCAL_MODEL
+            + " = :model and " + PROPERTY_FISCAL_YEAR + " = :year and " + PROPERTY_PERIOD
+            + " = :period");
+    query.setNamedParameter("clientId", clientId);
+    query.setNamedParameter("orgId", orgId);
+    query.setNamedParameter("model", model);
+    query.setNamedParameter("year", Long.valueOf(year));
+    query.setNamedParameter("period", period);
+    Set<String> taken = new HashSet<>();
+    for (BaseOBObject existing : query.list()) {
+      String dt = asString(existing.get(PROPERTY_DECLARATION_TYPE));
+      if (StringUtils.isNotBlank(dt)) {
+        taken.add(dt.trim());
+      }
+    }
+    if (!taken.contains(requestedType)) {
+      return requestedType;
+    }
+    String fallback = "O".equals(requestedType) ? "C" : "O";
+    return taken.contains(fallback) ? null : fallback;
   }
 
   private void handleDeclPut(HttpServletRequest request, HttpServletResponse response)
@@ -309,11 +374,24 @@ class FiscalDeclCrudHandler {
     }
   }
 
+  /**
+   * Deletes a declaration — restricted to {@code draft} status (ETP-5187, "edit/delete hover
+   * actions on the declaration list row"). Defense in depth: the frontend already only shows the
+   * delete action for draft rows ({@code FmListPage.jsx}), but this guard is what actually
+   * prevents a non-draft declaration (ready/submitted/…) from being removed, regardless of what
+   * the client sends.
+   */
   private void handleDeclDelete(HttpServletRequest request, HttpServletResponse response)
       throws Exception {
     String id = request.getParameter("id");
     BaseOBObject decl = resolveOwnedDeclaration(id, response);
     if (decl == null) {
+      return;
+    }
+    String status = asString(decl.get(PROPERTY_DECLARATION_STATUS));
+    if (!DEFAULT_STATUS.equals(status)) {
+      servlet.sendError(response, HttpServletResponse.SC_CONFLICT,
+          "Only draft declarations can be deleted: " + id);
       return;
     }
     OBDal.getInstance().remove(decl);
