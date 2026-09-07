@@ -32,9 +32,12 @@ import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Constructor;
 import java.math.BigDecimal;
+import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
@@ -381,6 +384,31 @@ class McpLinePriceInjectorTest {
   // ─────────────────────────────────────────────────────────────────────
   // Parent resolution
   // ─────────────────────────────────────────────────────────────────────
+
+  /** The Kinds the parameterized test below asserts abstain on, plus the one that does not. */
+  private static final Set<String> KINDS_WITHOUT_A_PARENT_FIELD =
+      Set.of("NOT_CHILD", "SAME_RECORD", "UNPARENTED", "UNRESOLVABLE");
+  private static final Set<String> KINDS_WITH_A_PARENT_FIELD = Set.of("RESOLVED");
+
+  @Test
+  @DisplayName("Every McpParentScope.Kind is classified by this suite")
+  void aNewKindMustBeClassifiedByThisSuite() {
+    // Tripwire, not a behaviour test. The @EnumSource below selects Kinds by name, so a SIXTH
+    // Kind added to McpParentScope would be skipped in silence: the suite would stay green while
+    // covering strictly less. Whoever adds one must decide which side it falls on — a Kind that
+    // carries a parent field belongs with RESOLVED and needs its own happy-path coverage; one that
+    // does not must be added to the names list below, where it is asserted to abstain.
+    Set<String> classified = new HashSet<>(KINDS_WITHOUT_A_PARENT_FIELD);
+    classified.addAll(KINDS_WITH_A_PARENT_FIELD);
+
+    assertEquals(5, McpParentScope.Kind.values().length,
+        "a new McpParentScope.Kind must be classified as carrying a parent field or not, and "
+            + "added to the @EnumSource names list of abstainsForEveryKindWithoutAParentField "
+            + "when it does not");
+    assertEquals(classified, Arrays.stream(McpParentScope.Kind.values()).map(Enum::name)
+            .collect(Collectors.toSet()),
+        "the Kinds this suite classifies no longer match the enum — see the message above");
+  }
 
   @ParameterizedTest
   @EnumSource(value = McpParentScope.Kind.class,
