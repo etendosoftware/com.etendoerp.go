@@ -2679,18 +2679,30 @@ shared `com.etendoerp.go.roles.overlap` package (`ActiveTemplateInheritance`,
 loud `ConstraintViolationException` — see `ObuiappProcessAccessOverlapCorruptionGuard`'s own
 class/method javadoc for the full detail.
 
-**Six matrix rows remain a documented, deliberate gap — not yet implementable (down from nine as
-of this ETP-5116 pass).** Every one of them has NO `AD_Window_ID` at all backing it in this
+**Four matrix rows remain a documented, deliberate gap — not yet implementable (down from six as
+of a later ETP-5116 pass).** Every one of them has NO `AD_Window_ID` at all backing it in this
 environment (either a pure custom/aggregate Schema Forge page with zero classic-AD entity, or a
 report-type spec whose access resolves via a different, non-window mechanism), so
 `AD_Window_Access` cannot express a grant for it at all: **Inicio (Dashboard)**, **Favoritos**,
-**Copilot (Asistente IA)**, **Informes de inventario**, **Informes financieros**, **Escaneo
-inteligente**. Full per-row resolution detail (which spec/artifact was checked, why it has no
-window) lives in `EnsureSystemRoleTemplatesScript`'s own class javadoc. Closing this gap needs
-either building the missing AD entity/spec first, or a different grant mechanism entirely — left
-for a follow-up ticket. Separately, "Roles", "Usuario", and "Conectar asistente de IA" DO resolve
-to real `AD_Window_ID`s but are deliberately granted to none of the four templates — the matrix
-shows "—" for all four non-Admin roles on all three, so they stay Admin-only.
+**Copilot (Asistente IA)**, **Informes de inventario**. Full per-row resolution detail (which
+spec/artifact was checked, why it has no window) lives in `EnsureSystemRoleTemplatesScript`'s own
+class javadoc. Closing this gap needs either building the missing AD entity/spec first, or a
+different grant mechanism entirely — left for a follow-up ticket. Separately, "Roles", "Usuario",
+and "Conectar asistente de IA" DO resolve to real `AD_Window_ID`s but are deliberately granted to
+none of the four templates — the matrix shows "—" for all four non-Admin roles on all three, so
+they stay Admin-only.
+
+**"Informes financieros" and "Escaneo inteligente" are off this list too — resolved by a later
+ETP-5116 pass, via two brand-new pseudo-`AD_Window` records created specifically as permission
+anchors for these frontend-only report pages (0 tabs each, never opened directly).** Neither is a
+proxy onto a pre-existing window like SII Monitor/Tax Report above — the new window IDs anchor
+these pages directly. "Informes financieros" (`D647D118F5014D00AF47A636B2CD0DD3`) is granted FULL
+to Financiero only. "Escaneo inteligente" (`33705E0F52874D91B0BB2FF8BB648B8E`) is granted FULL to
+all four non-Admin templates — a deliberate product decision that this page stays open to
+everyone once real access control exists, replacing what was previously just a cosmetic
+`hidden: true` in the frontend menu with zero real enforcement. Admin needs no explicit row for
+either: `NeoAccessHelper#isAdminOrClientAdmin` already bypasses window-access checks entirely for
+the System Administrator role and any per-client `is_client_admin='Y'` role.
 
 **"Documentos no contabilizados", "Informe Antigüedad de Cobros" and "Informe Antigüedad de
 Pagos" are off this list — resolved by this ETP-5116 pass, but via the new standalone-process

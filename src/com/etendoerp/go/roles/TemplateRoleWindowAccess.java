@@ -42,14 +42,14 @@ import java.util.Map;
  * truth for everything else ({@code UserRoleCompositionService}, the webhooks, and this class's
  * own tests).</p>
  *
- * <p><b>Six matrix rows are intentionally NOT represented here — known gap (down from nine as of
- * this ETP-5116 pass).</b> Every excluded row has NO {@code AD_Window_ID} at all backing it
+ * <p><b>Four matrix rows are intentionally NOT represented here — known gap (down from six as of
+ * this later ETP-5116 pass).</b> Every excluded row has NO {@code AD_Window_ID} at all backing it
  * (either a pure custom/aggregate Schema Forge page with zero classic-AD entity, or a report-type
  * spec whose access is resolved via a different, non-window mechanism): Inicio (Dashboard),
- * Favoritos, Copilot (Asistente IA), Informes de inventario, Informes financieros, Escaneo
- * inteligente. See {@code EnsureSystemRoleTemplatesScript}'s class javadoc for the full per-row
- * resolution detail, and {@code docs/neo-headless.md} in this module for the research dispatch's
- * complete mapping table.</p>
+ * Favoritos, Copilot (Asistente IA), Informes de inventario. See {@code
+ * EnsureSystemRoleTemplatesScript}'s class javadoc for the full per-row resolution detail, and
+ * {@code docs/neo-headless.md} in this module for the research dispatch's complete mapping
+ * table.</p>
  *
  * <p><b>"Monitor fiscal" and "Modelos fiscales" were originally in that windowless-gap list too,
  * but ETP-5116 resolved both for Finance via a proxy grant</b> onto a different, real classic
@@ -93,6 +93,24 @@ import java.util.Map;
  * B917E8A7B0864ACEA9D941E3B7494E53}), NOT the classic {@code G/L Journal} window ({@code 132}),
  * which literally carries the matching ES label but has no Schema Forge spec — an explicit human
  * decision on an otherwise genuinely ambiguous resolution (ETP-4878 decision 2).</p>
+ *
+ * <p><b>"Informes financieros" and "Escaneo inteligente" were also in that windowless-gap list,
+ * and this later ETP-5116 pass resolved both too — not via a proxy onto a pre-existing window
+ * like "Monitor fiscal"/"Modelos fiscales" above, but via two brand-new pseudo-{@code AD_Window}
+ * records created specifically as permission anchors for these frontend-only report pages, which
+ * have no real classic-AD window backing them.</b> Both anchors have 0 tabs by design — they are
+ * never opened directly, they exist only so {@code AD_Window_Access} has something to grant
+ * against. "Informes financieros" / Financial Reports ({@code
+ * D647D118F5014D00AF47A636B2CD0DD3}) is granted FULL to Financiero ONLY, matching the rest of
+ * that role's finance-only tooling; Ventas/Compras/Almacén get nothing. "Escaneo inteligente" /
+ * Smart Scan ({@code 33705E0F52874D91B0BB2FF8BB648B8E}) is granted FULL to ALL FOUR non-Admin
+ * templates — a deliberate product decision that this page stays open to everyone once real
+ * access control exists, replacing what was previously just a cosmetic {@code hidden: true} in
+ * the frontend menu with zero real enforcement behind it. Admin needs no explicit row for either
+ * window: {@code NeoAccessHelper#isAdminOrClientAdmin} already bypasses window-access checks
+ * entirely for the System Administrator role ({@code "0"}) and any per-client {@code
+ * is_client_admin='Y'} role, confirmed by reading that method directly rather than assumed —
+ * consistent with this class staying "Admin stays client-level, out of scope" throughout.</p>
  */
 public final class TemplateRoleWindowAccess {
 
@@ -134,10 +152,11 @@ public final class TemplateRoleWindowAccess {
   }
 
   /**
-   * Sales ("Ventas") column of the ETP-4878 matrix — 12 grants (13 in the original ticket matrix,
+   * Sales ("Ventas") column of the ETP-4878 matrix — 13 grants (13 in the original ticket matrix,
    * minus the {@code full("168")} over-grant on Inventario físico / Physical Inventory removed by
-   * ETP-5116: Ventas should have NO access to that window). Comments name the matrix row in
-   * Spanish (matching the ticket) followed by the AD_Window's own English name.
+   * ETP-5116, plus {@code full("33705E0F52874D91B0BB2FF8BB648B8E")} — Smart Scan, granted to all
+   * four non-Admin templates per this later ETP-5116 pass, see class javadoc). Comments name the
+   * matrix row in Spanish (matching the ticket) followed by the AD_Window's own English name.
    */
   private static List<WindowGrant> salesGrants() {
     return list(
@@ -152,12 +171,15 @@ public final class TemplateRoleWindowAccess {
         full("E547CE89D4C04429B6340FFA44E70716"),              // Cobro — Payment In
         full("146"),                                           // Tarifa — Price List
         readOnly("141"),                                       // Condiciones de pago — Payment Term
-        readOnly("192"));                                      // Categoría de contacto — Business Partner Category
+        readOnly("192"),                                       // Categoría de contacto — Business Partner Category
+        full("33705E0F52874D91B0BB2FF8BB648B8E"));             // Escaneo inteligente — Smart Scan (ETP-5116)
   }
 
   /**
-   * Purchasing ("Compras") column of the ETP-4878 matrix — 11 grants, plus {@code 107}
-   * (Receipt-Invoice Link, added after the original matrix by ETP-5075).
+   * Purchasing ("Compras") column of the ETP-4878 matrix — 12 grants: 11 from the original
+   * matrix, plus {@code 107} (Receipt-Invoice Link, added after the original matrix by
+   * ETP-5075), plus {@code full("33705E0F52874D91B0BB2FF8BB648B8E")} — Smart Scan, granted to
+   * all four non-Admin templates per this later ETP-5116 pass, see class javadoc.
    *
    * <p>Window 107 is granted FULL even though the window's DATA is read-only: its accounting
    * posting action is invoked as a {@code POST} on the action sub-endpoint, and
@@ -181,22 +203,26 @@ public final class TemplateRoleWindowAccess {
         full("6F8F913FA60F4CBD93DC1D3AA696E76E"),              // Pago — Payment Out
         full("146"),                                          // Tarifa — Price List
         readOnly("141"),                                       // Condiciones de pago — Payment Term
-        readOnly("192"));                                      // Categoría de contacto — Business Partner Category
+        readOnly("192"),                                       // Categoría de contacto — Business Partner Category
+        full("33705E0F52874D91B0BB2FF8BB648B8E"));             // Escaneo inteligente — Smart Scan (ETP-5116)
   }
 
   /**
-   * Finance ("Financiero") column of the ETP-4878 matrix — 31 grants: 25 from the original ticket
+   * Finance ("Financiero") column of the ETP-4878 matrix — 33 grants: 25 from the original ticket
    * matrix (27 minus the two ETP-5116 over-grants removed below — Categoría del producto /
    * Product Category and Inventario físico / Physical Inventory, neither of which Financiero
    * should have access to), plus {@code 107} (Receipt-Invoice Link, ETP-5075 — see {@link
    * #purchasingGrants()}), 2 ETP-5116 proxy grants (SII Monitor and Tax Report — see the class
-   * javadoc's "Monitor fiscal"/"Modelos fiscales" note), and 3 more ETP-5116 grants for
+   * javadoc's "Monitor fiscal"/"Modelos fiscales" note), 3 more ETP-5116 grants for
    * "Configuración fiscal" — a product decision, not a proxy: that label has no single spec/menu
    * of its own, but maps to 3 real sibling windows that already have full working window-level
    * access control — SII Configuration ({@code C1D3A2A017AC4B82B9FEE6F4D2A0C55A}), TBAI
    * Configuration ({@code C327DE215AC945F69363905840118177}), and Verifactu Configuration
    * ({@code 27A453FA86974745977672F1A8DCCEFF}) — so all three are granted directly, unlike the
-   * proxy pattern above.
+   * proxy pattern above — and 2 more ETP-5116 grants from this later pass: "Informes financieros"
+   * / Financial Reports ({@code D647D118F5014D00AF47A636B2CD0DD3}, Financiero-only) and
+   * "Escaneo inteligente" / Smart Scan ({@code 33705E0F52874D91B0BB2FF8BB648B8E}, shared with
+   * every other non-Admin template — see class javadoc).
    */
   private static List<WindowGrant> financeGrants() {
     return list(
@@ -230,10 +256,16 @@ public final class TemplateRoleWindowAccess {
         full("3E8FEA1EA7404D979306C9EE7FD2E7E8"),              // Tax Report — proxies "Modelos Fiscales" (ETP-5116)
         full("C1D3A2A017AC4B82B9FEE6F4D2A0C55A"),              // SII Configuration — "Configuración fiscal" (ETP-5116)
         full("C327DE215AC945F69363905840118177"),              // TBAI Configuration — "Configuración fiscal" (ETP-5116)
-        full("27A453FA86974745977672F1A8DCCEFF"));             // Verifactu Configuration — "Configuración fiscal" (ETP-5116)
+        full("27A453FA86974745977672F1A8DCCEFF"),              // Verifactu Configuration — "Configuración fiscal" (ETP-5116)
+        full("D647D118F5014D00AF47A636B2CD0DD3"),              // Informes financieros — Financial Reports (ETP-5116, Financiero-only)
+        full("33705E0F52874D91B0BB2FF8BB648B8E"));             // Escaneo inteligente — Smart Scan (ETP-5116)
   }
 
-  /** Inventory ("Almacén") column of the ETP-4878 matrix — 13 grants. */
+  /**
+   * Inventory ("Almacén") column of the ETP-4878 matrix — 14 grants: 13 from the original matrix,
+   * plus {@code full("33705E0F52874D91B0BB2FF8BB648B8E")} — Smart Scan, granted to all four
+   * non-Admin templates per this later ETP-5116 pass, see class javadoc.
+   */
   private static List<WindowGrant> inventoryGrants() {
     return list(
         readOnly("123"),                                      // Contactos — Business Partner
@@ -248,7 +280,8 @@ public final class TemplateRoleWindowAccess {
         full("168"),                                          // Inventario físico — Physical Inventory
         full("170"),                                          // Movimiento entre almacenes — Goods Movements
         full("800076"),                                       // Consumo interno — Internal Consumption
-        full("139"));                                          // Almacén — Warehouse and Storage Bins
+        full("139"),                                          // Almacén — Warehouse and Storage Bins
+        full("33705E0F52874D91B0BB2FF8BB648B8E"));             // Escaneo inteligente — Smart Scan (ETP-5116)
   }
 
   private static List<WindowGrant> list(WindowGrant... grants) {

@@ -65,6 +65,8 @@ class TemplateRoleWindowAccessTest {
   private static final String WINDOW_SII_CONFIG = "C1D3A2A017AC4B82B9FEE6F4D2A0C55A";
   private static final String WINDOW_TBAI_CONFIG = "C327DE215AC945F69363905840118177";
   private static final String WINDOW_VERIFACTU_CONFIG = "27A453FA86974745977672F1A8DCCEFF";
+  private static final String WINDOW_FINANCIAL_REPORTS = "D647D118F5014D00AF47A636B2CD0DD3";
+  private static final String WINDOW_SMART_SCAN = "33705E0F52874D91B0BB2FF8BB648B8E";
 
   private static WindowGrant grantFor(List<WindowGrant> grants, String windowId) {
     for (WindowGrant grant : grants) {
@@ -89,12 +91,13 @@ class TemplateRoleWindowAccessTest {
   void financeHasTwentySevenGrantsIncludingTheResolvedSimpleGlJournal() {
     List<WindowGrant> finance = TemplateRoleWindowAccess.byRoleId()
         .get(SystemRoleTemplates.FINANCE_ROLE_ID);
-    assertEquals(31, finance.size(),
+    assertEquals(33, finance.size(),
         "Finance's ETP-4878 column has 25 non-dash rows once the 12 windowless rows and the 2 "
             + "ETP-5116 over-grants (Categoría del producto, Inventario físico) are excluded, plus "
             + "window 107 (Receipt-Invoice Link, ETP-5075), 2 ETP-5116 proxy grants (SII "
-            + "Monitor, Tax Report), and 3 more ETP-5116 direct grants for Configuración fiscal "
-            + "(SII/TBAI/Verifactu Configuration)");
+            + "Monitor, Tax Report), 3 more ETP-5116 direct grants for Configuración fiscal "
+            + "(SII/TBAI/Verifactu Configuration), and 2 more ETP-5116 direct grants from a later "
+            + "pass (Informes financieros, Escaneo inteligente)");
 
     WindowGrant glJournalGrant = grantFor(finance, WINDOW_SIMPLE_GL_JOURNAL);
     assertNotNull(glJournalGrant,
@@ -148,9 +151,10 @@ class TemplateRoleWindowAccessTest {
   void salesHasTwelveGrantsAndNoPaymentOutOrPhysicalInventoryAccess() {
     List<WindowGrant> sales = TemplateRoleWindowAccess.byRoleId()
         .get(SystemRoleTemplates.SALES_ROLE_ID);
-    assertEquals(12, sales.size(),
+    assertEquals(13, sales.size(),
         "13 in the original ETP-4878 matrix, minus the ETP-5116 over-grant removal of "
-            + "full(\"168\") (Inventario físico) — Ventas should have NO access to that window");
+            + "full(\"168\") (Inventario físico) — Ventas should have NO access to that window — "
+            + "plus 1 more ETP-5116 grant from a later pass (Escaneo inteligente)");
     assertNull(grantFor(sales, WINDOW_PAYMENT_OUT),
         "Sales must NOT have a grant for Pago (Payment Out) — the matrix shows — for "
             + "Ventas on that row");
@@ -163,9 +167,10 @@ class TemplateRoleWindowAccessTest {
   void purchasingHasTwelveGrants() {
     List<WindowGrant> purchasing = TemplateRoleWindowAccess.byRoleId()
         .get(SystemRoleTemplates.PURCHASING_ROLE_ID);
-    assertEquals(12, purchasing.size(),
+    assertEquals(13, purchasing.size(),
         "Purchasing's ETP-4878 column has 11 rows, plus window 107 (Receipt-Invoice Link) added "
-            + "post-matrix by ETP-5075");
+            + "post-matrix by ETP-5075, plus 1 more ETP-5116 grant from a later pass (Escaneo "
+            + "inteligente)");
     WindowGrant contacts = grantFor(purchasing, WINDOW_CONTACTS);
     assertTrue(contacts != null && !contacts.isReadOnly(),
         "Purchasing has full access to Contactos per the matrix");
@@ -180,7 +185,9 @@ class TemplateRoleWindowAccessTest {
   void inventoryHasThirteenGrantsWithReadOnlySalesOrderAndFullWarehouse() {
     List<WindowGrant> inventory = TemplateRoleWindowAccess.byRoleId()
         .get(SystemRoleTemplates.INVENTORY_ROLE_ID);
-    assertEquals(13, inventory.size());
+    assertEquals(14, inventory.size(),
+        "13 in the original ETP-4878 matrix, plus 1 more ETP-5116 grant from a later pass "
+            + "(Escaneo inteligente)");
 
     WindowGrant salesOrder = grantFor(inventory, WINDOW_SALES_ORDER);
     assertTrue(salesOrder != null && salesOrder.isReadOnly(),
@@ -189,6 +196,53 @@ class TemplateRoleWindowAccessTest {
     WindowGrant warehouse = grantFor(inventory, WINDOW_WAREHOUSE);
     assertTrue(warehouse != null && !warehouse.isReadOnly(),
         "Almacén has full access to its own Warehouse window");
+  }
+
+  /**
+   * ETP-5116 — "Informes financieros" / Financial Reports ({@code
+   * D647D118F5014D00AF47A636B2CD0DD3}) is a brand-new pseudo-{@code AD_Window} permission anchor
+   * (0 tabs) created for the {@code report-viewer-finance} menu item. Per the target matrix it is
+   * Financiero-only: Ventas, Compras and Almacén must have NO access to it.
+   */
+  @Test
+  void financialReportsIsGrantedToFinancieroOnlyAndFullAccess() {
+    Map<String, List<WindowGrant>> byRoleId = TemplateRoleWindowAccess.byRoleId();
+
+    WindowGrant financeGrant = grantFor(byRoleId.get(SystemRoleTemplates.FINANCE_ROLE_ID),
+        WINDOW_FINANCIAL_REPORTS);
+    assertTrue(financeGrant != null && !financeGrant.isReadOnly(),
+        "ETP-5116: Financiero must have FULL access to Informes financieros (Financial Reports)");
+
+    assertNull(grantFor(byRoleId.get(SystemRoleTemplates.SALES_ROLE_ID), WINDOW_FINANCIAL_REPORTS),
+        "ETP-5116: Ventas must have NO access to Informes financieros — Financiero-only per the "
+            + "target matrix");
+    assertNull(grantFor(byRoleId.get(SystemRoleTemplates.PURCHASING_ROLE_ID), WINDOW_FINANCIAL_REPORTS),
+        "ETP-5116: Compras must have NO access to Informes financieros — Financiero-only per the "
+            + "target matrix");
+    assertNull(grantFor(byRoleId.get(SystemRoleTemplates.INVENTORY_ROLE_ID), WINDOW_FINANCIAL_REPORTS),
+        "ETP-5116: Almacén must have NO access to Informes financieros — Financiero-only per the "
+            + "target matrix");
+  }
+
+  /**
+   * ETP-5116 — "Escaneo inteligente" / Smart Scan ({@code 33705E0F52874D91B0BB2FF8BB648B8E}) is a
+   * brand-new pseudo-{@code AD_Window} permission anchor (0 tabs). Per the target matrix it is
+   * intentionally open to everyone: all four non-Admin templates get FULL access. Admin is out of
+   * scope for this matrix (see class javadoc) — it already bypasses window-access checks entirely
+   * via {@code NeoAccessHelper#isAdminOrClientAdmin}, so it needs no explicit row here to also
+   * have access, making all 5 roles (4 explicit + Admin's implicit bypass) effectively covered.
+   */
+  @Test
+  void smartScanIsGrantedFullAccessToAllFourNonAdminTemplates() {
+    Map<String, List<WindowGrant>> byRoleId = TemplateRoleWindowAccess.byRoleId();
+
+    for (String roleId : List.of(SystemRoleTemplates.FINANCE_ROLE_ID, SystemRoleTemplates.SALES_ROLE_ID,
+        SystemRoleTemplates.PURCHASING_ROLE_ID, SystemRoleTemplates.INVENTORY_ROLE_ID)) {
+      WindowGrant grant = grantFor(byRoleId.get(roleId), WINDOW_SMART_SCAN);
+      assertTrue(grant != null && !grant.isReadOnly(),
+          "ETP-5116: role " + roleId + " must have FULL access to Escaneo inteligente (Smart "
+              + "Scan) — intentionally open to every non-Admin template");
+    }
   }
 
   @Test
@@ -226,13 +280,15 @@ class TemplateRoleWindowAccessTest {
     for (List<WindowGrant> grants : TemplateRoleWindowAccess.byRoleId().values()) {
       total += grants.size();
     }
-    assertEquals(68, total,
-        "12 (Sales) + 12 (Purchasing) + 31 (Finance) + 13 (Inventory) = 68 — from the original "
+    assertEquals(73, total,
+        "13 (Sales) + 13 (Purchasing) + 33 (Finance) + 14 (Inventory) = 73 — from the original "
             + "64: +2 for window 107 (Receipt-Invoice Link) added to Purchasing and Finance by "
             + "ETP-5075, then ETP-5116 removed 1 net grant (Sales -1 for dropping full(\"168\")) "
             + "and added 3 net to Finance (+2/-2 for the 144/168 over-grant removals and the 2 "
             + "new SII Monitor/Tax Report proxy grants, then +3 more for the direct Configuración "
-            + "fiscal grants — SII/TBAI/Verifactu Configuration)");
+            + "fiscal grants — SII/TBAI/Verifactu Configuration), reaching 68, then a later "
+            + "ETP-5116 pass added Escaneo inteligente to all 4 roles (+4) and Informes "
+            + "financieros to Finance only (+1), reaching 73");
   }
 
   @Test
@@ -256,7 +312,9 @@ class TemplateRoleWindowAccessTest {
    * <p>ETP-5116 update: 34 distinct windows (33 + window 107 from ETP-5075) plus 2 proxy windows
    * (SII Monitor, Tax Report) plus 3 more direct windows (SII/TBAI/Verifactu Configuration) = 39.
    * The removed over-grants (144, 168) did not change the distinct count since both windows
-   * remain granted elsewhere (144 via Sales/Purchasing/Inventory; 168 via Inventory).</p>
+   * remain granted elsewhere (144 via Sales/Purchasing/Inventory; 168 via Inventory). A later
+   * ETP-5116 pass added 2 more brand-new distinct windows (Informes financieros, Escaneo
+   * inteligente) = 41. Escaneo inteligente is granted to all 4 roles but counts once here.</p>
    */
   @Test
   void thirtySixDistinctWindowIdsAreCoveredAcrossAllFourRoles() {
@@ -266,12 +324,14 @@ class TemplateRoleWindowAccessTest {
         distinctWindowIds.add(grant.getWindowId());
       }
     }
-    assertEquals(39, distinctWindowIds.size(),
-        "The matrix's 68 grants must resolve to exactly 39 distinct AD_Window_IDs once shared "
-            + "windows (e.g. Contactos, Producto, Tarifa) are counted once — 34 from ETP-4878/"
-            + "ETP-5075 (window 107 added to both Purchasing and Finance), plus 2 ETP-5116 proxy "
-            + "windows (SII Monitor, Tax Report) and 3 more ETP-5116 direct windows (SII/TBAI/"
-            + "Verifactu Configuration), all added to Finance");
+    assertEquals(41, distinctWindowIds.size(),
+        "The matrix's 73 grants must resolve to exactly 41 distinct AD_Window_IDs once shared "
+            + "windows (e.g. Contactos, Producto, Tarifa, Escaneo inteligente) are counted once — "
+            + "34 from ETP-4878/ETP-5075 (window 107 added to both Purchasing and Finance), plus "
+            + "2 ETP-5116 proxy windows (SII Monitor, Tax Report) and 3 more ETP-5116 direct "
+            + "windows (SII/TBAI/Verifactu Configuration), all added to Finance, plus 2 more "
+            + "brand-new ETP-5116 windows from a later pass (Informes financieros — Finance only; "
+            + "Escaneo inteligente — all 4 roles, counted once)");
   }
 
   /**
