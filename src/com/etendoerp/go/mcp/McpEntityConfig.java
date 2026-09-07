@@ -330,20 +330,36 @@ final class McpEntityConfig {
   /** Repeated in three problem messages; Sonar java:S1192 and one place to change the wording. */
   private static final String SECTION_PREFIX = "-level MCP_CONFIG section '";
 
+  /**
+   * The body to file under {@code sectionName}, or {@code null} having recorded why it is not
+   * usable — the shape rejections of {@link #usableBody} plus the section's own validation.
+   *
+   * <p>Composed rather than merged into {@code usableBody} so that method keeps judging payload
+   * shape only; this one is the whole answer to "does this section contribute a body", which is
+   * what leaves {@link #collectSections} a single exit per iteration (java:S135).</p>
+   */
+  private static JSONObject acceptedBody(Level level, JSONObject payload, String sectionName,
+      List<String> problems) {
+    JSONObject body = usableBody(level, payload, sectionName, problems);
+    if (body == null) {
+      return null;
+    }
+    List<String> sectionProblems = validateBody(level, SECTIONS.get(sectionName), body);
+    if (!sectionProblems.isEmpty()) {
+      problems.addAll(sectionProblems);
+      return null;
+    }
+    return body;
+  }
+
   /** Validate every section of one payload and file its body under the section name. */
   private static void collectSections(Level level, JSONObject payload,
       Map<String, List<JSONObject>> bodies, List<String> problems) {
     for (String sectionName : keysOf(payload)) {
-      JSONObject body = usableBody(level, payload, sectionName, problems);
-      if (body == null) {
-        continue;
+      JSONObject body = acceptedBody(level, payload, sectionName, problems);
+      if (body != null) {
+        bodies.computeIfAbsent(sectionName, k -> new ArrayList<>()).add(body);
       }
-      List<String> sectionProblems = validateBody(level, SECTIONS.get(sectionName), body);
-      if (!sectionProblems.isEmpty()) {
-        problems.addAll(sectionProblems);
-        continue;
-      }
-      bodies.computeIfAbsent(sectionName, k -> new ArrayList<>()).add(body);
     }
   }
 
