@@ -526,7 +526,8 @@ public class ToolRegistry {
     return new McpToolDefinition(
         "neo_get",
         "Get a single record by ID from a NEO Headless API spec. Supports field projection "
-            + "(`fields` / view:\"summary\").",
+            + "(`fields` / view:\"summary\"). "
+            + McpConstants.RECORD_URL_NOTE,
           buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY, "id")));
   }
 
@@ -545,7 +546,8 @@ public class ToolRegistry {
             + "user for every field or guessing values that already have a sensible default "
             + "(document number, dates, prices, etc.). "
             + "Dates must be ISO-8601: 'YYYY-MM-DD' for date fields and "
-            + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported.",
+            + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported. "
+            + McpConstants.RECORD_URL_NOTE,
         buildObjectSchema(props,
           List.of("spec", McpConstants.PARAM_ENTITY, McpConstants.PARAM_FIELDS)));
   }

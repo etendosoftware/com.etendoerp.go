@@ -1672,6 +1672,54 @@ Design record, including the rejected alternatives and the phases not yet built 
 a `neo://image/{id}` resource, `resource_link` in `neo_get`, and a downscaling `neo_get_image`):
 `docs/plans/2026-09-07-mcp-image-field-support-plan.md`.
 
+### 4.14 Record Links in the App (ETP-5200)
+
+An agent asked for "the link to that order" used to have nothing to work with: no MCP response
+carried a URL. It invented one, guessing the legacy backoffice shape
+`https://<host>/etendo/?tabId=186&recordId=<id>` — which on a Go deployment resolves to a
+different application altogether.
+
+The React app routes a record at `:windowName/:recordId`, where `windowName` is the kebab-case
+spec name — the exact string the tools already take as their `spec` argument. So a link is simply:
+
+```
+<appBaseUrl>/<spec>/<recordId>
+https://go.experimental.etendo.cloud/sales-order/4B2DBECAC0D34E309AA5C8C86DC81519
+```
+
+Two things now emit it (`McpRecordUrls`):
+
+**`neo_discover` advertises the recipe once per session**, next to `guidance`:
+
+```json
+"app": {
+  "baseUrl": "https://go.experimental.etendo.cloud",
+  "recordUrlTemplate": "{baseUrl}/{spec}/{id}",
+  "hint": "Build a link to any record as {baseUrl}/{spec}/{id}, … Only a spec's primaryEntity has a page of its own — link a line record to its header."
+}
+```
+
+That costs a couple of dozen tokens once and lets the agent link any record it later sees,
+including the rows of a 100-record `neo_list`, which deliberately carries no URLs of its own.
+
+**`neo_get` and `neo_create` add a ready-made `url`** to the record they return — the two moments
+an agent hands the user a link.
+
+Two rules keep the links honest, and both are enforced in code:
+
+1. **No configured base, no link.** The base comes from
+   `PublicUrlResolver.resolveConfiguredAppBaseUrl()` (`etendo.go.app.baseUrl` / `ETGO_APP_BASE_URL`)
+   and nowhere else; when it is unset, the `app` block and the `url` field are omitted entirely.
+   There is deliberately **no fallback to `context.url`** — that is the *internal* Tomcat address,
+   and using it is exactly what produced `http://localhost:8080/…` instead of
+   `http://localhost:3100/…` for the image upload URL in ETP-5184. A wrong link is worse than no
+   link, because an agent publishes it either way.
+2. **Only a spec's primary entity (tab level 0) has a route.** A line record gets no `url`; the
+   agent is told to link to its header.
+
+A proxied deployment therefore **must** set `etendo.go.app.baseUrl` to the public app URL, the same
+property the image upload URL depends on.
+
 ## 5. Configuration
 
 ### 5.1 Creating a Spec

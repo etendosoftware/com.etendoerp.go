@@ -364,6 +364,12 @@ public class McpToolRouter {
     result.put("specs", specsArray);
     result.put("count", specsArray.length());
     result.put("guidance", McpToolRouterSupport.buildDocsGuidance());
+    // ETP-5200: how to build an app link, advertised once per session instead of on every row.
+    // Omitted entirely when no public app base URL is configured — see McpRecordUrls.
+    JSONObject app = McpRecordUrls.buildAppMetadata();
+    if (app != null) {
+      result.put(McpRecordUrls.KEY_APP, app);
+    }
     return wrapAsTextContent(result.toString(2));
   }
 
@@ -488,8 +494,11 @@ public class McpToolRouter {
     McpQuerySupport.applyProjection(responseJson, args, sfEntity, adTab, fieldFilter);
 
     // IMP-5 clause (iii): see handleList — flatten last, after every stage that reads the wrapper.
-    return wrapAsTextContent(
-        McpToolRouterSupport.flattenCoreResponse(responseJson).toString(2));
+    JSONObject flat = McpToolRouterSupport.flattenCoreResponse(responseJson);
+    // ETP-5200: the link the agent hands the user. Header records only — a line has no app page.
+    McpRecordUrls.addRecordUrl(flat, specName, recordId,
+        McpToolRouterSupport.isPrimaryTab(adTab));
+    return wrapAsTextContent(flat.toString(2));
   }
 
   // ── neo_create ────────────────────────────────────────────────────────
@@ -661,8 +670,11 @@ public class McpToolRouter {
 
     // IMP-5 clause (iii): the post-hook still sees core's wrapped body, for parity with the REST
     // CRUD path a handler was written against; only the body handed to the agent is flattened.
-    return wrapAsTextContent(
-        McpToolRouterSupport.flattenCoreResponse(responseJson).toString(2));
+    JSONObject flat = McpToolRouterSupport.flattenCoreResponse(responseJson);
+    // ETP-5200: the id only exists in the response here, so it is read back from the flat body.
+    McpRecordUrls.addRecordUrl(flat, specName, null,
+        McpToolRouterSupport.isPrimaryTab(adTab));
+    return wrapAsTextContent(flat.toString(2));
   }
 
   // ── neo_update ────────────────────────────────────────────────────────

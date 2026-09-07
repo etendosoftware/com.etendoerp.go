@@ -164,6 +164,15 @@ final class McpConstants {
   static final String KEY_HINT = "hint";
   /** Key that points a structured error at a relevant {@code docs} recipe (IMP-10). */
   static final String KEY_SEE_ALSO = "seeAlso";
+  /**
+   * Told to the agent by neo_get and neo_create so it knows a ready-made link is in the response
+   * and never has to invent one (ETP-5200). Emitted only for header records, and only when the
+   * deployment has a public app base URL configured — see {@link McpRecordUrls}.
+   */
+  static final String RECORD_URL_NOTE =
+      "When the record is a spec's primaryEntity, the response carries a `url` field: the Etendo "
+          + "Go link to that record. Use it verbatim when referring the user to the record — never "
+          + "build a link by hand.";
   /** Hint advertised by neo_discover to route a cold agent to ready-to-run recipes (IMP-10). */
   static final String GUIDANCE_DOCS_HINT =
       "Call docs(topic:…) for ready-to-run recipes per task.";
