@@ -137,6 +137,7 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   private static final String KEY_IMPORT_FROM_DATE = "importFromDate";
   private static final String KEY_IMPORT_TO_DATE = "importToDate";
   private static final String KEY_STATEMENT_GROUPING = "statementGrouping";
+  private static final String KEY_MAX_FETCH_INTERVAL = "maxFetchInterval";
   private static final String KEY_PROVIDER_LOGO = "providerLogoUrl";
   private static final String KEY_LOGO_URL = "logo_url";
   private static final String KEY_DATA = "data";
@@ -250,6 +251,18 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
       data.put("scopes", connection.getFetchScopes());
       data.put("consentExpiresAt", FinancialAccountBankConnectionSupport.formatInstant(expiresAt));
       data.put("daysUntilExpires", FinancialAccountBankConnectionSupport.daysUntil(expiresAt));
+      // Inside this block on purpose: without an active connection the account cannot sync at
+      // all — fetchAccountTransactions throws PSD2_NoActiveConnectionForAccount long before the
+      // interval check runs — so there is nothing to advise about and the SPA shows no notice.
+      //
+      // Omitted rather than null when the provider declares no limit, so the SPA reads
+      // `status.maxFetchInterval === undefined` and stays silent. An int, because the AD_MESSAGE
+      // the sync toast carries renders the limit with toPlainString(): emitting 90 rather than
+      // 90.0 makes the field advisory print the same token as the toast.
+      Integer maxFetchInterval = FinancialAccountBankConnectionSupport.maxFetchIntervalOf(connection);
+      if (maxFetchInterval != null) {
+        data.put(KEY_MAX_FETCH_INTERVAL, maxFetchInterval.intValue());
+      }
     }
     return FinancialAccountBankConnectionSupport.okData(data);
   }
