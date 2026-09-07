@@ -2251,8 +2251,10 @@ consumption; it does not touch `AD_Window_Access` grants, `windows`/`windowCount
 provisioning path. Full mechanism (exact proxy ids, category-lookup handling, the duplicate guard):
 `SFRolesOverview.java`'s own javadoc (`PROXY_MATRIX_ROWS`, `FISCAL_MONITOR_PROXY_WINDOW_ID`,
 `TAX_MODELS_PROXY_WINDOW_ID`, `NOT_POSTED_DOCS_PROXY_PROCESS_ID`) — not duplicated here. See also
-§8d's "Twelve matrix rows" note below: this proxy resolution is unrelated to (and does not close)
-that separate, provisioning-side gap.
+§8d's "Ten matrix rows" note below: this proxy resolution is unrelated to (and does not close)
+that separate, provisioning-side gap — as of ETP-5116, 2 of these 3 windowless items (Monitor
+fiscal, Modelos fiscales) DO also have a real provisioning-side grant now (see that note), but
+Not Posted Documents still does not.
 
 ---
 
@@ -2651,31 +2653,36 @@ shared `com.etendoerp.go.roles.overlap` package (`ActiveTemplateInheritance`,
 loud `ConstraintViolationException` — see `ObuiappProcessAccessOverlapCorruptionGuard`'s own
 class/method javadoc for the full detail.
 
-**Twelve matrix rows are a documented, deliberate gap — not yet implementable.** Every one of
+**Ten matrix rows are a documented, deliberate gap — not yet implementable.** Every one of
 them has NO `AD_Window_ID` at all backing it in this environment (either a pure custom/aggregate
 Schema Forge page with zero classic-AD entity, or a report-type spec whose access resolves via a
 different, non-window mechanism), so `AD_Window_Access` cannot express a grant for it at all:
-**Inicio (Dashboard)**, **Favoritos**, **Copilot (Asistente IA)**, **Informes de inventario**,
-**Documentos no contabilizados**, **Monitor fiscal**, **Modelos fiscales**, **Informes
-financieros**, **Informe Antigüedad de Cobros**, **Informe Antigüedad de Pagos**, **Escaneo
-inteligente**, **Configuración fiscal**. Full per-row resolution detail (which spec/artifact was
-checked, why it has no window) lives in `EnsureSystemRoleTemplatesScript`'s own class javadoc.
-Closing this gap needs either building the missing AD entity/spec first, or a different grant
-mechanism entirely — left for a follow-up ticket. Separately, "Roles", "Usuario", and "Conectar
-asistente de IA" DO resolve to real `AD_Window_ID`s but are deliberately granted to none of the
-four templates — the matrix shows "—" for all four non-Admin roles on all three, so they stay
-Admin-only.
+**Inicio (Dashboard)**, **Favoritos**, **Copilot (Asistente IA)**, **Documentos no
+contabilizados**, **Informes de inventario**, **Informes financieros**, **Informe Antigüedad de
+Cobros**, **Informe Antigüedad de Pagos**, **Escaneo inteligente**, **Configuración fiscal**. Full
+per-row resolution detail (which spec/artifact was checked, why it has no window) lives in
+`EnsureSystemRoleTemplatesScript`'s own class javadoc. Closing this gap needs either building the
+missing AD entity/spec first, or a different grant mechanism entirely — left for a follow-up
+ticket. Separately, "Roles", "Usuario", and "Conectar asistente de IA" DO resolve to real
+`AD_Window_ID`s but are deliberately granted to none of the four templates — the matrix shows "—"
+for all four non-Admin roles on all three, so they stay Admin-only.
 
-> **Scope note (ETP-5071) — this gap is PROVISIONING-side only, not display-side anymore for 3 of
-> these rows.** This paragraph is about `TemplateRoleWindowAccess`/`EnsureSystemRoleTemplatesScript`
-> — whether the 4 system role templates can be GRANTED `AD_Window_Access` for these rows at all.
-> Three of the twelve names listed above — **Documentos no contabilizados**, **Monitor fiscal**,
-> **Modelos fiscales** — are a SEPARATE concern from `SFRolesOverview`'s live "Configuración > Roles"
-> admin screen (§8c above): that screen now shows real, per-role (proxied) access data for these
-> same 3 items via `SFRolesOverview`'s `PROXY_MATRIX_ROWS` mechanism. Do not read this paragraph as
-> meaning those 3 items are "still completely unaddressed" — the display case is resolved; only the
-> underlying template-provisioning grant (can a system role template itself hold a real grant for
-> them) remains open, and is unrelated to what an admin sees on the Roles screen.
+> **Scope note (ETP-5071/ETP-5116) — this gap is PROVISIONING-side, and is now down to ONE of the
+> 3 originally-proxied rows.** This paragraph is about `TemplateRoleWindowAccess`/
+> `EnsureSystemRoleTemplatesScript` — whether the 4 system role templates can be GRANTED
+> `AD_Window_Access`/`OBUIAPP_Process_Access` for these rows at all. Of the three names ETP-5071
+> first proxied on the DISPLAY side (`SFRolesOverview`'s "Configuración > Roles" admin screen, §8c
+> above, via `PROXY_MATRIX_ROWS`) — **Documentos no contabilizados**, **Monitor fiscal**,
+> **Modelos fiscales** — ETP-5116 closed the provisioning-side gap for the latter two: Finance now
+> holds a real `AD_Window_Access` grant on the same two proxy windows (SII Monitor, Tax Report) via
+> `TemplateRoleWindowAccess#financeGrants()`, so they are OFF this ten-row list entirely (see the
+> class's own javadoc). **Documentos no contabilizados remains open** — its target is a standalone
+> `OBUIAPP_Process_Access` grant (process `D6AB95CE52D34E1599590526115E26C6`, the same id
+> `SFRolesOverview` already proxies for display) with no backing window at all, and
+> `EnsureSystemRoleTemplatesScript#reconcileProcessAccess` only ever DERIVES process access from a
+> role's FULL window grants — it has no mechanism to reconcile a standalone process id that isn't
+> reachable as a button on any granted window. Closing it needs that mechanism designed first, not
+> just the target id (which is already known).
 
 **Still open (ETP-4877, unchanged by ETP-4878):** the ~21 existing tenants still holding
 per-client duplicated role copies are untouched by this mechanism (a migration, not a runtime

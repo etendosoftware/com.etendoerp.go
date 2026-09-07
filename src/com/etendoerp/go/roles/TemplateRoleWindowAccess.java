@@ -42,15 +42,34 @@ import java.util.Map;
  * truth for everything else ({@code UserRoleCompositionService}, the webhooks, and this class's
  * own tests).</p>
  *
- * <p><b>Twelve matrix rows are intentionally NOT represented here — known gap.</b> Every excluded
+ * <p><b>Ten matrix rows are intentionally NOT represented here — known gap.</b> Every excluded
  * row has NO {@code AD_Window_ID} at all backing it (either a pure custom/aggregate Schema Forge
  * page with zero classic-AD entity, or a report-type spec whose access is resolved via a
  * different, non-window mechanism): Inicio (Dashboard), Favoritos, Copilot (Asistente IA),
- * Informes de inventario, Documentos no contabilizados, Monitor fiscal, Modelos fiscales,
- * Informes financieros, Informe Antigüedad de Cobros, Informe Antigüedad de Pagos, Escaneo
- * inteligente, Configuración fiscal. See {@code EnsureSystemRoleTemplatesScript}'s class javadoc
- * for the full per-row resolution detail, and {@code docs/neo-headless.md} in this module for the
- * research dispatch's complete mapping table.</p>
+ * Documentos no contabilizados, Informes de inventario, Informes financieros, Informe Antigüedad
+ * de Cobros, Informe Antigüedad de Pagos, Escaneo inteligente, Configuración fiscal. See
+ * {@code EnsureSystemRoleTemplatesScript}'s class javadoc for the full per-row resolution detail,
+ * and {@code docs/neo-headless.md} in this module for the research dispatch's complete mapping
+ * table.</p>
+ *
+ * <p><b>"Monitor fiscal" and "Modelos fiscales" were originally in that windowless-gap list too,
+ * but ETP-5116 resolved both for Finance via a proxy grant</b> onto a different, real classic
+ * window that serves as their closest access-control stand-in: {@code
+ * FEF76C3E0F104F06A89AAD15A4A4A35C} (SII Monitor) for "Monitor fiscal", and {@code
+ * 3E8FEA1EA7404D979306C9EE7FD2E7E8} (Tax Report) for "Modelos fiscales". Neither Schema-Forge-only
+ * page has a window of its own — the grant is a deliberate proxy, not a literal match — mirroring
+ * the same pattern {@code SFRolesOverview} already uses for its own read-side resolution (see
+ * that class's {@code FISCAL_MONITOR_PROXY_WINDOW_ID}/{@code TAX_MODELS_PROXY_WINDOW_ID}, the
+ * same two ids).</p>
+ *
+ * <p><b>"Documentos no contabilizados" remains unresolved here — ETP-5116 investigation, not a new
+ * gap.</b> Financiero needs FULL access to process {@code D6AB95CE52D34E1599590526115E26C6} via
+ * {@code OBUIAPP_Process_Access} (proxying "Not Posted Documents"), but that is a standalone
+ * process grant, not a window grant — this class only models {@link WindowGrant}s, and {@code
+ * EnsureSystemRoleTemplatesScript#reconcileProcessAccess} only ever DERIVES process access from a
+ * role's FULL window grants (button-linked processes on that window's tabs); it has no mechanism
+ * to reconcile a standalone process id with no backing window. Populating this row requires
+ * designing that mechanism first — deliberately left out of this matrix until that design lands.</p>
  *
  * <p><b>"Roles", "Usuario", and "Conectar asistente de IA" resolve to real {@code AD_Window_ID}s
  * but are deliberately absent from every role's grant list below</b> — the ticket's matrix shows
@@ -101,7 +120,9 @@ public final class TemplateRoleWindowAccess {
   }
 
   /**
-   * Sales ("Ventas") column of the ETP-4878 matrix — 13 grants. Comments name the matrix row in
+   * Sales ("Ventas") column of the ETP-4878 matrix — 12 grants (13 in the original ticket matrix,
+   * minus the {@code full("168")} over-grant on Inventario físico / Physical Inventory removed by
+   * ETP-5116: Ventas should have NO access to that window). Comments name the matrix row in
    * Spanish (matching the ticket) followed by the AD_Window's own English name.
    */
   private static List<WindowGrant> salesGrants() {
@@ -114,7 +135,6 @@ public final class TemplateRoleWindowAccess {
         full("FF808081330213E60133021822E40007"),              // Albarán de devolución — Return from Customer
         full("140"),                                           // Producto — Product
         readOnly("144"),                                       // Categoría del producto — Product Category
-        full("168"),                                           // Inventario físico — Physical Inventory
         full("E547CE89D4C04429B6340FFA44E70716"),              // Cobro — Payment In
         full("146"),                                           // Tarifa — Price List
         readOnly("141"),                                       // Condiciones de pago — Payment Term
@@ -151,8 +171,12 @@ public final class TemplateRoleWindowAccess {
   }
 
   /**
-   * Finance ("Financiero") column of the ETP-4878 matrix — 27 grants, plus {@code 107}
-   * (Receipt-Invoice Link, ETP-5075 — see {@link #purchasingGrants()}).
+   * Finance ("Financiero") column of the ETP-4878 matrix — 28 grants: 25 from the original ticket
+   * matrix (27 minus the two ETP-5116 over-grants removed below — Categoría del producto /
+   * Product Category and Inventario físico / Physical Inventory, neither of which Financiero
+   * should have access to), plus {@code 107} (Receipt-Invoice Link, ETP-5075 — see {@link
+   * #purchasingGrants()}) and 2 new ETP-5116 proxy grants (SII Monitor and Tax Report — see the
+   * class javadoc's "Monitor fiscal"/"Modelos fiscales" note).
    */
   private static List<WindowGrant> financeGrants() {
     return list(
@@ -164,8 +188,6 @@ public final class TemplateRoleWindowAccess {
         full("183"),                                          // Factura de compra — Purchase Invoice
         full("107"),                                          // Relación albarán-factura — Receipt-Invoice Link (ETP-5075)
         full("140"),                                          // Producto — Product
-        full("144"),                                          // Categoría del producto — Product Category
-        full("168"),                                          // Inventario físico — Physical Inventory
         full("139"),                                          // Almacén — Warehouse and Storage Bins
         full("E547CE89D4C04429B6340FFA44E70716"),              // Cobro — Payment In
         full("6F8F913FA60F4CBD93DC1D3AA696E76E"),              // Pago — Payment Out
@@ -183,7 +205,9 @@ public final class TemplateRoleWindowAccess {
         full("137"),                                          // Impuesto — Tax Rate
         full("138"),                                          // Categoría de impuesto — Tax Category
         full("192"),                                          // Categoría de contacto — Business Partner Category
-        full("6FEBA130CDE24CC09041FFA6117ADFA9"));             // Registro descarga tipos de cambio — Conversion Rate Downloader Log
+        full("6FEBA130CDE24CC09041FFA6117ADFA9"),             // Registro descarga tipos de cambio — Conversion Rate Downloader Log
+        full("FEF76C3E0F104F06A89AAD15A4A4A35C"),              // SII Monitor — proxies "Monitor Fiscal" (ETP-5116)
+        full("3E8FEA1EA7404D979306C9EE7FD2E7E8"));             // Tax Report — proxies "Modelos Fiscales" (ETP-5116)
   }
 
   /** Inventory ("Almacén") column of the ETP-4878 matrix — 13 grants. */

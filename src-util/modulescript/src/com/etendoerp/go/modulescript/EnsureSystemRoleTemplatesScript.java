@@ -72,10 +72,17 @@ import org.openbravo.modulescript.ModuleScript;
  * <p><b>ETP-4878 — real permission matrix (supersedes the old 2-window-per-role smoke test).</b>
  * Each template now carries the full window-access matrix from the ticket (Ventas/Compras/
  * Financiero/Almacén columns; "Admin" stays client-level and is out of scope). Grant counts:
- * Sales 13, Purchasing 12, Finance 28, Inventory 13 (34 distinct windows, some shared across more
- * than one role at different access levels — e.g. "Categoría del producto" is read-only for
- * Sales/Purchasing but full for Finance/Inventory); ETP-5075 later added window 107 (Receipt-
- * Invoice Link, read-only) to Purchasing and Finance, +1 grant each over the original matrix.
+ * Sales 12, Purchasing 12, Finance 28, Inventory 13 (65 grants, 36 distinct windows, some shared
+ * across more than one role at different access levels — e.g. "Categoría del producto" is
+ * read-only for Sales/Purchasing but full for Finance/Inventory); ETP-5075 added window 107
+ * (Receipt-Invoice Link, read-only) to Purchasing and Finance, +1 grant each over the original
+ * matrix. ETP-5116 then (a) removed 2 known over-grants — {@code full("168")} (Inventario
+ * físico) from BOTH Sales and Finance, and {@code full("144")} (Categoría del producto) from
+ * Finance — since neither role should have had that access, and (b) added 2 new proxy grants to
+ * Finance for the previously-windowless "Monitor fiscal"/"Modelos fiscales" rows (SII Monitor,
+ * {@code FEF76C3E0F104F06A89AAD15A4A4A35C}, and Tax Report, {@code 3E8FEA1EA7404D979306C9EE7FD2E7E8}
+ * — same two proxy ids {@code SFRolesOverview} already uses for its own read-side resolution).
+ * Net effect: Sales -1 grant, Finance unchanged (2 removed, 2 added), 2 new distinct windows.
  * "Asientos manuales" resolves to the
  * <b>Simple G/L Journal</b> window ({@code B917E8A7B0864ACEA9D941E3B7494E53}), not the classic
  * {@code G/L Journal} (window {@code 132}, which literally carries the ES label "Asientos
@@ -85,7 +92,8 @@ import org.openbravo.modulescript.ModuleScript;
  *
  * <p><b>ETP-4830 item #6.3 — process/report access, mechanical follow-up to the window matrix
  * above.</b> A real-DB audit found all four templates had ZERO {@code AD_Process_Access}/
- * {@code obuiapp_process_access} rows despite the (then-64, now 66) window grants — a composed user could open
+ * {@code obuiapp_process_access} rows despite the (then-64, now 65 after ETP-5075/ETP-5116) window
+ * grants — a composed user could open
  * a window but not click any action button on it. {@link #reconcileProcessAccess} closes this
  * for every window a role has FULL access to: every classic/OBUIAPP process reachable as a
  * button on that window is granted, queried LIVE from the DB every run (not a hardcoded list,
@@ -96,26 +104,32 @@ import org.openbravo.modulescript.ModuleScript;
  * not tied to any window button remain a separate, known gap. See that method's own javadoc for
  * the full rule and rationale.</p>
  *
- * <p><b>Twelve matrix rows are deliberately NOT implemented — known gap, follow-up ticket
+ * <p><b>Ten matrix rows are deliberately NOT implemented — known gap, follow-up ticket
  * pending.</b> Every one of these has NO {@code AD_Window_ID} at all backing it (either a pure
  * custom/aggregate Schema Forge page with zero classic-AD entity, or a report-type spec whose
  * access is resolved via a different, non-window mechanism) — {@code AD_Window_Access} cannot
- * express a grant against something that has no window. Listed here so the gap is visible from
- * the class that would otherwise silently look complete:
+ * express a grant against something that has no window. "Monitor fiscal" and "Modelos fiscales"
+ * used to be on this list too, but ETP-5116 resolved both for Finance via a window PROXY grant
+ * (SII Monitor / Tax Report — see {@code TemplateRoleWindowAccess}'s own javadoc), so they are no
+ * longer windowless gaps. Listed here so the remaining gap is visible from the class that would
+ * otherwise silently look complete:
  * <ul>
  *   <li><b>Inicio (Dashboard)</b> — {@code dashboard} spec is pure widget-handler qualifiers, no
  *       {@code ad_tab_id}/{@code ad_window_id} anywhere.</li>
  *   <li><b>Favoritos</b> — no backing AD entity of any kind found (app-shell client feature).</li>
  *   <li><b>Copilot (Asistente IA)</b> — {@code AD_Menu} "Copilot" exists but its
  *       {@code ad_window_id} is null (points at an embedded chat feature, not a window).</li>
+ *   <li><b>Documentos no contabilizados</b> — {@code not-posted-documents} spec, type W but
+ *       {@code ad_window_id} null; fully custom, no classic window backing it. Unlike the other
+ *       rows here, its target grant mechanism IS identified (ETP-5116 investigation): Financiero
+ *       needs FULL access to process {@code D6AB95CE52D34E1599590526115E26C6} via {@code
+ *       OBUIAPP_Process_Access}, proxying "Not Posted Documents" — but that is a standalone
+ *       process grant with no backing window, and {@link #reconcileProcessAccess} only ever
+ *       DERIVES process access from a role's FULL window grants; it has no mechanism to
+ *       reconcile a standalone process id. Blocked on designing that mechanism, not on finding
+ *       the target id.</li>
  *   <li><b>Informes de inventario</b> — {@code inventory-stock-report} spec, type R, no window,
  *       no tab; pure webhook handler.</li>
- *   <li><b>Documentos no contabilizados</b> — {@code not-posted-documents} spec, type W but
- *       {@code ad_window_id} null; fully custom, no classic window backing it.</li>
- *   <li><b>Monitor fiscal</b> — {@code fiscal-monitor} artifact is {@code category: "custom"},
- *       {@code entities: {}}; not even pushed to {@code ETGO_SF_SPEC}.</li>
- *   <li><b>Modelos fiscales</b> — {@code fiscal-models} artifact has no {@code decisions.json} at
- *       all yet (only mock data) — earliest possible pipeline stage.</li>
  *   <li><b>Informes financieros</b> — no single window backs this label; multiple jsreport-print
  *       candidates exist ({@code profit-loss}, {@code balance-sheet}, {@code tax-report}, the
  *       {@code reports} index, …), none with an {@code AD_Window_ID} — likely a menu category,
@@ -131,7 +145,7 @@ import org.openbravo.modulescript.ModuleScript;
  *       "configuration"}, {@code entities: {}}; not in {@code ETGO_SF_SPEC}.</li>
  * </ul>
  * See {@code docs/neo-headless.md} (in this module) for the same list with the research
- * dispatch's full resolution table. Populating these 12 requires either building the missing AD
+ * dispatch's full resolution table. Populating these 10 requires either building the missing AD
  * entity/spec first or a different, non-{@code AD_Window_Access} grant mechanism — out of scope
  * for this script until that follow-up ticket lands.</p>
  *
@@ -223,7 +237,9 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
   }
 
   /**
-   * Sales ("Ventas") column of the ETP-4878 matrix — 13 grants. Comments name the matrix row in
+   * Sales ("Ventas") column of the ETP-4878 matrix — 12 grants (13 in the original ticket matrix,
+   * minus the {@code full("168")} over-grant on Inventario físico / Physical Inventory removed by
+   * ETP-5116: Ventas should have NO access to that window). Comments name the matrix row in
    * Spanish (matching the ticket) followed by the AD_Window's own English name. Inlined copy of
    * {@code TemplateRoleWindowAccess#salesGrants()}.
    */
@@ -237,7 +253,6 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("FF808081330213E60133021822E40007"),              // Albarán de devolución — Return from Customer
         full("140"),                                           // Producto — Product
         readOnly("144"),                                       // Categoría del producto — Product Category
-        full("168"),                                           // Inventario físico — Physical Inventory
         full("E547CE89D4C04429B6340FFA44E70716"),              // Cobro — Payment In
         full("146"),                                           // Tarifa — Price List
         readOnly("141"),                                       // Condiciones de pago — Payment Term
@@ -269,9 +284,13 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
   }
 
   /**
-   * Finance ("Financiero") column of the ETP-4878 matrix — 27 grants, plus {@code 107}
-   * (Receipt-Invoice Link, ETP-5075 — see {@link #purchasingGrants()}). Inlined copy of
-   * {@code TemplateRoleWindowAccess#financeGrants()}.
+   * Finance ("Financiero") column of the ETP-4878 matrix — 28 grants: 25 from the original ticket
+   * matrix (27 minus the two ETP-5116 over-grants removed below — Categoría del producto /
+   * Product Category and Inventario físico / Physical Inventory, neither of which Financiero
+   * should have access to), plus {@code 107} (Receipt-Invoice Link, ETP-5075 — see {@link
+   * #purchasingGrants()}) and 2 new ETP-5116 proxy grants (SII Monitor and Tax Report — see the
+   * class javadoc's "Monitor fiscal"/"Modelos fiscales" note). Inlined copy of {@code
+   * TemplateRoleWindowAccess#financeGrants()}.
    */
   private static List<WindowGrant> financeGrants() {
     return List.of(
@@ -283,8 +302,6 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("183"),                                          // Factura de compra — Purchase Invoice
         full("107"),                                          // Relación albarán-factura — Receipt-Invoice Link (ETP-5075)
         full("140"),                                          // Producto — Product
-        full("144"),                                          // Categoría del producto — Product Category
-        full("168"),                                          // Inventario físico — Physical Inventory
         full("139"),                                          // Almacén — Warehouse and Storage Bins
         full("E547CE89D4C04429B6340FFA44E70716"),              // Cobro — Payment In
         full("6F8F913FA60F4CBD93DC1D3AA696E76E"),              // Pago — Payment Out
@@ -302,7 +319,9 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("137"),                                          // Impuesto — Tax Rate
         full("138"),                                          // Categoría de impuesto — Tax Category
         full("192"),                                          // Categoría de contacto — Business Partner Category
-        full("6FEBA130CDE24CC09041FFA6117ADFA9"));             // Registro descarga tipos de cambio — Conversion Rate Downloader Log
+        full("6FEBA130CDE24CC09041FFA6117ADFA9"),             // Registro descarga tipos de cambio — Conversion Rate Downloader Log
+        full("FEF76C3E0F104F06A89AAD15A4A4A35C"),              // SII Monitor — proxies "Monitor Fiscal" (ETP-5116)
+        full("3E8FEA1EA7404D979306C9EE7FD2E7E8"));             // Tax Report — proxies "Modelos Fiscales" (ETP-5116)
   }
 
   /**

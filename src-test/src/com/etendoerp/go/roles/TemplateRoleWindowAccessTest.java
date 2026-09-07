@@ -43,9 +43,10 @@ import com.etendoerp.go.roles.TemplateRoleWindowAccess.WindowGrant;
  *
  * <p>Counts and specific grants below are transcribed directly from the ETP-4878 ticket's
  * Ventas/Compras/Financiero/Almacén matrix, cross-referenced against the research dispatch's
- * resolved {@code AD_Window_ID} mapping. See {@link TemplateRoleWindowAccess}'s own javadoc for
- * the full per-role breakdown and the 12 deferred, windowless matrix rows this suite does not
- * (and should never) reference.</p>
+ * resolved {@code AD_Window_ID} mapping (ETP-5116 later removed 2 over-grants and added 2 new
+ * proxy grants — see the affected tests below). See {@link TemplateRoleWindowAccess}'s own
+ * javadoc for the full per-role breakdown and the 10 deferred, windowless matrix rows this suite
+ * does not (and should never) reference.</p>
  */
 class TemplateRoleWindowAccessTest {
 
@@ -58,6 +59,9 @@ class TemplateRoleWindowAccessTest {
   private static final String WINDOW_CLASSIC_GL_JOURNAL = "132";
   private static final String WINDOW_WAREHOUSE = "139";
   private static final String WINDOW_MATCHED_PURCHASE_INVOICES = "107";
+  private static final String WINDOW_PHYSICAL_INVENTORY = "168";
+  private static final String WINDOW_SII_MONITOR = "FEF76C3E0F104F06A89AAD15A4A4A35C";
+  private static final String WINDOW_TAX_REPORT = "3E8FEA1EA7404D979306C9EE7FD2E7E8";
 
   private static WindowGrant grantFor(List<WindowGrant> grants, String windowId) {
     for (WindowGrant grant : grants) {
@@ -83,8 +87,10 @@ class TemplateRoleWindowAccessTest {
     List<WindowGrant> finance = TemplateRoleWindowAccess.byRoleId()
         .get(SystemRoleTemplates.FINANCE_ROLE_ID);
     assertEquals(28, finance.size(),
-        "Finance's ETP-4878 column has 27 non-dash rows once the 12 windowless rows are excluded, "
-            + "plus window 107 (Receipt-Invoice Link) added post-matrix by ETP-5075");
+        "Finance's ETP-4878 column has 25 non-dash rows once the 12 windowless rows and the 2 "
+            + "ETP-5116 over-grants (Categoría del producto, Inventario físico) are excluded, plus "
+            + "window 107 (Receipt-Invoice Link, ETP-5075) and 2 ETP-5116 proxy grants (SII "
+            + "Monitor, Tax Report)");
 
     WindowGrant glJournalGrant = grantFor(finance, WINDOW_SIMPLE_GL_JOURNAL);
     assertNotNull(glJournalGrant,
@@ -100,16 +106,38 @@ class TemplateRoleWindowAccessTest {
         "Financiero has FULL access to Relación albarán-factura (ETP-5075): the window's data is "
             + "read-only, but its posting action is a POST that hasWindowAccess only clears when "
             + "IsReadWrite='Y' — a read-only grant would 403 the post");
+
+    assertNull(grantFor(finance, WINDOW_PRODUCT_CATEGORY),
+        "ETP-5116: Financiero must have NO access to Categoría del producto — the previous "
+            + "full(\"144\") grant was an over-grant and has been removed");
+    assertNull(grantFor(finance, WINDOW_PHYSICAL_INVENTORY),
+        "ETP-5116: Financiero must have NO access to Inventario físico — the previous "
+            + "full(\"168\") grant was an over-grant and has been removed");
+
+    WindowGrant siiMonitorGrant = grantFor(finance, WINDOW_SII_MONITOR);
+    assertTrue(siiMonitorGrant != null && !siiMonitorGrant.isReadOnly(),
+        "ETP-5116: Financiero has FULL access to the SII Monitor window, proxying the windowless "
+            + "\"Monitor fiscal\" row");
+
+    WindowGrant taxReportGrant = grantFor(finance, WINDOW_TAX_REPORT);
+    assertTrue(taxReportGrant != null && !taxReportGrant.isReadOnly(),
+        "ETP-5116: Financiero has FULL access to the Tax Report window, proxying the windowless "
+            + "\"Modelos fiscales\" row");
   }
 
   @Test
-  void salesHasThirteenGrantsAndNoPaymentOutAccess() {
+  void salesHasTwelveGrantsAndNoPaymentOutOrPhysicalInventoryAccess() {
     List<WindowGrant> sales = TemplateRoleWindowAccess.byRoleId()
         .get(SystemRoleTemplates.SALES_ROLE_ID);
-    assertEquals(13, sales.size());
+    assertEquals(12, sales.size(),
+        "13 in the original ETP-4878 matrix, minus the ETP-5116 over-grant removal of "
+            + "full(\"168\") (Inventario físico) — Ventas should have NO access to that window");
     assertNull(grantFor(sales, WINDOW_PAYMENT_OUT),
         "Sales must NOT have a grant for Pago (Payment Out) — the matrix shows — for "
             + "Ventas on that row");
+    assertNull(grantFor(sales, WINDOW_PHYSICAL_INVENTORY),
+        "ETP-5116: Ventas must have NO access to Inventario físico — the previous full(\"168\") "
+            + "grant was an over-grant and has been removed");
   }
 
   @Test
@@ -145,7 +173,7 @@ class TemplateRoleWindowAccessTest {
   }
 
   @Test
-  void productCategoryIsReadOnlyForSalesAndPurchasingButFullForFinanceAndInventory() {
+  void productCategoryIsReadOnlyForSalesAndPurchasingFullForInventoryAndAbsentForFinance() {
     Map<String, List<WindowGrant>> byRoleId = TemplateRoleWindowAccess.byRoleId();
 
     WindowGrant salesGrant = grantFor(byRoleId.get(SystemRoleTemplates.SALES_ROLE_ID), WINDOW_PRODUCT_CATEGORY);
@@ -155,7 +183,9 @@ class TemplateRoleWindowAccessTest {
 
     assertTrue(salesGrant != null && salesGrant.isReadOnly());
     assertTrue(purchasingGrant != null && purchasingGrant.isReadOnly());
-    assertTrue(financeGrant != null && !financeGrant.isReadOnly());
+    assertNull(financeGrant,
+        "ETP-5116: Financiero must have NO access to Categoría del producto — the previous "
+            + "full(\"144\") grant was an over-grant and has been removed");
     assertTrue(inventoryGrant != null && !inventoryGrant.isReadOnly());
   }
 
@@ -177,10 +207,12 @@ class TemplateRoleWindowAccessTest {
     for (List<WindowGrant> grants : TemplateRoleWindowAccess.byRoleId().values()) {
       total += grants.size();
     }
-    assertEquals(66, total,
-        "13 (Sales) + 12 (Purchasing) + 28 (Finance) + 13 (Inventory) = 66 — the +2 over the "
-            + "original 64 is window 107 (Receipt-Invoice Link) added to Purchasing and Finance "
-            + "by ETP-5075");
+    assertEquals(65, total,
+        "12 (Sales) + 12 (Purchasing) + 28 (Finance) + 13 (Inventory) = 65 — from the original "
+            + "64: +2 for window 107 (Receipt-Invoice Link) added to Purchasing and Finance by "
+            + "ETP-5075, then ETP-5116 removed 1 net grant (Sales -1 for dropping full(\"168\"); "
+            + "Finance unchanged at +2/-2 for the 144/168 over-grant removals and the 2 new SII "
+            + "Monitor/Tax Report proxy grants)");
   }
 
   @Test
@@ -200,20 +232,25 @@ class TemplateRoleWindowAccessTest {
    * would stay 64 even if every role duplicated the same handful of windows). This locks in the
    * documented number so a future matrix edit that silently drifts from it is caught here instead
    * of only being caught by someone re-reading the javadoc by hand.
+   *
+   * <p>ETP-5116 update: 34 distinct windows (33 + window 107 from ETP-5075) plus 2 brand-new
+   * proxy windows (SII Monitor, Tax Report) = 36. The removed over-grants (144, 168) did not
+   * change the distinct count since both windows remain granted elsewhere (144 via Sales/
+   * Purchasing/Inventory; 168 via Inventory).</p>
    */
   @Test
-  void thirtyThreeDistinctWindowIdsAreCoveredAcrossAllFourRoles() {
+  void thirtySixDistinctWindowIdsAreCoveredAcrossAllFourRoles() {
     Set<String> distinctWindowIds = new TreeSet<>();
     for (List<WindowGrant> grants : TemplateRoleWindowAccess.byRoleId().values()) {
       for (WindowGrant grant : grants) {
         distinctWindowIds.add(grant.getWindowId());
       }
     }
-    assertEquals(34, distinctWindowIds.size(),
-        "The matrix's 66 grants must resolve to exactly 34 distinct AD_Window_IDs once shared "
-            + "windows (e.g. Contactos, Producto, Tarifa) are counted once, per the class javadoc "
-            + "and EnsureSystemRoleTemplatesScript's own javadoc — the 34th is window 107 "
-            + "(Receipt-Invoice Link), added to both Purchasing and Finance by ETP-5075");
+    assertEquals(36, distinctWindowIds.size(),
+        "The matrix's 65 grants must resolve to exactly 36 distinct AD_Window_IDs once shared "
+            + "windows (e.g. Contactos, Producto, Tarifa) are counted once — 34 from ETP-4878/"
+            + "ETP-5075 (window 107 added to both Purchasing and Finance), plus 2 new ETP-5116 "
+            + "proxy windows (SII Monitor, Tax Report) added to Finance");
   }
 
   /**
