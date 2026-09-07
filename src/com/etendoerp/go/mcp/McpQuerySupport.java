@@ -314,7 +314,7 @@ final class McpQuerySupport {
     crit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
     for (SFField sfField : crit.list()) {
       Column col = sfField.getADColumn();
-      if (Boolean.TRUE.equals(sfField.isBusinessCritical()) && col != null) {
+      if (McpFieldView.of(sfField).isBusinessCritical() && col != null) {
         Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
         if (prop != null) {
           result.add(prop.getName());

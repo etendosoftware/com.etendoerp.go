@@ -52,26 +52,37 @@ import com.etendoerp.go.schemaforge.data.SFField;
  *
  * <p>Nothing in a signature or a type can catch a reader that stops routing through
  * {@link McpFieldView} — the drift is a <b>call site</b>, and each reader's own unit tests would
- * keep passing. All three methods need an {@code OBContext}, a live DAL and an {@code AD_Tab}, so
+ * keep passing. All four methods need an {@code OBContext}, a live DAL and an {@code AD_Tab}, so
  * the call site cannot be asserted behaviourally; the behavioural half of the contract is pinned at
  * the {@link McpFieldView} seam instead, both here
- * ({@link #oneViewAnswersAllThreeReadersTheSameWay}) and in {@code McpFieldViewTest}.</p>
+ * ({@link #oneViewAnswersEveryReaderTheSameWay}) and in {@code McpFieldViewTest}.</p>
  *
- * <p><b>Deliberately out of scope:</b> {@code McpQuerySupport.summaryFields} reads
- * {@code sfField.isBusinessCritical()} directly and is left as committed — it is not one of the
- * three methods ETP-5184 routed, and widening this guard to it would fail the build on behaviour
- * nobody has decided to change.</p>
+ * <p>{@code McpQuerySupport.summaryFields} was the fourth reader, found after the first three were
+ * unified: it read {@code sfField.isBusinessCritical()} straight off the row, so a {@code fields}
+ * override setting {@code businessCritical} was honoured by {@code neo_schema} and ignored by
+ * {@code neo_list}/{@code neo_get} with {@code view:"summary"} — an agent told a field is
+ * business-critical, then handed a projection that omits it. Routed and guarded here.</p>
  */
 @DisplayName("ETP-5184 — every MCP reader of a field's curation goes through McpFieldView")
 class McpFieldViewSingleResolverCallSiteTest {
 
-  /** The three readers ETP-5184 unified, as {@code source file → method name}. */
+  /**
+   * The readers ETP-5184 unified, as {@code source file#method name}. Keyed by file <i>and</i>
+   * method because {@code McpQuerySupport} contributes two of them.
+   */
   private static final Map<String, String> READERS = new LinkedHashMap<>();
 
   static {
     READERS.put("com/etendoerp/go/mcp/McpSchemaFieldBuilder.java", "loadFieldMetadata");
     READERS.put("com/etendoerp/go/mcp/McpQuerySupport.java", "editablePropertyNames");
+    READERS.put("com/etendoerp/go/mcp/McpQuerySupport.java#summaryFields", "summaryFields");
     READERS.put("com/etendoerp/go/mcp/McpResourceProvider.java", "buildFieldsArray");
+  }
+
+  /** Strips the disambiguating {@code #method} suffix a key may carry. */
+  private static String sourceFileOf(String key) {
+    int hash = key.indexOf('#');
+    return hash < 0 ? key : key.substring(0, hash);
   }
 
   /** The one resolver every reader must go through. */
@@ -101,12 +112,13 @@ class McpFieldViewSingleResolverCallSiteTest {
   }
 
   @Test
-  @DisplayName("all three readers resolve through McpFieldView and none reads SFField raw")
+  @DisplayName("every reader resolves through McpFieldView and none reads SFField raw")
   void everyReaderRoutesThroughTheResolver() {
     List<String> violations = new ArrayList<>();
     for (Map.Entry<String, String> reader : READERS.entrySet()) {
       String method = reader.getValue();
-      String body = McpSourceScanner.methodBody(McpSourceScanner.read(reader.getKey()), method);
+      String body = McpSourceScanner.methodBody(
+          McpSourceScanner.read(sourceFileOf(reader.getKey())), method);
       if (!RESOLVER_CALL.matcher(body).find()) {
         violations.add(method + " does not call McpFieldView.of(...)");
       }
@@ -123,13 +135,13 @@ class McpFieldViewSingleResolverCallSiteTest {
   }
 
   @Test
-  @DisplayName("the scan still finds all three readers — a guard that finds nothing is mute, "
+  @DisplayName("the scan still finds every reader — a guard that finds nothing is mute, "
       + "not passing")
   void theScanStillResolvesEveryReader() {
-    assertEquals(3, READERS.size(), "ETP-5184 unified exactly three readers");
+    assertEquals(4, READERS.size(), "ETP-5184 unified exactly four readers");
     for (Map.Entry<String, String> reader : READERS.entrySet()) {
-      String body = McpSourceScanner.methodBody(McpSourceScanner.read(reader.getKey()),
-          reader.getValue());
+      String body = McpSourceScanner.methodBody(
+          McpSourceScanner.read(sourceFileOf(reader.getKey())), reader.getValue());
       assertTrue(body.length() > 100,
           reader.getValue() + " was resolved to a body of " + body.length() + " chars, which means"
               + " the extractor matched the wrong thing — fix this test, not the source");
@@ -140,23 +152,26 @@ class McpFieldViewSingleResolverCallSiteTest {
   }
 
   /**
-   * The behavioural half: one {@link McpFieldView} instance is the single answer all three readers
-   * report, so the properties they each consume are mutually consistent by construction.
+   * The behavioural half: one {@link McpFieldView} instance is the single answer every reader
+   * reports, so the properties they each consume are mutually consistent by construction.
    *
    * <p>The drift scenario spelled out: {@code neo_schema} publishes {@code visibility} and
    * {@code readOnly} from the view, {@code neo_selectors} publishes {@code isEditable()}, and the
-   * resource provider publishes {@code readOnly}. If the override moved only one of them, the three
-   * would contradict each other for the same field.</p>
+   * resource provider publishes {@code readOnly}, and {@code summaryFields} publishes
+   * {@code isBusinessCritical()}. If the override moved only one of them, the readers would
+   * contradict each other for the same field.</p>
    */
   @Test
-  @DisplayName("one resolved view answers all three readers the same way")
-  void oneViewAnswersAllThreeReadersTheSameWay() {
+  @DisplayName("one resolved view answers every reader the same way")
+  void oneViewAnswersEveryReaderTheSameWay() {
     McpFieldView view = McpFieldView.of(overriddenField("editable"));
 
     // neo_schema's two properties, neo_selectors' one, the resource provider's one.
     assertEquals("editable", view.getVisibility());
     assertFalse(view.isReadOnly());
     assertTrue(view.isEditable());
+    // summaryFields' one: the fixture leaves it false, so the view must not invent a true.
+    assertFalse(view.isBusinessCritical());
 
     // And the same field narrowed: no reader can be left on the pre-override answer.
     McpFieldView demoted = McpFieldView.of(overriddenField("system"));
