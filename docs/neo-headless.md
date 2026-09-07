@@ -1611,6 +1611,14 @@ the same direction as every other NEO call.
 Returns `token`, `uploadUrl`, `expiresAt`, `maxBytes`, `acceptedMimeTypes`, and a ready-to-run
 `curlExample`. Whoever holds the file PUTs the raw bytes:
 
+`uploadUrl` is built on the **Etendo Go app's public base** (`etendo.go.app.baseUrl`, the same
+property the transactional emails use), because the uploader is a shell, a browser or an agent
+talking to the app — not to Tomcat. `context.url` is only the fallback for an instance reached
+directly on Tomcat with no app in front: it is the internal backend address and can be unreachable
+for the client behind a proxy or a tunnel. **If the app is behind a proxy, set
+`etendo.go.app.baseUrl`** or the URL handed to the agent will point at the backend.
+
+
 ```bash
 curl -X PUT --upload-file ./photo.jpg "https://<host>/sws/neo/image/upload/<token>"
 ```

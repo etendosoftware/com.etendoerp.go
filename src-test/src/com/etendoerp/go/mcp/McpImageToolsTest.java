@@ -29,6 +29,7 @@ import static org.mockito.Mockito.when;
 
 import java.io.ByteArrayOutputStream;
 import java.time.Clock;
+import java.util.Properties;
 import java.util.Base64;
 
 import javax.imageio.ImageIO;
@@ -42,6 +43,7 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.access.User;
@@ -174,6 +176,81 @@ class McpImageToolsTest {
       assertEquals(NeoImageHelper.MAX_IMAGE_SIZE_BYTES, result.getInt("maxBytes"));
       assertNotNull(result.getString("expiresAt"));
       assertFalse(result.has(McpConstants.KEY_ERROR));
+    }
+
+    /** Runs {@code body} with a live store, a session, and exactly these Openbravo properties. */
+    private <T> T withProperties(NeoImageUploadTickets store, Properties props,
+        ThrowingSupplier<T> body) throws Exception {
+      OBPropertiesProvider provider = mock(OBPropertiesProvider.class);
+      when(provider.getOpenbravoProperties()).thenReturn(props);
+      try (MockedStatic<OBPropertiesProvider> propsMock = mockStatic(OBPropertiesProvider.class)) {
+        propsMock.when(OBPropertiesProvider::getInstance).thenReturn(provider);
+        return withSession(store, body);
+      }
+    }
+
+    @Test
+    @DisplayName("the upload URL is built on the Go app's public base, not on context.url")
+    void uploadUrlUsesTheAppBase() throws Exception {
+      Properties props = new Properties();
+      props.setProperty("etendo.go.app.baseUrl", "http://localhost:3100");
+      props.setProperty("context.url", "http://localhost:8080/etendo");
+      props.setProperty("context.name", "etendo");
+      NeoImageUploadTickets store = new NeoImageUploadTickets(Clock.systemUTC());
+
+      JSONObject result = withProperties(store, props,
+          () -> McpImageTools.requestUpload(new JSONObject()));
+
+      // The uploader talks to the app, not to Tomcat: context.url can be an internal address the
+      // client cannot reach at all (proxy, tunnel, other host).
+      assertEquals("http://localhost:3100" + McpImageTools.UPLOAD_PATH + result.getString("token"),
+          result.getString("uploadUrl"));
+    }
+
+    @Test
+    @DisplayName("without an app base it falls back to context.url WITH its context path")
+    void fallbackKeepsTheContextPath() throws Exception {
+      Properties props = new Properties();
+      props.setProperty("context.url", "http://localhost:8080/etendo");
+      props.setProperty("context.name", "etendo");
+      NeoImageUploadTickets store = new NeoImageUploadTickets(Clock.systemUTC());
+
+      JSONObject result = withProperties(store, props,
+          () -> McpImageTools.requestUpload(new JSONObject()));
+
+      // Regression: this used to strip "/etendo", so the PUT reached Tomcat's default servlet and
+      // came back 405 without ever entering NeoServlet. Asserting only that the URL *contains*
+      // UPLOAD_PATH did not catch it — the stripped URL contained it too.
+      assertEquals("http://localhost:8080/etendo" + McpImageTools.UPLOAD_PATH
+          + result.getString("token"), result.getString("uploadUrl"));
+    }
+
+    @Test
+    @DisplayName("with no base configured the relative fallback still carries the context path")
+    void relativeFallbackCarriesTheContext() throws Exception {
+      Properties props = new Properties();
+      props.setProperty("context.name", "etendo");
+      NeoImageUploadTickets store = new NeoImageUploadTickets(Clock.systemUTC());
+
+      JSONObject result = withProperties(store, props,
+          () -> McpImageTools.requestUpload(new JSONObject()));
+
+      assertEquals("/etendo" + McpImageTools.UPLOAD_PATH + result.getString("token"),
+          result.getString("uploadUrl"));
+    }
+
+    @Test
+    @DisplayName("a trailing slash on the base does not produce a double slash")
+    void trailingSlashIsNormalised() throws Exception {
+      Properties props = new Properties();
+      props.setProperty("etendo.go.app.baseUrl", "http://localhost:3100/");
+      NeoImageUploadTickets store = new NeoImageUploadTickets(Clock.systemUTC());
+
+      JSONObject result = withProperties(store, props,
+          () -> McpImageTools.requestUpload(new JSONObject()));
+
+      assertEquals("http://localhost:3100" + McpImageTools.UPLOAD_PATH + result.getString("token"),
+          result.getString("uploadUrl"));
     }
 
     @Test

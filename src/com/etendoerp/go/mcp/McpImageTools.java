@@ -30,6 +30,7 @@ import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.utility.Image;
 
+import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.etendoerp.go.schemaforge.util.NeoImageUploadTickets;
 
@@ -67,6 +68,7 @@ final class McpImageTools {
   /** Relative path of the ticketed upload endpoint; joined to {@code context.url} when known. */
   static final String UPLOAD_PATH = "/sws/neo/image/upload/";
   private static final String OPENBRAVO_CONTEXT_URL = "context.url";
+  private static final String OPENBRAVO_CONTEXT_NAME = "context.name";
   private static final String KEY_UPLOAD_URL = "uploadUrl";
   private static final String DEFAULT_IMAGE_NAME = "image";
 
@@ -133,25 +135,61 @@ final class McpImageTools {
   }
 
   /**
-   * Absolute upload URL when {@code context.url} is configured, relative otherwise.
+   * Absolute upload URL the CLIENT can reach, or a relative path when no base can be resolved.
    *
-   * <p>A relative path is a usable answer, not a failure: the MCP client is already talking to this
-   * host, so it can resolve it. Guessing a host would be worse — an agent that PUTs to the wrong one
+   * <p>The uploader is not this server: it is a shell, a browser or an agent that talks to the
+   * Etendo Go app, so the URL has to be the app's public base — NOT {@code context.url}, which is
+   * the internal backend address and may be unreachable (reverse proxy, tunnel, different host).
+   * The app serves {@code /sws/*} on its own origin, so appending the servlet path to the app base
+   * is what produces a working URL. Resolution order:
+   *
+   * <ol>
+   *   <li>{@code etendo.go.app.baseUrl} — the app's public base, the same property the
+   *       transactional emails use for their links.</li>
+   *   <li>{@code context.url}, context path included, for an instance reached directly on Tomcat
+   *       with no app in front.</li>
+   *   <li>a context-relative path, so the answer is still usable by a client that resolves it
+   *       against the origin it is already talking to.</li>
+   * </ol>
+   *
+   * <p>Guessing a host would be worse than a relative path — an agent that PUTs to the wrong one
    * gets a network error instead of an upload.
    */
   private static String buildUploadUrl(String token) {
-    String base = readContextUrl();
-    return base == null ? UPLOAD_PATH + token : StringUtils.removeEnd(base, "/") + UPLOAD_PATH + token;
+    String base = readAppBaseUrl();
+    if (base == null) {
+      base = readContextUrl();
+    }
+    return base == null
+        ? contextPrefix() + UPLOAD_PATH + token
+        : StringUtils.removeEnd(base, "/") + UPLOAD_PATH + token;
+  }
+
+  /**
+   * The configured public base of the Etendo Go app, or {@code null}. Deliberately the
+   * request-independent variant: a tool call has no {@link javax.servlet.http.HttpServletRequest}
+   * to hand, and deriving a base from one would be wrong here anyway — behind the app's proxy the
+   * request carries Tomcat's own context path, which the app does not serve {@code /sws} under.
+   */
+  private static String readAppBaseUrl() {
+    try {
+      return StringUtils.trimToNull(PublicUrlResolver.resolveConfiguredAppBaseUrl());
+    } catch (Exception e) {
+      log.debug("Could not resolve the app base URL: {}", e.getMessage());
+      return null;
+    }
   }
 
   private static String readContextUrl() {
     try {
       String raw = OBPropertiesProvider.getInstance().getOpenbravoProperties()
           .getProperty(OPENBRAVO_CONTEXT_URL);
-      String trimmed = StringUtils.trimToNull(raw);
-      // context.url ships WITH the context path (e.g. http://host:8080/etendo), while UPLOAD_PATH
-      // is servlet-absolute — so strip the trailing context name to avoid /etendo/etendo/sws/...
-      return trimmed == null ? null : StringUtils.removeEnd(trimmed, contextName(trimmed));
+      // Returned AS-IS, context path included. UPLOAD_PATH is relative to the context (the servlet
+      // is mapped at /sws/neo/* INSIDE it), so context.url = http://host:8080/etendo yields
+      // http://host:8080/etendo/sws/neo/image/upload/{token}. Stripping the context name here — as
+      // this method used to — produced http://host:8080/sws/neo/... which Tomcat answers with a 405
+      // from its default servlet, never reaching NeoServlet.
+      return StringUtils.trimToNull(raw);
     } catch (Exception e) {
       log.debug("Could not read {}: {}", OPENBRAVO_CONTEXT_URL, e.getMessage());
       return null;
@@ -159,19 +197,15 @@ final class McpImageTools {
   }
 
   /**
-   * @return the trailing {@code /context.name} of {@code contextUrl} when it is really there, or
-   *     {@code ""} — so {@link StringUtils#removeEnd} becomes a no-op for a bare-server
-   *     {@code context.url}.
+   * @return {@code /context.name} when that property is set, or {@code ""}. Used only to prefix the
+   *     relative fallback below: without it a host-absolute path would miss the context and hit
+   *     Tomcat's default servlet instead of NeoServlet.
    */
-  private static String contextName(String contextUrl) {
+  private static String contextPrefix() {
     try {
       String name = StringUtils.trimToNull(OBPropertiesProvider.getInstance()
-          .getOpenbravoProperties().getProperty("context.name"));
-      if (name == null) {
-        return "";
-      }
-      String suffix = "/" + StringUtils.strip(name, "/");
-      return StringUtils.endsWith(contextUrl, suffix) ? suffix : "";
+          .getOpenbravoProperties().getProperty(OPENBRAVO_CONTEXT_NAME));
+      return name == null ? "" : "/" + StringUtils.strip(name, "/");
     } catch (Exception e) {
       return "";
     }
