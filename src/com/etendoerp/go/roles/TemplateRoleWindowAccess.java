@@ -42,15 +42,14 @@ import java.util.Map;
  * truth for everything else ({@code UserRoleCompositionService}, the webhooks, and this class's
  * own tests).</p>
  *
- * <p><b>Nine matrix rows are intentionally NOT represented here — known gap.</b> Every excluded
- * row has NO {@code AD_Window_ID} at all backing it (either a pure custom/aggregate Schema Forge
- * page with zero classic-AD entity, or a report-type spec whose access is resolved via a
- * different, non-window mechanism): Inicio (Dashboard), Favoritos, Copilot (Asistente IA),
- * Documentos no contabilizados, Informes de inventario, Informes financieros, Informe Antigüedad
- * de Cobros, Informe Antigüedad de Pagos, Escaneo inteligente. See
- * {@code EnsureSystemRoleTemplatesScript}'s class javadoc for the full per-row resolution detail,
- * and {@code docs/neo-headless.md} in this module for the research dispatch's complete mapping
- * table.</p>
+ * <p><b>Six matrix rows are intentionally NOT represented here — known gap (down from nine as of
+ * this ETP-5116 pass).</b> Every excluded row has NO {@code AD_Window_ID} at all backing it
+ * (either a pure custom/aggregate Schema Forge page with zero classic-AD entity, or a report-type
+ * spec whose access is resolved via a different, non-window mechanism): Inicio (Dashboard),
+ * Favoritos, Copilot (Asistente IA), Informes de inventario, Informes financieros, Escaneo
+ * inteligente. See {@code EnsureSystemRoleTemplatesScript}'s class javadoc for the full per-row
+ * resolution detail, and {@code docs/neo-headless.md} in this module for the research dispatch's
+ * complete mapping table.</p>
  *
  * <p><b>"Monitor fiscal" and "Modelos fiscales" were originally in that windowless-gap list too,
  * but ETP-5116 resolved both for Finance via a proxy grant</b> onto a different, real classic
@@ -72,22 +71,19 @@ import java.util.Map;
  * this is not a stand-in for a windowless page — these 3 windows ARE what "Configuración fiscal"
  * refers to, so all 3 are granted directly.</p>
  *
- * <p><b>"Documentos no contabilizados" remains unresolved here — ETP-5116 investigation, not a new
- * gap.</b> Financiero needs FULL access to process {@code D6AB95CE52D34E1599590526115E26C6} via
- * {@code OBUIAPP_Process_Access} (proxying "Not Posted Documents"), but that is a standalone
- * process grant, not a window grant — this class only models {@link WindowGrant}s, and {@code
- * EnsureSystemRoleTemplatesScript#reconcileProcessAccess} only ever DERIVES process access from a
- * role's FULL window grants (button-linked processes on that window's tabs); it has no mechanism
- * to reconcile a standalone process id with no backing window. Populating this row requires
- * designing that mechanism first — deliberately left out of this matrix until that design lands.
- * "Informe Antigüedad de Cobros"/"Informe Antigüedad de Pagos" hit this exact same gap under a
- * fresh ETP-5116 investigation: both {@code AgingReportHandler} OBUIAPP process ids
- * (Receivables {@code 0D37A9F6109549DEB058373EF2DAEB6A}, Payables
- * {@code EB4C4053F3B94A17A08D1DD7E89CEB7E}) are real, confirmed via the same
- * {@code AD_Menu.em_obuiapp_process_id} FK chain, but neither {@code AD_Menu} row has an
- * {@code ad_window_id} either — so the target Ventas/Compras/Financiero grants from that
- * investigation are equally blocked on the same missing standalone-process-reconciliation
- * mechanism, not on any missing id.</p>
+ * <p><b>"Documentos no contabilizados", "Informe Antigüedad de Cobros" and "Informe Antigüedad de
+ * Pagos" are resolved too, as of this ETP-5116 pass — but NOT as {@link WindowGrant}s.</b> All
+ * three target a real {@code OBUIAPP_Process_Access} grant with no backing {@code AD_Window} at
+ * all ({@code AD_Menu.ad_window_id IS NULL} for all three), so neither this matrix nor {@code
+ * EnsureSystemRoleTemplatesScript#reconcileProcessAccess} (which only ever DERIVES process access
+ * from a role's FULL window grants — button-linked processes on that window's tabs) can reach
+ * them. {@link #standaloneProcessGrantsByRoleId()} is the new, parallel mechanism built for
+ * exactly this: Financiero gets all three processes (the "Documentos no contabilizados" proxy,
+ * {@code D6AB95CE52D34E1599590526115E26C6}, plus BOTH aging schedules per the v2 target matrix),
+ * Ventas gets only the Receivables schedule ({@code 0D37A9F6109549DEB058373EF2DAEB6A}), and Compras
+ * gets only the Payables one ({@code EB4C4053F3B94A17A08D1DD7E89CEB7E}) — reconciled by {@code
+ * EnsureSystemRoleTemplatesScript#reconcileStandaloneProcessAccess}, a mechanism deliberately
+ * separate from (not layered on top of) {@code #reconcileProcessAccess}.</p>
  *
  * <p><b>"Roles", "Usuario", and "Conectar asistente de IA" resolve to real {@code AD_Window_ID}s
  * but are deliberately absent from every role's grant list below</b> — the ticket's matrix shows
@@ -274,6 +270,57 @@ public final class TemplateRoleWindowAccess {
     map.put(SystemRoleTemplates.SALES_ROLE_ID, salesGrants());
     map.put(SystemRoleTemplates.PURCHASING_ROLE_ID, purchasingGrants());
     map.put(SystemRoleTemplates.INVENTORY_ROLE_ID, inventoryGrants());
+    return map;
+  }
+
+  /**
+   * ETP-5116 — standalone {@code OBUIAPP_Process_Access} grants: real, confirmed process ids with
+   * NO backing {@code AD_Window} at all ({@code AD_Menu.ad_window_id IS NULL}), so neither the
+   * {@link WindowGrant} matrix above nor {@code EnsureSystemRoleTemplatesScript
+   * #reconcileProcessAccess}'s window-button-derived process access can reach them (both need an
+   * {@code AD_Window_ID} to start from). See this class's own javadoc ("Documentos no
+   * contabilizados"/aging reports paragraph) for the full investigation. Financiero gets all three
+   * — the "Documentos no contabilizados" proxy plus BOTH aging schedules, per the v2 target
+   * matrix; Ventas gets only the Receivables schedule; Compras gets only the Payables one;
+   * Almacén gets none. Reconciled by {@code
+   * EnsureSystemRoleTemplatesScript#reconcileStandaloneProcessAccess} — a mechanism deliberately
+   * separate from (not layered on top of) {@code #reconcileProcessAccess}: it grants each process
+   * id directly, independent of any window grant.
+   */
+  private static List<String> financeStandaloneProcessGrants() {
+    return List.of(
+        "D6AB95CE52D34E1599590526115E26C6",   // Documentos no contabilizados (Not Posted Documents proxy)
+        "0D37A9F6109549DEB058373EF2DAEB6A",   // Informe Antigüedad de Cobros (Receivables Aging Schedule)
+        "EB4C4053F3B94A17A08D1DD7E89CEB7E");  // Informe Antigüedad de Pagos (Payables Aging Schedule)
+  }
+
+  /** Sales ("Ventas") standalone-process column — only the Receivables aging schedule. */
+  private static List<String> salesStandaloneProcessGrants() {
+    return List.of(
+        "0D37A9F6109549DEB058373EF2DAEB6A");  // Informe Antigüedad de Cobros (Receivables Aging Schedule)
+  }
+
+  /** Purchasing ("Compras") standalone-process column — only the Payables aging schedule. */
+  private static List<String> purchasingStandaloneProcessGrants() {
+    return List.of(
+        "EB4C4053F3B94A17A08D1DD7E89CEB7E");  // Informe Antigüedad de Pagos (Payables Aging Schedule)
+  }
+
+  /**
+   * The full role→standalone-process-grant-list map, keyed by {@code AD_Role_ID} — sibling of
+   * {@link #byRoleId()} for the ETP-5116 standalone-process mechanism. Every one of the four
+   * template roles is a key, even Inventory (empty list — Almacén gets no standalone-process
+   * grant), mirroring {@link #byRoleId()}'s own "always all four keys" contract.
+   *
+   * @return a fresh, mutable {@link LinkedHashMap} from template role id to its (immutable) list
+   *     of {@code OBUIAPP_Process_Access} ids
+   */
+  public static Map<String, List<String>> standaloneProcessGrantsByRoleId() {
+    Map<String, List<String>> map = new LinkedHashMap<>();
+    map.put(SystemRoleTemplates.FINANCE_ROLE_ID, financeStandaloneProcessGrants());
+    map.put(SystemRoleTemplates.SALES_ROLE_ID, salesStandaloneProcessGrants());
+    map.put(SystemRoleTemplates.PURCHASING_ROLE_ID, purchasingStandaloneProcessGrants());
+    map.put(SystemRoleTemplates.INVENTORY_ROLE_ID, Collections.emptyList());
     return map;
   }
 }

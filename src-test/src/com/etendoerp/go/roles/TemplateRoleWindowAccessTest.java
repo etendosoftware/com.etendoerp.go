@@ -377,4 +377,89 @@ class TemplateRoleWindowAccessTest {
             + "resolved by UserRoleCompositionService's most-permissive-wins reconciliation "
             + "pass (see UserRoleCompositionServiceOverlapIntegrationTest)");
   }
+
+  // --- ETP-5116: standalone-process grants (Documentos no contabilizados, aging schedules) ---
+
+  private static final String PROCESS_NOT_POSTED_DOCUMENTS = "D6AB95CE52D34E1599590526115E26C6";
+  private static final String PROCESS_RECEIVABLES_AGING = "0D37A9F6109549DEB058373EF2DAEB6A";
+  private static final String PROCESS_PAYABLES_AGING = "EB4C4053F3B94A17A08D1DD7E89CEB7E";
+
+  @Test
+  void exposesExactlyTheFourNonAdminTemplateRolesForStandaloneProcessGrants() {
+    Map<String, List<String>> byRoleId = TemplateRoleWindowAccess.standaloneProcessGrantsByRoleId();
+    assertEquals(4, byRoleId.size());
+    assertTrue(byRoleId.containsKey(SystemRoleTemplates.FINANCE_ROLE_ID));
+    assertTrue(byRoleId.containsKey(SystemRoleTemplates.SALES_ROLE_ID));
+    assertTrue(byRoleId.containsKey(SystemRoleTemplates.PURCHASING_ROLE_ID));
+    assertTrue(byRoleId.containsKey(SystemRoleTemplates.INVENTORY_ROLE_ID));
+  }
+
+  @Test
+  void financeHasAllThreeStandaloneProcessGrants() {
+    List<String> finance = TemplateRoleWindowAccess.standaloneProcessGrantsByRoleId()
+        .get(SystemRoleTemplates.FINANCE_ROLE_ID);
+    assertEquals(3, finance.size(),
+        "Financiero holds all three ETP-5116 standalone processes per the v2 target matrix: the "
+            + "Documentos no contabilizados proxy plus BOTH aging schedules");
+    assertTrue(finance.contains(PROCESS_NOT_POSTED_DOCUMENTS),
+        "Financiero must have the Documentos no contabilizados proxy grant");
+    assertTrue(finance.contains(PROCESS_RECEIVABLES_AGING),
+        "Financiero must have the Receivables Aging Schedule grant");
+    assertTrue(finance.contains(PROCESS_PAYABLES_AGING),
+        "Financiero must have the Payables Aging Schedule grant");
+  }
+
+  @Test
+  void salesHasOnlyTheReceivablesAgingStandaloneGrant() {
+    List<String> sales = TemplateRoleWindowAccess.standaloneProcessGrantsByRoleId()
+        .get(SystemRoleTemplates.SALES_ROLE_ID);
+    assertEquals(List.of(PROCESS_RECEIVABLES_AGING), sales,
+        "Ventas must have exactly the Receivables Aging Schedule standalone grant, nothing else");
+  }
+
+  @Test
+  void purchasingHasOnlyThePayablesAgingStandaloneGrant() {
+    List<String> purchasing = TemplateRoleWindowAccess.standaloneProcessGrantsByRoleId()
+        .get(SystemRoleTemplates.PURCHASING_ROLE_ID);
+    assertEquals(List.of(PROCESS_PAYABLES_AGING), purchasing,
+        "Compras must have exactly the Payables Aging Schedule standalone grant, nothing else");
+  }
+
+  @Test
+  void inventoryHasNoStandaloneProcessGrants() {
+    List<String> inventory = TemplateRoleWindowAccess.standaloneProcessGrantsByRoleId()
+        .get(SystemRoleTemplates.INVENTORY_ROLE_ID);
+    assertTrue(inventory.isEmpty(), "Almacén must have zero ETP-5116 standalone-process grants");
+  }
+
+  @Test
+  void noStandaloneProcessIsGrantedTwiceWithinTheSameRole() {
+    for (Map.Entry<String, List<String>> entry
+        : TemplateRoleWindowAccess.standaloneProcessGrantsByRoleId().entrySet()) {
+      Set<String> seen = new HashSet<>(entry.getValue());
+      assertEquals(entry.getValue().size(), seen.size(),
+          entry.getKey() + " must not repeat the same standalone process id twice in its own "
+              + "grant list");
+    }
+  }
+
+  /**
+   * "Idempotency" at this DB-free data-class level: the same contract {@link
+   * #byRoleIdReturnsAFreshMutableMapEachCall} already locks in for the window matrix — mutating a
+   * caller's copy of the returned map must never leak into the next caller. This is what makes
+   * {@code EnsureSystemRoleTemplatesScript}'s own per-run reconciliation safe to re-invoke without
+   * accumulating state between roles/runs; the DB-level "running the reconciliation twice creates
+   * no duplicate row" guarantee itself lives in that class's {@code upsertObuiappProcessAccess}/
+   * {@code removeStaleStandaloneProcessAccess} and is exercised there, not here (this class has no
+   * {@code ConnectionProvider} at all — see class javadoc).
+   */
+  @Test
+  void standaloneProcessGrantsByRoleIdReturnsAFreshMutableMapEachCall() {
+    Map<String, List<String>> first = TemplateRoleWindowAccess.standaloneProcessGrantsByRoleId();
+    first.clear();
+    Map<String, List<String>> second = TemplateRoleWindowAccess.standaloneProcessGrantsByRoleId();
+    assertEquals(4, second.size(),
+        "Mutating a caller's copy must never affect the next caller — "
+            + "standaloneProcessGrantsByRoleId() must return a fresh map each time");
+  }
 }

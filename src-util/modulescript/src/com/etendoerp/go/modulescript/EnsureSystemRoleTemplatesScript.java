@@ -19,6 +19,7 @@ package com.etendoerp.go.modulescript;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -108,9 +109,10 @@ import org.openbravo.modulescript.ModuleScript;
  * not tied to any window button remain a separate, known gap. See that method's own javadoc for
  * the full rule and rationale.</p>
  *
- * <p><b>Nine matrix rows are deliberately NOT implemented — known gap, follow-up ticket
- * pending.</b> Every one of these has NO {@code AD_Window_ID} at all backing it (either a pure
- * custom/aggregate Schema Forge page with zero classic-AD entity, or a report-type spec whose
+ * <p><b>Six matrix rows are deliberately NOT implemented — known gap, follow-up ticket pending
+ * (down from nine as of this ETP-5116 pass).</b> Every one of these has NO {@code AD_Window_ID}
+ * at all backing it (either a pure custom/aggregate Schema Forge page with zero classic-AD
+ * entity, or a report-type spec whose
  * access is resolved via a different, non-window mechanism) — {@code AD_Window_Access} cannot
  * express a grant against something that has no window. "Monitor fiscal" and "Modelos fiscales"
  * used to be on this list too, but ETP-5116 resolved both for Finance via a window PROXY grant
@@ -126,14 +128,11 @@ import org.openbravo.modulescript.ModuleScript;
  *   <li><b>Copilot (Asistente IA)</b> — {@code AD_Menu} "Copilot" exists but its
  *       {@code ad_window_id} is null (points at an embedded chat feature, not a window).</li>
  *   <li><b>Documentos no contabilizados</b> — {@code not-posted-documents} spec, type W but
- *       {@code ad_window_id} null; fully custom, no classic window backing it. Unlike the other
- *       rows here, its target grant mechanism IS identified (ETP-5116 investigation): Financiero
- *       needs FULL access to process {@code D6AB95CE52D34E1599590526115E26C6} via {@code
- *       OBUIAPP_Process_Access}, proxying "Not Posted Documents" — but that is a standalone
- *       process grant with no backing window, and {@link #reconcileProcessAccess} only ever
- *       DERIVES process access from a role's FULL window grants; it has no mechanism to
- *       reconcile a standalone process id. Blocked on designing that mechanism, not on finding
- *       the target id.</li>
+ *       {@code ad_window_id} null; fully custom, no classic window backing it. RESOLVED by this
+ *       ETP-5116 pass, but NOT via {@link #reconcileProcessAccess} (which only ever DERIVES
+ *       process access from a role's FULL window grants): Financiero now holds a standalone
+ *       {@code OBUIAPP_Process_Access} grant on process {@code D6AB95CE52D34E1599590526115E26C6}
+ *       (proxying "Not Posted Documents") via the new {@link #reconcileStandaloneProcessAccess}.</li>
  *   <li><b>Informes de inventario</b> — {@code inventory-stock-report} spec, type R, no window,
  *       no tab; pure webhook handler.</li>
  *   <li><b>Informes financieros</b> — no single window backs this label; multiple jsreport-print
@@ -142,27 +141,51 @@ import org.openbravo.modulescript.ModuleScript;
  *       not one window.</li>
  *   <li><b>Informe Antigüedad de Cobros</b> — {@code aging-receivable} spec exists (type R) but
  *       has neither {@code ad_window_id} nor {@code ad_tab_id}; same report-access-mechanism gap
- *       as ETP-4596. A fresh ETP-5116 investigation confirmed the SAME resolution shape as
- *       "Documentos no contabilizados" above: Ventas needs FULL access to the real, confirmed
- *       OBUIAPP process {@code 0D37A9F6109549DEB058373EF2DAEB6A} (Receivables Aging Schedule) via
- *       {@code OBUIAPP_Process_Access}, but {@code AD_Menu} row
- *       {@code CC226771DE354AEEAA5D69F696F1A676} has {@code ad_window_id} null — no window to
- *       proxy through, and {@link #reconcileProcessAccess} still has no standalone-process-id
- *       mechanism. Blocked on the same missing mechanism, not on finding the target id.</li>
+ *       as ETP-4596. RESOLVED by this ETP-5116 pass via {@link #reconcileStandaloneProcessAccess}:
+ *       Ventas (and Financiero) now hold a standalone grant on the real, confirmed OBUIAPP process
+ *       {@code 0D37A9F6109549DEB058373EF2DAEB6A} (Receivables Aging Schedule; {@code AD_Menu} row
+ *       {@code CC226771DE354AEEAA5D69F696F1A676}, {@code ad_window_id} still null — there is no
+ *       window to proxy through, hence the standalone mechanism).</li>
  *   <li><b>Informe Antigüedad de Pagos</b> — no {@code ETGO_SF_SPEC} row exists at all (only a
- *       jsreport template artifact); more severe than its sibling above. Same ETP-5116
- *       investigation: Compras needs FULL access to OBUIAPP process
- *       {@code EB4C4053F3B94A17A08D1DD7E89CEB7E} (Payables Aging Schedule, confirmed via
- *       {@code AD_Menu} row {@code B6D984F9FEFB412D827A37BACF2F1D66}, also
- *       {@code ad_window_id} null), and Financiero needs FULL access to BOTH aging processes —
- *       all three grants blocked on the exact same standalone-process-id gap.</li>
+ *       jsreport template artifact); more severe than its sibling above. RESOLVED the same way:
+ *       Compras (and Financiero) now hold a standalone grant on OBUIAPP process
+ *       {@code EB4C4053F3B94A17A08D1DD7E89CEB7E} (Payables Aging Schedule; {@code AD_Menu} row
+ *       {@code B6D984F9FEFB412D827A37BACF2F1D66}, also {@code ad_window_id} null).</li>
  *   <li><b>Escaneo inteligente</b> — {@code smart-scan} artifact is an aggregate/custom route
  *       page ({@code /smart-scan}); no {@code ad_window}/{@code ad_menu} entry whatsoever.</li>
  * </ul>
  * See {@code docs/neo-headless.md} (in this module) for the same list with the research
- * dispatch's full resolution table. Populating these 10 requires either building the missing AD
- * entity/spec first or a different, non-{@code AD_Window_Access} grant mechanism — out of scope
- * for this script until that follow-up ticket lands.</p>
+ * dispatch's full resolution table. Populating the remaining 6 (the ones NOT marked RESOLVED
+ * above) requires either building the missing AD entity/spec first or a different, non-{@code
+ * AD_Window_Access} grant mechanism — out of scope for this script until that follow-up ticket
+ * lands.</p>
+ *
+ * <p><b>ETP-5116 — {@link #reconcileStandaloneProcessAccess}, a new mechanism parallel to {@link
+ * #reconcileProcessAccess}.</b> The window-button-derived mechanism above can only ever reach a
+ * process that is a button on a window some role already has FULL access to — it has no path to a
+ * process whose {@code AD_Menu} entry has {@code ad_window_id IS NULL}. Three such processes were
+ * confirmed real via the {@code AD_Menu.em_obuiapp_process_id} FK chain (see the windowless-gap
+ * list above) and needed direct grants: the "Documentos no contabilizados" proxy
+ * ({@code D6AB95CE52D34E1599590526115E26C6}, Financiero only) and the two
+ * {@code AgingReportHandler} processes, Receivables ({@code 0D37A9F6109549DEB058373EF2DAEB6A},
+ * Ventas + Financiero) and Payables ({@code EB4C4053F3B94A17A08D1DD7E89CEB7E}, Compras +
+ * Financiero) — Financiero holds all three per the v2 target matrix. {@link
+ * #standaloneProcessGrantsByRoleId()} is this script's own inlined copy of {@code
+ * TemplateRoleWindowAccess#standaloneProcessGrantsByRoleId()} (same self-containment rule as the
+ * window matrix above), and {@link #reconcileStandaloneProcessAccess} is called from the exact
+ * same per-role loop in {@link #execute()} that calls {@link #reconcileWindowAccess}/{@link
+ * #reconcileProcessAccess}, so it runs on every {@code update.database} too.
+ *
+ * <p>Deliberately a genuinely separate mechanism, not layered on top of {@link
+ * #reconcileProcessAccess}: it grants every desired process id directly, independent of any
+ * window grant, reusing {@link #upsertObuiappProcessAccess} as-is for idempotent insert (no
+ * duplicate row on a re-run — the existing check-then-insert/reactivate guard already handles
+ * that). The one new piece is stale-removal: both mechanisms write to the SAME {@code
+ * obuiapp_process_access} table for the SAME role, so a naive "delete every active row not in
+ * my desired set" would delete the OTHER mechanism's grants. {@link
+ * #removeStaleStandaloneProcessAccess} avoids that by scoping its delete to {@link
+ * #ALL_STANDALONE_PROCESS_IDS} — the fixed, known universe of ids this mechanism ever grants —
+ * so it can only ever touch rows it itself owns, never a window-button-derived grant.</p>
  *
  * <p><b>"Roles", "Usuario", and "Conectar asistente de IA" resolve to real {@code AD_Window_ID}s
  * (111, 108, and {@code 6006F3B3DDF74D618CBEE21BEFD398DC} respectively) but are deliberately NOT
@@ -378,16 +401,74 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
     return map;
   }
 
+  /**
+   * Financiero's ETP-5116 standalone-process column — all three: the "Documentos no
+   * contabilizados" proxy plus BOTH aging schedules, per the v2 target matrix. Inlined copy of
+   * {@code TemplateRoleWindowAccess#financeStandaloneProcessGrants()}.
+   */
+  private static List<String> financeStandaloneProcessGrants() {
+    return List.of(
+        "D6AB95CE52D34E1599590526115E26C6",   // Documentos no contabilizados (Not Posted Documents proxy)
+        "0D37A9F6109549DEB058373EF2DAEB6A",   // Informe Antigüedad de Cobros (Receivables Aging Schedule)
+        "EB4C4053F3B94A17A08D1DD7E89CEB7E");  // Informe Antigüedad de Pagos (Payables Aging Schedule)
+  }
+
+  /**
+   * Ventas's ETP-5116 standalone-process column — only the Receivables aging schedule. Inlined
+   * copy of {@code TemplateRoleWindowAccess#salesStandaloneProcessGrants()}.
+   */
+  private static List<String> salesStandaloneProcessGrants() {
+    return List.of(
+        "0D37A9F6109549DEB058373EF2DAEB6A");  // Informe Antigüedad de Cobros (Receivables Aging Schedule)
+  }
+
+  /**
+   * Compras's ETP-5116 standalone-process column — only the Payables aging schedule. Inlined copy
+   * of {@code TemplateRoleWindowAccess#purchasingStandaloneProcessGrants()}.
+   */
+  private static List<String> purchasingStandaloneProcessGrants() {
+    return List.of(
+        "EB4C4053F3B94A17A08D1DD7E89CEB7E");  // Informe Antigüedad de Pagos (Payables Aging Schedule)
+  }
+
+  /**
+   * The full role→standalone-process-grant-list map, keyed by {@code AD_Role_ID}. Inlined copy of
+   * {@code TemplateRoleWindowAccess#standaloneProcessGrantsByRoleId()} — every one of the four
+   * template roles is a key, even Inventory (empty list).
+   */
+  private static Map<String, List<String>> standaloneProcessGrantsByRoleId() {
+    Map<String, List<String>> map = new LinkedHashMap<>();
+    map.put(FINANCE_ROLE_ID, financeStandaloneProcessGrants());
+    map.put(SALES_ROLE_ID, salesStandaloneProcessGrants());
+    map.put(PURCHASING_ROLE_ID, purchasingStandaloneProcessGrants());
+    map.put(INVENTORY_ROLE_ID, Collections.emptyList());
+    return map;
+  }
+
+  /**
+   * The fixed universe of every {@code obuiapp_process_id} ever granted through {@link
+   * #reconcileStandaloneProcessAccess}, across all four templates combined — used to scope {@link
+   * #removeStaleStandaloneProcessAccess}'s stale-removal to ONLY these ids, so it can never touch
+   * a window-button-derived grant {@link #reconcileProcessAccess} wrote for the same role in the
+   * very same {@code obuiapp_process_access} table.
+   */
+  private static final Set<String> ALL_STANDALONE_PROCESS_IDS = Set.of(
+      "D6AB95CE52D34E1599590526115E26C6",
+      "0D37A9F6109549DEB058373EF2DAEB6A",
+      "EB4C4053F3B94A17A08D1DD7E89CEB7E");
+
   @Override
   public void execute() {
     try {
       ConnectionProvider cp = getConnectionProvider();
       Map<String, List<WindowGrant>> grantsByRoleId = windowAccessByRoleId();
+      Map<String, List<String>> standaloneProcessGrantsByRoleId = standaloneProcessGrantsByRoleId();
       for (Map.Entry<String, List<WindowGrant>> entry : grantsByRoleId.entrySet()) {
         String roleId = entry.getKey();
         ensureRole(cp, roleId, ROLE_NAMES_BY_ID.get(roleId));
         reconcileWindowAccess(cp, roleId, entry.getValue());
         reconcileProcessAccess(cp, roleId, entry.getValue());
+        reconcileStandaloneProcessAccess(cp, roleId, standaloneProcessGrantsByRoleId.get(roleId));
       }
     } catch (Exception e) {
       handleError(e);
@@ -786,22 +867,91 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
   private void removeStaleObuiappProcessAccess(ConnectionProvider cp, String roleId,
       Set<String> desiredObuiappProcessIds) throws Exception {
     List<String> staleIds = new ArrayList<>();
+    for (String obuiappProcessId : activeObuiappProcessIds(cp, roleId)) {
+      if (!desiredObuiappProcessIds.contains(obuiappProcessId)) {
+        staleIds.add(obuiappProcessId);
+      }
+    }
+    deleteObuiappProcessAccessRows(cp, roleId, staleIds);
+  }
+
+  /**
+   * ETP-5116 — reconciles {@code roleId}'s standalone {@code obuiapp_process_access} grants (this
+   * script's own inlined copy of {@code TemplateRoleWindowAccess}'s standalone-process matrix) —
+   * for processes with NO backing {@code AD_Window} at all, so neither {@link
+   * #reconcileWindowAccess} nor the window-button-derived {@link #reconcileProcessAccess} can
+   * reach them (both need an {@code AD_Window_ID} to start from). Deliberately a separate,
+   * parallel mechanism, not layered on top of {@link #reconcileProcessAccess}: it grants every
+   * desired process id directly, independent of any window grant.
+   *
+   * <p>Idempotent the same way every other reconciliation in this class is: {@link
+   * #upsertObuiappProcessAccess} is reused as-is (insert if missing, reactivate if inactive,
+   * no-op if already active) — running this twice on an unchanged {@code desiredProcessIds} never
+   * creates a duplicate row. Stale removal is scoped to {@link #ALL_STANDALONE_PROCESS_IDS} only
+   * (never "every active row not in {@code desiredProcessIds}", unlike {@link
+   * #removeStaleObuiappProcessAccess}), so it can never delete a window-button-derived grant
+   * {@link #reconcileProcessAccess} wrote for the same role in the very same table — the two
+   * mechanisms coexist safely because each only ever touches the process ids it owns.</p>
+   */
+  private void reconcileStandaloneProcessAccess(ConnectionProvider cp, String roleId,
+      List<String> desiredProcessIds) throws Exception {
+    for (String processId : desiredProcessIds) {
+      upsertObuiappProcessAccess(cp, roleId, processId);
+    }
+    removeStaleStandaloneProcessAccess(cp, roleId, desiredProcessIds);
+  }
+
+  /**
+   * Deletes every active {@code obuiapp_process_access} row for {@code roleId} whose process id
+   * is in {@link #ALL_STANDALONE_PROCESS_IDS} (the fixed universe this mechanism owns) but NOT in
+   * {@code desiredProcessIds}. Scoped this way — rather than "every active row not desired",
+   * unlike {@link #removeStaleObuiappProcessAccess} — so it never touches a window-button-derived
+   * grant {@link #reconcileProcessAccess} wrote for the same role on the same table.
+   */
+  private void removeStaleStandaloneProcessAccess(ConnectionProvider cp, String roleId,
+      List<String> desiredProcessIds) throws Exception {
+    Set<String> desired = new HashSet<>(desiredProcessIds);
+    List<String> staleIds = new ArrayList<>();
+    for (String obuiappProcessId : activeObuiappProcessIds(cp, roleId)) {
+      if (ALL_STANDALONE_PROCESS_IDS.contains(obuiappProcessId) && !desired.contains(obuiappProcessId)) {
+        staleIds.add(obuiappProcessId);
+      }
+    }
+    deleteObuiappProcessAccessRows(cp, roleId, staleIds);
+  }
+
+  /**
+   * Every active {@code obuiapp_process_id} currently granted to {@code roleId} — shared read
+   * used by both {@link #removeStaleObuiappProcessAccess} and {@link
+   * #removeStaleStandaloneProcessAccess} so the two mechanisms' stale-removal logic differs only
+   * in which ids they consider "theirs", not in how they read the table.
+   */
+  private List<String> activeObuiappProcessIds(ConnectionProvider cp, String roleId)
+      throws Exception {
+    List<String> ids = new ArrayList<>();
     String selectSql = "SELECT obuiapp_process_id FROM obuiapp_process_access "
         + "WHERE AD_Role_ID = ? AND IsActive = 'Y'";
     try (PreparedStatement ps = cp.getPreparedStatement(selectSql)) {
       ps.setString(1, roleId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          String obuiappProcessId = rs.getString(1);
-          if (!desiredObuiappProcessIds.contains(obuiappProcessId)) {
-            staleIds.add(obuiappProcessId);
-          }
+          ids.add(rs.getString(1));
         }
       }
     }
+    return ids;
+  }
+
+  /**
+   * Hard-deletes the given active {@code obuiapp_process_access} rows for {@code roleId} — shared
+   * delete used by both {@link #removeStaleObuiappProcessAccess} and {@link
+   * #removeStaleStandaloneProcessAccess}.
+   */
+  private void deleteObuiappProcessAccessRows(ConnectionProvider cp, String roleId,
+      List<String> obuiappProcessIds) throws Exception {
     String deleteSql = "DELETE FROM obuiapp_process_access WHERE AD_Role_ID = ? "
         + "AND obuiapp_process_id = ? AND IsActive = 'Y'";
-    for (String obuiappProcessId : staleIds) {
+    for (String obuiappProcessId : obuiappProcessIds) {
       try (PreparedStatement ps = cp.getPreparedStatement(deleteSql)) {
         ps.setString(1, roleId);
         ps.setString(2, obuiappProcessId);
