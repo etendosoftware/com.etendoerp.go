@@ -362,23 +362,46 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     // so a whitespace cell in a re-imported file would erase a province already on the record.
     String regionName = StringUtils.trimToNull(nullIfEmpty(body.optString(FIELD_REGION_NAME, null)));
     if (regionId != null) {
-      geoLoc.setRegion(OBDal.getInstance().get(Region.class, regionId));
-      // The two region columns are mutually exclusive: a record whose RegionName was filled by
-      // the free-text fallback and is later edited with a selector must not keep both, or the
-      // contacts export's COALESCE(C_Region.name, C_Location.regionname) picks arbitrarily.
-      geoLoc.setRegionName(null);
+      Region region = OBDal.getInstance().get(Region.class, regionId);
+      if (region == null) {
+        // OBDal.get answers null for an id that does not exist, and nothing validates the id
+        // before this. Writing that null through assignRegion would clear BOTH columns, so a
+        // caller that guessed a region id (an MCP agent, typically) would get a 200 back with
+        // the province silently gone — and on an Argentine address the free text erased with
+        // it. Refusing here is the same contract as the free-text path: an unresolvable region
+        // is an error, never a partial write. Thrown before any OBDal.save on both paths.
+        throw regionFailure(regionId, "does not exist.");
+      }
+      assignRegion(geoLoc, region, null);
     } else if (regionName != null) {
       applyRegionName(regionName, geoLoc);
     } else if (body.has(FIELD_REGION)) {
       // Only the id field clears. `regionName` is set-if-provided: a blank one means "this file
       // says nothing about the province", never "erase it". Clearing stays an explicit
       // `region: null`, which is what the Location modal's selector sends.
-      geoLoc.setRegion(null);
-      // Clearing the province clears BOTH representations of it. Leaving the free text behind made
-      // the clear look like a no-op: the contacts export reads
-      // COALESCE(C_Region.name, C_Location.regionname) and kept rendering the old province.
-      geoLoc.setRegionName(null);
+      assignRegion(geoLoc, null, null);
     }
+  }
+
+  /**
+   * Writes both region columns at once — the only place either of them is assigned.
+   *
+   * <p>{@code C_Location} answers "which province" twice: the {@code C_Region_ID} FK and the
+   * free-text {@code RegionName}, the latter for countries whose {@code C_Country.HasRegion} is
+   * {@code 'N'} (Argentina, for one). At most one may be non-null, because readers resolve the
+   * province with {@code COALESCE(C_Region.name, C_Location.regionname)} and would otherwise
+   * pick arbitrarily between two answers.
+   *
+   * <p>That invariant used to live in each branch of {@link #applyGeoLocFields}, every branch
+   * separately remembering to clear the sibling column — and three separate defects were found
+   * there, one per branch, because a change touched one and not the others. Routing every write
+   * through this method makes the invariant unbreakable by construction: a future branch cannot
+   * set one column without deciding the other, since there is no other way to set either.
+   */
+  private static void assignRegion(org.openbravo.model.common.geography.Location geoLoc,
+      Region region, String freeText) {
+    geoLoc.setRegion(region);
+    geoLoc.setRegionName(freeText);
   }
 
   /**
@@ -404,7 +427,8 @@ public class ContactsLocationAddressHandler implements NeoHandler {
    * guard the only reachable failure is "does not exist" (with no region rows there is nothing
    * to be ambiguous about), so the {@code catch} cannot silence an ambiguity.
    *
-   * <p><b>The two columns are kept mutually exclusive.</b> Whichever one this write fills, the
+   * <p><b>The two columns are kept mutually exclusive</b> by {@link #assignRegion}, which every
+   * branch below goes through. Whichever one this write fills, the
    * other is cleared: an FK to Madrid sitting next to a {@code RegionName} of "Cordoba" is a
    * record that answers the same question two ways, and every reader (display name, print,
    * export) would be free to pick either. Nothing is lost by clearing — both columns are written
@@ -418,16 +442,14 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     Country country = geoLoc.getCountry();
     boolean countryWithoutRegions = country != null && !Boolean.TRUE.equals(country.isHasRegions());
     try {
-      geoLoc.setRegion(resolveRegionByName(regionName, country));
-      geoLoc.setRegionName(null);
+      assignRegion(geoLoc, resolveRegionByName(regionName, country), null);
     } catch (OBException e) {
       if (!countryWithoutRegions) {
         throw e;
       }
       log.debug("Region '{}' not modelled in {}; storing it as C_Location.RegionName free text",
           regionName, country.getName());
-      geoLoc.setRegion(null);
-      geoLoc.setRegionName(regionName);
+      assignRegion(geoLoc, null, regionName);
     }
   }
 
