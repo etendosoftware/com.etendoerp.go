@@ -19,6 +19,7 @@ package com.etendoerp.go.mcp;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 import org.apache.commons.lang3.StringUtils;
@@ -236,10 +237,11 @@ final class McpFieldsSection {
    * The declared read-only flag.
    *
    * @param body the section body, may be {@code null}
-   * @return {@link Boolean#TRUE}/{@link Boolean#FALSE} as configured, or {@code null} when the key
-   *         is absent — which is <b>not</b> the same as a configured {@code false}
+   * @return {@link Boolean#TRUE}/{@link Boolean#FALSE} as configured, or
+   *         {@link Optional#empty()} when the key is absent — which is <b>not</b> the same as a
+   *         configured {@code false}
    */
-  static Boolean readOnly(JSONObject body) {
+  static Optional<Boolean> readOnly(JSONObject body) {
     return booleanAt(body, KEY_READ_ONLY);
   }
 
@@ -247,10 +249,11 @@ final class McpFieldsSection {
    * The declared business-critical flag.
    *
    * @param body the section body, may be {@code null}
-   * @return {@link Boolean#TRUE}/{@link Boolean#FALSE} as configured, or {@code null} when the key
-   *         is absent — which is <b>not</b> the same as a configured {@code false}
+   * @return {@link Boolean#TRUE}/{@link Boolean#FALSE} as configured, or
+   *         {@link Optional#empty()} when the key is absent — which is <b>not</b> the same as a
+   *         configured {@code false}
    */
-  static Boolean businessCritical(JSONObject body) {
+  static Optional<Boolean> businessCritical(JSONObject body) {
     return booleanAt(body, KEY_BUSINESS_CRITICAL);
   }
 
@@ -267,13 +270,22 @@ final class McpFieldsSection {
    *
    * <p>{@link #validateBooleans} already refuses those payloads, so a non-boolean can only reach
    * here from a body that failed validation and is therefore not being acted on — but "absent" and
-   * "malformed" must both answer {@code null} rather than silently answering {@code false}.</p>
+   * "malformed" must both answer "nothing was said" rather than silently answering
+   * {@code false}: the merge in {@code McpFieldView} treats an unstated flag as "do not override",
+   * and a {@code false} would demote a field the {@code SFField} row marked true.</p>
+   *
+   * <p>The tri-state is carried as an {@link Optional} rather than a nullable {@link Boolean}
+   * (S2447). Two of the three states of a nullable {@code Boolean} unbox to the same thing at any
+   * call site that forgets the null check, and the value crosses a package boundary into
+   * {@code McpFieldView}; {@code Optional} makes the third state impossible to drop silently and
+   * lets the merge state its rule in one line, {@code orElse(current)}. Nothing about which
+   * payloads answer which state changed.</p>
    */
-  private static Boolean booleanAt(JSONObject body, String key) {
+  private static Optional<Boolean> booleanAt(JSONObject body, String key) {
     if (body == null) {
-      return null;
+      return Optional.empty();
     }
     Object value = body.opt(key);
-    return value instanceof Boolean ? (Boolean) value : null;
+    return value instanceof Boolean ? Optional.of((Boolean) value) : Optional.empty();
   }
 }

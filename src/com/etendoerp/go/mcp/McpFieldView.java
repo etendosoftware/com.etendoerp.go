@@ -108,14 +108,10 @@ final class McpFieldView {
     if (configuredVisibility != null) {
       visibility = configuredVisibility;
     }
-    Boolean configuredReadOnly = McpFieldsSection.readOnly(fields);
-    if (configuredReadOnly != null) {
-      readOnly = configuredReadOnly;
-    }
-    Boolean configuredBusinessCritical = McpFieldsSection.businessCritical(fields);
-    if (configuredBusinessCritical != null) {
-      businessCritical = configuredBusinessCritical;
-    }
+    // orElse(current) IS the merge rule: an unstated flag leaves the SFField row's value
+    // standing. Same three outcomes as the previous explicit null checks.
+    readOnly = McpFieldsSection.readOnly(fields).orElse(readOnly);
+    businessCritical = McpFieldsSection.businessCritical(fields).orElse(businessCritical);
     return new McpFieldView(visibility, readOnly, businessCritical, included);
   }
 
