@@ -75,6 +75,9 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   private static final String FIELD_REGION_NAME = "regionName";
   private static final String FIELD_RESPONSE = "response";
   private static final String FIELD_DATA = "data";
+  /** DAL property holding the parent Business Partner FK on C_BPartner_Location. */
+  private static final String FIELD_BUSINESS_PARTNER =
+      org.openbravo.model.common.businesspartner.Location.PROPERTY_BUSINESSPARTNER;
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
@@ -116,10 +119,33 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
   // ------------------------------------------------------------------ create
 
+  /**
+   * Creates the C_Location + C_BPartner_Location pair for a parent Business Partner.
+   *
+   * <p>The parent BP is resolved from the request <b>body</b> first
+   * ({@code businessPartner}), falling back to the {@code parentId} query parameter. Both
+   * lookups are needed because the parent reaches this handler differently depending on the
+   * caller, and {@link NeoContext#getQueryParams()} is {@code null} on the MCP CRUD hook path
+   * ({@code McpHookExecutor.buildHookContext} does not populate it), so it must be guarded:
+   * <ol>
+   *   <li><b>MCP</b> ({@code neo_create}) — {@code McpToolRouter} removes {@code parentId} from
+   *       the body and writes the resolved FK back as the {@code businessPartner} property;
+   *       {@code queryParams} is {@code null}, so the body branch wins.</li>
+   *   <li><b>REST from the UI</b> ({@code POST /locationAddress?parentId=<bpId>}) — the body
+   *       carries no FK, so the query-param branch is used: behaviour identical to before.</li>
+   *   <li><b>REST with {@code parentId} in the body</b> — a shape {@code NeoCrudHandler}
+   *       supports via {@code injectParentIdAsProperty}; the FK is already in the body, so the
+   *       body branch wins with the same value.</li>
+   * </ol>
+   * The two sources never disagree, so this is additive and not a change of precedence.
+   */
   private NeoResponse handleCreate(NeoContext ctx) throws Exception {
     JSONObject body = ctx.getRequestBody();
-    String bpId = ctx.getQueryParams().get("parentId");
-    if (bpId == null || bpId.isEmpty()) {
+    String bpId = body != null ? body.optString(FIELD_BUSINESS_PARTNER, null) : null;
+    if (StringUtils.isBlank(bpId) && ctx.getQueryParams() != null) {
+      bpId = ctx.getQueryParams().get("parentId");
+    }
+    if (StringUtils.isBlank(bpId)) {
       return NeoResponse.error(400, "Missing parentId (Business Partner ID)");
     }
 
