@@ -45,7 +45,7 @@ final class NearMatchSupport {
    * <p>Returns {@code null} when {@code pct} is absent or non-positive: 0% means the AMOUNT
    * dimension is disabled, not that the feature is off — see {@link #findNearMatch}, which still
    * searches with a zero-gap requirement. Deliberately unlike
-   * {@link AutoMatchSupport#signalGroupTolerance}, which reads the very same
+   * {@link MatchTolerances#signalGroupTolerance}, which reads the very same
    * {@code EM_ETGO_Amount_Tolerance} column with the opposite convention because it is only
    * rounding slack for a 1:N sum and authorises no accounting entry. Two names for two purposes:
    * never swap them. No floor here either, for the same reason.
@@ -65,10 +65,12 @@ final class NearMatchSupport {
    * filters by sign, date window and {@code status <> 'RPPC'} — the only code in the module that
    * widens the search by date at all.
    *
-   * <p><b>The exact-exact case is deliberately excluded.</b> Zero amount deviation AND zero date
-   * deviation is a plain suggestion, not a difference — the first row of the classification matrix.
-   * An exact AMOUNT at a non-zero date distance still counts: the deviation is real, it just
-   * produces no accounting entry.
+   * <p><b>An exact-exact candidate IS returned</b> — same amount, same day — and outranks every
+   * other. It used to be skipped, on the assumption that pass 1 (Core's standard algorithm) had
+   * already claimed it; Core's criteria are narrower, so when it does not match, skipping hid the
+   * best candidate and the line was handed a worse one. This method only ranks; the CALLER labels
+   * the result from the deviation it actually has ({@link MatchTolerances#deviatesFrom}), so an
+   * exact hit is still reported as a plain suggestion and never as a difference.
    *
    * <p><b>Accumulator contract.</b> {@code usedTxnIds} and {@code excludedTxns} are shared across
    * every line of one classification/automatch pass. This method filters on BOTH and, on a hit,
@@ -102,17 +104,20 @@ final class NearMatchSupport {
     FIN_FinaccTransaction best = null;
     BigDecimal bestGap = null;
     long bestDateDistance = Long.MAX_VALUE;
+    java.util.Date bestTxnDate = null;
     for (FIN_FinaccTransaction candidate : AutoMatchSupport.loadUnreconciledSameSign(
         accountId, target, excludedIds, dateTolDays, lineDate)) {
       BigDecimal gap = target.subtract(AutoMatchSupport.txnSignedAmount(candidate)).abs();
       long dateDistance = dayDistance(lineDate, candidate.getTransactionDate());
-      if (!isReportableDeviation(gap, dateDistance, maxGap)) {
+      if (!isEligibleCandidate(gap, maxGap)) {
         continue;
       }
-      if (isBetter(gap, dateDistance, bestGap, bestDateDistance)) {
+      if (isBetter(gap, dateDistance, candidate.getTransactionDate(),
+          bestGap, bestDateDistance, bestTxnDate)) {
         best = candidate;
         bestGap = gap;
         bestDateDistance = dateDistance;
+        bestTxnDate = candidate.getTransactionDate();
       }
     }
     if (best != null) {
@@ -135,28 +140,46 @@ final class NearMatchSupport {
   }
 
   /**
-   * Whether this candidate's deviation is one worth reporting: inside the amount tolerance, and not
-   * the exact-exact case, which is a plain suggestion rather than a difference (matrix row 1).
+   * Whether a candidate is eligible at all: its amount gap must be within tolerance. An EXACT
+   * candidate (zero gap, same day) qualifies too.
+   *
+   * <p>It used to be excluded, on the assumption that pass 1 — Core's standard algorithm — had
+   * already claimed it. When Core does not match (its own criteria are narrower: exact date AND
+   * reference, or a fallback that a differing reference can still miss), that assumption silently
+   * hid the BEST candidate and handed the line to a worse one: a 14,52 statement line of 04/09 was
+   * matched against a 14,52 movement of 01/09 while two same-amount, same-day movements sat
+   * unused. Ranking decides now — see {@link #isBetter} — and the caller labels the result from the
+   * deviation it actually has, so an exact hit is still reported as a plain suggestion.
    */
-  private static boolean isReportableDeviation(BigDecimal gap, long dateDistance,
-      BigDecimal maxGap) {
-    if (gap.compareTo(maxGap) > 0) {
-      return false;
-    }
-    return gap.signum() != 0 || dateDistance != 0;
+  private static boolean isEligibleCandidate(BigDecimal gap, BigDecimal maxGap) {
+    return gap.compareTo(maxGap) <= 0;
   }
 
   /**
-   * The ordering: smallest amount deviation wins, and a tie on that is broken by the closest date.
-   * A null {@code bestGap} means nothing has been chosen yet.
+   * Ranks candidates: smallest amount gap first, then closest date, then OLDEST transaction.
+   *
+   * <p>The last tie-break is not cosmetic. With two identical same-day movements the winner used to
+   * be whichever the pool happened to yield first — an unstable answer that could change between
+   * two runs over unchanged data. Oldest-first also matches how the rest of the reconciliation
+   * allocates (invoices are consumed oldest first) and is what a user expects when two payments are
+   * indistinguishable.
    */
-  private static boolean isBetter(BigDecimal gap, long dateDistance, BigDecimal bestGap,
-      long bestDateDistance) {
+  private static boolean isBetter(BigDecimal gap, long dateDistance, java.util.Date txnDate,
+      BigDecimal bestGap, long bestDateDistance, java.util.Date bestTxnDate) {
     if (bestGap == null) {
       return true;
     }
     int byGap = gap.compareTo(bestGap);
-    return byGap < 0 || (byGap == 0 && dateDistance < bestDateDistance);
+    if (byGap != 0) {
+      return byGap < 0;
+    }
+    if (dateDistance != bestDateDistance) {
+      return dateDistance < bestDateDistance;
+    }
+    if (txnDate == null || bestTxnDate == null) {
+      return false;
+    }
+    return txnDate.before(bestTxnDate);
   }
 
   /**
@@ -170,10 +193,11 @@ final class NearMatchSupport {
    * matrix row 1, silently wrong. Comparing epoch days also makes the tie-break mean what it says,
    * and is immune to DST (a "day" is not always 86.4M ms).
    *
-   * <p>A null date yields 0, i.e. "same day": combined with the zero-gap exclusion above, an undated
-   * transaction with an exact amount is treated as an exact-exact match and is therefore never
-   * offered as a near match. That is the conservative reading — an undated row carries no evidence
-   * of a date deviation to report.
+   * <p>A null date yields 0, i.e. "same day", so an undated transaction with an exact amount counts
+   * as an exact match and is reported as a plain suggestion, never as a difference. That is the
+   * conservative reading — an undated row carries no evidence of a date deviation. Note the
+   * consequence for {@link #isBetter}'s oldest-first tie-break: it cannot order two undated
+   * candidates, so between those the pool order still decides.
    */
   static long dayDistance(java.util.Date a, java.util.Date b) {
     if (a == null || b == null) {
