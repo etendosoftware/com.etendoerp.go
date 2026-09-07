@@ -211,18 +211,20 @@ public class AgingReportHandler implements NeoHandler {
   @Override
   public NeoResponse handle(NeoContext context) {
     String method = context.getHttpMethod();
-    // The gate must match the side actually being served. POST carries recOrPay in its body;
-    // GET (describeReport) has no body but CAN carry query params (NeoContext#getQueryParams),
-    // so it resolves recOrPay from there instead — same param name, same "absent → RECEIVABLES"
-    // default as POST/executeReport, so a bare GET with no query param keeps behaving exactly as
-    // before this fix. Only these two methods ever reach a real report side; any other method
-    // (DELETE/PUT, both 405 below) keeps the receivables default, since it never touches either
-    // process.
+    // Which side this request is gated against must match how it is actually being served,
+    // because the write path and the read path learn the requested side from two different
+    // places. A write request carries that selection in its body; a read request has no body,
+    // but can carry the same selection as a query parameter instead, and both fall back to the
+    // receivables side when nothing is supplied — so a bare read request with no query parameter
+    // keeps behaving exactly as it did before this fix. Only the write and read paths ever serve
+    // a real report side; every other method falls through to the receivables default below,
+    // since it never reaches either side.
     //
-    // Before this fix, GET always hardcoded the receivables process regardless of recOrPay, so a
-    // role granted ONLY the payables process got a 403 on describeReport even though that call
-    // returns no real financial data (static parameter descriptions) and — had the correct side
-    // been consulted — the role legitimately has access to it.
+    // Before this fix, the read path always checked access against the receivables side, no
+    // matter which side was actually requested. That meant a role granted only the payables side
+    // was denied a request that returns no financial data at all (just the static parameter
+    // descriptions), even though the role legitimately had access to it once the requested side
+    // was correctly taken into account.
     String gatedProcessId;
     if ("POST".equals(method)) {
       gatedProcessId = resolveGatedProcessId(context.getRequestBody());
