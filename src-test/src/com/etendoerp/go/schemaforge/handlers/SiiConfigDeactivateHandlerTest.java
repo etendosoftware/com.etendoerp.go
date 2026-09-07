@@ -443,6 +443,100 @@ public class SiiConfigDeactivateHandlerTest {
   }
 
   /**
+   * {@code scheduleAutoSendIfActive} must not attempt to schedule when the request carries no
+   * {@link OBContext} at all — there is no user/role to run the scheduled process as. Guards
+   * against a regression that would call {@code ensureAutoSendSchedule} with a null user/role id,
+   * producing a broken {@code AD_Process_Request} row.
+   */
+  @Test
+  public void afterHandlePostSkipsAutoSendScheduleWhenObContextIsNull() throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    SiiConfigDeactivateHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    JSONObject dataRow = new JSONObject().put("id", RECORD_ID);
+    JSONObject response = new JSONObject().put("data", new JSONArray().put(dataRow));
+    JSONObject body = new JSONObject().put("response", response);
+
+    // No .obContext(...) — mirrors a request whose security context could not be resolved.
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .previousResult(new NeoResponse(201, body))
+        .build();
+
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(ORG_ID);
+    AEATSIIConfig config = mock(AEATSIIConfig.class);
+    when(config.isActive()).thenReturn(true);
+    when(config.getClient()).thenReturn(client);
+    when(config.getOrganization()).thenReturn(org);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(AEATSIIConfig.class), eq(RECORD_ID))).thenReturn(config);
+
+      assertNull(handler.afterHandle(ctx));
+
+      verifyNoInteractions(scheduleService);
+    }
+  }
+
+  /**
+   * Same guard, narrower trigger: an {@link OBContext} is present but its {@code Role} is
+   * {@code null} (e.g. a partially-resolved security context) — still not enough to schedule.
+   */
+  @Test
+  public void afterHandlePostSkipsAutoSendScheduleWhenObContextHasNoRole() throws Exception {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    SiiConfigDeactivateHandler handler = handlerWithScheduleServiceMock(scheduleService);
+
+    JSONObject dataRow = new JSONObject().put("id", RECORD_ID);
+    JSONObject response = new JSONObject().put("data", new JSONArray().put(dataRow));
+    JSONObject body = new JSONObject().put("response", response);
+
+    OBContext obContextNoRole = mock(OBContext.class);
+    User user = mock(User.class);
+    when(user.getId()).thenReturn(USER_ID);
+    when(obContextNoRole.getUser()).thenReturn(user);
+    when(obContextNoRole.getRole()).thenReturn(null);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST")
+        .previousResult(new NeoResponse(201, body))
+        .obContext(obContextNoRole)
+        .build();
+
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn(ORG_ID);
+    AEATSIIConfig config = mock(AEATSIIConfig.class);
+    when(config.isActive()).thenReturn(true);
+    when(config.getClient()).thenReturn(client);
+    when(config.getOrganization()).thenReturn(org);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(AEATSIIConfig.class), eq(RECORD_ID))).thenReturn(config);
+
+      assertNull(handler.afterHandle(ctx));
+
+      verifyNoInteractions(scheduleService);
+    }
+  }
+
+  /**
    * A PUT that explicitly deactivates the config never reaches the CREATE-side scheduling logic
    * ({@code ensureAutoSendSchedule}/{@code activateSchedule}) — instead it takes the ETP-5117
    * follow-up cleanup branch, which calls {@code unscheduleAutoSend} instead (see the dedicated

@@ -1084,6 +1084,89 @@ public class TbaiConfigSequenceHandlerTest {
     }
   }
 
+  /**
+   * {@code scheduleAutoSendIfActive} must not attempt to schedule when the request carries no
+   * {@link OBContext} (or one with no {@code Role}) — there is no user/role to run the scheduled
+   * process as. {@code ensureTbaiSequences} is unaffected and still runs (it needs no
+   * {@link OBContext} beyond the static {@code OBContext.getOBContext()} used for the org tree).
+   * Guards against a regression that would call {@code ensureAutoSendSchedule} with a null
+   * user/role id, producing a broken {@code AD_Process_Request} row.
+   */
+  @Test
+  public void afterHandleSkipsAutoSendScheduleWhenObContextHasNoRole() {
+    SiiTbaiAutoSendScheduleService scheduleService = mock(SiiTbaiAutoSendScheduleService.class);
+    TbaiConfigSequenceHandler handler;
+    try {
+      handler = handlerWithScheduleServiceMock(scheduleService);
+    } catch (Exception e) {
+      throw new IllegalStateException(e);
+    }
+
+    OBContext obContextNoRole = mock(OBContext.class);
+    User user = mock(User.class);
+    when(user.getId()).thenReturn(USER_ID);
+    when(obContextNoRole.getUser()).thenReturn(user);
+    when(obContextNoRole.getRole()).thenReturn(null);
+
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("PUT")
+        .recordId(RECORD_ID)
+        .obContext(obContextNoRole)
+        .build();
+
+    Client client = mock(Client.class);
+    Organization configOrg = mock(Organization.class);
+    when(configOrg.getId()).thenReturn(ORG_ID);
+    when(configOrg.getName()).thenReturn(ORG_NAME);
+    TbaiConfig config = mock(TbaiConfig.class);
+    when(config.getClient()).thenReturn(client);
+    when(config.getOrganization()).thenReturn(configOrg);
+    when(config.isActive()).thenReturn(true);
+
+    DocumentType docType = mock(DocumentType.class);
+    when(docType.getTbaiAdSequence()).thenReturn(null);
+
+    Sequence sequence = mock(Sequence.class);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = mockStatic(OBProvider.class)) {
+
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBContext staticObContext = mock(OBContext.class);
+      OrganizationStructureProvider osp = mock(OrganizationStructureProvider.class);
+      when(osp.getNaturalTree(ORG_ID)).thenReturn(Collections.singleton(ORG_ID));
+      when(staticObContext.getOrganizationStructureProvider()).thenReturn(osp);
+      obCtxMock.when(OBContext::getOBContext).thenReturn(staticObContext);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(TbaiConfig.class, RECORD_ID)).thenReturn(config);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<DocumentType> criteria = mock(OBCriteria.class);
+      when(obDal.createCriteria(DocumentType.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.singletonList(docType));
+
+      OBProvider obProvider = mock(OBProvider.class);
+      obProviderMock.when(OBProvider::getInstance).thenReturn(obProvider);
+      when(obProvider.get(Sequence.class)).thenReturn(sequence);
+
+      assertNull(handler.afterHandle(ctx));
+
+      // Regression: sequence assignment is unaffected by the missing Role.
+      verify(docType).setTbaiAdSequence(sequence);
+      verify(obDal).save(docType);
+
+      // No schedule is created without a resolvable user/role, even though the config is active.
+      verifyNoInteractions(scheduleService);
+    }
+  }
+
   // ─── afterHandle: skips sequence assignment when handle() already deleted ─────
 
   /**
