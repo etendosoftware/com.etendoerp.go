@@ -466,8 +466,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     CountingForceTestModeService forceTestModeService = new CountingForceTestModeService();
     TestServlet servlet = new TestServlet(new SuccessfulImportService(),
         new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
-        new CountingFiscalDataSetupService(), new CountingDefaultCustomerService(),
-        baselineService);
+        new CountingFiscalDataSetupService(), baselineService);
     servlet.onboardingForceTestModeService = forceTestModeService;
     StringWriter output = new StringWriter();
 
@@ -493,8 +492,7 @@ public class EtendoGoJwtServletOnboardingDatasetTest {
     CountingBaselineService baselineService = new CountingBaselineService();
     TestServlet servlet = new TestServlet(new SuccessfulImportService(),
         new CountingSequenceGeneratorService(), new CountingMarkOrgReadyService(),
-        new CountingFiscalDataSetupService(), new CountingDefaultCustomerService(),
-        baselineService);
+        new CountingFiscalDataSetupService(), baselineService);
     servlet.onboardingForceTestModeService =
         new FailingForceTestModeService("broken force test mode");
     StringWriter output = new StringWriter();
