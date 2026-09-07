@@ -17,6 +17,14 @@
 
 package com.etendoerp.go.mcp;
 
+import static com.etendoerp.go.mcp.McpJsonSchema.KEY_REQUIRED;
+import static com.etendoerp.go.mcp.McpJsonSchema.buildObjectSchema;
+import static com.etendoerp.go.mcp.McpJsonSchema.enumProp;
+import static com.etendoerp.go.mcp.McpJsonSchema.numericProp;
+import static com.etendoerp.go.mcp.McpJsonSchema.objectProp;
+import static com.etendoerp.go.mcp.McpJsonSchema.stringArrayProp;
+import static com.etendoerp.go.mcp.McpJsonSchema.stringProp;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -64,8 +72,6 @@ public class ToolRegistry {
 
   private static final Logger log = LogManager.getLogger(ToolRegistry.class);
 
-  /** The JSON-schema {@code required} keyword, kept as one constant so it is not re-typed. */
-  private static final String KEY_REQUIRED = "required";
   /** JSON-schema numeric type used by integer-valued MCP arguments. */
   private static final String TYPE_INTEGER = "integer";
 
@@ -1029,63 +1035,6 @@ public class ToolRegistry {
     return new McpToolDefinition(McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD,
         GET_IMAGE_UPLOAD_DESCRIPTION, buildObjectSchema(props, List.of("token")));
   }
-
-  // ── JSON Schema builder helpers ────────────────────────────────────────
-
-  private Map<String, Object> buildObjectSchema(Map<String, Object> properties,
-      List<String> required) {
-    Map<String, Object> schema = new LinkedHashMap<>();
-    schema.put("type", McpConstants.TYPE_OBJECT);
-    schema.put(McpConstants.KEY_PROPERTIES, properties);
-    if (required != null && !required.isEmpty()) {
-      schema.put(KEY_REQUIRED, required);
-    }
-    return schema;
-  }
-
-  private Map<String, Object> stringProp(String description) {
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", McpConstants.TYPE_STRING);
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    return prop;
-  }
-
-  private Map<String, Object> enumProp(String description, List<String> values) {
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", McpConstants.TYPE_STRING);
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    prop.put("enum", values);
-    return prop;
-  }
-
-  private Map<String, Object> numericProp(String type, String description) {
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", type);
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    return prop;
-  }
-
-  private Map<String, Object> objectProp(String description, Map<String, Object>... nestedProps) {
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", McpConstants.TYPE_OBJECT);
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    if (nestedProps.length > 0 && nestedProps[0] != null && !nestedProps[0].isEmpty()) {
-      prop.put(McpConstants.KEY_PROPERTIES, nestedProps[0]);
-    }
-    return prop;
-  }
-
-  /** A JSON-schema array of strings, used for the IMP-2 {@code fields} projection whitelist. */
-  private Map<String, Object> stringArrayProp(String description) {
-    Map<String, Object> items = new LinkedHashMap<>();
-    items.put("type", McpConstants.TYPE_STRING);
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", "array");
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    prop.put("items", items);
-    return prop;
-  }
-
 
   // ── Naming helpers ─────────────────────────────────────────────────────
 
