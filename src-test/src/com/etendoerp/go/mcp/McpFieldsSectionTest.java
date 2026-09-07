@@ -18,10 +18,12 @@ package com.etendoerp.go.mcp;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONException;
@@ -134,8 +136,11 @@ class McpFieldsSectionTest {
           + "\"businessCritical\":true," + REASON + "}");
       assertTrue(McpFieldsSection.validate(payload).isEmpty());
       assertEquals("editable", McpFieldsSection.visibility(payload));
-      assertEquals(Boolean.FALSE, McpFieldsSection.readOnly(payload));
-      assertEquals(Boolean.TRUE, McpFieldsSection.businessCritical(payload));
+      // A configured false, which is deliberately not the same answer as an absent key — see
+      // theThreeBooleanStatesStayDistinct.
+      assertEquals(Optional.of(Boolean.FALSE), McpFieldsSection.readOnly(payload));
+      assertNotEquals(Optional.empty(), McpFieldsSection.readOnly(payload));
+      assertEquals(Optional.of(Boolean.TRUE), McpFieldsSection.businessCritical(payload));
     }
   }
 
@@ -239,27 +244,65 @@ class McpFieldsSectionTest {
     @DisplayName("a null body reads as unconfigured, never an NPE")
     void nullBodyIsSafe() {
       assertNull(McpFieldsSection.visibility(null));
-      assertNull(McpFieldsSection.readOnly(null));
-      assertNull(McpFieldsSection.businessCritical(null));
+      assertEquals(Optional.empty(), McpFieldsSection.readOnly(null));
+      assertEquals(Optional.empty(), McpFieldsSection.businessCritical(null));
       assertNull(McpFieldsSection.reason(null));
     }
 
     @Test
-    @DisplayName("an absent boolean answers null, which is not a configured false")
+    @DisplayName("an absent boolean answers empty, which is not a configured false")
     void absentBooleanIsNotFalse() throws JSONException {
       JSONObject onlyVisibility = withReason("\"visibility\":\"editable\"");
-      assertNull(McpFieldsSection.readOnly(onlyVisibility),
+      assertEquals(Optional.empty(), McpFieldsSection.readOnly(onlyVisibility),
           "an absent key must not overwrite the SFField row's own value with false");
-      assertNull(McpFieldsSection.businessCritical(onlyVisibility));
+      assertNotEquals(Optional.of(Boolean.FALSE), McpFieldsSection.readOnly(onlyVisibility),
+          "absent and configured-false must stay two different answers");
+      assertEquals(Optional.empty(), McpFieldsSection.businessCritical(onlyVisibility));
     }
 
     @Test
-    @DisplayName("a malformed boolean answers null rather than reading as false")
+    @DisplayName("a malformed boolean answers empty rather than reading as false")
     void malformedBooleanIsNotFalse() throws JSONException {
       // Unreachable in production (validate refuses the body first) but belt and braces: a
       // non-boolean must never resolve to the permissive value.
-      assertNull(McpFieldsSection.readOnly(withReason("\"readOnly\":\"true\"")));
-      assertNull(McpFieldsSection.businessCritical(withReason("\"businessCritical\":7")));
+      assertEquals(Optional.empty(), McpFieldsSection.readOnly(withReason("\"readOnly\":\"true\"")));
+      assertEquals(Optional.empty(),
+          McpFieldsSection.businessCritical(withReason("\"businessCritical\":7")));
+      assertNotEquals(Optional.of(Boolean.TRUE),
+          McpFieldsSection.readOnly(withReason("\"readOnly\":\"true\"")),
+          "the quoted true must not be read as a configured true either");
+    }
+
+    /**
+     * The three answers this accessor's type exists to keep apart, side by side.
+     *
+     * <p>{@code Optional} makes {@code isEmpty()} the easy assertion everywhere, and writing it
+     * everywhere would lose the difference between "the override said nothing" and "the override
+     * said false" — which is the whole point: the first leaves the {@code SFField} row's own value
+     * standing, the second replaces it. The {@code orElse} lines pin that consequence rather than
+     * just the representation, because {@code orElse(current)} is exactly how
+     * {@code McpFieldView.of} merges the two.
+     */
+    @Test
+    @DisplayName("absent, malformed and configured-false stay three distinct answers")
+    void theThreeBooleanStatesStayDistinct() throws JSONException {
+      Optional<Boolean> configuredFalse =
+          McpFieldsSection.readOnly(withReason("\"readOnly\":false"));
+      Optional<Boolean> absent = McpFieldsSection.readOnly(withReason("\"visibility\":\"editable\""));
+      Optional<Boolean> malformed = McpFieldsSection.readOnly(withReason("\"readOnly\":\"false\""));
+
+      assertEquals(Optional.of(Boolean.FALSE), configuredFalse);
+      assertEquals(Optional.empty(), absent);
+      assertEquals(Optional.empty(), malformed);
+      assertNotEquals(configuredFalse, absent,
+          "collapsing these two is the regression this type change exists to prevent");
+      assertNotEquals(configuredFalse, malformed);
+
+      // The consequence, against a row that says readOnly = true: only a configured value moves
+      // it, and a malformed one must not silently unlock the field.
+      assertFalse(configuredFalse.orElse(Boolean.TRUE), "a configured false overrides the row");
+      assertTrue(absent.orElse(Boolean.TRUE), "an absent key leaves the row's true standing");
+      assertTrue(malformed.orElse(Boolean.TRUE), "a malformed value leaves the row's true standing");
     }
 
     @Test
