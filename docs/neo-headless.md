@@ -1555,6 +1555,115 @@ unwritable, and a client that sends it on a create is still filtered/rejected ex
 
 ---
 
+### 4.13 Image Fields and Image Upload (ETP-5184)
+
+An `Image BLOB` column (`AD_Reference_ID = 4AA6C3BE9D3B4D84A3B80489505A23E5`) is an FK to
+`AD_Image`, whose bytes live in `AD_Image.BinaryData` alongside `Mimetype` and `Name`.
+`M_Product.AD_Image_ID` and `AD_OrgInfo.Your_Company_Document_Image` are the two such fields
+Schema Forge exposes as editable today; everything below is driven by the column's reference, so
+enabling another one needs no code.
+
+#### The field contract
+
+`mapColumnType()` maps the reference to its own type, `image` — deliberately **not**
+`foreignKey`: there is no selector an agent can query for an image, and the id it needs does not
+exist until something uploads bytes. `McpImageFieldSupport.decorateImageField()` then adds the
+contract to the field descriptor in `neo_schema`, `formState` and the create view:
+
+```json
+"image": {
+  "type": "image",
+  "format": "etendo-image-id",
+  "valueType": "string",
+  "hint": "Holds an AD_Image id (32 hex chars), not the image itself. Do NOT send base64 and do NOT send a URL here ... call neo_request_image_upload ... or neo_upload_image for an image under 256 KB ... Then write the returned imageId to this field with neo_update."
+}
+```
+
+The hint is written to **both** `description` and `hint`. `hint` is the durable one:
+`description` is overlaid by `applyCuratedLabels` whenever the AD field carries help text, and
+losing the AD author's own words would be the wrong trade — so `description` carries the guidance
+only when AD has nothing to say.
+
+`neo_create` / `neo_update` reject a value on an image field that is not a resolvable `AD_Image`
+id (`error: "invalid_image_reference"`), with a message that names the upload tools. The point is
+that the agent can fix itself: the alternative is a raw FK violation from DAL.
+
+#### Why the bytes do not travel as tool arguments
+
+A tool argument is model **output**, generated token by token, and no MCP client elides argument
+content — so base64 inline always costs output tokens (roughly 1.4 characters per token: ~100 KB
+of image ≈ 100k tokens). There is no way to mark an argument as not-for-the-model. The only way
+not to pay is to keep the bytes out of the argument, which is what the ticket below does.
+
+This is also where the protocol is heading: MCP has no client-to-server file-upload primitive
+today, and the File Uploads working group's SEP-2356 routes large files through URL-mode
+elicitation — i.e. it formalizes the ticket pattern. Server-side fetching of a `source_url` was
+considered and **rejected**: it would make the ERP an outbound HTTP client. The ticket is inbound,
+the same direction as every other NEO call.
+
+#### `neo_request_image_upload` — the primary path (~50 tokens)
+
+| Param | Required | Notes |
+|---|---|---|
+| `name` | no | name for the stored image (defaults to `image`) |
+| `mime_type` | no | `image/png` or `image/jpeg`; omit it and the type is detected from the bytes, and if you do send it a mismatch is rejected |
+
+Returns `token`, `uploadUrl`, `expiresAt`, `maxBytes`, `acceptedMimeTypes`, and a ready-to-run
+`curlExample`. Whoever holds the file PUTs the raw bytes:
+
+```bash
+curl -X PUT --upload-file ./photo.jpg "https://<host>/sws/neo/image/upload/<token>"
+```
+
+The response of the PUT carries `{ imageId, name, mimeType, bytes }`. **The file never enters the
+conversation — only its path and the URL do.** A person with a browser can use the same URL.
+
+#### `PUT /sws/neo/image/upload/{token}` — intentionally unauthenticated
+
+This endpoint has a pre-authentication entry point in `NeoServlet`, on the same basis as the
+document-download links: the **token is the credential**. It is single-use, expires in 10 minutes,
+carries 192 bits of `SecureRandom`, and holds the client/org/user of the MCP session it was issued
+to. It has to work this way — the whole point is that whoever holds the FILE uploads it directly,
+and that party has no session. `NeoImageHelper` validates the token, the size and the magic bytes
+before anything is stored, and the row's client/organization come from the ticket rather than from
+the admin context the upload runs in, so the elevation grants no scope the requesting MCP session
+did not already have.
+
+Tickets live in `NeoImageUploadTickets`, an in-memory single-node store: at most
+`MAX_PENDING_PER_SESSION` (10) unused tickets per session, expiry checked on read plus a lazy
+sweep on each issue. **Tickets are lost on restart/redeploy and are invisible to another node** —
+acceptable at a 10-minute TTL because a lost ticket surfaces as the same self-correctable error as
+an expired one. If Etendo GO ever runs multi-node, or behind a load balancer that does not pin a
+client to a node, that class must be replaced by a small AD table; the class Javadoc states the
+condition and the replacement.
+
+#### `neo_upload_image` — the base64 fallback
+
+| Param | Required | Notes |
+|---|---|---|
+| `data_base64` | **yes** | a `data:image/png;base64,` prefix is accepted and stripped |
+| `name` | no | as above |
+| `mime_type` | no | cross-checked against the actual bytes |
+
+**Hard limit: 256 KB decoded** — deliberately far below the servlet's 10 MB, so nobody discovers
+the token cost by paying it. Over the cap the call is rejected with a message naming
+`neo_request_image_upload`. Type is sniffed from magic bytes and cross-checked against a supplied
+`mime_type`, so a lying `mime_type` cannot store an arbitrary blob.
+
+#### `neo_get_image_upload`
+
+Takes the `token` and returns `{ status: "pending" | "completed", expiresAt }` plus `imageId` once
+completed — for an agent that did not see the PUT's own output. Read-only, same token.
+
+#### Both upload tools create the `AD_Image` row only
+
+Attaching it to a record stays an explicit `neo_update` of the image field. That keeps the tools
+generic across every image field and keeps the audit trail obvious.
+
+Design record, including the rejected alternatives and the phases not yet built (the read path:
+a `neo://image/{id}` resource, `resource_link` in `neo_get`, and a downscaling `neo_get_image`):
+`docs/plans/2026-09-07-mcp-image-field-support-plan.md`.
+
 ## 5. Configuration
 
 ### 5.1 Creating a Spec

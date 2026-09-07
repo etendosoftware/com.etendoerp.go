@@ -161,6 +161,12 @@ public class McpToolRouter {
             return handleGenerateAmortizationPlan(arguments);
           case McpConstants.TOOL_NEO_WIDGET:
             return McpWidgetHandler.handle(arguments);
+          case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
+            return imageToolResult(McpImageTools.requestUpload(arguments));
+          case McpConstants.TOOL_NEO_UPLOAD_IMAGE:
+            return imageToolResult(McpImageTools.uploadImage(arguments));
+          case McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD:
+            return imageToolResult(McpImageTools.getUpload(arguments));
           case "docs":
             return handleDocs(arguments);
           default:
@@ -521,6 +527,15 @@ public class McpToolRouter {
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableId(adTab.getTable().getId());
 
+    // ETP-5184: image fields are validated before FK-by-name resolution, and that order is the
+    // whole point. An Image BLOB column is an FK to AD_Image, so resolveFkNames below would take a
+    // base64 blob or a URL for a display name and answer "no record named …" for a table the agent
+    // cannot search — a dead end. Here it gets told which tool produces a valid id instead.
+    JSONObject imageError = McpImageFieldSupport.validateImageFields(filteredBody, adTab, dalEntity);
+    if (imageError != null) {
+      return wrapAsErrorContent(imageError.toString(2));
+    }
+
     // IMP-4: resolve FK-by-name search strings (e.g. businessPartner:"Acme Corp") into real
     // record ids before anything downstream touches them. A value that already looks like an id
     // is left untouched. See McpFkResolver's class javadoc for the selector-context limitation.
@@ -680,6 +695,13 @@ public class McpToolRouter {
     // IMP-4: resolve FK-by-name search strings before persist (mirrors handleCreate).
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableId(adTab.getTable().getId());
+
+    // ETP-5184: same pre-FK image guard as handleCreate, and for the same reason — see there.
+    JSONObject imageError = McpImageFieldSupport.validateImageFields(filteredBody, adTab, dalEntity);
+    if (imageError != null) {
+      return wrapAsErrorContent(imageError.toString(2));
+    }
+
     JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody, dalEntity, adTab,
         McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log);
     if (fkError != null) {
@@ -1600,6 +1622,16 @@ public class McpToolRouter {
       default:
         return HTTP_METHOD_GET;
     }
+  }
+
+  /**
+   * ETP-5184: an image tool reports a rejection through the same error-content channel every other
+   * MCP write uses, so an agent detects the failure the same way regardless of which tool produced
+   * it. The envelope itself already carries {@code status}/{@code error}/{@code hint}.
+   */
+  private JSONObject imageToolResult(JSONObject body) throws JSONException {
+    boolean failed = body.has(McpConstants.KEY_ERROR);
+    return failed ? wrapAsErrorContent(body.toString(2)) : wrapAsTextContent(body.toString(2));
   }
 
   // ── MCP content formatting ────────────────────────────────────────────

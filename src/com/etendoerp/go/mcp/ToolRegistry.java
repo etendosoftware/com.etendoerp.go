@@ -35,6 +35,7 @@ import org.openbravo.model.ad.ui.Process;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 import com.etendoerp.go.schemaforge.util.NeoReportContract;
 import com.etendoerp.go.schemaforge.util.NeoReportParam;
@@ -110,6 +111,15 @@ public class ToolRegistry {
 
     registerCrudTools(tools, accessibleWindowSpecs, creatableWindowSpecs,
         updatableWindowSpecs, deletableWindowSpecs, permissions);
+
+    // ETP-5184: the image-upload tools are built-in and type-driven, not spec-driven — they create
+    // an AD_Image row and nothing else, and the same three tools serve every image-typed field in
+    // the instance. Gated on write scope because they do write a row.
+    if (permissions.canWrite) {
+      tools.add(buildRequestImageUploadTool());
+      tools.add(buildUploadImageTool());
+      tools.add(buildGetImageUploadTool());
+    }
 
     log.debug("Generated {} MCP tools for scopes {}", tools.size(), scopes);
     return tools;
@@ -323,6 +333,12 @@ public class ToolRegistry {
       case "neo_action":
       case McpConstants.TOOL_NEO_WIDGET:
       case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
+      // ETP-5184: listed here so resolveSpecName does not derive a spec name from the tool name.
+      // These tools address no spec at all — they create an AD_Image row — and "neo-upload-image"
+      // would be looked up as a spec and denied.
+      case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
+      case McpConstants.TOOL_NEO_UPLOAD_IMAGE:
+      case McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD:
         return true;
       default:
         return false;
@@ -946,6 +962,70 @@ public class ToolRegistry {
     }
 
     return paramProps;
+  }
+
+  // ── Image upload tools (ETP-5184) ─────────────────────────────────────
+
+  /**
+   * Description of {@link McpConstants#TOOL_NEO_REQUEST_IMAGE_UPLOAD}.
+   *
+   * <p>Held as a constant because a test asserts it names the cheap path and the cap: the guidance
+   * an agent reads and the validation the server enforces must not be able to drift apart.
+   */
+  static final String REQUEST_IMAGE_UPLOAD_DESCRIPTION =
+      "Returns a single-use URL to upload an image to Etendo, plus a ready-to-run curl command. "
+      + "Prefer this over " + McpConstants.TOOL_NEO_UPLOAD_IMAGE + " whenever you can run a shell "
+      + "command or the user can open a link: the image bytes never pass through the conversation, "
+      + "so it costs almost no tokens. After the upload succeeds you get an imageId — write it to "
+      + "any field of type 'image' with neo_update. The URL works exactly once and expires in 10 "
+      + "minutes.";
+
+  /** Description of {@link McpConstants#TOOL_NEO_UPLOAD_IMAGE}. See above for why it is a constant. */
+  static final String UPLOAD_IMAGE_DESCRIPTION =
+      "Uploads an image inline as base64 and returns its imageId. Use only for images under 256 KB: "
+      + "base64 in a tool argument is model output, so ~100 KB of image costs ~100k tokens. If you "
+      + "can run a shell command, use " + McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD + " instead. "
+      + "image/png or image/jpeg only; resize to max 1024 px on the long side before encoding.";
+
+  /** Description of {@link McpConstants#TOOL_NEO_GET_IMAGE_UPLOAD}. */
+  static final String GET_IMAGE_UPLOAD_DESCRIPTION =
+      "Looks up an upload ticket returned by " + McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD
+      + " and reports whether the file has arrived, plus the imageId once it has. Use it only when "
+      + "you did not see the output of the upload itself — the PUT already returns the imageId.";
+
+  private McpToolDefinition buildRequestImageUploadTool() {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("name", stringProp(
+        "Optional name for the stored image (defaults to 'image')."));
+    props.put("mime_type", enumProp(
+        "Optional expected type. Omit it and the type is detected from the uploaded bytes; if you "
+            + "do send it, it is cross-checked against them and a mismatch is rejected.",
+        NeoImageHelper.ALLOWED_MIME_TYPES));
+    return new McpToolDefinition(McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD,
+        REQUEST_IMAGE_UPLOAD_DESCRIPTION, buildObjectSchema(props, null));
+  }
+
+  private McpToolDefinition buildUploadImageTool() {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("data_base64", stringProp(
+        "The image file encoded as base64. A 'data:image/png;base64,' prefix is accepted and "
+            + "stripped. Hard limit: 256 KB decoded — over that the call is rejected and points you "
+            + "at " + McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD + "."));
+    props.put("name", stringProp(
+        "Optional name for the stored image (defaults to 'image')."));
+    props.put("mime_type", enumProp(
+        "Optional. Cross-checked against the actual bytes; omit it and the type is detected.",
+        NeoImageHelper.ALLOWED_MIME_TYPES));
+    return new McpToolDefinition(McpConstants.TOOL_NEO_UPLOAD_IMAGE, UPLOAD_IMAGE_DESCRIPTION,
+        buildObjectSchema(props, List.of("data_base64")));
+  }
+
+  private McpToolDefinition buildGetImageUploadTool() {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("token", stringProp("The token returned by "
+        + McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD + "."));
+    return new McpToolDefinition(McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD,
+        GET_IMAGE_UPLOAD_DESCRIPTION, buildObjectSchema(props, List.of("token")));
   }
 
   // ── JSON Schema builder helpers ────────────────────────────────────────

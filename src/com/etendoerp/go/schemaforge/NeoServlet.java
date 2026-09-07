@@ -27,6 +27,7 @@ import org.openbravo.model.ad.ui.Tab;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
+import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.smf.securewebservices.SWSConfig;
 
 /**
@@ -50,7 +51,10 @@ public class NeoServlet extends HttpBaseServlet {
 
   private static final String METHOD_DELETE = "DELETE";
   private static final String METHOD_PATCH = "PATCH";
+  private static final String METHOD_PUT = "PUT";
   private static final String DOCUMENT_DOWNLOAD_PREFIX = "/document-download/";
+  /** Unauthenticated one-shot MCP image-upload endpoint (ETP-5184); the token is the credential. */
+  private static final String IMAGE_UPLOAD_PREFIX = "/image/upload/";
   static final String ERR_ENTITY_NOT_FOUND = "Entity not found: ";
   static final String ERR_NO_LINKED_TAB = "Entity has no linked AD_Tab: ";
   public static final String ACTION_REQUEST_BODY_ATTR = "neo.action.requestBody";
@@ -96,7 +100,7 @@ public class NeoServlet extends HttpBaseServlet {
 
   @Override
   public void doPut(HttpServletRequest request, HttpServletResponse response) throws IOException {
-    processRequest(request, response, "PUT");
+    processRequest(request, response, METHOD_PUT);
   }
 
   @Override
@@ -133,6 +137,17 @@ public class NeoServlet extends HttpBaseServlet {
       return;
     }
 
+    // ETP-5184: the MCP image-upload ticket is intentionally unauthenticated, on the same basis as
+    // the download links above — the single-use, 10-minute, 192-bit token IS the credential, and it
+    // carries the client/org/user of the MCP session it was issued to. It has to be: the point of
+    // the ticket is that whoever holds the FILE (a shell running curl, a person with a browser)
+    // uploads it directly, so the bytes never pass through the model's context. NeoImageHelper
+    // validates the token, the size and the magic bytes before anything is stored.
+    if (METHOD_PUT.equals(method) && isImageUploadTicketPath(request.getPathInfo())) {
+      handleImageUploadTicket(request, response, method);
+      return;
+    }
+
     if (!authenticator.authenticateRequest(request, response)) {
       return;
     }
@@ -155,6 +170,27 @@ public class NeoServlet extends HttpBaseServlet {
     } catch (Exception e) {
       log.error("Error processing NEO request: {}", e.getMessage(), e);
       sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, NeoErrorSanitizer.sanitize(e));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private boolean isImageUploadTicketPath(String pathInfo) {
+    return pathInfo != null && pathInfo.startsWith(IMAGE_UPLOAD_PREFIX)
+        && StringUtils.isNotBlank(StringUtils.substringAfter(pathInfo, IMAGE_UPLOAD_PREFIX));
+  }
+
+  /**
+   * Runs the ticketed upload in an admin context, because there is no session to inherit one from.
+   * The row's client/organization come from the ticket, not from this context, so the elevation
+   * grants no scope the MCP session that requested the ticket did not already have.
+   */
+  private void handleImageUploadTicket(HttpServletRequest request, HttpServletResponse response,
+      String method) throws IOException {
+    String token = StringUtils.substringAfter(request.getPathInfo(), IMAGE_UPLOAD_PREFIX);
+    try {
+      OBContext.setAdminMode(false);
+      NeoImageHelper.handleUploadTicketRequest(token, method, request, response);
     } finally {
       OBContext.restorePreviousMode();
     }
