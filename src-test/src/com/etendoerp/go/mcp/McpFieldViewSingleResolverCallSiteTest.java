@@ -24,7 +24,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import org.junit.jupiter.api.AfterEach;
@@ -83,11 +86,58 @@ class McpFieldViewSingleResolverCallSiteTest {
       Pattern.compile("McpFieldView\\s*\\.\\s*of\\s*\\(");
 
   /**
-   * A curation property read straight off the {@code SFField} loop variable — the shape all four
-   * readers used before ETP-5184, and the shape a regression would take.
+   * The three curated properties. {@link McpFieldView} exposes these under exactly the same names
+   * as {@code SFField} does, so the method name cannot tell a raw row read from a resolved-view
+   * read — only the <b>receiver's declared type</b> can.
    */
-  private static final Pattern RAW_FIELD_READ = Pattern.compile(
-      "\\b(sfField|field)\\s*\\.\\s*(getVisibility|isReadOnly|isBusinessCritical)\\s*\\(");
+  private static final String CURATION_PROPERTIES = "getVisibility|isReadOnly|isBusinessCritical";
+
+  /**
+   * Every variable of type {@code SFField} declared inside a body — the enhanced-for loop
+   * variable, a plain local, or a parameter. {@code List<SFField>} and
+   * {@code OBCriteria<SFField>} are not matched: the type name there is followed by {@code >},
+   * not by whitespace and an identifier.
+   */
+  private static final Pattern SF_FIELD_VARIABLE =
+      Pattern.compile("\\bSFField\\s+(\\w+)\\s*[:=;)]");
+
+  /**
+   * Locate the {@code SFField}-typed variables a body reads from.
+   *
+   * <p>Type-driven rather than name-driven, and that is the whole point. The previous version of
+   * this guard hardcoded the receiver names {@code sfField|field}, so a reader refactored to
+   * {@code for (SFField row : crit.list())} reading {@code row.getVisibility()} passed both
+   * assertions — it still called {@code McpFieldView.of(} for some other property and still
+   * contained the string {@code "SFField"}. The guard read as covered while being blind to the
+   * exact regression it exists to catch, which is worse than no guard, because the next reader
+   * trusts it (REVIEW W6).</p>
+   *
+   * @param body the method body, comments already stripped
+   * @return the declared names; empty means the scan found nothing to check, which is a failure
+   */
+  private static Set<String> sfFieldVariables(String body) {
+    Set<String> names = new LinkedHashSet<>();
+    Matcher matcher = SF_FIELD_VARIABLE.matcher(body);
+    while (matcher.find()) {
+      names.add(matcher.group(1));
+    }
+    return names;
+  }
+
+  /**
+   * A curation property read straight off an {@code SFField} row — the shape all four readers
+   * used before ETP-5184, and the shape a regression would take.
+   *
+   * <p>The receiver must be the variable itself: {@code row.getVisibility()} matches, while
+   * {@code McpFieldView.of(row).getVisibility()} does not, because there the token before the dot
+   * is {@code )}. That is what keeps the legitimate resolved-view chain — and any local holding a
+   * resolved view, whatever it is named — out of the match, without the guard having to know any
+   * name on the correct side.</p>
+   */
+  private static Pattern rawReadOf(String variable) {
+    return Pattern.compile("\\b" + Pattern.quote(variable) + "\\s*\\.\\s*("
+        + CURATION_PROPERTIES + ")\\s*\\(");
+  }
 
   @BeforeEach
   void registerRealSections() {
@@ -114,9 +164,7 @@ class McpFieldViewSingleResolverCallSiteTest {
       if (!RESOLVER_CALL.matcher(body).find()) {
         violations.add(method + " does not call McpFieldView.of(...)");
       }
-      if (RAW_FIELD_READ.matcher(body).find()) {
-        violations.add(method + " reads a curation property straight off the SFField row");
-      }
+      violations.addAll(rawReadViolations(method, body));
     }
     if (!violations.isEmpty()) {
       fail("MCP readers disagree about a field's curation: " + violations
@@ -137,10 +185,69 @@ class McpFieldViewSingleResolverCallSiteTest {
       assertTrue(body.length() > 100,
           method + " was resolved to a body of " + body.length() + " chars, which means"
               + " the extractor matched the wrong thing — fix this test, not the source");
-      assertTrue(body.contains("SFField"),
-          method + " no longer mentions SFField, so the guard above has nothing left to"
-              + " check — the reader was probably refactored elsewhere");
+      assertFalse(sfFieldVariables(body).isEmpty(),
+          method + " declares no SFField-typed variable, so the raw-read check above has nothing"
+              + " to look for and passes vacuously — the reader was probably refactored"
+              + " elsewhere. Fix this test, not the source");
     }
+  }
+
+  /**
+   * Prove the raw-read check fires. A guard nobody has seen fail is a guard nobody knows works,
+   * and this one has already been blind once: the name-coupled version accepted a reader that
+   * read straight off a loop variable called anything other than {@code sfField}/{@code field}.
+   */
+  @Test
+  @DisplayName("the raw-read check flags a row read under any receiver name, and spares the "
+      + "resolved-view chain")
+  void theRawReadCheckIsNotMute() {
+    // The regression, under a receiver name the old regex did not know about. It also calls the
+    // resolver for another property, so the McpFieldView.of() assertion alone would pass it.
+    String regressed = "{ for (SFField row : crit.list()) {"
+        + " String v = row.getVisibility();"
+        + " boolean ro = McpFieldView.of(row).isReadOnly(); } }";
+    assertEquals(Set.of("row"), sfFieldVariables(regressed));
+    assertFalse(rawReadViolations("synthetic", regressed).isEmpty(),
+        "a raw row read must be flagged whatever the loop variable is called");
+
+    // The correct shape, with the view held in a local named nothing the guard knows.
+    String correct = "{ for (SFField anySfFieldName : crit.list()) {"
+        + " McpFieldView resolved = McpFieldView.of(anySfFieldName);"
+        + " String v = resolved.getVisibility();"
+        + " boolean bc = resolved.isBusinessCritical();"
+        + " boolean ro = McpFieldView.of(anySfFieldName).isReadOnly();"
+        + " Column col = anySfFieldName.getADColumn(); } }";
+    assertTrue(rawReadViolations("synthetic", correct).isEmpty(),
+        "reading through a resolved view — held in a local or chained — is the correct shape and"
+            + " must never be flagged, whatever the variables are called");
+
+    // A property that is not curated is not this guard's business either.
+    String included = "{ for (SFField row : crit.list()) { boolean i = row.isIncluded(); } }";
+    assertTrue(rawReadViolations("synthetic", included).isEmpty(),
+        "isIncluded is deliberately not overridable, so reading it off the row is correct");
+  }
+
+  /**
+   * Every curation property read straight off an {@code SFField}-typed variable in {@code body}.
+   *
+   * <p>An empty result from a body with no {@code SFField} variable at all is reported as a
+   * violation rather than as cleanliness: it means the scan lost track of the receiver, and a
+   * check that cannot find its subject must fail loudly instead of passing.</p>
+   */
+  private static List<String> rawReadViolations(String method, String body) {
+    Set<String> variables = sfFieldVariables(body);
+    if (variables.isEmpty()) {
+      return List.of(method + " declares no SFField-typed variable — the raw-read check cannot"
+          + " find its subject, so it would pass vacuously");
+    }
+    List<String> violations = new ArrayList<>();
+    for (String variable : variables) {
+      if (rawReadOf(variable).matcher(body).find()) {
+        violations.add(method + " reads a curation property straight off the SFField row '"
+            + variable + "'");
+      }
+    }
+    return violations;
   }
 
   /**
