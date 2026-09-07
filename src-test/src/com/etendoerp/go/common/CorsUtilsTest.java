@@ -88,6 +88,26 @@ class CorsUtilsTest {
     }
 
     @Test
+    void viteDevServerOriginIsAllowedByDefault() {
+      when(request.getHeader("Origin")).thenReturn("http://localhost:3100");
+      when(request.getRequestURL()).thenReturn(new StringBuffer("http://server:8080/api"));
+
+      CorsUtils.apply(request, response, "GET", "Content-Type", null, false);
+
+      verify(response).setHeader("Access-Control-Allow-Origin", "http://localhost:3100");
+    }
+
+    @Test
+    void viteDevServerLoopbackOriginIsAllowedByDefault() {
+      when(request.getHeader("Origin")).thenReturn("http://127.0.0.1:3100");
+      when(request.getRequestURL()).thenReturn(new StringBuffer("http://server:8080/api"));
+
+      CorsUtils.apply(request, response, "GET", "Content-Type", null, false);
+
+      verify(response).setHeader("Access-Control-Allow-Origin", "http://127.0.0.1:3100");
+    }
+
+    @Test
     void unknownOriginDoesNotSetCorsHeaders() {
       when(request.getHeader("Origin")).thenReturn("http://evil.example.com");
       when(request.getRequestURL()).thenReturn(new StringBuffer("http://server:8080/api"));
