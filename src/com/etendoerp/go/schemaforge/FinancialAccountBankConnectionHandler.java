@@ -144,6 +144,19 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   private static final String KEY_CODE = "code";
   private static final String KEY_PROVIDERS = "providers";
   private static final String KEY_RECONNECTABLE = "reconnectable";
+  // ETP-5179. Diagnosis of an empty `accounts` list, as a machine-readable CODE rather than an
+  // English sentence. The obvious alternative — an AD_Message from
+  // com.etendoerp.psd2.bank.integration — cannot be used: those rows ship with istranslated='N',
+  // so Core resolves them to their English text unless the environment happened to import the
+  // translation pack, and their `%s` templates never interpolate either (OBMessageUtils
+  // .getI18NMessage only substitutes `%0`). A code is translated by the SPA in all three shipped
+  // locales, with its parameter, without depending on Core provisioning.
+  private static final String KEY_EMPTY_REASON = "emptyReason";
+  private static final String KEY_ACCOUNT_CURRENCY = "accountCurrency";
+  private static final String REASON_NO_ACCOUNTS = "noAccounts";
+  private static final String REASON_TYPE_MISMATCH = "typeMismatch";
+  private static final String REASON_ALL_LINKED = "allLinked";
+  private static final String REASON_CURRENCY_MISMATCH = "currencyMismatch";
   private static final String DEFAULT_PROVIDER_COUNTRY = "ES";
   private static final String MSG_ACCOUNT_NOT_FOUND = "Financial account not found";
   private static final String MSG_MISSING = "Missing required parameter: ";
@@ -286,13 +299,17 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
     String faType = finAcc != null ? finAcc.getType() : StringUtils.defaultIfBlank(type,
         BankIntegrationConstants.FA_TYPE_BANK);
 
-    JSONArray accounts = BankIntegrationUtils.getSaltEdgeAccountsForConnection(connectionId, apiKey);
-    accounts = SaltEdgeAccountLinkHelper.filterAccountsByFAType(accounts, faType);
-    accounts = SaltEdgeAccountLinkHelper.filterUnlinkedAccounts(accounts,
+    // ETP-5179. Each filtering stage keeps its own array instead of reassigning a single variable:
+    // when the final list is empty, the stage that emptied it is the whole diagnosis the SPA needs
+    // to tell a currency mismatch apart from a wrong type or an already-linked account.
+    JSONArray fromBank = BankIntegrationUtils.getSaltEdgeAccountsForConnection(connectionId, apiKey);
+    JSONArray typeFiltered = SaltEdgeAccountLinkHelper.filterAccountsByFAType(fromBank, faType);
+    JSONArray unlinked = SaltEdgeAccountLinkHelper.filterUnlinkedAccounts(typeFiltered,
         finAcc != null ? finAcc.getId() : null);
+    JSONArray accounts = unlinked;
     if (finAcc != null) {
       // Case 1: the FA already has a currency — only its matching accounts are linkable.
-      accounts = SaltEdgeAccountLinkHelper.filterAccountsByCurrency(accounts, finAcc);
+      accounts = SaltEdgeAccountLinkHelper.filterAccountsByCurrency(unlinked, finAcc);
     }
 
     JSONArray out = new JSONArray();
@@ -321,8 +338,58 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
         data.put(KEY_PROVIDER_LOGO,
             FinancialAccountBankConnectionSupport.fetchProviderLogo(providerCode, apiKey));
       }
+    } else {
+      putEmptyDiagnosis(data, fromBank, typeFiltered, unlinked, finAcc);
     }
     return FinancialAccountBankConnectionSupport.okData(data);
+  }
+
+  /**
+   * Explains an empty {@code accounts} list by naming the FIRST filtering stage that emptied it,
+   * so the SPA can raise a toast that states the actual cause instead of one generic message.
+   *
+   * <p>The reason is a code, not a sentence — see {@link #KEY_EMPTY_REASON} for why the wording is
+   * left to the SPA. {@link #KEY_ACCOUNT_CURRENCY} is added only for a currency mismatch, where the
+   * Financial Account's own ISO code is the single piece of data the message needs; the other
+   * reasons take no parameter, and the SPA treats the field's presence as meaningful.
+   *
+   * <p>Kept out of {@code handleAccounts} to hold that method's cognitive complexity down.
+   *
+   * @param data           response payload being built
+   * @param fromBank       accounts as the bank returned them, before any filtering
+   * @param typeFiltered   accounts left after the Financial Account type filter
+   * @param unlinked       accounts left after discarding the ones already linked elsewhere
+   * @param finAcc         the Financial Account being connected, or {@code null} in the create flow
+   */
+  private static void putEmptyDiagnosis(JSONObject data, JSONArray fromBank, JSONArray typeFiltered,
+      JSONArray unlinked, FIN_FinancialAccount finAcc) throws JSONException {
+    String reason = emptyReasonOf(fromBank, typeFiltered, unlinked);
+    data.put(KEY_EMPTY_REASON, reason);
+    if (!REASON_CURRENCY_MISMATCH.equals(reason)) {
+      return;
+    }
+    // filterAccountsByCurrency short-circuits on a currency-less FA, so reaching this branch means
+    // there is one — read it defensively all the same.
+    Currency currency = finAcc != null ? finAcc.getCurrency() : null;
+    String isoCode = currency != null ? currency.getISOCode() : null;
+    if (StringUtils.isNotBlank(isoCode)) {
+      data.put(KEY_ACCOUNT_CURRENCY, isoCode);
+    }
+  }
+
+  /** The first filtering stage that emptied the list; the currency filter is the last resort. */
+  private static String emptyReasonOf(JSONArray fromBank, JSONArray typeFiltered,
+      JSONArray unlinked) {
+    if (fromBank.length() == 0) {
+      return REASON_NO_ACCOUNTS;
+    }
+    if (typeFiltered.length() == 0) {
+      return REASON_TYPE_MISMATCH;
+    }
+    if (unlinked.length() == 0) {
+      return REASON_ALL_LINKED;
+    }
+    return REASON_CURRENCY_MISMATCH;
   }
 
   // ---------------------------------------------------------------------------
