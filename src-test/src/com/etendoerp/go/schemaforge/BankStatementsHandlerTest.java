@@ -1039,6 +1039,100 @@ public class BankStatementsHandlerTest {
     }
   }
 
+  /**
+   * ETP-4954 (QA retest): the API-level half of the "no negative amounts" rule. The modal already
+   * refused this pair, but {@code createLines}' old guard was only "not both zero", so an MCP/REST
+   * caller could persist {@code (cr = -20, dr = -50)} — which the read path then collapsed into an
+   * Entrada of +30. The negative side must be rejected here too, and nothing may be saved.
+   */
+  @Test
+  public void handleCreateRejectsALineWithNegativeAmounts() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("name", "Extracto manual");
+    JSONArray lines = new JSONArray();
+    JSONObject negative = new JSONObject();
+    negative.put("date", "2026-06-02T00:00:00Z");
+    negative.put("reference", "REF-1"); // non-blank → not skipped as an empty row
+    negative.put("in", -20);
+    negative.put("out", -50);
+    lines.put(negative);
+    body.put("lines", lines);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+
+    doReturn(statement).when(handler).newManualBankStatement(any(), any());
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(account);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FIN_BankStatementLine.class)).thenReturn(line);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "create"));
+      assertEquals(400, r.getHttpStatus());
+      assertTrue(r.getBody().getJSONObject("error").getString("message")
+          .contains("negative"));
+      verify(handler, never()).processStatement(any());
+      verify(dal, never()).save(line);
+      // Validation must run BEFORE the setters: a managed entity is flushed even on a 400.
+      verify(line, never()).setCramount(any());
+      verify(line, never()).setDramount(any());
+    }
+  }
+
+  /**
+   * ETP-4954: a single negative side is rejected too, not just the both-negative pair — the rule is
+   * "no negative amounts", matching the modal's isLineComplete (which needs a strictly positive side).
+   */
+  @Test
+  public void handleCreateRejectsALineWithASingleNegativeAmount() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("name", "Extracto manual");
+    JSONArray lines = new JSONArray();
+    JSONObject negative = new JSONObject();
+    negative.put("date", "2026-06-02T00:00:00Z");
+    negative.put("reference", "REF-1");
+    negative.put("in", 0);
+    negative.put("out", -50);
+    lines.put(negative);
+    body.put("lines", lines);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+
+    doReturn(statement).when(handler).newManualBankStatement(any(), any());
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(account);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FIN_BankStatementLine.class)).thenReturn(line);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "create"));
+      assertEquals(400, r.getHttpStatus());
+      assertTrue(r.getBody().getJSONObject("error").getString("message")
+          .contains("negative"));
+      verify(dal, never()).save(line);
+    }
+  }
+
   @Test
   public void handleCreateSaveAsDraftSkipsProcessing() throws Exception {
     NeoContext ctx = mock(NeoContext.class);

@@ -137,11 +137,46 @@ public class BankStatementLinePrunerTest {
     }
   }
 
+  /**
+   * ETP-4954 (QA retest): the reported failure. A CSV line with BOTH amounts negative was imported
+   * instead of rejected, and the stored pair then read back as a nonsensical positive: the row holds
+   * {@code (cr = -20, dr = -50)} and {@code BankStatementsSupport#mapLineRow} collapses it to
+   * {@code amount = cr - dr = +30}, which the grid renders as an Entrada of 30. The manual form
+   * always rejected the same combination, so the two flows disagreed AND the import persisted junk.
+   */
   @Test
-  public void keepsNegativeAmountsBecauseClassicDoesToo() {
-    // Classic's condition is "not both zero", not "positive", so a negative
-    // amount is a real movement and must survive. Rejecting negatives would be
-    // a new business rule, not a consistency fix.
+  public void dropsALineWithBothAmountsNegative() {
+    List<FIN_BankStatementLine> lines = new ArrayList<>();
+    FIN_BankStatementLine bothNegative = line(10L, "-20.00", "-50.00");
+    lines.add(bothNegative);
+    FIN_BankStatement statement = statement();
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = stubDal(obDalMock, lines);
+
+      BankStatementLinePruner.PruneResult r =
+          BankStatementLinePruner.pruneZeroAmountLines(statement);
+
+      assertEquals(0, r.getKept());
+      assertEquals(1, r.getDiscarded());
+      verify(dal).remove(bothNegative);
+    }
+  }
+
+  /**
+   * ETP-4954 (QA retest) — DELIBERATE DIVERGENCE FROM CLASSIC, decided with product.
+   *
+   * <p>This test replaces {@code keepsNegativeAmountsBecauseClassicDoesToo}, which asserted the
+   * opposite and whose comment read: "Classic's condition is 'not both zero', not 'positive', so a
+   * negative amount is a real movement and must survive. Rejecting negatives would be a new business
+   * rule, not a consistency fix." That IS the new business rule now: a statement line never carries a
+   * negative amount — a negative Salida is conceptually an Entrada — so any negative is rejected in
+   * BOTH flows rather than silently netted into the opposite column. Verified safe against real data:
+   * 0 of the 2.965 statement lines in the reference database carry a negative amount, across the CSV,
+   * Cuaderno 43 and PSD2-sync origins.
+   */
+  @Test
+  public void dropsALineWithASingleNegativeAmount() {
     List<FIN_BankStatementLine> lines = new ArrayList<>();
     FIN_BankStatementLine negative = line(10L, "-25.00", "0");
     lines.add(negative);
@@ -153,10 +188,55 @@ public class BankStatementLinePrunerTest {
       BankStatementLinePruner.PruneResult r =
           BankStatementLinePruner.pruneZeroAmountLines(statement);
 
+      assertEquals(0, r.getKept());
+      assertEquals(1, r.getDiscarded());
+      verify(dal).remove(negative);
+    }
+  }
+
+  /**
+   * The opposite-signs case QA documented separately: Salida positive, Entrada negative. Both flows
+   * used to "net" it into a single value (net = Entrada − Salida, sign picking the column), which QA
+   * flagged as consistent-but-undefined. Under the new rule the negative side alone rejects the line,
+   * so nothing is netted anywhere.
+   */
+  @Test
+  public void dropsALineWithOppositeSignsInsteadOfNettingIt() {
+    List<FIN_BankStatementLine> lines = new ArrayList<>();
+    FIN_BankStatementLine mixed = line(10L, "-20.00", "50.00");
+    lines.add(mixed);
+    FIN_BankStatement statement = statement();
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = stubDal(obDalMock, lines);
+
+      BankStatementLinePruner.PruneResult r =
+          BankStatementLinePruner.pruneZeroAmountLines(statement);
+
+      assertEquals(0, r.getKept());
+      assertEquals(1, r.getDiscarded());
+      verify(dal).remove(mixed);
+    }
+  }
+
+  /** A line with one positive amount and the other side at zero is the normal, valid shape. */
+  @Test
+  public void keepsALineWhoseOnlyAmountIsPositive() {
+    List<FIN_BankStatementLine> lines = new ArrayList<>();
+    FIN_BankStatementLine credit = line(10L, "150.00", "0");
+    lines.add(credit);
+    FIN_BankStatement statement = statement();
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = stubDal(obDalMock, lines);
+
+      BankStatementLinePruner.PruneResult r =
+          BankStatementLinePruner.pruneZeroAmountLines(statement);
+
       assertEquals(1, r.getKept());
       assertEquals(0, r.getDiscarded());
-      verify(negative).setLineNo(10L);
-      verify(dal, never()).remove(negative);
+      verify(credit).setLineNo(10L);
+      verify(dal, never()).remove(credit);
     }
   }
 

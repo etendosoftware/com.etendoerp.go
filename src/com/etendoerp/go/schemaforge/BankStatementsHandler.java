@@ -155,6 +155,13 @@ public class BankStatementsHandler implements NeoHandler {
       "The file contains no valid lines to import";
   private static final String MSG_ZERO_AMOUNT_LINE =
       "Every line must have an amount in either Deposit or Withdrawal";
+  /**
+   * ETP-4954: a statement line never carries a negative amount — a negative Salida is conceptually
+   * an Entrada. Rejecting it here (instead of letting the read path net the pair into the opposite
+   * column) keeps this endpoint aligned with the manual form and with the file-import pruner.
+   */
+  private static final String MSG_NEGATIVE_AMOUNT_LINE =
+      "Line amounts cannot be negative: use Deposit for money in and Withdrawal for money out";
   private static final String CODE_NO_VALID_LINES = "NO_VALID_LINES";
   private static final String FIELD_DISCARDED_LINES = "discardedLines";
 
@@ -929,8 +936,17 @@ public class BankStatementsHandler implements NeoHandler {
       // A line the user actually filled in must carry an amount. Unlike the file
       // import — which silently drops amount-less rows, as Classic does — here it
       // is a validation error: the manual form has a user to fix it.
+      // Both checks run BEFORE the setters on purpose: a managed entity gets flushed even when the
+      // request ends in a 400, so validating after setCramount/setDramount would persist the very
+      // row we are rejecting.
       if (crAmount.signum() == 0 && drAmount.signum() == 0) {
         throw new OBException(MSG_ZERO_AMOUNT_LINE);
+      }
+      // ETP-4954: the API-level half of the "no negative amounts" rule. The frontend already refuses
+      // these (isLineComplete needs a strictly positive side) but this endpoint is also reachable
+      // from MCP/REST, where the old "not both zero" guard let a negative pair through.
+      if (crAmount.signum() < 0 || drAmount.signum() < 0) {
+        throw new OBException(MSG_NEGATIVE_AMOUNT_LINE);
       }
       line.setCramount(crAmount);
       line.setDramount(drAmount);
