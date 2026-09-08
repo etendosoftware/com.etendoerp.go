@@ -4,11 +4,25 @@
       <parameter name="p_bpartner_id" type="VARCHAR" mode="in">
         <default/>
       </parameter>
-      <body><![CDATA[v_location character varying;
+      <body><![CDATA[v_c_location_id character varying;
 BEGIN
-    select
-        ad_column_identifier_std('c_location', bploc.c_location_id)
-    into v_location
+    -- ETP-5060: return the Location ID, NOT a pre-rendered address string.
+    --
+    -- A computed column is raw SQL inside the query (Hibernate formula): it has no
+    -- access to the request language, so any text it builds is frozen in the base
+    -- language. That is why the country used to read "Spain" in a Spanish session:
+    -- this function called ad_column_identifier_std, the variant WITHOUT a language
+    -- parameter, and passing one in is not possible from here.
+    --
+    -- Returning the id moves the rendering to read time: the column reference
+    -- (Search -> Location) resolves the identifier through the DAL, which goes
+    -- through C_Country_Trl and answers in the session language. An id is stable
+    -- and language-independent, so materializing it freezes no translation.
+    --
+    -- Zero rows (a partner with no active address) leaves v_c_location_id NULL:
+    -- plain SELECT ... INTO assigns NULL and does not raise, unlike INTO STRICT.
+    select bploc.c_location_id
+    into v_c_location_id
     from c_bpartner_location bploc
     where bploc.c_bpartner_id = p_bpartner_id
       and bploc.isactive = 'Y'
@@ -21,7 +35,7 @@ BEGIN
         bploc.created desc
     limit 1;
 
-    return v_location;
+    return v_c_location_id;
 END ETGO_GET_LOCATION
 ]]></body>
     </function>
