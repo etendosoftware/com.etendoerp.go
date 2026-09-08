@@ -62,8 +62,23 @@ class FiscalDeclCrudHandler {
    * business field with a uniqueness counter risked corrupting its actual meaning the moment a
    * future feature needs to let the user genuinely pick ordinaria vs. complementaria. See
    * {@link #resolveNextDeclSeq}.
+   *
+   * <p><b>Value is {@code "declarationSequence"}, not an abbreviated {@code "declSeq"}.</b>
+   * Openbravo's dynamic {@code Entity}/{@code Property} model does NOT derive a property's Java
+   * name from {@code AD_Column.ColumnName} (the physical DB column, {@code Decl_Seq}) — it derives
+   * it from {@code AD_Column.Name} (see {@code NamingUtil#getPropertyMappingName}), camel-casing
+   * on both {@code "_"} and {@code " "}. This column's {@code AD_Column.Name}/
+   * {@code AD_Element.Name} is the human-readable {@code "Declaration Sequence"} (consistent with
+   * the sibling columns {@link #PROPERTY_DECLARATION_TYPE}, {@link #PROPERTY_DECLARATION_STATUS}
+   * and {@link #PROPERTY_DECLARATION_FILE_NAME}, all spelled out in full rather than abbreviated),
+   * so the runtime property name is {@code "declarationSequence"}. Using {@code "declSeq"} here
+   * — matching the abbreviated physical column name instead of the spelled-out element name —
+   * caused every {@code decl.set(...)}/{@code decl.get(...)} call to throw
+   * {@code CheckException: Property declSeq does not exist for entity ETGO_Fiscal_Decl}, even
+   * with a correct, active {@code AD_Column} row and a freshly rebuilt runtime model. See
+   * {@code docs/generated-custom-windows/fiscal-models.md} for the full writeup.
    */
-  static final String PROPERTY_DECL_SEQ = "declSeq";
+  static final String PROPERTY_DECL_SEQ = "declarationSequence";
   static final String PROPERTY_DECLARATION_STATUS = "declarationStatus";
   static final String PROPERTY_DECLARATION_FILE_NAME = "declarationFileName";
   static final String PROPERTY_FILE_EXTERNAL = "fileExternal";
