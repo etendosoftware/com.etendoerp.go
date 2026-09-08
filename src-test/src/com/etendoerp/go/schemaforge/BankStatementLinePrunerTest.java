@@ -240,6 +240,138 @@ public class BankStatementLinePrunerTest {
     }
   }
 
+  /**
+   * ETP-4954 (product decision) — the third clause of {@code hasUnusableAmounts}: EXACTLY ONE
+   * SIDE. The predicate was renamed from {@code hasNoUsableAmount} for this reason: it no longer
+   * only answers "is there an amount", it answers "are the amounts usable".
+   *
+   * <p>The clause arrived with no coverage at all — the whole suite passed with zero failures
+   * when it was added, which means no existing case had ever fed the pruner a line with both
+   * sides filled. It is trivially reachable on THIS path: the generic CSV importer fills
+   * {@code cramount} and {@code dramount} from two independent columns
+   * ({@code GenericCsvBankStatementImporter.saveLine}), so any file that populates both columns
+   * on one row produces such a line.
+   *
+   * <p>What it used to do: {@code BankStatementsSupport#mapLineRow} collapses the pair into
+   * {@code amount = cr - dr}, so {@code (cr = 30, dr = 100)} imported and then DISPLAYED as a
+   * Salida of 70 — a movement the bank never reported.
+   * {@code ReactivationSupport.applyBankStatementAmounts} already refuses to leave a line in that
+   * state (it nets them onto one side, under Classic's sign normalization); the import path drops
+   * the line instead, because a row a file arrived with is bad input rather than two records
+   * being merged.
+   */
+  @Test
+  public void dropsALineFilledOnBothSides() {
+    List<FIN_BankStatementLine> lines = new ArrayList<>();
+    FIN_BankStatementLine bothSides = line(10L, "30.00", "100.00");
+    lines.add(bothSides);
+    FIN_BankStatement statement = statement();
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = stubDal(obDalMock, lines);
+
+      BankStatementLinePruner.PruneResult r =
+          BankStatementLinePruner.pruneZeroAmountLines(statement);
+
+      assertEquals(0, r.getKept());
+      // Counted in the discarded total, so the import still reports what it left behind
+      // through APRM_ZeroAmountNotInserted instead of dropping the row invisibly.
+      assertEquals(1, r.getDiscarded());
+      verify(dal).remove(bothSides);
+      verify(bothSides, never()).setLineNo(any());
+    }
+  }
+
+  /**
+   * The case that MOTIVATED the clause. Two EQUAL sides clear every other rule — neither side is
+   * zero, neither is negative — so the line was imported, and {@code mapLineRow} then collapsed
+   * it to {@code 50 - 50 = 0}: a statement line displaying zero, which is exactly the state
+   * {@link #dropsTheZeroZeroLineAndRenumbersWithoutGaps} rejects at the front door. Nothing else
+   * in this class reaches it.
+   */
+  @Test
+  public void dropsALineWithTwoEqualSidesThatWouldHaveReadBackAsZero() {
+    List<FIN_BankStatementLine> lines = new ArrayList<>();
+    FIN_BankStatementLine equalSides = line(10L, "50.00", "50.00");
+    lines.add(equalSides);
+    FIN_BankStatement statement = statement();
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = stubDal(obDalMock, lines);
+
+      BankStatementLinePruner.PruneResult r =
+          BankStatementLinePruner.pruneZeroAmountLines(statement);
+
+      assertEquals(0, r.getKept());
+      assertEquals(1, r.getDiscarded());
+      verify(dal).remove(equalSides);
+    }
+  }
+
+  /**
+   * The DISCRIMINATOR. Without it the clause could just as well read "drop any line whose two
+   * amount columns were both written", which would drop every ordinary line a CSV exports with
+   * an explicit 0 in the unused column — the shape the import template itself ships
+   * ({@code 150,00} out / {@code 0,00} in). A zero is not an amount, on either side.
+   */
+  @Test
+  public void keepsALineWithOneAmountAndAnExplicitZeroOnTheOtherSide() {
+    List<FIN_BankStatementLine> lines = new ArrayList<>();
+    FIN_BankStatementLine credit = line(10L, "150.00", "0");
+    FIN_BankStatementLine debit = line(20L, "0", "98.00");
+    lines.add(credit);
+    lines.add(debit);
+    FIN_BankStatement statement = statement();
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = stubDal(obDalMock, lines);
+
+      BankStatementLinePruner.PruneResult r =
+          BankStatementLinePruner.pruneZeroAmountLines(statement);
+
+      assertEquals(2, r.getKept());
+      assertEquals(0, r.getDiscarded());
+      verify(credit).setLineNo(10L);
+      verify(debit).setLineNo(20L);
+      verify(dal, never()).remove(credit);
+      verify(dal, never()).remove(debit);
+    }
+  }
+
+  /**
+   * The renumbering half, with the both-filled line dropped from the MIDDLE of the file — the
+   * position where a gap would actually show. Classic's contract is that the survivors come out
+   * 10, 20, 30… with no hole, and a partially pruned import is still a successful import.
+   */
+  @Test
+  public void renumbersContiguouslyWhenABothFilledLineIsDroppedInTheMiddle() {
+    List<FIN_BankStatementLine> lines = new ArrayList<>();
+    FIN_BankStatementLine first = line(10L, "100.00", "0");
+    FIN_BankStatementLine bothSides = line(20L, "30.00", "100.00");
+    FIN_BankStatementLine third = line(30L, "0", "75.00");
+    lines.add(first);
+    lines.add(bothSides);
+    lines.add(third);
+    FIN_BankStatement statement = statement();
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = stubDal(obDalMock, lines);
+
+      BankStatementLinePruner.PruneResult r =
+          BankStatementLinePruner.pruneZeroAmountLines(statement);
+
+      assertEquals(2, r.getKept());
+      assertEquals(1, r.getDiscarded());
+      // 10, 20 — NOT 10, 30: the dropped middle line leaves no gap behind.
+      verify(first).setLineNo(10L);
+      verify(third).setLineNo(20L);
+      verify(third, never()).setLineNo(30L);
+      verify(dal).remove(bothSides);
+      verify(dal, never()).remove(first);
+      verify(dal, never()).remove(third);
+    }
+  }
+
   @Test
   public void reportsZeroKeptWhenEveryLineIsAmountLess() {
     List<FIN_BankStatementLine> lines = new ArrayList<>();
