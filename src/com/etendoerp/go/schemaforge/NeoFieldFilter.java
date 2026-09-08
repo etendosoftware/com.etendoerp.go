@@ -677,22 +677,30 @@ public class NeoFieldFilter {
       return;
     }
     for (Map.Entry<String, String> alias : AUDIT_PROP_TO_API_KEY.entrySet()) {
-      String propName = alias.getKey();
-      if (!jsonObj.has(propName)) {
-        continue;
-      }
-      String apiKey = alias.getValue();
-      Object value = jsonObj.opt(propName);
-      jsonObj.remove(propName);
-      if (jsonObj.has(apiKey) || value == null) {
-        continue;
-      }
-      try {
-        jsonObj.put(apiKey, value);
-      } catch (Exception e) {
-        log.warn("[NEO] renameAuditPropsToApiKeys: failed to rename '{}' → '{}': {}",
-            propName, apiKey, e.getMessage());
-      }
+      renameAuditProp(jsonObj, alias.getKey(), alias.getValue());
+    }
+  }
+
+  /**
+   * Renames a single audit DAL property into its API key, if present. Extracted out of
+   * {@link #renameAuditPropsToApiKeys}'s loop so each early exit is a {@code return} here
+   * rather than a {@code continue} there, keeping the caller's loop to a single exit point
+   * (java:S135).
+   */
+  private void renameAuditProp(JSONObject jsonObj, String propName, String apiKey) {
+    if (!jsonObj.has(propName)) {
+      return;
+    }
+    Object value = jsonObj.opt(propName);
+    jsonObj.remove(propName);
+    if (jsonObj.has(apiKey) || value == null) {
+      return;
+    }
+    try {
+      jsonObj.put(apiKey, value);
+    } catch (Exception e) {
+      log.warn("[NEO] renameAuditPropsToApiKeys: failed to rename '{}' → '{}': {}",
+          propName, apiKey, e.getMessage());
     }
   }
 

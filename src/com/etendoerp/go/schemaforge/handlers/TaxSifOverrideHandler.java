@@ -95,6 +95,7 @@ public class TaxSifOverrideHandler implements NeoHandler {
   private static final String METHOD_GET = "GET";
   private static final String TAX_ENTITY_NAME = "tax";
   private static final String FIELD_ID = "id";
+  private static final String PARAM_ORG_ID = "orgId";
 
   // JSON field name (camelCase, as exposed on the `tax` entity contract) -> DB column, shared by
   // both c_tax and etsg_tax_sif_config (same column name on both tables). Confirmed against
@@ -262,7 +263,7 @@ public class TaxSifOverrideHandler implements NeoHandler {
     NativeQuery<?> upsert = session.createNativeQuery(buildUpsertSql(presentColumns));
     upsert.setParameter("id", SequenceIdData.getUUID());
     upsert.setParameter("clientId", obContext.getCurrentClient().getId());
-    upsert.setParameter("orgId", leOrgId);
+    upsert.setParameter(PARAM_ORG_ID, leOrgId);
     upsert.setParameter("userId", obContext.getUser().getId());
     upsert.setParameter("taxId", taxId);
     for (Map.Entry<String, String> entry : values.entrySet()) {
@@ -298,7 +299,7 @@ public class TaxSifOverrideHandler implements NeoHandler {
     try {
       NativeQuery<Object> query = (NativeQuery<Object>) session.createNativeQuery(
           "SELECT ad_get_org_le_bu(:orgId, 'LE')");
-      query.setParameter("orgId", organizationId);
+      query.setParameter(PARAM_ORG_ID, organizationId);
       Object result = query.uniqueResult();
       return result != null ? result.toString() : null;
     } catch (Exception e) {
@@ -397,7 +398,7 @@ public class TaxSifOverrideHandler implements NeoHandler {
     String sql = buildEffectiveValuesSql(withOverride);
     NativeQuery<Object> query = (NativeQuery<Object>) session.createNativeQuery(sql);
     if (withOverride) {
-      query.setParameter("orgId", organizationId);
+      query.setParameter(PARAM_ORG_ID, organizationId);
     }
     query.setParameterList("taxIds", taxIds);
 
