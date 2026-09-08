@@ -270,21 +270,32 @@ public class DocumentPostingService {
   /**
    * Names which of the curated {@link #BP_GROUP_ACCOUNT_COLUMNS} are unconfigured for the failing
    * BP Group + accounting schema (ETP-5175). Returns {@code null} when the accounting schema
-   * cannot be resolved (defensive — leaves the message unchanged rather than guessing) or when
-   * every curated column is configured, so a fully-configured group produces no behavior change.
+   * cannot be resolved (defensive — leaves the message unchanged rather than guessing), when
+   * every curated column is configured, so a fully-configured group produces no behavior change,
+   * or when the lookup itself fails (e.g. transient DB error, OBDal/Hibernate mapping issue) —
+   * this addendum is optional, so it fails closed on its own instead of propagating to
+   * {@link #resolveBusinessPartnerDetail}, which would otherwise discard the already-built
+   * BP + BP Group detail along with it (QA regression, ETP-5175).
    *
    * @param bpGroupId
    *     id of the resolved BP Group ({@code C_BP_Group_ID}).
    * @param acct
    *     the failed {@link AcctServer} instance, used to resolve the accounting schema.
-   * @return the "missing account setup" message detail, or {@code null} if nothing is missing.
+   * @return the "missing account setup" message detail, or {@code null} if nothing is missing or
+   *     the lookup failed.
    */
   private static String resolveMissingAccountsDetail(String bpGroupId, AcctServer acct) {
     String acctSchemaId = resolveAcctSchemaId(acct);
     if (StringUtils.isBlank(acctSchemaId)) {
       return null;
     }
-    List<String> missing = resolveMissingBpGroupAccounts(bpGroupId, acctSchemaId);
+    List<String> missing;
+    try {
+      missing = resolveMissingBpGroupAccounts(bpGroupId, acctSchemaId);
+    } catch (Exception e) {
+      log.debug("Could not resolve missing BP Group accounts detail, bpGroupId={}", bpGroupId, e);
+      return null;
+    }
     if (missing.isEmpty()) {
       return null;
     }

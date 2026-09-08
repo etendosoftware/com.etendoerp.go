@@ -922,20 +922,19 @@ public class DocumentPostingServiceTest {
   }
 
   /**
-   * ETP-5175 BUG (QA finding, see QA report): {@code resolveMissingAccountsDetail} runs INSIDE
-   * the same outer {@code try} block in {@code resolveBusinessPartnerDetail} that already built
-   * the BP+Group {@code detail} string. If the new {@code CategoryAccounts} criteria query throws
-   * (e.g. a transient DB error, an OBDal/Hibernate mapping issue), the {@code catch (Exception e)}
-   * discards the ALREADY-SUCCESSFULLY-BUILT BP+Group detail along with it and returns
-   * {@code null} — degrading the pre-existing, working ETP-4706 enrichment (Business Partner name
-   * + BP Group name) down to the bare accounting-engine message, solely because of a failure in
-   * the brand-new, optional missing-accounts lookup. This test documents CURRENT behavior (it
-   * passes against the code as shipped) to pin the regression for a future fix: the missing-
-   * accounts lookup should fail closed on its own (return {@code null} on exception) without
-   * unwinding the outer try and losing already-resolved data.
+   * ETP-5175 BUG FIX (QA finding, see QA report / BUG-1): {@code resolveMissingAccountsDetail}
+   * used to run INSIDE the same outer {@code try} block in {@code resolveBusinessPartnerDetail}
+   * that already built the BP+Group {@code detail} string, so a thrown {@code CategoryAccounts}
+   * criteria query (e.g. a transient DB error, an OBDal/Hibernate mapping issue) discarded the
+   * ALREADY-SUCCESSFULLY-BUILT BP+Group detail along with it — degrading the pre-existing,
+   * working ETP-4706 enrichment (Business Partner name + BP Group name) down to the bare
+   * accounting-engine message, solely because of a failure in the optional missing-accounts
+   * lookup. {@code resolveMissingAccountsDetail} now fails closed on its own (catches locally and
+   * returns {@code null}), so this proves the outer BP+Group detail survives and only the
+   * missing-accounts addendum is skipped.
    */
   @Test
-  public void postLosesBpGroupDetailWhenMissingAccountsLookupThrows() throws Exception {
+  public void postKeepsBpGroupDetailWhenMissingAccountsLookupThrows() throws Exception {
     DocumentPostingService svc = new DocumentPostingService();
 
     ConnectionProvider conn = mock(ConnectionProvider.class);
@@ -965,10 +964,12 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message().contains("Account could not be found."));
-      // Regression: the already-built BP+Group detail is lost, not just the missing-accounts
-      // addendum, because both are computed inside the same try block that the exception unwinds.
-      assertFalse(r.message().contains("Fernet Branca S.A."));
-      assertFalse(r.message().contains("Proveedores Generales"));
+      // Fixed: the already-built BP+Group detail survives a failure in the missing-accounts
+      // lookup, because that lookup now fails closed on its own instead of unwinding the outer
+      // try block.
+      assertTrue(r.message().contains("Fernet Branca S.A."));
+      assertTrue(r.message().contains("Proveedores Generales"));
+      assertFalse(r.message().contains("Missing account setup"));
     }
   }
 }
