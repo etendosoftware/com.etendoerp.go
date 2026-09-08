@@ -1,0 +1,64 @@
+<?xml version="1.0"?>
+  <database name="FUNCTION ETGO_GET_TBAI_STATUS">
+    <function name="ETGO_GET_TBAI_STATUS" type="VARCHAR" volatility="STABLE">
+      <parameter name="p_c_invoice_id" type="VARCHAR" mode="in">
+        <default/>
+      </parameter>
+      <body><![CDATA[v_estado character varying;
+BEGIN
+  -- TOTAL FUNCTION. Refresh_Mode = 'S' runs this inside the business transaction,
+  -- so ANY exception raised here rolls back the invoice save itself. Every edge
+  -- case below must therefore resolve to a value, never to an error.
+
+  -- Edge case 1 - null/blank target id. Cannot happen through the engine (it
+  -- always passes a PK), but a NULL argument must not propagate as a NULL-handling
+  -- surprise: answer the "no submission" state explicitly.
+  IF p_c_invoice_id IS NULL THEN
+    RETURN 'Pendiente';
+  END IF;
+
+  -- Edge case 2 - invoice with NO row in tbai_syncinvoice (never submitted, or
+  -- TicketBAI simply not used for this invoice). SELECT ... INTO in PL/pgSQL
+  -- assigns NULL for zero rows and does NOT raise (unlike SELECT ... INTO STRICT,
+  -- which raises NO_DATA_FOUND - deliberately not used here).
+  -- Edge case 3 - SEVERAL rows, including several sharing the same `created`
+  -- timestamp. LIMIT 1 makes the result single-valued no matter how many rows
+  -- match, so the multi-row case cannot raise TOO_MANY_ROWS. The tie-break on
+  -- tbai_syncinvoice_id makes the choice DETERMINISTIC rather than arbitrary,
+  -- which matters because the engine writes the value unconditionally on every
+  -- recompute: without it, two recomputes of unchanged data could store different
+  -- values and ad_scd_check would report permanent phantom drift.
+  SELECT s.estado
+    INTO v_estado
+    FROM tbai_syncinvoice s
+   WHERE s.c_invoice_id = p_c_invoice_id
+   ORDER BY s.created DESC, s.tbai_syncinvoice_id DESC
+   LIMIT 1;
+
+  -- Edge case 4 - a row exists but ESTADO is NULL (the column is nullable, and a
+  -- row is created before the response is parsed - see SynchronizeUtils.java:374-385,
+  -- which builds the row first and sets ESTADO only in determineInvoiceState).
+  -- Same answer as "no row": submission not resolved yet.
+  IF v_estado IS NULL OR btrim(v_estado) = '' THEN
+    RETURN 'Pendiente';
+  END IF;
+
+  -- Edge case 5 - an UNEXPECTED status value (TicketBAI adds a new state, or a
+  -- tenant has legacy data). Pass it through UNCHANGED rather than mapping it to
+  -- a known state or raising. The frontend badge already degrades gracefully:
+  -- FiscalStatusBadge.jsx renders any unmapped value as its raw text with a
+  -- neutral tone. Normalising here would invent information; raising would block
+  -- the save. Passing through is the only option that neither lies nor breaks.
+  RETURN v_estado;
+
+-- Belt and braces. Nothing above should be able to raise, but an unforeseen
+-- runtime error (a type change in a future TicketBAI version, say) must not take
+-- the invoice down with it. Degrading to the "unknown" state keeps writes working;
+-- the wrong badge is visible and recoverable, a failed save is not.
+EXCEPTION
+  WHEN OTHERS THEN
+    RETURN 'Pendiente';
+END ETGO_GET_TBAI_STATUS
+]]></body>
+    </function>
+  </database>
