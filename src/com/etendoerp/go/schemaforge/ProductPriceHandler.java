@@ -35,6 +35,8 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.model.pricing.pricelist.PriceListVersion;
 
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
+
 
 /**
  * NEO Handler for the {@code price} entity (M_ProductPrice tab).
@@ -61,6 +63,7 @@ public class ProductPriceHandler implements NeoHandler {
   private static final String PRODUCT_FIELD = "product";
   private static final String STANDARD_PRICE_FIELD = "standardPrice";
   private static final String LIST_PRICE_FIELD = "listPrice";
+  private static final String FIELD_UPDATED = "updated";
 
   private static final String PRICE_LIST_SQL = ""
       + "SELECT "
@@ -78,7 +81,8 @@ public class ProductPriceHandler implements NeoHandler {
       + "  c.cursymbol                     AS currency_symbol, "
       + "  c.iso_code                      AS currency_iso, "
       + "  pl.isdefault                    AS is_default, "
-      + "  plv.validfrom                   AS valid_from_date "
+      + "  plv.validfrom                   AS valid_from_date, "
+      + "  pp.updated                      AS updated "
       + "FROM m_productprice pp "
       + "JOIN m_pricelist_version plv ON plv.m_pricelist_version_id = pp.m_pricelist_version_id "
       + "JOIN m_pricelist pl          ON pl.m_pricelist_id = plv.m_pricelist_id "
@@ -212,6 +216,16 @@ public class ProductPriceHandler implements NeoHandler {
           // frontend keeps the most recent version (<= today).
           item.put("priceListVersion$validFromDate",   row[14] != null ? String.valueOf(row[14]) : null);
           item.put("_entityName",                      "PricingProductPrice");
+          // ETP-5203: row[15] (updated) is mandatory for every PUT/PATCH by
+          // NeoCrudHandler#validateUpdateRequest (ETP-5073) — omitting it left the
+          // Product window's Price tab with no way to echo the value back, so every
+          // edit 400'd with missing_updated. Canonicalized through NeoDateFormat since a
+          // native-SQL Timestamp prints in the raw Postgres shape, mirroring
+          // ChartOfAccountsHandler#toAccountJson.
+          String rawUpdated = row[15] != null ? String.valueOf(row[15]) : null;
+          String canonicalUpdated = rawUpdated != null ? NeoDateFormat.toCanonical(rawUpdated, true) : null;
+          String updatedValue = canonicalUpdated != null ? canonicalUpdated : rawUpdated;
+          item.put(FIELD_UPDATED, updatedValue != null ? updatedValue : JSONObject.NULL);
           data.put(item);
         }
 
