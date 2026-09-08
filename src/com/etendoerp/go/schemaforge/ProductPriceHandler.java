@@ -192,41 +192,7 @@ public class ProductPriceHandler implements NeoHandler {
 
         JSONArray data = new JSONArray();
         for (Object[] row : rows) {
-          JSONObject item = new JSONObject();
-          item.put("id",                               row[0]);
-          item.put(PRODUCT_FIELD,                      row[1]);
-          item.put(PRICE_LIST_VERSION_FIELD,           row[2]);
-          item.put("priceListVersion$_identifier",     row[3]);
-          item.put(STANDARD_PRICE_FIELD,               ProductHandlerUtils.toBigDecimal(row[4]));
-          item.put(LIST_PRICE_FIELD,                   ProductHandlerUtils.toBigDecimal(row[5]));
-          item.put(PRICE_LIMIT,                        ProductHandlerUtils.toBigDecimal(row[6]));
-          String algoCode = row[7] != null ? String.valueOf(row[7]) : "S";
-          item.put("algorithm",                        algoCode);
-          item.put("algorithm$_identifier",            "S".equals(algoCode) ? "Standard" : algoCode);
-          // issopricelist is a CHAR(1) Etendo boolean — 'Y'/'N', not a Java boolean
-          item.put("priceListVersion$salesPriceList",  "Y".equals(String.valueOf(row[8])));
-          item.put("priceList$_identifier",            row[9]);
-          item.put("_identifier",                      row[10]);
-          item.put("currencySymbol",                   row[11] != null ? String.valueOf(row[11]) : null);
-          item.put("currencyIso",                      row[12] != null ? String.valueOf(row[12]) : null);
-          // isdefault (M_PriceList) — CHAR(1) 'Y'/'N'; lets the frontend pick the
-          // default sales/purchase price list when a product has several.
-          item.put("priceListVersion$default",         "Y".equals(String.valueOf(row[13])));
-          // validfromdate (M_PriceList_Version) — tiebreaker: among defaults the
-          // frontend keeps the most recent version (<= today).
-          item.put("priceListVersion$validFromDate",   row[14] != null ? String.valueOf(row[14]) : null);
-          item.put("_entityName",                      "PricingProductPrice");
-          // ETP-5203: row[15] (updated) is mandatory for every PUT/PATCH by
-          // NeoCrudHandler#validateUpdateRequest (ETP-5073) — omitting it left the
-          // Product window's Price tab with no way to echo the value back, so every
-          // edit 400'd with missing_updated. Canonicalized through NeoDateFormat since a
-          // native-SQL Timestamp prints in the raw Postgres shape, mirroring
-          // ChartOfAccountsHandler#toAccountJson.
-          String rawUpdated = row[15] != null ? String.valueOf(row[15]) : null;
-          String canonicalUpdated = rawUpdated != null ? NeoDateFormat.toCanonical(rawUpdated, true) : null;
-          String updatedValue = canonicalUpdated != null ? canonicalUpdated : rawUpdated;
-          item.put(FIELD_UPDATED, updatedValue != null ? updatedValue : JSONObject.NULL);
-          data.put(item);
+          data.put(toPriceJson(row));
         }
 
         return ProductHandlerUtils.buildListResponse(data);
@@ -238,6 +204,45 @@ public class ProductPriceHandler implements NeoHandler {
       log.error("Error fetching prices with salesPriceList for product {}: {}", parentId, e.getMessage(), e);
       return NeoResponse.error(500, "Error fetching price data");
     }
+  }
+
+  /** Row shape matches {@link #PRICE_LIST_SQL} column order 1:1. */
+  private static JSONObject toPriceJson(Object[] row) throws Exception {
+    JSONObject item = new JSONObject();
+    item.put("id",                               row[0]);
+    item.put(PRODUCT_FIELD,                      row[1]);
+    item.put(PRICE_LIST_VERSION_FIELD,           row[2]);
+    item.put("priceListVersion$_identifier",     row[3]);
+    item.put(STANDARD_PRICE_FIELD,               ProductHandlerUtils.toBigDecimal(row[4]));
+    item.put(LIST_PRICE_FIELD,                   ProductHandlerUtils.toBigDecimal(row[5]));
+    item.put(PRICE_LIMIT,                        ProductHandlerUtils.toBigDecimal(row[6]));
+    String algoCode = row[7] != null ? String.valueOf(row[7]) : "S";
+    item.put("algorithm",                        algoCode);
+    item.put("algorithm$_identifier",            "S".equals(algoCode) ? "Standard" : algoCode);
+    // issopricelist is a CHAR(1) Etendo boolean — 'Y'/'N', not a Java boolean
+    item.put("priceListVersion$salesPriceList",  "Y".equals(String.valueOf(row[8])));
+    item.put("priceList$_identifier",            row[9]);
+    item.put("_identifier",                      row[10]);
+    item.put("currencySymbol",                   row[11] != null ? String.valueOf(row[11]) : null);
+    item.put("currencyIso",                      row[12] != null ? String.valueOf(row[12]) : null);
+    // isdefault (M_PriceList) — CHAR(1) 'Y'/'N'; lets the frontend pick the
+    // default sales/purchase price list when a product has several.
+    item.put("priceListVersion$default",         "Y".equals(String.valueOf(row[13])));
+    // validfromdate (M_PriceList_Version) — tiebreaker: among defaults the
+    // frontend keeps the most recent version (<= today).
+    item.put("priceListVersion$validFromDate",   row[14] != null ? String.valueOf(row[14]) : null);
+    item.put("_entityName",                      "PricingProductPrice");
+    // ETP-5203: row[15] (updated) is mandatory for every PUT/PATCH by
+    // NeoCrudHandler#validateUpdateRequest (ETP-5073) — omitting it left the
+    // Product window's Price tab with no way to echo the value back, so every
+    // edit 400'd with missing_updated. Canonicalized through NeoDateFormat since a
+    // native-SQL Timestamp prints in the raw Postgres shape, mirroring
+    // ChartOfAccountsHandler#toAccountJson.
+    String rawUpdated = row[15] != null ? String.valueOf(row[15]) : null;
+    String canonicalUpdated = rawUpdated != null ? NeoDateFormat.toCanonical(rawUpdated, true) : null;
+    String updatedValue = canonicalUpdated != null ? canonicalUpdated : rawUpdated;
+    item.put(FIELD_UPDATED, updatedValue != null ? updatedValue : JSONObject.NULL);
+    return item;
   }
 
   /**
