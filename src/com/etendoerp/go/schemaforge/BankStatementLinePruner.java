@@ -40,7 +40,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
  *
  * <p><b>One deliberate divergence from Classic (ETP-4954):</b> a line with ANY
  * negative amount is dropped too, not just the both-zero one. See
- * {@link #hasNoUsableAmount} for why, and {@code BankStatementLinePrunerTest} for
+ * {@link #hasUnusableAmounts} for why, and {@code BankStatementLinePrunerTest} for
  * the cases that pin it.
  *
  * <p>It deliberately operates on the already-persisted lines of a statement
@@ -83,7 +83,7 @@ final class BankStatementLinePruner {
 
   /**
    * Removes every line of {@code statement} that carries no usable amount — both sides zero, or ANY
-   * side negative (see {@link #hasNoUsableAmount}) — then renumbers the survivors 10, 20, 30… in
+   * side negative or both sides at once (see {@link #hasUnusableAmounts}) — then renumbers the survivors 10, 20, 30… in
    * line-number order so the discarded rows leave no gap. Mirrors Classic's behaviour, including the
    * fact that a partially pruned import is still a successful import.
    *
@@ -102,7 +102,7 @@ final class BankStatementLinePruner {
     List<FIN_BankStatementLine> discarded = new ArrayList<>();
     long counter = 0L;
     for (FIN_BankStatementLine line : lines) {
-      if (hasNoUsableAmount(line)) {
+      if (hasUnusableAmounts(line)) {
         discarded.add(line);
         continue;
       }
@@ -159,10 +159,28 @@ final class BankStatementLinePruner {
    * @param line the parsed line to classify
    * @return whether the line must be dropped instead of imported
    */
-  private static boolean hasNoUsableAmount(FIN_BankStatementLine line) {
+  private static boolean hasUnusableAmounts(FIN_BankStatementLine line) {
     return (isZero(line.getCramount()) && isZero(line.getDramount()))
         || isNegative(line.getCramount())
-        || isNegative(line.getDramount());
+        || isNegative(line.getDramount())
+        || hasBothSides(line);
+  }
+
+  /**
+   * Both sides carrying an amount (ETP-4954). Reachable on this path: the generic CSV importer
+   * fills {@code dramount} and {@code cramount} from two independent columns
+   * ({@code GenericCsvBankStatementImporter.saveLine}), so a file with both columns populated
+   * produces such a line. It is not a movement the bank reported — the read path collapses the
+   * pair into {@code cramount - dramount}, so 100/30 surfaces as a -70 that appears in no
+   * statement and 50/50 reads as zero, which is exactly what the both-zero rule above exists to
+   * prevent. {@code ReactivationSupport.applyBankStatementAmounts} already refuses to leave a
+   * line in that state.
+   *
+   * @param line the parsed line to classify
+   * @return whether both sides carry a non-zero amount
+   */
+  private static boolean hasBothSides(FIN_BankStatementLine line) {
+    return !isZero(line.getCramount()) && !isZero(line.getDramount());
   }
 
   private static boolean isZero(BigDecimal amount) {

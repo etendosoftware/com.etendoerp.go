@@ -162,6 +162,17 @@ public class BankStatementsHandler implements NeoHandler {
    */
   private static final String MSG_NEGATIVE_AMOUNT_LINE =
       "Line amounts cannot be negative: use Deposit for money in and Withdrawal for money out";
+  /**
+   * ETP-4954: a statement line is an inflow OR an outflow, never both. Filling both sides is not
+   * a movement the bank reported — the read path collapses the pair into
+   * {@code cramount - dramount}, so 100/30 surfaces as a -70 that appears in no statement and
+   * 50/50 persists and then reads as zero. {@code ReactivationSupport.applyBankStatementAmounts}
+   * already refuses to leave both sides filled, netting them onto one side under Classic's sign
+   * normalization; this endpoint rejects instead, because an inbound line with both sides filled
+   * is bad input rather than two records being merged.
+   */
+  private static final String MSG_BOTH_AMOUNTS_LINE =
+      "A line must have an amount in either Deposit or Withdrawal, not in both";
   private static final String CODE_NO_VALID_LINES = "NO_VALID_LINES";
   private static final String FIELD_DISCARDED_LINES = "discardedLines";
 
@@ -947,6 +958,10 @@ public class BankStatementsHandler implements NeoHandler {
       // from MCP/REST, where the old "not both zero" guard let a negative pair through.
       if (crAmount.signum() < 0 || drAmount.signum() < 0) {
         throw new OBException(MSG_NEGATIVE_AMOUNT_LINE);
+      }
+      // ETP-4954: exactly one side. See MSG_BOTH_AMOUNTS_LINE.
+      if (crAmount.signum() != 0 && drAmount.signum() != 0) {
+        throw new OBException(MSG_BOTH_AMOUNTS_LINE);
       }
       line.setCramount(crAmount);
       line.setDramount(drAmount);
