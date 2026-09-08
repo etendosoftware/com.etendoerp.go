@@ -140,9 +140,13 @@ public class OnboardingDatasetImportService {
    * Validates that the imported dataset contains visible seed data for the target organization.
    *
    * <p><b>ETP-5079:</b> financial accounts are deliberately NOT part of this gate any more. The
-   * curated dataset no longer ships the three template accounts ("Caja"/"Cuenta de Banco"/
-   * "Tarjeta") — a tenant is expected to create its own — so a zero count is now the normal,
-   * correct outcome rather than a failed import. The count is still logged for diagnostics.</p>
+   * three template accounts ("Caja"/"Cuenta de Banco"/"Tarjeta") no longer reach a tenant — a
+   * tenant is expected to create its own — so a zero count is now the normal, correct outcome
+   * rather than a failed import. The count is still logged for diagnostics. (The rows are still
+   * SHIPPED by the dataset, for the GOClient sample client that {@code install.source} seeds; they
+   * are dropped on the onboarding path by {@code OnboardingDatasetNormalizer}'s
+   * {@code DemoMasterDataFilter}. Deleting them at the source instead is what broke
+   * {@code ./gradlew install} — see {@code OnboardingDemoMasterData}.)</p>
    *
    * @param client the client for which the dataset was imported
    * @param organization the organization for which the dataset was imported
