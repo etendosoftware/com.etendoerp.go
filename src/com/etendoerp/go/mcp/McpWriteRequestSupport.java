@@ -293,33 +293,42 @@ final class McpWriteRequestSupport {
 
   /**
    * Resolve parentId to the actual FK property name on child tabs.
-   * Replicates the same logic from NeoServlet's POST handler.
+   *
+   * <p><b>ETP-5184:</b> the target property now comes from {@link McpParentScope}, which picks the
+   * parent-link column whose target IS the parent tab's table (or the one declared in
+   * {@code MCP_CONFIG}). The previous implementation walked {@code getADColumnList()} and took the
+   * first {@code isLinkToParentColumn()} it found, without checking where that column pointed —
+   * and on the 17 entities whose first such column is not the parent link, it wrote the parent id
+   * into the wrong foreign key. {@code product/stock} is the clearest case: its SEQNO parent is
+   * {@code M_Product} but its only parent-link column is {@code M_RefInventory_ID}, so a create
+   * passing a product id stored it as "referenced inventory". It did not fail — it stored wrong
+   * data, which is why it went unnoticed. Both properties exist on the same entity
+   * ({@code product} and {@code referencedInventory}), so the write landed in the neighbouring
+   * field.</p>
+   *
+   * <p>A scope that cannot identify the parent writes nothing, exactly as before: the caller's
+   * gate is what refuses such an entity, and silently guessing a column here is what caused the
+   * defect in the first place.</p>
+   *
+   * @param adTab         the child tab
+   * @param body          the write payload, mutated in place
+   * @param parentIdValue the parent record id
+   * @param log           caller's logger
+   * @param sfEntity      the SchemaForge entity, needed to read its {@code MCP_CONFIG}
+   * @throws JSONException if the payload cannot be written to
    */
-  static void resolveParentFK(Tab adTab, JSONObject body, String parentIdValue, Logger log)
-      throws JSONException {
+  static void resolveParentFK(Tab adTab, JSONObject body, String parentIdValue, Logger log,
+      SFEntity sfEntity) throws JSONException {
     if (adTab.getTabLevel() == null || adTab.getTabLevel() <= 0) {
       return;
     }
-
-    Entity dalEntity = ModelProvider.getInstance()
-        .getEntityByTableName(adTab.getTable().getDBTableName());
-    if (dalEntity == null) {
+    McpParentScope.Scope scope = McpParentScope.forEntity(sfEntity);
+    if (scope.getParentField() == null) {
+      log.warn("No parent field resolved for tab '{}' — parentId not applied ({})",
+          adTab.getName(), scope.getProblem());
       return;
     }
-
-    for (Column col : adTab.getTable().getADColumnList()) {
-      if (col.isLinkToParentColumn() && col.isActive()) {
-        try {
-          Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
-          if (prop != null) {
-            body.put(prop.getName(), parentIdValue);
-            break;
-          }
-        } catch (Exception e) {
-          log.warn("Column '{}' not mappable to property in entity '{}': {}", col.getDBColumnName(), dalEntity.getName(), e.getMessage());
-        }
-      }
-    }
+    body.put(scope.getParentField(), parentIdValue);
   }
 
   /**

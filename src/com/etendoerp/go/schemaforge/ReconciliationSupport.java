@@ -163,6 +163,26 @@ final class ReconciliationSupport {
         && accountId.equals(line.getBankStatement().getAccount().getId());
   }
 
+  /**
+   * True when the line hangs off a bank statement that is still in DRAFT (not processed).
+   *
+   * <p>Fails <b>closed</b>, exactly like {@link #belongsToAccount}: a missing line or a missing
+   * statement answers "draft", because every caller uses this to REFUSE a write. A persisted row
+   * never reaches that branch - {@code FIN_BankStatement.Processed} is NOT NULL with default
+   * {@code 'N'} - but an unstubbed mock does, and a guard must not be the thing that throws.
+   *
+   * <p>A draft statement is not reconcilable yet (ETP-5121). "Save and process" is what makes a
+   * statement's lines reconcilable, and reactivating one puts it back in Borrador. The read side
+   * enforces the same rule in {@code ReconciliationHandler.loadPendingLines} and
+   * {@code PENDING_LINES_SQL}; this predicate is what the write paths use, so an Automatch preview
+   * taken before a reactivation cannot be applied after it.
+   */
+  static boolean isOnDraftStatement(FIN_BankStatementLine line) {
+    return line == null
+        || line.getBankStatement() == null
+        || !Boolean.TRUE.equals(line.getBankStatement().isProcessed());
+  }
+
   /** Signed amount of a transaction: {@code depositAmount - paymentAmount}. */
   static BigDecimal signedAmount(FIN_FinaccTransaction trx) {
     return nullSafe(trx.getDepositAmount()).subtract(nullSafe(trx.getPaymentAmount()));
