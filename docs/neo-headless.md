@@ -1553,13 +1553,27 @@ A requested `$_identifier` companion is normalised to its base property, for bot
 the validation — `fields:["businessPartner$_identifier"]` returns the FK *and* its label (it used to
 return only `id`) and is never mislabelled as unknown.
 
-The always-readable audit keys are known too (ETP-5073). `updated` is an AD *column* on every table
-but not an AD *field*, so no `ETGO_SF_FIELD` row exists for it and no window can opt in; the read
-path serves it anyway (`NeoFieldFilter.ALWAYS_READABLE_KEYS`, ETP-4787). Until ETP-5073 the emittable
-set omitted it, so `fields:["name","updated"]` returned `updated` in `data` **and** listed it in
-`unknownFields` — a response contradicting itself, which for an agent consumer is worse than no
-signal at all. The set is now unioned into `emittableResponseKeys()` only: `updated` stays
-unwritable, and a client that sends it on a create is still filtered/rejected exactly as before.
+The always-readable audit keys are known too (ETP-5073). `updated` and `created` are AD *columns* on
+every table but not AD *fields*, so no `ETGO_SF_FIELD` row exists for either and no window can opt
+in; the read path serves them anyway (`NeoFieldFilter.ALWAYS_READABLE_PROPS`, ETP-4787 for `updated`,
+ETP-5122 for `created`). Until ETP-5073 the emittable set omitted `updated`, so
+`fields:["name","updated"]` returned it in `data` **and** listed it in `unknownFields` — a response
+contradicting itself, which for an agent consumer is worse than no signal at all. The set is now
+unioned into `emittableResponseKeys()` only: both keys stay unwritable, and a client that sends
+either on a create is still filtered/rejected exactly as before.
+
+**`created` is served under an alias, and the DAL name is the trap (ETP-5122).** The exemption set is
+matched against raw `DataToJsonConverter` output, whose keys are DAL *property* names — and DAL does
+not name the `Created` column `created`. `Property` forces every name through
+`NamingUtil.getStaticPropertyName`, which resolves that column to the generated
+`PROPERTY_CREATIONDATE` constant, i.e. **`creationDate`** (`Updated`, by contrast, keeps the name
+`updated`). So a raw row never contains a key spelled `created`: ETP-5122's first attempt exempted
+`created`, which matched nothing, while `creationDate` went on being stripped — an entirely silent
+no-op, no failing test and no log line. `ALWAYS_READABLE_PROPS` therefore holds `creationDate`, and
+`AUDIT_PROP_TO_API_KEY` renames it to `created` on the way out, so clients see one key, `created`, and
+`emittableResponseKeys()` advertises that same name and never `creationDate`. The alias is read-side
+only — deliberately not merged into `apiKeyToPropName`, or `remapApiKeys` would turn a client-sent
+`created` into a writable `creationDate` on the write path.
 
 ---
 
