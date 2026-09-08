@@ -527,30 +527,36 @@ public class OnboardingDatasetNormalizer {
      * its table's entries matches — the parent tables match on their own primary key, the child
      * tables on the foreign key pointing at an excluded parent.
      */
+    private static final String FINANCIAL_ACCOUNT_ID_COLUMN = "FIN_FINANCIAL_ACCOUNT_ID";
+    private static final String PRODUCT_ID_COLUMN = "M_PRODUCT_ID";
+    private static final String WAREHOUSE_ID_COLUMN = "M_WAREHOUSE_ID";
+    private static final String LOCATOR_ID_COLUMN = "M_LOCATOR_ID";
+    private static final String PRODUCT_CATEGORY_ID_COLUMN = "M_PRODUCT_CATEGORY_ID";
+
     private static final Map<String, Map<String, Set<String>>> EXCLUSIONS_BY_TABLE = Map.of(
         "FIN_FINANCIAL_ACCOUNT",
-        Map.of("FIN_FINANCIAL_ACCOUNT_ID", OnboardingDemoMasterData.FINANCIAL_ACCOUNT_IDS),
+        Map.of(FINANCIAL_ACCOUNT_ID_COLUMN, OnboardingDemoMasterData.FINANCIAL_ACCOUNT_IDS),
         "FIN_FINACC_PAYMENTMETHOD",
-        Map.of("FIN_FINANCIAL_ACCOUNT_ID", OnboardingDemoMasterData.FINANCIAL_ACCOUNT_IDS),
+        Map.of(FINANCIAL_ACCOUNT_ID_COLUMN, OnboardingDemoMasterData.FINANCIAL_ACCOUNT_IDS),
         "M_PRODUCT",
-        Map.of("M_PRODUCT_ID", OnboardingDemoMasterData.PRODUCT_IDS),
+        Map.of(PRODUCT_ID_COLUMN, OnboardingDemoMasterData.PRODUCT_IDS),
         "M_PRODUCTPRICE",
-        Map.of("M_PRODUCT_ID", OnboardingDemoMasterData.PRODUCT_IDS),
+        Map.of(PRODUCT_ID_COLUMN, OnboardingDemoMasterData.PRODUCT_IDS),
         "M_WAREHOUSE",
-        Map.of("M_WAREHOUSE_ID", OnboardingDemoMasterData.WAREHOUSE_IDS),
+        Map.of(WAREHOUSE_ID_COLUMN, OnboardingDemoMasterData.WAREHOUSE_IDS),
         "AD_ORG_WAREHOUSE",
-        Map.of("M_WAREHOUSE_ID", OnboardingDemoMasterData.WAREHOUSE_IDS),
+        Map.of(WAREHOUSE_ID_COLUMN, OnboardingDemoMasterData.WAREHOUSE_IDS),
         // Both handles on purpose: the locator is demo data in its own right AND belongs to an
         // excluded warehouse, so a future locator added to that warehouse is dropped too.
         "M_LOCATOR",
-        Map.of("M_LOCATOR_ID", OnboardingDemoMasterData.LOCATOR_IDS,
-            "M_WAREHOUSE_ID", OnboardingDemoMasterData.WAREHOUSE_IDS),
+        Map.of(LOCATOR_ID_COLUMN, OnboardingDemoMasterData.LOCATOR_IDS,
+            WAREHOUSE_ID_COLUMN, OnboardingDemoMasterData.WAREHOUSE_IDS),
         "M_PRODUCT_CATEGORY",
-        Map.of("M_PRODUCT_CATEGORY_ID", OnboardingDemoMasterData.PRODUCT_CATEGORY_IDS),
+        Map.of(PRODUCT_CATEGORY_ID_COLUMN, OnboardingDemoMasterData.PRODUCT_CATEGORY_IDS),
         // The excluded category's es_ES translation. Dropping the parent while importing its
         // translation would hand every tenant a _TRL row pointing at a category it does not have.
         "M_PRODUCT_CATEGORY_TRL",
-        Map.of("M_PRODUCT_CATEGORY_ID", OnboardingDemoMasterData.PRODUCT_CATEGORY_IDS)
+        Map.of(PRODUCT_CATEGORY_ID_COLUMN, OnboardingDemoMasterData.PRODUCT_CATEGORY_IDS)
     );
 
     private boolean isExcludedRow(String tableName, Map<String, String> rawColumns) {
