@@ -29,6 +29,7 @@ import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseAmount;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseIsoDate;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseStatementIds;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.truncate;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.validateLineAmounts;
 
 import com.etendoerp.go.schemaforge.BankStatementFormatDetector.StatementFormat;
 
@@ -153,26 +154,6 @@ public class BankStatementsHandler implements NeoHandler {
   private static final String MSG_LINE_REQUIRED = "At least one line is required";
   private static final String MSG_NO_VALID_LINES =
       "The file contains no valid lines to import";
-  private static final String MSG_ZERO_AMOUNT_LINE =
-      "Every line must have an amount in either Deposit or Withdrawal";
-  /**
-   * ETP-4954: a statement line never carries a negative amount — a negative Salida is conceptually
-   * an Entrada. Rejecting it here (instead of letting the read path net the pair into the opposite
-   * column) keeps this endpoint aligned with the manual form and with the file-import pruner.
-   */
-  private static final String MSG_NEGATIVE_AMOUNT_LINE =
-      "Line amounts cannot be negative: use Deposit for money in and Withdrawal for money out";
-  /**
-   * ETP-4954: a statement line is an inflow OR an outflow, never both. Filling both sides is not
-   * a movement the bank reported — the read path collapses the pair into
-   * {@code cramount - dramount}, so 100/30 surfaces as a -70 that appears in no statement and
-   * 50/50 persists and then reads as zero. {@code ReactivationSupport.applyBankStatementAmounts}
-   * already refuses to leave both sides filled, netting them onto one side under Classic's sign
-   * normalization; this endpoint rejects instead, because an inbound line with both sides filled
-   * is bad input rather than two records being merged.
-   */
-  private static final String MSG_BOTH_AMOUNTS_LINE =
-      "A line must have an amount in either Deposit or Withdrawal, not in both";
   private static final String CODE_NO_VALID_LINES = "NO_VALID_LINES";
   private static final String FIELD_DISCARDED_LINES = "discardedLines";
 
@@ -914,46 +895,6 @@ public class BankStatementsHandler implements NeoHandler {
     statement.setFileName(StringUtils.isNotBlank(fileName) ? truncate(fileName, 255) : null);
     String notes = body.optString(FIELD_NOTES, null);
     statement.setNotes(StringUtils.isNotBlank(notes) ? truncate(notes, 255) : null);
-  }
-
-  /**
-   * The amount rule for one inbound line: an amount above zero on EXACTLY ONE side.
-   *
-   * <p>Three ways to fail it, each with its own message because the caller cannot tell them apart
-   * from a bare 400:
-   * <ul>
-   *   <li>no amount at all. Unlike the file import — which silently drops amount-less rows, as
-   *       Classic does — this is a validation error here: the manual form has a user to fix it.</li>
-   *   <li>a negative amount. The frontend already refuses these ({@code isLineComplete} needs a
-   *       strictly positive side), but this endpoint is also reachable from MCP/REST, where the
-   *       original "not both zero" guard let a negative pair through.</li>
-   *   <li>both sides filled. A statement line is an inflow OR an outflow; see
-   *       {@link #MSG_BOTH_AMOUNTS_LINE}.</li>
-   * </ul>
-   *
-   * <p><b>Called BEFORE the setters, and that ordering is load-bearing:</b> a managed entity is
-   * flushed even when the request ends in a 400, so validating after
-   * {@code setCramount}/{@code setDramount} would persist the very row being rejected.
-   * {@code BankStatementsHandlerTest} pins it with {@code verify(line, never()).setCramount(any())}.
-   *
-   * <p>Extracted from {@link #createLines} rather than left inline: three guards for one concept
-   * carried the whole rule's documentation into the middle of a loop, and pushed that method past
-   * Sonar's cognitive-complexity threshold (S3776) once the second and third were added.
-   *
-   * @param crAmount the Deposit (money in) amount, never null
-   * @param drAmount the Withdrawal (money out) amount, never null
-   * @throws OBException when the pair does not describe a single-sided movement
-   */
-  private static void validateLineAmounts(BigDecimal crAmount, BigDecimal drAmount) {
-    if (crAmount.signum() == 0 && drAmount.signum() == 0) {
-      throw new OBException(MSG_ZERO_AMOUNT_LINE);
-    }
-    if (crAmount.signum() < 0 || drAmount.signum() < 0) {
-      throw new OBException(MSG_NEGATIVE_AMOUNT_LINE);
-    }
-    if (crAmount.signum() != 0 && drAmount.signum() != 0) {
-      throw new OBException(MSG_BOTH_AMOUNTS_LINE);
-    }
   }
 
   /**
