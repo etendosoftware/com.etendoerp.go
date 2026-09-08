@@ -307,6 +307,16 @@ public final class NeoAttachmentsHelper {
         return NeoResponse.error(400, "Missing 'file' part");
       }
 
+      // ETP-5038: the size/type policy is enforced HERE, not only in the dropzone — the
+      // browser is not the only caller and the part's Content-Type is chosen by whoever
+      // is calling. Cheap checks (declared size, extension) run before a single byte is
+      // written to disk; the magic-byte check needs the materialized file and runs below.
+      String submittedName = resolveFileName(filePart);
+      String rejection = NeoAttachmentPolicy.validateMetadata(submittedName, filePart.getSize());
+      if (rejection != null) {
+        return NeoResponse.error(400, rejection);
+      }
+
       String tableId = resolveTableId(tableName);
       String tabId = resolveTabId(tableId, request.getParameter("tabId"));
       if (tabId == null) {
@@ -317,6 +327,11 @@ public final class NeoAttachmentsHelper {
       String orgId = OBContext.getOBContext().getCurrentOrganization().getId();
 
       tempFile = materializeTempFile(filePart);
+
+      rejection = NeoAttachmentPolicy.validateContent(submittedName, tempFile);
+      if (rejection != null) {
+        return NeoResponse.error(400, rejection);
+      }
 
       AttachImplementationManager aim = getAttachManager();
       aim.upload(new HashMap<>(), tabId, recordId, orgId, tempFile);
@@ -344,6 +359,24 @@ public final class NeoAttachmentsHelper {
       return NeoResponse.error(500, "Internal error uploading attachment");
     } finally {
       cleanupTempFile(tempFile);
+    }
+  }
+
+  // ── Policy (accepted types / max size) ──────────────────────────────────────
+
+  /**
+   * Serves the upload policy enforced by {@link #handleUpload} — the single source of
+   * truth the React Attachments tab reads to build its {@code accept} attribute, its
+   * client-side check and its "Supported formats" label (ETP-5038).
+   *
+   * @return 200 with {@code {maxSizeMB, allowedMimeTypes, allowedExtensions, typeGroups}}
+   */
+  public static NeoResponse handleGetPolicy() {
+    try {
+      return NeoResponse.ok(NeoAttachmentPolicy.toJson());
+    } catch (JSONException e) {
+      log.error("Failed to build the attachments policy response", e);
+      return NeoResponse.error(500, "Failed to build the attachments policy response");
     }
   }
 
