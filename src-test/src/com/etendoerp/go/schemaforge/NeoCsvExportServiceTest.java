@@ -36,6 +36,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import javax.servlet.ServletOutputStream;
 import javax.servlet.WriteListener;
@@ -50,6 +51,9 @@ import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 
 /**
  * Unit tests for {@link NeoCsvExportService} — pure (no DB / OBContext). Builds
@@ -57,6 +61,16 @@ import org.junit.jupiter.api.Test;
  * CSV plus the download headers.
  */
 class NeoCsvExportServiceTest {
+
+  /** Query params and envelope keys the neutralization cases build over and over. */
+  private static final String EXPORT_PARAM = "export";
+  private static final String CSV_FORMAT = "csv";
+  private static final String COLUMNS_PARAM = "columns";
+  private static final String STATEMENTS_KEY = "statements";
+  private static final String CELL_KEY = "cell";
+  private static final String CELL_LABEL = "Cell";
+  /** The CSV writer's line separator, as a {@code String.split} regex. */
+  private static final String CRLF_SEPARATOR = "\\r\\n";
 
   private static NeoResponse envelope(String key, JSONArray rows) throws Exception {
     JSONObject data = new JSONObject().put(key, rows);
@@ -386,80 +400,190 @@ class NeoCsvExportServiceTest {
     assertFalse(csv.replace("﻿", "").trim().contains("\n"), csv);
   }
 
-  @Test
-  void neutralizesFormulaInjectionInCsvExport() throws Exception {
-    CapturingResponse cap = new CapturingResponse();
-    JSONArray rows = new JSONArray().put(new JSONObject()
-        .put("equals", "=1+1")
-        .put("plus", "+1+1")
-        .put("minus", "-cmd|' /C calc'!A0")
-        .put("at", "@SUM(1,2)")
-        .put("tab", "\t=1+1")
-        .put("cr", "\r=1+1")
-        .put("safe", "Normal Value"));
-    NeoResponse res = envelope("statements", rows);
+  // ── Spreadsheet formula neutralization (ETP-5032, closes SEC-04) ──────────
+  //
+  // The cases below are the canonical cross-runtime contract, not this class's own
+  // choice of inputs: docs/security/csv-neutralization-fixtures.md (referenced by
+  // ADR-0004 D2) is the specification, and its executable twin for the two JavaScript
+  // implementations is
+  // @etendosoftware/app-shell-core/lib/csv/csvNeutralizationFixtures.js. A trigger is
+  // added to that table FIRST, then to every implementation — so this stream must stay
+  // in step with it.
 
-    boolean handled = NeoCsvExportService.tryExport(
-        res,
-        params("export", "csv",
-            "columns", "equals:Equals|plus:Plus|minus:Minus|at:At|tab:Tab|cr:Cr|safe:Safe"),
-        cap.response);
-
-    assertTrue(handled);
-    String csv = cap.csv();
-    assertTrue(csv.contains("\"'=1+1\""), csv);
-    assertTrue(csv.contains("\"'+1+1\""), csv);
-    assertTrue(csv.contains("\"'-cmd|' /C calc'!A0\""), csv);
-    assertTrue(csv.contains("\"'@SUM(1,2)\""), csv);
-    assertTrue(csv.contains("\"'\t=1+1\""), csv);
-    assertTrue(csv.contains("\"'\r=1+1\""), csv);
-    assertTrue(csv.contains("\"Normal Value\""), csv);
+  /**
+   * The canonical fixture table: {@code description, input, expected cell value}. "Expected"
+   * is the value AFTER neutralization and BEFORE CSV quoting, which is why every assertion
+   * below wraps it in {@link #quotedField}.
+   *
+   * <p>The {@code null} row of the markdown table is covered by two dedicated tests instead
+   * ({@link #writesAnEmptyCellForAJsonNullValue} and the pre-existing missing-key test),
+   * because a JSON row expresses "no value" as an absent key or {@code JSONObject.NULL},
+   * never as a Java {@code null} cell.
+   *
+   * @return one {@link Arguments} triple per fixture row
+   */
+  static Stream<Arguments> spreadsheetNeutralizationFixtures() {
+    return Stream.of(
+        Arguments.of("Equals", "=1+1", "'=1+1"),
+        Arguments.of("Plus", "+SUM(A1:A2)", "'+SUM(A1:A2)"),
+        Arguments.of("Minus / DDE-like", "-CMD", "'-CMD"),
+        Arguments.of("At sign", "@SUM(A1:A2)", "'@SUM(A1:A2)"),
+        Arguments.of("DDE command payload", "+cmd|' /C calc'!A0", "'+cmd|' /C calc'!A0"),
+        Arguments.of("HYPERLINK payload", "=HYPERLINK(\"http://example.com\",\"Click\")",
+            "'=HYPERLINK(\"http://example.com\",\"Click\")"),
+        Arguments.of("Marker behind spaces", "   =1+1", "'   =1+1"),
+        Arguments.of("Marker behind TAB", "\t=1+1", "'\t=1+1"),
+        Arguments.of("Marker behind CR", "\r=1+1", "'\r=1+1"),
+        Arguments.of("Marker behind LF", "\n=1+1", "'\n=1+1"),
+        Arguments.of("TAB as first standalone control", "\tText", "'\tText"),
+        Arguments.of("CR as first standalone control", "\rText", "'\rText"),
+        Arguments.of("LF as first standalone control", "\nText", "'\nText"),
+        Arguments.of("BOM before marker", "\uFEFF=1+1", "'\uFEFF=1+1"),
+        Arguments.of("NBSP before marker", "\u00A0=1+1", "'\u00A0=1+1"),
+        Arguments.of("Full-width equals", "\uFF1D1+1", "'\uFF1D1+1"),
+        Arguments.of("Full-width plus", "\uFF0BSUM(A1:A2)", "'\uFF0BSUM(A1:A2)"),
+        Arguments.of("Full-width minus", "\uFF0DCMD", "'\uFF0DCMD"),
+        Arguments.of("Full-width at", "\uFF20SUM(A1:A2)", "'\uFF20SUM(A1:A2)"),
+        Arguments.of("Already neutralized", "'=1+1", "'=1+1"),
+        Arguments.of("Negative number", "-500.00", "'-500.00"),
+        Arguments.of("Plain text", "Normal Value", "Normal Value"),
+        Arguments.of("Plain text behind spaces", "  Normal Value", "  Normal Value"),
+        Arguments.of("Trigger not in first position", "Total = 1+1", "Total = 1+1"),
+        Arguments.of("Empty", "", ""));
   }
 
-  @Test
-  void neutralizesFormulaMarkersHiddenBehindLeadingWhitespaceOrLineFeed() throws Exception {
-    CapturingResponse cap = new CapturingResponse();
-    JSONArray rows = new JSONArray().put(new JSONObject()
-        .put("spaces", "   =1+1")
-        .put("lf", "\n=1+1")
-        .put("safe", "  Normal Value"));
-    NeoResponse res = envelope("statements", rows);
-
-    boolean handled = NeoCsvExportService.tryExport(
-        res,
-        params("export", "csv", "columns", "spaces:Spaces|lf:Lf|safe:Safe"),
-        cap.response);
-
-    assertTrue(handled);
-    String csv = cap.csv();
-    // A marker hiding behind leading spaces or a line feed is still caught.
-    assertTrue(csv.contains("\"'   =1+1\""), csv);
-    assertTrue(csv.contains("\"'\n=1+1\""), csv);
-    // Leading whitespace with no formula marker behind it is left untouched.
-    assertTrue(csv.contains("\"  Normal Value\""), csv);
+  /**
+   * The same fixtures, minus the rows a column LABEL cannot express, because
+   * {@code NeoExportTable.parseColumns} normalizes the {@code columns} spec before the writer
+   * ever sees it: it splits on {@code |} and {@code :}, falls back to the column key for a
+   * blank label, and TRIMS what is left. So a label whose payload is leading whitespace (or
+   * TAB/CR/LF) cannot survive the parser and is not a neutralization concern — those triggers
+   * are covered on the data-cell path, where nothing trims.
+   *
+   * <p>Filtering here rather than branching inside the test keeps the assertion
+   * unconditional: every case this stream yields must be neutralized, with no escape hatch.
+   *
+   * @return the fixture rows that survive the columns-spec parser unchanged
+   */
+  static Stream<Arguments> headerLabelFixtures() {
+    return spreadsheetNeutralizationFixtures().filter(args -> {
+      String label = (String) args.get()[1];
+      return !label.isEmpty()
+          && label.equals(label.trim())
+          && label.indexOf('|') < 0
+          && label.indexOf(':') < 0;
+    });
   }
 
-  @Test
-  void handlesNegativeNumbersAndAlreadyNeutralizedValuesWithoutDoublePrefixing() throws Exception {
-    CapturingResponse cap = new CapturingResponse();
-    JSONArray rows = new JSONArray().put(new JSONObject()
-        .put("negative", "-500.00")
-        .put("prefixed", "'=1+1"));
-    NeoResponse res = envelope("statements", rows);
+  /**
+   * Every fixture row, asserted on a DATA cell.
+   *
+   * @param description fixture label, used as the test name
+   * @param input       the stored value
+   * @param expected    the cell value after neutralization, before quoting
+   * @throws Exception if the envelope cannot be built or the response cannot be written
+   */
+  @ParameterizedTest(name = "data cell — {0}")
+  @MethodSource("spreadsheetNeutralizationFixtures")
+  void neutralizesEveryCanonicalFixtureInADataCell(String description, String input,
+      String expected) throws Exception {
+    String csv = exportOneCell(input);
 
-    boolean handled = NeoCsvExportService.tryExport(
-        res,
-        params("export", "csv", "columns", "negative:Negative|prefixed:Prefixed"),
+    assertTrue(csv.contains(quotedField(expected)), description + " → " + csv);
+  }
+
+  /**
+   * Every fixture row, asserted on a HEADER LABEL. Labels are attacker-influenced too:
+   * they derive from AD field names and from the caller-supplied {@code columns} spec
+   * (ADR-0004 D3 requires both header and data cells to be neutralized).
+   *
+   * @param description fixture label, used as the test name
+   * @param input       the column label
+   * @param expected    the label after neutralization, before quoting
+   * @throws Exception if the envelope cannot be built or the response cannot be written
+   */
+  @ParameterizedTest(name = "header label — {0}")
+  @MethodSource("headerLabelFixtures")
+  void neutralizesEveryCanonicalFixtureInAHeaderLabel(String description, String input,
+      String expected) throws Exception {
+    CapturingResponse cap = new CapturingResponse();
+    JSONArray rows = new JSONArray().put(new JSONObject().put(CELL_KEY, "value"));
+
+    NeoCsvExportService.tryExport(envelope(STATEMENTS_KEY, rows),
+        params(EXPORT_PARAM, CSV_FORMAT, COLUMNS_PARAM, CELL_KEY + ":" + input), cap.response);
+
+    assertTrue(cap.csv().contains(quotedField(expected)), description + " → " + cap.csv());
+  }
+
+  /**
+   * Pins the normative ordering: neutralize, THEN quote. The apostrophe must land INSIDE the
+   * quoted field, the embedded quote must be doubled, and the comma and newline must not split
+   * the cell — one RFC 4180 field, however the value is built.
+   *
+   * @throws Exception if the envelope cannot be built or the response cannot be written
+   */
+  @Test
+  void neutralizesBeforeQuotingWhenTheTriggerArrivesWithDelimitersAndQuotes() throws Exception {
+    String csv = exportOneCell("=1+1,\"x\"\nnext");
+
+    assertTrue(csv.contains("\"'=1+1,\"\"x\"\"\nnext\""), csv);
+    // The apostrophe is never emitted outside the quotes.
+    assertFalse(csv.contains("'\"=1+1"), csv);
+  }
+
+  /**
+   * A JSON null cell exports as an empty field, with no apostrophe: there is nothing for a
+   * spreadsheet to interpret.
+   *
+   * @throws Exception if the envelope cannot be built or the response cannot be written
+   */
+  @Test
+  void writesAnEmptyCellForAJsonNullValue() throws Exception {
+    CapturingResponse cap = new CapturingResponse();
+    JSONArray rows = new JSONArray().put(new JSONObject().put(CELL_KEY, JSONObject.NULL));
+
+    NeoCsvExportService.tryExport(envelope(STATEMENTS_KEY, rows),
+        params(EXPORT_PARAM, CSV_FORMAT, COLUMNS_PARAM, CELL_KEY + ":" + CELL_LABEL),
         cap.response);
 
-    assertTrue(handled);
-    String csv = cap.csv();
-    // Negative numbers are also neutralized (documented trade-off: rendered as text in Excel).
-    // "-CMD" must be caught, so a bare leading "-" cannot be exempted.
-    assertTrue(csv.contains("\"'-500.00\""), csv);
-    // A value already safely prefixed with an apostrophe is not prefixed a second time.
-    assertTrue(csv.contains("\"'=1+1\""), csv);
-    assertFalse(csv.contains("''=1+1"), csv);
+    // The data line is exactly one empty quoted field — not an apostrophe, not the literal
+    // string "null".
+    String[] lines = cap.csv().split(CRLF_SEPARATOR);
+    assertEquals(2, lines.length, cap.csv());
+    assertEquals("\"\"", lines[1], cap.csv());
+  }
+
+  /**
+   * Exports {@code value} as the single cell of a single row and returns the streamed CSV.
+   * Collapses the envelope-plus-params boilerplate every neutralization case would otherwise
+   * repeat.
+   *
+   * @param value the cell value to export
+   * @return the streamed CSV, BOM included
+   * @throws Exception if the envelope cannot be built or the response cannot be written
+   */
+  private static String exportOneCell(String value) throws Exception {
+    CapturingResponse cap = new CapturingResponse();
+    JSONArray rows = new JSONArray().put(new JSONObject().put(CELL_KEY, value));
+
+    boolean handled = NeoCsvExportService.tryExport(envelope(STATEMENTS_KEY, rows),
+        params(EXPORT_PARAM, CSV_FORMAT, COLUMNS_PARAM, CELL_KEY + ":" + CELL_LABEL),
+        cap.response);
+
+    assertTrue(handled, "tryExport declined an export=csv request");
+    return cap.csv();
+  }
+
+  /**
+   * Wraps an expected cell value the way the CSV writer does: always quoted, inner quotes
+   * doubled. Keeps the fixture table free of quoting noise so it stays comparable, row for
+   * row, with the markdown specification.
+   *
+   * @param cell expected cell value after neutralization
+   * @return the expected RFC 4180 field
+   */
+  private static String quotedField(String cell) {
+    return "\"" + cell.replace("\"", "\"\"") + "\"";
   }
 
   // ETP-4997 — a generic CRUD list (contacts, products) returns `response.data` as the array
