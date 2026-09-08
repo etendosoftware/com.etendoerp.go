@@ -1542,4 +1542,312 @@ public class DocumentPostingServiceTest {
       assertFalse(r.message().contains("Invoice Price Variance"));
     }
   }
+
+  /**
+   * ETP-5175 QA follow-up: a session language that is neither {@code es_ES} nor {@code en_US}
+   * (e.g. a regional variant or an unrelated language, here {@code fr_FR}) must fall back to the
+   * English label cleanly — {@link DocumentPostingService.BpGroupAccountColumn#label(String)}
+   * does a plain exact-match {@code equals} against {@code es_ES}, so anything else (including
+   * {@code es_AR}, {@code es_MX}, {@code pt_PT}) resolves to English, never an exception or a
+   * blank label.
+   */
+  @Test
+  public void postAddsMissingAccountsDetailFallsBackToEnglishForUnsupportedSessionLanguage()
+      throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubAcctServerForBpGroupEnrichment();
+    AcctSchema schema = mock(AcctSchema.class);
+    when(schema.getC_AcctSchema_ID()).thenReturn("schema-1");
+    acct.m_as = new AcctSchema[] { schema };
+
+    OBDal obDal = mock(OBDal.class);
+    stubBusinessPartnerWithGroup(obDal);
+
+    CategoryAccounts row = fullyConfiguredCategoryAccounts();
+    when(row.getNonInvoicedReceipts()).thenReturn(null);
+    stubCategoryAccountsCriteria(obDal, row);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "fr_FR");
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      stubBpGroupAndMissingAccountsMessages(msgMock);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertTrue(r.message()
+          .contains("Please review the BP Group's accounting setup: Non-Invoiced Receipts."));
+      assertFalse(r.message().contains("Recibos no facturados"));
+    }
+  }
+
+  /**
+   * ETP-5175 QA follow-up: with two missing {@code C_BP_Group_Acct} columns and a Spanish
+   * session, BOTH labels in the comma-joined list must be Spanish — {@code lang} is resolved
+   * once per call and reused for every column in the loop (not re-resolved per entry), so there
+   * is no risk of a mixed EN/ES list. {@code
+   * postAddsMissingAccountsDetailForMultipleMissingColumns} already proves the multi-column case
+   * in English; {@code postAddsMissingAccountsDetailUsesSpanishLabelWhenSessionLanguageIsEsEs}
+   * already proves the Spanish case for a single column. This is the only test combining both.
+   */
+  @Test
+  public void postAddsMissingAccountsDetailForMultipleMissingColumnsInSpanish() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubAcctServerForBpGroupEnrichment();
+    AcctSchema schema = mock(AcctSchema.class);
+    when(schema.getC_AcctSchema_ID()).thenReturn("schema-1");
+    acct.m_as = new AcctSchema[] { schema };
+
+    OBDal obDal = mock(OBDal.class);
+    stubBusinessPartnerWithGroup(obDal);
+
+    CategoryAccounts row = fullyConfiguredCategoryAccounts();
+    when(row.getNonInvoicedReceipts()).thenReturn(null);
+    when(row.getVendorPrepayment()).thenReturn(null);
+    stubCategoryAccountsCriteria(obDal, row);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "es_ES");
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      stubBpGroupAndMissingAccountsMessages(msgMock);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertTrue(r.message().contains(
+          "Please review the BP Group's accounting setup: Recibos no facturados, "
+              + "Pagos por adelantado del proveedor."));
+      assertFalse(r.message().contains("Non-Invoiced Receipts"));
+      assertFalse(r.message().contains("Vendor Prepayment"));
+    }
+  }
+
+  /**
+   * ETP-5175 QA follow-up: {@code OBContext.getOBContext().getLanguage()} returning {@code null}
+   * (e.g. a background/scheduled process without a full session) must NOT crash the whole
+   * {@code post()} call. {@code resolveMissingBpGroupAccounts}/{@code resolveMissingProductAccounts}
+   * dereference {@code .getLanguage().getLanguage()} unguarded, but that call is wrapped by the
+   * caller's own try/catch ({@code resolveMissingAccountsDetail}, same fail-closed contract as
+   * every other lookup failure in this class) — so the NPE is swallowed, the missing-accounts
+   * addendum is silently omitted, and the already-built BP + BP Group detail is preserved.
+   */
+  @Test
+  public void postOmitsMissingAccountsDetailWhenSessionLanguageIsNull() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubAcctServerForBpGroupEnrichment();
+    AcctSchema schema = mock(AcctSchema.class);
+    when(schema.getC_AcctSchema_ID()).thenReturn("schema-1");
+    acct.m_as = new AcctSchema[] { schema };
+
+    OBDal obDal = mock(OBDal.class);
+    stubBusinessPartnerWithGroup(obDal);
+
+    CategoryAccounts row = fullyConfiguredCategoryAccounts();
+    when(row.getNonInvoicedReceipts()).thenReturn(null);
+    stubCategoryAccountsCriteria(obDal, row);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      OBContext ctx = mock(OBContext.class);
+      Client client = mock(Client.class);
+      Organization org = mock(Organization.class);
+      User user = mock(User.class);
+      when(client.getId()).thenReturn("test-client-id");
+      when(org.getId()).thenReturn("test-org-id");
+      when(user.getId()).thenReturn("test-user-id");
+      when(ctx.getCurrentClient()).thenReturn(client);
+      when(ctx.getCurrentOrganization()).thenReturn(org);
+      when(ctx.getUser()).thenReturn(user);
+      when(ctx.getLanguage()).thenReturn(null);
+      obc.when(OBContext::getOBContext).thenReturn(ctx);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      stubBpGroupAndMissingAccountsMessages(msgMock);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
+      assertFalse(r.message().contains("Please review the BP Group's accounting setup"));
+    }
+  }
+
+  /**
+   * ETP-5175 QA follow-up: full end-to-end reproduction of the user's live-server scenario (BP
+   * Group fully configured, product missing only {@code Invoice Price Variance}) in an
+   * {@code en_US} session, pinning the exact composed message character-for-character — not just
+   * a {@code contains} check — so any future wording drift on either the BP+Group enrichment or
+   * the product addendum is caught immediately.
+   */
+  @Test
+  public void postComposesExactEnglishMessageForBpGroupAndProductScenario() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    acct.C_BPartner_ID = "bp-1";
+    acct.DocumentType = AcctServer.DOCTYPE_MatMatchInv;
+    acct.Record_ID = "matchinv-1";
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_InvalidAccount);
+    OBError err = new OBError();
+    err.setMessage("Account could not be found.");
+    when(acct.getMessageResult()).thenReturn(err);
+    AcctSchema schema = mock(AcctSchema.class);
+    when(schema.getC_AcctSchema_ID()).thenReturn("schema-1");
+    acct.m_as = new AcctSchema[] { schema };
+
+    OBDal obDal = mock(OBDal.class);
+    BusinessPartner bp = mock(BusinessPartner.class);
+    when(bp.getName()).thenReturn("Blanquiceleste S.A.");
+    Category bpGroup = mock(Category.class);
+    when(bpGroup.getId()).thenReturn("bp-group-1");
+    when(bpGroup.getName()).thenReturn("Proveedora");
+    when(bp.getBusinessPartnerCategory()).thenReturn(bpGroup);
+    when(obDal.get(BusinessPartner.class, "bp-1")).thenReturn(bp);
+    stubCategoryAccountsCriteria(obDal, fullyConfiguredCategoryAccounts());
+    stubReceiptInvoiceMatchWithProduct(obDal, "matchinv-1");
+
+    ProductAccounts productRow = fullyConfiguredProductAccounts();
+    when(productRow.getInvoicePriceVariance()).thenReturn(null);
+    stubProductAccountsCriteria(obDal, productRow);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "en_US");
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
+          .thenReturn("(Business Partner: @bpName@, BP Group: @bpGroup@)");
+      stubMissingProductAccountsMessage(msgMock);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Account could not be found. (Business Partner: Blanquiceleste S.A., "
+          + "BP Group: Proveedora) Please review the Product's accounting setup: "
+          + "Invoice Price Variance.", r.message());
+    }
+  }
+
+  /**
+   * ETP-5175 QA follow-up: the Spanish counterpart of {@code
+   * postComposesExactEnglishMessageForBpGroupAndProductScenario} — same scenario, {@code es_ES}
+   * session, pinning the exact composed message using the NEW {@code AD_MESSAGE_TRL} Spanish
+   * translations for {@code ETGO_InvalidAccountBpAndGroup} and {@code
+   * ETGO_InvalidAccountMissingProductAccounts} plus the Spanish {@code Desviación Pr. Factura}
+   * column label.
+   *
+   * <p><b>QA BUG (HIGH, ETP-5175):</b> this pins the ACTUAL current output, which does NOT match
+   * the ticket's own target string. The English base {@code ETGO_InvalidAccountBpAndGroup}
+   * {@code MSGTEXT} is {@code "(Business Partner: @bpName@, BP Group: @bpGroup@)"} — wrapped in
+   * parentheses — but its new {@code AD_MESSAGE_TRL} Spanish translation
+   * ({@code src-db/database/sourcedata/AD_MESSAGE_TRL.xml}, id {@code 30005C8B...}) is
+   * {@code "Contacto: @bpName@, Grupo de Terceros: @bpGroup@"} with NO parentheses (same gap on
+   * the BP-only translation, id {@code 0DCEE0AA...}). {@link
+   * DocumentPostingService#resolveBusinessPartnerDetail} appends the next detail with a single
+   * space and no other punctuation, so losing the closing paren merges the BP+Group clause
+   * directly into the following sentence with no delimiter — e.g. {@code "...Grupo de Terceros:
+   * Proveedora Revise la configuración contable del Producto: ..."} — reintroducing, in Spanish
+   * only, exactly the kind of ambiguous run-on wording this ticket set out to fix. Once
+   * {@code AD_MESSAGE_TRL} is corrected to wrap the Spanish text in parentheses (matching the
+   * English structure), update this assertion to the ticket's target string:
+   * {@code "No se pudo encontrar la cuenta. (Contacto: Blanquiceleste S.A., Grupo de Terceros:
+   * Proveedora) Revise la configuración contable del Producto: Desviación Pr. Factura."}</p>
+   */
+  @Test
+  public void postComposesExactSpanishMessageForBpGroupAndProductScenario() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    acct.C_BPartner_ID = "bp-1";
+    acct.DocumentType = AcctServer.DOCTYPE_MatMatchInv;
+    acct.Record_ID = "matchinv-1";
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_InvalidAccount);
+    OBError err = new OBError();
+    err.setMessage("No se pudo encontrar la cuenta.");
+    when(acct.getMessageResult()).thenReturn(err);
+    AcctSchema schema = mock(AcctSchema.class);
+    when(schema.getC_AcctSchema_ID()).thenReturn("schema-1");
+    acct.m_as = new AcctSchema[] { schema };
+
+    OBDal obDal = mock(OBDal.class);
+    BusinessPartner bp = mock(BusinessPartner.class);
+    when(bp.getName()).thenReturn("Blanquiceleste S.A.");
+    Category bpGroup = mock(Category.class);
+    when(bpGroup.getId()).thenReturn("bp-group-1");
+    when(bpGroup.getName()).thenReturn("Proveedora");
+    when(bp.getBusinessPartnerCategory()).thenReturn(bpGroup);
+    when(obDal.get(BusinessPartner.class, "bp-1")).thenReturn(bp);
+    stubCategoryAccountsCriteria(obDal, fullyConfiguredCategoryAccounts());
+    stubReceiptInvoiceMatchWithProduct(obDal, "matchinv-1");
+
+    ProductAccounts productRow = fullyConfiguredProductAccounts();
+    when(productRow.getInvoicePriceVariance()).thenReturn(null);
+    stubProductAccountsCriteria(obDal, productRow);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "es_ES");
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
+          .thenReturn("Contacto: @bpName@, Grupo de Terceros: @bpGroup@");
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountMissingProductAccounts"))
+          .thenReturn("Revise la configuración contable del Producto: @missingAccounts@.");
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      // ACTUAL (buggy) output — see the QA BUG note above. Missing parentheses around the
+      // "Contacto: ..., Grupo de Terceros: ..." clause make it run into the next sentence.
+      assertEquals("No se pudo encontrar la cuenta. Contacto: Blanquiceleste S.A., "
+          + "Grupo de Terceros: Proveedora Revise la configuración contable del Producto: "
+          + "Desviación Pr. Factura.", r.message());
+    }
+  }
 }
