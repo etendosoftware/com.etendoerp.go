@@ -253,9 +253,19 @@ public class GoSessionEndpointsTest {
     when(account.getName()).thenReturn("User");
 
     CapturedResponse resp = new CapturedResponse();
+    // ETP-5115 enriched GET /me with an authMethods block, so the handler now also reaches
+    // AccountIdentityDalHelper and EmailVerificationDalHelper. Left unstubbed they hit the real
+    // DAL and the handler answers 500, which reads as a broken cookie session rather than a
+    // missing stub.
     try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
-        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+        MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
+        MockedStatic<EmailVerificationDalHelper> verify =
+            mockStatic(EmailVerificationDalHelper.class);
+        MockedStatic<AccountIdentityDalHelper> identities =
+            mockStatic(AccountIdentityDalHelper.class)) {
       dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountById("ACC1")).thenReturn(account);
+      identities.when(() -> AccountIdentityDalHelper.identitiesFor(account))
+          .thenReturn(new ArrayList<>());
       servlet.doGet(getRequest("/me", "tok"), resp.response);
     }
 

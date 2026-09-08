@@ -1025,6 +1025,11 @@ public class EtendoGoJwtServletCoverageTest {
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
           .thenReturn(account);
+      // ETP-4575: resolveAuthenticatedAccountContext resolves the legacy bearer through the
+      // WIDE lookup, so stubbing only findActiveAccountByToken leaves it null and the handler
+      // answers 401 before any of the assertions below can be reached.
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(false);
 
       servletWithEmailSender.doPost(req, resp.response);
@@ -1067,6 +1072,11 @@ public class EtendoGoJwtServletCoverageTest {
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
           .thenReturn(account);
+      // ETP-4575: resolveAuthenticatedAccountContext resolves the legacy bearer through the
+      // WIDE lookup, so stubbing only findActiveAccountByToken leaves it null and the handler
+      // answers 401 before any of the assertions below can be reached.
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
 
       servletWithEmailSender.doPost(req, resp.response);
@@ -1103,6 +1113,11 @@ public class EtendoGoJwtServletCoverageTest {
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
           .thenReturn(account);
+      // ETP-4575: resolveAuthenticatedAccountContext resolves the legacy bearer through the
+      // WIDE lookup, so stubbing only findActiveAccountByToken leaves it null and the handler
+      // answers 401 before any of the assertions below can be reached.
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
 
       servletWithEmailSender.doPost(req, resp.response);
@@ -1134,6 +1149,11 @@ public class EtendoGoJwtServletCoverageTest {
     try (var ctxMock = mockStatic(OBContext.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByToken("valid-token"))
+          .thenReturn(account);
+      // ETP-4575: resolveAuthenticatedAccountContext resolves the legacy bearer through the
+      // WIDE lookup, so stubbing only findActiveAccountByToken leaves it null and the handler
+      // answers 401 before any of the assertions below can be reached.
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
       dalMock.when(() -> EtendoGoJwtDalHelper.hasLocalPassword(account)).thenReturn(true);
 
