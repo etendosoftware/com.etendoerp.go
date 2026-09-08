@@ -278,6 +278,34 @@ public class DefaultDocumentSendEmailContractTest {
     assertTrue(body.contains(">26/08/2026</td>"));
   }
 
+  // ── ETP-5069: readable per-document send history gate ───────────────────────
+
+  @Test
+  public void everyDocumentSendContractOptsIntoTheReadableHistory() {
+    // The gate lives here rather than in a contract-name list inside TransactionalEmailService,
+    // so a new document contract inherits it without anyone remembering to register it.
+    assertTrue(contract(CONTRACT_NAME).logsSendHistory());
+  }
+
+  @Test
+  public void specNameIsDerivedByStrippingTheSendSuffix() {
+    // Inverts the frontend's `${windowName}-send` convention, so one rule serves both sides.
+    assertEquals("test-document", contract(CONTRACT_NAME).getSpecName());
+    assertEquals("sales-invoice", contract("sales-invoice-send").getSpecName());
+  }
+
+  @Test
+  public void specNameIsNullWhenTheContractNameDoesNotFollowTheConvention() {
+    // The column is nullable and best effort; a name outside the convention must not guess.
+    assertNull(contract("company-invitation").getSpecName());
+  }
+
+  private static DefaultDocumentSendEmailContract contract(String contractName) {
+    return new DefaultDocumentSendEmailContract(contractName, "Documento",
+        recordId -> Optional.of(new EmailDocumentRecord("Cliente", RECIPIENT_EMAIL, RECORD_ID,
+            DOCUMENT_NUMBER, null, DOWNLOAD_LINK, "client-1")));
+  }
+
   private static Date august26() {
     Calendar calendar = Calendar.getInstance();
     calendar.clear();
