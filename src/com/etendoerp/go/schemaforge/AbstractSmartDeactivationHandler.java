@@ -34,6 +34,18 @@ import org.openbravo.dal.core.OBContext;
  * would bypass the pending-invoices check and allow deactivation without verification.
  * Concrete handlers supply only {@link #smartDeactivate} and their {@code @Named} qualifier.
  *
+ * <p><b>DELETE pre-hook (ETP-5117).</b> A genuine HTTP {@code DELETE} never reaches
+ * {@link #smartDeactivate} — it falls straight through to NEO's default hard-delete CRUD. Any
+ * cleanup that needs the record's own data (its client/organization, for instance) therefore has
+ * to run <em>before</em> the delete, not in {@code afterHandle} where the row is already gone and
+ * only the session context is left to guess from — and a GO client-admin session very commonly
+ * reports organization {@code '0'} (the {@code '*'} org), which is not the record's own
+ * organization. {@link #beforeDelete} is the extension point for that: it defaults to a no-op, so
+ * subclasses that need no DELETE cleanup (e.g. {@code VerifactuConfigReadyHandler}) are entirely
+ * unaffected, and {@link #handle} always returns {@code null} for a DELETE so the default CRUD
+ * proceeds exactly as before. Failures inside {@link #beforeDelete} are logged and swallowed —
+ * a cleanup side effect must never block the delete itself.
+ *
  * <p>{@link #deletedResponse()} is {@code protected static} for use in subclass
  * {@code smartDeactivate} and {@code afterHandle} implementations. {@link
  * #isExplicitlyDeactivating} is {@code public static} instead — {@code
@@ -46,10 +58,15 @@ import org.openbravo.dal.core.OBContext;
 public abstract class AbstractSmartDeactivationHandler implements NeoHandler {
 
   protected static final String METHOD_PUT = "PUT";
+  protected static final String METHOD_DELETE = "DELETE";
   private static final String FIELD_ACTIVE = "active";
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    if (METHOD_DELETE.equalsIgnoreCase(context.getHttpMethod())) {
+      runBeforeDelete(context);
+      return null;
+    }
     if (!METHOD_PUT.equalsIgnoreCase(context.getHttpMethod())) {
       return null;
     }
@@ -76,6 +93,47 @@ public abstract class AbstractSmartDeactivationHandler implements NeoHandler {
   }
 
   protected abstract NeoResponse smartDeactivate(String recordId) throws JSONException;
+
+  /**
+   * Runs {@link #beforeDelete} under admin mode for a genuine {@code DELETE}, swallowing any
+   * failure: this is a cleanup side effect, and letting it surface would block a delete the user
+   * explicitly asked for.
+   */
+  private void runBeforeDelete(NeoContext context) {
+    String recordId = context.getRecordId();
+    if (StringUtils.isBlank(recordId)) {
+      return;
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        beforeDelete(context, recordId);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      LogManager.getLogger(getClass()).warn(
+          "beforeDelete: cleanup failed for {}: {}", recordId, e.getMessage(), e);
+    }
+  }
+
+  /**
+   * Hook invoked just before NEO's default CRUD hard-deletes {@code recordId}, while the record
+   * still exists and can still answer for its own client/organization. Defaults to a no-op, so
+   * subclasses that need no DELETE cleanup keep their previous behavior exactly.
+   *
+   * <p>Runs under admin mode; the caller swallows and logs any exception. Implementations must
+   * not attempt to cancel the delete — the return value of {@link #handle} for a DELETE is always
+   * {@code null}.
+   *
+   * @param context
+   *          the current NEO request context
+   * @param recordId
+   *          the primary key of the record about to be deleted (never blank)
+   */
+  protected void beforeDelete(NeoContext context, String recordId) {
+    // no-op by default
+  }
 
   protected static NeoResponse deletedResponse() throws JSONException {
     JSONObject body = new JSONObject();
