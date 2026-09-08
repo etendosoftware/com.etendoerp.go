@@ -917,6 +917,46 @@ public class BankStatementsHandler implements NeoHandler {
   }
 
   /**
+   * The amount rule for one inbound line: an amount above zero on EXACTLY ONE side.
+   *
+   * <p>Three ways to fail it, each with its own message because the caller cannot tell them apart
+   * from a bare 400:
+   * <ul>
+   *   <li>no amount at all. Unlike the file import — which silently drops amount-less rows, as
+   *       Classic does — this is a validation error here: the manual form has a user to fix it.</li>
+   *   <li>a negative amount. The frontend already refuses these ({@code isLineComplete} needs a
+   *       strictly positive side), but this endpoint is also reachable from MCP/REST, where the
+   *       original "not both zero" guard let a negative pair through.</li>
+   *   <li>both sides filled. A statement line is an inflow OR an outflow; see
+   *       {@link #MSG_BOTH_AMOUNTS_LINE}.</li>
+   * </ul>
+   *
+   * <p><b>Called BEFORE the setters, and that ordering is load-bearing:</b> a managed entity is
+   * flushed even when the request ends in a 400, so validating after
+   * {@code setCramount}/{@code setDramount} would persist the very row being rejected.
+   * {@code BankStatementsHandlerTest} pins it with {@code verify(line, never()).setCramount(any())}.
+   *
+   * <p>Extracted from {@link #createLines} rather than left inline: three guards for one concept
+   * carried the whole rule's documentation into the middle of a loop, and pushed that method past
+   * Sonar's cognitive-complexity threshold (S3776) once the second and third were added.
+   *
+   * @param crAmount the Deposit (money in) amount, never null
+   * @param drAmount the Withdrawal (money out) amount, never null
+   * @throws OBException when the pair does not describe a single-sided movement
+   */
+  private static void validateLineAmounts(BigDecimal crAmount, BigDecimal drAmount) {
+    if (crAmount.signum() == 0 && drAmount.signum() == 0) {
+      throw new OBException(MSG_ZERO_AMOUNT_LINE);
+    }
+    if (crAmount.signum() < 0 || drAmount.signum() < 0) {
+      throw new OBException(MSG_NEGATIVE_AMOUNT_LINE);
+    }
+    if (crAmount.signum() != 0 && drAmount.signum() != 0) {
+      throw new OBException(MSG_BOTH_AMOUNTS_LINE);
+    }
+  }
+
+  /**
    * Creates and persists one {@link FIN_BankStatementLine} per non-blank entry
    * in {@code lines}, numbering them 10, 20, 30… Fully-blank rows (no date, no
    * description, no counterparty and zero amounts) are skipped. Throws when no
@@ -944,25 +984,7 @@ public class BankStatementsHandler implements NeoHandler {
       line.setTransactionDate(parseIsoDate(l.optString("date", null), statement.getTransactionDate()));
       BigDecimal crAmount = parseAmount(l.optString("in", null));
       BigDecimal drAmount = parseAmount(l.optString("out", null));
-      // A line the user actually filled in must carry an amount. Unlike the file
-      // import — which silently drops amount-less rows, as Classic does — here it
-      // is a validation error: the manual form has a user to fix it.
-      // Both checks run BEFORE the setters on purpose: a managed entity gets flushed even when the
-      // request ends in a 400, so validating after setCramount/setDramount would persist the very
-      // row we are rejecting.
-      if (crAmount.signum() == 0 && drAmount.signum() == 0) {
-        throw new OBException(MSG_ZERO_AMOUNT_LINE);
-      }
-      // ETP-4954: the API-level half of the "no negative amounts" rule. The frontend already refuses
-      // these (isLineComplete needs a strictly positive side) but this endpoint is also reachable
-      // from MCP/REST, where the old "not both zero" guard let a negative pair through.
-      if (crAmount.signum() < 0 || drAmount.signum() < 0) {
-        throw new OBException(MSG_NEGATIVE_AMOUNT_LINE);
-      }
-      // ETP-4954: exactly one side. See MSG_BOTH_AMOUNTS_LINE.
-      if (crAmount.signum() != 0 && drAmount.signum() != 0) {
-        throw new OBException(MSG_BOTH_AMOUNTS_LINE);
-      }
+      validateLineAmounts(crAmount, drAmount);
       line.setCramount(crAmount);
       line.setDramount(drAmount);
 
