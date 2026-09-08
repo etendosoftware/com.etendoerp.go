@@ -421,7 +421,9 @@ public class McpResourceProvider {
       fieldObj.put("name", column.getDBColumnName());
       fieldObj.put("label", column.getName());
       fieldObj.put("type", McpSchemaFieldBuilder.mapColumnType(refId));
-      fieldObj.put("readOnly", Boolean.TRUE.equals(field.isReadOnly()));
+      // Effective curation via the one resolver (ETP-5184), so this list cannot report a field as
+      // writable that neo_schema reports as read-only, or the other way round.
+      fieldObj.put("readOnly", McpFieldView.of(field).isReadOnly());
       fieldObj.put("required", column.isMandatory());
 
       // Include default value if present

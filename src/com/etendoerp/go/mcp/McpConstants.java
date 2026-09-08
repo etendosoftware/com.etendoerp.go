@@ -40,6 +40,49 @@ final class McpConstants {
   /** Parent/header record context used to resolve child MCP selectors. */
   static final String PARAM_PARENT_CONTEXT = "parentContext";
   static final String TYPE_STRING = "string";
+  /**
+   * The MCP field type of an {@code Image BLOB} AD column (ETP-5184).
+   *
+   * <p>Before this existed, {@link McpSchemaFieldBuilder#mapColumnType} had no case for the
+   * {@code Image BLOB} reference, so the column fell through to {@code default → "string"} and
+   * {@code neo_schema} advertised it as an ordinary text field. An agent then either wrote a bogus
+   * string (an FK violation from the DAL, with no hint of what the column really holds) or inlined a
+   * base64 payload — which is not what the column stores and costs ~100k output tokens for a 130 KB
+   * image. The type exists so the field can describe itself; see
+   * {@link McpImageFieldSupport#IMAGE_FIELD_HINT}.
+   */
+  static final String TYPE_IMAGE = "image";
+  /**
+   * {@code AD_Reference_ID} of the {@code Image BLOB} reference — an FK column pointing at
+   * {@code AD_Image}, whose bytes live in {@code AD_Image.BinaryData}. Live editable instances today:
+   * {@code M_Product.AD_Image_ID} and {@code AD_OrgInfo.Your_Company_Document_Image}; support is
+   * keyed off this reference alone, so enabling any other image column needs no new code.
+   */
+  static final String REF_IMAGE_BLOB = "4AA6C3BE9D3B4D84A3B80489505A23E5";
+  /** JSON-schema {@code format} advertised for an {@link #TYPE_IMAGE} field. */
+  static final String FORMAT_IMAGE_ID = "etendo-image-id";
+  /** Tool name of the base64 fallback upload (ETP-5184, capped at {@link #IMAGE_BASE64_MAX_BYTES}). */
+  static final String TOOL_NEO_UPLOAD_IMAGE = "neo_upload_image";
+  /** Tool name of the primary, out-of-band upload-ticket tool (ETP-5184). */
+  static final String TOOL_NEO_REQUEST_IMAGE_UPLOAD = "neo_request_image_upload";
+  /** Tool name of the read-only ticket-status lookup (ETP-5184). */
+  static final String TOOL_NEO_GET_IMAGE_UPLOAD = "neo_get_image_upload";
+  /**
+   * Hard cap on the DECODED size of {@link #TOOL_NEO_UPLOAD_IMAGE}'s {@code data_base64}.
+   *
+   * <p>Deliberately far below the servlet endpoint's 10 MB: these bytes are model output, generated
+   * token by token at roughly 1.4 characters per token, so 100 KB of image costs about 100k output
+   * tokens. The cap is low on purpose, so nobody discovers that cost by paying it — over the cap the
+   * error names {@link #TOOL_NEO_REQUEST_IMAGE_UPLOAD}, which moves the bytes out of the
+   * conversation entirely.
+   */
+  static final int IMAGE_BASE64_MAX_BYTES = 256 * 1024;
+  /**
+   * Machine-detectable error code for a value written to an {@link #TYPE_IMAGE} field that is not an
+   * existing {@code AD_Image} id (ETP-5184). Distinct from {@link #ERROR_VALIDATION} so an agent can
+   * key on "this needs an upload first" rather than parsing the prose.
+   */
+  static final String ERROR_INVALID_IMAGE_REFERENCE = "invalid_image_reference";
   static final String TYPE_OBJECT = "object";
   static final String KEY_PROPERTIES = "properties";
   static final String KEY_DESCRIPTION = "description";
@@ -67,6 +110,29 @@ final class McpConstants {
   static final String ERROR_SERVER = "server_error";
   /** Machine-detectable error code for a write on an entity whose method flag is off (IMP-15). */
   static final String ERROR_METHOD_NOT_ALLOWED = "method_not_allowed";
+  /**
+   * Machine-detectable error code for a filter key that resolves to no property on the entity
+   * (ETP-5184). Distinct from {@link #ERROR_VALIDATION} because the fix is specific and known:
+   * the key is wrong, and {@code available} names the ones that would have worked.
+   *
+   * <p>This case used to be logged and dropped. A caller filtering on a misspelled key therefore
+   * got an unfiltered result set with a 200 on it — the worst possible answer, because it is
+   * indistinguishable from "the filter matched everything". This is the same failure shape that
+   * made {@code neo_list} on a child entity return every row in the table.</p>
+   */
+  static final String ERROR_UNKNOWN_FILTER_FIELD = "unknown_filter_field";
+  /**
+   * Machine-detectable error code for a call on a child entity that did not name its parent
+   * (ETP-5184). In Etendo a child record is only ever browsed inside one parent record — there is
+   * no global list — so a child call without {@code parentId} has no correct answer to give.
+   */
+  static final String ERROR_PARENT_REQUIRED = "parent_required";
+  /**
+   * How many names an {@code available} list may carry before it is truncated (ETP-5184). Twenty
+   * is enough for the agent to spot its own typo; a wide entity has 150+ properties and dumping
+   * them all turns a one-line correction into a context bill.
+   */
+  static final int MAX_AVAILABLE_NAMES = 20;
   /** HTTP-style status for a not-found result (IMP-5). */
   static final int STATUS_NOT_FOUND = 404;
   /** HTTP-style status for a validation failure on a write (IMP-5). */
@@ -121,6 +187,15 @@ final class McpConstants {
   static final String KEY_HINT = "hint";
   /** Key that points a structured error at a relevant {@code docs} recipe (IMP-10). */
   static final String KEY_SEE_ALSO = "seeAlso";
+  /**
+   * Told to the agent by neo_get and neo_create so it knows a ready-made link is in the response
+   * and never has to invent one (ETP-5200). Emitted only for header records, and only when the
+   * deployment has a public app base URL configured — see {@link McpRecordUrls}.
+   */
+  static final String RECORD_URL_NOTE =
+      "When the record is a spec's primaryEntity, the response carries a `url` field: the Etendo "
+          + "Go link to that record. Use it verbatim when referring the user to the record — never "
+          + "build a link by hand.";
   /** Hint advertised by neo_discover to route a cold agent to ready-to-run recipes (IMP-10). */
   static final String GUIDANCE_DOCS_HINT =
       "Call docs(topic:…) for ready-to-run recipes per task.";
