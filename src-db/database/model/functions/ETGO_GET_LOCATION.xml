@@ -19,8 +19,26 @@ BEGIN
     -- through C_Country_Trl and answers in the session language. An id is stable
     -- and language-independent, so materializing it freezes no translation.
     --
-    -- Zero rows (a partner with no active address) leaves v_c_location_id NULL:
-    -- plain SELECT ... INTO assigns NULL and does not raise, unlike INTO STRICT.
+    -- TOTAL FUNCTION. Refresh_Mode = 'S' runs this inside the business transaction,
+    -- so ANY exception raised here rolls back the C_BPartner save itself. Every edge
+    -- case below must resolve to a value -- NULL is a legitimate one, an empty address
+    -- column -- and never to an error.
+
+    -- Edge case 1 - null target id. The engine always passes a PK, but a NULL argument
+    -- must answer "no address" rather than reach the query.
+    IF p_bpartner_id IS NULL THEN
+        RETURN NULL;
+    END IF;
+
+    -- Edge case 2 - zero rows (a partner with no active address). Plain SELECT ... INTO
+    -- assigns NULL and does NOT raise, unlike SELECT ... INTO STRICT (deliberately not
+    -- used here, it would raise NO_DATA_FOUND).
+    -- Edge case 3 - several rows, including several created in the same instant. LIMIT 1
+    -- makes the result single-valued, so TOO_MANY_ROWS cannot be raised. The ordering is
+    -- fully deterministic (the priority case, then created, then the PK as tie-break)
+    -- because the engine writes the value unconditionally on every recompute: an
+    -- arbitrary pick would make two recomputes of unchanged data store different ids and
+    -- ad_scd_check would report permanent phantom drift.
     select bploc.c_location_id
     into v_c_location_id
     from c_bpartner_location bploc
@@ -32,10 +50,18 @@ BEGIN
             when bploc.isshipto = 'Y' then 2
             else 3
         end,
-        bploc.created desc
+        bploc.created desc,
+        bploc.c_bpartner_location_id desc
     limit 1;
 
     return v_c_location_id;
+
+-- Belt and braces. Nothing above should be able to raise, but an unforeseen runtime error
+-- must not take the partner save down with it. An empty address is visible and
+-- recoverable; a save that cannot complete is not.
+EXCEPTION
+    WHEN OTHERS THEN
+        RETURN NULL;
 END ETGO_GET_LOCATION
 ]]></body>
     </function>
