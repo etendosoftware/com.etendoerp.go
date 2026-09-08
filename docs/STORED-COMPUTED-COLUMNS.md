@@ -218,9 +218,14 @@ gatekeeper:
 - **`AD_Field.ReadOnlyLogic = 'Y'`** — propagated automatically by a Gradle/ModuleScript step
   (`EnforceStoredComputedReadOnly`), a callout at field-creation time, and an `@OBDALEventHandler`
   (`ADFieldStoredComputedHandler`) on every save, including programmatic ones.
-- **Schema Forge pipeline** — `resolve-curated.js` forces `readOnly` regardless of `decisions.json`;
-  `push-to-neo.js` sets `Is_ReadOnly = true` in `ETGO_SF_FIELD`; the pipeline validator blocks any
-  contract field backed by a stored computed column that is not read-only.
+- **Schema Forge pipeline — NOT enforced today.** An earlier revision of this document claimed
+  `resolve-curated.js` forces `readOnly`, `push-to-neo.js` sets `Is_ReadOnly` in `ETGO_SF_FIELD`,
+  and the pipeline validator blocks a non-read-only contract field backed by a stored computed
+  column. None of that exists in `@etendosoftware/schema-forge-cli` (verified at 0.3.47: grepping
+  `storedComputed` / `isStoredComputed` in those three files returns nothing). Until it is
+  implemented, `"visibility": "readOnly"` must be set by hand in the window's `decisions.json` — it
+  is the only thing between the pipeline and an editable input bound to a column the DAL maps
+  `insert="false" update="false"`.
 - **Generated React UI** — stored computed fields are emitted display-only, never as an input.
 
 ---
@@ -265,11 +270,18 @@ One `AD_COLUMN_COMP_DEPENDENCY` row per source table you must react to:
 |-------|---------|-------|
 | `Source_Table_ID` | `C_OrderLine` | The table whose changes trigger a refresh |
 | `Insert_Event` / `Update_Event` / `Delete_Event` | Y / Y / Y | Which events fire |
-| `Watched_Columns` | `LineNetAmt` (+ `QtyOrdered`) | Required for UPDATE; recompute only if one changed |
 | `Target_ID_Resolver_SQL` | `SELECT COALESCE(NEW.c_order_id, OLD.c_order_id)` | Maps source row → target id(s); must never return NULL |
 | `SeqNo` | 10 | Row ordering within the column's dependency set |
 
 Exactly **one** of `Target_ID_Resolver_SQL` / `Target_Link_Column_ID` must be set (rule V11).
+
+**Watched columns are a child table, not a field.** `AD_COLUMN_COMP_DEPENDENCY` has no
+`Watched_Columns` column — an earlier revision of this document presented one, and it does not
+exist. Add one row of **`AD_COMPDEP_WATCHED_COL`** (`AD_COLUMN_COMP_DEPENDENCY_ID` + `AD_COLUMN_ID`
++ `SeqNo` + `AD_MODULE_ID`) per watched column; see
+`src-db/database/sourcedata/AD_COMPDEP_WATCHED_COL.xml` for the real records. At least one is
+required for any dependency with `Update_Event = 'Y'` (rule V9), and an UPDATE that touches no
+watched column enqueues nothing.
 
 ### Step 4 — Deploy
 

@@ -140,10 +140,14 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   }
 
   /**
-   * Adjusts grandTotalAmount / outstandingAmount for draft invoices with a total discount, and
-   * injects {@code tbaiSyncEstado} (latest sync status from {@code tbai_syncinvoice}) into every
-   * record so the frontend can display it without a separate inSet GET request to the TBAI spec.
-   * In detail view, also injects {@code aeatsiiFacturaId} / {@code tbaiSyncInvoiceId} /
+   * Adjusts grandTotalAmount / outstandingAmount for draft invoices with a total discount.
+   *
+   * <p>ETP-5216: the former {@code tbaiSyncEstado} injection is gone. The TicketBAI status is now
+   * the stored computed AD column {@code EM_ETGO_Tbai_Status} on {@code C_Invoice}, so it travels
+   * in the contract like any other column and is filterable and sortable — an injected field never
+   * was, and its failures were invisible from the UI (ETP-4391).
+   *
+   * <p>In detail view, this also injects {@code aeatsiiFacturaId} / {@code tbaiSyncInvoiceId} /
    * {@code invoiceVerifactuId} (see {@link SifSubRecordAttachments}) so the SIF tab's Adjuntos
    * sections can list/download the fiscal XML attached to each sub-record (ETP-4888).
    */
@@ -195,7 +199,6 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         enrichLinkedShipments(rec, context.getRecordId());
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
       }
-      TbaiSyncStatusInjector.inject(dataArr);
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error enriching sales invoice response", e);

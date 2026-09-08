@@ -152,28 +152,10 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
    * adjustment, subtype, and — in detail view — linked receipts, origin invoice, docTypeLocked,
    * rectificative flags and exempt taxes).
    *
-   * <p>ETP-5087: also injects {@code tbaiSyncEstado} (latest sync status from
-   * {@code tbai_syncinvoice}) into every record that has a sync row, mirroring
-   * {@link SalesInvoiceHeaderHandler#afterHandle}. Purchase invoices in the Basque Country are
-   * sent to Batuz (Bizkaia only), and that submission writes to the very same
-   * {@code tbai_syncinvoice} table the sales flow uses — the classic {@code com.smf.ticketbai}
-   * module backs both the "Ticketbai" tab of the Sales Invoice window and the "Batuz" tab of the
-   * Purchase Invoice window with {@code TBAI_SyncInvoice}. Without this the frontend had no sync
-   * status for AP invoices and fell back to a default "Pendiente" badge even for invoices Batuz
-   * had rejected.
-   *
-   * <p>Records with NO row in {@code tbai_syncinvoice} are deliberately left without the
-   * {@code tbaiSyncEstado} key rather than given a default value. That absence is exactly what
-   * the frontend fallback keys off
-   * ({@code row.tbaiSyncEstado ?? (isSent(row.tbaiIssent) ? 'Enviada' : 'Pendiente')}), so a
-   * record without the field is expected behaviour, not missing data.
-   *
-   * <p>The injection deliberately runs for EVERY purchase invoice — there is no territory check
-   * on the Java side, and none should be added. Gating by
-   * {@code etsgSifTerritory === 'BIZKAIA'} is purely a frontend concern (whether the column is
-   * rendered at all). A backend filter would be redundant: an invoice that was never sent to
-   * Batuz simply has no row in {@code tbai_syncinvoice}, so the query returns nothing for it and
-   * the record is left untouched.
+   * <p>ETP-5216: the former {@code tbaiSyncEstado} injection is gone. The TicketBAI/Batuz status
+   * is now the stored computed AD column {@code EM_ETGO_Tbai_Status} on {@code C_Invoice}, shared
+   * by AR and AP, so it travels in the contract and is filterable and sortable. An injected field
+   * never was, and an injector failure was undetectable from the UI (ETP-4391).
    *
    * <p>ETP-5087 (same root cause, second symptom): in detail view it also injects
    * {@code aeatsiiFacturaId} / {@code tbaiSyncInvoiceId} / {@code invoiceVerifactuId} (see
@@ -224,7 +206,6 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         InvoiceExemptTaxes.enrich(rec, context.getRecordId());
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
       }
-      TbaiSyncStatusInjector.inject(dataArr);
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error enriching purchase invoice", e);
