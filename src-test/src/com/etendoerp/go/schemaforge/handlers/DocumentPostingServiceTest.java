@@ -50,6 +50,7 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.financial.ResetAccounting;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.system.Language;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.businesspartner.Category;
 import org.openbravo.model.common.businesspartner.CategoryAccounts;
@@ -78,18 +79,31 @@ import org.openbravo.model.ad.ui.Tab;
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class DocumentPostingServiceTest {
 
-  /** Stubs OBContext.getOBContext() to return client/org/user mocks with ids set. */
+  /** Stubs OBContext.getOBContext() to return client/org/user/language mocks, defaulting to {@code en_US}. */
   private static void stubObContext(MockedStatic<OBContext> obc) {
+    stubObContext(obc, "en_US");
+  }
+
+  /**
+   * Stubs OBContext.getOBContext() to return client/org/user mocks with ids set, plus a
+   * {@code Language} mock whose {@code getLanguage()} returns {@code lang} (ETP-5175: the
+   * curated BP-Group / Product account labels are resolved per session language) — same pattern
+   * as {@code NotPostedDocumentsHandlerTest#refListDocumentTypesIncludesTypeWithActiveAccountingSchema}.
+   */
+  private static void stubObContext(MockedStatic<OBContext> obc, String lang) {
     OBContext ctx = mock(OBContext.class);
     Client client = mock(Client.class);
     Organization org = mock(Organization.class);
     User user = mock(User.class);
+    Language language = mock(Language.class);
     when(client.getId()).thenReturn("test-client-id");
     when(org.getId()).thenReturn("test-org-id");
     when(user.getId()).thenReturn("test-user-id");
+    when(language.getLanguage()).thenReturn(lang);
     when(ctx.getCurrentClient()).thenReturn(client);
     when(ctx.getCurrentOrganization()).thenReturn(org);
     when(ctx.getUser()).thenReturn(user);
+    when(ctx.getLanguage()).thenReturn(language);
     obc.when(OBContext::getOBContext).thenReturn(ctx);
   }
 
@@ -656,7 +670,7 @@ public class DocumentPostingServiceTest {
     msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
         .thenReturn("(Business Partner: @bpName@, BP Group: @bpGroup@)");
     msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountMissingBpGroupAccounts"))
-        .thenReturn("(Missing account setup on BP Group: @missingAccounts@)");
+        .thenReturn("Please review the BP Group's accounting setup: @missingAccounts@.");
   }
 
   /** Mocks {@code OBDal.getInstance().createCriteria(CategoryAccounts.class)} to return {@code row}. */
@@ -669,12 +683,11 @@ public class DocumentPostingServiceTest {
     when(criteria.uniqueResult()).thenReturn(row);
   }
 
-  /** A {@code CategoryAccounts} row with all 6 curated columns configured (non-null). */
+  /** A {@code CategoryAccounts} row with all 5 curated columns configured (non-null). */
   private static CategoryAccounts fullyConfiguredCategoryAccounts() {
     CategoryAccounts row = mock(CategoryAccounts.class);
     AccountingCombination combo = mock(AccountingCombination.class);
     when(row.getNonInvoicedReceipts()).thenReturn(combo);
-    when(row.getNonInvoicedReceivables()).thenReturn(combo);
     when(row.getCustomerReceivablesNo()).thenReturn(combo);
     when(row.getVendorLiability()).thenReturn(combo);
     when(row.getCustomerPrepayment()).thenReturn(combo);
@@ -683,11 +696,11 @@ public class DocumentPostingServiceTest {
   }
 
   /**
-   * ETP-5175: a fully-configured BP Group (all 6 curated {@code C_BP_Group_Acct} columns
+   * ETP-5175: a fully-configured BP Group (all 5 curated {@code C_BP_Group_Acct} columns
    * non-null) must NOT add any "missing account setup" text — no behavior change from the
    * pre-existing BP+Group enrichment. Also proves {@code getVendorLiability()} participates in
-   * the uniform check with the other 5 columns (it never fires for real data since the DB column
-   * is {@code NOT NULL}, but the code path is exercised the same way for all 6).
+   * the uniform check with the other 4 columns (it never fires for real data since the DB column
+   * is {@code NOT NULL}, but the code path is exercised the same way for all 5).
    */
   @Test
   public void postDoesNotAddMissingAccountsDetailWhenAllCuratedColumnsAreConfigured() throws Exception {
@@ -720,7 +733,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Missing account setup"));
+      assertFalse(r.message().contains("Please review the BP Group's accounting setup"));
     }
   }
 
@@ -761,7 +774,8 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Missing account setup on BP Group: Non-Invoiced Receipts)"));
+      assertTrue(r.message()
+          .contains("Please review the BP Group's accounting setup: Non-Invoiced Receipts."));
     }
   }
 
@@ -803,16 +817,16 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message()
-          .contains("(Missing account setup on BP Group: Non-Invoiced Receipts, Vendor Prepayment)"));
+      assertTrue(r.message().contains(
+          "Please review the BP Group's accounting setup: Non-Invoiced Receipts, Vendor Prepayment."));
     }
   }
 
   /**
    * ETP-5175: when the {@code C_BP_Group_Acct} row does not exist at all for the BP Group +
-   * accounting schema (no configuration whatsoever), all 6 curated column labels are reported as
+   * accounting schema (no configuration whatsoever), all 5 curated column labels are reported as
    * missing, in declared order — including {@code getVendorLiability()} ("Vendor Liability"),
-   * which is checked uniformly with the other 5 columns even though the underlying DB column is
+   * which is checked uniformly with the other 4 columns even though the underlying DB column is
    * {@code NOT NULL} in production and this specific null-check structurally cannot fire for real
    * data.
    */
@@ -846,9 +860,9 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Missing account setup on BP Group: "
-          + "Non-Invoiced Receipts, Non-Invoiced Receivables, Customer Receivables No., "
-          + "Vendor Liability, Customer Prepayment, Vendor Prepayment)"));
+      assertTrue(r.message().contains("Please review the BP Group's accounting setup: "
+          + "Non-Invoiced Receipts, Customer Receivables No., "
+          + "Vendor Liability, Customer Prepayment, Vendor Prepayment."));
     }
   }
 
@@ -887,7 +901,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Missing account setup"));
+      assertFalse(r.message().contains("Please review the BP Group's accounting setup"));
       verify(obDal, never()).createCriteria(CategoryAccounts.class);
     }
   }
@@ -928,7 +942,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Missing account setup"));
+      assertFalse(r.message().contains("Please review the BP Group's accounting setup"));
       verify(obDal, never()).createCriteria(CategoryAccounts.class);
     }
   }
@@ -967,13 +981,13 @@ public class DocumentPostingServiceTest {
   /** Stubs the {@code M_Product_Acct} missing-accounts message-catalog key (ETP-5175). */
   private static void stubMissingProductAccountsMessage(MockedStatic<OBMessageUtils> msgMock) {
     msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountMissingProductAccounts"))
-        .thenReturn("(Missing account setup on Product: @missingAccounts@)");
+        .thenReturn("Please review the Product's accounting setup: @missingAccounts@.");
   }
 
   /**
    * ETP-5175: on a Matched Purchase Invoice ({@code AcctServer.DOCTYPE_MatMatchInv}) whose
-   * product accounting ({@code M_Product_Acct}) is fully configured, no "Missing account setup on
-   * Product" text is added — no behavior change. Runs alongside a BP Group scenario to prove both
+   * product accounting ({@code M_Product_Acct}) is fully configured, no "Please review the
+   * Product's accounting setup" text is added — no behavior change. Runs alongside a BP Group scenario to prove both
    * enrichments coexist correctly: the BP+Group detail is present, the product addendum is not.
    */
   @Test
@@ -1013,7 +1027,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Missing account setup on Product"));
+      assertFalse(r.message().contains("Please review the Product's accounting setup"));
     }
   }
 
@@ -1059,7 +1073,8 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      assertTrue(r.message().contains("(Missing account setup on Product: Invoice Price Variance)"));
+      assertTrue(r.message()
+          .contains("Please review the Product's accounting setup: Invoice Price Variance."));
     }
   }
 
@@ -1105,7 +1120,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message()
-          .contains("(Missing account setup on Product: Product Expense, Invoice Price Variance)"));
+          .contains("Please review the Product's accounting setup: Product Expense, Invoice Price Variance."));
     }
   }
 
@@ -1152,7 +1167,7 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Missing account setup on Product"));
+      assertFalse(r.message().contains("Please review the Product's accounting setup"));
       verify(obDal, never()).get(ReceiptInvoiceMatch.class, "invoice-1");
       verify(obDal, never()).createCriteria(ProductAccounts.class);
     }
@@ -1206,7 +1221,7 @@ public class DocumentPostingServiceTest {
       // closed on its own instead of unwinding the outer try block.
       assertTrue(r.message().contains("Fernet Branca S.A."));
       assertTrue(r.message().contains("Proveedores Generales"));
-      assertFalse(r.message().contains("Missing account setup on Product"));
+      assertFalse(r.message().contains("Please review the Product's accounting setup"));
     }
   }
 
@@ -1258,7 +1273,7 @@ public class DocumentPostingServiceTest {
       // try block.
       assertTrue(r.message().contains("Fernet Branca S.A."));
       assertTrue(r.message().contains("Proveedores Generales"));
-      assertFalse(r.message().contains("Missing account setup"));
+      assertFalse(r.message().contains("Please review the BP Group's accounting setup"));
     }
   }
 
@@ -1310,14 +1325,15 @@ public class DocumentPostingServiceTest {
       DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
 
       assertFalse(r.ok());
-      // BP-only baseline (no BP Group / no "Missing account setup on BP Group" text at all)...
+      // BP-only baseline (no BP Group / no "Please review the BP Group's accounting setup" text at all)...
       assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A.)"));
       assertFalse(r.message().contains("BP Group"));
-      assertFalse(r.message().contains("Missing account setup on BP Group"));
+      assertFalse(r.message().contains("Please review the BP Group's accounting setup"));
       // ...plus the independent product-accounts addendum, appended after it.
-      assertTrue(r.message().contains("(Missing account setup on Product: Invoice Price Variance)"));
+      assertTrue(r.message()
+          .contains("Please review the Product's accounting setup: Invoice Price Variance."));
       assertTrue(r.message().indexOf("(Business Partner: Fernet Branca S.A.)")
-          < r.message().indexOf("(Missing account setup on Product:"));
+          < r.message().indexOf("Please review the Product's accounting setup:"));
     }
   }
 
@@ -1371,8 +1387,10 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertTrue(r.message().contains("(Missing account setup on BP Group: Non-Invoiced Receipts)"));
-      assertTrue(r.message().contains("(Missing account setup on Product: Invoice Price Variance)"));
+      assertTrue(r.message()
+          .contains("Please review the BP Group's accounting setup: Non-Invoiced Receipts."));
+      assertTrue(r.message()
+          .contains("Please review the Product's accounting setup: Invoice Price Variance."));
     }
   }
 
@@ -1422,8 +1440,106 @@ public class DocumentPostingServiceTest {
 
       assertFalse(r.ok());
       assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
-      assertFalse(r.message().contains("Missing account setup on Product"));
+      assertFalse(r.message().contains("Please review the Product's accounting setup"));
       verify(obDal, never()).createCriteria(ProductAccounts.class);
+    }
+  }
+
+  /**
+   * ETP-5175 follow-up: the missing-accounts labels are resolved per session language — proves
+   * the Spanish label ({@code Recibos no facturados}) is used, not the English one, when
+   * {@code OBContext.getOBContext().getLanguage().getLanguage()} is {@code es_ES}. Every other
+   * missing-accounts test in this class stubs the default {@code en_US} (via {@code
+   * stubObContext(obc)}), so this is the only place that exercises the Spanish branch of {@code
+   * BpGroupAccountColumn#label(String)}.
+   */
+  @Test
+  public void postAddsMissingAccountsDetailUsesSpanishLabelWhenSessionLanguageIsEsEs() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubAcctServerForBpGroupEnrichment();
+    AcctSchema schema = mock(AcctSchema.class);
+    when(schema.getC_AcctSchema_ID()).thenReturn("schema-1");
+    acct.m_as = new AcctSchema[] { schema };
+
+    OBDal obDal = mock(OBDal.class);
+    stubBusinessPartnerWithGroup(obDal);
+
+    CategoryAccounts row = fullyConfiguredCategoryAccounts();
+    when(row.getNonInvoicedReceipts()).thenReturn(null);
+    stubCategoryAccountsCriteria(obDal, row);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "es_ES");
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      stubBpGroupAndMissingAccountsMessages(msgMock);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertTrue(r.message()
+          .contains("Please review the BP Group's accounting setup: Recibos no facturados."));
+      assertFalse(r.message().contains("Non-Invoiced Receipts"));
+    }
+  }
+
+  /**
+   * ETP-5175 follow-up: same Spanish-label proof as {@code
+   * postAddsMissingAccountsDetailUsesSpanishLabelWhenSessionLanguageIsEsEs}, mirrored on the
+   * {@code M_Product_Acct} side — proves {@code Desviación Pr. Factura} is used, not {@code
+   * Invoice Price Variance}, when the session language is {@code es_ES}.
+   */
+  @Test
+  public void postAddsMissingProductAccountsDetailUsesSpanishLabelWhenSessionLanguageIsEsEs()
+      throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubAcctServerForBpGroupEnrichment();
+    acct.DocumentType = AcctServer.DOCTYPE_MatMatchInv;
+    acct.Record_ID = "matchinv-1";
+    AcctSchema schema = mock(AcctSchema.class);
+    when(schema.getC_AcctSchema_ID()).thenReturn("schema-1");
+    acct.m_as = new AcctSchema[] { schema };
+
+    OBDal obDal = mock(OBDal.class);
+    stubBusinessPartnerWithGroup(obDal);
+    stubCategoryAccountsCriteria(obDal, fullyConfiguredCategoryAccounts());
+    stubReceiptInvoiceMatchWithProduct(obDal, "matchinv-1");
+
+    ProductAccounts row = fullyConfiguredProductAccounts();
+    when(row.getInvoicePriceVariance()).thenReturn(null);
+    stubProductAccountsCriteria(obDal, row);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "es_ES");
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      stubBpGroupAndMissingAccountsMessages(msgMock);
+      stubMissingProductAccountsMessage(msgMock);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertTrue(r.message()
+          .contains("Please review the Product's accounting setup: Desviación Pr. Factura."));
+      assertFalse(r.message().contains("Invoice Price Variance"));
     }
   }
 }

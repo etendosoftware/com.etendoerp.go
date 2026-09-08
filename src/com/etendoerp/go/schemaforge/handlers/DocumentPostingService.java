@@ -76,24 +76,42 @@ public class DocumentPostingService {
    */
   private static final String MSG_MISSING_PRODUCT_ACCOUNTS = "ETGO_InvalidAccountMissingProductAccounts";
 
+  /** {@code AD_LANGUAGE} code that selects the Spanish label pair below; anything else falls back to English. */
+  private static final String LANGUAGE_ES_ES = "es_ES";
+
   /**
    * The {@code C_BP_Group_Acct} columns relevant to this app's document types (ETP-5175) — a
-   * curated subset, not every nullable column on that table. Each entry pairs the account's
-   * English label (matching the English-only precedent of {@link #MSG_INVALID_ACCOUNT_BP_AND_GROUP}
-   * / {@link #MSG_INVALID_ACCOUNT_BP_ONLY} — no {@code AD_MESSAGE_TRL} exists for this catalog)
-   * with the {@link CategoryAccounts} getter that reads it. {@code getVendorLiability()} is a DB
-   * {@code NOT NULL} column — its null-check structurally never fires, kept for completeness.
+   * curated subset, not every nullable column on that table. {@code NotInvoicedReceivables_Acct}
+   * (getter {@code getNonInvoicedReceivables()}) was deliberately dropped from this list
+   * (ETP-5175 follow-up): an exhaustive search of {@code AcctServer.java}, every {@code Doc*.java}
+   * posting handler and every {@code ad_forms} {@code .xsql} found zero references to that
+   * column in any posting engine — only onboarding-provisioning code touches it. It can never
+   * legitimately be the cause of an Invalid-Account posting failure, so including it here only
+   * produced a false-positive "missing account" report (the column the BP Group's Non-Invoiced
+   * Receipts DocMatchInv actually reads was fine; the unrelated, unused Non-Invoiced Receivables
+   * column happened to also be null and was wrongly surfaced to the user). Each entry pairs the
+   * account's EN/ES label with the {@link CategoryAccounts} getter that reads it.
+   * {@code getVendorLiability()} is a DB {@code NOT NULL} column — its null-check structurally
+   * never fires, kept for completeness.
    */
   private static final List<BpGroupAccountColumn> BP_GROUP_ACCOUNT_COLUMNS = List.of(
-      new BpGroupAccountColumn("Non-Invoiced Receipts", CategoryAccounts::getNonInvoicedReceipts),
-      new BpGroupAccountColumn("Non-Invoiced Receivables", CategoryAccounts::getNonInvoicedReceivables),
-      new BpGroupAccountColumn("Customer Receivables No.", CategoryAccounts::getCustomerReceivablesNo),
-      new BpGroupAccountColumn("Vendor Liability", CategoryAccounts::getVendorLiability),
-      new BpGroupAccountColumn("Customer Prepayment", CategoryAccounts::getCustomerPrepayment),
-      new BpGroupAccountColumn("Vendor Prepayment", CategoryAccounts::getVendorPrepayment));
+      new BpGroupAccountColumn("Non-Invoiced Receipts", "Recibos no facturados", CategoryAccounts::getNonInvoicedReceipts),
+      new BpGroupAccountColumn("Customer Receivables No.", "Recibos de clientes", CategoryAccounts::getCustomerReceivablesNo),
+      new BpGroupAccountColumn("Vendor Liability", "Pasivo del proveedor", CategoryAccounts::getVendorLiability),
+      new BpGroupAccountColumn("Customer Prepayment", "Prepago del cliente", CategoryAccounts::getCustomerPrepayment),
+      new BpGroupAccountColumn("Vendor Prepayment", "Pagos por adelantado del proveedor", CategoryAccounts::getVendorPrepayment));
 
-  /** One curated {@code C_BP_Group_Acct} column: its EN label plus its {@link CategoryAccounts} getter. */
-  private record BpGroupAccountColumn(String label, Function<CategoryAccounts, AccountingCombination> getter) {
+  /**
+   * One curated {@code C_BP_Group_Acct} column: its EN/ES labels plus its {@link CategoryAccounts}
+   * getter. {@link #label(String)} picks the Spanish label when {@code lang} is
+   * {@value #LANGUAGE_ES_ES} (same exact-match precedent as
+   * {@code NotPostedDocumentsHandler#getTranslatedName}), English otherwise.
+   */
+  private record BpGroupAccountColumn(String labelEn, String labelEs,
+      Function<CategoryAccounts, AccountingCombination> getter) {
+    String label(String lang) {
+      return LANGUAGE_ES_ES.equals(lang) ? labelEs : labelEn;
+    }
   }
 
   /**
@@ -104,11 +122,19 @@ public class DocumentPostingService {
    * above, its null-check structurally never fires on an existing row; kept for completeness.
    */
   private static final List<ProductAccountColumn> PRODUCT_ACCOUNT_COLUMNS = List.of(
-      new ProductAccountColumn("Product Expense", ProductAccounts::getProductExpense),
-      new ProductAccountColumn("Invoice Price Variance", ProductAccounts::getInvoicePriceVariance));
+      new ProductAccountColumn("Product Expense", "Gastos del producto", ProductAccounts::getProductExpense),
+      new ProductAccountColumn("Invoice Price Variance", "Desviación Pr. Factura",
+          ProductAccounts::getInvoicePriceVariance));
 
-  /** One curated {@code M_Product_Acct} column: its EN label plus its {@link ProductAccounts} getter. */
-  private record ProductAccountColumn(String label, Function<ProductAccounts, AccountingCombination> getter) {
+  /**
+   * One curated {@code M_Product_Acct} column: its EN/ES labels plus its {@link ProductAccounts}
+   * getter. Same language-selection rule as {@link BpGroupAccountColumn#label(String)}.
+   */
+  private record ProductAccountColumn(String labelEn, String labelEs,
+      Function<ProductAccounts, AccountingCombination> getter) {
+    String label(String lang) {
+      return LANGUAGE_ES_ES.equals(lang) ? labelEs : labelEn;
+    }
   }
 
   /** Result of a post/unpost attempt. */
@@ -360,11 +386,12 @@ public class DocumentPostingService {
     criteria.setMaxResults(1);
     CategoryAccounts categoryAccounts = (CategoryAccounts) criteria.uniqueResult();
 
+    String lang = OBContext.getOBContext().getLanguage().getLanguage();
     List<String> missing = new ArrayList<>();
     for (BpGroupAccountColumn column : BP_GROUP_ACCOUNT_COLUMNS) {
       AccountingCombination value = categoryAccounts == null ? null : column.getter().apply(categoryAccounts);
       if (value == null) {
-        missing.add(column.label());
+        missing.add(column.label(lang));
       }
     }
     return missing;
@@ -442,11 +469,12 @@ public class DocumentPostingService {
     criteria.setMaxResults(1);
     ProductAccounts productAccounts = (ProductAccounts) criteria.uniqueResult();
 
+    String lang = OBContext.getOBContext().getLanguage().getLanguage();
     List<String> missing = new ArrayList<>();
     for (ProductAccountColumn column : PRODUCT_ACCOUNT_COLUMNS) {
       AccountingCombination value = productAccounts == null ? null : column.getter().apply(productAccounts);
       if (value == null) {
-        missing.add(column.label());
+        missing.add(column.label(lang));
       }
     }
     return missing;
