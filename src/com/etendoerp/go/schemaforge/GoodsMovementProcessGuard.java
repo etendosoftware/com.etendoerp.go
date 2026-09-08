@@ -158,10 +158,9 @@ final class GoodsMovementProcessGuard {
         continue;
       }
       BigDecimal available = StockAvailabilityGuard.onHandQuantity(product.getId(), locator.getId());
-      if (available == null || available.compareTo(requested) >= 0) {
-        continue;
+      if (available != null && available.compareTo(requested) < 0) {
+        violations.put(groupKey, new Violation(product, locator, available, requested));
       }
-      violations.put(groupKey, new Violation(product, locator, available, requested));
     }
     return violations.values();
   }
