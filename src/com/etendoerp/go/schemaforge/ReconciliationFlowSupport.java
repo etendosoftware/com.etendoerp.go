@@ -126,7 +126,8 @@ final class ReconciliationFlowSupport {
     if (StringUtils.isBlank(paymentMethodId)) {
       return null;
     }
-    FIN_PaymentMethod method = OBDal.getInstance().get(FIN_PaymentMethod.class, paymentMethodId);
+    // Tenant guard: the id comes from the request body (ETP-4950).
+    FIN_PaymentMethod method = TenantOwnership.loadOwned(FIN_PaymentMethod.class, paymentMethodId);
     if (method == null) {
       throw new OBException("Payment method not found: " + paymentMethodId);
     }
@@ -164,8 +165,11 @@ final class ReconciliationFlowSupport {
       return new SettlementOutcome(remaining, NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "invoiceId and scheduleId are required for each invoice"));
     }
-    Invoice invoice = OBDal.getInstance().get(Invoice.class, invoiceId);
-    FIN_PaymentSchedule schedule = OBDal.getInstance().get(FIN_PaymentSchedule.class, scheduleId);
+    // Both ids come from the request body and this method goes on to register a REAL payment
+    // against them, so a foreign id must resolve to nothing rather than to another tenant's
+    // invoice (ETP-4950).
+    Invoice invoice = TenantOwnership.loadOwned(Invoice.class, invoiceId);
+    FIN_PaymentSchedule schedule = TenantOwnership.loadOwned(FIN_PaymentSchedule.class, scheduleId);
     if (invoice == null || schedule == null) {
       return new SettlementOutcome(remaining, NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
           "Invoice or payment schedule not found: " + invoiceId));
@@ -284,6 +288,41 @@ final class ReconciliationFlowSupport {
    * the Sonar per-class method-count limit (java:S1448); every DAL seam still runs on the caller's
    * {@code handler} instance, so behavior — and test stubbing — is unchanged.
    */
+  /**
+   * Runs {@link #prepareGroup} over every submitted group, collecting the ones that pass into
+   * {@code prepared} and appending each rejection to {@code results}. Nothing here touches a
+   * {@code FIN_Reconciliation}: an invalid group must be reported without disturbing the shared
+   * document the accepted ones will be matched into.
+   *
+   * <p>Each failure is tagged with the line it came from. {@code results[]} is not aligned with the
+   * submitted groups — failures are appended in this pass and successes in the next — and a success
+   * entry already carries {@code statementLineId}; without the tag the client can count failures but
+   * cannot say WHICH suggestion failed, which is the whole point of a per-group result.
+   *
+   * <p>Extracted from {@code ReconciliationHandler.applySuggestions} so that method stays under the
+   * Sonar cognitive-complexity limit (java:S3776); behavior is unchanged, and every DAL seam still
+   * runs on the caller's {@code handler} instance.
+   */
+  static void prepareAllGroups(ReconciliationHandler handler, FIN_FinancialAccount account,
+      JSONArray groupsJson, List<ReconciliationHandler.PreparedGroup> prepared, JSONArray results)
+      throws Exception {
+    for (int i = 0; i < groupsJson.length(); i++) {
+      JSONObject groupEntry = groupsJson.optJSONObject(i);
+      if (groupEntry == null) {
+        continue;
+      }
+      NeoResponse prepError = prepareGroup(handler, account, groupEntry, prepared);
+      if (prepError != null) {
+        JSONObject failure = prepError.getBody();
+        if (failure != null && !failure.has(ReconciliationHandler.KEY_STATEMENT_LINE_ID)) {
+          failure.put(ReconciliationHandler.KEY_STATEMENT_LINE_ID,
+              groupEntry.optString(ReconciliationHandler.KEY_STATEMENT_LINE_ID, ""));
+        }
+        results.put(failure);
+      }
+    }
+  }
+
   static NeoResponse prepareGroup(ReconciliationHandler handler, FIN_FinancialAccount account,
       JSONObject groupEntry, List<ReconciliationHandler.PreparedGroup> out) throws Exception {
     String statementLineId = groupEntry.optString(ReconciliationHandler.KEY_STATEMENT_LINE_ID, null);
@@ -292,7 +331,12 @@ final class ReconciliationFlowSupport {
     }
 
     FIN_BankStatementLine line = handler.loadLine(statementLineId);
-    if (line == null) {
+    // Ownership: the line must belong to the account this batch is reconciling. Every other entry
+    // point already did this — reconcileGroup, reactivate, reactivateSelected and
+    // reconcileDifference. applySuggestions was the one path that skipped it, so a line from
+    // another account, another tenant's included, could be matched in against transactions of this
+    // one. See ETP-4950.
+    if (line == null || !ReconciliationSupport.belongsToAccount(line, account.getId())) {
       return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND,
           ReconciliationHandler.MSG_STATEMENT_LINE_NOT_FOUND + statementLineId);
     }

@@ -20,6 +20,7 @@ package com.etendoerp.go.schemaforge;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -27,10 +28,12 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -52,6 +55,8 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.InOrder;
+import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
@@ -61,7 +66,9 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
+import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 
 /**
  * Unit tests for {@link BankStatementsHandler}.
@@ -78,6 +85,25 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 // then fail its post-run mock inspection with NotAMockException, so use Silent.
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class BankStatementsHandlerTest {
+
+  /**
+   * PSD2 connection status meaning "connected to the bank". Mirrors
+   * {@code BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED} deliberately by VALUE rather
+   * than importing it: the point of the assertion below is that the handler recognises this exact
+   * code, so a test that reused the same constant could not catch it changing on one side only.
+   */
+  private static final String PSD2_CONNECTED = "CO";
+
+  /** The model's default connection status for a financial account, i.e. not bank-connected. */
+  private static final String PSD2_DISCONNECTED = "DC";
+
+  /**
+   * The bank-connected delete rejection (ETP-5111), byte-for-byte in sync with the handler's own
+   * constant and with the frontend's {@code backendError.statementBankConnectedNotDeletable}
+   * entry, which matches it by EXACT text after {@code trim()}.
+   */
+  private static final String MSG_STATEMENT_BANK_CONNECTED =
+      "Statements from a bank-connected account cannot be deleted.";
 
   private BankStatementsHandler handler;
   private MockedStatic<BankStatementAggregates> aggMock;
@@ -136,6 +162,8 @@ public class BankStatementsHandlerTest {
 
     doReturn(new JSONArray()).when(handler).loadLines("stmt-1");
 
+    // The tenant gate is a seam here so this stays a routing test (ETP-4950).
+    doReturn(true).when(handler).owns(any(), anyString());
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       NeoResponse response = handler.handle(ctx);
       assertEquals(200, response.getHttpStatus());
@@ -174,6 +202,8 @@ public class BankStatementsHandlerTest {
 
     doThrow(new RuntimeException("db boom")).when(handler).loadStatements("acc-1");
 
+    // The tenant gate is a seam here so this stays a routing test (ETP-4950).
+    doReturn(true).when(handler).owns(any(), anyString());
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       NeoResponse response = handler.handle(ctx);
       assertEquals(500, response.getHttpStatus());
@@ -191,6 +221,8 @@ public class BankStatementsHandlerTest {
 
     doThrow(new RuntimeException("boom")).when(handler).loadLines("stmt-1");
 
+    // The tenant gate is a seam here so this stays a routing test (ETP-4950).
+    doReturn(true).when(handler).owns(any(), anyString());
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       NeoResponse response = handler.handle(ctx);
       assertEquals(500, response.getHttpStatus());
@@ -211,6 +243,8 @@ public class BankStatementsHandlerTest {
     rows.put(row);
     doReturn(rows).when(handler).loadStatements("acc-1");
 
+    // The tenant gate is a seam here so this stays a routing test (ETP-4950).
+    doReturn(true).when(handler).owns(any(), anyString());
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class)) {
       NeoResponse response = handler.handle(ctx);
       assertEquals(200, response.getHttpStatus());
@@ -1067,12 +1101,33 @@ public class BankStatementsHandlerTest {
 
   // ── ?action=process / update / delete (draft row actions) ──────────────
 
-  /** A draft (unprocessed) statement mock. */
+  /**
+   * A draft (unprocessed) statement mock, on an account that is NOT bank-connected.
+   *
+   * <p>The account is stubbed because {@code handleDelete}'s PSD2 guard (ETP-5111) dereferences
+   * {@code statement.getAccount().getPSD2ConnectionStatus()}. An unstubbed {@code getAccount()}
+   * returns null, the guard NPEs, and {@code catch (Exception)} swallows it into a 500 — so the
+   * delete tests below would fail for a reason that has nothing to do with what they assert.
+   * {@link #PSD2_DISCONNECTED} is the model's own default for the column, i.e. the ordinary case.
+   */
   private static FIN_BankStatement draftStatement(String id) {
     FIN_BankStatement s = mock(FIN_BankStatement.class);
     when(s.getId()).thenReturn(id);
     when(s.isProcessed()).thenReturn(false);
+    // The account MUST be built before when(...) opens: inlining the helper call as the
+    // thenReturn() argument runs a second when(...) while this one is still unfinished, which
+    // Mockito rejects with UnfinishedStubbingException (and it surfaces on whichever test runs
+    // first, not on the line at fault).
+    FIN_FinancialAccount account = accountWithConnectionStatus(PSD2_DISCONNECTED);
+    when(s.getAccount()).thenReturn(account);
     return s;
+  }
+
+  /** A financial account whose PSD2 connection status is exactly {@code status}. */
+  private static FIN_FinancialAccount accountWithConnectionStatus(String status) {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getPSD2ConnectionStatus()).thenReturn(status);
+    return account;
   }
 
   private static JSONObject idBody(String id) throws Exception {
@@ -1409,6 +1464,75 @@ public class BankStatementsHandlerTest {
   }
 
   /**
+   * ETP-5111 — a statement whose financial account is bank-connected through PSD2 / Salt Edge is
+   * refused with a 409, even when it is a perfectly ordinary DRAFT with no matched lines (the
+   * `hasMatchedLines` probe is deliberately stubbed false, so the ONLY thing that can reject this
+   * delete is the connection status). Those statements are re-fetched from the bank, so removing
+   * one locally desynchronises the account.
+   *
+   * <p>This is the server-side half of the unified delete rule: the Statements tab no longer
+   * disables its bulk trash for a connected account, so this guard is what actually enforces the
+   * refusal — for the UI, the REST API and MCP alike. It also covers the accepted consequence that
+   * an OLD manual statement on an account since connected is no longer deletable either.
+   */
+  @Test
+  public void handleDeleteRejectsStatementOfBankConnectedAccount() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement draft = draftStatement("st-1");
+    // Built before when(...) opens — see draftStatement() for why inlining this breaks.
+    FIN_FinancialAccount connectedAccount = accountWithConnectionStatus(PSD2_CONNECTED);
+    when(draft.getAccount()).thenReturn(connectedAccount);
+    doReturn(false).when(handler).hasMatchedLines(draft);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "delete"));
+
+      assertEquals(409, r.getHttpStatus());
+      assertEquals(MSG_STATEMENT_BANK_CONNECTED,
+          r.getBody().getJSONObject("error").getString("message"));
+      verify(dal, never()).remove(any());
+      verify(dal, never()).flush();
+    }
+  }
+
+  /**
+   * The other side of that guard, and the reason it compares against one exact code rather than
+   * "has any connection status": a disconnected account carries a non-null status too
+   * ({@link #PSD2_DISCONNECTED} is the column's default), and its statements must stay deletable.
+   * A null-check instead of a value-check would pass the test above and fail this one.
+   */
+  @Test
+  public void handleDeleteAllowsStatementOfDisconnectedAccount() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement draft = draftStatement("st-1");
+    doReturn(false).when(handler).hasMatchedLines(draft);
+    @SuppressWarnings("unchecked")
+    OBCriteria<FIN_BankStatementLine> crit = mock(OBCriteria.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
+      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.list()).thenReturn(Collections.emptyList());
+
+      NeoResponse r = handler.handle(postCtx(ctx, "delete"));
+
+      assertEquals(200, r.getHttpStatus());
+      verify(dal).remove(draft);
+    }
+  }
+
+  /**
    * ETP-4921 — update must rebuild ONLY the unmatched lines. The criteria it issues therefore
    * carries an extra isNull(financialAccountTransaction) restriction compared to the old
    * delete-everything path, and the matched lines it leaves behind still count towards the
@@ -1521,5 +1645,88 @@ public class BankStatementsHandlerTest {
       NeoResponse r = handler.handle(postCtx(ctx, "update"));
       assertEquals(400, r.getHttpStatus());
     }
+  }
+
+  // ── ETP-5121: reactivating a statement must not undo its reconciliations ──
+  //
+  // Every reactivate test above stubs reactivateStatement away (doNothing), so its BODY was never
+  // exercised. That body is the invariant ETP-5121's PENDING_LINES_SQL fix rests on: returning a
+  // statement to draft flips FIN_BankStatement.Processed and APRM's process selector, and NOTHING
+  // else — it never clears FIN_BankStatementLine.FIN_FinAcc_Transaction_ID and never detaches that
+  // transaction from its FIN_Reconciliation. Hence a line reconciled before the reactivation is
+  // still genuinely reconciled afterwards, which is exactly why the reconciliation panel has to
+  // keep listing it (see ReconciliationHandlerTest's PENDING_LINES_SQL shape tests). If this
+  // invariant ever changed — if reactivate started reversing reconciliations — that SQL exception
+  // would become wrong, and these tests are what would say so.
+
+  /** APRM process-selector value a reactivated statement goes back to. */
+  private static final String APRM_SELECTOR_PROCESS = "P";
+
+  @Mock private FIN_BankStatement reactivatedStatement;
+  @Mock private FIN_BankStatementLine reconciledLine;
+  @Mock private FIN_FinaccTransaction linkedTransaction;
+  @Mock private FIN_Reconciliation processedReconciliation;
+  @Mock private OBDal reactivateDal;
+
+  /**
+   * The whole of {@code reactivateStatement}: {@code ProcessNow} is raised around the change (so
+   * core's own bank-statement triggers stand down), {@code Processed} is cleared, and both APRM
+   * process selectors go back to "P". Each step is persisted rather than only mutated in memory.
+   */
+  @Test
+  public void testReactivateStatementOnlyReturnsTheHeaderToDraft() {
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(reactivateDal);
+
+      handler.reactivateStatement(reactivatedStatement);
+
+      InOrder order = inOrder(reactivatedStatement);
+      order.verify(reactivatedStatement).setProcessNow(true);
+      order.verify(reactivatedStatement).setProcessed(false);
+      order.verify(reactivatedStatement).setProcessNow(false);
+      verify(reactivatedStatement).setAPRMProcessBankStatement(APRM_SELECTOR_PROCESS);
+      verify(reactivatedStatement).setAPRMProcessBankStatementForce(APRM_SELECTOR_PROCESS);
+      verify(reactivateDal, times(3)).save(reactivatedStatement);
+      verify(reactivateDal, times(2)).flush();
+      // Nothing else on the header is touched — in particular the posting flag.
+      verify(reactivatedStatement, never()).setPosted(anyString());
+    }
+  }
+
+  /**
+   * The invariant the ETP-5121 SQL fix depends on: a matched line of the statement keeps BOTH links
+   * of the reconciliation chain (line to transaction, transaction to reconciliation) and the
+   * reconciliation itself stays processed. {@code reactivateStatement} does not even read the line
+   * collection.
+   */
+  @Test
+  public void testReactivateStatementKeepsTheReconciledLineChainIntact() {
+    when(reconciledLine.getFinancialAccountTransaction()).thenReturn(linkedTransaction);
+    when(linkedTransaction.getReconciliation()).thenReturn(processedReconciliation);
+    when(processedReconciliation.isProcessed()).thenReturn(true);
+    when(reactivatedStatement.getFINBankStatementLineList())
+        .thenReturn(Collections.singletonList(reconciledLine));
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(reactivateDal);
+
+      handler.reactivateStatement(reactivatedStatement);
+    }
+
+    // The line keeps pointing at its transaction, and the transaction at its reconciliation.
+    verify(reconciledLine, never()).setFinancialAccountTransaction(any());
+    verify(linkedTransaction, never()).setReconciliation(any());
+    verify(processedReconciliation, never()).setProcessed(false);
+    assertSame("the line to transaction link must survive the reactivation",
+        linkedTransaction, reconciledLine.getFinancialAccountTransaction());
+    assertSame("the transaction to reconciliation link must survive the reactivation",
+        processedReconciliation, linkedTransaction.getReconciliation());
+    assertTrue("the reconciliation must stay processed, which is what keeps the line reconciled",
+        processedReconciliation.isProcessed());
+    // It does not even look at the lines: reactivation is a header-only operation.
+    verify(reactivatedStatement, never()).getFINBankStatementLineList();
+    // And it never touches the line at all, so APRM_FIN_BNKSTM_LINE_CHECK_TRG has nothing to
+    // reject (the ETP-4921 finding this builds on).
+    verify(reconciledLine, never()).setBankStatement(any());
   }
 }
