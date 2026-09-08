@@ -642,6 +642,15 @@ public class DocumentPostingServiceTest {
     return bp;
   }
 
+  /** Stubs {@code OBDal.getInstance().get(BusinessPartner.class, "bp-1")} with a BP that has NO BP Group. */
+  private static BusinessPartner stubBusinessPartnerWithoutGroup(OBDal obDal) {
+    BusinessPartner bp = mock(BusinessPartner.class);
+    when(bp.getName()).thenReturn("Fernet Branca S.A.");
+    when(bp.getBusinessPartnerCategory()).thenReturn(null);
+    when(obDal.get(BusinessPartner.class, "bp-1")).thenReturn(bp);
+    return bp;
+  }
+
   /** Stubs the two message-catalog keys used by the BP+Group and missing-accounts enrichment. */
   private static void stubBpGroupAndMissingAccountsMessages(MockedStatic<OBMessageUtils> msgMock) {
     msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
@@ -1250,6 +1259,171 @@ public class DocumentPostingServiceTest {
       assertTrue(r.message().contains("Fernet Branca S.A."));
       assertTrue(r.message().contains("Proveedores Generales"));
       assertFalse(r.message().contains("Missing account setup"));
+    }
+  }
+
+  /**
+   * ETP-5175 QA finding (Alex review W1): the {@code appendDetail(bpOnly, productAccountsDetail)}
+   * branch in {@code resolveBusinessPartnerDetail} — "BP has NO BP Group" composed with "MXI
+   * product accounts missing" — was a reachable code path with ZERO test coverage: every other
+   * ETP-5175 test uses {@link #stubBusinessPartnerWithGroup}. Proves the two independent addenda
+   * compose correctly even when the BP-Group one has nothing to contribute: the base message stays
+   * the {@code ETGO_InvalidAccountBpOnly} template (no BP-Group text at all, since {@code
+   * resolveMissingAccountsDetail} is never reached when {@code bpGroup == null}), with the product
+   * addendum appended after it.
+   */
+  @Test
+  public void postAddsMissingProductAccountsDetailOnBpOnlyMessageWhenGroupAbsent() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubAcctServerForBpGroupEnrichment();
+    acct.DocumentType = AcctServer.DOCTYPE_MatMatchInv;
+    acct.Record_ID = "matchinv-1";
+    AcctSchema schema = mock(AcctSchema.class);
+    when(schema.getC_AcctSchema_ID()).thenReturn("schema-1");
+    acct.m_as = new AcctSchema[] { schema };
+
+    OBDal obDal = mock(OBDal.class);
+    stubBusinessPartnerWithoutGroup(obDal);
+    stubReceiptInvoiceMatchWithProduct(obDal, "matchinv-1");
+
+    ProductAccounts row = fullyConfiguredProductAccounts();
+    when(row.getInvoicePriceVariance()).thenReturn(null);
+    stubProductAccountsCriteria(obDal, row);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpOnly"))
+          .thenReturn("(Business Partner: @bpName@)");
+      stubMissingProductAccountsMessage(msgMock);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      // BP-only baseline (no BP Group / no "Missing account setup on BP Group" text at all)...
+      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A.)"));
+      assertFalse(r.message().contains("BP Group"));
+      assertFalse(r.message().contains("Missing account setup on BP Group"));
+      // ...plus the independent product-accounts addendum, appended after it.
+      assertTrue(r.message().contains("(Missing account setup on Product: Invoice Price Variance)"));
+      assertTrue(r.message().indexOf("(Business Partner: Fernet Branca S.A.)")
+          < r.message().indexOf("(Missing account setup on Product:"));
+    }
+  }
+
+  /**
+   * ETP-5175 (Alex review suggestion, optional): proves both independent addenda can fire
+   * SIMULTANEOUSLY on the same MXI failure — the BP has a BP Group AND that group is missing a
+   * curated {@code C_BP_Group_Acct} column, AND the MXI product is also missing a curated {@code
+   * M_Product_Acct} column. No existing test (pre- or post-ETP-5175) exercised this combination;
+   * every other scenario keeps one side fully configured.
+   */
+  @Test
+  public void postAddsBothBpGroupAndProductAccountsDetailWhenBothAreMissingSimultaneously()
+      throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubAcctServerForBpGroupEnrichment();
+    acct.DocumentType = AcctServer.DOCTYPE_MatMatchInv;
+    acct.Record_ID = "matchinv-1";
+    AcctSchema schema = mock(AcctSchema.class);
+    when(schema.getC_AcctSchema_ID()).thenReturn("schema-1");
+    acct.m_as = new AcctSchema[] { schema };
+
+    OBDal obDal = mock(OBDal.class);
+    stubBusinessPartnerWithGroup(obDal);
+
+    CategoryAccounts bpGroupRow = fullyConfiguredCategoryAccounts();
+    when(bpGroupRow.getNonInvoicedReceipts()).thenReturn(null);
+    stubCategoryAccountsCriteria(obDal, bpGroupRow);
+
+    stubReceiptInvoiceMatchWithProduct(obDal, "matchinv-1");
+    ProductAccounts productRow = fullyConfiguredProductAccounts();
+    when(productRow.getInvoicePriceVariance()).thenReturn(null);
+    stubProductAccountsCriteria(obDal, productRow);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      stubBpGroupAndMissingAccountsMessages(msgMock);
+      stubMissingProductAccountsMessage(msgMock);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
+      assertTrue(r.message().contains("(Missing account setup on BP Group: Non-Invoiced Receipts)"));
+      assertTrue(r.message().contains("(Missing account setup on Product: Invoice Price Variance)"));
+    }
+  }
+
+  /**
+   * ETP-5175 adversarial edge case: a Matched Purchase Invoice ({@code acct.Record_ID}) that does
+   * NOT resolve to any {@code ReceiptInvoiceMatch} at all (a deleted/orphaned record — a
+   * data-integrity gap, not an accounting-setup gap) must degrade to "nothing reported", exactly
+   * as {@link DocumentPostingService#resolveMissingProductAccounts} javadocs claim — not an
+   * exception, and not a false-positive "all columns missing" report. {@code OBDal.get(...)}
+   * returns {@code null} by default on an unstubbed mock, so this also proves the {@code
+   * ProductAccounts} criteria query is never even attempted once the product cannot be resolved.
+   */
+  @Test
+  public void postSkipsMissingProductAccountsDetailWhenReceiptInvoiceMatchDoesNotResolve()
+      throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubAcctServerForBpGroupEnrichment();
+    acct.DocumentType = AcctServer.DOCTYPE_MatMatchInv;
+    acct.Record_ID = "orphaned-matchinv-1";
+    AcctSchema schema = mock(AcctSchema.class);
+    when(schema.getC_AcctSchema_ID()).thenReturn("schema-1");
+    acct.m_as = new AcctSchema[] { schema };
+
+    OBDal obDal = mock(OBDal.class);
+    stubBusinessPartnerWithGroup(obDal);
+    stubCategoryAccountsCriteria(obDal, fullyConfiguredCategoryAccounts());
+    // obDal.get(ReceiptInvoiceMatch.class, "orphaned-matchinv-1") intentionally left unstubbed —
+    // Mockito default is null, simulating a deleted/orphaned M_MatchInv record.
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      stubBpGroupAndMissingAccountsMessages(msgMock);
+      stubMissingProductAccountsMessage(msgMock);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
+      assertFalse(r.message().contains("Missing account setup on Product"));
+      verify(obDal, never()).createCriteria(ProductAccounts.class);
     }
   }
 }
