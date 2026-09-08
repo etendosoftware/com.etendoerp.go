@@ -879,4 +879,96 @@ public class DocumentPostingServiceTest {
       verify(obDal, never()).createCriteria(CategoryAccounts.class);
     }
   }
+
+  /**
+   * ETP-5175: an EMPTY (not just null) {@code acct.m_as} array must also be treated as
+   * "schema unresolvable" — same defensive skip as the null case above, no
+   * {@code ArrayIndexOutOfBoundsException}. Distinct scenario from
+   * {@code postSkipsMissingAccountsDetailWhenAcctSchemaIsUnresolvable} (null array): this proves
+   * the {@code length > 0} guard, not just the {@code != null} guard.
+   */
+  @Test
+  public void postSkipsMissingAccountsDetailWhenAcctSchemaArrayIsEmpty() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubAcctServerForBpGroupEnrichment();
+    acct.m_as = new AcctSchema[0];
+
+    OBDal obDal = mock(OBDal.class);
+    stubBusinessPartnerWithGroup(obDal);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
+          .thenReturn("(Business Partner: @bpName@, BP Group: @bpGroup@)");
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
+      assertFalse(r.message().contains("Missing account setup"));
+      verify(obDal, never()).createCriteria(CategoryAccounts.class);
+    }
+  }
+
+  /**
+   * ETP-5175 BUG (QA finding, see QA report): {@code resolveMissingAccountsDetail} runs INSIDE
+   * the same outer {@code try} block in {@code resolveBusinessPartnerDetail} that already built
+   * the BP+Group {@code detail} string. If the new {@code CategoryAccounts} criteria query throws
+   * (e.g. a transient DB error, an OBDal/Hibernate mapping issue), the {@code catch (Exception e)}
+   * discards the ALREADY-SUCCESSFULLY-BUILT BP+Group detail along with it and returns
+   * {@code null} — degrading the pre-existing, working ETP-4706 enrichment (Business Partner name
+   * + BP Group name) down to the bare accounting-engine message, solely because of a failure in
+   * the brand-new, optional missing-accounts lookup. This test documents CURRENT behavior (it
+   * passes against the code as shipped) to pin the regression for a future fix: the missing-
+   * accounts lookup should fail closed on its own (return {@code null} on exception) without
+   * unwinding the outer try and losing already-resolved data.
+   */
+  @Test
+  public void postLosesBpGroupDetailWhenMissingAccountsLookupThrows() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubAcctServerForBpGroupEnrichment();
+    AcctSchema schema = mock(AcctSchema.class);
+    when(schema.getC_AcctSchema_ID()).thenReturn("schema-1");
+    acct.m_as = new AcctSchema[] { schema };
+
+    OBDal obDal = mock(OBDal.class);
+    stubBusinessPartnerWithGroup(obDal);
+    when(obDal.createCriteria(CategoryAccounts.class)).thenThrow(new RuntimeException("DB error"));
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      stubBpGroupAndMissingAccountsMessages(msgMock);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertTrue(r.message().contains("Account could not be found."));
+      // Regression: the already-built BP+Group detail is lost, not just the missing-accounts
+      // addendum, because both are computed inside the same try block that the exception unwinds.
+      assertFalse(r.message().contains("Fernet Branca S.A."));
+      assertFalse(r.message().contains("Proveedores Generales"));
+    }
+  }
 }
