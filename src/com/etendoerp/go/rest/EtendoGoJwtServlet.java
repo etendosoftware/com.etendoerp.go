@@ -198,7 +198,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   // AUTH-07 / ETP-5022 — change-password failures. Stable codes so the web client translates
   // by code; the English text below is a developer-facing fallback, never end-user copy.
   private static final String CODE_MISSING_CREDENTIALS = "CHANGE_PASSWORD_MISSING_CREDENTIALS";
-  private static final String CODE_NO_LOCAL_PASSWORD = "NO_LOCAL_PASSWORD";
   private static final String CODE_INVALID_CURRENT_PASSWORD = "INVALID_CURRENT_PASSWORD";
   private static final String CODE_METHOD_NOT_FOUND = "AUTH_METHOD_NOT_FOUND";
   private static final String CODE_LAST_AUTH_METHOD = "LAST_AUTH_METHOD";
@@ -1251,6 +1250,60 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return true;
   }
 
+  /** The two passwords a change-password request carries, once validated. */
+  private static final class ChangePasswordRequest {
+    private final String currentPassword;
+    private final String newPassword;
+
+    private ChangePasswordRequest(String currentPassword, String newPassword) {
+      this.currentPassword = currentPassword;
+      this.newPassword = newPassword;
+    }
+  }
+
+  /**
+   * Reads and validates the change-password body. Writes the error response and returns
+   * {@code null} when the body is unusable, so the caller only has to check for null.
+   *
+   * <p>ETP-5115: currentPassword is read optionally rather than demanded up front. An account with
+   * no local password has none to give, and requiring it here rejected those callers with a
+   * missing-credentials error before anything ever looked at the account — so the endpoint that
+   * says "this account signs in through an external provider" could not be reached by the very
+   * accounts it describes. Whether it is actually required is decided by the caller, once the
+   * account is known; an account that has a password still must supply it.
+   */
+  private ChangePasswordRequest readChangePasswordRequest(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      return null;
+    }
+
+    String newPassword;
+    try {
+      newPassword = body.getString("newPassword");
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
+          "changePassword: request body lacks newPassword",
+          "The new password is required.");
+      return null;
+    }
+    if (newPassword.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
+          "changePassword: newPassword is empty",
+          "The new password is required.");
+      return null;
+    }
+    if (!PasswordPolicy.isStrong(newPassword)) {
+      writeWeakPasswordError(response);
+      return null;
+    }
+    return new ChangePasswordRequest(body.optString("currentPassword", ""), newPassword);
+  }
+
   /**
    * POST /sws/go/change-password
    * Header: Authorization: Bearer <session_token>
@@ -1263,40 +1316,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
 
-    JSONObject body;
-    try {
-      body = readJsonBody(request);
-    } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+    ChangePasswordRequest passwords = readChangePasswordRequest(request, response);
+    if (passwords == null) {
       return;
     }
-
-    // ETP-5115: currentPassword is read optionally rather than demanded up front. An account with
-    // no local password has none to give, and requiring it here rejected those callers with a
-    // missing-credentials error before anything ever looked at the account — so the endpoint that
-    // says "this account signs in through an external provider" could not be reached by the very
-    // accounts it describes. Whether it is actually required is decided below, once the account is
-    // known; an account that has a password still must supply it.
-    String currentPassword = body.optString("currentPassword", "");
-    String newPassword;
-    try {
-      newPassword = body.getString("newPassword");
-    } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
-          "changePassword: request body lacks newPassword",
-          "The new password is required.");
-      return;
-    }
-    if (newPassword.isEmpty()) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
-          "changePassword: newPassword is empty",
-          "The new password is required.");
-      return;
-    }
-    if (!PasswordPolicy.isStrong(newPassword)) {
-      writeWeakPasswordError(response);
-      return;
-    }
+    String currentPassword = passwords.currentPassword;
+    String newPassword = passwords.newPassword;
 
     try {
       AuthenticatedAccount authenticated = resolveAuthenticatedAccountContext(request, response);
