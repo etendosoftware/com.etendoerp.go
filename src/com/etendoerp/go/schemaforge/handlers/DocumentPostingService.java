@@ -40,7 +40,10 @@ import org.openbravo.financial.ResetAccounting;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.businesspartner.Category;
 import org.openbravo.model.common.businesspartner.CategoryAccounts;
+import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.common.plm.ProductAccounts;
 import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
+import org.openbravo.model.procurement.ReceiptInvoiceMatch;
 import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -67,6 +70,11 @@ public class DocumentPostingService {
   private static final String MSG_INVALID_ACCOUNT_BP_ONLY = "ETGO_InvalidAccountBpOnly";
   /** AD_MESSAGE searchkey for naming the specific missing {@code C_BP_Group_Acct} column(s). */
   private static final String MSG_MISSING_BP_GROUP_ACCOUNTS = "ETGO_InvalidAccountMissingBpGroupAccounts";
+  /**
+   * AD_MESSAGE searchkey for naming the specific missing {@code M_Product_Acct} column(s), on a
+   * Matched Purchase Invoice only (ETP-5175).
+   */
+  private static final String MSG_MISSING_PRODUCT_ACCOUNTS = "ETGO_InvalidAccountMissingProductAccounts";
 
   /**
    * The {@code C_BP_Group_Acct} columns relevant to this app's document types (ETP-5175) — a
@@ -86,6 +94,21 @@ public class DocumentPostingService {
 
   /** One curated {@code C_BP_Group_Acct} column: its EN label plus its {@link CategoryAccounts} getter. */
   private record BpGroupAccountColumn(String label, Function<CategoryAccounts, AccountingCombination> getter) {
+  }
+
+  /**
+   * The {@code M_Product_Acct} columns relevant to a Matched Purchase Invoice failure (ETP-5175):
+   * {@code DocMatchInv#createFact} resolves these two accounts independently from the BP-Group
+   * ones above, keyed by the invoice line's PRODUCT rather than the Business Partner's group.
+   * {@code getProductExpense()} is a DB {@code NOT NULL} column — like {@code getVendorLiability()}
+   * above, its null-check structurally never fires on an existing row; kept for completeness.
+   */
+  private static final List<ProductAccountColumn> PRODUCT_ACCOUNT_COLUMNS = List.of(
+      new ProductAccountColumn("Product Expense", ProductAccounts::getProductExpense),
+      new ProductAccountColumn("Invoice Price Variance", ProductAccounts::getInvoicePriceVariance));
+
+  /** One curated {@code M_Product_Acct} column: its EN label plus its {@link ProductAccounts} getter. */
+  private record ProductAccountColumn(String label, Function<ProductAccounts, AccountingCombination> getter) {
   }
 
   /** Result of a post/unpost attempt. */
@@ -252,19 +275,28 @@ public class DocumentPostingService {
       if (bp == null) {
         return null;
       }
+      // Fails closed on its own (see javadoc) — safe to call unconditionally, before the
+      // BP-Group branching below, without risking the outer try/catch here.
+      String productAccountsDetail = resolveMissingProductAccountsDetail(acct);
       Category bpGroup = bp.getBusinessPartnerCategory();
       if (bpGroup == null) {
-        return OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BP_ONLY).replace("@bpName@", bp.getName());
+        String bpOnly = OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BP_ONLY).replace("@bpName@", bp.getName());
+        return appendDetail(bpOnly, productAccountsDetail);
       }
       String detail = OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BP_AND_GROUP)
           .replace("@bpName@", bp.getName())
           .replace("@bpGroup@", bpGroup.getName());
-      String missingAccountsDetail = resolveMissingAccountsDetail(bpGroup.getId(), acct);
-      return missingAccountsDetail != null ? detail + " " + missingAccountsDetail : detail;
+      detail = appendDetail(detail, resolveMissingAccountsDetail(bpGroup.getId(), acct));
+      return appendDetail(detail, productAccountsDetail);
     } catch (Exception e) {
       log.debug("Could not resolve Business Partner detail for account error, bpartnerId={}", bpartnerId, e);
       return null;
     }
+  }
+
+  /** Appends {@code addendum} to {@code base} (space-separated) when present, otherwise returns {@code base} unchanged. */
+  private static String appendDetail(String base, String addendum) {
+    return addendum != null ? base + " " + addendum : base;
   }
 
   /**
@@ -331,6 +363,88 @@ public class DocumentPostingService {
     List<String> missing = new ArrayList<>();
     for (BpGroupAccountColumn column : BP_GROUP_ACCOUNT_COLUMNS) {
       AccountingCombination value = categoryAccounts == null ? null : column.getter().apply(categoryAccounts);
+      if (value == null) {
+        missing.add(column.label());
+      }
+    }
+    return missing;
+  }
+
+  /**
+   * Names which of the curated {@link #PRODUCT_ACCOUNT_COLUMNS} are unconfigured for the product
+   * on a failing Matched Purchase Invoice (ETP-5175). {@code DocMatchInv#createFact} resolves
+   * these from {@code M_Product_Acct} — a completely different table from the BP-Group one above,
+   * keyed by the invoice line's PRODUCT, not the Business Partner's group — so this check is
+   * gated to {@code AcctServer.DOCTYPE_MatMatchInv} only: a Sales Invoice's (or any other document
+   * type's) Invalid-Account failure has nothing to do with product accounts.
+   *
+   * <p>Fails closed on its own, same as {@link #resolveMissingAccountsDetail}: any exception here
+   * (product lookup, criteria query) is caught locally and yields {@code null}, so it never
+   * unwinds {@link #resolveBusinessPartnerDetail}'s outer try and discards the already-built
+   * BP (+ BP Group) detail — the same regression class QA caught once for the sibling BP-Group
+   * lookup (ETP-5175 reject cycle).</p>
+   *
+   * @param acct
+   *     the failed {@link AcctServer} instance; {@code acct.Record_ID} is the
+   *     {@code M_MatchInv_ID} on a Matched Purchase Invoice failure.
+   * @return the "missing account setup" message detail, or {@code null} if the document is not a
+   *     Matched Purchase Invoice, nothing is missing, or the lookup failed.
+   */
+  private static String resolveMissingProductAccountsDetail(AcctServer acct) {
+    if (!AcctServer.DOCTYPE_MatMatchInv.equals(acct.DocumentType)) {
+      return null;
+    }
+    String acctSchemaId = resolveAcctSchemaId(acct);
+    if (StringUtils.isBlank(acctSchemaId)) {
+      return null;
+    }
+    List<String> missing;
+    try {
+      missing = resolveMissingProductAccounts(acct.Record_ID, acctSchemaId);
+    } catch (Exception e) {
+      log.debug("Could not resolve missing product accounts detail, matchInvId={}", acct.Record_ID, e);
+      return null;
+    }
+    if (missing.isEmpty()) {
+      return null;
+    }
+    return OBMessageUtils.messageBD(MSG_MISSING_PRODUCT_ACCOUNTS)
+        .replace("@missingAccounts@", String.join(", ", missing));
+  }
+
+  /**
+   * Looks up the {@link ProductAccounts} row (the {@code M_Product_Acct} table, keyed by
+   * {@code (M_Product_ID, C_AcctSchema_ID)}) for the product on the given Matched Purchase Invoice
+   * ({@code M_MatchInv_ID}) + accounting schema, and returns the EN labels of every curated column
+   * that is null. When no {@code ProductAccounts} row exists at all (the product's accounting was
+   * never provisioned) every curated column is reported as missing, mirroring
+   * {@link #resolveMissingBpGroupAccounts}'s "no row" handling. When the {@code M_MatchInv} record
+   * or its product cannot be resolved at all (a data-integrity edge case, not an accounting-setup
+   * gap), nothing is reported — there is no product to name a missing account against.
+   *
+   * @param matchInvId
+   *     id of the {@code M_MatchInv} record ({@code acct.Record_ID} on a Matched Purchase Invoice
+   *     failure).
+   * @param acctSchemaId
+   *     id of the accounting schema ({@code C_AcctSchema_ID}).
+   * @return labels of the unconfigured curated columns; empty when everything is configured.
+   */
+  private static List<String> resolveMissingProductAccounts(String matchInvId, String acctSchemaId) {
+    ReceiptInvoiceMatch match = OBDal.getInstance().get(ReceiptInvoiceMatch.class, matchInvId);
+    Product product = match == null ? null : match.getProduct();
+    if (product == null) {
+      return List.of();
+    }
+
+    OBCriteria<ProductAccounts> criteria = OBDal.getInstance().createCriteria(ProductAccounts.class);
+    criteria.add(Restrictions.eq(ProductAccounts.PROPERTY_PRODUCT + ".id", product.getId()));
+    criteria.add(Restrictions.eq(ProductAccounts.PROPERTY_ACCOUNTINGSCHEMA + ".id", acctSchemaId));
+    criteria.setMaxResults(1);
+    ProductAccounts productAccounts = (ProductAccounts) criteria.uniqueResult();
+
+    List<String> missing = new ArrayList<>();
+    for (ProductAccountColumn column : PRODUCT_ACCOUNT_COLUMNS) {
+      AccountingCombination value = productAccounts == null ? null : column.getter().apply(productAccounts);
       if (value == null) {
         missing.add(column.label());
       }
