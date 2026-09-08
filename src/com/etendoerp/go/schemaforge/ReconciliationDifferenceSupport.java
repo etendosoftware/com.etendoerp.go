@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.belongsToAccount;
+import static com.etendoerp.go.schemaforge.ReconciliationSupport.isOnDraftStatement;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.nullSafe;
 
 import java.math.BigDecimal;
@@ -216,6 +217,14 @@ final class ReconciliationDifferenceSupport {
     NeoResponse stateError = checkLineState(line, snap);
     if (stateError != null) {
       return Preflight.failed(stateError);
+    }
+    // ETP-5121: a partially reconciled group survives its statement's reactivation intact, so this
+    // path stays reachable on a draft statement even though the Automatch no longer proposes one.
+    // Placed after checkLineState so an already-reconciled line keeps its more specific answer,
+    // matching reconcileGroup and prepareGroup. Everything here is read-only, so returning is safe.
+    if (isOnDraftStatement(line)) {
+      return Preflight.failed(NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT));
     }
 
     NeoResponse toleranceError = checkTolerance(handler, accountId, snap);

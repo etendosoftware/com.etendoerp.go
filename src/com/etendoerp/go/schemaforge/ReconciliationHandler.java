@@ -24,6 +24,7 @@ import static com.etendoerp.go.schemaforge.ReconciliationSupport.bindDateRange;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.docTypeToIsReceipt;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.envelope;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.formatDate;
+import static com.etendoerp.go.schemaforge.ReconciliationSupport.isOnDraftStatement;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.nullSafe;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.readOperationIds;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.signedAmount;
@@ -254,6 +255,14 @@ public class ReconciliationHandler implements NeoHandler {
       "Statement line does not belong to the financial account";
   /** Shared with {@link ReconciliationDifferenceSupport}, which hoists this very guard. */
   static final String MSG_LINE_ALREADY_RECONCILED = "Statement line is already reconciled";
+  /**
+   * Shared by the three write paths that consume a suggestion (ETP-5121, QA round):
+   * {@link #reconcileGroup}, {@link ReconciliationFlowSupport#prepareGroup} and
+   * {@link ReconciliationDifferenceSupport}. Kept as one constant because the frontend maps the
+   * backend text to a locale key by exact match - two spellings would need two map entries.
+   */
+  static final String MSG_LINE_ON_DRAFT_STATEMENT =
+      "The bank statement is in draft; process it before reconciling its lines";
   static final String KEY_UPDATED_BALANCE = "updatedBalance";
 
   /**
@@ -883,6 +892,13 @@ public class ReconciliationHandler implements NeoHandler {
     }
     if (line.getFinancialAccountTransaction() != null) {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT, MSG_LINE_ALREADY_RECONCILED);
+    }
+    // ETP-5121: a statement returned to Borrador is not reconcilable. Deliberately AFTER the
+    // already-reconciled check - a reconciled line of a reactivated statement is a real state
+    // (reactivating a statement does not undo its reconciliations) and deserves that more specific
+    // answer. Everything above is read-only, so this rejection cannot flush a half-built write.
+    if (isOnDraftStatement(line)) {
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, MSG_LINE_ON_DRAFT_STATEMENT);
     }
 
     // Pay each selected unpaid invoice (creates payment + auto-creates its transaction); the new
@@ -1691,25 +1707,54 @@ public class ReconciliationHandler implements NeoHandler {
   }
 
   /**
-   * Loads unreconciled bank-statement lines for the given account.
-   * Uses the same criteria as the {@code pendingLines} action: active lines with no linked
-   * transaction, regardless of the bank-statement processed flag (which would exclude C43-imported
-   * or manually-entered statements that are still in draft status).
+   * Loads the bank-statement lines the Automatch engine may propose for the given account: active,
+   * unmatched lines of an active, PROCESSED statement.
+   *
+   * <p><b>The processed gate (ETP-5121, QA round).</b> A statement in Borrador is not reconcilable
+   * yet, so its unmatched lines must not be suggested. Until this change the query had no
+   * {@code processed} predicate at all, so reactivating a statement dropped its pending line from
+   * the left panel - which gates on it through {@code PENDING_LINES_SQL} - while the Automatch
+   * modal went on offering that same line, and applying the suggestion actually succeeded. The
+   * write paths carry the rule as a guard too ({@link #reconcileGroup},
+   * {@link ReconciliationFlowSupport#prepareGroup}, {@link ReconciliationDifferenceSupport}), so a
+   * preview taken before a reactivation cannot be applied after it.
+   *
+   * <p><b>Why there is no already-reconciled exception here.</b> {@code PENDING_LINES_SQL} lets a
+   * reconciled line of a reactivated statement through, because the panel still has to list it
+   * under "Conciliadas". That exception requires a non-null {@code FIN_FinAcc_Transaction_ID},
+   * which contradicts this query's own {@code financialAccountTransaction is null} restriction -
+   * the intersection is empty, so repeating it here would only add a join no predicate reads. The
+   * Automatch only ever looks at UNMATCHED lines; a reconciled one has nothing left to suggest.
+   *
+   * <p><b>Tenant scoping (ETP-4950 pattern).</b> This goes through the DAL rather than a raw
+   * {@code getSession().createQuery} precisely so {@link OBCriteria} contributes
+   * {@code client.id in (readableClients)} and {@code organization.id in (readableOrganizations)}
+   * itself: the filter cannot be forgotten by a caller, and it still applies under
+   * {@code OBContext.setAdminMode(true)} - which this whole reconciliation path runs in - because
+   * the admin-mode guard only skips the entity-access check, not those predicates. The previous
+   * HQL filtered on the account and {@code isactive} alone, exactly the hole ETP-4950 closed on
+   * {@link MatchRuleEngine#loadRules(String)}.
+   *
+   * <p>No date filter, deliberately: the modal proposes every pending line regardless of age.
    * Package-private for testability.
+   *
+   * @param accountId the financial account whose statement lines are collected
+   * @return the proposable lines, ordered by transaction date then line number
    */
-  @SuppressWarnings("unchecked")
   List<FIN_BankStatementLine> loadPendingLines(String accountId) {
-    String hql = "select bsl from FIN_BankStatementLine as bsl"
-        + "  join bsl.bankStatement as bs"
-        + " where bs.account.id = :accountId"
-        + "   and bsl.financialAccountTransaction is null"
-        + "   and bsl.active = true"
-        + "   and bs.active = true"
-        + " order by bsl.transactionDate asc, bsl.lineNo asc";
-    return OBDal.getInstance().getSession()
-        .createQuery(hql, FIN_BankStatementLine.class)
-        .setParameter(PARAM_ACCOUNT_ID, accountId)
-        .list();
+    OBCriteria<FIN_BankStatementLine> c =
+        OBDal.getInstance().createCriteria(FIN_BankStatementLine.class);
+    c.createAlias(FIN_BankStatementLine.PROPERTY_BANKSTATEMENT, "bs");
+    c.add(Restrictions.eq(FIN_BankStatementLine.PROPERTY_ACTIVE, true));
+    c.add(Restrictions.isNull(FIN_BankStatementLine.PROPERTY_FINANCIALACCOUNTTRANSACTION));
+    c.add(Restrictions.eq("bs." + FIN_BankStatement.PROPERTY_ACTIVE, true));
+    c.add(Restrictions.eq("bs." + FIN_BankStatement.PROPERTY_PROCESSED, true));
+    c.add(Restrictions.eq("bs." + FIN_BankStatement.PROPERTY_ACCOUNT + ".id", accountId));
+    c.addOrder(Order.asc(FIN_BankStatementLine.PROPERTY_TRANSACTIONDATE));
+    c.addOrder(Order.asc(FIN_BankStatementLine.PROPERTY_LINENO));
+    @SuppressWarnings("unchecked")
+    List<FIN_BankStatementLine> rows = c.list();
+    return rows;
   }
 
   /**
