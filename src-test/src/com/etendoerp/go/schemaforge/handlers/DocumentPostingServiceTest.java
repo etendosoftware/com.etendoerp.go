@@ -347,6 +347,126 @@ public class DocumentPostingServiceTest {
     }
   }
 
+  /**
+   * ETP-5175: for {@code STATUS_InvalidAccount}, the base message must be RE-RESOLVED via
+   * {@code OBMessageUtils.messageBD("InvalidAccount")} in the session's own locale — never
+   * trusted from {@code acct.getMessageResult()}, whose text core always derives from the
+   * classic HttpServletRequest/session language, ignoring the GO locale applied to
+   * {@code OBContext}. This is proven by deliberately setting the underlying
+   * {@code OBError}'s message to the ENGLISH text while the session is {@code es_ES}: if the
+   * fix regressed to trusting {@code result.getMessage()} again, this assertion would fail
+   * because the composed message would come back in English instead of Spanish.
+   */
+  @Test
+  public void postResolvesInvalidAccountBaseMessageInSpanishSessionIgnoringBakedInEnglishText() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_InvalidAccount);
+    OBError err = new OBError();
+    // Deliberately the WRONG (English) text — core's own bug this ticket works around — to
+    // prove the fix ignores it in favor of the re-resolved, session-language value below.
+    err.setMessage("Account could not be found.");
+    when(acct.getMessageResult()).thenReturn(err);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "es_ES");
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("InvalidAccount"))
+          .thenReturn("No se pudo encontrar la cuenta.");
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("No se pudo encontrar la cuenta.", r.message());
+    }
+  }
+
+  /**
+   * ETP-5175 regression guard: the {@code en_US} counterpart of the test above — same
+   * {@code STATUS_InvalidAccount} status, same re-resolution path, but confirming the base
+   * message still comes back correctly in English when that is the session language (no
+   * regression for the majority/default-locale case).
+   */
+  @Test
+  public void postResolvesInvalidAccountBaseMessageInEnglishSession() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_InvalidAccount);
+    OBError err = new OBError();
+    err.setMessage("Account could not be found.");
+    when(acct.getMessageResult()).thenReturn(err);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "en_US");
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("InvalidAccount"))
+          .thenReturn("Account could not be found.");
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Account could not be found.", r.message());
+    }
+  }
+
+  /**
+   * ETP-5175 regression guard: a NON-{@code InvalidAccount} status must never trigger the new
+   * re-resolution path at all — {@code OBMessageUtils.messageBD("InvalidAccount")} must not even
+   * be called, and the message must still come verbatim from {@code acct.getMessageResult()},
+   * exactly as {@code postDoesNotEnrichMessageWhenStatusIsNotInvalidAccount} already proves for
+   * the (pre-existing) entity-enrichment path.
+   */
+  @Test
+  public void postDoesNotResolveInvalidAccountBaseMessageForOtherStatuses() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_PeriodClosed);
+    OBError err = new OBError();
+    err.setMessage("Period is closed.");
+    when(acct.getMessageResult()).thenReturn(err);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "es_ES");
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Period is closed.", r.message());
+      msgMock.verify(() -> OBMessageUtils.messageBD("InvalidAccount"), never());
+    }
+  }
+
   @Test
   public void unpostReturnsOkWhenResetAccountingRuns() {
     DocumentPostingService svc = new DocumentPostingService();

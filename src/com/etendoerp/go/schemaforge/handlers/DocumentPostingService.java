@@ -254,11 +254,35 @@ public class DocumentPostingService {
     return new DalConnectionProvider(false);
   }
 
+  /**
+   * {@code AD_MESSAGE.VALUE} for the base "account could not be found" text (ETP-5175) — confirmed
+   * against {@code AD_MESSAGE_ID = FF8080812EA11CED012EA1CCB28700F0} in core Etendo's
+   * {@code AD_MESSAGE.xml}. Re-resolved directly (see {@link #errorMessageOf}) rather than trusted
+   * from {@code AcctServer.getMessageResult()}, because core always bakes that base text in the
+   * WRONG language for a NEO Headless request.
+   */
+  private static final String MSG_INVALID_ACCOUNT_BASE = "InvalidAccount";
+
   private static String errorMessageOf(AcctServer acct) {
     OBError result = acct.getMessageResult();
     String message = (result != null && result.getMessage() != null && !result.getMessage().isEmpty())
         ? result.getMessage()
         : "Posting failed";
+    // ETP-5175: core's AcctServer.setMessageResult always re-derives the message language from
+    // the classic HttpServletRequest/session (see AcctServer.java — it never reads the GO locale
+    // NeoAuthenticator/NeoLanguage apply to OBContext for a NEO request, because a NEO request
+    // always has an active HttpServletRequest and so always takes that branch), so the base
+    // "InvalidAccount" text is permanently baked in the wrong language before we ever see it here.
+    // Re-resolve it ourselves in the GO locale for this one known status — no core change needed,
+    // OBMessageUtils.messageBD already follows OBContext's language like the rest of this file's
+    // own enrichment messages (MSG_INVALID_ACCOUNT_BP_AND_GROUP, etc.). Every other status already
+    // carries its own correctly-derived message from core and is left untouched.
+    if (AcctServer.STATUS_InvalidAccount.equals(acct.getStatus())) {
+      String localizedBase = OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BASE);
+      if (StringUtils.isNotBlank(localizedBase)) {
+        message = localizedBase;
+      }
+    }
     return enrichWithFailingEntity(acct, message);
   }
 
