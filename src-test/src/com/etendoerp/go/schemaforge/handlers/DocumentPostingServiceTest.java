@@ -1970,4 +1970,93 @@ public class DocumentPostingServiceTest {
           + "Desviación Pr. Factura.", r.message());
     }
   }
+
+  /**
+   * ETP-5175 QA follow-up: closes a coverage gap in {@link
+   * #postComposesExactSpanishMessageForBpGroupAndProductScenario} — that test (and its English
+   * counterpart) never stubs {@code OBMessageUtils.messageBD("InvalidAccount")}, so with {@code
+   * OBMessageUtils} fully mocked, that unstubbed call returns Mockito's default {@code null}, and
+   * {@code errorMessageOf} silently falls through to {@code result.getMessage()} — which those
+   * tests had ALREADY set to the correct-language text. They therefore pin the full composed
+   * message without ever exercising the NEW re-resolution branch this ticket added; a regression
+   * that broke ONLY that branch (e.g. wrong message key, an exception swallowed the wrong way)
+   * would not fail either test.
+   *
+   * <p>This test closes that gap: {@code acct.getMessageResult()} is deliberately seeded with the
+   * WRONG (English) text — mimicking core's own bug — while {@code OBMessageUtils.messageBD(
+   * "InvalidAccount")} is stubbed to return the correct Spanish base text, in the same
+   * BP-Group + Product enrichment scenario as the test above. If the re-resolution branch
+   * regressed to trusting {@code result.getMessage()} again, the composed message would revert to
+   * English for the base sentence while the (already-Spanish) enrichment stayed Spanish — a
+   * mixed-language message. Asserting the FULL string here proves the re-resolved base and the
+   * enrichment addenda compose consistently in one language end-to-end, not just in isolation.</p>
+   */
+  @Test
+  public void postComposesFullSpanishMessageWithReResolvedBaseAndEnrichment() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    acct.C_BPartner_ID = "bp-1";
+    acct.DocumentType = AcctServer.DOCTYPE_MatMatchInv;
+    acct.Record_ID = "matchinv-1";
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_InvalidAccount);
+    OBError err = new OBError();
+    // Deliberately the WRONG (English) text — core's own bug this ticket works around — to prove
+    // the composed message only comes out in Spanish because the re-resolution branch replaces
+    // it, not because this baked-in text happened to already be correct.
+    err.setMessage("Account could not be found.");
+    when(acct.getMessageResult()).thenReturn(err);
+    AcctSchema schema = mock(AcctSchema.class);
+    when(schema.getC_AcctSchema_ID()).thenReturn("schema-1");
+    acct.m_as = new AcctSchema[] { schema };
+
+    OBDal obDal = mock(OBDal.class);
+    BusinessPartner bp = mock(BusinessPartner.class);
+    when(bp.getName()).thenReturn("Blanquiceleste S.A.");
+    Category bpGroup = mock(Category.class);
+    when(bpGroup.getId()).thenReturn("bp-group-1");
+    when(bpGroup.getName()).thenReturn("Proveedora");
+    when(bp.getBusinessPartnerCategory()).thenReturn(bpGroup);
+    when(obDal.get(BusinessPartner.class, "bp-1")).thenReturn(bp);
+    stubCategoryAccountsCriteria(obDal, fullyConfiguredCategoryAccounts());
+    stubReceiptInvoiceMatchWithProduct(obDal, "matchinv-1");
+
+    ProductAccounts productRow = fullyConfiguredProductAccounts();
+    when(productRow.getInvoicePriceVariance()).thenReturn(null);
+    stubProductAccountsCriteria(obDal, productRow);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "es_ES");
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      // The re-resolution branch this ticket added — exercised here, unlike the two
+      // "ComposesExactMessage" tests above.
+      msgMock.when(() -> OBMessageUtils.messageBD("InvalidAccount"))
+          .thenReturn("No se pudo encontrar la cuenta.");
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
+          .thenReturn("Contacto: @bpName@, Grupo de Terceros: @bpGroup@");
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountMissingProductAccounts"))
+          .thenReturn("Revise la configuración contable del Producto: @missingAccounts@.");
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      // Same composed shape as postComposesExactSpanishMessageForBpGroupAndProductScenario, but
+      // this time the leading sentence is proven to come from re-resolution, not a lucky baked-in
+      // value — and it must not have reverted to the English text seeded on the OBError above.
+      assertEquals("No se pudo encontrar la cuenta. Contacto: Blanquiceleste S.A., "
+          + "Grupo de Terceros: Proveedora Revise la configuración contable del Producto: "
+          + "Desviación Pr. Factura.", r.message());
+    }
+  }
 }
