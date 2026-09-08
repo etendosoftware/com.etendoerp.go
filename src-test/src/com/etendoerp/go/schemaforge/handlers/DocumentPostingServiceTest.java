@@ -28,6 +28,8 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.sql.Connection;
@@ -38,8 +40,10 @@ import org.junit.runner.RunWith;
 import org.mockito.MockedStatic;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.database.ConnectionProvider;
+import org.openbravo.erpCommon.ad_forms.AcctSchema;
 import org.openbravo.erpCommon.ad_forms.AcctServer;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
@@ -48,7 +52,9 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.businesspartner.Category;
+import org.openbravo.model.common.businesspartner.CategoryAccounts;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
@@ -606,5 +612,271 @@ public class DocumentPostingServiceTest {
     assertEquals(422, resp.getHttpStatus());
     assertFalse(resp.getBody().getBoolean("success"));
     assertEquals("Account could not be found.", resp.getBody().getString("message"));
+  }
+
+  /** Builds an {@code AcctServer} mock ready for the InvalidAccount + BP + BP Group enrichment path. */
+  private static AcctServer stubAcctServerForBpGroupEnrichment() throws Exception {
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    acct.C_BPartner_ID = "bp-1";
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_InvalidAccount);
+    OBError err = new OBError();
+    err.setMessage("Account could not be found.");
+    when(acct.getMessageResult()).thenReturn(err);
+    return acct;
+  }
+
+  /** Stubs {@code OBDal.getInstance().get(BusinessPartner.class, "bp-1")} with a BP that has a BP Group. */
+  private static BusinessPartner stubBusinessPartnerWithGroup(OBDal obDal) {
+    BusinessPartner bp = mock(BusinessPartner.class);
+    when(bp.getName()).thenReturn("Fernet Branca S.A.");
+    Category bpGroup = mock(Category.class);
+    when(bpGroup.getId()).thenReturn("bp-group-1");
+    when(bpGroup.getName()).thenReturn("Proveedores Generales");
+    when(bp.getBusinessPartnerCategory()).thenReturn(bpGroup);
+    when(obDal.get(BusinessPartner.class, "bp-1")).thenReturn(bp);
+    return bp;
+  }
+
+  /** Stubs the two message-catalog keys used by the BP+Group and missing-accounts enrichment. */
+  private static void stubBpGroupAndMissingAccountsMessages(MockedStatic<OBMessageUtils> msgMock) {
+    msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
+        .thenReturn("(Business Partner: @bpName@, BP Group: @bpGroup@)");
+    msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountMissingBpGroupAccounts"))
+        .thenReturn("(Missing account setup on BP Group: @missingAccounts@)");
+  }
+
+  /** Mocks {@code OBDal.getInstance().createCriteria(CategoryAccounts.class)} to return {@code row}. */
+  @SuppressWarnings("unchecked")
+  private static void stubCategoryAccountsCriteria(OBDal obDal, CategoryAccounts row) {
+    OBCriteria<CategoryAccounts> criteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(CategoryAccounts.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    when(criteria.uniqueResult()).thenReturn(row);
+  }
+
+  /** A {@code CategoryAccounts} row with all 6 curated columns configured (non-null). */
+  private static CategoryAccounts fullyConfiguredCategoryAccounts() {
+    CategoryAccounts row = mock(CategoryAccounts.class);
+    AccountingCombination combo = mock(AccountingCombination.class);
+    when(row.getNonInvoicedReceipts()).thenReturn(combo);
+    when(row.getNonInvoicedReceivables()).thenReturn(combo);
+    when(row.getCustomerReceivablesNo()).thenReturn(combo);
+    when(row.getVendorLiability()).thenReturn(combo);
+    when(row.getCustomerPrepayment()).thenReturn(combo);
+    when(row.getVendorPrepayment()).thenReturn(combo);
+    return row;
+  }
+
+  /**
+   * ETP-5175: a fully-configured BP Group (all 6 curated {@code C_BP_Group_Acct} columns
+   * non-null) must NOT add any "missing account setup" text — no behavior change from the
+   * pre-existing BP+Group enrichment. Also proves {@code getVendorLiability()} participates in
+   * the uniform check with the other 5 columns (it never fires for real data since the DB column
+   * is {@code NOT NULL}, but the code path is exercised the same way for all 6).
+   */
+  @Test
+  public void postDoesNotAddMissingAccountsDetailWhenAllCuratedColumnsAreConfigured() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubAcctServerForBpGroupEnrichment();
+    AcctSchema schema = mock(AcctSchema.class);
+    when(schema.getC_AcctSchema_ID()).thenReturn("schema-1");
+    acct.m_as = new AcctSchema[] { schema };
+
+    OBDal obDal = mock(OBDal.class);
+    stubBusinessPartnerWithGroup(obDal);
+    stubCategoryAccountsCriteria(obDal, fullyConfiguredCategoryAccounts());
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      stubBpGroupAndMissingAccountsMessages(msgMock);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
+      assertFalse(r.message().contains("Missing account setup"));
+    }
+  }
+
+  /**
+   * ETP-5175: when exactly one curated column is unconfigured for the failing BP Group +
+   * accounting schema, the message is enriched with that single column's EN label.
+   */
+  @Test
+  public void postAddsMissingAccountsDetailForSingleMissingColumn() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubAcctServerForBpGroupEnrichment();
+    AcctSchema schema = mock(AcctSchema.class);
+    when(schema.getC_AcctSchema_ID()).thenReturn("schema-1");
+    acct.m_as = new AcctSchema[] { schema };
+
+    OBDal obDal = mock(OBDal.class);
+    stubBusinessPartnerWithGroup(obDal);
+
+    CategoryAccounts row = fullyConfiguredCategoryAccounts();
+    when(row.getNonInvoicedReceipts()).thenReturn(null);
+    stubCategoryAccountsCriteria(obDal, row);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      stubBpGroupAndMissingAccountsMessages(msgMock);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertTrue(r.message().contains("(Missing account setup on BP Group: Non-Invoiced Receipts)"));
+    }
+  }
+
+  /**
+   * ETP-5175: when several curated columns are unconfigured, all their EN labels are listed,
+   * comma-separated, in the declared column order.
+   */
+  @Test
+  public void postAddsMissingAccountsDetailForMultipleMissingColumns() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubAcctServerForBpGroupEnrichment();
+    AcctSchema schema = mock(AcctSchema.class);
+    when(schema.getC_AcctSchema_ID()).thenReturn("schema-1");
+    acct.m_as = new AcctSchema[] { schema };
+
+    OBDal obDal = mock(OBDal.class);
+    stubBusinessPartnerWithGroup(obDal);
+
+    CategoryAccounts row = fullyConfiguredCategoryAccounts();
+    when(row.getNonInvoicedReceipts()).thenReturn(null);
+    when(row.getVendorPrepayment()).thenReturn(null);
+    stubCategoryAccountsCriteria(obDal, row);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      stubBpGroupAndMissingAccountsMessages(msgMock);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertTrue(r.message()
+          .contains("(Missing account setup on BP Group: Non-Invoiced Receipts, Vendor Prepayment)"));
+    }
+  }
+
+  /**
+   * ETP-5175: when the {@code C_BP_Group_Acct} row does not exist at all for the BP Group +
+   * accounting schema (no configuration whatsoever), all 6 curated column labels are reported as
+   * missing, in declared order — including {@code getVendorLiability()} ("Vendor Liability"),
+   * which is checked uniformly with the other 5 columns even though the underlying DB column is
+   * {@code NOT NULL} in production and this specific null-check structurally cannot fire for real
+   * data.
+   */
+  @Test
+  public void postAddsMissingAccountsDetailForAllColumnsWhenNoCategoryAccountsRowExists() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubAcctServerForBpGroupEnrichment();
+    AcctSchema schema = mock(AcctSchema.class);
+    when(schema.getC_AcctSchema_ID()).thenReturn("schema-1");
+    acct.m_as = new AcctSchema[] { schema };
+
+    OBDal obDal = mock(OBDal.class);
+    stubBusinessPartnerWithGroup(obDal);
+    stubCategoryAccountsCriteria(obDal, null);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      stubBpGroupAndMissingAccountsMessages(msgMock);
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertTrue(r.message().contains("(Missing account setup on BP Group: "
+          + "Non-Invoiced Receipts, Non-Invoiced Receivables, Customer Receivables No., "
+          + "Vendor Liability, Customer Prepayment, Vendor Prepayment)"));
+    }
+  }
+
+  /**
+   * ETP-5175: when the accounting schema cannot be resolved from {@code AcctServer.m_as} (left
+   * unset by a mock, or an empty array), the missing-accounts lookup is skipped defensively — the
+   * message stays exactly the pre-existing BP+Group-only text, and {@code OBDal.createCriteria} is
+   * never even invoked.
+   */
+  @Test
+  public void postSkipsMissingAccountsDetailWhenAcctSchemaIsUnresolvable() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = stubAcctServerForBpGroupEnrichment();
+    // acct.m_as intentionally left null (the mock's default) — schema cannot be resolved.
+
+    OBDal obDal = mock(OBDal.class);
+    stubBusinessPartnerWithGroup(obDal);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc);
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvalidAccountBpAndGroup"))
+          .thenReturn("(Business Partner: @bpName@, BP Group: @bpGroup@)");
+
+      DocumentPostingService.PostResult r = svc.post("318", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertTrue(r.message().contains("(Business Partner: Fernet Branca S.A., BP Group: Proveedores Generales)"));
+      assertFalse(r.message().contains("Missing account setup"));
+      verify(obDal, never()).createCriteria(CategoryAccounts.class);
+    }
   }
 }

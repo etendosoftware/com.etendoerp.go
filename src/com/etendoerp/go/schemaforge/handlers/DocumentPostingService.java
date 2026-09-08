@@ -18,14 +18,19 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import java.sql.Connection;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
+import java.util.function.Function;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.database.ConnectionProvider;
 import org.openbravo.erpCommon.ad_forms.AcctServer;
@@ -34,6 +39,8 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.financial.ResetAccounting;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.businesspartner.Category;
+import org.openbravo.model.common.businesspartner.CategoryAccounts;
+import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
 import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.NeoContext;
@@ -58,6 +65,28 @@ public class DocumentPostingService {
   private static final String MSG_INVALID_ACCOUNT_BP_AND_GROUP = "ETGO_InvalidAccountBpAndGroup";
   /** AD_MESSAGE searchkey for the BP-only enrichment fallback (no BP Group). */
   private static final String MSG_INVALID_ACCOUNT_BP_ONLY = "ETGO_InvalidAccountBpOnly";
+  /** AD_MESSAGE searchkey for naming the specific missing {@code C_BP_Group_Acct} column(s). */
+  private static final String MSG_MISSING_BP_GROUP_ACCOUNTS = "ETGO_InvalidAccountMissingBpGroupAccounts";
+
+  /**
+   * The {@code C_BP_Group_Acct} columns relevant to this app's document types (ETP-5175) — a
+   * curated subset, not every nullable column on that table. Each entry pairs the account's
+   * English label (matching the English-only precedent of {@link #MSG_INVALID_ACCOUNT_BP_AND_GROUP}
+   * / {@link #MSG_INVALID_ACCOUNT_BP_ONLY} — no {@code AD_MESSAGE_TRL} exists for this catalog)
+   * with the {@link CategoryAccounts} getter that reads it. {@code getVendorLiability()} is a DB
+   * {@code NOT NULL} column — its null-check structurally never fires, kept for completeness.
+   */
+  private static final List<BpGroupAccountColumn> BP_GROUP_ACCOUNT_COLUMNS = List.of(
+      new BpGroupAccountColumn("Non-Invoiced Receipts", CategoryAccounts::getNonInvoicedReceipts),
+      new BpGroupAccountColumn("Non-Invoiced Receivables", CategoryAccounts::getNonInvoicedReceivables),
+      new BpGroupAccountColumn("Customer Receivables No.", CategoryAccounts::getCustomerReceivablesNo),
+      new BpGroupAccountColumn("Vendor Liability", CategoryAccounts::getVendorLiability),
+      new BpGroupAccountColumn("Customer Prepayment", CategoryAccounts::getCustomerPrepayment),
+      new BpGroupAccountColumn("Vendor Prepayment", CategoryAccounts::getVendorPrepayment));
+
+  /** One curated {@code C_BP_Group_Acct} column: its EN label plus its {@link CategoryAccounts} getter. */
+  private record BpGroupAccountColumn(String label, Function<CategoryAccounts, AccountingCombination> getter) {
+  }
 
   /** Result of a post/unpost attempt. */
   public record PostResult(boolean ok, String message) {
@@ -209,11 +238,12 @@ public class DocumentPostingService {
     if (acct == null || !AcctServer.STATUS_InvalidAccount.equals(acct.getStatus())) {
       return baseMessage;
     }
-    String detail = resolveBusinessPartnerDetail(acct.C_BPartner_ID);
+    String detail = resolveBusinessPartnerDetail(acct);
     return detail != null ? baseMessage + " " + detail : baseMessage;
   }
 
-  private static String resolveBusinessPartnerDetail(String bpartnerId) {
+  private static String resolveBusinessPartnerDetail(AcctServer acct) {
+    String bpartnerId = acct.C_BPartner_ID;
     if (StringUtils.isBlank(bpartnerId)) {
       return null;
     }
@@ -223,16 +253,78 @@ public class DocumentPostingService {
         return null;
       }
       Category bpGroup = bp.getBusinessPartnerCategory();
-      return bpGroup != null
-          ? OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BP_AND_GROUP)
-              .replace("@bpName@", bp.getName())
-              .replace("@bpGroup@", bpGroup.getName())
-          : OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BP_ONLY)
-              .replace("@bpName@", bp.getName());
+      if (bpGroup == null) {
+        return OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BP_ONLY).replace("@bpName@", bp.getName());
+      }
+      String detail = OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BP_AND_GROUP)
+          .replace("@bpName@", bp.getName())
+          .replace("@bpGroup@", bpGroup.getName());
+      String missingAccountsDetail = resolveMissingAccountsDetail(bpGroup.getId(), acct);
+      return missingAccountsDetail != null ? detail + " " + missingAccountsDetail : detail;
     } catch (Exception e) {
       log.debug("Could not resolve Business Partner detail for account error, bpartnerId={}", bpartnerId, e);
       return null;
     }
+  }
+
+  /**
+   * Names which of the curated {@link #BP_GROUP_ACCOUNT_COLUMNS} are unconfigured for the failing
+   * BP Group + accounting schema (ETP-5175). Returns {@code null} when the accounting schema
+   * cannot be resolved (defensive — leaves the message unchanged rather than guessing) or when
+   * every curated column is configured, so a fully-configured group produces no behavior change.
+   *
+   * @param bpGroupId
+   *     id of the resolved BP Group ({@code C_BP_Group_ID}).
+   * @param acct
+   *     the failed {@link AcctServer} instance, used to resolve the accounting schema.
+   * @return the "missing account setup" message detail, or {@code null} if nothing is missing.
+   */
+  private static String resolveMissingAccountsDetail(String bpGroupId, AcctServer acct) {
+    String acctSchemaId = resolveAcctSchemaId(acct);
+    if (StringUtils.isBlank(acctSchemaId)) {
+      return null;
+    }
+    List<String> missing = resolveMissingBpGroupAccounts(bpGroupId, acctSchemaId);
+    if (missing.isEmpty()) {
+      return null;
+    }
+    return OBMessageUtils.messageBD(MSG_MISSING_BP_GROUP_ACCOUNTS)
+        .replace("@missingAccounts@", String.join(", ", missing));
+  }
+
+  /** First accounting schema's id, resolved the same way the rest of {@code AcctServer} does (its public {@code m_as} array). */
+  private static String resolveAcctSchemaId(AcctServer acct) {
+    return (acct.m_as != null && acct.m_as.length > 0) ? acct.m_as[0].getC_AcctSchema_ID() : null;
+  }
+
+  /**
+   * Looks up the {@link CategoryAccounts} row (the {@code C_BP_Group_Acct} table) for the given
+   * BP Group + accounting schema — the unique constraint {@code c_bp_group_acct_schem_group_un}
+   * guarantees at most one row — and returns the EN labels of every curated column that is null.
+   * When no row exists at all for that group + schema, every curated column is reported as
+   * missing (there is no configuration whatsoever), which is itself the useful signal.
+   *
+   * @param bpGroupId
+   *     id of the BP Group ({@code C_BP_Group_ID}).
+   * @param acctSchemaId
+   *     id of the accounting schema ({@code C_AcctSchema_ID}).
+   * @return labels of the unconfigured curated columns; empty when everything is configured.
+   */
+  private static List<String> resolveMissingBpGroupAccounts(String bpGroupId, String acctSchemaId) {
+    OBCriteria<CategoryAccounts> criteria = OBDal.getInstance().createCriteria(CategoryAccounts.class);
+    criteria.add(Restrictions.eq(CategoryAccounts.PROPERTY_BUSINESSPARTNERCATEGORY + ".id", bpGroupId));
+    criteria.add(Restrictions.eq(CategoryAccounts.PROPERTY_ACCOUNTINGSCHEMA + ".id", acctSchemaId));
+    criteria.setMaxResults(1);
+    CategoryAccounts categoryAccounts = (CategoryAccounts) criteria.uniqueResult();
+
+    List<String> missing = new ArrayList<>();
+    for (BpGroupAccountColumn column : BP_GROUP_ACCOUNT_COLUMNS) {
+      AccountingCombination value = categoryAccounts == null ? null : column.getter().apply(categoryAccounts);
+      if (value == null) {
+        missing.add(column.label());
+      }
+    }
+    return missing;
   }
 
   private static void rollbackQuietly(ConnectionProvider conn, Connection con) {
