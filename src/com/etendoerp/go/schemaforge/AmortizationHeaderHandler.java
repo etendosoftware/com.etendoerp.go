@@ -284,15 +284,17 @@ public class AmortizationHeaderHandler implements NeoHandler {
   /**
    * Resolves {@code assetId} using a two-step lookup:
    * <ol>
-   *   <li>{@link NeoContext#getQueryParams()} — populated by both the MCP path
-   *       ({@code McpToolRouter.handleDefaults}) and the REST path
-   *       ({@code NeoDefaultsEndpoint}).</li>
+   *   <li>{@link NeoContext#getQueryParams()} — populated on the REST path
+   *       ({@code NeoDefaultsEndpoint}) and on the MCP {@code neo_defaults} /
+   *       {@code neo_action} paths ({@code McpToolRouter.handleDefaults}), but <b>not</b> on
+   *       the MCP CRUD hook path: {@code McpHookExecutor.buildHookContext} leaves it
+   *       {@code null}, so it must always be null-guarded.</li>
    *   <li>{@link RequestContext} HTTP parameter — kept as a fallback for any direct
    *       servlet invocation that does not populate queryParams.</li>
    * </ol>
    */
   private static String readAssetIdFromContext(NeoContext context) {
-    // Primary: queryParams populated by McpToolRouter and NeoDefaultsEndpoint
+    // Primary: queryParams populated by NeoDefaultsEndpoint and McpToolRouter (null on MCP CRUD hooks)
     if (context != null && context.getQueryParams() != null) {
       String assetId = context.getQueryParams().get(PARAM_ASSET_ID);
       if (assetId != null && !assetId.isEmpty()) {

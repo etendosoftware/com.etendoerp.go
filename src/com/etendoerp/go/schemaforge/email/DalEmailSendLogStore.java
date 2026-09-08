@@ -87,7 +87,7 @@ public class DalEmailSendLogStore implements EmailSendLogStore {
   private static final int LEN_CONTRACT_NAME = 80;
   private static final int LEN_SPEC_NAME = 80;
   private static final int LEN_RECORD_ID = 32;
-  private static final int LEN_STATUS = 40;
+  private static final int LEN_STATUS = 60;
   private static final int LEN_ERROR_MESSAGE = 2000;
   private static final int LEN_RECIPIENTS = 2000;
   private static final int LEN_SUBJECT = 400;

@@ -1065,8 +1065,11 @@ public class ChartOfAccountsHandler implements NeoHandler {
    * <p>Query-param lookup follows the two-step pattern established by
    * {@code AmortizationHeaderHandler}:
    * <ol>
-   *   <li>{@link NeoContext#getQueryParams()} — populated by the MCP path and the REST
-   *       path through {@code NeoDefaultsEndpoint}.</li>
+   *   <li>{@link NeoContext#getQueryParams()} — populated by the REST path through
+   *       {@code NeoDefaultsEndpoint} and by the MCP {@code neo_defaults} /
+   *       {@code neo_action} paths, but <b>not</b> by the MCP CRUD hook path
+   *       ({@code McpHookExecutor.buildHookContext} leaves it {@code null}), so it must
+   *       always be null-guarded.</li>
    *   <li>{@link RequestContext} HTTP parameter — fallback for callers that do not yet
    *       set queryParams in the hook context.</li>
    * </ol>

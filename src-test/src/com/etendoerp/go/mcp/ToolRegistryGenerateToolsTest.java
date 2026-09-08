@@ -240,8 +240,14 @@ class ToolRegistryGenerateToolsTest {
 
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:write"));
 
-      assertFalse(toolNames(tools).contains("neo_discover"));
-      assertTrue(tools.isEmpty());
+      List<String> names = toolNames(tools);
+      assertFalse(names.contains("neo_discover"));
+      // Write scope alone still yields the three built-in image-upload tools (ETP-5184): they are
+      // type-driven rather than spec-driven, and they write an AD_Image row, which is exactly what
+      // neo:write grants. Nothing read-only survives here.
+      assertTrue(names.containsAll(List.of(McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD,
+          McpConstants.TOOL_NEO_UPLOAD_IMAGE, McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD)), names.toString());
+      assertEquals(3, tools.size(), "nothing but the image-upload tools: " + names);
     }
 
     @Test
@@ -474,8 +480,9 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read", "neo:write"));
       List<String> names = toolNames(tools);
 
-      // No window specs => no CRUD/window tools. Only the read-scope baseline
-      // tools (neo_discover + docs + neo_widget + neo_vector_search) are present.
+      // No window specs => no CRUD/window tools. What remains is the read-scope baseline
+      // (neo_discover + docs + neo_widget + neo_vector_search) plus the three write-scope
+      // image-upload tools (ETP-5184), which are built-in and not gated on any spec.
       assertFalse(names.contains("neo_list"));
       assertFalse(names.contains("neo_create"));
       assertFalse(names.contains("neo_update"));
@@ -484,7 +491,10 @@ class ToolRegistryGenerateToolsTest {
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
       assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
-      assertEquals(4, tools.size());
+      assertTrue(names.contains(McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD));
+      assertTrue(names.contains(McpConstants.TOOL_NEO_UPLOAD_IMAGE));
+      assertTrue(names.contains(McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD));
+      assertEquals(7, tools.size());
     }
   }
 

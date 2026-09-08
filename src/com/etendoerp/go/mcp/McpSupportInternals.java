@@ -129,6 +129,15 @@ final class McpSupportInternals {
     JSONArray methods = buildDiscoverMethodsArray(entity);
     item.put("methods", methods);
     item.put("readOnly", isReadOnlyMethods(methods));
+    // ETP-5184: the parent scope answers both of discover's questions in one read — whether this
+    // entity may be served at all (a broken MCP_CONFIG or an unidentifiable parent withhold it,
+    // and the reason is named rather than left to be inferred), and, when it may, how the agent is
+    // expected to address it. Going through the scope instead of reading MCP_CONFIG here keeps the
+    // column to a single consumer; asking twice would also have meant two answers to reconcile.
+    // The descriptor is what stops the parent requirement from being pure friction: an agent that
+    // can read parentField and parentRequiredFor gets the call right the first time. neo_schema
+    // emits the same block from the same helper, so the two tools cannot drift apart.
+    McpParentScope.publishInto(item, McpParentScope.forEntity(entity));
     // Entity-level agent guidance (ETP-4278), additive to the spec-level and
     // per-field prompts. Emitted only when set so untagged entities stay lean.
     String agentPrompt = entity.getAgentPrompt();
