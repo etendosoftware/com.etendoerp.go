@@ -61,7 +61,15 @@ final class NeoCsvExportService {
   private static final String DEFAULT_FILENAME = "export";
   private static final String UTF8_BOM = "\uFEFF";
   private static final String CRLF = "\r\n";
-  private static final String FORMULA_TRIGGER_CHARS = "=+-@";
+  /**
+   * Characters that make a spreadsheet interpret a cell as a formula. Beyond the classic
+   * {@code = + - @}, TAB/CR/LF are initiators in their own right (OWASP) rather than skippable
+   * leading whitespace, and the full-width variants close the documented full-width bypass.
+   * The set is normative — see ADR-0004 D3 and the fixture table it references.
+   */
+  private static final String FORMULA_TRIGGER_CHARS = "=+-@\t\r\n\uFF1D\uFF0B\uFF0D\uFF20";
+  private static final String NEUTRALIZING_PREFIX = "'";
+  private static final char BOM_CHAR = '\uFEFF';
 
   private NeoCsvExportService() {
   }
@@ -195,24 +203,52 @@ final class NeoCsvExportService {
    * user's spreadsheet rather than a defence against anything.
    */
   private static String csvField(String value) {
-    String safe = value == null ? "" : value;
-    if (isFormulaInjection(safe)) {
-      safe = "'" + safe;
-    }
+    String safe = neutralizeSpreadsheetCell(value == null ? "" : value);
     return "\"" + safe.replace("\"", "\"\"") + "\"";
   }
 
   /**
-   * A cell is formula-sensitive when its first non-whitespace character is a spreadsheet
-   * formula trigger ({@code = + - @}). Leading whitespace/control characters (space, tab, CR,
-   * LF) are skipped first so a marker cannot hide behind them.
+   * Prepends a single ASCII apostrophe when the cell is formula-sensitive, so the spreadsheet
+   * renders the value as literal text instead of evaluating it (CWE-1236). An already
+   * neutralized value is returned untouched: an apostrophe is not a trigger, so a value can
+   * never be double-prefixed.
+   *
+   * <p>Policy and expected outputs are normative — ADR-0004 and
+   * {@code docs/security/csv-neutralization-fixtures.md}, the same table the two JavaScript
+   * implementations are tested against.
    */
-  private static boolean isFormulaInjection(String value) {
+  private static String neutralizeSpreadsheetCell(String value) {
+    int i = firstSignificantIndex(value);
+    if (i < value.length() && isFormulaTrigger(value.charAt(i))) {
+      return NEUTRALIZING_PREFIX + value;
+    }
+    return value;
+  }
+
+  private static boolean isFormulaTrigger(char c) {
+    return FORMULA_TRIGGER_CHARS.indexOf(c) >= 0;
+  }
+
+  /**
+   * Index of the first character a spreadsheet would actually interpret. A leading BOM or
+   * Unicode space is skipped so a marker cannot hide behind one; TAB/CR/LF are NOT skipped
+   * because they are triggers themselves. {@code isSpaceChar} is checked alongside
+   * {@code isWhitespace} because the former is what covers NBSP (U+00A0) — without it, Java
+   * would silently disagree with the JavaScript twin, whose {@code \s} matches NBSP.
+   */
+  private static int firstSignificantIndex(String value) {
     int i = 0;
-    while (i < value.length() && Character.isWhitespace(value.charAt(i))) {
+    while (i < value.length() && isInsignificantPrefixChar(value.charAt(i))) {
       i++;
     }
-    return i < value.length() && FORMULA_TRIGGER_CHARS.indexOf(value.charAt(i)) >= 0;
+    return i;
+  }
+
+  private static boolean isInsignificantPrefixChar(char c) {
+    if (isFormulaTrigger(c)) {
+      return false;
+    }
+    return c == BOM_CHAR || Character.isWhitespace(c) || Character.isSpaceChar(c);
   }
 
   /** Sanitizes the requested filename and guarantees the extension matching the format. */

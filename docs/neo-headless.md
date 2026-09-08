@@ -75,6 +75,7 @@ Top-level specification record. Each spec maps to either an AD_Window (CRUD) or 
 | `AD_WINDOW_ID` | VARCHAR (FK) | Required when `SPEC_TYPE = 'W'`. |
 | `AD_PROCESS_ID` | VARCHAR (FK) | Required when `SPEC_TYPE = 'P'`. |
 | `AD_MODULE_ID` | VARCHAR (FK) | Module that owns this spec. |
+| `MCP_CONFIG` | VARCHAR | JSON, MCP-only configuration. See §4.12.6. |
 | `ISACTIVE` | CHAR(1) | Only active specs are served. |
 | `AD_CLIENT_ID` | VARCHAR (FK) | Standard Etendo audit column. |
 | `AD_ORG_ID` | VARCHAR (FK) | Standard Etendo audit column. |
@@ -99,6 +100,7 @@ Represents a tab (for window specs) or the process itself (for process specs) wi
 | `ISDELETE` | CHAR(1) | Enable DELETE. |
 | `JAVA_QUALIFIER` | VARCHAR | CDI `@Named` qualifier for a custom `NeoHandler`. |
 | `SEQNO` | NUMERIC | Display/processing order. |
+| `MCP_CONFIG` | VARCHAR | JSON, MCP-only configuration (`parent`, `fields`). See §4.12.6. |
 | `AD_MODULE_ID` | VARCHAR (FK) | Module that owns this entity. |
 
 ### ETGO_SF_FIELD
@@ -114,7 +116,10 @@ Represents a column (for window specs) or a process parameter (for process specs
 | `ISREADONLY` | CHAR(1) | Field-level read-only flag. |
 | `DEFAULTVALUE` | VARCHAR | Default value override. For process specs, stores the parameter default. |
 | `JAVA_QUALIFIER` | VARCHAR | For process specs: stores the parameter DB column name. |
+| `VISIBILITY` | VARCHAR | Curated `editable`/`readOnly`/`system`/`discarded`. Frequently `NULL`; the REST layer does not gate on it, the MCP does. See §4.12.6. |
+| `ISBUSINESSCRITICAL` | CHAR(1) | Marks the field part of the entity's curated summary. |
 | `SEQNO` | NUMERIC | Display/processing order. |
+| `MCP_CONFIG` | VARCHAR | JSON, MCP-only configuration (`fields`). See §4.12.6. |
 | `AD_MODULE_ID` | VARCHAR (FK) | Module that owns this field. |
 
 ### ETGO_PREVIEW_FILE
@@ -1566,7 +1571,297 @@ set omitted it, so `fields:["name","updated"]` returned `updated` in `data` **an
 signal at all. The set is now unioned into `emittableResponseKeys()` only: `updated` stays
 unwritable, and a client that sends it on a create is still filtered/rejected exactly as before.
 
+#### 4.12.6 `MCP_CONFIG` — the MCP's own configuration column (ETP-5184)
+
+`ETGO_SF_SPEC`, `ETGO_SF_ENTITY` and `ETGO_SF_FIELD` each carry an `MCP_CONFIG` text column holding
+a JSON object that maps **section name → section body**. It is the MCP's private configuration
+layer: nothing outside `src/com/etendoerp/go/mcp/` reads it, so a value written here changes what
+agents are offered and leaves the REST and React contracts untouched.
+
+Resolution is a chain, `spec` → `entity` → `field`, merged by `McpEntityConfig`. Each section
+declares how its levels combine — `REPLACE` (the most specific level that defines the section wins
+outright) or `ADDITIVE` (every level contributes). Both current sections are `REPLACE`.
+
+Sections are registered in `McpConfigSections.ensureRegistered()`, and `McpEntityConfig` calls that
+before it parses anything. **An unknown section name, or an unknown key inside a known section, is
+an error, not a value that is quietly dropped** — for this column an absent key means
+"unconfigured", which for a section that gates access is the permissive answer, so a typo must not
+be indistinguishable from an omission. Problems are reported through `neo_discover` rather than
+thrown, and a body that failed validation is never acted on.
+
+Adding a section is one class plus one line in `McpConfigSections` — no model change and no AD
+metadata.
+
+**Registered sections:**
+
+| Section | Level | Purpose |
+|---|---|---|
+| `parent` | entity | How a child entity identifies its parent, and for which verbs the parent key is required (`field`, `entity`, `optionalFor`, `mode`, `reason`). See §6. |
+| `fields` | spec / entity / field | Reclassifies the MCP's view of field curation — `visibility`, `readOnly`, `businessCritical`, `reason`. |
+
+##### The `fields` section
+
+```json
+{
+  "fields": {
+    "visibility": "editable",
+    "readOnly": false,
+    "businessCritical": true,
+    "reason": "why the shared curation is wrong for agent use"
+  }
+}
+```
+
+- `visibility` — one of `editable`, `readOnly`, `system`, `discarded`. An unknown value is a
+  validation error.
+- `readOnly`, `businessCritical` — JSON booleans, unquoted. An absent key is *not* a configured
+  `false`: it leaves the `ETGO_SF_FIELD` value standing.
+- `reason` — **mandatory** whenever the section is present, and non-blank. Every row of this section
+  asserts that the shared curation is wrong for agent use; that claim has to be auditable on the row
+  that makes it.
+- An empty section body is a validation error — remove the section instead.
+
+Written at entity level it reclassifies every field of that entity at once; at field level it
+reclassifies one.
+
+**It reclassifies curation, never permissions.** Curation decides whether `neo_schema` advertises a
+field and whether `McpToolRouter` publishes `POST`/`PUT` for the entity at all. Whether a role may
+actually write a column on a record is settled downstream by the DAL and `NeoCrudHandler`, exactly
+as before — an AD-level non-writable column still fails. The override widens what is *offered*, not
+what is *allowed*.
+
+**Why it exists.** `McpToolRouter` publishes a write verb for an entity only if at least one field
+is agent-suppliable (`McpSchemaFieldBuilder.isAgentSuppliable`: `visibility == "editable"` and not
+read-only). All ten `ETGO_SF_FIELD` rows for `C_Location` carry `VISIBILITY = NULL` — a curation
+omission, not a decision — so `bp-location/bpLocation` advertised `["GET","DELETE"]` despite
+`ISPOST = 'Y'` and `ISPUT = 'Y'`, and since it is the only entity mapping `C_Location`, no
+business-partner address could be created through an agent at all (`contacts/locationAddress`
+requires an existing `C_Location_ID`).
+
+Backfilling `VISIBILITY` is the deeper fix and the one to make eventually — 18 entities share this
+gap. It was not taken here because that column is read by the REST and React layers too, so a
+backfill changes the shared contract for every existing consumer. The override is the deliberately
+low-risk path: MCP-only, blast radius of one entity. Only `bpLocation` carries it today.
+
+**One resolver, three readers.** `McpFieldView.of(SFField)` applies the resolved section and is the
+single source of `visibility` / `readOnly` / `businessCritical` / `isEditable` for all three places
+that previously derived them independently — `McpSchemaFieldBuilder.loadFieldMetadata`
+(`neo_schema`), `McpQuerySupport.editablePropertyNames` (`neo_selectors`, which computed its own
+`isIncluded && !isReadOnly`) and `McpResourceProvider`. Without it an override honoured by only the
+first reader would have `neo_schema` and `neo_selectors` contradicting each other about the same
+field. A field that neither the row nor the override classifies still reports **no** `visibility`
+key, exactly as before.
+
+##### Entity-level `AGENT_PROMPT` — a sibling column, not an `MCP_CONFIG` section
+
+`ETGO_SF_ENTITY.AGENT_PROMPT` is curated free text: whatever an agent must know about this entity
+that the AD dictionary cannot express. It is not part of `MCP_CONFIG` (it predates it, ETP-4278) and
+it is not validated — it is prose handed to the model verbatim, trimmed, and omitted entirely when
+the column is blank so the 285 entities without one stay byte-for-byte lean.
+
+It is now emitted by **both** discovery tools, from the same trim/blank check:
+
+| Tool | Where |
+|---|---|
+| `neo_discover` | `McpSupportInternals` — per-entity item, key `agentPrompt` |
+| `neo_schema` (full) | `McpToolRouter.handleSchema` — alongside `spec`/`entity`/`table`, ahead of `fields` |
+| `neo_schema` with `view:"create"` | `McpSchemaCreateView.buildResponse` — after `entity`, before `required` |
+
+ETP-5184 added the last two. `neo_discover` is a catalogue an agent reads once at the start of a
+session; `neo_schema` is what it reads immediately before writing, so guidance that lived only in
+discover was guidance already paged out by the time it mattered.
+
+**Why it earns its place on a handler-backed entity.** For the 92 of 287 active entities that carry
+a `JAVA_QUALIFIER`, a `NeoHandler` may implement a contract other than the one `neo_schema` derives
+from the dictionary, and the prompt is currently the only place that divergence can be stated.
+`contacts/locationAddress` is the worked example: `view:"create"` advertises `locationAddress` as a
+**required** Search field, while `ContactsLocationAddressHandler` creates the `C_Location` itself and
+discards whatever id was sent (a live create passing an existing location id came back holding a
+brand-new one). The fields the handler actually reads — `addressLine1`, `cityName`, `country`,
+`postalCode`, `regionName` — belong to `C_Location`, a different table, so they are absent from that
+entity's schema and undiscoverable. Omitting the id fails the generic mandatory-field check with a
+422; sending it without address fields fails with a constraint violation. Only "a throwaway id plus
+the address fields" works, and nothing in the machine-readable contract says so — hence the prompt.
+
+Note which level serves that example, because the two are easy to conflate: `contacts/locationAddress`
+is fixed by a **field**-level prompt on `ETGO_SF_FIELD.AGENT_PROMPT` for `C_Location_ID`, which
+predates ETP-5184 and reaches the response through `McpSchemaFieldBuilder`'s per-field
+`addAgentPrompt`. The **entity**-level prompt ETP-5184 added to `neo_schema` is a separate path with
+its own two consumers — `contacts/bankAccount` and `financial-account/account`, both disambiguating
+a contact's own bank account from the company's. `contacts/locationAddress` carries no entity-level
+prompt at all.
+
+Making the schema itself tell the truth is the deeper fix and is proposed, not implemented, in
+`schema_forge/docs/plans/2026-09-07-mcp-handler-contract-section.md` (a `handlerContract`
+`MCP_CONFIG` section). It touches `validateMandatoryFields`, the write gate for the whole MCP, so it
+was deferred to its own cycle.
+
 ---
+
+### 4.13 Image Fields and Image Upload (ETP-5184)
+
+An `Image BLOB` column (`AD_Reference_ID = 4AA6C3BE9D3B4D84A3B80489505A23E5`) is an FK to
+`AD_Image`, whose bytes live in `AD_Image.BinaryData` alongside `Mimetype` and `Name`.
+`M_Product.AD_Image_ID` and `AD_OrgInfo.Your_Company_Document_Image` are the two such fields
+Schema Forge exposes as editable today; everything below is driven by the column's reference, so
+enabling another one needs no code.
+
+#### The field contract
+
+`mapColumnType()` maps the reference to its own type, `image` — deliberately **not**
+`foreignKey`: there is no selector an agent can query for an image, and the id it needs does not
+exist until something uploads bytes. `McpImageFieldSupport.decorateImageField()` then adds the
+contract to the field descriptor in `neo_schema`, `formState` and the create view:
+
+```json
+"image": {
+  "type": "image",
+  "format": "etendo-image-id",
+  "valueType": "string",
+  "hint": "Holds an AD_Image id (32 hex chars), not the image itself. Do NOT send base64 and do NOT send a URL here ... call neo_request_image_upload ... or neo_upload_image for an image under 256 KB ... Then write the returned imageId to this field with neo_update."
+}
+```
+
+The hint is written to **both** `description` and `hint`. `hint` is the durable one:
+`description` is overlaid by `applyCuratedLabels` whenever the AD field carries help text, and
+losing the AD author's own words would be the wrong trade — so `description` carries the guidance
+only when AD has nothing to say.
+
+`neo_create` / `neo_update` reject a value on an image field that is not a resolvable `AD_Image`
+id (`error: "invalid_image_reference"`), with a message that names the upload tools. The point is
+that the agent can fix itself: the alternative is a raw FK violation from DAL.
+
+#### Why the bytes do not travel as tool arguments
+
+A tool argument is model **output**, generated token by token, and no MCP client elides argument
+content — so base64 inline always costs output tokens (roughly 1.4 characters per token: ~100 KB
+of image ≈ 100k tokens). There is no way to mark an argument as not-for-the-model. The only way
+not to pay is to keep the bytes out of the argument, which is what the ticket below does.
+
+This is also where the protocol is heading: MCP has no client-to-server file-upload primitive
+today, and the File Uploads working group's SEP-2356 routes large files through URL-mode
+elicitation — i.e. it formalizes the ticket pattern. Server-side fetching of a `source_url` was
+considered and **rejected**: it would make the ERP an outbound HTTP client. The ticket is inbound,
+the same direction as every other NEO call.
+
+#### `neo_request_image_upload` — the primary path (~50 tokens)
+
+| Param | Required | Notes |
+|---|---|---|
+| `name` | no | name for the stored image (defaults to `image`) |
+| `mime_type` | no | `image/png` or `image/jpeg`; omit it and the type is detected from the bytes, and if you do send it a mismatch is rejected |
+
+Returns `token`, `uploadUrl`, `expiresAt`, `maxBytes`, `acceptedMimeTypes`, and a ready-to-run
+`curlExample`. Whoever holds the file PUTs the raw bytes:
+
+`uploadUrl` is built on the **Etendo Go app's public base** (`etendo.go.app.baseUrl`, the same
+property the transactional emails use), because the uploader is a shell, a browser or an agent
+talking to the app — not to Tomcat. `context.url` is only the fallback for an instance reached
+directly on Tomcat with no app in front: it is the internal backend address and can be unreachable
+for the client behind a proxy or a tunnel. **If the app is behind a proxy, set
+`etendo.go.app.baseUrl`** or the URL handed to the agent will point at the backend.
+
+
+```bash
+curl -X PUT --upload-file ./photo.jpg "https://<host>/sws/neo/image/upload/<token>"
+```
+
+The response of the PUT carries `{ imageId, name, mimeType, bytes }`. **The file never enters the
+conversation — only its path and the URL do.** A person with a browser can use the same URL.
+
+#### `PUT /sws/neo/image/upload/{token}` — intentionally unauthenticated
+
+This endpoint has a pre-authentication entry point in `NeoServlet`, on the same basis as the
+document-download links: the **token is the credential**. It is single-use, expires in 10 minutes,
+carries 192 bits of `SecureRandom`, and holds the client/org/user of the MCP session it was issued
+to. It has to work this way — the whole point is that whoever holds the FILE uploads it directly,
+and that party has no session. `NeoImageHelper` validates the token, the size and the magic bytes
+before anything is stored, and the row's client/organization come from the ticket rather than from
+the admin context the upload runs in, so the elevation grants no scope the requesting MCP session
+did not already have.
+
+Tickets live in `NeoImageUploadTickets`, an in-memory single-node store: at most
+`MAX_PENDING_PER_SESSION` (10) unused tickets per session, expiry checked on read plus a lazy
+sweep on each issue. **Tickets are lost on restart/redeploy and are invisible to another node** —
+acceptable at a 10-minute TTL because a lost ticket surfaces as the same self-correctable error as
+an expired one. If Etendo GO ever runs multi-node, or behind a load balancer that does not pin a
+client to a node, that class must be replaced by a small AD table; the class Javadoc states the
+condition and the replacement.
+
+#### `neo_upload_image` — the base64 fallback
+
+| Param | Required | Notes |
+|---|---|---|
+| `data_base64` | **yes** | a `data:image/png;base64,` prefix is accepted and stripped |
+| `name` | no | as above |
+| `mime_type` | no | cross-checked against the actual bytes |
+
+**Hard limit: 256 KB decoded** — deliberately far below the servlet's 10 MB, so nobody discovers
+the token cost by paying it. Over the cap the call is rejected with a message naming
+`neo_request_image_upload`. Type is sniffed from magic bytes and cross-checked against a supplied
+`mime_type`, so a lying `mime_type` cannot store an arbitrary blob.
+
+#### `neo_get_image_upload`
+
+Takes the `token` and returns `{ status: "pending" | "completed", expiresAt }` plus `imageId` once
+completed — for an agent that did not see the PUT's own output. Read-only, same token.
+
+#### Both upload tools create the `AD_Image` row only
+
+Attaching it to a record stays an explicit `neo_update` of the image field. That keeps the tools
+generic across every image field and keeps the audit trail obvious.
+
+Design record, including the rejected alternatives and the phases not yet built (the read path:
+a `neo://image/{id}` resource, `resource_link` in `neo_get`, and a downscaling `neo_get_image`):
+`docs/plans/2026-09-07-mcp-image-field-support-plan.md`.
+
+### 4.14 Record Links in the App (ETP-5200)
+
+An agent asked for "the link to that order" used to have nothing to work with: no MCP response
+carried a URL. It invented one, guessing the legacy backoffice shape
+`https://<host>/etendo/?tabId=186&recordId=<id>` — which on a Go deployment resolves to a
+different application altogether.
+
+The React app routes a record at `:windowName/:recordId`, where `windowName` is the kebab-case
+spec name — the exact string the tools already take as their `spec` argument. So a link is simply:
+
+```
+<appBaseUrl>/<spec>/<recordId>
+https://go.experimental.etendo.cloud/sales-order/4B2DBECAC0D34E309AA5C8C86DC81519
+```
+
+Two things now emit it (`McpRecordUrls`):
+
+**`neo_discover` advertises the recipe once per session**, next to `guidance`:
+
+```json
+"app": {
+  "baseUrl": "https://go.experimental.etendo.cloud",
+  "recordUrlTemplate": "{baseUrl}/{spec}/{id}",
+  "hint": "Build a link to any record as {baseUrl}/{spec}/{id}, … Only a spec's primaryEntity has a page of its own — link a line record to its header."
+}
+```
+
+That costs a couple of dozen tokens once and lets the agent link any record it later sees,
+including the rows of a 100-record `neo_list`, which deliberately carries no URLs of its own.
+
+**`neo_get` and `neo_create` add a ready-made `url`** to the record they return — the two moments
+an agent hands the user a link.
+
+Two rules keep the links honest, and both are enforced in code:
+
+1. **No configured base, no link.** The base comes from
+   `PublicUrlResolver.resolveConfiguredAppBaseUrl()` (`etendo.go.app.baseUrl` / `ETGO_APP_BASE_URL`)
+   and nowhere else; when it is unset, the `app` block and the `url` field are omitted entirely.
+   There is deliberately **no fallback to `context.url`** — that is the *internal* Tomcat address,
+   and using it is exactly what produced `http://localhost:8080/…` instead of
+   `http://localhost:3100/…` for the image upload URL in ETP-5184. A wrong link is worse than no
+   link, because an agent publishes it either way.
+2. **Only a spec's primary entity (tab level 0) has a route.** A line record gets no `url`; the
+   agent is told to link to its header.
+
+A proxied deployment therefore **must** set `etendo.go.app.baseUrl` to the public app URL, the same
+property the image upload URL depends on.
 
 ## 5. Configuration
 

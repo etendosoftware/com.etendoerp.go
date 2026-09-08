@@ -36,6 +36,8 @@ class NeoBuiltInEndpointHandler {
   private static final String IS_MAIN_FIELD = "isMain";
   private static final String MARK_AS_MAIN_PARAM = "markAsMain";
   private static final String INVALID_JSON_BODY_PREFIX = "Invalid JSON body: ";
+  /** Path segment that turns {@code /image/...} into the ETP-5184 upload-ticket endpoint. */
+  static final String IMAGE_UPLOAD_SEGMENT = "upload";
 
   private final NeoServlet servlet;
   private final NeoDiscoveryHandler discoveryHandler;
@@ -62,6 +64,14 @@ class NeoBuiltInEndpointHandler {
       return handleDiscoveryEndpoint(method, response);
     }
     if ("image".equals(pathInfo.specName)) {
+      // ETP-5184: /image/upload/{token} is the one-shot MCP upload ticket, not an image id. It also
+      // has a pre-authentication entry point in NeoServlet (the token is the credential, so the
+      // uploader has no session) — this branch is what serves it when the caller DOES send a
+      // bearer token, so both callers hit the same handler and the same validation.
+      if (IMAGE_UPLOAD_SEGMENT.equals(pathInfo.entityName)) {
+        NeoImageHelper.handleUploadTicketRequest(pathInfo.recordId, method, request, response);
+        return true;
+      }
       NeoImageHelper.handleImageRequest(pathInfo.entityName, method, request, response);
       return true;
     }
