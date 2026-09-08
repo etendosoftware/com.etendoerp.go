@@ -167,18 +167,26 @@ Two canonical patterns:
 **Pattern 1 — single, immutable target** (the FK to the target never changes on update):
 
 ```sql
-SELECT COALESCE(NEW.c_order_id, OLD.c_order_id)
+SELECT COALESCE(NEW.c_order_id, OLD.c_order_id) FROM dual
 -- NEW on insert/update, OLD on delete
 ```
+
+> **`FROM dual` is mandatory, not decoration.** A resolver with no `FROM` clause is valid
+> PostgreSQL but not valid Oracle, so the generator rejects it — and it rejects it as a
+> `log.warn`, NOT as a build error: `update.database` finishes green, the dependency is silently
+> skipped, and the column is left with no enqueue trigger. It then keeps whatever value it was
+> last given and never refreshes again, which looks exactly like a working column. Etendo ships
+> `public.dual` on PostgreSQL, so the clause costs nothing. This is how ETP-5216 shipped a
+> dependency that generated no trigger.
 
 **Pattern 2 — reparenting** (the FK *can* be reassigned on update — a line moved to another order).
 A single update is then a **two-target** event: the *old* parent's aggregate is now stale (a child
 left) and the *new* parent's is stale (a child arrived). Both must recompute:
 
 ```sql
-SELECT NEW.c_order_id WHERE NEW.c_order_id IS NOT NULL
+SELECT NEW.c_order_id FROM dual WHERE NEW.c_order_id IS NOT NULL
 UNION
-SELECT OLD.c_order_id WHERE OLD.c_order_id IS NOT NULL
+SELECT OLD.c_order_id FROM dual WHERE OLD.c_order_id IS NOT NULL
 ```
 
 - `UNION` (not `UNION ALL`) collapses the two rows into one when `NEW = OLD` (an ordinary update
