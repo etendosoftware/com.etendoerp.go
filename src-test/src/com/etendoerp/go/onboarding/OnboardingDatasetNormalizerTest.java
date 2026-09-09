@@ -151,8 +151,10 @@ public class OnboardingDatasetNormalizerTest {
    * tenant cannot post negative stock from day one. The prior value, {@code '0'}
    * ("Undefined-OverIssue", {@code OVERISSUE='Y'}), is the root cause documented in
    * {@code docs/etendo-ad/onboarding-gaps.md} §I1 — assert it is gone, not merely that '2' appears,
-   * so a partial revert still fails this test. (ETP-5079 reduced the dataset to a single locator,
-   * {@code AG-0-0-0} of "Almacen Principal"; the assertion is deliberately count-agnostic.)
+   * so a partial revert still fails this test. (ETP-5079 reduced the ONBOARDING output to a single
+   * locator, {@code AG-0-0-0} of "Almacen Principal" — the source dataset still ships the secondary
+   * warehouse's {@code AS-0-0-0} for GOClient, filtered out at import time. The assertion is
+   * deliberately count-agnostic.)
    */
   @Test
   public void testNormalizerLocatorsDefaultToAvailableInventoryStatus() {
@@ -208,9 +210,11 @@ public class OnboardingDatasetNormalizerTest {
   public void testNormalizerKeepsSharedSetupContent() {
     String xml = pathBackedNormalizer().buildDatasetXml();
 
-    // ETP-5079 removed the four sample products and the three template financial accounts from the
-    // dataset, so this test no longer asserts on "Agua"/"Cuenta de Banco". The shared setup content
-    // it actually guards is the price lists, payment terms and payment methods.
+    // ETP-5079 keeps the four sample products and the three template financial accounts in the
+    // SOURCE dataset (GOClient demos with them at install time) and drops them from the NORMALIZED
+    // onboarding output instead, so this test no longer asserts on "Agua"/"Cuenta de Banco". The
+    // shared setup content it actually guards is the price lists, payment terms and payment
+    // methods.
     assertTrue(xml.contains("Tarifa de venta principal"));
     assertTrue(xml.contains("Tarifa de compra principal"));
     assertTrue(xml.contains("30 Días"));
@@ -228,6 +232,14 @@ public class OnboardingDatasetNormalizerTest {
    * while the pieces the runtime actually depends on must survive: the internal {@code ETGO_DTO}
    * "Discount" product (resolved at runtime for inline discounts) and the single warehouse
    * "Almacen Principal".
+   *
+   * <p>Asserted on the NORMALIZED output, which is the level that matters and the reason this test
+   * survived the fix. All of these rows are still present in the SOURCE dataset — GOClient is
+   * seeded from all 121 files by {@code install.source} and is meant to have sample data to demo
+   * with — and are dropped here by {@code DemoMasterDataFilter}. Deleting them at the source
+   * instead is what broke {@code ./gradlew install}; the complementary claim, that the source still
+   * defines them, is asserted by
+   * {@link OnboardingDatasetReferentialIntegrityTest#testTheDemoMasterDataStaysInTheSourceDatasetForGoClient()}.</p>
    */
   @Test
   public void testNormalizerShipsCorrectedInitialDataset() {
@@ -243,8 +255,9 @@ public class OnboardingDatasetNormalizerTest {
     // anyway because its category is flagged EM_Etgo_IsSystemCategory='Y'.
     assertTrue(xml.contains("ETGO_DTO"));
 
-    // Product categories: exactly two survive. "Bebidas" was dropped (ETP-5079, after inspecting
-    // the FranOB2 tenant); the starter category stays, and "Discounts" is required by ETGO_DTO.
+    // Product categories: exactly two survive. "Beverages" is filtered out (ETP-5079, after
+    // inspecting the FranOB2 tenant); the starter category stays, and "Discounts" is required by
+    // ETGO_DTO.
     // The starter category was also renamed as part of ETP-5079 — English base name and VALUE
     // "Generic", with the Spanish "Genérico" moved into a real M_PRODUCT_CATEGORY_TRL row, the
     // same English-base-plus-translation convention this ticket applied to document types.
@@ -255,6 +268,11 @@ public class OnboardingDatasetNormalizerTest {
     // C_ELEMENTVALUE. The new Generic and Generico are far less collision-prone, but a name
     // assertion would still pass on a row that merely mentions the word, and it would break
     // again on the next rename.
+    // Both halves of the filtered category: its English base name and the es_ES translation row
+    // the dataset now ships for it. "Bebidas" absent is the assertion that would catch the _TRL
+    // row leaking through while its parent category is dropped — a tenant would then hold a
+    // translation for a category it does not have.
+    assertFalse(xml.contains("Beverages"));
     assertFalse(xml.contains("Bebidas"));
     assertTrue("starter product category (M_Product_Category EBAE46FD...) missing",
         xml.contains("EBAE46FD129049DEB26B948E160C6AD8"));
@@ -295,6 +313,64 @@ public class OnboardingDatasetNormalizerTest {
     assertTrue(xml.contains("Corrective Sales Invoice"));
     assertTrue(xml.contains("Corrective Purchase Invoice"));
     assertTrue(OnboardingDatasetDefinition.getIncludedTables().contains("C_DOCTYPE_TRL"));
+  }
+
+  /**
+   * Row-exact counterpart to {@link #testNormalizerShipsCorrectedInitialDataset()}: every demo
+   * master-data row AND every child row hanging off one is dropped from the normalized output, and
+   * exactly the keepers survive.
+   *
+   * <p>Counted rather than string-matched because the four CHILD tables are invisible to a
+   * substring assertion — {@code M_PRODUCTPRICE}, {@code FIN_FINACC_PAYMENTMETHOD} and
+   * {@code AD_ORG_WAREHOUSE} carry no names, only ids and numbers, so a filter that dropped the
+   * parents and kept the children would leave every assertion above green while handing each new
+   * tenant 8 price rows, 6 payment-method rows and a warehouse assignment pointing at rows the
+   * tenant does not have. That is an import failure, not a cosmetic one.
+   *
+   * <p>The source dataset ships 3/6/5/8/2/2/3/2 rows for these tables (asserted by
+   * {@link OnboardingDatasetReferentialIntegrityTest#testTheDemoMasterDataStaysInTheSourceDatasetForGoClient()}),
+   * so each expectation below is also a statement about how many rows the filter removes.
+   */
+  @Test
+  public void testNormalizerDropsDemoMasterDataTogetherWithItsChildRows() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    // Parents.
+    assertEquals("only the internal ETGO_DTO product may survive", 1,
+        countEntities(xml, "mProduct"));
+    assertEquals("a tenant creates its own financial accounts", 0,
+        countEntities(xml, "finFinancialAccount"));
+    assertEquals("a tenant is born with a single warehouse", 1,
+        countEntities(xml, "mWarehouse"));
+    assertEquals("the starter category plus the system-flagged Discounts one", 2,
+        countEntities(xml, "mProductCategory"));
+
+    // Children of an excluded parent — the rows a name-based assertion cannot see.
+    assertEquals("price rows of the four sample products must go with them", 0,
+        countEntities(xml, "mProductprice"));
+    assertEquals("payment-method rows of the three template accounts must go with them", 0,
+        countEntities(xml, "finFinaccPaymentmethod"));
+    assertEquals("only the primary warehouse keeps its locator", 1,
+        countEntities(xml, "mLocator"));
+    assertEquals("only the primary warehouse keeps its organization assignment", 1,
+        countEntities(xml, "adOrgWarehouse"));
+    assertEquals("only the starter category keeps its es_ES translation", 1,
+        countEntities(xml, "mProductCategoryTrl"));
+  }
+
+  /**
+   * Counts normalized entity elements of one entity name. Matches {@code "<name "} rather than
+   * {@code "<name"}: every emitted row carries an {@code id} attribute, and the trailing space is
+   * what keeps {@code mProduct} from also counting {@code mProductCategory} and
+   * {@code mProductprice}.
+   */
+  private int countEntities(String xml, String entityName) {
+    String openingTag = "<" + entityName + " ";
+    int count = 0;
+    for (int at = xml.indexOf(openingTag); at >= 0; at = xml.indexOf(openingTag, at + 1)) {
+      count++;
+    }
+    return count;
   }
 
   /** Verifies that user-scoped sales representative columns are stripped from product rows. */

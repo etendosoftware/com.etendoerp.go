@@ -421,6 +421,7 @@
 <!--1318775D8FB24AB7B974EB501DC7621B-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--1318775D8FB24AB7B974EB501DC7621B-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--1318775D8FB24AB7B974EB501DC7621B-->  <SEQNO><![CDATA[50]]></SEQNO>
+<!--1318775D8FB24AB7B974EB501DC7621B-->  <MCP_CONFIG><![CDATA[{"parent":{"mode":"sameRecord","reason":"The vendorCreditor tab is the same C_BPartner record as businessPartner, filtered to the vendor role — it has no FK to a parent because it IS the parent."}}]]></MCP_CONFIG>
 <!--1318775D8FB24AB7B974EB501DC7621B--></ETGO_SF_ENTITY>
 
 <!--1343B4002EE14A9896594655770261ED--><ETGO_SF_ENTITY>
@@ -595,6 +596,7 @@
 <!--1DBA8836C40B4A0B962DE4CAEFE8A1A1-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--1DBA8836C40B4A0B962DE4CAEFE8A1A1-->  <JAVA_QUALIFIER><![CDATA[productTransactionsHandler]]></JAVA_QUALIFIER>
 <!--1DBA8836C40B4A0B962DE4CAEFE8A1A1-->  <SEQNO><![CDATA[30]]></SEQNO>
+<!--1DBA8836C40B4A0B962DE4CAEFE8A1A1-->  <MCP_CONFIG><![CDATA[{"parent":{"field":"storageBin","reason":"M_Transaction's isparent column points at M_Product, but under this window the parent tab is the storage bin (M_Locator)."}}]]></MCP_CONFIG>
 <!--1DBA8836C40B4A0B962DE4CAEFE8A1A1--></ETGO_SF_ENTITY>
 
 <!--1E5CCE2CAE124801935155391F327F87--><ETGO_SF_ENTITY>
@@ -712,6 +714,7 @@
 <!--21AAF33B768D4E8D8B1658148FDA0065-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--21AAF33B768D4E8D8B1658148FDA0065-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--21AAF33B768D4E8D8B1658148FDA0065-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--21AAF33B768D4E8D8B1658148FDA0065-->  <MCP_CONFIG><![CDATA[{"parent":{"field":"sIIConfiguration","reason":"aeatsii_config_log has no isparent column pointing at aeatsii_config; the link is the plain sIIConfiguration property."}}]]></MCP_CONFIG>
 <!--21AAF33B768D4E8D8B1658148FDA0065--></ETGO_SF_ENTITY>
 
 <!--23A0F047D9614B2B9554B5E95C69005E--><ETGO_SF_ENTITY>
@@ -924,6 +927,7 @@
 <!--296EE5752DA54E7880FECB13F5C7B40D-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--296EE5752DA54E7880FECB13F5C7B40D-->  <JAVA_QUALIFIER><![CDATA[productStockWarehouseHandler]]></JAVA_QUALIFIER>
 <!--296EE5752DA54E7880FECB13F5C7B40D-->  <SEQNO><![CDATA[170]]></SEQNO>
+<!--296EE5752DA54E7880FECB13F5C7B40D-->  <MCP_CONFIG><![CDATA[{"parent":{"field":"product","reason":"M_Storage_Detail's only isparent column is M_RefInventory_ID, which points at the referenced inventory, not at the M_Product parent tab. Auto-resolution would have picked the wrong column."}}]]></MCP_CONFIG>
 <!--296EE5752DA54E7880FECB13F5C7B40D--></ETGO_SF_ENTITY>
 
 <!--2A0ACAA2D061485394A336A95148FBD5--><ETGO_SF_ENTITY>
@@ -1370,6 +1374,7 @@
 <!--42549A84D7E047FDA2A08531A0473716-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--42549A84D7E047FDA2A08531A0473716-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--42549A84D7E047FDA2A08531A0473716-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--42549A84D7E047FDA2A08531A0473716-->  <MCP_CONFIG><![CDATA[{"parent":{"mode":"sameRecord","reason":"The customer tab is the same C_BPartner record as businessPartner, filtered to the customer role — it has no FK to a parent because it IS the parent."}}]]></MCP_CONFIG>
 <!--42549A84D7E047FDA2A08531A0473716--></ETGO_SF_ENTITY>
 
 <!--4295026CB3344E2AA5DB89204A200DB3--><ETGO_SF_ENTITY>
@@ -1427,6 +1432,7 @@
 <!--434A402466384781936F3E794D3A0E72-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--434A402466384781936F3E794D3A0E72-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--434A402466384781936F3E794D3A0E72-->  <SEQNO><![CDATA[80]]></SEQNO>
+<!--434A402466384781936F3E794D3A0E72-->  <MCP_CONFIG><![CDATA[{"parent":{"mode":"unparented","reason":"aeatsii_config is per-organization SII configuration, not an owner: there is no foreign key between it and this tab's table in either direction, no two-hop path, and the tab carries neither a whereclause nor a link column — Etendo's own UI scopes this outside the dictionary. Reads are global and remain scoped by the caller's organization access."}}]]></MCP_CONFIG>
 <!--434A402466384781936F3E794D3A0E72--></ETGO_SF_ENTITY>
 
 <!--45951533B9E743BC8A31AB9C4442FB2B--><ETGO_SF_ENTITY>
@@ -2255,6 +2261,7 @@
 <!--643B950E1F62480D87DD5D0C2437139A-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--643B950E1F62480D87DD5D0C2437139A-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--643B950E1F62480D87DD5D0C2437139A-->  <SEQNO><![CDATA[10]]></SEQNO>
+<!--643B950E1F62480D87DD5D0C2437139A-->  <MCP_CONFIG><![CDATA[{"fields":{"visibility":"editable","reason":"C_Location's ETGO_SF_FIELD rows carry no visibility. The REST layer does not gate on it, but the MCP method gate does, so POST/PUT are stripped and no address can be created through the agent. Classified MCP-side to leave the shared contract untouched."}}]]></MCP_CONFIG>
 <!--643B950E1F62480D87DD5D0C2437139A--></ETGO_SF_ENTITY>
 
 <!--65BF1DFD362B4F1CB6FEC60DB7030CF5--><ETGO_SF_ENTITY>
@@ -2314,6 +2321,7 @@
 <!--66EE3DC9A2F14CC3970B245EBCBA6954-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--66EE3DC9A2F14CC3970B245EBCBA6954-->  <JAVA_QUALIFIER><![CDATA[factAcctHandler]]></JAVA_QUALIFIER>
 <!--66EE3DC9A2F14CC3970B245EBCBA6954-->  <SEQNO><![CDATA[120]]></SEQNO>
+<!--66EE3DC9A2F14CC3970B245EBCBA6954-->  <MCP_CONFIG><![CDATA[{"parent":{"mode":"unparented","reason":"Fact_Acct addresses its document through the polymorphic Record_ID + AD_Table_ID pair, which is not a DAL property, so no parent filter can be expressed. Read-only accounting entries."}}]]></MCP_CONFIG>
 <!--66EE3DC9A2F14CC3970B245EBCBA6954--></ETGO_SF_ENTITY>
 
 <!--6810F54BEB51433EBE56EB0DACECC780--><ETGO_SF_ENTITY>
@@ -2740,6 +2748,7 @@
 <!--758A5E5C7ED7451F9044F8C04A5871E2-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--758A5E5C7ED7451F9044F8C04A5871E2-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--758A5E5C7ED7451F9044F8C04A5871E2-->  <SEQNO><![CDATA[40]]></SEQNO>
+<!--758A5E5C7ED7451F9044F8C04A5871E2-->  <MCP_CONFIG><![CDATA[{"parent":{"mode":"unparented","reason":"aeatsii_config is per-organization SII configuration, not an owner: there is no foreign key between it and this tab's table in either direction, no two-hop path, and the tab carries neither a whereclause nor a link column — Etendo's own UI scopes this outside the dictionary. Reads are global and remain scoped by the caller's organization access."}}]]></MCP_CONFIG>
 <!--758A5E5C7ED7451F9044F8C04A5871E2--></ETGO_SF_ENTITY>
 
 <!--76050C1AF3374963A36F0CDE8D3BB085--><ETGO_SF_ENTITY>
@@ -2913,6 +2922,7 @@
 <!--7C94FD1A7ED9477291D8A5BDB739D45E-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--7C94FD1A7ED9477291D8A5BDB739D45E-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--7C94FD1A7ED9477291D8A5BDB739D45E-->  <SEQNO><![CDATA[100]]></SEQNO>
+<!--7C94FD1A7ED9477291D8A5BDB739D45E-->  <MCP_CONFIG><![CDATA[{"parent":{"mode":"unparented","reason":"aeatsii_config is per-organization SII configuration, not an owner: there is no foreign key between it and this tab's table in either direction, no two-hop path, and the tab carries neither a whereclause nor a link column — Etendo's own UI scopes this outside the dictionary. Reads are global and remain scoped by the caller's organization access."}}]]></MCP_CONFIG>
 <!--7C94FD1A7ED9477291D8A5BDB739D45E--></ETGO_SF_ENTITY>
 
 <!--7D08A4AE00174933A80057407BCF35C9--><ETGO_SF_ENTITY>
@@ -3181,6 +3191,7 @@
 <!--91A349D8AF1B43D2B8C9DF8AC167F955-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--91A349D8AF1B43D2B8C9DF8AC167F955-->  <JAVA_QUALIFIER><![CDATA[binContentsHandler]]></JAVA_QUALIFIER>
 <!--91A349D8AF1B43D2B8C9DF8AC167F955-->  <SEQNO><![CDATA[40]]></SEQNO>
+<!--91A349D8AF1B43D2B8C9DF8AC167F955-->  <MCP_CONFIG><![CDATA[{"parent":{"field":"storageBin","reason":"M_Storage_Detail carries no isparent column pointing at M_Locator; the bin link is the plain storageBin property."}}]]></MCP_CONFIG>
 <!--91A349D8AF1B43D2B8C9DF8AC167F955--></ETGO_SF_ENTITY>
 
 <!--927E92EBB8ED4998BE5E9B8E6489B186--><ETGO_SF_ENTITY>
@@ -3604,6 +3615,7 @@
 <!--A965C00786804AE4BCFB257B61377E6B-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--A965C00786804AE4BCFB257B61377E6B-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--A965C00786804AE4BCFB257B61377E6B-->  <SEQNO><![CDATA[70]]></SEQNO>
+<!--A965C00786804AE4BCFB257B61377E6B-->  <MCP_CONFIG><![CDATA[{"parent":{"mode":"unparented","reason":"aeatsii_payment shares only FIN_Payment_ID with its parent view aeatsii_payment_cashvat_v — a join on a shared dimension, not a link to the parent record. Reads are global."}}]]></MCP_CONFIG>
 <!--A965C00786804AE4BCFB257B61377E6B--></ETGO_SF_ENTITY>
 
 <!--A9ED6A567B204F308D982C93050BA2CA--><ETGO_SF_ENTITY>
@@ -3662,6 +3674,7 @@
 <!--AC5E1116738F4C6ABA1D248180DFE037-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--AC5E1116738F4C6ABA1D248180DFE037-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--AC5E1116738F4C6ABA1D248180DFE037-->  <SEQNO><![CDATA[60]]></SEQNO>
+<!--AC5E1116738F4C6ABA1D248180DFE037-->  <MCP_CONFIG><![CDATA[{"parent":{"mode":"unparented","reason":"aeatsii_config is per-organization SII configuration, not an owner: there is no foreign key between it and this tab's table in either direction, no two-hop path, and the tab carries neither a whereclause nor a link column — Etendo's own UI scopes this outside the dictionary. Reads are global and remain scoped by the caller's organization access."}}]]></MCP_CONFIG>
 <!--AC5E1116738F4C6ABA1D248180DFE037--></ETGO_SF_ENTITY>
 
 <!--ACF544B8064246E3AB3BE84A3726AE17--><ETGO_SF_ENTITY>
@@ -3818,6 +3831,7 @@
 <!--B3FFED4A53DA480BA2B20E313623AC9C-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--B3FFED4A53DA480BA2B20E313623AC9C-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--B3FFED4A53DA480BA2B20E313623AC9C-->  <SEQNO><![CDATA[80]]></SEQNO>
+<!--B3FFED4A53DA480BA2B20E313623AC9C-->  <MCP_CONFIG><![CDATA[{"parent":{"mode":"sameRecord","reason":"The employee tab is the same C_BPartner record as businessPartner, filtered to the employee role — it has no FK to a parent because it IS the parent."}}]]></MCP_CONFIG>
 <!--B3FFED4A53DA480BA2B20E313623AC9C--></ETGO_SF_ENTITY>
 
 <!--B4256207DE694E28B8194FC21F5FE15A--><ETGO_SF_ENTITY>
@@ -4243,6 +4257,7 @@
 <!--C99AC1F3447349918AAD688CDA247C38-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--C99AC1F3447349918AAD688CDA247C38-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--C99AC1F3447349918AAD688CDA247C38-->  <SEQNO><![CDATA[140]]></SEQNO>
+<!--C99AC1F3447349918AAD688CDA247C38-->  <MCP_CONFIG><![CDATA[{"parent":{"field":"invoice","reason":"TBAI_SyncInvoice has no isparent column at all; the link to the C_Invoice parent tab is the plain invoice property."}}]]></MCP_CONFIG>
 <!--C99AC1F3447349918AAD688CDA247C38--></ETGO_SF_ENTITY>
 
 <!--C9F1DB9EEA984AD4BF9D3AE2A49B8D40--><ETGO_SF_ENTITY>
@@ -4338,6 +4353,7 @@
 <!--CC1D93D1A750429E84B02C0E00F0B3BD-->  <ISPATCH><![CDATA[Y]]></ISPATCH>
 <!--CC1D93D1A750429E84B02C0E00F0B3BD-->  <ISDELETE><![CDATA[Y]]></ISDELETE>
 <!--CC1D93D1A750429E84B02C0E00F0B3BD-->  <SEQNO><![CDATA[40]]></SEQNO>
+<!--CC1D93D1A750429E84B02C0E00F0B3BD-->  <MCP_CONFIG><![CDATA[{"parent":{"field":"salesOrderLine","reason":"C_Orderline_Servicerelation marks C_Orderline_Related_ID as the parent link, but the parent tab is the return line itself — C_Orderline_ID (salesOrderLine)."}}]]></MCP_CONFIG>
 <!--CC1D93D1A750429E84B02C0E00F0B3BD--></ETGO_SF_ENTITY>
 
 <!--CDB6025F014247498E609C72EF8371B1--><ETGO_SF_ENTITY>
@@ -4873,6 +4889,7 @@
 <!--E24C7489E4764489A8DCB07DD5348DF8-->  <ISPATCH><![CDATA[N]]></ISPATCH>
 <!--E24C7489E4764489A8DCB07DD5348DF8-->  <ISDELETE><![CDATA[N]]></ISDELETE>
 <!--E24C7489E4764489A8DCB07DD5348DF8-->  <SEQNO><![CDATA[20]]></SEQNO>
+<!--E24C7489E4764489A8DCB07DD5348DF8-->  <MCP_CONFIG><![CDATA[{"parent":{"mode":"unparented","reason":"aeatsii_config is per-organization SII configuration, not an owner: there is no foreign key between it and this tab's table in either direction, no two-hop path, and the tab carries neither a whereclause nor a link column — Etendo's own UI scopes this outside the dictionary. Reads are global and remain scoped by the caller's organization access."}}]]></MCP_CONFIG>
 <!--E24C7489E4764489A8DCB07DD5348DF8--></ETGO_SF_ENTITY>
 
 <!--E2836583C7F149B3BE054F2C5646D214--><ETGO_SF_ENTITY>

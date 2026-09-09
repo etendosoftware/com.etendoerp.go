@@ -38,6 +38,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
+import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
@@ -84,6 +85,59 @@ final class FinancialAccountBankConnectionSupport {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * The maximum number of days of history the connection's provider declares it will serve, or
+   * null when there is no limit worth advising against.
+   *
+   * Returns an {@code Integer}, not the DAL's raw {@code BigDecimal}, on purpose: the column is
+   * {@code DECIMAL(10,0)} so the value is whole days by definition, and the conversion belongs
+   * here — once, beside the guards that already validate it — rather than in every caller. A
+   * caller that forgot it would serialize {@code 90.0}, which jettison's {@code getInt()}
+   * silently unwraps, so the mistake would pass an int-shaped assertion and only surface as
+   * "90.0 días" in the UI.
+   *
+   * Resolved from the CONNECTION's {@code providerCode}, deliberately NOT from
+   * {@code FIN_FinancialAccount.psd2Provider}. The FK is provider *memory*: it is written when an
+   * account is created offline with a bank chosen, and it survives a reconnect to a different
+   * bank until the account is relinked. Reading it here would let the field advisory name a
+   * different number than the warning the synchronization prints — the very class of bug this is
+   * meant to close. Going through the provider code reproduces exactly what
+   * {@code SaltEdgeConnectionHelper.findProviderMaxFetchInterval} does at sync time, so the two
+   * can never disagree.
+   *
+   * The guards below mirror {@code getProviderCodesForAccount}'s own filters, cheapest first, so
+   * a connection that could not produce a warning anyway costs no query at all.
+   *
+   * A null return means "say nothing". It is never coerced to 90: the fallback in
+   * {@link #fetchAndRegisterProvider} already invents a 90 when the provider details call fails,
+   * and a second invented default would make an undeclared limit indistinguishable from a real
+   * one.
+   */
+  static Integer maxFetchIntervalOf(FinaccConnection connection) {
+    if (connection == null) {
+      return null;
+    }
+    // Boxed Boolean on the DAL getter, so an explicit TRUE test — not a bare negation, which
+    // would NPE on a null column.
+    if (!Boolean.TRUE.equals(connection.isHandlesTransactions())) {
+      return null;
+    }
+    if (StringUtils.isBlank(connection.getProviderCode())) {
+      return null;
+    }
+    Provider provider = findProviderByCode(connection.getProviderCode());
+    if (provider == null) {
+      return null;
+    }
+    BigDecimal maxFetchInterval = provider.getMaxFetchInterval();
+    // A stored 0 means "not declared", never a zero-day limit — same test the PSD2 module applies
+    // before it warns.
+    if (maxFetchInterval == null || maxFetchInterval.compareTo(BigDecimal.ZERO) <= 0) {
+      return null;
+    }
+    return maxFetchInterval.intValue();
   }
 
   private static Provider fetchAndRegisterProvider(String providerCode, String providerName,

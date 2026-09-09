@@ -809,7 +809,14 @@ class NeoCrudHandler {
     String javaQualifier = context.getSfEntity() != null
         ? context.getSfEntity().getJavaQualifier() : null;
     if (StringUtils.isNotBlank(javaQualifier)) {
-      NeoHandler handler = servlet.lookupHandler(javaQualifier);
+      // Resolved statically, NOT through `servlet`. This runs in the DEFAULT create path, which
+      // BatchService.forBatchOnly() is allowed to reach with a null servlet — its javadoc states
+      // that contract ("only handleWithHooks touches the owning servlet"). Going through
+      // servlet.lookupHandler here broke it: every neo_batch create on an entity with a
+      // Java_Qualifier died with an NPE on `this.servlet`. NeoServlet.lookupHandler is itself a
+      // one-line delegation to this same static, so the behaviour is identical on both paths
+      // (same precedent as NeoActionSurface's CDI_RESOLVER).
+      NeoHandler handler = NeoServletSupport.lookupHandler(javaQualifier);
       if (handler != null) {
         protectedCalloutFields.addAll(handler.protectedCreateCalloutFields(context));
       }
