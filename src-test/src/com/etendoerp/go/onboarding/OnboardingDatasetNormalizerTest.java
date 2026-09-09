@@ -524,8 +524,18 @@ public class OnboardingDatasetNormalizerTest {
   public void testNormalizerIncludesAcctSchemaDefaultInvoicePriceVarianceAccount() {
     String xml = pathBackedNormalizer().buildDatasetXml();
 
-    assertTrue("P_InvoicePriceVariance_Acct (99904000) missing — expected GOClient's own "
-        + "99904000 combination id", xml.contains("29616DEC549948E7A65ABC28BCC18742"));
+    // Assert the ACTUAL new element (P_InvoicePriceVariance_Acct on C_ACCTSCHEMA_DEFAULT), not a
+    // bare substring: 29616DEC549948E7A65ABC28BCC18742 is also the C_ValidCombination row's own PK
+    // (that table is in INCLUDED_TABLES and the normalizer emits every row's id), so a bare
+    // xml.contains(id) check is a tautology that passes even with this ticket's actual XML edit
+    // reverted (ETP-5222 review finding W2). Tag name follows the same DAL-property camelCase
+    // convention as the sibling assertions above (e.g. "mInventorystatusId" for
+    // M_InventoryStatus_ID, "mProductCategoryTrl" for M_Product_Category_Trl):
+    // P_InvoicePriceVariance_Acct -> pInvoicepricevarianceAcct.
+    assertTrue("P_InvoicePriceVariance_Acct (99904000) element missing on C_ACCTSCHEMA_DEFAULT — "
+        + "expected GOClient's own 99904000 combination id",
+        xml.contains("<pInvoicepricevarianceAcct>29616DEC549948E7A65ABC28BCC18742"
+            + "</pInvoicepricevarianceAcct>"));
   }
 
   /**
