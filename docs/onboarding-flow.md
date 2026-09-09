@@ -257,6 +257,21 @@ along with all four `FIN_PAYMENTMETHOD` rows. Corrective twin for
 already-provisioned tenants: `R31-document-sequence-startno` in
 `etendo_schema_forge`, which covers the sequences.
 
+**Dataset content corrected by ETP-5245 — `ISDEFAULT` on the price lists.**
+`referencedata/sampledata/GOClient/M_PRICELIST.xml` shipped both curated tariffs
+with `ISDEFAULT='N'`, so a newly onboarded tenant had **no** default price list
+in either direction. Four independent consumers disambiguate tariffs with
+`isdefault` and all of them degrade silently without it: the
+`ETGO_PRODUCT_SALE_PRICE` / `ETGO_PRODUCT_PURCHASE_PRICE` computed columns
+(`ORDER BY (pl.isdefault = 'Y') DESC, …`), the frontend `PriceListPicker`, the
+`R33` standard-cost anchor fix, and the `PriceListVersionResolver` that ETP-5245
+uses to seed a new product's zero prices. Both rows are now `ISDEFAULT='Y'` —
+one per direction (`Tarifa de venta principal` `ISSOPRICELIST='Y'`,
+`Tarifa de compra principal` `ISSOPRICELIST='N'`) — and
+`DefaultPriceListSampleDataTest` pins the invariant. Corrective twin for
+already-provisioned tenants: `R35-pricelist-isdefault` in `etendo_schema_forge`;
+the full analysis lives there, in `docs/etendo-ad/onboarding-gaps.md` § N5.
+
 ## NDJSON Progress Events
 
 Each step emits two events:
