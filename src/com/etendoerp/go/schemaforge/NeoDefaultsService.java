@@ -829,13 +829,20 @@ public class NeoDefaultsService {
     }
 
     // List-reference columns (AD_Reference_ID = "17") with a pure literal default (no "@"
-    // context/preference token) must return that literal verbatim. Their AD_Ref_List values
-    // are opaque codes — often all-digit strings like "000000000000000" (see Invoicegrouping,
-    // a 15-digit binary code) — and Utility.getDefault treats a plain literal as a numeric
-    // candidate, collapsing it to "0" and losing the leading zeros / length. That produces a
-    // value that matches none of the column's real AD_Ref_List entries.
+    // context/preference token) return that literal without going through Utility.getDefault.
+    // Their AD_Ref_List values are opaque codes — sometimes all-digit strings like
+    // "000000000000000" (see Invoicegrouping on C_BPartner, a 15-digit binary code) — and the
+    // post-resolution numeric coercion (applyResolvedDefault / NeoTypeCoercionHelper.coerceField,
+    // both of which now exclude List columns) used to collapse them to "0", losing the leading
+    // zeros / length and producing a value that matches no real AD_Ref_List entry (ETP-4700).
+    //
+    // The literal still has to be unquoted, though. Quoting a string literal in
+    // AD_Column.DefaultValue is the standard AD convention (C_BPartner.EM_OBTIK_Tax_ID_Key is
+    // stored as '1'), and Utility.getDefault does not strip it either. Returning such a literal
+    // verbatim served a value no AD_Ref_List entry matches, which made every business-partner
+    // create fail with a 400 on that field.
     if (!defaultExpr.contains("@") && isListReference(adColumn)) {
-      return defaultExpr;
+      return stripEnclosingQuotes(defaultExpr);
     }
 
     // Delegate to Utility.getDefault for all other cases:
@@ -938,6 +945,34 @@ public class NeoDefaultsService {
   private static boolean isListReference(Column adColumn) {
     return adColumn.getReference() != null
         && REFERENCE_ID_LIST.equals(adColumn.getReference().getId());
+  }
+
+  /**
+   * Removes ONE pair of matching enclosing quotes from an AD default literal.
+   *
+   * <p>Quoting a string literal in {@code AD_Column.DefaultValue} is the long-standing AD
+   * convention — the core's own {@code Property.getActualDefaultValue()} strips it before use.
+   * {@code Utility.getDefault} does NOT (a literal without "@" comes back verbatim, quotes
+   * included), so any caller that bypasses or precedes it must strip the quotes itself.
+   *
+   * <p>Both ends must carry the SAME quote character, and the string must be longer than the
+   * two quotes. That is what keeps unquoted opaque list codes intact — most notably
+   * {@code Invoicegrouping}'s 15-digit {@code 000000000000000} (ETP-4700), which must be
+   * returned untouched.
+   *
+   * @param literal
+   *     the raw default expression, may be null
+   * @return the literal with one pair of enclosing quotes removed, or the input unchanged
+   */
+  private static String stripEnclosingQuotes(String literal) {
+    if (literal == null || literal.length() <= 2) {
+      return literal;
+    }
+    char first = literal.charAt(0);
+    if ((first == '\'' || first == '"') && literal.charAt(literal.length() - 1) == first) {
+      return literal.substring(1, literal.length() - 1);
+    }
+    return literal;
   }
 
   /**

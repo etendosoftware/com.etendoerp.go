@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import org.openbravo.base.exception.OBException;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -381,6 +382,70 @@ public final class BankStatementsSupport {
       return new BigDecimal(raw.trim());
     } catch (NumberFormatException e) {
       return BigDecimal.ZERO;
+    }
+  }
+
+  private static final String MSG_ZERO_AMOUNT_LINE =
+      "Every line must have an amount in either Deposit or Withdrawal";
+  /**
+   * ETP-4954: a statement line never carries a negative amount — a negative Salida is conceptually
+   * an Entrada. Rejecting it here (instead of letting the read path net the pair into the opposite
+   * column) keeps this endpoint aligned with the manual form and with the file-import pruner.
+   */
+  private static final String MSG_NEGATIVE_AMOUNT_LINE =
+      "Line amounts cannot be negative: use Deposit for money in and Withdrawal for money out";
+  /**
+   * ETP-4954: a statement line is an inflow OR an outflow, never both. Filling both sides is not
+   * a movement the bank reported — the read path collapses the pair into
+   * {@code cramount - dramount}, so 100/30 surfaces as a -70 that appears in no statement and
+   * 50/50 persists and then reads as zero. {@code ReactivationSupport.applyBankStatementAmounts}
+   * already refuses to leave both sides filled, netting them onto one side under Classic's sign
+   * normalization; this endpoint rejects instead, because an inbound line with both sides filled
+   * is bad input rather than two records being merged.
+   */
+  private static final String MSG_BOTH_AMOUNTS_LINE =
+      "A line must have an amount in either Deposit or Withdrawal, not in both";
+
+  /**
+   * The amount rule for one inbound line: an amount above zero on EXACTLY ONE side.
+   *
+   * <p>Three ways to fail it, each with its own message because the caller cannot tell them apart
+   * from a bare 400:
+   * <ul>
+   *   <li>no amount at all. Unlike the file import — which silently drops amount-less rows, as
+   *       Classic does — this is a validation error here: the manual form has a user to fix it.</li>
+   *   <li>a negative amount. The frontend already refuses these ({@code isLineComplete} needs a
+   *       strictly positive side), but this endpoint is also reachable from MCP/REST, where the
+   *       original "not both zero" guard let a negative pair through.</li>
+   *   <li>both sides filled. A statement line is an inflow OR an outflow; see
+   *       {@link #MSG_BOTH_AMOUNTS_LINE}.</li>
+   * </ul>
+   *
+   * <p><b>Called BEFORE the setters, and that ordering is load-bearing:</b> a managed entity is
+   * flushed even when the request ends in a 400, so validating after
+   * {@code setCramount}/{@code setDramount} would persist the very row being rejected.
+   * {@code BankStatementsHandlerTest} pins it with {@code verify(line, never()).setCramount(any())}.
+   *
+   * <p>Lives here rather than in {@code BankStatementsHandler} for two reasons. Inline in
+   * {@code createLines} it carried the whole rule's documentation into the middle of a loop and
+   * pushed that method past Sonar's cognitive-complexity threshold (S3776); extracted but left
+   * in the handler it took that class to 36 methods against the 35 S1448 allows. This is also
+   * simply where it belongs: {@link #parseAmount} produces the two values it checks, and
+   * {@link #isBlankLine} is the sibling check the same loop runs.
+   *
+   * @param crAmount the Deposit (money in) amount, never null
+   * @param drAmount the Withdrawal (money out) amount, never null
+   * @throws OBException when the pair does not describe a single-sided movement
+   */
+  public static void validateLineAmounts(BigDecimal crAmount, BigDecimal drAmount) {
+    if (crAmount.signum() == 0 && drAmount.signum() == 0) {
+      throw new OBException(MSG_ZERO_AMOUNT_LINE);
+    }
+    if (crAmount.signum() < 0 || drAmount.signum() < 0) {
+      throw new OBException(MSG_NEGATIVE_AMOUNT_LINE);
+    }
+    if (crAmount.signum() != 0 && drAmount.signum() != 0) {
+      throw new OBException(MSG_BOTH_AMOUNTS_LINE);
     }
   }
 
