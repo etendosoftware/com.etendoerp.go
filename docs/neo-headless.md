@@ -2263,7 +2263,9 @@ NEO Headless enforces security at multiple levels:
 
 **Report spec access control (ETP-4596):** `NeoAccessHelper.hasReportSpecAccess(SFSpec, String)` is the single gate now shared by all 4 access-check call sites that previously either skipped `SPEC_TYPE = 'R'` report specs entirely or fell through a `spec.getProcess() == null` guard that was always true for them — `NeoRequestRouter.handleReportSpecRequest` (the real HTTP data-access gate, which previously had zero check), `NeoDiscoveryHelper.isSpecAccessible`, `McpToolRouterSupport.hasSpecAccess`, and `ToolRegistry`. It checks a linked `AD_Process`/`OBUIAPP_Process` first when the spec has one (delegating to items 5/6 above), else falls back to the same constituent-window check from item 4, keyed off each active/included `SFEntity`'s `AD_TAB_ID`. Five of the 8 report specs now have `AD_TAB_ID` populated and gate on the classic "Financial Account" window (`AD_Window_ID=94EAA455D2644E04AB25D93BE5157B6D`): `financial-accounts-page`, `financial-account-transactions`, `bank-statements`, `bank-reconciliation`, `financial-account-bank-connection`. Verified end-to-end against real roles: `403` for a role lacking Financial Account window access, `200` for a role that has it; discovery listing correctly excludes these specs for an unauthorized role while still showing them to an authorized one.
 
-**Known limitations (ETP-4596):** two report specs — `tax-report` and `inventory-stock-report` — are wired to neither a classic `AD_Process` nor a populated `AD_TAB_ID` yet, so they still hit `hasReportSpecAccess`'s permissive fallback and remain reachable by any authenticated role regardless of `AD_Window_Access`. Closing this needs a functional decision on their process/window mapping (pending, tracked separately); once linked, they gate with zero further code changes. Unrelated to access control: `bank-reconciliation`'s handler currently returns `500` for correctly-authorized roles due to a pre-existing `ReconciliationHandler` dispatch bug ("No AD_Tab linked to entity") — the RBAC gate added above is confirmed correct for it; the report itself is separately non-functional today even for authorized users.
+**Known limitations (ETP-4596):** one report spec — `tax-report` — is wired to neither a classic `AD_Process` nor a populated `AD_TAB_ID` yet, so it still hits `hasReportSpecAccess`'s permissive fallback and remains reachable by any authenticated role regardless of `AD_Window_Access`. Closing this needs a functional decision on its process/window mapping (pending, tracked separately); once linked, it gates with zero further code changes. Unrelated to access control: `bank-reconciliation`'s handler currently returns `500` for correctly-authorized roles due to a pre-existing `ReconciliationHandler` dispatch bug ("No AD_Tab linked to entity") — the RBAC gate added above is confirmed correct for it; the report itself is separately non-functional today even for authorized users.
+
+**`inventory-stock-report` is no longer on this list — resolved by a still-later ETP-5116 pass.** Same underlying gap as above (no `AD_Process`, no `AD_TAB_ID`, so `hasReportSpecAccess`'s discovery-listing fallback still applies), but this one was confirmed over-permissive in **production** — every authenticated role, including ones that should have none, could retrieve this data — so it was closed at the handler level directly rather than waiting on the generic mechanism: a brand-new pseudo-`AD_Window` (`6346B88619F948F9A42224BDB0B239FA`, 0 tabs, permission anchor only) was created, `TemplateRoleWindowAccess` grants it to Compras/Financiero/Almacén (not Ventas), and `InventoryStockReportHandler#handle` now calls `NeoAccessHelper.hasWindowAccess` on that window id explicitly at the top of the method — a real, explicit gate, not a proxy hoping the discovery-listing fallback happens to line up. The MCP tool-discovery/listing path is unaffected (still permissive, a separate and smaller informational-leak issue, tracked separately) — only the actual data-serving `handle()` call is now denied.
 
 **Document-number writes at org `*` — the one deliberate, scoped bypass of item 2 (ETP-5230):** item 2 above says every DAL query respects the user's organization access. One narrow class of write cannot: bumping a document-number sequence. Every fixed GO role and every per-user personal composition role carries `AD_Role.UserLevel = "  O"` (`SystemRoleTemplates#FIXED_ROLE_USER_LEVEL`), and core's `OBContext#setWritableOrganizations` removes `"0"` from the writable-organization set of any role at exactly that level — silently, and regardless of the role actually holding `AD_Role_OrgAccess` to `*`. Meanwhile every document sequence the onboarding dataset ships lives at org `*`. The APRM numbering path (`FIN_Utility#getDocumentNo` → `Fin_UtilityLegacy#incrementSeqIfUpdateNext`) increments the counter through the DAL, so the write is security-checked and rejected with `Organization 0 of object (ADSequence(…)) is not present in OrganizationList […]`. Net effect before the fix: no invited user could reconcile, register a payment or close a cash drawer — only the tenant owner, whose role ships `" CO"` and therefore keeps `"0"`. Classic's own equivalent flows are still affected; only GO's five call sites are covered.
 
@@ -2552,8 +2554,11 @@ consumption; it does not touch `AD_Window_Access` grants, `windows`/`windowCount
 provisioning path. Full mechanism (exact proxy ids, category-lookup handling, the duplicate guard):
 `SFRolesOverview.java`'s own javadoc (`PROXY_MATRIX_ROWS`, `FISCAL_MONITOR_PROXY_WINDOW_ID`,
 `TAX_MODELS_PROXY_WINDOW_ID`, `NOT_POSTED_DOCS_PROXY_PROCESS_ID`) — not duplicated here. See also
-§8d's "Twelve matrix rows" note below: this proxy resolution is unrelated to (and does not close)
-that separate, provisioning-side gap.
+§8d's "Six matrix rows" note below: this proxy resolution is unrelated to (and does not close)
+that separate, provisioning-side gap — as of ETP-5116, ALL 3 of these windowless items (Monitor
+fiscal, Modelos fiscales, and now Not Posted Documents too, via the new standalone-process
+mechanism) also have a real provisioning-side grant (see that note); this display-side proxy
+resolution remains independently needed regardless, since it serves a different endpoint/purpose.
 
 ---
 
@@ -2770,6 +2775,31 @@ own access (this script's only job) is sufficient — `UserRoleCompositionServic
 changes at all for personal roles to inherit these new grants, the same way they already inherit
 window access.
 
+**ETP-5116 — `reconcileStandaloneProcessAccess`, a second, genuinely separate process-access
+mechanism (not layered on `reconcileProcessAccess` above).** `reconcileProcessAccess` can only
+ever reach a process that is a button on a window some role already has FULL access to — it has
+no path to a process whose `AD_Menu` entry has `ad_window_id IS NULL`. Three such processes were
+confirmed real (via the `AD_Menu.em_obuiapp_process_id` FK chain) and needed direct grants: the
+"Documentos no contabilizados" proxy (`D6AB95CE52D34E1599590526115E26C6`, Financiero only) and
+both `AgingReportHandler` processes — Receivables (`0D37A9F6109549DEB058373EF2DAEB6A`, Ventas +
+Financiero) and Payables (`EB4C4053F3B94A17A08D1DD7E89CEB7E`, Compras + Financiero); Financiero
+holds all three per the v2 target matrix. `TemplateRoleWindowAccess#standaloneProcessGrantsByRoleId()`
+is this mechanism's own per-role data (mirroring `byRoleId()`'s `WindowGrant` matrix, but a plain
+`List<String>` of `OBUIAPP_Process_Access` ids — there is no read-only variant, since
+`obuiapp_process_access` rows are always written with `IsReadWrite='Y'`), and
+`EnsureSystemRoleTemplatesScript#reconcileStandaloneProcessAccess` is called from the exact same
+per-role loop in `execute()` that calls `reconcileWindowAccess`/`reconcileProcessAccess`, so it
+runs on every `update.database` too.
+
+Both mechanisms write to the SAME `obuiapp_process_access` table for the SAME role, so a naive
+"delete every active row not in my desired set" stale-removal in the new method would delete the
+OTHER mechanism's window-button-derived grants (and vice-versa). `reconcileStandaloneProcessAccess`
+avoids that by scoping its delete to a fixed, known universe — every id it is EVER capable of
+granting across all four templates (`ALL_STANDALONE_PROCESS_IDS`) — so it can only ever touch rows
+it itself owns, never a row `reconcileProcessAccess` wrote. Insert-side idempotency reuses
+`upsertObuiappProcessAccess` as-is (insert if missing, reactivate if inactive, no-op if already
+active), the same guarantee every other reconciliation in this class already relies on.
+
 **Cross-template `AD_Window_Access` overlap — self-contained fix for a latent core bug (found via
 ETP-4878's overlapping matrix, QA/Sentinel; fixed here, not in core, per an explicit human
 decision).** Composing a personal role from 2+ templates that grant the SAME window used to throw
@@ -2952,31 +2982,84 @@ shared `com.etendoerp.go.roles.overlap` package (`ActiveTemplateInheritance`,
 loud `ConstraintViolationException` — see `ObuiappProcessAccessOverlapCorruptionGuard`'s own
 class/method javadoc for the full detail.
 
-**Twelve matrix rows are a documented, deliberate gap — not yet implementable.** Every one of
-them has NO `AD_Window_ID` at all backing it in this environment (either a pure custom/aggregate
-Schema Forge page with zero classic-AD entity, or a report-type spec whose access resolves via a
-different, non-window mechanism), so `AD_Window_Access` cannot express a grant for it at all:
-**Inicio (Dashboard)**, **Favoritos**, **Copilot (Asistente IA)**, **Informes de inventario**,
-**Documentos no contabilizados**, **Monitor fiscal**, **Modelos fiscales**, **Informes
-financieros**, **Informe Antigüedad de Cobros**, **Informe Antigüedad de Pagos**, **Escaneo
-inteligente**, **Configuración fiscal**. Full per-row resolution detail (which spec/artifact was
-checked, why it has no window) lives in `EnsureSystemRoleTemplatesScript`'s own class javadoc.
-Closing this gap needs either building the missing AD entity/spec first, or a different grant
-mechanism entirely — left for a follow-up ticket. Separately, "Roles", "Usuario", and "Conectar
-asistente de IA" DO resolve to real `AD_Window_ID`s but are deliberately granted to none of the
-four templates — the matrix shows "—" for all four non-Admin roles on all three, so they stay
-Admin-only.
+**Three matrix rows remain a documented, deliberate gap — not yet implementable (down from six as
+of the ETP-5116 arc).** Every one of them has NO `AD_Window_ID` at all backing it in this
+environment (either a pure custom/aggregate Schema Forge page with zero classic-AD entity, or a
+report-type spec whose access resolves via a different, non-window mechanism), so
+`AD_Window_Access` cannot express a grant for it at all: **Inicio (Dashboard)**, **Favoritos**,
+**Copilot (Asistente IA)**. Full per-row resolution detail (which spec/artifact was checked, why
+it has no window) lives in `EnsureSystemRoleTemplatesScript`'s own class javadoc. Closing this gap
+needs either building the missing AD entity/spec first, or a different grant mechanism entirely —
+left for a follow-up ticket. Separately, "Roles", "Usuario", and "Conectar asistente de IA" DO
+resolve to real `AD_Window_ID`s but are deliberately granted to none of the four templates — the
+matrix shows "—" for all four non-Admin roles on all three, so they stay Admin-only.
 
-> **Scope note (ETP-5071) — this gap is PROVISIONING-side only, not display-side anymore for 3 of
-> these rows.** This paragraph is about `TemplateRoleWindowAccess`/`EnsureSystemRoleTemplatesScript`
-> — whether the 4 system role templates can be GRANTED `AD_Window_Access` for these rows at all.
-> Three of the twelve names listed above — **Documentos no contabilizados**, **Monitor fiscal**,
-> **Modelos fiscales** — are a SEPARATE concern from `SFRolesOverview`'s live "Configuración > Roles"
-> admin screen (§8c above): that screen now shows real, per-role (proxied) access data for these
-> same 3 items via `SFRolesOverview`'s `PROXY_MATRIX_ROWS` mechanism. Do not read this paragraph as
-> meaning those 3 items are "still completely unaddressed" — the display case is resolved; only the
-> underlying template-provisioning grant (can a system role template itself hold a real grant for
-> them) remains open, and is unrelated to what an admin sees on the Roles screen.
+**"Informes financieros" and "Escaneo inteligente" are off this list too — resolved by a later
+ETP-5116 pass, via two brand-new pseudo-`AD_Window` records created specifically as permission
+anchors for these frontend-only report pages (0 tabs each, never opened directly).** Neither is a
+proxy onto a pre-existing window like SII Monitor/Tax Report above — the new window IDs anchor
+these pages directly. "Informes financieros" (`D647D118F5014D00AF47A636B2CD0DD3`) is granted FULL
+to Financiero only. "Escaneo inteligente" (`33705E0F52874D91B0BB2FF8BB648B8E`) is granted FULL to
+all four non-Admin templates — a deliberate product decision that this page stays open to
+everyone once real access control exists, replacing what was previously just a cosmetic
+`hidden: true` in the frontend menu with zero real enforcement. Admin needs no explicit row for
+either: `NeoAccessHelper#isAdminOrClientAdmin` already bypasses window-access checks entirely for
+the System Administrator role and any per-client `is_client_admin='Y'` role.
+
+**"Informes de inventario" is off this list too — resolved by a still-later ETP-5116 pass, the
+same brand-new-pseudo-`AD_Window` pattern as the two rows above (`6346B88619F948F9A42224BDB0B239FA`,
+0 tabs, permission anchor only), but unlike them this one closes a CONFIRMED production
+over-permission rather than a merely-theoretical one.** `inventory-stock-report` is a raw-SQL
+`spec_type='R'` report handler (`InventoryStockReportHandler`) with no linked `AD_Process` and no
+`AD_TAB_ID` anywhere, so every authenticated role — including ones that should have none — could
+retrieve this data in production: `NeoAccessHelper#hasReportSpecAccess` falls through to its
+documented permissive default when there is no combination data to check at all, and the handler
+itself made zero access-control calls of its own. Per the v2 target matrix this window is granted
+FULL to Compras, Financiero and Almacén — Ventas gets nothing. Because the window/grant alone
+protects nothing for a spec whose data-serving path never consulted it,
+`InventoryStockReportHandler#handle` was ALSO given an explicit `NeoAccessHelper.hasWindowAccess`
+gate on this same window id, at the very top of the method — the actual security fix; the window
+and its grants are the permission anchor the gate checks against, not a fix on their own. The
+MCP tool-discovery/listing path for this spec may still surface it as discoverable (the same
+permissive fallback still applies there) — a known, separate, smaller informational-leak issue,
+out of scope for this pass. Admin needs no explicit row, same bypass rationale as above.
+
+**"Documentos no contabilizados", "Informe Antigüedad de Cobros" and "Informe Antigüedad de
+Pagos" are off this list — resolved by this ETP-5116 pass, but via the new standalone-process
+mechanism above, NOT `AD_Window_Access`.** All three target a real `OBUIAPP_Process_Access` grant
+with no backing window at all; see `reconcileStandaloneProcessAccess` above and
+`TemplateRoleWindowAccess`'s own javadoc for the per-role breakdown (Financiero holds all three;
+Ventas only the Receivables schedule; Compras only the Payables one).
+
+> **Scope note (ETP-5071/ETP-5116) — this gap is PROVISIONING-side, and is now fully closed.**
+> This paragraph is about `TemplateRoleWindowAccess`/`EnsureSystemRoleTemplatesScript` — whether
+> the 4 system role templates can be GRANTED `AD_Window_Access`/`OBUIAPP_Process_Access` for these
+> rows at all. Of the three names ETP-5071 first proxied on the DISPLAY side (`SFRolesOverview`'s
+> "Configuración > Roles" admin screen, §8c above, via `PROXY_MATRIX_ROWS`) — **Documentos no
+> contabilizados**, **Monitor fiscal**, **Modelos fiscales** — an earlier ETP-5116 pass closed the
+> provisioning-side gap for the latter two: Finance now holds a real `AD_Window_Access` grant on
+> the same two proxy windows (SII Monitor, Tax Report) via
+> `TemplateRoleWindowAccess#financeGrants()`, so they are OFF this row list entirely (see the
+> class's own javadoc). A LATER ETP-5116 pass separately closed **Configuración fiscal** too — not
+> via a proxy but via 3 DIRECT grants onto its real sibling windows (SII/TBAI/Verifactu
+> Configuration, product decision), so it is off this list as well. **Documentos no contabilizados
+> is now closed too**, via a genuinely new mechanism: its target is a standalone
+> `OBUIAPP_Process_Access` grant (process `D6AB95CE52D34E1599590526115E26C6`, the same id
+> `SFRolesOverview` already proxies for display) with no backing window at all, and
+> `EnsureSystemRoleTemplatesScript#reconcileProcessAccess` only ever DERIVES process access from a
+> role's FULL window grants — it has no path to a standalone process id that isn't reachable as a
+> button on any granted window. This pass built exactly that missing mechanism
+> (`reconcileStandaloneProcessAccess`, documented above) and Financiero now holds the grant.
+> **A fresh ETP-5116 investigation found Informe Antigüedad de Cobros/Pagos hit the exact same
+> gap, and both are now closed the same way:** `AgingReportHandler`'s own access gate was ALSO
+> found to be a real bug — hardcoded to the receivables OBUIAPP process regardless of the
+> request's `recOrPay`, so a payables request never actually checked payables access — and that
+> bug is now fixed (the gate branches on `recOrPay`). The target grants (Ventas → receivables
+> process, Compras → payables process, Financiero → both) were blocked on the identical missing
+> mechanism — both processes are real, confirmed OBUIAPP process ids with no backing `AD_Window`
+> at all (`AD_Menu.ad_window_id` is null on both "Receivables Aging Schedule" and "Payables Aging
+> Schedule"), so there was no window to proxy through either — and now hold their standalone
+> grants via the same new mechanism.
 
 **Still open (ETP-4877, unchanged by ETP-4878):** the ~21 existing tenants still holding
 per-client duplicated role copies are untouched by this mechanism (a migration, not a runtime
