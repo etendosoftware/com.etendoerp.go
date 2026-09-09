@@ -75,6 +75,9 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   private static final String FIELD_REGION_NAME = "regionName";
   private static final String FIELD_RESPONSE = "response";
   private static final String FIELD_DATA = "data";
+  /** DAL property holding the parent Business Partner FK on C_BPartner_Location. */
+  private static final String FIELD_BUSINESS_PARTNER =
+      org.openbravo.model.common.businesspartner.Location.PROPERTY_BUSINESSPARTNER;
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
@@ -116,10 +119,33 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
   // ------------------------------------------------------------------ create
 
+  /**
+   * Creates the C_Location + C_BPartner_Location pair for a parent Business Partner.
+   *
+   * <p>The parent BP is resolved from the request <b>body</b> first
+   * ({@code businessPartner}), falling back to the {@code parentId} query parameter. Both
+   * lookups are needed because the parent reaches this handler differently depending on the
+   * caller, and {@link NeoContext#getQueryParams()} is {@code null} on the MCP CRUD hook path
+   * ({@code McpHookExecutor.buildHookContext} does not populate it), so it must be guarded:
+   * <ol>
+   *   <li><b>MCP</b> ({@code neo_create}) — {@code McpToolRouter} removes {@code parentId} from
+   *       the body and writes the resolved FK back as the {@code businessPartner} property;
+   *       {@code queryParams} is {@code null}, so the body branch wins.</li>
+   *   <li><b>REST from the UI</b> ({@code POST /locationAddress?parentId=<bpId>}) — the body
+   *       carries no FK, so the query-param branch is used: behaviour identical to before.</li>
+   *   <li><b>REST with {@code parentId} in the body</b> — a shape {@code NeoCrudHandler}
+   *       supports via {@code injectParentIdAsProperty}; the FK is already in the body, so the
+   *       body branch wins with the same value.</li>
+   * </ol>
+   * The two sources never disagree, so this is additive and not a change of precedence.
+   */
   private NeoResponse handleCreate(NeoContext ctx) throws Exception {
     JSONObject body = ctx.getRequestBody();
-    String bpId = ctx.getQueryParams().get("parentId");
-    if (bpId == null || bpId.isEmpty()) {
+    String bpId = body != null ? body.optString(FIELD_BUSINESS_PARTNER, null) : null;
+    if (StringUtils.isBlank(bpId) && ctx.getQueryParams() != null) {
+      bpId = ctx.getQueryParams().get("parentId");
+    }
+    if (StringUtils.isBlank(bpId)) {
       return NeoResponse.error(400, "Missing parentId (Business Partner ID)");
     }
 
@@ -336,14 +362,94 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     // so a whitespace cell in a re-imported file would erase a province already on the record.
     String regionName = StringUtils.trimToNull(nullIfEmpty(body.optString(FIELD_REGION_NAME, null)));
     if (regionId != null) {
-      geoLoc.setRegion(OBDal.getInstance().get(Region.class, regionId));
+      Region region = OBDal.getInstance().get(Region.class, regionId);
+      if (region == null) {
+        // OBDal.get answers null for an id that does not exist, and nothing validates the id
+        // before this. Writing that null through assignRegion would clear BOTH columns, so a
+        // caller that guessed a region id (an MCP agent, typically) would get a 200 back with
+        // the province silently gone — and on an Argentine address the free text erased with
+        // it. Refusing here is the same contract as the free-text path: an unresolvable region
+        // is an error, never a partial write. Thrown before any OBDal.save on both paths.
+        throw regionFailure(regionId, "does not exist.");
+      }
+      assignRegion(geoLoc, region, null);
     } else if (regionName != null) {
-      geoLoc.setRegion(resolveRegionByName(regionName, geoLoc.getCountry()));
+      applyRegionName(regionName, geoLoc);
     } else if (body.has(FIELD_REGION)) {
       // Only the id field clears. `regionName` is set-if-provided: a blank one means "this file
       // says nothing about the province", never "erase it". Clearing stays an explicit
       // `region: null`, which is what the Location modal's selector sends.
-      geoLoc.setRegion(null);
+      assignRegion(geoLoc, null, null);
+    }
+  }
+
+  /**
+   * Writes both region columns at once — the only place either of them is assigned.
+   *
+   * <p>{@code C_Location} answers "which province" twice: the {@code C_Region_ID} FK and the
+   * free-text {@code RegionName}, the latter for countries whose {@code C_Country.HasRegion} is
+   * {@code 'N'} (Argentina, for one). At most one may be non-null, because readers resolve the
+   * province with {@code COALESCE(C_Region.name, C_Location.regionname)} and would otherwise
+   * pick arbitrarily between two answers.
+   *
+   * <p>That invariant used to live in each branch of {@link #applyGeoLocFields}, every branch
+   * separately remembering to clear the sibling column — and three separate defects were found
+   * there, one per branch, because a change touched one and not the others. Routing every write
+   * through this method makes the invariant unbreakable by construction: a future branch cannot
+   * set one column without deciding the other, since there is no other way to set either.
+   */
+  private static void assignRegion(org.openbravo.model.common.geography.Location geoLoc,
+      Region region, String freeText) {
+    geoLoc.setRegion(region);
+    geoLoc.setRegionName(freeText);
+  }
+
+  /**
+   * Writes a free-text region name onto {@code geoLoc}, as an FK when the country defines
+   * regions and as C_Location's own {@code RegionName} column when it does not.
+   *
+   * <p>ETP-5184. Before this the only outcome was the FK: {@link #resolveRegionByName} either
+   * found a {@link Region} of the payload's country or threw. That is right for a country whose
+   * regions are loaded — a name that is none of them is a data error — but it made an address in
+   * a country with no C_Region rows impossible to save. A live Argentine address failed with
+   * {@code The region "Cordoba" does not exist in Argentina.}: C_Country.HasRegion is {@code 'N'}
+   * for Argentina and no region row hangs off it, so no province could ever resolve, and the
+   * province was rejected outright rather than stored.
+   *
+   * <p>{@code C_Location.RegionName} is Etendo's own home for exactly this case — Classic hides
+   * the region selector and shows the free-text field when a country has {@code HasRegion = 'N'}
+   * — so filling it is the modelled behaviour, not a workaround.
+   *
+   * <p>The strict path is unchanged where it means something. The fallback is entered only when
+   * the country is known AND declares no regions; a country that does define regions still
+   * refuses an unknown name, and a payload with a region name but no country still refuses,
+   * because "does this country have regions" is unanswerable without the country. Under that
+   * guard the only reachable failure is "does not exist" (with no region rows there is nothing
+   * to be ambiguous about), so the {@code catch} cannot silence an ambiguity.
+   *
+   * <p><b>The two columns are kept mutually exclusive</b> by {@link #assignRegion}, which every
+   * branch below goes through. Whichever one this write fills, the
+   * other is cleared: an FK to Madrid sitting next to a {@code RegionName} of "Cordoba" is a
+   * record that answers the same question two ways, and every reader (display name, print,
+   * export) would be free to pick either. Nothing is lost by clearing — both columns are written
+   * from this single {@code regionName} input, so the value being cleared is a stale answer to
+   * the same question, superseded by the one just resolved. Clearing the stale FK matters most
+   * on the update path: an address moved from Spain to Argentina would otherwise keep pointing
+   * at a Spanish province while its free text says Cordoba.
+   */
+  private static void applyRegionName(String regionName,
+      org.openbravo.model.common.geography.Location geoLoc) {
+    Country country = geoLoc.getCountry();
+    boolean countryWithoutRegions = country != null && !Boolean.TRUE.equals(country.isHasRegions());
+    try {
+      assignRegion(geoLoc, resolveRegionByName(regionName, country), null);
+    } catch (OBException e) {
+      if (!countryWithoutRegions) {
+        throw e;
+      }
+      log.debug("Region '{}' not modelled in {}; storing it as C_Location.RegionName free text",
+          regionName, country.getName());
+      assignRegion(geoLoc, null, regionName);
     }
   }
 

@@ -1400,10 +1400,7 @@ public class McpToolRouterTest {
    */
   @Test
   public void testUnexpectedErrorBodyIsAServerErrorEnvelope() throws Exception {
-    java.lang.reflect.Method m = McpToolRouter.class.getDeclaredMethod(
-        "buildUnexpectedErrorBody", String.class, Exception.class);
-    m.setAccessible(true);
-    String body = (String) m.invoke(new McpToolRouter(), "neo_list",
+    String body = McpToolResponses.buildUnexpectedErrorBody("neo_list",
         new RuntimeException("null pointer somewhere"));
 
     JSONObject envelope = new JSONObject(body);
