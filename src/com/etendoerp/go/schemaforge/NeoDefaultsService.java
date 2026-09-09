@@ -12,6 +12,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -814,6 +816,18 @@ public class NeoDefaultsService {
       return outcome.getValue();
     }
 
+    // AD_Column.DefaultValue conventionally stores a plain default as a SQL string literal —
+    // e.g. the column holds `'1'`, not `1` — and neither branch below unquotes it on its own:
+    // the List-reference short-circuit just below returns defaultExpr verbatim, and
+    // Utility.getDefault (further down) only parses "@" tokens, so a literal with none just
+    // comes back exactly as it went in, quotes included. Stripping it once, here, fixes both
+    // call sites with one change instead of two. Guarded by the same "no @" test the
+    // List-reference branch already relies on: a context/session token or an @SQL= expression
+    // (already returned above) is never a candidate, whatever its shape.
+    if (!defaultExpr.contains("@")) {
+      defaultExpr = stripSqlLiteralQuotes(defaultExpr);
+    }
+
     // List-reference columns (AD_Reference_ID = "17") with a pure literal default (no "@"
     // context/preference token) must return that literal verbatim. Their AD_Ref_List values
     // are opaque codes — often all-digit strings like "000000000000000" (see Invoicegrouping,
@@ -843,6 +857,49 @@ public class NeoDefaultsService {
     }
 
     return null;
+  }
+
+  /** Matches a value that is, in its entirety, a single-quoted SQL string literal. */
+  private static final Pattern SQL_STRING_LITERAL = Pattern.compile("^'([^']*)'$");
+
+  /**
+   * Strips the SQL string-literal quoting {@code AD_COLUMN.DEFAULTVALUE} conventionally wraps
+   * a plain default in — the column holds {@code '1'}, not {@code 1} — so a List/TableDir/
+   * YesNo/Table-reference column resolves to the same bare value its own AD_Ref_List entries,
+   * referenced-table ids, or {@code 'Y'}/{@code 'N'} use, instead of failing property
+   * validation with the quote characters still attached.
+   *
+   * <p>Classic never hits this: a new business object populated via the DAL model resolves its
+   * defaults through {@link org.openbravo.base.model.Property#getActualDefaultValue()}, which
+   * strips exactly this quoting before the value ever reaches a Hibernate property setter. NEO's
+   * default-resolution path does not go through {@code Property} at all — it reads
+   * {@code AD_Column.getDefaultValue()} directly and hands it either to the List-reference
+   * short-circuit above or to {@link Utility#getDefault}, neither of which unquotes anything —
+   * so the quoted literal reached property validation completely untouched. Reproduced for real:
+   * {@code C_BPartner.EM_OBTIK_Tax_ID_Key} stores {@code '1'}, and a business partner created via
+   * {@code neo_create} with no explicit value for that field failed a 422 on the very default
+   * NEO had just injected. The same quoting was found on 9 other columns across as many tables
+   * (list references, {@code TableDir} FKs, a {@code YesNo}, and a {@code Table} FK) — all
+   * fixed by this one shared choke point rather than a field-by-field patch.
+   *
+   * <p>Deliberately conservative: only a value that is, in its entirety, a single-quoted
+   * literal — matching {@code ^'([^']*)'$}, no interior quotes, nothing before or after — is
+   * unwrapped. Anything else comes back unchanged, in particular:
+   * <ul>
+   *   <li>SQL expressions ({@code now()}, sub-selects, function calls, concatenations) — none
+   *       of these match the pattern, since they carry parentheses/operators the literal-only
+   *       regex does not accept
+   *   <li>context/session tokens ({@code @#AD_Client_ID@}, {@code @AD_User_ID@}) and
+   *       {@code @SQL=...@} expressions — never even reach this method: every call site only
+   *       invokes it once the caller has already confirmed {@code defaultExpr} contains no "@"
+   *   <li>a value already unquoted (e.g. a bare {@code 000000000000000}) — returned identical
+   *   <li>a string with interior or unbalanced quotes (e.g. an SQL literal with an escaped
+   *       {@code ''}) — ambiguous, left alone rather than guessed at
+   * </ul>
+   */
+  private static String stripSqlLiteralQuotes(String defaultExpr) {
+    Matcher m = SQL_STRING_LITERAL.matcher(defaultExpr);
+    return m.matches() ? m.group(1) : defaultExpr;
   }
 
   /**
