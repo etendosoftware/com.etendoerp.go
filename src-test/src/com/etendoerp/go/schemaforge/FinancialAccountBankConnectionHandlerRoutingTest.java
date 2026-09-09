@@ -22,6 +22,7 @@ import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARA
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.PARAM_ACTION;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.getContext;
 import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.singleParam;
+import static com.etendoerp.go.schemaforge.BankConnectionHandlerTestSupport.stubProviderLookup;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -33,6 +34,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.math.BigDecimal;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -46,9 +48,11 @@ import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
+import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
 
 /**
@@ -61,13 +65,16 @@ import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
  * stubbed on a Mockito spy so no database is touched.
  *
  * <p>Scenarios: GET/POST dispatch and the unknown-action / wrong-method branches; status mapping
- * for connected and disconnected accounts; account-not-found → 404; the OBException → 400 and the
- * generic Exception → 500 translations (both rollback).
+ * for connected and disconnected accounts; account-not-found → 404; the ETP-5181
+ * {@code maxFetchInterval} advisory field; the OBException → 400 and the generic Exception → 500
+ * translations (both rollback).
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class FinancialAccountBankConnectionHandlerRoutingTest {
 
   private static final String ACTION_STATUS = "status";
+  private static final String KEY_MAX_FETCH_INTERVAL = "maxFetchInterval";
+  private static final String PROVIDER_CODE = "bbva";
 
   private FinancialAccountBankConnectionHandler handler;
 
@@ -237,6 +244,135 @@ public class FinancialAccountBankConnectionHandlerRoutingTest {
     }
   }
 
+  // ── ETP-5181: the provider's max fetch interval on GET status ─────────────
+
+  /**
+   * The SPA's "Importar desde" advisory needs the provider's published limit, so {@code GET
+   * status} exposes it as {@code maxFetchInterval}.
+   *
+   * <p>Asserted with {@code getInt}, not {@code getDouble}/{@code getString}: the column is a
+   * {@code DECIMAL(10,0)} and the value must cross the wire as a plain integer ({@code 90}, never
+   * {@code 90.0}) — the frontend compares it with {@code > 0} and feeds it into a day count, and a
+   * BigDecimal leaking through would render "90.0 días".
+   */
+  @Test
+  public void testStatusExposesProviderMaxFetchInterval() throws Exception {
+    FIN_FinancialAccount finAcc = connectedAccount();
+    FinaccConnection connection = transactionalConnection();
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubActiveConnection(linkHelper, finAcc, connection);
+      stubProviderLookup(obDal, provider(BigDecimal.valueOf(90)));
+
+      JSONObject data = dataOf(handler.handle(getContext(statusParams())));
+
+      assertTrue("the advisory needs the limit on GET status", data.has(KEY_MAX_FETCH_INTERVAL));
+      assertEquals(90, data.getInt(KEY_MAX_FETCH_INTERVAL));
+      // getInt() would happily unwrap a BigDecimal, so the stored type is asserted directly:
+      // the value has to serialize as `90`, never `90.0`, or the SPA renders "90.0 días".
+      assertTrue("maxFetchInterval must serialize as a plain int",
+          data.get(KEY_MAX_FETCH_INTERVAL) instanceof Integer);
+    }
+  }
+
+  /**
+   * With no active connection the account cannot synchronize at all — {@code
+   * fetchAccountTransactions} fails with {@code PSD2_NoActiveConnectionForAccount} long before any
+   * interval check — so there is nothing to advise about and the key must be absent.
+   *
+   * <p>This pins the deliberate placement INSIDE the {@code connection != null} block. It is also
+   * why the key is omitted rather than set to JSON null: the SPA tests
+   * {@code status.maxFetchInterval === undefined} and simply advises nothing.
+   */
+  @Test
+  public void testStatusOmitsMaxFetchIntervalWhenNoActiveConnection() throws Exception {
+    FIN_FinancialAccount finAcc = connectedAccount();
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubActiveConnection(linkHelper, finAcc, null);
+
+      JSONObject data = dataOf(handler.handle(getContext(statusParams())));
+
+      assertFalse("no connection ⇒ nothing to advise about",
+          data.has(KEY_MAX_FETCH_INTERVAL));
+      // The provider catalog is not queried either — the guard runs before any DAL work.
+      obDal.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * A connection that does not handle transactions never imports movements, so its import range
+   * is irrelevant and the key is omitted. The provider lookup must not even run — the flag is
+   * checked first precisely so {@code GET status} does not pay for a criteria query per account.
+   */
+  @Test
+  public void testStatusOmitsMaxFetchIntervalWhenConnectionDoesNotHandleTransactions()
+      throws Exception {
+    FIN_FinancialAccount finAcc = connectedAccount();
+    FinaccConnection connection = transactionalConnection();
+    when(connection.isHandlesTransactions()).thenReturn(Boolean.FALSE);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubActiveConnection(linkHelper, finAcc, connection);
+
+      JSONObject data = dataOf(handler.handle(getContext(statusParams())));
+
+      assertFalse(data.has(KEY_MAX_FETCH_INTERVAL));
+      obDal.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * The provider record exists but published no interval. The key must be absent rather than
+   * defaulted to 90 — the SPA would otherwise advise against dates the bank may well serve.
+   */
+  @Test
+  public void testStatusOmitsMaxFetchIntervalWhenLimitNull() throws Exception {
+    FIN_FinancialAccount finAcc = connectedAccount();
+    FinaccConnection connection = transactionalConnection();
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubActiveConnection(linkHelper, finAcc, connection);
+      stubProviderLookup(obDal, provider(null));
+
+      JSONObject data = dataOf(handler.handle(getContext(statusParams())));
+
+      assertFalse("an unpublished limit must never be defaulted",
+          data.has(KEY_MAX_FETCH_INTERVAL));
+    }
+  }
+
+  /** Zero days is not a real limit: advising against it would flag every date in the past. */
+  @Test
+  public void testStatusOmitsMaxFetchIntervalWhenLimitNotPositive() throws Exception {
+    FIN_FinancialAccount finAcc = connectedAccount();
+    FinaccConnection connection = transactionalConnection();
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class)) {
+      stubActiveConnection(linkHelper, finAcc, connection);
+      stubProviderLookup(obDal, provider(BigDecimal.ZERO));
+
+      JSONObject data = dataOf(handler.handle(getContext(statusParams())));
+
+      assertFalse(data.has(KEY_MAX_FETCH_INTERVAL));
+    }
+  }
+
   /** A business error (OBException) is translated to a 400 and rolls back. */
   @Test
   public void testOBExceptionTranslatesTo400() {
@@ -269,6 +405,43 @@ public class FinancialAccountBankConnectionHandlerRoutingTest {
 
   private void doThrowOnLoad(RuntimeException toThrow) {
     Mockito.doThrow(toThrow).when(handler).loadAccount(ACCOUNT_ID);
+  }
+
+  /** The GET query params for {@code status} on {@link BankConnectionHandlerTestSupport#ACCOUNT_ID}. */
+  private static Map<String, String> statusParams() {
+    Map<String, String> params = new HashMap<>();
+    params.put(PARAM_ACTION, ACTION_STATUS);
+    params.put(PARAM_ACCOUNT_ID, ACCOUNT_ID);
+    return params;
+  }
+
+  /** A live (status {@code CO}) bank-linked account, already wired into the loadAccount seam. */
+  private FIN_FinancialAccount connectedAccount() {
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    when(finAcc.getPSD2ConnectionStatus()).thenReturn("CO");
+    when(finAcc.getPSD2SaltEdgeAccountID()).thenReturn("SE-1");
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+    return finAcc;
+  }
+
+  /** A connection that DOES handle transactions and carries a provider code. */
+  private static FinaccConnection transactionalConnection() {
+    FinaccConnection connection = mock(FinaccConnection.class);
+    when(connection.isHandlesTransactions()).thenReturn(Boolean.TRUE);
+    when(connection.getProviderCode()).thenReturn(PROVIDER_CODE);
+    return connection;
+  }
+
+  private static Provider provider(BigDecimal maxFetchInterval) {
+    Provider provider = mock(Provider.class);
+    when(provider.getMaxFetchInterval()).thenReturn(maxFetchInterval);
+    return provider;
+  }
+
+  private static void stubActiveConnection(MockedStatic<SaltEdgeAccountLinkHelper> linkHelper,
+      FIN_FinancialAccount finAcc, FinaccConnection connection) {
+    linkHelper.when(() -> SaltEdgeAccountLinkHelper.getActiveConnectionForFinAcc(finAcc))
+        .thenReturn(connection);
   }
 
   private static JSONObject dataOf(NeoResponse response) throws Exception {

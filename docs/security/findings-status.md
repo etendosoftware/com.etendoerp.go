@@ -20,13 +20,15 @@ Status meanings:
 
 - **Reproduced:** the vulnerable contract is present in current source or public deployment evidence.
 - **Partially corrected:** at least one material control exists, but the PRD invariant is not closed.
+- **Corrected in source:** the PRD invariant is closed in code and pinned by tests. Any deployment or
+  third-party-consumer evidence the finding also requires is named explicitly in the row.
 - **Not reproduced:** the tested condition was absent in the evidence available on the assessment date.
 
 ## Findings
 
 | Finding | Status on 2026-07-30 | Evidence | Implementation owner |
 |---|---|---|---|
-| **SEC-04 — CSV formula injection** | **Partially corrected** | `NeoCsvExportService` gained classic `= + - @` neutralization in ETP-4560 and `app-shell-core` gained the matching client helper in ETP-4559. The fiscal-monitor builder still only quote-escapes values. Neither implementation covers the agreed full-width variants, and TAB/CR/LF are skipped as leading whitespace rather than treated as standalone triggers. | ETP-4568, unassigned / `TBD` |
+| **SEC-04 — CSV formula injection** | **Corrected in source** (2026-09-07, ETP-5032) | All six CSV-producing paths now share one policy, pinned by the fixture table in `csv-neutralization-fixtures.md` across three runtimes. `NeoCsvExportService.neutralizeSpreadsheetCell` and both JavaScript implementations cover the full D3 trigger set — classic `= + - @`, standalone TAB/CR/LF, the BOM and NBSP skip prefixes, and the four full-width variants — on header labels as well as data cells. The two paths ADR-0004 had missed are closed too: the list Print → CSV (`ReportDrawer.CSV_TEMPLATE`, which had neither neutralization nor quoting and is what QA reproduced on Contacts) and the nine accounting reports, whose hand-copied `csvField` was replaced by the canonical helper. Fiscal-monitor delegates the policy while keeping its own always-quote/LF format (ADR-0004 D4). **Still open:** the manual Excel-desktop / LibreOffice Calc / Google Sheets compatibility evidence, including save-and-reopen, which ADR-0004 requires and which cannot be automated. | ETP-5032, Luciano Palacio |
 | **SEC-08 — no CSP** | **Reproduced** | No CSP header was returned by production, staging or experimental HTML. No CSP is owned in `infra/` or the deployment workflow. | ETP-4572, unassigned / `TBD` |
 | **SEC-09 — hardening headers** | **Partially corrected** | Production and staging return HSTS, `nosniff`, Referrer-Policy and Permissions-Policy, but use `X-Frame-Options: SAMEORIGIN`; experimental returns none of them. The representative backend `401` response also lacks them. No repository-owned policy explains the drift. | ETP-4573/4574, unassigned / `TBD` |
 | **SEC-09b — NEO JSON cache control** | **Reproduced** | `NeoServlet.writeResponse()` copies opt-in response headers but sets no default `Cache-Control`. Public `GET /etendo/sws/neo/session` returned `401 application/json` without `Cache-Control`. Authenticated `/session` still requires a credentialed confirmation after the fix lands. | ETP-4571, unassigned / `TBD` |
