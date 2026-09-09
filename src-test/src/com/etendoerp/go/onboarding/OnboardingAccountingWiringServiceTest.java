@@ -779,7 +779,7 @@ public class OnboardingAccountingWiringServiceTest {
 
   // ---------------------------------------------------------------------------------------------
   // backfillInvoicePriceVarianceDefault() — native query parameter binding (real implementation)
-  // ETP-5075 gap A8
+  // ETP-5075 gap A8 / ETP-5222 (99904000-first, P_Expense_Acct-fallback priority)
   // ---------------------------------------------------------------------------------------------
 
   @Test
@@ -803,18 +803,83 @@ public class OnboardingAccountingWiringServiceTest {
 
     String sql = sqlCaptor.getValue();
     assertTrue("backfill SQL must target c_acctschema_default", sql.contains("c_acctschema_default"));
-    assertTrue("backfill SQL must copy p_expense_acct into p_invoicepricevariance_acct",
+    assertTrue("backfill SQL must copy p_expense_acct into p_invoicepricevariance_acct as the fallback",
         sql.contains("p_invoicepricevariance_acct") && sql.contains("p_expense_acct"));
+    assertTrue("backfill SQL must resolve the 99904000 combination FIRST via a COALESCE-wrapped subquery",
+        sql.contains("COALESCE(") && sql.contains("vc.c_validcombination_id") && sql.contains("d2.p_expense_acct"));
+    assertTrue("backfill SQL must scope the account lookup through C_AcctSchema_Element (elementtype = 'AC')"
+        + " so an unwired orphan element sharing the same account code is never picked",
+        sql.contains("c_acctschema_element") && sql.contains("elementtype = 'AC'"));
+    assertTrue("backfill SQL must join c_validcombination for the natural combination lookup",
+        sql.contains("c_validcombination"));
+    // ETP-5222 review fix (Alex/W1): the resolved combination must be the NATURAL one — every other
+    // C_ValidCombination dimension column explicitly required NULL, mirroring
+    // GlItemProvisioningSupport#resolveNaturalCombination's Restrictions.isNull(...) list, translated
+    // to native SQL. Without this, a non-natural (e.g. product-specific) row for the same
+    // account+schema could match too, and Postgres UPDATE...FROM would pick one ARBITRARILY.
+    for (String dimensionColumn : new String[] {
+        "m_product_id", "c_bpartner_id", "ad_orgtrx_id", "c_locfrom_id", "c_locto_id",
+        "c_salesregion_id", "c_project_id", "c_campaign_id", "c_activity_id", "user1_id", "user2_id" }) {
+      assertTrue("backfill SQL must require vc." + dimensionColumn + " IS NULL for the natural-combination filter",
+          sql.contains("vc." + dimensionColumn + " IS NULL"));
+    }
+    assertTrue("backfill SQL must defensively order + limit the natural-combination subquery to 1 row,"
+        + " mirroring resolveNaturalCombination's own ORDER BY + setMaxResults(1) guard",
+        sql.contains("ORDER BY vc.c_validcombination_id LIMIT 1"));
     verify(query).setParameter("clientId", "C1");
     verify(query).setParameter("schemaId", "S1");
+    verify(query).setParameter("ipvAcctValue", "99904000");
     verify(query).executeUpdate();
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBackfillInvoicePriceVarianceDefaultScopesBothSourceAndTargetToTheCallersOwnSchema() {
+    // ETP-5222 QA (Sentinel): a client can have MORE THAN ONE row in c_acctschema_default (one per
+    // accounting schema — confirmed live on local dev DB against a real 2-schema client, "F&B
+    // International Group"). This asserts, at the SQL-text level, that BOTH halves of the statement
+    // are scoped to the caller's own schemaId — not just the client — so a resolved combination for
+    // schema A can never be written onto schema B's row:
+    //   1) the natural-combination SOURCE (the "resolved" derived table) only looks at the
+    //      c_acctschema_default row(s) matching :schemaId, via "d2.ad_client_id = :clientId AND
+    //      d2.c_acctschema_id = :schemaId";
+    //   2) the UPDATE TARGET is correlated back by primary key AND re-asserts the same schema scope,
+    //      via "d.c_acctschema_default_id = resolved.c_acctschema_default_id" together with
+    //      "d.ad_client_id = :clientId AND d.c_acctschema_id = :schemaId".
+    // Without both halves, a client with 2+ schemas could have one schema's resolved 99904000
+    // combination silently written onto a DIFFERENT schema's row.
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    NativeQuery query = mock(NativeQuery.class);
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    when(session.createNativeQuery(sqlCaptor.capture())).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.executeUpdate()).thenReturn(1);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.backfillInvoicePriceVarianceDefault("C1", "S1");
+    }
+
+    String sql = sqlCaptor.getValue().replaceAll("\\s+", " ");
+    assertTrue("the resolution SOURCE (derived table) must scope to the caller's own schemaId,"
+        + " not every schema of the client",
+        sql.contains("d2.ad_client_id = :clientId AND d2.c_acctschema_id = :schemaId"));
+    assertTrue("the UPDATE TARGET must be correlated back to the source row by primary key",
+        sql.contains("d.c_acctschema_default_id = resolved.c_acctschema_default_id"));
+    assertTrue("the UPDATE TARGET must ALSO re-assert the caller's own schemaId (defense in depth"
+        + " alongside the PK correlation, mirroring c_acctschema_default's own unique key)",
+        sql.contains("d.ad_client_id = :clientId AND d.c_acctschema_id = :schemaId"));
   }
 
   @Test
   @SuppressWarnings("unchecked")
   public void testBackfillInvoicePriceVarianceDefaultDoesNotFailWhenZeroRowsAffected() {
     // Covers the "nothing to backfill" outcome (already-configured schema, or no matching row) —
-    // must still bind both parameters and simply skip the debug log, never throw.
+    // must still bind all three parameters and simply skip the debug log, never throw.
     OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
 
     OBDal dal = mock(OBDal.class);
@@ -836,6 +901,7 @@ public class OnboardingAccountingWiringServiceTest {
         sqlCaptor.getValue().contains("c_acctschema_default"));
     verify(query).setParameter("clientId", "C1");
     verify(query).setParameter("schemaId", "S1");
+    verify(query).setParameter("ipvAcctValue", "99904000");
     verify(query).executeUpdate();
   }
 
