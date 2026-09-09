@@ -76,6 +76,7 @@ import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
+import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
@@ -218,6 +219,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_BP_GROUP_ACCT_PATCH = "bpGroupAcctPatch";
   private static final String PROGRESS_ACCTDIM_VISIBILITY = "acctdimVisibility";
   private static final String PROGRESS_ADMIN_IDENTITY = "adminIdentity";
+  private static final String PROGRESS_FORCE_TEST_MODE = "forceTestMode";
   private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
   // Stable codes for provisioning failures whose underlying message is an unresolved AD message
   // key. Mirrored by the frontend's onboarding/errorMessages.js (ETP-4665).
@@ -275,6 +277,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingAdminIdentityService();
   OnboardingBaselineService onboardingBaselineService =
       new OnboardingBaselineService();
+  OnboardingForceTestModeService onboardingForceTestModeService =
+      new OnboardingForceTestModeService();
   OnboardingBankConnectionSyncService onboardingBankConnectionSyncService =
       new OnboardingBankConnectionSyncService();
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
@@ -1853,6 +1857,51 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * ETP-5117: a tenant converting to productive must stop overriding the System-level
+   * ETSG_ForceTestMode default (e.g. a tenant that started as Demo and got its own row via
+   * {@link OnboardingForceTestModeService}). Same best-effort philosophy as {@code
+   * markProductive} itself — commercial/fiscal-config metadata, never allowed to abort an
+   * otherwise-successful paid signup. See {@link OnboardingForceTestModeService}'s own javadoc
+   * ("The reverse direction") for why this needs its own service call, not a one-liner.
+   *
+   * @param clientId the tenant just marked productive
+   */
+  private void revertTestModeForProductiveTenantBestEffort(String clientId) {
+    try {
+      onboardingForceTestModeService.revertTestModeForProductiveTenant(clientId);
+    } catch (RuntimeException e) {
+      log.error("Could not revert ETSG_ForceTestMode for now-productive tenant '{}': {}",
+          clientId, e.getMessage(), e);
+    }
+  }
+
+  /**
+   * ETP-5117: applies the side effects of a paid upgrade once {@code handleOnboarding}'s paywall
+   * has approved the request — marks the tenant productive and, only on success, reverts any
+   * {@code ETSG_ForceTestMode} override (see {@link #revertTestModeForProductiveTenantBestEffort}).
+   * Joins the onboarding transaction, so a successful marker commits with the tenant. Still
+   * best-effort in the revert direction, mirroring {@code markProductive} itself: commercial/fiscal
+   * -config metadata must never abort an otherwise-successful paid signup. A failed marker is only
+   * logged — "paid but demo" is the symptom ETP-4966 was reported as, and this line is what makes it
+   * searchable instead of indistinguishable from a marker that was never attempted.
+   *
+   * @param clientId the tenant just created/resolved
+   * @param starOrgId the tenant's "*" organization id, required by {@code markProductive}
+   * @param clientName the onboarding request's client name, used only for the failure log line
+   * @param accountEmail the account driving onboarding, masked in the failure log line
+   */
+  private void applyPaidUpgradeSideEffects(String clientId, String starOrgId, String clientName,
+      String accountEmail) {
+    if (!tenantPlanService.markProductive(clientId, starOrgId)) {
+      log.error("Paid environment '{}' (client {}) for account {} could not be marked as plan "
+          + "'{}' and will read back as free", clientName, clientId,
+          maskEmail(accountEmail), TenantPlanService.PLAN_PRODUCTIVE);
+    } else {
+      revertTestModeForProductiveTenantBestEffort(clientId);
+    }
+  }
+
+  /**
    * GET /sws/go/environments
    * Header: Authorization: Bearer <session_token>
    * Returns 200 with environments linked to the account, each carrying its plan
@@ -2070,10 +2119,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // that case, so it is logged as an error naming the account — "paid but demo" is the
       // symptom ETP-4966 was reported as, and this line is what makes it searchable instead of
       // indistinguishable from a marker that was never attempted.
-      if (paidUpgrade && !tenantPlanService.markProductive(clientId, adminContext.starOrgId)) {
-        log.error("Paid environment '{}' (client {}) for account {} could not be marked as plan "
-            + "'{}' and will read back as free", onboardingRequest.clientName, clientId,
-            maskEmail(accountEmail), TenantPlanService.PLAN_PRODUCTIVE);
+      if (paidUpgrade) {
+        applyPaidUpgradeSideEffects(clientId, adminContext.starOrgId, onboardingRequest.clientName,
+            accountEmail);
       }
 
       // The returned flag (created vs. already-existing) is no longer used to gate downstream
@@ -2656,6 +2704,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!wireAdminIdentity(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
+    // ETP-5117 (gap N1): force SII/TicketBAI/VeriFactu into test/sandbox mode for Demo/free
+    // tenants, so no manual step in Classic is needed to trial the fiscal submission modules.
+    // Runs AFTER the org exists (needed as the new preference row's visibility scope) and BEFORE
+    // the baseline stamp — see OnboardingForceTestModeService for the full explanation (including
+    // why it must never touch the System-level default preference row) and its lockstep
+    // corrective twin (R31-force-test-mode-demo-tenants.sql).
+    if (!forceTestModeForFreeTenant(writer, clientId, orgId)) {
+      return false;
+    }
     // Final action before commitDalChanges: stamp the tenant's data-fix baseline so it lands in the
     // same atomic onboarding commit. A genuine SQL error propagates (not caught here) so the outer
     // handleOnboarding catch rolls back cleanly; the expected ON CONFLICT->0-rows case is benign.
@@ -2868,6 +2925,28 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String errorMessage = e.getMessage() != null ? e.getMessage()
           : "Admin identity wiring failed";
       sendProgress(writer, PROGRESS_ADMIN_IDENTITY, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
+  /**
+   * Forces SII/TicketBAI/VeriFactu submissions into test/sandbox mode for a Demo/free tenant
+   * (ETP-5117, gap N1) — see {@link OnboardingForceTestModeService} for the full explanation and
+   * its corrective twin ({@code R31-force-test-mode-demo-tenants.sql}).
+   */
+  boolean forceTestModeForFreeTenant(PrintWriter writer, String clientId, String orgId) {
+    sendProgress(writer, PROGRESS_FORCE_TEST_MODE, PROGRESS_IN_PROGRESS,
+        "Configuring fiscal test mode...");
+    try {
+      onboardingForceTestModeService.forceTestModeForFreeTenant(clientId, orgId);
+      sendProgress(writer, PROGRESS_FORCE_TEST_MODE, "done", "Fiscal test mode configured");
+      return true;
+    } catch (Exception e) {
+      EtendoGoDalHelper.rollbackDalChanges("onboarding force-test-mode", e, log);
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Fiscal test mode configuration failed";
+      sendProgress(writer, PROGRESS_FORCE_TEST_MODE, PROGRESS_ERROR, errorMessage);
       sendFinalResult(writer, false, errorMessage);
       return false;
     }

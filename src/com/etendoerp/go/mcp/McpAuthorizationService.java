@@ -83,6 +83,12 @@ final class McpAuthorizationService {
       case "neo_update":
       case "neo_delete":
       case "neo_action":
+      // ETP-5184: all three image-upload tools are write-tier. The two upload tools create an
+      // AD_Image row; the status lookup is bundled with them deliberately — it is a step of the
+      // write flow and has nothing to offer a read-only session.
+      case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
+      case McpConstants.TOOL_NEO_UPLOAD_IMAGE:
+      case McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD:
         return SCOPE_WRITE;
       default:
         return toolName.startsWith(McpConstants.GENERATE_PREFIX)

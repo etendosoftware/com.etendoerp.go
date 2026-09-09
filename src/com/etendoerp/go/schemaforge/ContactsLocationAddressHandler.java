@@ -69,12 +69,22 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(ContactsLocationAddressHandler.class);
   private static final String FIELD_SHIP_TO_ADDRESS = "shipToAddress";
   private static final String FIELD_INVOICE_TO_ADDRESS = "invoiceToAddress";
+  private static final String FIELD_TAX_LOCATION = "taxLocation";
   private static final String FIELD_COUNTRY = "country";
   private static final String FIELD_REGION = "region";
+  private static final String FIELD_ADDRESS_LINE1 = "addressLine1";
+  private static final String FIELD_ADDRESS_LINE2 = "addressLine2";
+  private static final String FIELD_CITY_NAME = "cityName";
+  private static final String FIELD_POSTAL_CODE = "postalCode";
+  /** FK to an existing C_Location, for the "reuse" create mode. See {@link #handleCreate}. */
+  private static final String FIELD_LOCATION_ADDRESS = "locationAddress";
   /** Free-text region, resolved server-side against the payload's own country. See {@link #resolveRegionByName}. */
   private static final String FIELD_REGION_NAME = "regionName";
   private static final String FIELD_RESPONSE = "response";
   private static final String FIELD_DATA = "data";
+  /** DAL property holding the parent Business Partner FK on C_BPartner_Location. */
+  private static final String FIELD_BUSINESS_PARTNER =
+      org.openbravo.model.common.businesspartner.Location.PROPERTY_BUSINESSPARTNER;
 
   @Override
   public NeoResponse handle(NeoContext ctx) {
@@ -116,16 +126,45 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
   // ------------------------------------------------------------------ create
 
+  /**
+   * Creates the C_Location + C_BPartner_Location pair for a parent Business Partner.
+   *
+   * <p>The parent BP is resolved from the request <b>body</b> first
+   * ({@code businessPartner}), falling back to the {@code parentId} query parameter. Both
+   * lookups are needed because the parent reaches this handler differently depending on the
+   * caller, and {@link NeoContext#getQueryParams()} is {@code null} on the MCP CRUD hook path
+   * ({@code McpHookExecutor.buildHookContext} does not populate it), so it must be guarded:
+   * <ol>
+   *   <li><b>MCP</b> ({@code neo_create}) — {@code McpToolRouter} removes {@code parentId} from
+   *       the body and writes the resolved FK back as the {@code businessPartner} property;
+   *       {@code queryParams} is {@code null}, so the body branch wins.</li>
+   *   <li><b>REST from the UI</b> ({@code POST /locationAddress?parentId=<bpId>}) — the body
+   *       carries no FK, so the query-param branch is used: behaviour identical to before.</li>
+   *   <li><b>REST with {@code parentId} in the body</b> — a shape {@code NeoCrudHandler}
+   *       supports via {@code injectParentIdAsProperty}; the FK is already in the body, so the
+   *       body branch wins with the same value.</li>
+   * </ol>
+   * The two sources never disagree, so this is additive and not a change of precedence.
+   */
   private NeoResponse handleCreate(NeoContext ctx) throws Exception {
     JSONObject body = ctx.getRequestBody();
-    String bpId = ctx.getQueryParams().get("parentId");
-    if (bpId == null || bpId.isEmpty()) {
+    String bpId = body != null ? body.optString(FIELD_BUSINESS_PARTNER, null) : null;
+    if (StringUtils.isBlank(bpId) && ctx.getQueryParams() != null) {
+      bpId = ctx.getQueryParams().get("parentId");
+    }
+    if (StringUtils.isBlank(bpId)) {
       return NeoResponse.error(400, "Missing parentId (Business Partner ID)");
     }
 
-    // Capture pre-save key and country before any OBDal saves
-    String preSaveKey = queryBPKey(bpId);
+    String locationAddressId = nullIfEmpty(body.optString(FIELD_LOCATION_ADDRESS, null));
     String countryId = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
+    NeoResponse rejected = rejectUnusableCreatePayload(body, locationAddressId, countryId);
+    if (rejected != null) {
+      return rejected;
+    }
+
+    // Capture the pre-save key before any OBDal save
+    String preSaveKey = queryBPKey(bpId);
 
     OBContext.setAdminMode(true);
     try {
@@ -134,14 +173,40 @@ public class ContactsLocationAddressHandler implements NeoHandler {
         return NeoResponse.error(404, "Business Partner not found: " + bpId);
       }
 
-      // Create C_Location (physical address)
-      org.openbravo.model.common.geography.Location geoLoc =
-          OBProvider.getInstance().get(org.openbravo.model.common.geography.Location.class);
-      geoLoc.setClient(bp.getClient());
-      geoLoc.setOrganization(bp.getOrganization());
-      geoLoc.setActive(Boolean.TRUE);
-      applyGeoLocFields(body, geoLoc);
-      OBDal.getInstance().save(geoLoc);
+      org.openbravo.model.common.geography.Location geoLoc;
+      // The country fed to checkAndAutoSetTaxKey below: what the request said on create, or
+      // whatever the reused C_Location actually has on reuse — either way the country the address
+      // ends up with, since a reuse never carries a `country` of its own to trust instead.
+      String effectiveCountryId;
+      if (locationAddressId != null) {
+        // Mode A: reuse. NEVER mutate the fetched Location — it is a shared master record that
+        // may already be linked to other Business Partners, and running it through
+        // applyGeoLocFields would silently overwrite it with whatever partial address this one
+        // caller happened to send.
+        geoLoc = OBDal.getInstance()
+            .get(org.openbravo.model.common.geography.Location.class, locationAddressId);
+        if (geoLoc == null) {
+          return NeoResponse.error(400, "Invalid locationAddress: " + locationAddressId);
+        }
+        effectiveCountryId = countryIdOf(geoLoc);
+      } else {
+        // Mode B: create. C_Location.C_Country_ID is NOT NULL, but applyGeoLocFields() silently
+        // ignores an id that does not resolve (see its own guard below) — correct on update,
+        // where an absent/invalid country must never blank out one the record already has, but
+        // wrong here: on create there is no existing country to fall back to, so a bad id would
+        // otherwise reach OBDal.flush() as a raw NOT NULL constraint violation instead of a clean
+        // 400.
+        if (OBDal.getInstance().get(Country.class, countryId) == null) {
+          return NeoResponse.error(400, "Invalid country: " + countryId);
+        }
+        geoLoc = OBProvider.getInstance().get(org.openbravo.model.common.geography.Location.class);
+        geoLoc.setClient(bp.getClient());
+        geoLoc.setOrganization(bp.getOrganization());
+        geoLoc.setActive(Boolean.TRUE);
+        applyGeoLocFields(body, geoLoc);
+        OBDal.getInstance().save(geoLoc);
+        effectiveCountryId = countryId;
+      }
 
       // Create C_BPartner_Location (BP–address link)
       org.openbravo.model.common.businesspartner.Location bpLoc =
@@ -154,6 +219,11 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       bpLoc.setName(str(body, "name", "."));
       bpLoc.setShipToAddress(boolField(body, FIELD_SHIP_TO_ADDRESS, true));
       bpLoc.setInvoiceToAddress(boolField(body, FIELD_INVOICE_TO_ADDRESS, true));
+      // C_BPartner_Location.IsTaxLocation's own AD default is an unquoted 'N', so a create that
+      // never mentions it should stay false — `neo_schema` advertises it as an accepted,
+      // server-defaulted field, and a caller that explicitly sends `taxLocation: true` has every
+      // reason to expect it stored, not silently dropped because nothing here ever read it.
+      bpLoc.setTaxLocation(boolField(body, FIELD_TAX_LOCATION, false));
       bpLoc.setPayFromAddress(Boolean.TRUE);
       bpLoc.setRemitToAddress(Boolean.TRUE);
       OBDal.getInstance().save(bpLoc);
@@ -162,11 +232,49 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
       // Build the response record and optionally inject a tax-key warning message
       JSONObject locationJson = buildRecord(bpLoc, geoLoc);
-      checkAndAutoSetTaxKey(locationJson, bpId, countryId, preSaveKey);
+      checkAndAutoSetTaxKey(locationJson, bpId, effectiveCountryId, preSaveKey);
       return wrapRecord(locationJson, 201);
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * The 400 for a create body that cannot be served, or {@code null} when it can.
+   *
+   * <p>{@code neo_schema} advertises {@code locationAddress} (an FK to an existing C_Location) as
+   * this entity's own field, mirroring how {@code bp-location/bpLocation} already exposes
+   * C_Location as a writable entity in its own right (country required there). A caller may
+   * therefore either
+   * <ol>
+   *   <li><b>Mode A (reuse)</b> — pass the id of a C_Location created through that endpoint as
+   *       {@code locationAddress}; no {@code country} is needed, the existing record has one.</li>
+   *   <li><b>Mode B (create)</b> — hand this endpoint raw address fields and let it build the
+   *       C_Location itself. This is the only mode the Contacts UI (LocationEditorModal) ever
+   *       uses; it never sends {@code locationAddress} on create. {@code C_Location.C_Country_ID}
+   *       is NOT NULL, so a missing country must fail here rather than as a raw constraint
+   *       violation at {@code flush()}.</li>
+   * </ol>
+   *
+   * <p>Both modes in the same body is refused rather than guessed at: which one would win is not
+   * a rule any caller could rely on.
+   */
+  private static NeoResponse rejectUnusableCreatePayload(JSONObject body, String locationAddressId,
+      String countryId) {
+    if (locationAddressId != null && hasRawAddressFields(body)) {
+      return NeoResponse.error(400,
+          "Ambiguous create: send either locationAddress (to reuse an existing C_Location) or "
+              + "raw address fields (country, addressLine1, ...), not both.");
+    }
+    if (locationAddressId == null && countryId == null) {
+      return NeoResponse.error(400, "Missing required field: country (C_Country_ID)");
+    }
+    return null;
+  }
+
+  /** The C_Country_ID of {@code geoLoc}, or {@code null} when it carries no country. */
+  private static String countryIdOf(org.openbravo.model.common.geography.Location geoLoc) {
+    return geoLoc.getCountry() != null ? geoLoc.getCountry().getId() : null;
   }
 
   // ------------------------------------------------------------------ update
@@ -206,6 +314,14 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       if (body.has(FIELD_INVOICE_TO_ADDRESS)) {
         bpLoc.setInvoiceToAddress(boolField(body, FIELD_INVOICE_TO_ADDRESS,
             Boolean.TRUE.equals(bpLoc.isInvoiceToAddress())));
+      }
+      // Same gap as create, and the same set-if-provided semantics as the two flags above:
+      // this handler never read taxLocation at all, so any caller sending it on an update was
+      // silently ignored just like on create. `body.has(...)`, not a bare boolField call, so an
+      // update that omits it keeps whatever the record already had instead of resetting it.
+      if (body.has(FIELD_TAX_LOCATION)) {
+        bpLoc.setTaxLocation(boolField(body, FIELD_TAX_LOCATION,
+            Boolean.TRUE.equals(bpLoc.isTaxLocation())));
       }
 
       OBDal.getInstance().flush();
@@ -312,12 +428,33 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     return (dataArr == null || dataArr.length() == 0) ? null : dataArr;
   }
 
+  /**
+   * Whether {@code body} carries any of the raw address fields {@link #applyGeoLocFields} would
+   * use to build a brand new C_Location — as opposed to just {@code locationAddress}, which
+   * points at one that already exists. Used by {@link #handleCreate} to refuse a body that tries
+   * to do both.
+   *
+   * <p>Checked by resolved value ({@link #nullIfEmpty}), not {@link JSONObject#has}: a caller
+   * that serializes every field its schema declares (an MCP client is the expected case) sends
+   * these keys as explicit {@code null}s alongside a real {@code locationAddress}, and that is
+   * exactly the reuse mode, not an ambiguous request.
+   */
+  private static boolean hasRawAddressFields(JSONObject body) {
+    return nullIfEmpty(body.optString(FIELD_ADDRESS_LINE1, null)) != null
+        || nullIfEmpty(body.optString(FIELD_ADDRESS_LINE2, null)) != null
+        || nullIfEmpty(body.optString(FIELD_CITY_NAME, null)) != null
+        || nullIfEmpty(body.optString(FIELD_POSTAL_CODE, null)) != null
+        || nullIfEmpty(body.optString(FIELD_COUNTRY, null)) != null
+        || nullIfEmpty(body.optString(FIELD_REGION, null)) != null
+        || nullIfEmpty(body.optString(FIELD_REGION_NAME, null)) != null;
+  }
+
   private static void applyGeoLocFields(JSONObject body,
       org.openbravo.model.common.geography.Location geoLoc) throws Exception {
-    geoLoc.setAddressLine1(nullIfEmpty(body.optString("addressLine1", null)));
-    geoLoc.setAddressLine2(nullIfEmpty(body.optString("addressLine2", null)));
-    geoLoc.setCityName(nullIfEmpty(body.optString("cityName", null)));
-    geoLoc.setPostalCode(nullIfEmpty(body.optString("postalCode", null)));
+    geoLoc.setAddressLine1(nullIfEmpty(body.optString(FIELD_ADDRESS_LINE1, null)));
+    geoLoc.setAddressLine2(nullIfEmpty(body.optString(FIELD_ADDRESS_LINE2, null)));
+    geoLoc.setCityName(nullIfEmpty(body.optString(FIELD_CITY_NAME, null)));
+    geoLoc.setPostalCode(nullIfEmpty(body.optString(FIELD_POSTAL_CODE, null)));
 
     String countryId = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
     if (countryId != null) {
@@ -336,14 +473,94 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     // so a whitespace cell in a re-imported file would erase a province already on the record.
     String regionName = StringUtils.trimToNull(nullIfEmpty(body.optString(FIELD_REGION_NAME, null)));
     if (regionId != null) {
-      geoLoc.setRegion(OBDal.getInstance().get(Region.class, regionId));
+      Region region = OBDal.getInstance().get(Region.class, regionId);
+      if (region == null) {
+        // OBDal.get answers null for an id that does not exist, and nothing validates the id
+        // before this. Writing that null through assignRegion would clear BOTH columns, so a
+        // caller that guessed a region id (an MCP agent, typically) would get a 200 back with
+        // the province silently gone — and on an Argentine address the free text erased with
+        // it. Refusing here is the same contract as the free-text path: an unresolvable region
+        // is an error, never a partial write. Thrown before any OBDal.save on both paths.
+        throw regionFailure(regionId, "does not exist.");
+      }
+      assignRegion(geoLoc, region, null);
     } else if (regionName != null) {
-      geoLoc.setRegion(resolveRegionByName(regionName, geoLoc.getCountry()));
+      applyRegionName(regionName, geoLoc);
     } else if (body.has(FIELD_REGION)) {
       // Only the id field clears. `regionName` is set-if-provided: a blank one means "this file
       // says nothing about the province", never "erase it". Clearing stays an explicit
       // `region: null`, which is what the Location modal's selector sends.
-      geoLoc.setRegion(null);
+      assignRegion(geoLoc, null, null);
+    }
+  }
+
+  /**
+   * Writes both region columns at once — the only place either of them is assigned.
+   *
+   * <p>{@code C_Location} answers "which province" twice: the {@code C_Region_ID} FK and the
+   * free-text {@code RegionName}, the latter for countries whose {@code C_Country.HasRegion} is
+   * {@code 'N'} (Argentina, for one). At most one may be non-null, because readers resolve the
+   * province with {@code COALESCE(C_Region.name, C_Location.regionname)} and would otherwise
+   * pick arbitrarily between two answers.
+   *
+   * <p>That invariant used to live in each branch of {@link #applyGeoLocFields}, every branch
+   * separately remembering to clear the sibling column — and three separate defects were found
+   * there, one per branch, because a change touched one and not the others. Routing every write
+   * through this method makes the invariant unbreakable by construction: a future branch cannot
+   * set one column without deciding the other, since there is no other way to set either.
+   */
+  private static void assignRegion(org.openbravo.model.common.geography.Location geoLoc,
+      Region region, String freeText) {
+    geoLoc.setRegion(region);
+    geoLoc.setRegionName(freeText);
+  }
+
+  /**
+   * Writes a free-text region name onto {@code geoLoc}, as an FK when the country defines
+   * regions and as C_Location's own {@code RegionName} column when it does not.
+   *
+   * <p>ETP-5184. Before this the only outcome was the FK: {@link #resolveRegionByName} either
+   * found a {@link Region} of the payload's country or threw. That is right for a country whose
+   * regions are loaded — a name that is none of them is a data error — but it made an address in
+   * a country with no C_Region rows impossible to save. A live Argentine address failed with
+   * {@code The region "Cordoba" does not exist in Argentina.}: C_Country.HasRegion is {@code 'N'}
+   * for Argentina and no region row hangs off it, so no province could ever resolve, and the
+   * province was rejected outright rather than stored.
+   *
+   * <p>{@code C_Location.RegionName} is Etendo's own home for exactly this case — Classic hides
+   * the region selector and shows the free-text field when a country has {@code HasRegion = 'N'}
+   * — so filling it is the modelled behaviour, not a workaround.
+   *
+   * <p>The strict path is unchanged where it means something. The fallback is entered only when
+   * the country is known AND declares no regions; a country that does define regions still
+   * refuses an unknown name, and a payload with a region name but no country still refuses,
+   * because "does this country have regions" is unanswerable without the country. Under that
+   * guard the only reachable failure is "does not exist" (with no region rows there is nothing
+   * to be ambiguous about), so the {@code catch} cannot silence an ambiguity.
+   *
+   * <p><b>The two columns are kept mutually exclusive</b> by {@link #assignRegion}, which every
+   * branch below goes through. Whichever one this write fills, the
+   * other is cleared: an FK to Madrid sitting next to a {@code RegionName} of "Cordoba" is a
+   * record that answers the same question two ways, and every reader (display name, print,
+   * export) would be free to pick either. Nothing is lost by clearing — both columns are written
+   * from this single {@code regionName} input, so the value being cleared is a stale answer to
+   * the same question, superseded by the one just resolved. Clearing the stale FK matters most
+   * on the update path: an address moved from Spain to Argentina would otherwise keep pointing
+   * at a Spanish province while its free text says Cordoba.
+   */
+  private static void applyRegionName(String regionName,
+      org.openbravo.model.common.geography.Location geoLoc) {
+    Country country = geoLoc.getCountry();
+    boolean countryWithoutRegions = country != null && !Boolean.TRUE.equals(country.isHasRegions());
+    try {
+      assignRegion(geoLoc, resolveRegionByName(regionName, country), null);
+    } catch (OBException e) {
+      if (!countryWithoutRegions) {
+        throw e;
+      }
+      log.debug("Region '{}' not modelled in {}; storing it as C_Location.RegionName free text",
+          regionName, country.getName());
+      assignRegion(geoLoc, null, regionName);
     }
   }
 
@@ -456,10 +673,10 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
   private static void putGeoLocFields(JSONObject locationJson,
       org.openbravo.model.common.geography.Location geoLoc) throws Exception {
-    locationJson.put("addressLine1", geoLoc.getAddressLine1() != null ? geoLoc.getAddressLine1() : JSONObject.NULL);
-    locationJson.put("addressLine2", geoLoc.getAddressLine2() != null ? geoLoc.getAddressLine2() : JSONObject.NULL);
-    locationJson.put("cityName",     geoLoc.getCityName()     != null ? geoLoc.getCityName()     : JSONObject.NULL);
-    locationJson.put("postalCode",   geoLoc.getPostalCode()   != null ? geoLoc.getPostalCode()   : JSONObject.NULL);
+    locationJson.put(FIELD_ADDRESS_LINE1, geoLoc.getAddressLine1() != null ? geoLoc.getAddressLine1() : JSONObject.NULL);
+    locationJson.put(FIELD_ADDRESS_LINE2, geoLoc.getAddressLine2() != null ? geoLoc.getAddressLine2() : JSONObject.NULL);
+    locationJson.put(FIELD_CITY_NAME,     geoLoc.getCityName()     != null ? geoLoc.getCityName()     : JSONObject.NULL);
+    locationJson.put(FIELD_POSTAL_CODE,   geoLoc.getPostalCode()   != null ? geoLoc.getPostalCode()   : JSONObject.NULL);
 
     if (geoLoc.getCountry() != null) {
       locationJson.put(FIELD_COUNTRY,          geoLoc.getCountry().getId());
