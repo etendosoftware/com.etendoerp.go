@@ -253,7 +253,11 @@ public class EtgoGetTbaiStatusFunctionIntegrationTest extends OBBaseTest {
     OBContext.setAdminMode(true);
     try {
       Invoice invoice = anyFixtureInvoice();
-      String unexpectedStatus = "SomeFutureStatus";
+      // Must fit TBAI_SyncInvoice.estado, which is VARCHAR(10): a longer literal never even
+      // reaches the function under test — OBInterceptor rejects the fixture save itself with
+      // "Value too long", so the test fails on its own setup rather than on the behaviour it
+      // means to pin. Any value the function does not recognise proves the same point.
+      String unexpectedStatus = "FutureVal";
       TbaiSyncinvoice row = newSyncRow(invoice, unexpectedStatus, farFutureTimestamp());
       OBDal.getInstance().save(row);
       OBDal.getInstance().flush();
