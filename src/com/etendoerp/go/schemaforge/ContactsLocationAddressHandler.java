@@ -69,8 +69,15 @@ public class ContactsLocationAddressHandler implements NeoHandler {
   private static final Logger log = LogManager.getLogger(ContactsLocationAddressHandler.class);
   private static final String FIELD_SHIP_TO_ADDRESS = "shipToAddress";
   private static final String FIELD_INVOICE_TO_ADDRESS = "invoiceToAddress";
+  private static final String FIELD_TAX_LOCATION = "taxLocation";
   private static final String FIELD_COUNTRY = "country";
   private static final String FIELD_REGION = "region";
+  private static final String FIELD_ADDRESS_LINE1 = "addressLine1";
+  private static final String FIELD_ADDRESS_LINE2 = "addressLine2";
+  private static final String FIELD_CITY_NAME = "cityName";
+  private static final String FIELD_POSTAL_CODE = "postalCode";
+  /** FK to an existing C_Location, for the "reuse" create mode. See {@link #handleCreate}. */
+  private static final String FIELD_LOCATION_ADDRESS = "locationAddress";
   /** Free-text region, resolved server-side against the payload's own country. See {@link #resolveRegionByName}. */
   private static final String FIELD_REGION_NAME = "regionName";
   private static final String FIELD_RESPONSE = "response";
@@ -149,9 +156,15 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       return NeoResponse.error(400, "Missing parentId (Business Partner ID)");
     }
 
-    // Capture pre-save key and country before any OBDal saves
-    String preSaveKey = queryBPKey(bpId);
+    String locationAddressId = nullIfEmpty(body.optString(FIELD_LOCATION_ADDRESS, null));
     String countryId = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
+    NeoResponse rejected = rejectUnusableCreatePayload(body, locationAddressId, countryId);
+    if (rejected != null) {
+      return rejected;
+    }
+
+    // Capture the pre-save key before any OBDal save
+    String preSaveKey = queryBPKey(bpId);
 
     OBContext.setAdminMode(true);
     try {
@@ -160,14 +173,40 @@ public class ContactsLocationAddressHandler implements NeoHandler {
         return NeoResponse.error(404, "Business Partner not found: " + bpId);
       }
 
-      // Create C_Location (physical address)
-      org.openbravo.model.common.geography.Location geoLoc =
-          OBProvider.getInstance().get(org.openbravo.model.common.geography.Location.class);
-      geoLoc.setClient(bp.getClient());
-      geoLoc.setOrganization(bp.getOrganization());
-      geoLoc.setActive(Boolean.TRUE);
-      applyGeoLocFields(body, geoLoc);
-      OBDal.getInstance().save(geoLoc);
+      org.openbravo.model.common.geography.Location geoLoc;
+      // The country fed to checkAndAutoSetTaxKey below: what the request said on create, or
+      // whatever the reused C_Location actually has on reuse — either way the country the address
+      // ends up with, since a reuse never carries a `country` of its own to trust instead.
+      String effectiveCountryId;
+      if (locationAddressId != null) {
+        // Mode A: reuse. NEVER mutate the fetched Location — it is a shared master record that
+        // may already be linked to other Business Partners, and running it through
+        // applyGeoLocFields would silently overwrite it with whatever partial address this one
+        // caller happened to send.
+        geoLoc = OBDal.getInstance()
+            .get(org.openbravo.model.common.geography.Location.class, locationAddressId);
+        if (geoLoc == null) {
+          return NeoResponse.error(400, "Invalid locationAddress: " + locationAddressId);
+        }
+        effectiveCountryId = countryIdOf(geoLoc);
+      } else {
+        // Mode B: create. C_Location.C_Country_ID is NOT NULL, but applyGeoLocFields() silently
+        // ignores an id that does not resolve (see its own guard below) — correct on update,
+        // where an absent/invalid country must never blank out one the record already has, but
+        // wrong here: on create there is no existing country to fall back to, so a bad id would
+        // otherwise reach OBDal.flush() as a raw NOT NULL constraint violation instead of a clean
+        // 400.
+        if (OBDal.getInstance().get(Country.class, countryId) == null) {
+          return NeoResponse.error(400, "Invalid country: " + countryId);
+        }
+        geoLoc = OBProvider.getInstance().get(org.openbravo.model.common.geography.Location.class);
+        geoLoc.setClient(bp.getClient());
+        geoLoc.setOrganization(bp.getOrganization());
+        geoLoc.setActive(Boolean.TRUE);
+        applyGeoLocFields(body, geoLoc);
+        OBDal.getInstance().save(geoLoc);
+        effectiveCountryId = countryId;
+      }
 
       // Create C_BPartner_Location (BP–address link)
       org.openbravo.model.common.businesspartner.Location bpLoc =
@@ -180,6 +219,11 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       bpLoc.setName(str(body, "name", "."));
       bpLoc.setShipToAddress(boolField(body, FIELD_SHIP_TO_ADDRESS, true));
       bpLoc.setInvoiceToAddress(boolField(body, FIELD_INVOICE_TO_ADDRESS, true));
+      // C_BPartner_Location.IsTaxLocation's own AD default is an unquoted 'N', so a create that
+      // never mentions it should stay false — `neo_schema` advertises it as an accepted,
+      // server-defaulted field, and a caller that explicitly sends `taxLocation: true` has every
+      // reason to expect it stored, not silently dropped because nothing here ever read it.
+      bpLoc.setTaxLocation(boolField(body, FIELD_TAX_LOCATION, false));
       bpLoc.setPayFromAddress(Boolean.TRUE);
       bpLoc.setRemitToAddress(Boolean.TRUE);
       OBDal.getInstance().save(bpLoc);
@@ -188,11 +232,49 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
       // Build the response record and optionally inject a tax-key warning message
       JSONObject locationJson = buildRecord(bpLoc, geoLoc);
-      checkAndAutoSetTaxKey(locationJson, bpId, countryId, preSaveKey);
+      checkAndAutoSetTaxKey(locationJson, bpId, effectiveCountryId, preSaveKey);
       return wrapRecord(locationJson, 201);
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * The 400 for a create body that cannot be served, or {@code null} when it can.
+   *
+   * <p>{@code neo_schema} advertises {@code locationAddress} (an FK to an existing C_Location) as
+   * this entity's own field, mirroring how {@code bp-location/bpLocation} already exposes
+   * C_Location as a writable entity in its own right (country required there). A caller may
+   * therefore either
+   * <ol>
+   *   <li><b>Mode A (reuse)</b> — pass the id of a C_Location created through that endpoint as
+   *       {@code locationAddress}; no {@code country} is needed, the existing record has one.</li>
+   *   <li><b>Mode B (create)</b> — hand this endpoint raw address fields and let it build the
+   *       C_Location itself. This is the only mode the Contacts UI (LocationEditorModal) ever
+   *       uses; it never sends {@code locationAddress} on create. {@code C_Location.C_Country_ID}
+   *       is NOT NULL, so a missing country must fail here rather than as a raw constraint
+   *       violation at {@code flush()}.</li>
+   * </ol>
+   *
+   * <p>Both modes in the same body is refused rather than guessed at: which one would win is not
+   * a rule any caller could rely on.
+   */
+  private static NeoResponse rejectUnusableCreatePayload(JSONObject body, String locationAddressId,
+      String countryId) {
+    if (locationAddressId != null && hasRawAddressFields(body)) {
+      return NeoResponse.error(400,
+          "Ambiguous create: send either locationAddress (to reuse an existing C_Location) or "
+              + "raw address fields (country, addressLine1, ...), not both.");
+    }
+    if (locationAddressId == null && countryId == null) {
+      return NeoResponse.error(400, "Missing required field: country (C_Country_ID)");
+    }
+    return null;
+  }
+
+  /** The C_Country_ID of {@code geoLoc}, or {@code null} when it carries no country. */
+  private static String countryIdOf(org.openbravo.model.common.geography.Location geoLoc) {
+    return geoLoc.getCountry() != null ? geoLoc.getCountry().getId() : null;
   }
 
   // ------------------------------------------------------------------ update
@@ -232,6 +314,14 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       if (body.has(FIELD_INVOICE_TO_ADDRESS)) {
         bpLoc.setInvoiceToAddress(boolField(body, FIELD_INVOICE_TO_ADDRESS,
             Boolean.TRUE.equals(bpLoc.isInvoiceToAddress())));
+      }
+      // Same gap as create, and the same set-if-provided semantics as the two flags above:
+      // this handler never read taxLocation at all, so any caller sending it on an update was
+      // silently ignored just like on create. `body.has(...)`, not a bare boolField call, so an
+      // update that omits it keeps whatever the record already had instead of resetting it.
+      if (body.has(FIELD_TAX_LOCATION)) {
+        bpLoc.setTaxLocation(boolField(body, FIELD_TAX_LOCATION,
+            Boolean.TRUE.equals(bpLoc.isTaxLocation())));
       }
 
       OBDal.getInstance().flush();
@@ -338,12 +428,33 @@ public class ContactsLocationAddressHandler implements NeoHandler {
     return (dataArr == null || dataArr.length() == 0) ? null : dataArr;
   }
 
+  /**
+   * Whether {@code body} carries any of the raw address fields {@link #applyGeoLocFields} would
+   * use to build a brand new C_Location — as opposed to just {@code locationAddress}, which
+   * points at one that already exists. Used by {@link #handleCreate} to refuse a body that tries
+   * to do both.
+   *
+   * <p>Checked by resolved value ({@link #nullIfEmpty}), not {@link JSONObject#has}: a caller
+   * that serializes every field its schema declares (an MCP client is the expected case) sends
+   * these keys as explicit {@code null}s alongside a real {@code locationAddress}, and that is
+   * exactly the reuse mode, not an ambiguous request.
+   */
+  private static boolean hasRawAddressFields(JSONObject body) {
+    return nullIfEmpty(body.optString(FIELD_ADDRESS_LINE1, null)) != null
+        || nullIfEmpty(body.optString(FIELD_ADDRESS_LINE2, null)) != null
+        || nullIfEmpty(body.optString(FIELD_CITY_NAME, null)) != null
+        || nullIfEmpty(body.optString(FIELD_POSTAL_CODE, null)) != null
+        || nullIfEmpty(body.optString(FIELD_COUNTRY, null)) != null
+        || nullIfEmpty(body.optString(FIELD_REGION, null)) != null
+        || nullIfEmpty(body.optString(FIELD_REGION_NAME, null)) != null;
+  }
+
   private static void applyGeoLocFields(JSONObject body,
       org.openbravo.model.common.geography.Location geoLoc) throws Exception {
-    geoLoc.setAddressLine1(nullIfEmpty(body.optString("addressLine1", null)));
-    geoLoc.setAddressLine2(nullIfEmpty(body.optString("addressLine2", null)));
-    geoLoc.setCityName(nullIfEmpty(body.optString("cityName", null)));
-    geoLoc.setPostalCode(nullIfEmpty(body.optString("postalCode", null)));
+    geoLoc.setAddressLine1(nullIfEmpty(body.optString(FIELD_ADDRESS_LINE1, null)));
+    geoLoc.setAddressLine2(nullIfEmpty(body.optString(FIELD_ADDRESS_LINE2, null)));
+    geoLoc.setCityName(nullIfEmpty(body.optString(FIELD_CITY_NAME, null)));
+    geoLoc.setPostalCode(nullIfEmpty(body.optString(FIELD_POSTAL_CODE, null)));
 
     String countryId = nullIfEmpty(body.optString(FIELD_COUNTRY, null));
     if (countryId != null) {
@@ -562,10 +673,10 @@ public class ContactsLocationAddressHandler implements NeoHandler {
 
   private static void putGeoLocFields(JSONObject locationJson,
       org.openbravo.model.common.geography.Location geoLoc) throws Exception {
-    locationJson.put("addressLine1", geoLoc.getAddressLine1() != null ? geoLoc.getAddressLine1() : JSONObject.NULL);
-    locationJson.put("addressLine2", geoLoc.getAddressLine2() != null ? geoLoc.getAddressLine2() : JSONObject.NULL);
-    locationJson.put("cityName",     geoLoc.getCityName()     != null ? geoLoc.getCityName()     : JSONObject.NULL);
-    locationJson.put("postalCode",   geoLoc.getPostalCode()   != null ? geoLoc.getPostalCode()   : JSONObject.NULL);
+    locationJson.put(FIELD_ADDRESS_LINE1, geoLoc.getAddressLine1() != null ? geoLoc.getAddressLine1() : JSONObject.NULL);
+    locationJson.put(FIELD_ADDRESS_LINE2, geoLoc.getAddressLine2() != null ? geoLoc.getAddressLine2() : JSONObject.NULL);
+    locationJson.put(FIELD_CITY_NAME,     geoLoc.getCityName()     != null ? geoLoc.getCityName()     : JSONObject.NULL);
+    locationJson.put(FIELD_POSTAL_CODE,   geoLoc.getPostalCode()   != null ? geoLoc.getPostalCode()   : JSONObject.NULL);
 
     if (geoLoc.getCountry() != null) {
       locationJson.put(FIELD_COUNTRY,          geoLoc.getCountry().getId());

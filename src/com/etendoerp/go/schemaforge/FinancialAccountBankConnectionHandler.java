@@ -562,10 +562,15 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
 
     FIN_FinancialAccount finAcc = FinancialAccountSupport.createAccount(currentClient(),
         OBContext.getOBContext().getCurrentOrganization(), currency, name, type);
-    // Mirrors the manual "sin conexión" creation flow (FinancialAccountHandler.afterHandle):
-    // a Salt Edge-created account must also come pre-wired with the payment methods that
-    // correspond to its type, with one marked as default.
-    FinancialAccountSupport.assignDefaultPaymentMethods(finAcc);
+    // Everything a newly created account must receive, whatever created it — the SAME single call
+    // FinancialAccountHandler.afterHandle's POST branch makes for the manual "sin conexión" flow.
+    // Do NOT inline provisioning steps here: this used to duplicate the manual path's call list
+    // and drifted from it twice (ETP-4872's accounting defaults never reached this flow, and
+    // ETP-5207's cleared-payment fix initially didn't either), which shipped connected accounts
+    // whose reconciliations posted. Safe to call here: createAccount already flushed, so core's
+    // FIN_FINANCIAL_ACCOUNT_TRG has created the fin_financial_account_acct row the accounting step
+    // corrects. Salt Edge linking below stays here — it is path-specific, not shared provisioning.
+    FinancialAccountSupport.provisionNewAccount(finAcc);
 
     String warning = linkAccount(finAcc, connectionId, saltEdgeAccountId, node, details, apiKey);
     JSONObject data = new JSONObject();

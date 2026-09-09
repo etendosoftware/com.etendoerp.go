@@ -138,7 +138,7 @@ class ContactsLocationAddressParentAndRegionTest {
       body.put(FIELD_BUSINESS_PARTNER, BODY_BP);
       when(obDal.get(BusinessPartner.class, BODY_BP)).thenReturn(null);
 
-      NeoResponse response = handler.handle(post(body, null));
+      NeoResponse response = handler.handle(post(withCountry(body), null));
 
       assertNotNull(response);
       assertEquals(404, response.getHttpStatus());
@@ -152,7 +152,7 @@ class ContactsLocationAddressParentAndRegionTest {
       body.put(FIELD_BUSINESS_PARTNER, BODY_BP);
       when(obDal.get(BusinessPartner.class, BODY_BP)).thenReturn(null);
 
-      handler.handle(post(body, params(QUERY_BP)));
+      handler.handle(post(withCountry(body), params(QUERY_BP)));
 
       verify(obDal).get(BusinessPartner.class, BODY_BP);
       verify(obDal, never()).get(BusinessPartner.class, QUERY_BP);
@@ -166,7 +166,7 @@ class ContactsLocationAddressParentAndRegionTest {
       // the change, because it is what the Contacts address modal sends.
       when(obDal.get(BusinessPartner.class, QUERY_BP)).thenReturn(null);
 
-      NeoResponse response = handler.handle(post(new JSONObject(), params(QUERY_BP)));
+      NeoResponse response = handler.handle(post(withCountry(new JSONObject()), params(QUERY_BP)));
 
       assertEquals(404, response.getHttpStatus());
       verify(obDal).get(BusinessPartner.class, QUERY_BP);
@@ -206,7 +206,7 @@ class ContactsLocationAddressParentAndRegionTest {
       body.put(FIELD_BUSINESS_PARTNER, "");
       when(obDal.get(BusinessPartner.class, QUERY_BP)).thenReturn(null);
 
-      NeoResponse response = handler.handle(post(body, params(QUERY_BP)));
+      NeoResponse response = handler.handle(post(withCountry(body), params(QUERY_BP)));
 
       assertEquals(404, response.getHttpStatus());
       verify(obDal).get(BusinessPartner.class, QUERY_BP);
@@ -220,7 +220,7 @@ class ContactsLocationAddressParentAndRegionTest {
       body.put(FIELD_BUSINESS_PARTNER, "   ");
       when(obDal.get(BusinessPartner.class, QUERY_BP)).thenReturn(null);
 
-      handler.handle(post(body, params(QUERY_BP)));
+      handler.handle(post(withCountry(body), params(QUERY_BP)));
 
       verify(obDal).get(BusinessPartner.class, QUERY_BP);
     }
@@ -538,7 +538,7 @@ class ContactsLocationAddressParentAndRegionTest {
 
       JSONObject body = new JSONObject();
       body.put("region", "ghost-region");
-      NeoResponse response = handler.handle(post(body, params(QUERY_BP)));
+      NeoResponse response = handler.handle(post(withCountry(body), params(QUERY_BP)));
 
       assertNotNull(response);
       verify(obDal, never()).save(any());
@@ -596,6 +596,24 @@ class ContactsLocationAddressParentAndRegionTest {
       builder.queryParams(queryParams);
     }
     return builder.build();
+  }
+
+  /**
+   * Adds the country the create path requires to {@code body}, stubs its lookup, and returns the
+   * body.
+   *
+   * <p>{@code C_Location.C_Country_ID} is NOT NULL, so a create carrying no resolvable country is
+   * refused with a 400 before the parent Business Partner is ever looked up. A test that asserts
+   * anything reached past that point has to satisfy it first — these tests are about parent
+   * resolution and the region columns, not about the country.
+   */
+  private JSONObject withCountry(JSONObject body) throws Exception {
+    // Built BEFORE the stubbing: mockCountry() stubs its own mock, and Mockito rejects a stubbing
+    // started inside another one's argument (UnfinishedStubbingException).
+    Country spain = mockCountry("Spain", Boolean.TRUE);
+    body.put("country", "C-Spain");
+    when(obDal.get(Country.class, "C-Spain")).thenReturn(spain);
+    return body;
   }
 
   private Map<String, String> params(String parentId) {

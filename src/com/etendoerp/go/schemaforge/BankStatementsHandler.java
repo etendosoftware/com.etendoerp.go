@@ -29,6 +29,7 @@ import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseAmount;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseIsoDate;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseStatementIds;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.truncate;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.validateLineAmounts;
 
 import com.etendoerp.go.schemaforge.BankStatementFormatDetector.StatementFormat;
 
@@ -153,8 +154,6 @@ public class BankStatementsHandler implements NeoHandler {
   private static final String MSG_LINE_REQUIRED = "At least one line is required";
   private static final String MSG_NO_VALID_LINES =
       "The file contains no valid lines to import";
-  private static final String MSG_ZERO_AMOUNT_LINE =
-      "Every line must have an amount in either Deposit or Withdrawal";
   private static final String CODE_NO_VALID_LINES = "NO_VALID_LINES";
   private static final String FIELD_DISCARDED_LINES = "discardedLines";
 
@@ -926,12 +925,7 @@ public class BankStatementsHandler implements NeoHandler {
       line.setTransactionDate(parseIsoDate(l.optString("date", null), statement.getTransactionDate()));
       BigDecimal crAmount = parseAmount(l.optString("in", null));
       BigDecimal drAmount = parseAmount(l.optString("out", null));
-      // A line the user actually filled in must carry an amount. Unlike the file
-      // import — which silently drops amount-less rows, as Classic does — here it
-      // is a validation error: the manual form has a user to fix it.
-      if (crAmount.signum() == 0 && drAmount.signum() == 0) {
-        throw new OBException(MSG_ZERO_AMOUNT_LINE);
-      }
+      validateLineAmounts(crAmount, drAmount);
       line.setCramount(crAmount);
       line.setDramount(drAmount);
 
