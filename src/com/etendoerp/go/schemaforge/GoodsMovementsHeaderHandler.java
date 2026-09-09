@@ -40,6 +40,12 @@ import org.openbravo.service.db.DalConnectionProvider;
  * INSERT, but only when the caller did not supply a real value. A real value always wins, and a
  * value already materialized here makes the core observer skip the record, so the sequence is
  * never consumed twice. See {@code docs/neo-headless-extensibility.md}.
+ *
+ * <p><b>Cumulative stock validation before "Procesar" (ETP-5037):</b> delegates to
+ * {@link GoodsMovementProcessGuard}, which runs first and short-circuits with a
+ * {@link NeoResponse} error when any (product, source warehouse) pair across the movement's
+ * lines would exceed on-hand stock — before the request ever reaches the classic completion
+ * process. See {@link GoodsMovementProcessGuard} for details.
  */
 @Named("goodsMovementsHeaderHandler")
 public class GoodsMovementsHeaderHandler implements NeoHandler {
@@ -50,6 +56,10 @@ public class GoodsMovementsHeaderHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoResponse processRejection = GoodsMovementProcessGuard.validateBeforeProcess(context);
+    if (processRejection != null) {
+      return processRejection;
+    }
     if (!"POST".equalsIgnoreCase(context.getHttpMethod())) {
       return null;
     }
