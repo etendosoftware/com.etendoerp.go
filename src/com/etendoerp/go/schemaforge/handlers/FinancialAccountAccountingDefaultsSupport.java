@@ -78,7 +78,16 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  *     </ul>
  *   </li>
  *   <li>{@code clearedPaymentAccount} / {@code clearedPaymentAccountOUT} → always empty for every
- *       account type (confirmed in the ticket's own default tables) — never set here.</li>
+ *       account type (confirmed in the ticket's own default tables), and <b>actively cleared</b>
+ *       here (ETP-5207). Core's AFTER INSERT trigger {@code FIN_FINANCIAL_ACCOUNT_TRG} pre-seeds
+ *       both underlying columns ({@code FIN_IN_CLEAR_ACCT} / {@code FIN_OUT_CLEAR_ACCT}) with the
+ *       ledger asset account, so "not setting them" is NOT the same as "leaving them empty" —
+ *       hence the explicit {@code set…(null)} pair rather than an omission. The trigger is core
+ *       and must not be modified. Deliberate functional consequence: a reconciliation whose
+ *       payment method uses {@code CLE} upon clearing (and likewise a GL-item {@code BPD}/
+ *       {@code BPW} or bank-fee {@code BF} line) is then simply not posted
+ *       ({@code STATUS_DocumentDisabled}) — see
+ *       {@code DocFINReconciliation#getDocumentConfirmation}.</li>
  * </ul>
  */
 public final class FinancialAccountAccountingDefaultsSupport {
@@ -107,6 +116,13 @@ public final class FinancialAccountAccountingDefaultsSupport {
    * A field whose default code does not resolve to an active {@link AccountingCombination} on this
    * tenant's ledger (e.g. a non-PGC-España chart) is simply left {@code null} — this must never
    * throw or otherwise interrupt account creation.
+   *
+   * <p>Note this both DEFAULTS and RESETS: the cleared-payment pair is explicitly set back to
+   * {@code null} (ETP-5207) because the row this finds was created — and pre-populated — by core's
+   * {@code FIN_FINANCIAL_ACCOUNT_TRG} moments earlier. Since the only caller is
+   * {@code FinancialAccountHandler.afterHandle}'s POST (create) branch — updates arrive as
+   * {@code PUT}/{@code PATCH} and never reach here — this cannot clobber a value a user later set
+   * deliberately from the "Contabilidad" tab (a different handler entirely).
    *
    * @param account the newly created (or updated) financial account to default; {@code null} is a no-op
    */
@@ -142,8 +158,28 @@ public final class FinancialAccountAccountingDefaultsSupport {
     String depositWithdrawalCode = depositWithdrawalCodeForType(type);
     applyIfResolved(row::setDepositAccount, depositWithdrawalCode, ledger);
     applyIfResolved(row::setWithdrawalAccount, depositWithdrawalCode, ledger);
-    // clearedPaymentAccount / clearedPaymentAccountOUT: always empty per the ticket's own default
-    // tables, for every account type — intentionally never set here.
+
+    // ETP-5207 — clearedPaymentAccount / clearedPaymentAccountOUT must end up EMPTY for every
+    // account type, and "empty" here means actively CLEARED, not merely un-set: core's AFTER
+    // INSERT trigger FIN_FINANCIAL_ACCOUNT_TRG (src-db/database/model/triggers/
+    // FIN_FINANCIAL_ACCOUNT_TRG.xml, lines 53-65) has already created this row and seeded both
+    // FIN_IN_CLEAR_ACCT and FIN_OUT_CLEAR_ACCT with the ledger's asset account (B_Asset_Acct, or
+    // CB_Asset_Acct for a Cash account — 57200000 on a PGC España chart). That trigger is CORE
+    // and must not be modified, and applyIfResolved above only ever SETS, so the previous
+    // "intentionally never set here" left the trigger's value in place — which is exactly the
+    // bug ETP-5207 reports.
+    //
+    // Unconditional for every account type, and independent of whether findOrCreateRow found or
+    // created the row: the FOUND (trigger-created) row is precisely the one carrying the wrong
+    // value. Harmless on a genuinely new row — DAL dirty-checks by value, so null-over-null
+    // emits no UPDATE.
+    //
+    // Deliberate functional consequence: a reconciliation is queued for posting only when the
+    // relevant account is non-null (DocFINReconciliation#getDocumentConfirmation), so with both
+    // columns empty such a document is simply not posted (STATUS_DocumentDisabled) instead of
+    // generating the unwanted accounting entries that distorted the accounting reports.
+    row.setClearedPaymentAccount(null);
+    row.setClearedPaymentAccountOUT(null);
   }
 
   private static String depositWithdrawalCodeForType(String type) {

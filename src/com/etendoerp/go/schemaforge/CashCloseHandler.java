@@ -227,8 +227,12 @@ public class CashCloseHandler implements NeoHandler {
       throw new OBException(
           "No 'REC' document type configured for organization " + account.getOrganization().getId());
     }
-    String docNumber = FIN_Utility.getDocumentNo(account.getOrganization(), "REC",
-        "DocumentNo_FIN_Reconciliation");
+    // ETP-5230: the Reconciliation sequence lives at org *, which an Organization-level role may not
+    // write. Nothing flushes anywhere in this method — the caller flushes later, outside the scope —
+    // so the scope's own flush is what actually persists the bumped counter.
+    String docNumber = StarOrgWriteScope.withWritableStarOrg(
+        () -> FIN_Utility.getDocumentNo(account.getOrganization(), "REC",
+            "DocumentNo_FIN_Reconciliation"));
     return new AdvPaymentMngtDao().getNewReconciliation(account.getOrganization(), account,
         docNumber, docType, closeDate, closeDate, openingBalance, BigDecimal.ZERO, "DR");
   }

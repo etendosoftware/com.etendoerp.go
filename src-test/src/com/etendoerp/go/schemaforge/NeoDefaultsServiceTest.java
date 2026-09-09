@@ -4899,4 +4899,216 @@ public class NeoDefaultsServiceTest {
     assertFalse(injected);
     assertFalse(body.has("description"));
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // stripEnclosingQuotes — via reflection (ETP-4700 follow-up)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  public void testStripEnclosingQuotesRemovesMatchingSingleQuotes() throws Exception {
+    // The reported bug: C_BPartner.EM_OBTIK_Tax_ID_Key default is stored as '1' — the
+    // enclosing single quotes must be stripped so "1" (a valid AD_Ref_List code) is returned.
+    Object result = invokePrivate("stripEnclosingQuotes", new Class<?>[]{ String.class }, "'1'");
+    assertEquals("1", result);
+  }
+
+  @Test
+  public void testStripEnclosingQuotesRemovesQuotesFromNonNumericListLiteral() throws Exception {
+    // A quoted list default does not have to be numeric — e.g. a Status-like column whose
+    // AD_Ref_List code is alphabetic.
+    Object result = invokePrivate("stripEnclosingQuotes", new Class<?>[]{ String.class },
+        "'RPAP'");
+    assertEquals("RPAP", result);
+  }
+
+  @Test
+  public void testStripEnclosingQuotesRemovesMatchingDoubleQuotes() throws Exception {
+    Object result = invokePrivate("stripEnclosingQuotes", new Class<?>[]{ String.class }, "\"1\"");
+    assertEquals("1", result);
+  }
+
+  @Test
+  public void testStripEnclosingQuotesLeavesUnquotedOpaqueCodeUntouched() throws Exception {
+    // ETP-4700 guarantee: Invoicegrouping's 15-digit unquoted code must survive untouched.
+    Object result = invokePrivate("stripEnclosingQuotes", new Class<?>[]{ String.class },
+        "000000000000000");
+    assertEquals("000000000000000", result);
+  }
+
+  @Test
+  public void testStripEnclosingQuotesLeavesSingleCharacterUnchanged() throws Exception {
+    Object result = invokePrivate("stripEnclosingQuotes", new Class<?>[]{ String.class }, "'");
+    assertEquals("'", result);
+  }
+
+  @Test
+  public void testStripEnclosingQuotesLeavesEmptyQuotedPairUnchanged() throws Exception {
+    // Exactly two characters — length() <= 2 short-circuits before any quote check.
+    Object result = invokePrivate("stripEnclosingQuotes", new Class<?>[]{ String.class }, "''");
+    assertEquals("''", result);
+  }
+
+  @Test
+  public void testStripEnclosingQuotesLeavesLeadingOnlyQuoteUnchanged() throws Exception {
+    Object result = invokePrivate("stripEnclosingQuotes", new Class<?>[]{ String.class }, "'1");
+    assertEquals("'1", result);
+  }
+
+  @Test
+  public void testStripEnclosingQuotesLeavesTrailingOnlyQuoteUnchanged() throws Exception {
+    Object result = invokePrivate("stripEnclosingQuotes", new Class<?>[]{ String.class }, "1'");
+    assertEquals("1'", result);
+  }
+
+  @Test
+  public void testStripEnclosingQuotesLeavesMismatchedQuoteCharsUnchanged() throws Exception {
+    Object result = invokePrivate("stripEnclosingQuotes", new Class<?>[]{ String.class }, "'1\"");
+    assertEquals("'1\"", result);
+  }
+
+  @Test
+  public void testStripEnclosingQuotesHandlesNullWithoutThrowing() throws Exception {
+    Object result = invokePrivate("stripEnclosingQuotes", new Class<?>[]{ String.class },
+        new Object[]{ null });
+    assertNull(result);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // resolveDefaults — list-reference column default literal (ETP-4700 follow-up)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveDefaultsListReferenceQuotedLiteralIsUnquoted() throws Exception {
+    // C_BPartner.EM_OBTIK_Tax_ID_Key: AD_Column.DefaultValue = '1' (quoted). The resolved
+    // default must come back as "1", not the raw "'1'" — that raw form matches no
+    // AD_Ref_List entry and made every business-partner create fail with a 400 (ETP-4700).
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<SFField> fieldCriteria = mock(OBCriteria.class);
+    SFField sfField = mock(SFField.class);
+    Column adColumn = mock(Column.class);
+    Reference listReference = mock(Reference.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    OBContext obContext = mock(OBContext.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    Entity dalEntity = mock(Entity.class);
+    Property prop = mock(Property.class);
+
+    when(sfEntity.getId()).thenReturn("sf-entity-1");
+    when(sfField.getADColumn()).thenReturn(adColumn);
+    when(sfField.isReadOnly()).thenReturn(false);
+    // No ETGO_SF_FIELD-level override — the AD_Column default must be used.
+    when(sfField.getDefaultValue()).thenReturn(null);
+    when(adColumn.getDBColumnName()).thenReturn("EM_OBTIK_Tax_ID_Key");
+    when(adColumn.getDefaultValue()).thenReturn("'1'");
+    when(adColumn.isLinkToParentColumn()).thenReturn(false);
+    when(adColumn.isUseAutomaticSequence()).thenReturn(false);
+    when(listReference.getId()).thenReturn("17"); // List reference
+    when(adColumn.getReference()).thenReturn(listReference);
+    when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
+    when(fieldCriteria.list()).thenReturn(Collections.singletonList(sfField));
+    when(dal.createCriteria(SFField.class)).thenReturn(fieldCriteria);
+    when(prop.isPrimitive()).thenReturn(true);
+    when(dalEntity.getProperty("oBTIKTaxIDKey")).thenReturn(prop);
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
+      obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, null)).thenReturn(vars);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
+          .thenReturn(dalEntity);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper
+          .resolvePropertyName(dalEntity, "EM_OBTIK_Tax_ID_Key"))
+          .thenReturn("oBTIKTaxIDKey");
+      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
+
+      NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
+
+      assertEquals(200, response.getHttpStatus());
+      JSONObject defaults = response.getBody().getJSONObject("defaults");
+      assertEquals("1", defaults.getString("oBTIKTaxIDKey"));
+      // The list-reference branch must never delegate to Utility.getDefault — asserting no
+      // interaction pins down that this test exercises the unquoting branch, not the generic
+      // literal/preference path.
+      utilityMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveDefaultsListReferenceUnquotedOpaqueCodeIsPreserved() throws Exception {
+    // Regression guard for ETP-4700 itself: C_BPartner.Invoicegrouping's unquoted 15-digit
+    // AD_Ref_List code must reach the response byte-for-byte, leading zeros included.
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<SFField> fieldCriteria = mock(OBCriteria.class);
+    SFField sfField = mock(SFField.class);
+    Column adColumn = mock(Column.class);
+    Reference listReference = mock(Reference.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    OBContext obContext = mock(OBContext.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    Entity dalEntity = mock(Entity.class);
+    Property prop = mock(Property.class);
+
+    when(sfEntity.getId()).thenReturn("sf-entity-1");
+    when(sfField.getADColumn()).thenReturn(adColumn);
+    when(sfField.isReadOnly()).thenReturn(false);
+    when(sfField.getDefaultValue()).thenReturn(null);
+    when(adColumn.getDBColumnName()).thenReturn("Invoicegrouping");
+    when(adColumn.getDefaultValue()).thenReturn("000000000000000");
+    when(adColumn.isLinkToParentColumn()).thenReturn(false);
+    when(adColumn.isUseAutomaticSequence()).thenReturn(false);
+    when(listReference.getId()).thenReturn("17"); // List reference
+    when(adColumn.getReference()).thenReturn(listReference);
+    when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
+    when(fieldCriteria.list()).thenReturn(Collections.singletonList(sfField));
+    when(dal.createCriteria(SFField.class)).thenReturn(fieldCriteria);
+    when(prop.isPrimitive()).thenReturn(true);
+    when(dalEntity.getProperty("invoicegrouping")).thenReturn(prop);
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
+      obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, null)).thenReturn(vars);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
+          .thenReturn(dalEntity);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper
+          .resolvePropertyName(dalEntity, "Invoicegrouping"))
+          .thenReturn("invoicegrouping");
+      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
+
+      NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
+
+      assertEquals(200, response.getHttpStatus());
+      JSONObject defaults = response.getBody().getJSONObject("defaults");
+      assertEquals("000000000000000", defaults.getString("invoicegrouping"));
+      utilityMock.verifyNoInteractions();
+    }
+  }
 }

@@ -52,6 +52,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.common.invoice.Invoice;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -69,6 +70,37 @@ class NeoFieldFilterTest {
     assertNotNull(filter);
     JSONObject input = new JSONObject();
     assertEquals(input, filter.filterGetResponse(input));
+  }
+
+  /**
+   * The guard that would have caught ETP-5122's first, silent-no-op attempt.
+   *
+   * <p>{@code ALWAYS_READABLE_PROPS} is matched against raw
+   * {@code DataToJsonConverter} output, whose keys are DAL <i>property</i> names
+   * ({@code property.getName()}), not AD column names. Listing a name that is not a real DAL
+   * property exempts a key that is never in the payload: the filter goes on stripping the real
+   * one and the whole fix is inert, with no failing test and no log line anywhere.
+   *
+   * <p>Pinned against the generated entity constants rather than string literals, because those
+   * constants ARE the property names DAL will produce at runtime — {@code Property} forces every
+   * name through {@code NamingUtil.getStaticPropertyName(mappingClass, name)}, which resolves the
+   * {@code Created} column to {@code PROPERTY_CREATIONDATE} ("creationDate") while {@code Updated}
+   * stays {@code PROPERTY_UPDATED} ("updated"). Any table would do; {@code Invoice} is the entity
+   * ETP-5122 needs.
+   */
+  @Test
+  @DisplayName("ALWAYS_READABLE_PROPS holds real DAL property names, not AD column names")
+  void alwaysReadablePropsMatchGeneratedEntityPropertyNames() throws Exception {
+    java.lang.reflect.Field f = NeoFieldFilter.class.getDeclaredField("ALWAYS_READABLE_PROPS");
+    f.setAccessible(true);
+    @SuppressWarnings("unchecked")
+    Set<String> props = (Set<String>) f.get(null);
+
+    assertEquals(Set.of(Invoice.PROPERTY_UPDATED, Invoice.PROPERTY_CREATIONDATE), props);
+    // Spelled out so the failure message says WHY "created" is wrong here: there is no such DAL
+    // property, hence no such key in the payload the filter inspects.
+    assertFalse(props.contains("created"),
+        "'created' is the API key, not a DAL property name — exempting it strips nothing");
   }
 
 
@@ -241,6 +273,89 @@ class NeoFieldFilterTest {
     }
 
     @Test
+    @DisplayName("serves the Created column as 'created', from DAL's 'creationDate' (ETP-5122)")
+    void preservesCreatedAuditKey() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id"));
+      NeoFieldFilter filter = activeFilter(included, included);
+
+      JSONObject row = new JSONObject();
+      row.put("id", "1");
+      // The key DataToJsonConverter really emits for the Created column. DAL renames that column
+      // to the property "creationDate" (Property#setName, matching PROPERTY_CREATIONDATE), so a
+      // raw response NEVER carries a key called "created" — the first ETP-5122 attempt exempted
+      // "created" and was therefore a silent no-op while "creationDate" went on being stripped.
+      row.put("creationDate", "2026-08-24T12:15:30+02:00");
+      row.put("createdBy", "100");
+
+      JSONArray data = new JSONArray();
+      data.put(row);
+      JSONObject wrapper = new JSONObject()
+          .put("response", new JSONObject().put("data", data));
+
+      filter.filterGetResponse(wrapper);
+
+      JSONObject filtered = wrapper.getJSONObject("response")
+          .getJSONArray("data").getJSONObject(0);
+      // Rationale: Created is an AD column rather than an AD field, so it can never appear in
+      // the ETGO_SF_FIELD configuration, yet the client needs it for date-of-creation
+      // eligibility checks (e.g. Verifactu eligibility by invoice creation date). It is served
+      // under the API key "created" — the name the frontend and emittableResponseKeys() use.
+      assertEquals("2026-08-24T12:15:30+02:00", filtered.getString("created"));
+      // Renamed, not duplicated: the DAL name must not also survive.
+      assertFalse(filtered.has("creationDate"));
+      // Only that one key is exempted, so the rest of the audit block stays filtered out.
+      assertFalse(filtered.has("createdBy"));
+    }
+
+    @Test
+    @DisplayName("audit rename runs even when no configured field has an API alias (ETP-5122)")
+    void createdIsRenamedWithAnEmptyApiKeyMap() throws Exception {
+      // renameToApiKeys() short-circuits on an empty propNameToApiKey map. The audit rename must
+      // not ride on it, or every entity without a single aliased field would still lose
+      // 'creationDate' entirely — which is the majority of specs.
+      Set<String> included = new HashSet<>(Set.of("id"));
+      NeoFieldFilter filter = activeFilter(included, included);
+
+      JSONArray data = new JSONArray();
+      data.put(new JSONObject().put("id", "1").put("creationDate", "2026-09-01T00:00:00+02:00"));
+      JSONObject wrapper = new JSONObject()
+          .put("response", new JSONObject().put("data", data));
+
+      filter.filterGetResponse(wrapper);
+
+      JSONObject filtered = wrapper.getJSONObject("response")
+          .getJSONArray("data").getJSONObject(0);
+      assertEquals("2026-09-01T00:00:00+02:00", filtered.getString("created"));
+    }
+
+    @Test
+    @DisplayName("a window's own field aliased to 'created' wins over the audit column")
+    void configuredCreatedAliasWinsOverAuditColumn() throws Exception {
+      Map<String, String> propToApi = new HashMap<>();
+      propToApi.put("someDate", "created");
+      NeoFieldFilter filter = activeFilterWithMappings(
+          new HashSet<>(Set.of("id", "someDate")), Collections.emptySet(),
+          Collections.emptyMap(), propToApi);
+
+      JSONArray data = new JSONArray();
+      data.put(new JSONObject()
+          .put("id", "1")
+          .put("someDate", "2020-01-01T00:00:00+00:00")
+          .put("creationDate", "2026-09-01T00:00:00+02:00"));
+      JSONObject wrapper = new JSONObject()
+          .put("response", new JSONObject().put("data", data));
+
+      filter.filterGetResponse(wrapper);
+
+      JSONObject filtered = wrapper.getJSONObject("response")
+          .getJSONArray("data").getJSONObject(0);
+      // The configured rename runs first; the audit alias then finds the key taken and drops
+      // 'creationDate' rather than clobbering the value the window actually declared.
+      assertEquals("2020-01-01T00:00:00+00:00", filtered.getString("created"));
+      assertFalse(filtered.has("creationDate"));
+    }
+
+    @Test
     void renamesPropertiesToApiKeysInGetResponse() throws Exception {
       Set<String> included = new HashSet<>(Set.of("id", "priceActual"));
       Map<String, String> propToApi = new HashMap<>();
@@ -338,6 +453,28 @@ class NeoFieldFilterTest {
       // The read-path exemption must not leak into the write path: letting a client set its
       // own 'updated' would let it defeat the very staleness check the exemption exists for.
       assertFalse(result.has("updated"));
+    }
+
+    @Test
+    @DisplayName("'created' is readable but never writable")
+    void stripsCreatedFromWriteBody() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id"));
+      NeoFieldFilter filter = activeFilter(included, included);
+
+      JSONObject body = new JSONObject()
+          .put("id", "1")
+          .put("created", "1999-01-01T00:00:00+00:00")
+          // Both spellings, because the audit alias means a client could try either: the API key
+          // it reads back, or the DAL property name the persistence layer would actually honour.
+          .put("creationDate", "1999-01-01T00:00:00+00:00");
+
+      JSONObject result = filter.filterWriteRequest(body);
+      assertTrue(result.has("id"));
+      // The read-path exemption must not leak into the write path: a client must never be able
+      // to set its own 'created'. AUDIT_PROP_TO_API_KEY is deliberately not merged into
+      // apiKeyToPropName, so remapApiKeys does not turn "created" into a writable "creationDate".
+      assertFalse(result.has("created"));
+      assertFalse(result.has("creationDate"));
     }
 
     @Test
@@ -447,9 +584,9 @@ class NeoFieldFilterTest {
           Collections.emptyMap(), propToApiKey);
 
       // The DAL name "dateAcct" must NOT appear: the caller never sees it, so asking for it is
-      // as wrong as asking for a field that does not exist. "updated" DOES appear: it is served
-      // unconditionally on the read path (ETP-5073).
-      assertEquals(Optional.of(Set.of("id", "documentNo", "accountingDate", "updated")),
+      // as wrong as asking for a field that does not exist. "updated"/"created" DO appear: they
+      // are served unconditionally on the read path (ETP-5073, ETP-5122).
+      assertEquals(Optional.of(Set.of("id", "documentNo", "accountingDate", "updated", "created")),
           filter.emittableResponseKeys());
     }
 
@@ -464,6 +601,21 @@ class NeoFieldFilterTest {
       // its value. Declaring it here keeps that array honest; the write path is unaffected.
       Set<String> emittable = filter.emittableResponseKeys().orElseThrow();
       assertTrue(emittable.contains("updated"));
+    }
+
+    @Test
+    @DisplayName("'created' is emittable even though no window can declare it (ETP-5122)")
+    void createdAlwaysReadableKeyIsEmittable() throws Exception {
+      Set<String> included = new HashSet<>(Set.of("id", "name"));
+      NeoFieldFilter filter = activeFilter(included, included);
+
+      // Regression: filterGetResponse serves "created", but emittableResponseKeys would omit it
+      // unless ALWAYS_READABLE_API_KEYS declares it — same reasoning as "updated" (ETP-5073).
+      Set<String> emittable = filter.emittableResponseKeys().orElseThrow();
+      assertTrue(emittable.contains("created"));
+      // And the DAL-property spelling must NOT be advertised: filterGetResponse renames it away,
+      // so a caller projecting "creationDate" would get nothing back (ETP-5122).
+      assertFalse(emittable.contains("creationDate"));
     }
 
     @Test
