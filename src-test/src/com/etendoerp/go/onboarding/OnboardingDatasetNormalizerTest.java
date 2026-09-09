@@ -539,6 +539,37 @@ public class OnboardingDatasetNormalizerTest {
   }
 
   /**
+   * ETP-5222 (Item 4, QA second pass, 2026-09-09) — self-referential FK consistency check.
+   *
+   * <p>Item 4's whole mechanism (see the ledger's "Item 4" section, {@code EntityResolver
+   * #getId}) only works for a brand-new tenant if the referenced {@code C_ValidCombination}
+   * row ({@code 29616DEC549948E7A65ABC28BCC18742}) itself survives normalization and appears
+   * in the SAME generated dataset XML — {@code DataImportService}'s ID-translation only
+   * resolves a foreign key against a row inserted earlier in the SAME import batch. The
+   * sibling test above proves the FK reference (the {@code <pInvoicepricevarianceAcct>}
+   * element) is present; it does not prove the FK TARGET (the {@code C_ValidCombination} row
+   * itself, with that id as its own primary key) is also present after filtering. Both must
+   * hold for a real import to succeed — asserting only one leaves a residual, previously-
+   * untested gap (e.g. a hypothetical future row-exclusion filter dropping this specific
+   * combination while leaving the schema-default reference dangling would pass the sibling
+   * test but break a real onboarding run). Row ids are emitted as an {@code id} attribute on
+   * the entity element ({@code OnboardingDatasetNormalizer#convertRow}, not text content), so
+   * this checks the row's own PK attribute rather than a bare substring.
+   */
+  @Test
+  public void testNormalizerInvoicePriceVarianceCombinationRowSurvivesNormalization() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue("C_ACCTSCHEMA_DEFAULT must still reference the combination (sibling test guard)",
+        xml.contains("<pInvoicepricevarianceAcct>29616DEC549948E7A65ABC28BCC18742"
+            + "</pInvoicepricevarianceAcct>"));
+    assertTrue("The referenced C_ValidCombination row (29616DEC549948E7A65ABC28BCC18742) itself "
+        + "must survive normalization as its own row in the SAME dataset XML, or a real "
+        + "DataImportService import cannot resolve the FK for a brand-new tenant",
+        xml.contains("<cValidcombination id=\"29616DEC549948E7A65ABC28BCC18742\""));
+  }
+
+  /**
    * ETP-4452 (R12, 2026-07-08): the product owner reconfirmed — reversing R11's own confirmation —
    * that {@code WriteOff_Acct} must resolve to account 65000000 ("Pérdidas de créditos comerciales
    * incobrables"), not 69400000. Verifies a freshly-provisioned tenant is born with
