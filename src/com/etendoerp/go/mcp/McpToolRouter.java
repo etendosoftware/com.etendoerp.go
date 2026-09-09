@@ -616,7 +616,12 @@ public class McpToolRouter {
     String result = jsonService.add(params, wrappedBody);
     JSONObject responseJson = new JSONObject(result);
 
-    JSONObject error = McpWriteRequestSupport.checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_WRITING);
+    // userProvided is still the pre-defaults snapshot here (ETP-4793 / IMP-24's witness),
+    // so it also answers "did the caller actually send this field" for a 422's fieldErrors —
+    // a key absent from it can only have been filled in afterwards, by injectMandatoryDefaults
+    // or the callout cascade above, never by the caller.
+    JSONObject error = McpWriteRequestSupport.checkJsonServiceError(responseJson,
+        McpConstants.SEE_ALSO_WRITING, NeoCrudHelper.snapshotBodyFields(userProvided));
     if (error != null) {
       return wrapAsErrorContent(error.toString(2));
     }
@@ -671,6 +676,11 @@ public class McpToolRouter {
 
     // MCP: accept all valid table columns from AI agents
     JSONObject filteredBody = McpWriteRequestSupport.mapFieldsToDalProperties(fields, adTab);
+
+    // Unlike handleCreate this path never runs injectMandatoryDefaults (see the IMP-16 note
+    // further down), so every key filteredBody carries at this point is the caller's own — this
+    // snapshot is a fixed reference set for a 422's fieldErrors, not a "before defaults" one.
+    Set<String> updateUserProvidedFields = NeoCrudHelper.snapshotBodyFields(filteredBody);
 
     // IMP-4: resolve FK-by-name search strings before persist (mirrors handleCreate).
     Entity dalEntity = ModelProvider.getInstance()
@@ -731,7 +741,8 @@ public class McpToolRouter {
     String result = jsonService.update(params, wrappedBody);
     JSONObject responseJson = new JSONObject(result);
 
-    JSONObject error = McpWriteRequestSupport.checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_WRITING);
+    JSONObject error = McpWriteRequestSupport.checkJsonServiceError(responseJson,
+        McpConstants.SEE_ALSO_WRITING, updateUserProvidedFields);
     if (error != null) {
       return wrapAsErrorContent(error.toString(2));
     }
