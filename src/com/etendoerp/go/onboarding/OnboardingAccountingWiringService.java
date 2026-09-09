@@ -1137,21 +1137,33 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
   // Classic's own fin_financial_account_trg AFTER INSERT trigger — which otherwise auto-provisions
   // this exact row for every LIVE financial-account creation — never fires for the bundled template
   // accounts ("Caja", "Cuenta de Banco", "Tarjeta"). This statement mirrors that trigger's own
-  // column mapping one-for-one: the asset account resolves to CB_Asset_Acct for cash-type accounts
-  // (type='C') and B_Asset_Acct for every other type, and that same resolved value is reused for
-  // fin_deposit_acct/fin_withdrawal_acct/fin_out_clear_acct/fin_in_clear_acct, exactly as the trigger
-  // does (fin_debit_acct/fin_credit_acct are left NULL, also matching the trigger).
+  // column mapping, with ONE deliberate divergence (see below): the asset account resolves to
+  // CB_Asset_Acct for cash-type accounts (type='C') and B_Asset_Acct for every other type, and that
+  // same resolved value is reused for fin_deposit_acct/fin_withdrawal_acct, as the trigger does
+  // (fin_debit_acct/fin_credit_acct are left NULL, also matching the trigger).
+  //
+  // ETP-5207 — deliberate divergence from the trigger: fin_out_clear_acct and fin_in_clear_acct
+  // (the "Cleared payment account" IN/OUT pair) are NO LONGER selected here, so a newly onboarded
+  // tenant's template accounts are born with them empty. The trigger seeds them with the asset
+  // account, and a non-null cleared account is exactly what makes DocFINReconciliation queue a
+  // reconciliation for posting (#getDocumentConfirmation) — producing accounting entries that
+  // distorted Sumas y Saldos / Libro Mayor. Note the GOClient sampledata XML for
+  // FIN_FINANCIAL_ACCOUNT_ACCT is NOT the source of a tenant's row (that table is absent from
+  // OnboardingDatasetDefinition.INCLUDED_TABLES, so the file is never imported) — THIS statement
+  // is the preventive front. Lockstep partners that must stay consistent with this decision:
+  // FinancialAccountAccountingDefaultsSupport (the runtime/create path, which now actively clears
+  // the pair after the trigger has run) and data-fix R34-fin-account-cleared-payment-accounts (the
+  // corrective front for already-provisioned tenants). Data-fix R22 is the frozen twin that still
+  // fills both columns; it is immutable and R34 sorts after it, so the chain self-corrects.
   private static final String FIN_FINANCIAL_ACCOUNT_ACCT_SQL =
       "INSERT INTO fin_financial_account_acct ("
       + "  fin_financial_account_acct_id, ad_client_id, ad_org_id, isactive, created, createdby,"
       + "  updated, updatedby, fin_financial_account_id, c_acctschema_id,"
-      + "  fin_deposit_acct, fin_withdrawal_acct, fin_out_clear_acct, fin_in_clear_acct,"
+      + "  fin_deposit_acct, fin_withdrawal_acct,"
       + "  fin_bankfee_acct, fin_bankrevaluationgain_acct, fin_bankrevaluationloss_acct,"
       + "  fin_out_intransit_acct, fin_in_intransit_acct) "
       + "SELECT get_uuid(), :clientId, f.ad_org_id, 'Y', now(), '0', now(), '0',"
       + "  f.fin_financial_account_id, :schemaId,"
-      + "  CASE WHEN f.type = 'C' THEN d.cb_asset_acct ELSE d.b_asset_acct END,"
-      + "  CASE WHEN f.type = 'C' THEN d.cb_asset_acct ELSE d.b_asset_acct END,"
       + "  CASE WHEN f.type = 'C' THEN d.cb_asset_acct ELSE d.b_asset_acct END,"
       + "  CASE WHEN f.type = 'C' THEN d.cb_asset_acct ELSE d.b_asset_acct END,"
       + "  d.b_expense_acct, d.b_revaluationgain_acct, d.b_revaluationloss_acct,"
