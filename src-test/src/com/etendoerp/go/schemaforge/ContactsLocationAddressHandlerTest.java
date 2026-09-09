@@ -191,7 +191,9 @@ class ContactsLocationAddressHandlerTest {
     params.put("parentId", "missing-bp-id");
     when(obDal.get(BusinessPartner.class, "missing-bp-id")).thenReturn(null);
 
-    NeoContext ctx = buildContext("POST", null, new JSONObject(), params);
+    // The country is what makes the body servable at all — the 404 asserted here is only
+    // reachable once the payload itself is accepted.
+    NeoContext ctx = buildContext("POST", null, createBodyWithCountry("ES"), params);
     NeoResponse response = handler.handle(ctx);
     assertNotNull(response);
     assertEquals(404, response.getHttpStatus());
@@ -225,10 +227,13 @@ class ContactsLocationAddressHandlerTest {
     when(bpLoc.isInvoiceToAddress()).thenReturn(Boolean.TRUE);
     when(obProvider.get(org.openbravo.model.common.businesspartner.Location.class)).thenReturn(bpLoc);
 
+    Country country = stubCountry("ES");
+
     JSONObject body = new JSONObject();
     body.put("name", "Test Address");
     body.put("addressLine1", "123 Main St");
     body.put("cityName", "Springfield");
+    body.put("country", "ES");
 
     NeoContext ctx = buildContext("POST", null, body, params);
     NeoResponse response = handler.handle(ctx);
@@ -244,6 +249,7 @@ class ContactsLocationAddressHandlerTest {
     JSONObject resultRecord = data.getJSONObject(0);
     assertEquals("bp-loc-id", resultRecord.getString("id"));
     assertEquals("geo-loc-id", resultRecord.getString("locationAddress"));
+    verify(geoLoc).setCountry(country);
   }
 
   // ── handleUpdate ────────────────────────────────────────────────────────
@@ -399,7 +405,7 @@ class ContactsLocationAddressHandlerTest {
 
     when(obDal.get(BusinessPartner.class, "bp-123")).thenThrow(new RuntimeException("DB error"));
 
-    NeoContext ctx = buildContext("POST", null, new JSONObject(), params);
+    NeoContext ctx = buildContext("POST", null, createBodyWithCountry("ES"), params);
     NeoResponse response = handler.handle(ctx);
 
     assertNotNull(response);
@@ -1038,6 +1044,8 @@ class ContactsLocationAddressHandlerTest {
     when(connMock.prepareStatement(anyString())).thenReturn(psMock);
     when(obDal.getConnection()).thenReturn(connMock);
 
+    stubCountry("ES");
+
     JSONObject body = new JSONObject();
     body.put("name", "Test");
     body.put("country", "ES");
@@ -1099,6 +1107,8 @@ class ContactsLocationAddressHandlerTest {
         .thenReturn(psKey);
     when(connMock.prepareStatement(argThat(s -> s != null && s.contains("em_eucntry_iseucountry"))))
         .thenReturn(psCountry);
+
+    stubCountry("US-COUNTRY-ID");
 
     JSONObject body = new JSONObject();
     body.put("name", "Test");
@@ -1169,6 +1179,8 @@ class ContactsLocationAddressHandlerTest {
         .thenReturn(psCountry);
     when(connMock.prepareStatement(argThat(s -> s != null && s.contains("taxid"))))
         .thenReturn(psTax);
+
+    stubCountry("FR-COUNTRY-ID");
 
     JSONObject body = new JSONObject();
     body.put("name", "Test");
@@ -1270,6 +1282,8 @@ class ContactsLocationAddressHandlerTest {
       mVies.when(() -> ViesService.checkVat(anyString())).thenReturn(viesResult);
       mMsg.when(() -> OBMessageUtils.messageBD(anyString())).thenReturn("msg");
 
+      stubCountry("FR-COUNTRY-ID");
+
       JSONObject body = new JSONObject();
       body.put("name", "Test");
       body.put("country", "FR-COUNTRY-ID");
@@ -1329,6 +1343,30 @@ class ContactsLocationAddressHandlerTest {
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────
+
+  /**
+   * Stubs the C_Country lookup {@code handleCreate} performs before building a brand new
+   * C_Location, and returns the mock.
+   *
+   * <p>Every create test needs this. {@code C_Location.C_Country_ID} is NOT NULL and
+   * {@code applyGeoLocFields} silently ignores an id that does not resolve, so the create path
+   * validates the country up front and answers 400 rather than letting the miss reach
+   * {@code flush()} as a raw constraint violation. An unstubbed mock answers null — which is
+   * exactly that refusal.
+   */
+  private Country stubCountry(String countryId) {
+    Country country = mock(Country.class);
+    when(country.getId()).thenReturn(countryId);
+    when(obDal.get(Country.class, countryId)).thenReturn(country);
+    return country;
+  }
+
+  /** A minimal create body: just the country, the one field the create path requires. */
+  private JSONObject createBodyWithCountry(String countryId) throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("country", countryId);
+    return body;
+  }
 
   private NeoContext buildContext(String method, String recordId, JSONObject body,
       Map<String, String> queryParams) {

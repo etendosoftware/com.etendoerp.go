@@ -70,6 +70,14 @@ import com.etendoerp.go.schemaforge.SiiTbaiAutoSendScheduleService;
  * config. This column is not mapped in the generated {@link AEATSIIConfig} entity class and
  * defaults to {@code 'N'}, so without this hook every PUT would clear the org flag.
  *
+ * <h3>REDEME forced to 'N' (ETP-5122)</h3>
+ * <p>{@code REDEME} ("Subject in REDEME") is hidden from the Etendo GO SII configuration UI —
+ * the frontend never sends it. The backend never trusts that, though: on every successful
+ * non-deactivating save (POST create <em>and</em> PUT update) this handler forces
+ * {@code REDEME = 'N'} via {@link AEATSIIConfig#setRedeme}, regardless of what the request
+ * body carried (or omitted). Unlike {@code INSIISYSTEM}, {@code redeme} IS mapped in the
+ * generated {@link AEATSIIConfig} entity class, so the DAL setter is used instead of native SQL.
+ *
  * <h3>POST/PUT afterHandle — twice-a-day auto-send schedule (ETP-5117)</h3>
  * <p>After a successful create (POST) or non-deactivating update (PUT) that leaves the config
  * active, ensures a scheduled {@code AD_Process_Request} exists for the SII sending process,
@@ -173,27 +181,33 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
   }
 
   /**
-   * After a successful create (POST) or non-deactivating update (PUT) of an SII config:
+   * After a successful create (POST) or non-deactivating update (PUT) of an SII config, applies
+   * the forced-field fixups that must never depend on the request body, plus the twice-a-day
+   * auto-send schedule maintenance (ETP-5117):
+   *
    * <ul>
-   *   <li>PUT only — ensures {@code INSIISYSTEM = 'Y'} in the DB so the
-   *       {@code AEATSII_CHECK_SIFS_CONFIGS_TRG} trigger correctly marks the org's
-   *       {@code em_etsg_has_sii_config} flag (ETP-4783, unchanged).</li>
-   *   <li>POST or PUT — ensures the twice-a-day auto-send schedule exists for the config's
-   *       organization (ETP-5117). POST is included (not just PUT) because SII configuration is
-   *       most commonly created via POST; gating only on PUT would silently skip the schedule for
-   *       every tenant that never edits the config after the initial save.</li>
+   *   <li><b>POST</b> (create): forces {@code REDEME = 'N'} on the newly created record, and
+   *       ensures the auto-send schedule exists for the config's organization. POST is included
+   *       (not just PUT) because SII configuration is most commonly created via POST; gating
+   *       only on PUT would silently skip the schedule for every tenant that never edits the
+   *       config after the initial save.</li>
+   *   <li><b>PUT</b> (update, non-deactivating): forces {@code REDEME = 'N'}, ensures
+   *       {@code INSIISYSTEM = 'Y'} in the DB so the {@code AEATSII_CHECK_SIFS_CONFIGS_TRG}
+   *       trigger correctly marks the org's {@code em_etsg_has_sii_config} flag (ETP-4783,
+   *       unchanged), and ensures the auto-send schedule exists.</li>
    * </ul>
    *
    * <p>Deactivation PUTs ({@code active=false}) and genuine DELETEs are skipped entirely — the
-   * org flag should be cleared, and a config that is not becoming active must not get a
-   * schedule. Their auto-send schedule cleanup runs in the pre-hook ({@link #smartDeactivate} /
-   * {@link #beforeDelete}), not here — see class Javadoc.
+   * org flag should be cleared when the config is deactivated, {@code REDEME} no longer matters
+   * for a record being turned off, and a config that is not becoming active must not get a
+   * schedule. Their auto-send schedule cleanup already ran in the pre-hook ({@link
+   * #smartDeactivate} / {@link #beforeDelete}) — see class Javadoc.
    */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
-    String method = context.getHttpMethod();
-    boolean isPost = METHOD_POST.equalsIgnoreCase(method);
-    boolean isPut = METHOD_PUT.equalsIgnoreCase(method);
+    String httpMethod = context.getHttpMethod();
+    boolean isPost = METHOD_POST.equalsIgnoreCase(httpMethod);
+    boolean isPut = METHOD_PUT.equalsIgnoreCase(httpMethod);
     if (!isPost && !isPut) {
       // Includes a genuine DELETE: its schedule cleanup already ran in beforeDelete, where the
       // config record still existed and could answer for its own client/organization.
@@ -210,6 +224,7 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
     try {
       OBContext.setAdminMode(true);
       try {
+        setRedemeN(recordId);
         if (isPut) {
           setInSiiSystemY(recordId);
         }
@@ -319,6 +334,29 @@ public class SiiConfigDeactivateHandler extends AbstractSmartDeactivationHandler
         .setParameter("id", recordId)
         .executeUpdate();
     log.info("SiiConfigDeactivateHandler: set INSIISYSTEM='Y' for config {}", recordId);
+  }
+
+  /**
+   * Forces {@code REDEME = 'N'} for the given {@code AEATSII_CONFIG} record. Unlike
+   * {@code INSIISYSTEM}, {@code redeme} IS mapped in the generated {@link AEATSIIConfig} entity
+   * (see {@link AEATSIIConfig#setRedeme}), so the DAL setter is used instead of native SQL — no
+   * flush ordering concern here since it goes through the same Hibernate session as the CRUD
+   * write that just committed.
+   *
+   * @param recordId primary key of the {@code AEATSII_CONFIG} row to update
+   */
+  private void setRedemeN(String recordId) {
+    AEATSIIConfig config = OBDal.getInstance().get(AEATSIIConfig.class, recordId);
+    if (config == null) {
+      return;
+    }
+    // Always force to false — never trust the current value, whatever it is (true, false, or
+    // even null on a legacy row) — the field is hidden from the UI and must never be anything
+    // other than 'N'.
+    config.setRedeme(false);
+    OBDal.getInstance().save(config);
+    OBDal.getInstance().flush();
+    log.info("SiiConfigDeactivateHandler: forced REDEME='N' for config {}", recordId);
   }
 
   /**
