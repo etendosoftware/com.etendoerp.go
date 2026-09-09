@@ -83,6 +83,19 @@ import org.openbravo.test.purchaseOrder.PurchaseOrderUtils;
  * it) and would require a full CDI container to exercise in a test. This
  * mirrors the same "test the routine that owns the decision, not the whole
  * endpoint" scoping used for {@code CreateGoodsReceiptHandlerNegativeQuantityIntegrationTest}.
+ *
+ * <p><b>ETP-4567 follow-up (QA "Hallazgo 1"):</b> the sign-unaware filter was fixed
+ * above (line-item level, Receipt → Invoice) but one sibling was missed: {@link
+ * CreatePurchaseInvoiceHandler#getPendingQuantity}, used only by {@link
+ * CreatePurchaseInvoiceHandler#buildSelectedLines}, which backs the *direct*
+ * PO → Purchase Invoice action (no Goods Receipt involved — {@code createFromOrder}).
+ * It still used {@code pending.compareTo(BigDecimal.ZERO) > 0}. That is invisible for
+ * a mixed-sign order (a positive line still populates {@code selectedLines}), which is
+ * exactly why the ETP-4722 fix and its E2E coverage didn't catch it — but when
+ * EVERY line on the order is negative (a fully-negative-total PO), every line is
+ * filtered out, {@code selectedLines} ends up empty, and the handler throws
+ * "No pending lines to invoice in this purchase order". See {@link
+ * #buildSelectedLinesIncludesLinesWhenOrderTotalIsFullyNegative}.
  */
 public class CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest extends OBBaseTest {
 
@@ -92,6 +105,9 @@ public class CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest extends
     // already proven to work under (see org.openbravo.test.purchaseOrder.PurchaseOrderStatus).
     OBContext.setOBContext(TestConstants.Users.ADMIN, TestConstants.Roles.FB_GRP_ADMIN,
         TestConstants.Clients.FB_GRP, TestConstants.Orgs.ESP);
+    // PurchaseOrderUtils stamps accountingDate=new Date() on every header it saves; open today's
+    // fiscal period so the save doesn't fail on a clean env or once the seeded period prefix lapses.
+    PeriodTestUtils.ensureOpenPeriod(new Date());
   }
 
   @After
@@ -165,6 +181,69 @@ public class CreatePurchaseInvoiceHandlerNegativeQuantityIntegrationTest extends
       }
     }
     assertTrue("expected an entry for the negative-quantity order line", negativeLineFound);
+  }
+
+  @Test
+  public void buildSelectedLinesIncludesLinesWhenOrderTotalIsFullyNegative() throws Exception {
+    // ── Real Purchase Order whose ENTIRE total is negative (every line negative,
+    // return-style PO — QA's exact repro: "todas las líneas con cantidad negativa") ──
+    Order order = PurchaseOrderUtils.createPurchaseOrder();
+    OrderLine firstLine = order.getOrderLineList().get(0);
+    firstLine.setOrderedQuantity(new BigDecimal("-1"));
+    firstLine.setLineNetAmount(new BigDecimal("-1").multiply(firstLine.getUnitPrice()));
+    OBDal.getInstance().save(firstLine);
+
+    OrderLine secondLine = OBProvider.getInstance().get(OrderLine.class);
+    secondLine.setClient(order.getClient());
+    secondLine.setOrganization(order.getOrganization());
+    secondLine.setSalesOrder(order);
+    secondLine.setOrderDate(new Date());
+    secondLine.setWarehouse(order.getWarehouse());
+    secondLine.setLineNo(20L);
+    secondLine.setProduct(firstLine.getProduct());
+    secondLine.setOrderedQuantity(new BigDecimal("-2"));
+    secondLine.setUOM(firstLine.getUOM());
+    secondLine.setUnitPrice(firstLine.getUnitPrice());
+    secondLine.setLineNetAmount(new BigDecimal("-2").multiply(firstLine.getUnitPrice()));
+    secondLine.setTax(firstLine.getTax());
+    secondLine.setCurrency(firstLine.getCurrency());
+    OBDal.getInstance().save(secondLine);
+    OBDal.getInstance().flush();
+    OBDal.getInstance().refresh(order);
+
+    assertEquals("sanity check: order must carry both fully-negative lines",
+        2, order.getOrderLineList().size());
+
+    // ── Run the ACTUAL production routine under test: the direct PO -> Purchase
+    // Invoice path ("Crear factura" straight on a Purchase Order, no Goods Receipt
+    // involved), exactly as QA reproduced it ──────────────────────────────────────
+    CreatePurchaseInvoiceHandler handler = new CreatePurchaseInvoiceHandler();
+    JSONArray selectedLines = handler.buildSelectedLines(order);
+
+    // ── The bug: a strictly-positive pending check drops every line when the WHOLE
+    // order total is negative, leaving selectedLines empty and the caller throwing
+    // "No pending lines to invoice in this purchase order" (ETP-4567) ───────────────
+    assertEquals("selectedLines must include every negative-quantity line when the order's "
+        + "entire total is negative, not just when a positive line offsets it",
+        2, selectedLines.length());
+
+    boolean firstLineFound = false;
+    boolean secondLineFound = false;
+    for (int i = 0; i < selectedLines.length(); i++) {
+      JSONObject entry = selectedLines.getJSONObject(i);
+      if (firstLine.getId().equals(entry.getString("id"))) {
+        firstLineFound = true;
+        assertEquals("the negative sign must be preserved in the invoice line input",
+            0, new BigDecimal("-1").compareTo(new BigDecimal(entry.getString("orderedQuantity"))));
+      }
+      if (secondLine.getId().equals(entry.getString("id"))) {
+        secondLineFound = true;
+        assertEquals("the negative sign must be preserved in the invoice line input",
+            0, new BigDecimal("-2").compareTo(new BigDecimal(entry.getString("orderedQuantity"))));
+      }
+    }
+    assertTrue("expected an entry for the first negative-quantity order line", firstLineFound);
+    assertTrue("expected an entry for the second negative-quantity order line", secondLineFound);
   }
 
   private ShipmentInOutLine newReceiptLine(ShipmentInOut receipt, OrderLine orderLine,

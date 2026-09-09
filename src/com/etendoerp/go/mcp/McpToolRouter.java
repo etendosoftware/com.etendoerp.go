@@ -48,6 +48,7 @@ import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.AmortizationPlanService;
+import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.BatchService;
 import com.etendoerp.go.schemaforge.NeoCommercialLinePolicy;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
@@ -56,14 +57,17 @@ import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.util.NeoReportContract;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
+import com.etendoerp.go.schemaforge.DocTypeResolver;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
 import com.etendoerp.go.schemaforge.NeoMandatoryDefaultsService;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 
 /**
@@ -117,6 +121,12 @@ public class McpToolRouter {
    */
   public JSONObject route(String toolName, JSONObject arguments, java.util.Set<String> scopes) {
     McpAuthorizationService.authorizeToolCall(toolName, scopes);
+    // Vector target authorization must run in the caller's role context. The regular MCP
+    // handlers use admin mode for DAL metadata and therefore cannot safely host this check.
+    // Dispatching before setAdminMode preserves AD_Window/entity organization isolation.
+    if (McpConstants.TOOL_NEO_VECTOR_SEARCH.equals(toolName)) {
+      return handleVectorSearch(arguments);
+    }
     try {
       OBContext.setAdminMode();
       try {
@@ -173,6 +183,19 @@ public class McpToolRouter {
       log.error("Error routing MCP tool '{}'", toolName, e);
       return wrapAsErrorContent(buildUnexpectedErrorBody(toolName, e));
     }
+  }
+
+  /** Route semantic search through the same authenticated DB Extended contract as REST. */
+  private JSONObject handleVectorSearch(JSONObject arguments) {
+    String query = arguments == null ? null : arguments.optString(McpConstants.PARAM_QUERY, null);
+    String targets = McpArgumentUtils.joinStringArray(
+        arguments == null ? null : arguments.optJSONArray("targets"));
+    NeoResponse response = new NeoVectorSearchEndpoint().handle(query, null, targets,
+        McpArgumentUtils.optionalString(arguments, "topK"),
+        McpArgumentUtils.optionalString(arguments, "minScore"),
+        McpArgumentUtils.optionalString(arguments, "maxScore"), null);
+    String body = response.getBody() == null ? "{}" : response.getBody().toString();
+    return response.getHttpStatus() >= 400 ? wrapAsErrorContent(body) : wrapAsTextContent(body);
   }
 
   /**
@@ -542,6 +565,15 @@ public class McpToolRouter {
       filteredBody.put(key, userProvided.get(key));
     }
 
+    // Keep MCP creates aligned with the REST create path. The create schema intentionally hides
+    // system document-type fields, but mandatory defaults may still inject the generic "Standard
+    // Order" target before the tab-specific subtype is known. Resolve the canonical type from
+    // the active tab (sales quotations use the quotation subtype) and apply it to both
+    // transactionDocument and documentType. Explicit values remain protected unless the tab has
+    // an authoritative subtype filter.
+    DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, ctx,
+        NeoCrudHelper.snapshotBodyFields(userProvided));
+
     // userProvided is the pre-defaults snapshot, so it is the only reliable witness of whether the
     // agent actually chose a uOM.
     injectLineUomIfApplicable(filteredBody, dalEntity, userProvided.has(FIELD_UOM));
@@ -616,11 +648,18 @@ public class McpToolRouter {
    * Update an existing record.
    */
   private JSONObject handleUpdate(String specName, JSONObject args) throws Exception {
-    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, "id", McpConstants.PARAM_FIELDS);
+    // ETP-5073 / DOC-04: `updated` joins the required set. Core's optimistic-locking check only
+    // runs when the write payload carries it (JsonToDataConverter#setData guards on the key being
+    // present), so an omission does not fail loudly — it silently disables the check and lets this
+    // write overwrite a concurrent edit. Refusing the call is therefore the only safe answer, and
+    // validateArgs already produces the 422 envelope that names the missing argument.
+    McpToolRouterSupport.validateArgs(args, McpConstants.PARAM_ENTITY, "id",
+        McpConstants.PARAM_FIELDS, McpConstants.PARAM_UPDATED);
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     String recordId = args.getString("id");
     JSONObject fields = args.getJSONObject(McpConstants.PARAM_FIELDS);
+    String updated = args.getString(McpConstants.PARAM_UPDATED);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
@@ -668,6 +707,22 @@ public class McpToolRouter {
     if (preHookResult != null) {
       return preHookResult;
     }
+
+    // ETP-5073 / DOC-04: the conflict is detected before the write, for the same reason the REST
+    // path does it there — core's refusal reaches us as translated prose with nothing stable to
+    // key on. See NeoRecordVersion.
+    if (NeoRecordVersion.isStale(dalEntityName, recordId, updated)) {
+      return wrapAsErrorContent(McpWriteRequestSupport.buildStaleRecordError().toString(2));
+    }
+
+    // ETP-5073 / DOC-04: injected here, deliberately last, so it never passes through the type
+    // coercion pass above. That pass canonicalises date and datetime strings, and rewriting this
+    // value by even a second would make every update look like a conflict, since the check
+    // compares it for exact equality against the stored timestamp. It is also not a field the
+    // caller is editing: core reads it, compares it, and then overwrites the column with its own
+    // stamp on save. Keeping it out of the caller's field map is what makes that distinction
+    // visible in the tool schema.
+    filteredBody.put(McpConstants.PARAM_UPDATED, updated);
 
     // Wrap for DefaultJsonDataService with record ID
     String wrappedBody = McpToolRouterSupport.wrapForSmartclient(filteredBody, dalEntityName, recordId, log);

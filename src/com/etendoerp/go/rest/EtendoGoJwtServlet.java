@@ -43,6 +43,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
@@ -65,10 +66,10 @@ import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.CheckoutPaymentRegistry;
 import com.etendoerp.go.payment.CheckoutWebhookVerifier;
 import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
+import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
-import com.etendoerp.go.onboarding.OnboardingDefaultCustomerService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
@@ -76,6 +77,7 @@ import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingBankConnectionSyncService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.AccountIdentity;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -162,6 +164,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   // onboarding/errorMessages.js so it translates by code and never shows this English text.
   private static final String CODE_EMAIL_NOT_VERIFIED = "EMAIL_NOT_VERIFIED";
   private static final String CODE_EMAIL_VERIFY_INVALID = "EMAIL_VERIFY_INVALID";
+  // AUTH-07 / ETP-5022 — change-password failures. Stable codes so the web client translates
+  // by code; the English text below is a developer-facing fallback, never end-user copy.
+  private static final String CODE_MISSING_CREDENTIALS = "CHANGE_PASSWORD_MISSING_CREDENTIALS";
+  private static final String CODE_NO_LOCAL_PASSWORD = "NO_LOCAL_PASSWORD";
+  private static final String CODE_INVALID_CURRENT_PASSWORD = "INVALID_CURRENT_PASSWORD";
+  private static final String CODE_METHOD_NOT_FOUND = "AUTH_METHOD_NOT_FOUND";
+  private static final String CODE_LAST_AUTH_METHOD = "LAST_AUTH_METHOD";
+  private static final String METHOD_PASSWORD = "password";
   private static final String PROGRESS_IN_PROGRESS = "in_progress";
   private static final String PROGRESS_CLIENT = "client";
   private static final String PROGRESS_ERROR = "error";
@@ -172,12 +182,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_SEQUENCES = "sequences";
   private static final String PROGRESS_FISCAL = "fiscal";
   private static final String PROGRESS_ORG_READY = "orgReady";
-  private static final String PROGRESS_CUSTOMER = "customer";
   private static final String PROGRESS_ORG_INFO = "orgInfo";
   private static final String PROGRESS_BASELINE = "baseline";
   private static final String PROGRESS_BANK_CONNECTION_SYNC = "bankConnectionSync";
   private static final String PROGRESS_BP_GROUP_ACCT_PATCH = "bpGroupAcctPatch";
   private static final String PROGRESS_ACCTDIM_VISIBILITY = "acctdimVisibility";
+  private static final String PROGRESS_ADMIN_IDENTITY = "adminIdentity";
   private static final String LEGAL_WITH_ACCOUNTING_ORG_TYPE_ID = "1";
   // Stable codes for provisioning failures whose underlying message is an unresolved AD message
   // key. Mirrored by the frontend's onboarding/errorMessages.js (ETP-4665).
@@ -229,10 +239,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingFiscalDataSetupService();
   OnboardingOrgInfoService onboardingOrgInfoService =
       new OnboardingOrgInfoService();
-  OnboardingDefaultCustomerService onboardingDefaultCustomerService =
-      new OnboardingDefaultCustomerService();
   OnboardingAcctdimCentrallyMaintainedService onboardingAcctdimCentrallyMaintainedService =
       new OnboardingAcctdimCentrallyMaintainedService();
+  OnboardingAdminIdentityService onboardingAdminIdentityService =
+      new OnboardingAdminIdentityService();
   OnboardingBaselineService onboardingBaselineService =
       new OnboardingBaselineService();
   OnboardingBankConnectionSyncService onboardingBankConnectionSyncService =
@@ -335,6 +345,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handlePasswordResetConfirm(request, response);
     } else if (isPath(path, "/change-password")) {
       handleChangePassword(request, response);
+    } else if (isPath(path, "/auth-methods/remove")) {
+      handleRemoveAuthMethod(request, response);
     } else if (isPath(path, PATH_VERIFY_EMAIL)) {
       handleVerifyEmail(request, response);
     } else if (isPath(path, PATH_VERIFY_EMAIL_RESEND)) {
@@ -882,8 +894,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
       Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
-      if (account != null && EtendoGoJwtDalHelper.hasLocalPassword(account)) {
-        storeResetTokenAndSendEmail(account, PublicUrlResolver.resolveConfiguredAppBaseUrl());
+      // ETP-5115 / AUTH-05: an account with no local password used to fall out here and receive
+      // nothing at all, while the screen still confirmed a link had been sent. That is every
+      // SSO-created account, which has passwordHash null by design — so the one flow that exists to
+      // recover access was a silent no-op for exactly the users who most needed it. It now gets a
+      // link too; only the wording differs, because it is being asked to create a first password
+      // rather than restore one it forgot.
+      //
+      // The neutral response below stays exactly as it was, and must. Varying it by account state
+      // is the classic user-enumeration vector: it would confirm to any anonymous prober both that
+      // the address is registered and which identity provider it uses. The disclosure belongs in
+      // the email, which only the owner of the mailbox reads.
+      if (account != null) {
+        storeResetTokenAndSendEmail(account, PublicUrlResolver.resolveConfiguredAppBaseUrl(),
+            EtendoGoJwtDalHelper.hasLocalPassword(account));
+      } else {
+        logPasswordResetBranch("no-account", email);
       }
       writePasswordResetNeutralResponse(response);
     } catch (RuntimeException e) {
@@ -939,6 +965,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
       EtendoGoJwtDalHelper.consumePasswordReset(account, hashPassword(password), new Date());
+      // ETP-5003 — the security notice belongs to every password change, not only the one made
+      // from inside the app. This is the path an attacker with a stolen reset link would take, so
+      // it is the one where the owner most needs to be told.
+      sendAuthEmailBestEffort("password-changed",
+          () -> authEmailSender.sendPasswordChanged(account));
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
@@ -1053,6 +1084,33 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * Verifies the current password of an account that has one, writing the error response itself.
+   *
+   * <p>Only the nesting moved here; both branches are unchanged. It is a separate method so
+   * {@link #handleChangePassword} stays inside its cognitive complexity budget, and the caller
+   * guards it with {@code !enrolling} because an account with no local password has nothing to
+   * verify.
+   *
+   * @return true when the caller may proceed; false when a response has already been written
+   */
+  private boolean currentPasswordAccepted(HttpServletResponse response, Account account,
+      String currentPassword) throws IOException {
+    if (currentPassword.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
+          "changePassword: request lacks currentPassword for an account that has one",
+          "The current password is required.");
+      return false;
+    }
+    if (!verifyPassword(currentPassword, account.getPasswordHash())) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, CODE_INVALID_CURRENT_PASSWORD,
+          "changePassword: current password did not verify",
+          "The current password is not correct.");
+      return false;
+    }
+    return true;
+  }
+
+  /**
    * POST /sws/go/change-password
    * Header: Authorization: Bearer <session_token>
    * Body: { "currentPassword": "...", "newPassword": "..." }
@@ -1073,19 +1131,26 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
 
-    String currentPassword;
+    // ETP-5115: currentPassword is read optionally rather than demanded up front. An account with
+    // no local password has none to give, and requiring it here rejected those callers with a
+    // missing-credentials error before anything ever looked at the account — so the endpoint that
+    // says "this account signs in through an external provider" could not be reached by the very
+    // accounts it describes. Whether it is actually required is decided below, once the account is
+    // known; an account that has a password still must supply it.
+    String currentPassword = body.optString("currentPassword", "");
     String newPassword;
     try {
-      currentPassword = body.getString("currentPassword");
       newPassword = body.getString("newPassword");
     } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Missing required fields: currentPassword, newPassword");
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
+          "changePassword: request body lacks newPassword",
+          "The new password is required.");
       return;
     }
-    if (currentPassword.isEmpty() || newPassword.isEmpty()) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Fields currentPassword and newPassword must not be empty");
+    if (newPassword.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
+          "changePassword: newPassword is empty",
+          "The new password is required.");
       return;
     }
     if (!PasswordPolicy.isStrong(newPassword)) {
@@ -1101,20 +1166,28 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
-      if (!EtendoGoJwtDalHelper.hasLocalPassword(account)) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST,
-            "Local password is not configured for this account");
-        return;
-      }
-      if (!verifyPassword(currentPassword, account.getPasswordHash())) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Current password is invalid");
+      // ETP-5115: an account with no local password is enrolling rather than changing, and there
+      // is no current password to verify — the bearer token already proves who is asking. This used
+      // to be a dead end that told the caller the account "has no password to change" and stopped
+      // there, leaving an SSO-only account unable to give itself one from inside the app.
+      boolean enrolling = !EtendoGoJwtDalHelper.hasLocalPassword(account);
+      if (!enrolling && !currentPasswordAccepted(response, account, currentPassword)) {
         return;
       }
       String sessionToken = generateToken();
       EtendoGoJwtDalHelper.changePassword(account, hashPassword(newPassword), sessionToken,
           new Date());
-      sendAuthEmailBestEffort("password-changed",
-          () -> authEmailSender.sendPasswordChanged(account));
+      // The notice tells the owner their way in changed, so it has to say which thing happened:
+      // "your password was changed" is alarming and wrong for somebody who just created a first one.
+      // A block lambda, not a ternary — sendAuthEmailBestEffort takes a Runnable, and a conditional
+      // expression is not void-compatible.
+      sendAuthEmailBestEffort(enrolling ? "password-added" : "password-changed", () -> {
+        if (enrolling) {
+          authEmailSender.sendPasswordAdded(account);
+        } else {
+          authEmailSender.sendPasswordChanged(account);
+        }
+      });
 
       JSONObject accountJson = new JSONObject();
       accountJson.put("id", account.getId());
@@ -1143,6 +1216,200 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Header: Authorization: Bearer <session_token>
    * Returns 200 with account info, 401 if token is invalid.
    */
+  /**
+   * Describes how an account can be signed into: an optional local password plus one entry per
+   * linked identity provider.
+   *
+   * <p>ETP-5115. Until now the client had to guess. The web app decided whether to offer "change
+   * password" by reading a value it had stashed in {@code localStorage} at login, which is why an
+   * SSO account was shown no such option at all — not disabled with a reason, simply absent. The
+   * server is the only side that knows, so it says so.
+   *
+   * <p><strong>{@code removable} is computed here and nowhere else.</strong> It lists the methods
+   * that could be taken away while leaving the account still reachable, and it is the only thing a
+   * client may use to enable a remove control. Recomputing the rule in the browser would put the
+   * invariant in the one place that cannot enforce it. The server checks it again when a removal is
+   * actually requested — this list is for drawing the screen, never for authorising the act.
+   *
+   * <p>The provider's subject claim is deliberately absent. It identifies the user at the provider
+   * and nothing on this screen needs it.
+   *
+   * <p><strong>Reading the identities can write one.</strong> An account still carrying its
+   * identity in the old inline columns is migrated to a child row on first read, so this GET has a
+   * write as a side effect. That is deliberate and it is the point: {@code /me} is the most-called
+   * endpoint in the app, which makes it the fastest way for the population to migrate without a
+   * backfill. The write is idempotent, guarded by a unique constraint, and opens no transaction of
+   * its own.
+   *
+   * @param account the account being described
+   * @return the {@code authMethods} object
+   * @throws JSONException if the response cannot be built
+   */
+  /**
+   * POST /sws/go/auth-methods/remove
+   * Body: { "method": "password" | "<provider>", "currentPassword": "..." }
+   *
+   * <p>ETP-5115. Removes one way of signing in. One endpoint rather than two so the invariant that
+   * makes this safe — an account must keep at least one method — is evaluated in exactly one place
+   * for both kinds of method.
+   *
+   * <p><strong>The invariant is enforced here, on the server, inside the transaction.</strong> The
+   * {@code removable} list that {@code /me} publishes exists to draw the screen and is deliberately
+   * not trusted: two tabs would each read one remaining method and both would be allowed through,
+   * emptying the account. The set is therefore re-read here, immediately before the delete.
+   *
+   * <p><strong>Re-authentication</strong> asks the caller to prove they hold a method, where doing
+   * so is cheap. Removing the password requires the current password. Removing an identity does
+   * not, because no equally cheap proof exists for a provider — the session token carries it, and
+   * the notice mail is what makes an unwanted removal visible. Tightening that into a full step-up
+   * is a decision left open in the plan, not an oversight.
+   */
+  private void handleRemoveAuthMethod(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String token = extractBearerToken(request);
+    if (token == null) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
+      return;
+    }
+
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      return;
+    }
+    String method = StringUtils.trimToEmpty(body.optString("method", ""));
+    String currentPassword = body.optString("currentPassword", "");
+    if (method.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
+          "removeAuthMethod: request body lacks method", "The method to remove is required.");
+      return;
+    }
+
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
+      if (account == null) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return;
+      }
+      removeAuthMethod(account, method, currentPassword, response);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("remove auth method", e, log);
+      log.error("Database error removing an authentication method", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("JSON error building remove-auth-method response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** Split out of {@link #handleRemoveAuthMethod} so neither trips the complexity limit. */
+  private void removeAuthMethod(Account account, String method, String currentPassword,
+      HttpServletResponse response) throws IOException, JSONException {
+    boolean hasPassword = EtendoGoJwtDalHelper.hasLocalPassword(account);
+    List<AccountIdentity> identities = AccountIdentityDalHelper.identitiesFor(account);
+    boolean removingPassword = StringUtils.equals(method, METHOD_PASSWORD);
+    AccountIdentity target = removingPassword ? null
+        : AccountIdentityDalHelper.identityForProvider(account, method);
+
+    if (removingPassword ? !hasPassword : target == null) {
+      writeError(response, HttpServletResponse.SC_NOT_FOUND, CODE_METHOD_NOT_FOUND,
+          "removeAuthMethod: the account does not have the requested method",
+          "That sign-in method is not enabled on this account.");
+      return;
+    }
+    // Re-read rather than trusting what /me last published: this is the check that keeps the
+    // account reachable, and it has to see the state as it is at this instant.
+    if ((hasPassword ? 1 : 0) + identities.size() <= 1) {
+      writeError(response, HttpServletResponse.SC_CONFLICT, CODE_LAST_AUTH_METHOD,
+          "removeAuthMethod: refusing to remove the only remaining method",
+          "This is the only way you can sign in. Add another method before removing this one.");
+      return;
+    }
+    if (removingPassword) {
+      if (currentPassword.isEmpty()) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
+            "removeAuthMethod: request lacks currentPassword",
+            "The current password is required.");
+        return;
+      }
+      if (!verifyPassword(currentPassword, account.getPasswordHash())) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, CODE_INVALID_CURRENT_PASSWORD,
+            "removeAuthMethod: current password did not verify",
+            "The current password is not correct.");
+        return;
+      }
+    }
+
+    String sessionToken = generateToken();
+    if (removingPassword) {
+      EtendoGoJwtDalHelper.removeLocalPassword(account, sessionToken, new Date());
+    } else {
+      AccountIdentityDalHelper.unlink(target);
+      EtendoGoJwtDalHelper.updateSessionToken(account, sessionToken);
+    }
+    sendAuthEmailBestEffort("auth-method-removed",
+        () -> authEmailSender.sendAuthMethodRemoved(account));
+
+    JSONObject result = new JSONObject();
+    result.put(FIELD_STATUS, STATUS_SUCCESS);
+    result.put(FIELD_TOKEN, sessionToken);
+    result.put("authMethods", buildAuthMethods(account));
+    writeResponse(response, HttpServletResponse.SC_OK, result);
+  }
+
+  private JSONObject buildAuthMethods(Account account) throws JSONException {
+    boolean hasPassword = EtendoGoJwtDalHelper.hasLocalPassword(account);
+    List<AccountIdentity> identities = AccountIdentityDalHelper.identitiesFor(account);
+
+    JSONObject password = new JSONObject();
+    password.put("enabled", hasPassword);
+    Date changedAt = EtendoGoJwtDalHelper.getPasswordChangedAt(account);
+    if (hasPassword && changedAt != null) {
+      password.put("lastChanged", changedAt.toInstant().toString());
+    }
+
+    JSONArray identityArray = new JSONArray();
+    for (AccountIdentity identity : identities) {
+      JSONObject entry = new JSONObject();
+      entry.put("provider", identity.getAuthProvider());
+      entry.put(FIELD_EMAIL, identity.getExternalEmail());
+      if (identity.getLinked() != null) {
+        entry.put("linked", identity.getLinked().toInstant().toString());
+      }
+      if (identity.getLastSSOLogin() != null) {
+        entry.put("lastLogin", identity.getLastSSOLogin().toInstant().toString());
+      }
+      identityArray.put(entry);
+    }
+
+    // One method has to survive. With a password and N identities the total is 1 + N, and a method
+    // is removable exactly when the total is greater than one — which is why the sole remaining
+    // method is reported as not removable rather than being left out of the list entirely: the
+    // screen still has to draw it, just without an enabled control.
+    int total = (hasPassword ? 1 : 0) + identities.size();
+    JSONArray removable = new JSONArray();
+    if (total > 1) {
+      if (hasPassword) {
+        removable.put(METHOD_PASSWORD);
+      }
+      for (AccountIdentity identity : identities) {
+        removable.put(identity.getAuthProvider());
+      }
+    }
+
+    JSONObject authMethods = new JSONObject();
+    authMethods.put(METHOD_PASSWORD, password);
+    authMethods.put("identities", identityArray);
+    authMethods.put("removable", removable);
+    return authMethods;
+  }
+
   private void handleMe(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     String token = extractBearerToken(request);
@@ -1175,6 +1442,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       result.put(FIELD_EMAIL_VERIFIED, EmailVerificationDalHelper.isEmailVerified(account));
       result.put(FIELD_EMAIL_VERIFICATION_PENDING,
           EmailVerificationDalHelper.isEmailVerificationPending(account));
+      result.put("authMethods", buildAuthMethods(account));
 
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
@@ -1931,6 +2199,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Override it with the full name entered during onboarding so the app shows
     // the person's name instead of their email. No-op when fullName is blank.
     EtendoGoJwtSupport.applyClientAdminDisplayName(clientUser, requestData.fullName);
+    // ETP-5019 — InitialClientSetup's underlying insertUser() never sets AD_User.Email at all
+    // (only Name/Description/Username), so the owner's "Correo electrónico" field renders empty
+    // in the Users window. Backfill it from the real account email (not clientUser, which may
+    // carry a client-name suffix) right after creation, same best-effort pattern as the display
+    // name override above.
+    EtendoGoJwtSupport.applyClientAdminEmail(clientUser, accountEmail);
     return EtendoGoJwtSupport.findClientIdByName(requestData.clientName);
   }
 
@@ -2138,9 +2412,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!wireOrgInfo(writer, clientId, orgId, adminUserId, adminRoleId, requestData)) {
       return false;
     }
-    if (!ensureDefaultCustomer(writer, clientId, orgId, adminUserId, adminRoleId)) {
-      return false;
-    }
     if (!scheduleBankConnectionSync(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
@@ -2159,6 +2430,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // OnboardingAcctdimCentrallyMaintainedService for the full root-cause explanation and its
     // lockstep corrective twin (R23-acctdim-centrally-maintained.sql).
     if (!forceFlatAccountingDimensionVisibility(writer, clientId)) {
+      return false;
+    }
+    // ETP-4999 (gap M1): wire the onboarding admin's own session defaults to the REAL business
+    // org, not the root/wildcard '0' InitialClientSetup left them at. Runs AFTER the org and its
+    // warehouse both exist (step 1) and BEFORE the baseline stamp — see
+    // OnboardingAdminIdentityService for the full root-cause explanation (including why this does
+    // NOT touch AD_User_Roles) and its lockstep corrective twin (R26-admin-identity-real-org.sql).
+    if (!wireAdminIdentity(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
     // Final action before commitDalChanges: stamp the tenant's data-fix baseline so it lands in the
@@ -2304,31 +2583,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
-  boolean ensureDefaultCustomer(PrintWriter writer, String clientId, String orgId,
-      String adminUserId, String adminRoleId) {
-    sendProgress(writer, PROGRESS_CUSTOMER, PROGRESS_IN_PROGRESS,
-        "Creating default customer...");
-    try {
-      onboardingDefaultCustomerService.ensureDefaultCustomer(clientId, orgId, adminUserId,
-          adminRoleId);
-      // A2: provision the per-BP posting accounts now that the default customer exists. wireAccounting
-      // ran earlier (before any business partner existed), so C_BP_CUSTOMER_ACCT would otherwise stay
-      // empty. Idempotent (NOT-EXISTS-guarded), so it runs unconditionally under the reconcile
-      // model (ETP-4428): the ledger it copies defaults from is guaranteed present because
-      // wireAccounting ran earlier in the same chain.
-      onboardingAccountingWiringService.wireBusinessPartnerAccounts(clientId, orgId, adminUserId,
-          adminRoleId);
-      sendProgress(writer, PROGRESS_CUSTOMER, "done", "Default customer ready");
-      return true;
-    } catch (Exception e) {
-      String errorMessage = e.getMessage() != null ? e.getMessage()
-          : "Default customer creation failed";
-      sendProgress(writer, PROGRESS_CUSTOMER, PROGRESS_ERROR, errorMessage);
-      sendFinalResult(writer, false, errorMessage);
-      return false;
-    }
-  }
-
   /**
    * Patches any {@code C_BP_Group_Acct} row still missing one of the 5 columns that neither the
    * core {@code c_bp_group_trg()} trigger nor {@code OnboardingAccountingWiringService}'s own
@@ -2375,6 +2629,29 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String errorMessage = e.getMessage() != null ? e.getMessage()
           : "Accounting-dimension visibility configuration failed";
       sendProgress(writer, PROGRESS_ACCTDIM_VISIBILITY, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
+  /**
+   * Wires the onboarding admin's session defaults to the real business organization (ETP-4999,
+   * gap M1) — see {@link OnboardingAdminIdentityService} for the full explanation and its
+   * corrective twin ({@code R26-admin-identity-real-org.sql}).
+   */
+  boolean wireAdminIdentity(PrintWriter writer, String clientId, String orgId,
+      String adminUserId, String adminRoleId) {
+    sendProgress(writer, PROGRESS_ADMIN_IDENTITY, PROGRESS_IN_PROGRESS,
+        "Wiring admin identity to organization...");
+    try {
+      onboardingAdminIdentityService.wireAdminIdentity(clientId, orgId, adminUserId, adminRoleId);
+      sendProgress(writer, PROGRESS_ADMIN_IDENTITY, "done", "Admin identity wired");
+      return true;
+    } catch (Exception e) {
+      EtendoGoDalHelper.rollbackDalChanges("onboarding admin-identity wiring", e, log);
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Admin identity wiring failed";
+      sendProgress(writer, PROGRESS_ADMIN_IDENTITY, PROGRESS_ERROR, errorMessage);
       sendFinalResult(writer, false, errorMessage);
       return false;
     }
@@ -2537,7 +2814,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return account != null ? account : EtendoGoJwtDalHelper.findActiveAccountByEmail(accountEmail);
   }
 
-  private void storeResetTokenAndSendEmail(Account account, String appBaseUrl) {
+  /**
+   * Issues a password link and mails it out, picking the contract from whether the account already
+   * has a local password: {@code reset-password} when it does, {@code set-password} when it does
+   * not. The link, the token and its expiry are identical either way — only the copy changes.
+   *
+   * @param account the account requesting the link
+   * @param appBaseUrl configured public app base URL, null when none is configured
+   * @param hasLocalPassword whether the account already has a password to restore
+   */
+  private void storeResetTokenAndSendEmail(Account account, String appBaseUrl,
+      boolean hasLocalPassword) {
+    String branch = hasLocalPassword ? "reset" : "enrol";
     EtendoGoJwtDalHelper.PasswordResetTokenState previousTokenState =
         EtendoGoJwtDalHelper.capturePasswordResetToken(account);
     String resetToken = generateSecureUrlToken();
@@ -2548,17 +2836,35 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     boolean emailSent = false;
     String resetLink = EtendoGoAuthLinkBuilder.resetPasswordLink(resetToken, appBaseUrl);
     if (resetLink == null) {
-      log.warn("Auth email reset-password skipped because the public app base URL is not configured");
+      log.warn("Auth email {} skipped because the public app base URL is not configured", branch);
     } else {
       try {
-        emailSent = authEmailSender.sendPasswordReset(account, resetTokenHash, resetLink);
+        emailSent = hasLocalPassword
+            ? authEmailSender.sendPasswordReset(account, resetTokenHash, resetLink, expiresAt)
+            : authEmailSender.sendSetPassword(account, resetTokenHash, resetLink, expiresAt);
       } catch (RuntimeException e) {
-        log.warn("Auth email reset-password failed after token storage", e);
+        log.warn("Auth email {} failed after token storage", branch, e);
       }
     }
     if (!emailSent) {
       EtendoGoJwtDalHelper.restorePasswordResetToken(account, previousTokenState);
     }
+    logPasswordResetBranch(emailSent ? branch : branch + "-not-sent", account.getEmail());
+  }
+
+  /**
+   * Records which branch a password-reset request took.
+   *
+   * <p>ETP-5115. The neutral response is deliberate and stays, but it means one answer hides
+   * several outcomes, and until now only two of them left even a warning — so nobody could tell
+   * "it did not arrive" from "it was never sent", which is precisely what the AUTH-05 finding asked
+   * for. The address is masked: this is a diagnostic, not a record of who asked to reset what.
+   *
+   * @param branch what happened: no-account, reset, enrol, or either of the latter not sent
+   * @param email the requested address, logged masked
+   */
+  private void logPasswordResetBranch(String branch, String email) {
+    log.info("Password reset request resolved to branch {} for {}", branch, maskEmail(email));
   }
 
   /**
@@ -2599,13 +2905,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
-      EmailVerificationDalHelper.storeEmailVerifyToken(account, verifyTokenHash,
-          Date.from(Instant.now().plusSeconds(EMAIL_VERIFICATION_TTL_SECONDS)));
+      // ETP-5003 — the same expiry the token is stored with is handed to the email, so the copy
+      // states the window the server actually grants instead of repeating a constant.
+      Date verifyExpiresAt = Date.from(Instant.now().plusSeconds(EMAIL_VERIFICATION_TTL_SECONDS));
+      EmailVerificationDalHelper.storeEmailVerifyToken(account, verifyTokenHash, verifyExpiresAt);
       tokenStored = true;
 
       boolean emailSent = welcome
-          ? authEmailSender.sendNewAccount(account, language, verifyLink)
-          : authEmailSender.sendVerifyEmail(account, verifyTokenHash, verifyLink, language);
+          ? authEmailSender.sendNewAccount(account, language, verifyLink, verifyExpiresAt)
+          : authEmailSender.sendVerifyEmail(account, verifyTokenHash, verifyLink, language,
+              verifyExpiresAt);
       if (emailSent) {
         return;
       }

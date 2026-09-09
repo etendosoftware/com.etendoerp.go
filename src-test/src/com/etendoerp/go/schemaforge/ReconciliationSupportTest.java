@@ -53,7 +53,9 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * <p>Scenarios:
  * <ul>
  *   <li>envelope: wraps data in the standard {@code response.data} NEO envelope.</li>
- *   <li>formatDate: null → empty; non-null → ISO-8601 UTC string.</li>
+ *   <li>formatDate: null → empty; non-null → the canonical NEO wire datetime
+ *       {@code yyyy-MM-dd'T'HH:mm:ss} in the server's own zone, with no trailing {@code Z}
+ *       (ETP-5100).</li>
  *   <li>nullSafe: null → ZERO; value kept (replaces the old handler-level test).</li>
  *   <li>bindDateRange: blank → setNull x4; set → setDate at the right indices; returns idx + 4.</li>
  *   <li>docTypeToIsReceipt: payments (any case) → 'N'; everything else → 'Y'.</li>
@@ -97,15 +99,27 @@ public class ReconciliationSupportTest {
   }
 
   /**
-   * A non-null timestamp formats to an ISO-8601 UTC string. Epoch 0 must render exactly
-   * {@code 1970-01-01T00:00:00Z}, and the output must match the {@code yyyy-MM-dd'T'HH:mm:ss'Z'}
-   * shape.
+   * A non-null timestamp formats to the canonical wire datetime {@code yyyy-MM-dd'T'HH:mm:ss},
+   * read in the server's own zone and carrying NO trailing {@code Z} (ETP-5100).
+   *
+   * <p>The input is a CIVIL value ({@link Timestamp#valueOf} reads the literal in the default
+   * zone), which is what keeps this assertion timezone-independent: input and expectation move
+   * together in any zone. It used to be {@code new Timestamp(0L)} — an epoch INSTANT — asserted
+   * against a UTC rendering; that only worked because the old formatter forced UTC. Keeping the
+   * instant and merely dropping the {@code Z} from the expectation would encode the runner's
+   * timezone into the test.
+   *
+   * <p>The value chosen is the ETP-5100 regression itself: a row written at 21:43 local came out
+   * as {@code 2026-09-02T00:43:02Z} under a UTC-3 server — the next calendar day — and the React
+   * range filter, which reads the {@code yyyy-MM-dd} prefix, then dropped it.
    */
   @Test
-  public void testFormatDateNonNullReturnsIsoUtc() {
-    String formatted = ReconciliationSupport.formatDate(new Timestamp(0L));
-    assertEquals("1970-01-01T00:00:00Z", formatted);
-    assertTrue(formatted.matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z"));
+  public void testFormatDateNonNullReturnsCanonicalWireDatetime() {
+    String formatted = ReconciliationSupport.formatDate(Timestamp.valueOf("2026-09-01 21:43:02"));
+    assertEquals("2026-09-01T21:43:02", formatted);
+    assertTrue(formatted.matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}"));
+    assertFalse("the wire datetime must not assert UTC on a zone-less civil value",
+        formatted.endsWith("Z"));
   }
 
   // ── nullSafe ─────────────────────────────────────────────────────────────────
@@ -277,5 +291,63 @@ public class ReconciliationSupportTest {
   public void testSignedAmountBothNullIsZero() {
     BigDecimal signed = ReconciliationSupport.signedAmount(trxWith(null, null));
     assertEquals(0, BigDecimal.ZERO.compareTo(signed));
+  }
+
+  // ---------------------------------------------------------------------------
+  // signedReconciledAmount (ETP-4921) — the left panel's "Progreso" bar
+  // ---------------------------------------------------------------------------
+
+  private static void assertReconciled(String expected, String amount, String pending) {
+    BigDecimal actual = ReconciliationHandlerSupport.signedReconciledAmount(
+        new BigDecimal(amount), new BigDecimal(pending));
+    assertEquals(amount + " - " + pending, 0, new BigDecimal(expected).compareTo(actual));
+  }
+
+  /**
+   * THE BUG. `amount` is signed but `pendingAmount` is the unsigned |cr - dr| the line handler
+   * stores, so the old `amount.subtract(pending)` gave -1.00 for a fully pending 0.50 withdrawal.
+   * Anything non-zero makes ProgressCell draw a bar, and the resulting 200% clamped to 100 drew a
+   * SOLID one — "fully reconciled" under a "Pendiente" badge. Values taken from the live rows of
+   * the Santander account that surfaced it.
+   */
+  @Test
+  public void testReconciledIsZeroForAFullyPendingWithdrawal() {
+    assertReconciled("0", "-0.50", "0.50");
+    assertReconciled("0", "-1.21", "1.21");
+    assertReconciled("0", "-0.30", "0.30");
+  }
+
+  /** Deposits were correct only by coincidence — both signs happened to match. Still correct. */
+  @Test
+  public void testReconciledIsZeroForAFullyPendingDeposit() {
+    assertReconciled("0", "10.00", "10.00");
+    assertReconciled("0", "0.30", "0.30");
+  }
+
+  /** A matched line stores pending = 0, so the whole amount is reconciled, sign included. */
+  @Test
+  public void testReconciledIsTheWholeAmountWhenNothingIsPending() {
+    assertReconciled("-0.50", "-0.50", "0");
+    assertReconciled("10.00", "10.00", "0");
+  }
+
+  /** The case the bar exists for: a partial group keeps the sign of its amount. */
+  @Test
+  public void testReconciledIsThePartialPortionForAPartialGroup() {
+    assertReconciled("53.24", "100", "46.76");
+    assertReconciled("-53.24", "-100", "46.76");
+  }
+
+  /** pending > |amount| is a data anomaly; reporting "nothing reconciled" beats a flipped bar. */
+  @Test
+  public void testReconciledClampsAtZeroWhenPendingExceedsTheAmount() {
+    assertReconciled("0", "-0.50", "5.00");
+    assertReconciled("0", "0.50", "5.00");
+  }
+
+  /** A zero-amount line has nothing to reconcile either way. */
+  @Test
+  public void testReconciledIsZeroForAZeroAmountLine() {
+    assertReconciled("0", "0", "0");
   }
 }

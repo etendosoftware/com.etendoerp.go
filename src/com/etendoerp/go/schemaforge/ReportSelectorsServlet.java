@@ -261,6 +261,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
       case "warehouse":  return buildWarehouseQuery(req);
       case "product-category": return buildProductCategoryQuery();
       case "project":    return buildProjectQuery();
+      case "costcenter": return buildCostcenterQuery();
       case "org":        return buildOrgQuery();
       case "account":    return buildAccountQuery(req);
       case "accounting":
@@ -349,6 +350,14 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
     return new SelectorQuery(
         "SELECT c_project_id AS id, name, name AS label",
         new StringBuilder("FROM c_project WHERE isactive='Y'"
+            + ACTIVE_CLIENT_NAME_SEARCH),
+        ORDER_BY_NAME, true);
+  }
+
+  private SelectorQuery buildCostcenterQuery() {
+    return new SelectorQuery(
+        "SELECT c_costcenter_id AS id, name, name AS label",
+        new StringBuilder("FROM c_costcenter WHERE isactive='Y'"
             + ACTIVE_CLIENT_NAME_SEARCH),
         ORDER_BY_NAME, true);
   }

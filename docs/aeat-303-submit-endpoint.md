@@ -26,6 +26,22 @@ POST /neo/fiscal303/submit?year=<YYYY>&period=<1T..4T|01..12>&tipo=<C|D|I|U|V|X|
 Content-Type: application/json
 ```
 
+**POST-only — a GET is answered `405` and never reaches `dispatch`** (ETP-5027, QA F7).
+`Fiscal303BoxesHandler.allowsGet` returns `false` for `submit`; `boxes`, `generate` and
+`modified` are reads and keep GET. The override was missing until ETP-5027: `submit` was listed
+in `isKnownEntity` and accepted by `allowsPost`, but `AbstractFiscalHandler.allowsGet` defaults
+to `true`, so a GET passed the method check and went straight into a real AEAT filing.
+
+This is **not** a drive-by or CSRF defence, and should not be described as one: NEO authenticates
+with a Bearer token in the `Authorization` header, so a link, an address bar, an `<img>` prefetch
+or a cross-site form carries no credential and gets a 401 whatever the method. The actual reasons,
+each sufficient on its own:
+
+- a GET with side effects lands in browser history, proxy caches and access logs;
+- many HTTP clients and proxies **auto-retry GETs** but not POSTs, so a retry can re-fire a
+  filing — the `ALREADY_SUBMITTED` guard limits that consequence but does not remove it;
+- plain HTTP semantics: GET must be safe and idempotent, and filing a declaration is neither.
+
 | Query param | Required | Meaning |
 |---|---|---|
 | `year` | yes | Fiscal year, same convention as `/fiscal303/generate`/`/fiscal303/boxes` |
@@ -309,7 +325,7 @@ note.
 |---|---|---|
 | `GET` | `/fiscal303/boxes?year=&period=` | `Fiscal303BoxesHandler.handleBoxes` |
 | `GET` | `/fiscal303/generate?year=&period=&tipo=` | `Fiscal303BoxesHandler.handleGenerate` |
-| `POST` | `/fiscal303/submit?year=&period=&tipo=&id=` | `Fiscal303BoxesHandler.handleSubmit` (this doc) |
+| `POST` | `/fiscal303/submit?year=&period=&tipo=&id=` | `Fiscal303BoxesHandler.handleSubmit` (this doc) — POST-only; a GET is 405 |
 | `GET` | `/fiscal303/incidents?id=` | `FiscalDeclCrudHandler.handleIncidents` — persisted AEAT errors (ETP-4456) |
 | `GET` | `/fiscal303/modified?year=&period=&since=` | `Fiscal303BoxesHandler.handleModified` |
 | `POST` | `/certificate` | `NeoCertificateHelper` — certificate storage used by this endpoint's production path |

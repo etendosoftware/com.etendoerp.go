@@ -72,9 +72,11 @@ import org.openbravo.modulescript.ModuleScript;
  * <p><b>ETP-4878 — real permission matrix (supersedes the old 2-window-per-role smoke test).</b>
  * Each template now carries the full window-access matrix from the ticket (Ventas/Compras/
  * Financiero/Almacén columns; "Admin" stays client-level and is out of scope). Grant counts:
- * Sales 13, Purchasing 11, Finance 27, Inventory 13 (33 distinct windows, some shared across more
+ * Sales 13, Purchasing 12, Finance 28, Inventory 13 (34 distinct windows, some shared across more
  * than one role at different access levels — e.g. "Categoría del producto" is read-only for
- * Sales/Purchasing but full for Finance/Inventory). "Asientos manuales" resolves to the
+ * Sales/Purchasing but full for Finance/Inventory); ETP-5075 later added window 107 (Receipt-
+ * Invoice Link, read-only) to Purchasing and Finance, +1 grant each over the original matrix.
+ * "Asientos manuales" resolves to the
  * <b>Simple G/L Journal</b> window ({@code B917E8A7B0864ACEA9D941E3B7494E53}), not the classic
  * {@code G/L Journal} (window {@code 132}, which literally carries the ES label "Asientos
  * manuales" but has no Schema Forge spec at all) — a human call on an otherwise genuinely
@@ -83,7 +85,7 @@ import org.openbravo.modulescript.ModuleScript;
  *
  * <p><b>ETP-4830 item #6.3 — process/report access, mechanical follow-up to the window matrix
  * above.</b> A real-DB audit found all four templates had ZERO {@code AD_Process_Access}/
- * {@code obuiapp_process_access} rows despite the 64 window grants — a composed user could open
+ * {@code obuiapp_process_access} rows despite the (then-64, now 66) window grants — a composed user could open
  * a window but not click any action button on it. {@link #reconcileProcessAccess} closes this
  * for every window a role has FULL access to: every classic/OBUIAPP process reachable as a
  * button on that window is granted, queried LIVE from the DB every run (not a hardcoded list,
@@ -243,8 +245,12 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
   }
 
   /**
-   * Purchasing ("Compras") column of the ETP-4878 matrix — 11 grants. Inlined copy of
-   * {@code TemplateRoleWindowAccess#purchasingGrants()}.
+   * Purchasing ("Compras") column of the ETP-4878 matrix — 11 grants, plus {@code 107}
+   * (Receipt-Invoice Link, added after the original matrix by ETP-5075 — granted FULL so its
+   * accounting posting action, a {@code POST} on the action sub-endpoint, clears
+   * {@code NeoAccessHelper#hasWindowAccess}'s {@code IsReadWrite='Y'} requirement for write
+   * methods; the data itself stays read-only via {@code ETGO_SF_ENTITY}, a separate gate).
+   * Inlined copy of {@code TemplateRoleWindowAccess#purchasingGrants()}.
    */
   private static List<WindowGrant> purchasingGrants() {
     return List.of(
@@ -252,6 +258,7 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("181"),                                          // Pedido de compra — Purchase Order
         full("184"),                                          // Albarán de compra — Goods Receipt
         full("183"),                                          // Factura de compra — Purchase Invoice
+        full("107"),                                          // Relación albarán-factura — Receipt-Invoice Link (ETP-5075)
         full("C50A8AEE6F044825B5EF54FAAE76826F"),              // Devolución a proveedor — Return to Vendor
         full("140"),                                          // Producto — Product
         readOnly("144"),                                       // Categoría del producto — Product Category
@@ -262,7 +269,8 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
   }
 
   /**
-   * Finance ("Financiero") column of the ETP-4878 matrix — 27 grants. Inlined copy of
+   * Finance ("Financiero") column of the ETP-4878 matrix — 27 grants, plus {@code 107}
+   * (Receipt-Invoice Link, ETP-5075 — see {@link #purchasingGrants()}). Inlined copy of
    * {@code TemplateRoleWindowAccess#financeGrants()}.
    */
   private static List<WindowGrant> financeGrants() {
@@ -273,6 +281,7 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("167"),                                          // Factura de venta — Sales Invoice
         readOnly("181"),                                       // Pedido de compra — Purchase Order
         full("183"),                                          // Factura de compra — Purchase Invoice
+        full("107"),                                          // Relación albarán-factura — Receipt-Invoice Link (ETP-5075)
         full("140"),                                          // Producto — Product
         full("144"),                                          // Categoría del producto — Product Category
         full("168"),                                          // Inventario físico — Physical Inventory

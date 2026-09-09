@@ -96,6 +96,19 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
   private static final String MSG_ATTACHMENT_NOT_FOUND = "Attachment not found";
   private static final String HEADER_INTERNAL_SECRET = "X-Internal-Secret";
   private static final String MSG_INVALID_SECRET = "Invalid secret";
+
+  /** Package-private and swappable so tests can force these fire-and-forget Jira calls
+   * (real HTTP POSTs to whatever {@code support.jira.*} credentials happen to be configured
+   * on the machine running the suite — see {@link SupportIntegrationClient#postJiraComment})
+   * onto the SAME thread as a {@code MockedStatic<SupportIntegrationClient>} block. Mockito's
+   * static mocks are thread-local: a real {@code new Thread(...).start()} escapes them
+   * entirely, so without this seam a test can silently spam a real, unrelated Jira ticket
+   * under the developer's own credentials whenever they're configured locally (confirmed
+   * incident: SUP-5 received months of "hola" / fake CSAT comments from unmocked runs of
+   * this exact class). Tests MUST reset this to a same-thread runner before exercising
+   * {@link #handleSendMessage}'s human-takeover branch or {@link #handleSubmitRating}. */
+  static java.util.function.BiConsumer<String, Runnable> backgroundTaskRunner =
+      (threadName, task) -> new Thread(task, threadName).start();
   /** Package-private: also used by {@link SupportAttachmentHelpers}. */
   static final String FIELD_MIME_TYPE   = "mimeType";
   /** Package-private: also used by {@link SupportAttachmentHelpers}. */
@@ -125,6 +138,33 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
    * description/link can reference it. Must match {@code _RESET_MARKER_RE} in the ADK's
    * {@code agent/callbacks.py}. */
   static final String RESET_TICKET_CONTEXT_MARKER_FORMAT = " VALERIA_RESET_TICKET_CONTEXT(%s) ";
+
+  /** Same rationale and delivery mechanism as {@link #RESET_TICKET_CONTEXT_MARKER_FORMAT} above,
+   * but for a narrower case: a human agent handed the Jira ticket back to the bot (via
+   * {@code SupportJiraWebhookHandler#handleAssigneeReset} or the internal reset-human-takeover
+   * webhook) while the conversation stays open — NOT a full reopen, so the ticket/escalation
+   * state must NOT be wiped, only {@code human_takeover}. Prepended on every non-human-takeover
+   * turn (idempotent — forcing an already-false value to false is a no-op) so the DB's
+   * {@code conv.isHumanTakeover() == false} is always reliably reflected in ADK session state,
+   * instead of via {@code stateDelta}, which the same ADK-version gap documented above also
+   * affects for this field. Must match {@code _HUMAN_TAKEOVER_SYNC_MARKER_RE} in the ADK's
+   * {@code agent/callbacks.py}. */
+  static final String HUMAN_TAKEOVER_SYNC_MARKER = " VALERIA_SYNC_HUMAN_TAKEOVER_FALSE ";
+
+  /** Same rationale and delivery mechanism as the two markers above, for a third field of the
+   * same class of gap: a ticket created via {@code jira_before_agent}'s background asyncio task
+   * (fired from a search/complex turn, awaited only much later by a DIFFERENT callback) sets
+   * {@code state["jira_ticket_key"]} from outside that turn's own callback frame — empirically
+   * confirmed (via the ADK's session event log) that this mutation is NOT captured in any
+   * turn's persisted state_delta, unlike a plain synchronous callback state write. The DB's
+   * {@code conv.getJiraTicketKey()} (set reliably by that same task's OTHER effect,
+   * {@code _notify_servlet_ticket}) is therefore the only trustworthy source — assert it on
+   * every turn once linked. Concretely, this fixes: a user creates a ticket via a search
+   * question, then immediately asks to escalate — escalate_before_agent's own
+   * {@code state.get("jira_ticket_key")} read still sees nothing, so it created a SECOND,
+   * duplicate ticket for the same conversation. {@code %s} is the existing key. Must match
+   * {@code _JIRA_TICKET_SYNC_MARKER_RE} in the ADK's {@code agent/callbacks.py}. */
+  static final String JIRA_TICKET_SYNC_MARKER_FORMAT = " VALERIA_SYNC_JIRA_TICKET_KEY(%s) ";
 
   private static final String WEBHOOK_SECRET = ConfigPropertyReader.readConfigValue(
       "support.webhook.secret", "ETGO_SUPPORT_WEBHOOK_SECRET", "");
@@ -413,6 +453,16 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       Date now = new Date();
       saveMessage(conv, SENDER_USER, "Tú", text, now, user, attachments);
 
+      // Live re-check, BOTH directions: neither the assignee-reset webhook (bot ← human) nor
+      // any webhook at all (bot → human: a support agent who reassigns the ticket directly in
+      // Jira, bypassing our own "quiero hablar con un agente" flow entirely, never notifies us)
+      // is a reliable way to learn the ticket's real current owner — the reset webhook depends
+      // on a Jira Automation rule that isn't always configured/reachable (confirmed gap), and
+      // there is no forward-direction webhook at all today. Poll the real assignee on every
+      // message that has a linked ticket so both kinds of manual reassignment are caught on the
+      // very next message regardless of what Jira Automation is or isn't wired up to do.
+      syncHumanTakeoverFromJira(conv);
+
       // If ticket is assigned to a human agent, block AI response
       if (Boolean.TRUE.equals(conv.isHumanTakeover())) {
         // Human agent is handling this — forward user message to Jira, send no AI reply.
@@ -424,7 +474,8 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
             : text;
         // Public: the customer will see this reflected in the portal, same as any other reply
         // they post there directly — this is just their own message, forwarded.
-        new Thread(() -> SupportIntegrationClient.postJiraComment(finalKey, finalText, false), "jira-comment").start();
+        backgroundTaskRunner.accept("jira-comment",
+            () -> SupportIntegrationClient.postJiraComment(finalKey, finalText, false));
         JSONObject result = new JSONObject();
         result.put(FIELD_MESSAGES,     buildMessageArray(convId));
         result.put(FIELD_CONVERSATION, toConvSummaryJson(conv));
@@ -432,10 +483,11 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
         return;
       }
 
-      // Sync human_takeover=false into ADK session state; flag tells agent to skip Jira re-check
-      JSONObject stateDelta = new JSONObject()
-          .put("human_takeover", false)
-          .put("human_takeover_synced", true);
+      // Not under human takeover right now (DB is the source of truth) — always assert that to
+      // the ADK via the reliable text-marker channel, since stateDelta can't be trusted for this
+      // field either (see HUMAN_TAKEOVER_SYNC_MARKER's javadoc). Idempotent when it was already
+      // false, so it's safe to prepend on every turn rather than only right after a reset.
+      String textForAdk = HUMAN_TAKEOVER_SYNC_MARKER + text;
       // Conversation was reopened and no new ticket has been created yet (the ADK's own session
       // state still has the OLD, already-resolved ticket key cached — it has no idea the DB-side
       // link was cleared). Reset ALL of the ticket-lifecycle state via the text marker (not
@@ -444,12 +496,17 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       // one, same as it would for a brand-new conversation. Self-limiting: once the ADK creates
       // the new ticket it calls back into /internal/set-ticket, which sets conv.jiraTicketKey
       // again — so this branch stops applying after the first turn.
-      String textForAdk = text;
       if (conv.getJiraTicketKey() == null && conv.getPreviousJiraTicketKey() != null) {
         textForAdk = String.format(RESET_TICKET_CONTEXT_MARKER_FORMAT, conv.getPreviousJiraTicketKey())
             + textForAdk;
+      } else if (conv.getJiraTicketKey() != null) {
+        // Already linked to a ticket — assert it via the same reliable channel (see
+        // JIRA_TICKET_SYNC_MARKER_FORMAT's javadoc) instead of trusting the ADK's own session
+        // state, which a background-task-created ticket key does not reliably persist into.
+        textForAdk = String.format(JIRA_TICKET_SYNC_MARKER_FORMAT, conv.getJiraTicketKey())
+            + textForAdk;
       }
-      String aiReplyText = SupportIntegrationClient.sendToAdk(userId, convId, textForAdk, attachments, stateDelta);
+      String aiReplyText = SupportIntegrationClient.sendToAdk(userId, convId, textForAdk, attachments, null);
       if (aiReplyText == null) aiReplyText = AI_STUB_REPLY;
 
       Date aiNow = new Date();
@@ -465,6 +522,29 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, MSG_INTERNAL_ERROR);
     } finally {
       restoreTenantContext(previous);
+    }
+  }
+
+  /**
+   * Polls the linked Jira ticket's real current assignee and reconciles {@code humanTakeover}
+   * against it, in either direction — see the call site in {@link #handleSendMessage} for why
+   * this can't rely on webhooks alone. No-op when there is no linked ticket.
+   */
+  private void syncHumanTakeoverFromJira(SupportConversation conv) {
+    String jiraKey = conv.getJiraTicketKey();
+    if (jiraKey == null || jiraKey.isEmpty()) return;
+
+    String[] assignee = SupportIntegrationClient.getTicketAssignee(jiraKey);
+    boolean assigneeKnown = assignee[0] != null || assignee[1] != null;
+    boolean assigneeIsBot = SupportJiraWebhookHandler.isBotIdentity(assignee[0], assignee[1]);
+    if (Boolean.TRUE.equals(conv.isHumanTakeover())) {
+      if (assigneeIsBot) {
+        conv.setHumanTakeover(false);
+        OBDal.getInstance().save(conv);
+      }
+    } else if (assigneeKnown && !assigneeIsBot) {
+      conv.setHumanTakeover(true);
+      OBDal.getInstance().save(conv);
     }
   }
 
@@ -501,12 +581,12 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
       final String finalJiraKey = conv.getJiraTicketKey();
       final int finalScore = score;
       final String finalComment = comment;
-      new Thread(() -> {
+      backgroundTaskRunner.accept("jira-csat-feedback", () -> {
         // Internal: the CSAT rating/comment is for the support team, never customer-facing.
         SupportIntegrationClient.postJiraComment(finalJiraKey,
             SupportIntegrationClient.buildFeedbackComment(finalScore, finalComment), true);
         SupportIntegrationClient.postJiraCsatLabel(finalJiraKey, finalScore);
-      }, "jira-csat-feedback").start();
+      });
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, "success");
@@ -688,6 +768,19 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
           writeError(response, HttpServletResponse.SC_NOT_FOUND, MSG_CONVERSATION_NOT_FOUND);
           return;
         }
+        String existingKey = conv.getJiraTicketKey();
+        // Guard against silently overwriting an already-linked ticket with a DIFFERENT one —
+        // the DB link is the reliable source of truth JIRA_TICKET_SYNC_MARKER_FORMAT relies on
+        // to prevent duplicate ticket creation on the ADK side; if a duplicate still slips
+        // through (a second call here with a different key), don't compound it by silently
+        // repointing the conversation to the newer/wrong ticket. Same key twice is a no-op.
+        if (existingKey != null && !existingKey.isEmpty() && !existingKey.equals(jiraKey)) {
+          log.warn("set-ticket for conversation {} ignored — already linked to {} (incoming: {})",
+              convId, existingKey, jiraKey);
+          writeJson(response, HttpServletResponse.SC_OK,
+              new JSONObject().put(FIELD_STATUS, "ignored_already_linked").put("existingKey", existingKey));
+          return;
+        }
         conv.setJiraTicketKey(jiraKey);
         if (!reporterAccountId.isEmpty()) {
           conv.setJiraReporterAccountId(reporterAccountId);
@@ -846,6 +939,17 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     // Customers now receive this key via the JSM ticket-notification email, so they may search
     // for a conversation by it — see MensajesTab's search filter in SupportChatWidget.jsx.
     obj.put(FIELD_JIRA_TICKET_KEY, conv.getJiraTicketKey() != null ? conv.getJiraTicketKey() : "");
+    // Drives ConversationView's escalate-button visibility (isHuman) and header label — was
+    // missing entirely, so the frontend's `conversation?.assigneeKind === 'human'` check always
+    // read undefined and the "talk to a human" bar never hid once a ticket was actually escalated.
+    obj.put("assigneeKind", Boolean.TRUE.equals(conv.isHumanTakeover()) ? "human" : "ai");
+    // The entity's real audit timestamp — bumped by EVERY server-side save() on this row,
+    // including the async /internal/set-human-takeover flip, which has no other effect on
+    // lastActivity/lastMessage. The frontend uses this to arbitrate which of two
+    // out-of-order network responses (the 15s poll vs. a slow sendMessage/close/rating
+    // round trip) actually reflects newer server state, instead of trusting arrival
+    // order — see SupportChatContext's UPDATE_CONVERSATION/MERGE_CONVERSATIONS reducers.
+    obj.put("updatedAt", toIso(conv.getUpdated()));
     return obj;
   }
 

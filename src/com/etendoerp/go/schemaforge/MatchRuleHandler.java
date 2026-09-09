@@ -17,8 +17,11 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
@@ -35,7 +38,9 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.core.OBContext;
 
 /**
  * Validation pre-hook for the Bank Reconciliation <b>matching rules</b> catalog (T5).
@@ -72,9 +77,55 @@ public class MatchRuleHandler extends AbstractNeoHandler {
   private static final String F_TEXT_CONDITION = "textCondition";
   private static final String F_TEXT_PATTERN = "textPattern";
   private static final String F_ACCOUNTING_CONCEPT = "accountingConcept";
+  private static final String F_PRIORITY = "priority";
+  /** Wire name of the contact field, as declared in the match-rule contract (C_BPartner_ID). */
+  private static final String F_BUSINESS_PARTNER = "businessPartner";
+
+  private static final String METHOD_GET = "GET";
+  private static final String PARAM_ACTION = "action";
+  /** Read-only action exposing which accounting dimensions the rule form may offer. */
+  private static final String ACTION_ACTIVE_DIMENSIONS = "activeDimensions";
+  private static final String KEY_RESPONSE = "response";
+  private static final String KEY_DATA = "data";
+  private static final String KEY_DIMENSIONS = "dimensions";
+
+  /**
+   * Rule fields that are accounting dimensions: wire field name → dimension key. A rule may only
+   * carry a dimension active for the tenant in the chart of accounts, because that is exactly
+   * what the transaction Automatch generates out of the rule can hold.
+   */
+  private static final Map<String, String> DIMENSION_FIELDS = dimensionFields();
+
+  private static Map<String, String> dimensionFields() {
+    Map<String, String> fields = new LinkedHashMap<>();
+    fields.put("project", AccountingDimensionsSupport.DIM_PROJECT);
+    fields.put("costCenter", AccountingDimensionsSupport.DIM_COSTCENTER);
+    fields.put("product", AccountingDimensionsSupport.DIM_PRODUCT);
+    // The contact is an ASSIGNMENT here, not a matching criterion: the engine only ever matches on
+    // textPattern (see MatchRuleEngine#matches), and c_bpartner_id is copied onto the movement the
+    // rule generates exactly like the other three. So the RULE FORM gates it like them (ETP-4950 QA
+    // round: it was the one toggle in the Accounting Schema that changed nothing).
+    //
+    // Scope of this gate is the rule form only. It deliberately does NOT extend to
+    // AccountingDimensionsSupport#applyRuleDimensions: on a FIN_FinaccTransaction the contact is a
+    // first-class field, always visible in the New Movement wizard, and folding it into
+    // requestsAnyDimension would make every difference posting resolve the dimension configuration.
+    fields.put(F_BUSINESS_PARTNER, AccountingDimensionsSupport.DIM_BPARTNER);
+    return fields;
+  }
 
   private static final int NAME_MAX_LENGTH = 60;
   private static final int PATTERN_MAX_LENGTH = 255;
+
+  /**
+   * Priority is a whole number, 1 or greater. Rules are evaluated {@code ORDER BY priority ASC}
+   * (lower value = higher precedence) and ties are allowed on purpose, so nothing technically broke
+   * with a zero or a negative — but the field had NO validation at all, and
+   * {@code ETGO_MATCH_RULE.PRIORITY} is {@code DECIMAL(10,0)}, so a decimal was silently truncated
+   * on the way in. The upper bound is what those ten integer digits can hold.
+   */
+  private static final BigDecimal PRIORITY_MIN = BigDecimal.ONE;
+  private static final BigDecimal PRIORITY_MAX = new BigDecimal("9999999999");
 
   /** Allowed values for the closed lists (mirror of the AD list references). */
   private static final Set<String> TEXT_CONDITIONS = new HashSet<>(Arrays.asList("C", "S", "R"));
@@ -87,7 +138,50 @@ public class MatchRuleHandler extends AbstractNeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    if (SPEC.equals(context.getSpecName()) && METHOD_GET.equals(context.getHttpMethod())
+        && ACTION_ACTIVE_DIMENSIONS.equals(queryParam(context, PARAM_ACTION))) {
+      return buildActiveDimensions();
+    }
     return runWriteHook(context, SPEC, log, body -> validateWrite(context, body));
+  }
+
+  private static String queryParam(NeoContext context, String key) {
+    Map<String, String> params = context.getQueryParams();
+    return params != null ? params.get(key) : null;
+  }
+
+  /**
+   * {@code GET ?action=activeDimensions} — the accounting dimensions active in the current
+   * tenant's chart of accounts ("Ledger Configuration"), in the canonical display order. The rule
+   * form renders a dimension selector only when its dimension is listed here, so a dimension
+   * switched off there disappears from the rule the same way it disappears from the New Movement
+   * wizard — same single source of truth for both, see {@link AccountingDimensionsSupport}.
+   */
+  NeoResponse buildActiveDimensions() {
+    try {
+      enterAdminMode();
+      String clientId = OBContext.getOBContext().getCurrentClient().getId();
+      Set<String> active = AccountingDimensionsSupport.flatActiveDimensionsForClient(clientId);
+      JSONArray arr = new JSONArray();
+      for (String key : AccountingDimensionsSupport.DIM_ORDER) {
+        if (active.contains(key)) {
+          arr.put(key);
+        }
+      }
+      JSONObject data = new JSONObject();
+      data.put(KEY_DIMENSIONS, arr);
+      JSONObject payload = new JSONObject();
+      payload.put(KEY_DATA, data);
+      JSONObject envelope = new JSONObject();
+      envelope.put(KEY_RESPONSE, payload);
+      return NeoResponse.ok(envelope);
+    } catch (Exception e) {
+      log.error("{} activeDimensions error", SPEC, e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Internal Server Error");
+    } finally {
+      exitAdminMode();
+    }
   }
 
   /**
@@ -97,6 +191,15 @@ public class MatchRuleHandler extends AbstractNeoHandler {
    */
   NeoResponse validateWrite(NeoContext context, JSONObject body) {
     final boolean isPatch = METHOD_PATCH.equals(context.getHttpMethod());
+
+    stripInactiveDimensions(body);
+
+    // Priority is validated on its own, independently of the content gate below: it has
+    // `inlineEdit` in the contract, so a PATCH can carry priority and nothing else.
+    NeoResponse invalidPriority = validatePriority(body, isPatch);
+    if (invalidPriority != null) {
+      return invalidPriority;
+    }
 
     // Full validation only applies when the relevant content fields are present. A PATCH
     // may carry a single field (inline toggle of `active`); fields absent from the body
@@ -110,6 +213,71 @@ public class MatchRuleHandler extends AbstractNeoHandler {
       }
     }
     return null;
+  }
+
+  /**
+   * Validates {@code priority}: a whole number from {@code 1} up to what {@code DECIMAL(10,0)}
+   * holds. Absent is an error on create/update and a no-op on a partial patch.
+   *
+   * @param body    the request body
+   * @param isPatch {@code true} for a PATCH, where an absent priority simply means "unchanged"
+   * @return {@code null} when valid, or the HTTP 400 to reject the write with
+   */
+  NeoResponse validatePriority(JSONObject body, boolean isPatch) {
+    String raw = optTrimmed(body, F_PRIORITY);
+    if (raw == null) {
+      return isPatch ? null
+          : NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Priority is required");
+    }
+    BigDecimal priority;
+    try {
+      priority = new BigDecimal(raw);
+    } catch (NumberFormatException e) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Priority must be a whole number");
+    }
+    // stripTrailingZeros so "10.00" is accepted as the integer 10 the column would have stored,
+    // while "10.5" — which DECIMAL(10,0) would have silently truncated — is rejected.
+    if (priority.stripTrailingZeros().scale() > 0) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Priority must be a whole number");
+    }
+    if (priority.compareTo(PRIORITY_MIN) < 0) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
+          "Priority must be 1 or greater");
+    }
+    if (priority.compareTo(PRIORITY_MAX) > 0) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Priority is too large");
+    }
+    return null;
+  }
+
+  /**
+   * Removes any accounting-dimension field whose dimension is not active for the tenant, so a rule
+   * never persists a dimension the generated movement could not carry. The value is dropped from
+   * the request, NOT cleared on the record: an existing value survives an unrelated save and starts
+   * applying again if the dimension is re-enabled in the Accounting Schema (ETP-4950). Dropping
+   * silently rather than rejecting matters because the clone and edit flows pre-fill the form from
+   * a stored row, which may still hold a now-inactive dimension.
+   */
+  void stripInactiveDimensions(JSONObject body) {
+    if (DIMENSION_FIELDS.keySet().stream().noneMatch(body::has)) {
+      return;
+    }
+    Set<String> active;
+    try {
+      String clientId = OBContext.getOBContext().getCurrentClient().getId();
+      active = AccountingDimensionsSupport.flatActiveDimensionsForClient(clientId);
+    } catch (Exception e) {
+      // Fail open: an unreadable accounting configuration must not block saving a rule.
+      log.warn("Could not resolve active accounting dimensions; keeping the body as sent", e);
+      return;
+    }
+    for (Map.Entry<String, String> field : DIMENSION_FIELDS.entrySet()) {
+      if (body.has(field.getKey()) && !active.contains(field.getValue())) {
+        body.remove(field.getKey());
+      }
+    }
   }
 
   /** True when the body carries any of the content fields that require full validation. */

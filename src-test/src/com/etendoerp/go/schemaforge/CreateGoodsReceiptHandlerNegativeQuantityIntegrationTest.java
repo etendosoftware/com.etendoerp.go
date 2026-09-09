@@ -97,6 +97,9 @@ public class CreateGoodsReceiptHandlerNegativeQuantityIntegrationTest extends OB
     // already proven to work under (see org.openbravo.test.purchaseOrder.PurchaseOrderStatus).
     OBContext.setOBContext(TestConstants.Users.ADMIN, TestConstants.Roles.FB_GRP_ADMIN,
         TestConstants.Clients.FB_GRP, TestConstants.Orgs.ESP);
+    // PurchaseOrderUtils stamps accountingDate=new Date() on every header it saves; open today's
+    // fiscal period so the save doesn't fail on a clean env or once the seeded period prefix lapses.
+    PeriodTestUtils.ensureOpenPeriod(new Date());
   }
 
   @After

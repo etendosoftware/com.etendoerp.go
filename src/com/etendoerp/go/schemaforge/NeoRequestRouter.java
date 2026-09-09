@@ -145,8 +145,8 @@ class NeoRequestRouter {
   }
 
   /**
-   * Runs the custom handler and writes its result (or streams a CSV export when
-   * the GET carries {@code export=csv}). Returns {@code true} when it handled the
+   * Runs the custom handler and writes its result (or streams a file export when
+   * the GET carries {@code export=csv} or {@code export=xlsx}). Returns {@code true} when it handled the
    * request, {@code false} when there was no handler result to write.
    */
   private boolean dispatchReportHandler(String qualifier, NeoPathInfo pathInfo, String method,

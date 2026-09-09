@@ -27,6 +27,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -40,10 +41,12 @@ import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
+import org.openbravo.model.pricing.pricelist.PriceList;
 
 /**
  * Unit tests for {@link GoodsShipmentHeaderHandler}.
@@ -837,6 +840,159 @@ public class GoodsShipmentHeaderHandlerTest {
         obContextMock.verifyNoInteractions();
         dalMock.verifyNoInteractions();
       }
+    }
+  }
+
+  // ── ETP-5052: enrichResolvedPriceList() — order/BP tariff resolution ─────────
+  //
+  // Invoked directly via reflection (private method) rather than through the full
+  // afterHandle() flow: enrichResolvedPriceList reads shipmentRec.linkedOrders,
+  // which is normally populated by enrichLinkedOrder's own DB query — pre-seeding
+  // that array here isolates this method's own priority logic (linked order ->
+  // Business Partner -> nothing) from enrichLinkedOrder's SQL, which already has
+  // its own coverage elsewhere.
+
+  /**
+   * Invokes the private {@code enrichResolvedPriceList(JSONObject, String)} via reflection.
+   */
+  private static void invokeEnrichResolvedPriceList(GoodsShipmentHeaderHandler handler,
+      JSONObject shipmentRec, String shipmentId) throws Exception {
+    Method m = GoodsShipmentHeaderHandler.class.getDeclaredMethod(
+        "enrichResolvedPriceList", JSONObject.class, String.class);
+    m.setAccessible(true);
+    m.invoke(handler, shipmentRec, shipmentId);
+  }
+
+  /**
+   * Builds a {@code linkedOrders} JSONArray with a single order carrying the given
+   * price list id/name (either may be {@code null}, which is written as {@link JSONObject#NULL}
+   * to mirror the real SQL projection in {@code enrichLinkedOrder}).
+   */
+  private static JSONArray linkedOrdersWithPriceList(String priceListId, String priceListName)
+      throws Exception {
+    JSONObject order = new JSONObject()
+        .put("id", "order-1")
+        .put("documentNo", "SO-1")
+        .put("priceListId", priceListId != null ? priceListId : JSONObject.NULL)
+        .put("priceList$_identifier", priceListName != null ? priceListName : JSONObject.NULL);
+    return new JSONArray().put(order);
+  }
+
+  /**
+   * Stubs {@code OBDal.getReadOnlyInstance().get(ShipmentInOut.class, shipmentId)} to return a
+   * shipment whose Business Partner has the given price list (or no price list at all when
+   * {@code priceList} is null).
+   */
+  private static ShipmentInOut stubShipmentWithBusinessPartnerPriceList(
+      OBDal dal, String shipmentId, PriceList priceList) {
+    ShipmentInOut shipment = mock(ShipmentInOut.class);
+    BusinessPartner bp = mock(BusinessPartner.class);
+    when(shipment.getBusinessPartner()).thenReturn(bp);
+    when(bp.getPriceList()).thenReturn(priceList);
+    when(dal.get(ShipmentInOut.class, shipmentId)).thenReturn(shipment);
+    return shipment;
+  }
+
+  /**
+   * Case 1 — a linked order carrying a price list DIFFERENT from the Business Partner's own
+   * must win: {@code resolvedPriceListId}/{@code resolvedPriceList$_identifier} come from the
+   * order, never from the BP. The Business Partner is not even stubbed here, since
+   * {@code applyPriceListFromLinkedOrder} must short-circuit before ever touching OBDal.
+   */
+  @Test
+  public void enrichResolvedPriceListPrefersLinkedOrderPriceListOverBusinessPartner()
+      throws Exception {
+    JSONObject shipmentRec = new JSONObject().put("id", "sh-1");
+    shipmentRec.put("linkedOrders", linkedOrdersWithPriceList("PL-ORDER", "Order Price List"));
+
+    invokeEnrichResolvedPriceList(new GoodsShipmentHeaderHandler(), shipmentRec, "sh-1");
+
+    assertEquals("PL-ORDER", shipmentRec.getString("resolvedPriceListId"));
+    assertEquals("Order Price List", shipmentRec.getString("resolvedPriceList$_identifier"));
+  }
+
+  /**
+   * Case 2 — no linked order at all: falls back to the Business Partner's own configured
+   * price list.
+   */
+  @Test
+  public void enrichResolvedPriceListFallsBackToBusinessPartnerWhenNoLinkedOrder()
+      throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+
+      PriceList bpPriceList = mock(PriceList.class);
+      when(bpPriceList.getId()).thenReturn("PL-BP");
+      when(bpPriceList.getName()).thenReturn("BP Price List");
+      stubShipmentWithBusinessPartnerPriceList(dal, "sh-2", bpPriceList);
+
+      JSONObject shipmentRec = new JSONObject().put("id", "sh-2")
+          .put("linkedOrders", new JSONArray());
+
+      invokeEnrichResolvedPriceList(new GoodsShipmentHeaderHandler(), shipmentRec, "sh-2");
+
+      assertEquals("PL-BP", shipmentRec.getString("resolvedPriceListId"));
+      assertEquals("BP Price List", shipmentRec.getString("resolvedPriceList$_identifier"));
+    }
+  }
+
+  /**
+   * Case 3 — no linked order and the Business Partner has no price list configured
+   * ({@code getPriceList()} returns null): neither {@code resolvedPriceListId} nor
+   * {@code resolvedPriceList$_identifier} is added to the JSON. This follows the actual
+   * source behavior (a bare early {@code return} inside {@code applyPriceListFromBusinessPartner}
+   * when {@code priceList == null}) — it does NOT write an explicit JSON null for either field.
+   */
+  @Test
+  public void enrichResolvedPriceListAddsNoFieldsWhenNeitherOrderNorBusinessPartnerHavePriceList()
+      throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      stubShipmentWithBusinessPartnerPriceList(dal, "sh-3", null);
+
+      JSONObject shipmentRec = new JSONObject().put("id", "sh-3")
+          .put("linkedOrders", new JSONArray());
+
+      invokeEnrichResolvedPriceList(new GoodsShipmentHeaderHandler(), shipmentRec, "sh-3");
+
+      assertFalse(shipmentRec.has("resolvedPriceListId"));
+      assertFalse(shipmentRec.has("resolvedPriceList$_identifier"));
+    }
+  }
+
+  /**
+   * Case 4 — a linked order exists but carries NO price list of its own
+   * ({@code co.m_pricelist_id IS NULL}, i.e. {@code priceListId} is JSON null in the
+   * pre-seeded {@code linkedOrders} entry). Confirms the ACTUAL current behavior (verified by
+   * reading {@code applyPriceListFromLinkedOrder}, not assumed): it returns {@code false} in
+   * this case, so {@code enrichResolvedPriceList} correctly falls through to the Business
+   * Partner's own price list rather than silently leaving the shipment with no resolved tariff.
+   * This is NOT a gap — it is the documented fallback chain working as designed.
+   */
+  @Test
+  public void enrichResolvedPriceListFallsBackToBusinessPartnerWhenLinkedOrderHasNoPriceList()
+      throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+
+      PriceList bpPriceList = mock(PriceList.class);
+      when(bpPriceList.getId()).thenReturn("PL-BP-FALLBACK");
+      when(bpPriceList.getName()).thenReturn("BP Fallback Price List");
+      stubShipmentWithBusinessPartnerPriceList(dal, "sh-4", bpPriceList);
+
+      JSONObject shipmentRec = new JSONObject().put("id", "sh-4");
+      shipmentRec.put("linkedOrders", linkedOrdersWithPriceList(null, null));
+
+      invokeEnrichResolvedPriceList(new GoodsShipmentHeaderHandler(), shipmentRec, "sh-4");
+
+      assertEquals("PL-BP-FALLBACK", shipmentRec.getString("resolvedPriceListId"));
+      assertEquals("BP Fallback Price List", shipmentRec.getString("resolvedPriceList$_identifier"));
     }
   }
 }

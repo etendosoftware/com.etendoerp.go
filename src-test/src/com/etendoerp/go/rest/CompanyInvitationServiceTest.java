@@ -93,6 +93,36 @@ class CompanyInvitationServiceTest {
     assertEquals("UNAUTHORIZED", response.optString("code"));
   }
 
+  /**
+   * Companion to the {@link CompanyInvitationDalHelper#findInviterHomeUser} unit coverage
+   * (ETP-4999 fix, Mystery #1): proves the caller side of the contract — when the platform
+   * account has no home {@code AD_User} at all (the DAL helper's {@code null} branch, e.g. its
+   * very first-ever {@code AD_User} was created by someone else inviting it before the account
+   * ever onboarded its own company), {@link CompanyInvitationService#resolveInviter} must resolve
+   * to a clean 403 rather than propagate a {@code NullPointerException} out of {@code
+   * createInvitationForInviter}'s {@code inviter == null} guard.
+   */
+  @Test
+  @DisplayName("createInvitation resolves a clean 403 FORBIDDEN, not an NPE, when the account has "
+      + "no home AD_User (findInviterHomeUser returns null — ETP-4999)")
+  void testCreateInvitationHandlesUnresolvedInviterGracefully() throws Exception {
+    Account account = mock(Account.class);
+    when(account.getEmail()).thenReturn("ghost@example.com");
+
+    try (MockedStatic<CompanyInvitationDalHelper> dalHelperMock =
+        mockStatic(CompanyInvitationDalHelper.class)) {
+      dalHelperMock.when(() -> CompanyInvitationDalHelper.findInviterHomeUser("ghost@example.com"))
+          .thenReturn(null);
+
+      CompanyInvitationService service = new CompanyInvitationService();
+      JSONObject response = service.createInvitation(account, "invitee@example.com",
+          "https://app.test", "en_US");
+
+      assertTrue(response.optBoolean("error"));
+      assertEquals("FORBIDDEN", response.optString("code"));
+    }
+  }
+
   @Test
   @DisplayName("account invitation list requires authentication")
   void testListInvitationsRequiresAuthentication() throws Exception {

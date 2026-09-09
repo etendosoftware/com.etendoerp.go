@@ -1,6 +1,6 @@
 name: Base Branch Health Check
 
-# Blocks merging a PR when the TARGET branch (main, develop, epic/*) is already
+# Blocks merging a PR when the TARGET branch (main, develop) is already
 # failing at its latest commit. The team must fix the base branch (direct
 # commit) first; once its checks are green, re-run this check on the PR
 # ("Re-run jobs") to unblock the merge.
@@ -10,7 +10,7 @@ name: Base Branch Health Check
 #   - Commit statuses → Jenkins (posted via build-update-github.sh)
 #
 # To actually block merges, add "Base branch is green" to the required status
-# checks in the branch protection rules of main/develop/epic branches.
+# checks in the branch protection rules of main/develop branches.
 
 on:
   pull_request:
@@ -20,7 +20,6 @@ on:
     branches:
       - main
       - develop
-      - 'epic/**'
 
 permissions:
   contents: read

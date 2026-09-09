@@ -26,7 +26,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -1200,8 +1199,10 @@ public abstract class AbstractInvoiceHeaderHandler {
    * request body — so that {@code foreignAmount} stays in sync as {@code grandTotalAmount}
    * evolves while lines are added/edited after the currency was first set.
    *
-   * <p>No-op when the invoice has no currency, the invoice currency equals the org currency,
-   * or no {@code EM_ETGO_Currency_Rate} override has been set on the invoice yet.
+   * <p>No-op when the invoice has no currency or no {@code EM_ETGO_Currency_Rate} override has
+   * been set on the invoice yet. When the invoice currency equals the org currency, any
+   * conversion-rate row left over from an earlier foreign-currency state is deleted instead
+   * (ETP-4836) — switching back to the org currency must clear the tab, not leave it stale.
    *
    * <p>Call unconditionally at the top of each subclass's {@code afterHandle()}, alongside
    * any other per-save hooks, before their own method-gated (e.g. GET-only) logic.
@@ -1262,8 +1263,14 @@ public abstract class AbstractInvoiceHeaderHandler {
         OBDal.getInstance().getSession().refresh(invoice);
         String orgId = invoice.getOrganization().getId();
         String orgCurrencyId = OBCurrencyUtils.getOrgCurrency(orgId);
-        if (orgCurrencyId == null || orgCurrencyId.equals(invoice.getCurrency().getId())) {
-          return; // nothing to track: same currency as org, or org currency unresolved
+        if (orgCurrencyId == null) {
+          return; // org currency unresolved, nothing to do
+        }
+        if (orgCurrencyId.equals(invoice.getCurrency().getId())) {
+          // Doc currency now matches org — any conversion-rate row left over from an earlier
+          // foreign-currency state is stale and must be cleared, not silently ignored (ETP-4836).
+          ConversionRateDocumentSync.deleteAllForInvoice(invoice.getId(), orgCurrencyId);
+          return;
         }
         BigDecimal rate = invoice.getETGOCurrencyRate();
         if (rate == null) {
@@ -1278,92 +1285,13 @@ public abstract class AbstractInvoiceHeaderHandler {
             ? grandTotal.multiply(docRate).setScale(2, RoundingMode.HALF_UP)
             : null;
 
-        upsertConversionRateDocument(invoice, orgCurrencyId, docRate, foreignAmount);
+        ConversionRateDocumentSync.upsert(invoice, orgCurrencyId, docRate, foreignAmount);
       } finally {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
       log.warn("[ETP-4029] autoCreateOrUpdateConversionRateDocument failed for invoice {}: {}",
           invoiceId, e.getMessage());
-    }
-  }
-
-  private static void upsertConversionRateDocument(Invoice invoice, String orgCurrencyId,
-      BigDecimal docRate, BigDecimal foreignAmount) throws java.sql.SQLException {
-    Connection conn = OBDal.getInstance().getConnection();
-    String existingId = findConversionRateDocumentId(conn, invoice.getId(),
-        invoice.getCurrency().getId(), orgCurrencyId);
-    if (existingId != null) {
-      updateConversionRateDocument(conn, existingId, docRate, foreignAmount);
-    } else {
-      insertConversionRateDocument(conn, invoice, orgCurrencyId, docRate, foreignAmount);
-    }
-  }
-
-  private static String findConversionRateDocumentId(Connection conn, String invoiceId,
-      String docCurrencyId, String orgCurrencyId) throws java.sql.SQLException {
-    String sql =
-        "SELECT c_conversion_rate_document_id FROM c_conversion_rate_document"
-      + " WHERE c_invoice_id = ? AND c_currency_id = ? AND c_currency_id_to = ? LIMIT 1";
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, invoiceId);
-      ps.setString(2, docCurrencyId);
-      ps.setString(3, orgCurrencyId);
-      try (ResultSet rs = ps.executeQuery()) {
-        return rs.next() ? rs.getString(1) : null;
-      }
-    }
-  }
-
-  private static void updateConversionRateDocument(Connection conn, String recordId,
-      BigDecimal docRate, BigDecimal foreignAmount) throws java.sql.SQLException {
-    String userId = OBContext.getOBContext().getUser().getId();
-    String sql =
-        "UPDATE c_conversion_rate_document"
-      + " SET rate = ?, foreign_amount = ?, updated = NOW(), updatedby = ?"
-      + " WHERE c_conversion_rate_document_id = ?";
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setBigDecimal(1, docRate);
-      if (foreignAmount != null) {
-        ps.setBigDecimal(2, foreignAmount);
-      } else {
-        ps.setNull(2, java.sql.Types.NUMERIC);
-      }
-      ps.setString(3, userId);
-      ps.setString(4, recordId);
-      ps.executeUpdate();
-      log.info("[ETP-4029] Updated C_Conversion_Rate_Document {} (docRate={})", recordId, docRate);
-    }
-  }
-
-  private static void insertConversionRateDocument(Connection conn, Invoice invoice,
-      String orgCurrencyId, BigDecimal docRate, BigDecimal foreignAmount) throws java.sql.SQLException {
-    String newId = UUID.randomUUID().toString().replace("-", "").toUpperCase();
-    String userId = OBContext.getOBContext().getUser().getId();
-    String sql =
-        "INSERT INTO c_conversion_rate_document ("
-      + " c_conversion_rate_document_id, ad_client_id, ad_org_id, isactive,"
-      + " created, createdby, updated, updatedby,"
-      + " c_invoice_id, c_currency_id, c_currency_id_to, rate, foreign_amount"
-      + ") VALUES (?, ?, ?, 'Y', NOW(), ?, NOW(), ?, ?, ?, ?, ?, ?)";
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      ps.setString(1, newId);
-      ps.setString(2, invoice.getClient().getId());
-      ps.setString(3, invoice.getOrganization().getId());
-      ps.setString(4, userId);
-      ps.setString(5, userId);
-      ps.setString(6, invoice.getId());
-      ps.setString(7, invoice.getCurrency().getId());
-      ps.setString(8, orgCurrencyId);
-      ps.setBigDecimal(9, docRate);
-      if (foreignAmount != null) {
-        ps.setBigDecimal(10, foreignAmount);
-      } else {
-        ps.setNull(10, java.sql.Types.NUMERIC);
-      }
-      ps.executeUpdate();
-      log.info("[ETP-4029] Created C_Conversion_Rate_Document {} for invoice {} (docRate={})",
-          newId, invoice.getId(), docRate);
     }
   }
 }

@@ -359,6 +359,116 @@ public class UserRoleCompositionServiceIntegrationTest extends WeldBaseTest {
     }
   }
 
+  /**
+   * QA (Sentinel, ETP-4877) — real-DB, end-to-end proof of the "going forward" half of the
+   * {@code EM_ETGO_Show_Acct_Fields} sync ({@link UserRoleCompositionService
+   * #syncShowAccountingFieldsFlag}, called unconditionally at the end of every {@code
+   * reconcileInheritances}). The retroactive half (every PRE-EXISTING personal role at migration
+   * time) is the sibling {@code R26-tenant-owner-and-personal-role-retrofit.sql} data-fix's Step
+   * 8b, in {@code etendo_schema_forge} — verified separately there (live, rolled-back-transaction
+   * check, both directions) since it is a distinct code path with its own regression risk, not a
+   * substitute for this one. The two are documented as needing to stay in lockstep (same
+   * predicate: an ACTIVE {@code AD_Role_Inheritance} row whose {@code InheritFrom} is the system
+   * Finance template) — this test pins the Java side of that contract.
+   *
+   * <p>Uses the REAL {@link SystemRoleTemplates#FINANCE_ROLE_ID} (seeded by {@code
+   * EnsureSystemRoleTemplatesScript} on {@code update.database}), not a throwaway template — {@code
+   * syncShowAccountingFieldsFlag} keys off that literal id, so a throwaway role (as {@link
+   * #createSystemTemplateRole()} mints for the other tests in this class) could never exercise it.</p>
+   */
+  @Test
+  public void testComposingWithFinanceTemplateSetsShowAccountingFieldsToY() throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Role financeTemplate = OBDal.getInstance().get(Role.class, SystemRoleTemplates.FINANCE_ROLE_ID);
+      assertNotNull("The real Finance system template must already exist (seeded by "
+          + "EnsureSystemRoleTemplatesScript on update.database)", financeTemplate);
+
+      UserRoleCompositionService.AssignmentResult result = new UserRoleCompositionService()
+          .assignTemplateRoles(TEST_USER_ID, Collections.singletonList(financeTemplate.getId()));
+
+      assertEquals(1, result.addedCount);
+      assertEquals("A personal role composed WITH the Finance template must read 'Y'",
+          "Y", readShowAcctFieldsFlag(result.personalRoleId));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * QA (Sentinel, ETP-4877) — the reverse direction: a personal role that HAD the Finance
+   * template and loses it (a later recompose call that no longer requests it) must flip back to
+   * {@code 'N'}, not merely stay at whatever it was set to when Finance was first added. Confirms
+   * {@code syncShowAccountingFieldsFlag} is called on EVERY {@code reconcileInheritances}
+   * — including a removal-only call — not only on the call that first added Finance.
+   */
+  @Test
+  public void testRemovingFinanceTemplateResetsShowAccountingFieldsToN() throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Role financeTemplate = OBDal.getInstance().get(Role.class, SystemRoleTemplates.FINANCE_ROLE_ID);
+      assertNotNull(financeTemplate);
+
+      UserRoleCompositionService service = new UserRoleCompositionService();
+      UserRoleCompositionService.AssignmentResult first = service.assignTemplateRoles(
+          TEST_USER_ID, Collections.singletonList(financeTemplate.getId()));
+      assertEquals("sanity check: must read 'Y' right after composing with Finance",
+          "Y", readShowAcctFieldsFlag(first.personalRoleId));
+
+      UserRoleCompositionService.AssignmentResult second = service.assignTemplateRoles(
+          TEST_USER_ID, Collections.emptyList());
+
+      assertEquals(first.personalRoleId, second.personalRoleId);
+      assertEquals(1, second.removedCount);
+      assertEquals("Removing the Finance template must reset the flag back to 'N', not leave it at 'Y'",
+          "N", readShowAcctFieldsFlag(second.personalRoleId));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * QA (Sentinel, ETP-4877) — composing with a NON-Finance template (Sales) must NOT set the
+   * flag, proving the derivation is keyed specifically on {@link
+   * SystemRoleTemplates#FINANCE_ROLE_ID}, not "any template at all".
+   */
+  @Test
+  public void testComposingWithoutFinanceLeavesShowAccountingFieldsAtN() throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Role salesTemplate = OBDal.getInstance().get(Role.class, SystemRoleTemplates.SALES_ROLE_ID);
+      assertNotNull("The real Sales system template must already exist", salesTemplate);
+
+      UserRoleCompositionService.AssignmentResult result = new UserRoleCompositionService()
+          .assignTemplateRoles(TEST_USER_ID, Collections.singletonList(salesTemplate.getId()));
+
+      assertEquals(1, result.addedCount);
+      assertEquals("A personal role composed WITHOUT Finance must read 'N' (never derived from any other template)",
+          "N", readShowAcctFieldsFlag(result.personalRoleId));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Mirrors {@code SFWindowAccessMap#resolveShowAccountingFields}'s own read: {@code
+   * EM_ETGO_Show_Acct_Fields} is a plain physical column (ETP-4520), not a mapped DAL property, so
+   * it must be read via the same native-query shape production code uses — never via a typed
+   * getter that does not exist.
+   */
+  private String readShowAcctFieldsFlag(String roleId) {
+    org.hibernate.Session session = OBDal.getInstance().getSession();
+    org.hibernate.query.NativeQuery<Object> query = session.createNativeQuery(
+        "SELECT em_etgo_show_acct_fields FROM ad_role WHERE ad_role_id = :roleId");
+    query.setParameter("roleId", roleId);
+    List<Object> results = query.getResultList();
+    assertTrue("expected exactly one ad_role row for " + roleId, results.size() == 1);
+    return results.get(0) == null ? null : results.get(0).toString();
+  }
+
   @SuppressWarnings("unchecked")
   private List<RoleInheritance> findInheritances(Role personalRole) {
     OBCriteria<RoleInheritance> criteria = OBDal.getInstance()

@@ -23,9 +23,6 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.sql.Types;
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
@@ -38,6 +35,8 @@ import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
+
 /**
  * Stateless helpers shared by {@link ReconciliationHandler}: the NEO response envelope, date /
  * amount formatting, optional SQL date-range binding and small JSON / entity utilities. Extracted
@@ -47,9 +46,6 @@ final class ReconciliationSupport {
 
   private static final String KEY_RESPONSE = "response";
   private static final String KEY_DATA = "data";
-  private static final DateTimeFormatter ISO_UTC =
-      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
-
   private ReconciliationSupport() {
   }
 
@@ -62,9 +58,13 @@ final class ReconciliationSupport {
     return NeoResponse.ok(wrapper);
   }
 
-  /** Formats a timestamp as an ISO-8601 UTC string ({@code ""} when null). */
+  /**
+   * Formats a business timestamp as the canonical NEO wire datetime, in the server's own zone
+   * ({@code ""} when null). See {@link NeoDateFormat#toWireDateTime} for why not UTC (ETP-5100).
+   */
   static String formatDate(Timestamp ts) {
-    return ts == null ? "" : ISO_UTC.format(Instant.ofEpochMilli(ts.getTime()));
+    String formatted = NeoDateFormat.toWireDateTime(ts);
+    return formatted == null ? "" : formatted;
   }
 
   /** Returns {@code value}, or {@link BigDecimal#ZERO} when null. */
@@ -120,9 +120,45 @@ final class ReconciliationSupport {
     return ids;
   }
 
-  /** True when the statement line's bank statement belongs to the given financial account. */
+  /**
+   * The read-only linked-movements answer when {@code line} is a reconciled line of
+   * {@code accountId}, or {@code null} to let the caller fall through to the unreconciled pool.
+   *
+   * <p>Lives here, next to {@link #belongsToAccount}, rather than in {@code CandidatesSupport}
+   * whose {@code buildLinkedTransactions} it calls. Two reasons: it keeps
+   * {@code ReconciliationHandler.buildCandidates} under Sonar's cognitive-complexity limit
+   * (java:S3776) without adding a method to that class, and it keeps the DECISION outside the class
+   * the handler tests mock wholesale — put it in {@code CandidatesSupport} and those tests stub the
+   * decision away instead of exercising it.
+   *
+   * <p>The precondition it encodes: {@code buildLinkedTransactions} scopes its query by line id
+   * alone, so the line has to be confirmed as this account's first — the same guard the reconcile
+   * and reactivate paths apply (ETP-4950).
+   *
+   * @param line      the selected statement line, already tenant-resolved, or {@code null}
+   * @param accountId the account the caller is reconciling
+   * @param lineId    the line id as it arrived in the request
+   */
+  static NeoResponse linkedTransactionsIfReconciled(FIN_BankStatementLine line, String accountId,
+      String lineId) throws Exception {
+    if (line == null || line.getFinancialAccountTransaction() == null) {
+      return null;
+    }
+    return belongsToAccount(line, accountId) ? CandidatesSupport.buildLinkedTransactions(lineId)
+        : null;
+  }
+
+  /**
+   * True when the statement line's bank statement belongs to the given financial account.
+   *
+   * <p>Fails <b>closed</b> on any missing link — including a null {@code line} or {@code accountId}.
+   * This is an authorization guard on six call paths, so it must answer "no" rather than throw when
+   * something it depends on is absent (before ETP-4950 a null {@code accountId} raised an NPE).
+   */
   static boolean belongsToAccount(FIN_BankStatementLine line, String accountId) {
-    return line.getBankStatement() != null
+    return line != null
+        && accountId != null
+        && line.getBankStatement() != null
         && line.getBankStatement().getAccount() != null
         && accountId.equals(line.getBankStatement().getAccount().getId());
   }

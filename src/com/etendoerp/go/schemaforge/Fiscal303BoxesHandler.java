@@ -114,6 +114,24 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
     return SUBMIT.equals(entityName);
   }
 
+  /**
+   * {@code submit} files the declaration with the AEAT, so it is POST-only — the same treatment
+   * {@code /fiscal349/validate-vies} already gets. {@code boxes}, {@code generate} and
+   * {@code modified} are reads and stay on GET.
+   *
+   * <p>ETP-5027 (QA F7): {@code submit} was listed in {@link #isKnownEntity} and accepted by
+   * {@link #allowsPost}, but {@code allowsGet} was never overridden, so the base default of
+   * {@code true} let a GET through the method check straight into a real AEAT filing. See
+   * {@link AbstractFiscalHandler#allowsGet} for why a side-effecting GET is unacceptable here
+   * (history/cache/log exposure, client and proxy auto-retry, and plain HTTP semantics) — the
+   * reason is NOT a drive-by or CSRF vector, which the Bearer-token requirement already rules
+   * out.
+   */
+  @Override
+  protected boolean allowsGet(String entityName) {
+    return !SUBMIT.equals(entityName);
+  }
+
   @Override
   protected void dispatch(String entityName, String orgId, int year, String period,
       HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {

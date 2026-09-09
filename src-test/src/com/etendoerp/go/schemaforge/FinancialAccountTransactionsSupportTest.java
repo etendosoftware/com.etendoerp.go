@@ -29,7 +29,6 @@ import java.math.BigDecimal;
 import java.sql.Timestamp;
 import java.time.LocalDate;
 import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
@@ -118,9 +117,11 @@ public class FinancialAccountTransactionsSupportTest {
 
   @Test
   public void testBuildPaymentLabelAllPartsJoinedWithSeparator() {
-    // 2026-01-15T00:00:00Z (UTC) → 15-01-2026
-    long epoch = LocalDate.of(2026, 1, 15).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli();
-    Timestamp date = new Timestamp(epoch);
+    // A CIVIL timestamp, not an instant: since ETP-5100 buildPaymentLabel renders the local
+    // calendar day (it used to force UTC, which moved the day for any evening value under a
+    // negative offset). Timestamp.valueOf reads the literal in the default zone, so input and
+    // expectation move together and this assertion holds in any timezone.
+    Timestamp date = Timestamp.valueOf("2026-01-15 21:43:02");
 
     String label = FinancialAccountTransactionsSupport.buildPaymentLabel(
         "DOC-001", date, "Acme Corp", new BigDecimal("-1234.50"));

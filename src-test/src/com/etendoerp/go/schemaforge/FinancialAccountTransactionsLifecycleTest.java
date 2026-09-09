@@ -36,6 +36,7 @@ import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Criterion;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -46,6 +47,7 @@ import org.mockito.junit.MockitoJUnitRunner;
 import org.openbravo.advpaymentmngt.process.FIN_TransactionProcess;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
@@ -135,6 +137,27 @@ public class FinancialAccountTransactionsLifecycleTest {
         .put("depositAmount", "100")
         .put("paymentAmount", "0")
         .put("description", "Sample");
+  }
+
+  /**
+   * Stubs the two "is any other transaction pointing at me?" criteria probes the delete guard runs
+   * ({@code FinancialAccountTransactionsSupport.isTransferCounterpart}, ETP-5085) so that BOTH find
+   * nothing — i.e. an ordinary movement, not one of the two legs of a funds transfer. An unstubbed
+   * mocked {@link OBDal} hands the guard a {@code null} criteria, whose NPE would turn every delete
+   * into a 500. Mirrors {@code FinancialAccountTransactionsHandlerTest.stubTransferProbes}, which
+   * also covers the "a probe DID find a counterpart" side; only the negative case is needed here.
+   */
+  @SuppressWarnings("unchecked")
+  private static void stubNoTransferReferences(OBDal dal) {
+    OBCriteria<FIN_FinaccTransaction> originProbe = mock(OBCriteria.class);
+    OBCriteria<FIN_FinaccTransaction> destProbe = mock(OBCriteria.class);
+    when(dal.createCriteria(FIN_FinaccTransaction.class)).thenReturn(originProbe, destProbe);
+    when(originProbe.add(any(Criterion.class))).thenReturn(originProbe);
+    when(originProbe.setMaxResults(1)).thenReturn(originProbe);
+    when(originProbe.uniqueResult()).thenReturn((FIN_FinaccTransaction) null);
+    when(destProbe.add(any(Criterion.class))).thenReturn(destProbe);
+    when(destProbe.setMaxResults(1)).thenReturn(destProbe);
+    when(destProbe.uniqueResult()).thenReturn((FIN_FinaccTransaction) null);
   }
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -228,6 +251,10 @@ public class FinancialAccountTransactionsLifecycleTest {
   /**
    * Deleting a DRAFT (not processed) transaction removes it directly via the DAL and never calls the
    * payment-removal module.
+   *
+   * <p>Needs {@link #stubNoTransferReferences}: since ETP-5085 the delete asks FIRST whether any
+   * other transaction references this one (a funds-transfer leg is rejected with a 409), so the
+   * criteria probes must answer "nobody" for this plain movement to reach the removal path at all.
    */
   @Test
   public void testDeleteDraftRemovesDirectly() throws Exception {
@@ -242,6 +269,7 @@ public class FinancialAccountTransactionsLifecycleTest {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(eq(FIN_FinaccTransaction.class), eq("tx-1"))).thenReturn(trx);
+      stubNoTransferReferences(dal);
 
       NeoResponse r = handler.handle(postActionCtx("delete", body));
 
@@ -255,6 +283,10 @@ public class FinancialAccountTransactionsLifecycleTest {
   /**
    * Deleting a PROCESSED transaction routes through the payment-removal module's
    * {@link TransactionRemovalUtil#reactivateAndRemove(String)} (undoing posting / reconciliation).
+   *
+   * <p>Needs {@link #stubNoTransferReferences} for the same reason as the Draft case above: since
+   * ETP-5085 the delete first probes whether another transaction references this one, and only an
+   * unreferenced movement gets as far as the payment-removal module.
    */
   @Test
   public void testDeleteProcessedReactivatesAndRemoves() throws Exception {
@@ -269,6 +301,7 @@ public class FinancialAccountTransactionsLifecycleTest {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(eq(FIN_FinaccTransaction.class), eq("tx-1"))).thenReturn(trx);
+      stubNoTransferReferences(dal);
 
       NeoResponse r = handler.handle(postActionCtx("delete", body));
 

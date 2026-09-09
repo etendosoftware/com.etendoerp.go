@@ -18,13 +18,9 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
-import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -40,12 +36,17 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchedTransaction;
 import org.openbravo.advpaymentmngt.utility.FIN_MatchingTransaction;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+
+import com.etendoerp.go.schemaforge.data.MatchRule;
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
 /**
  * Static helpers for the {@code autoMatch} and {@code applySuggestions} actions of
@@ -60,17 +61,35 @@ final class AutoMatchSupport {
   private static final String KEY_DATE = "date";
   private static final String KEY_AMOUNT = "amount";
   private static final String KEY_IS_NEW = "isNew";
+  /** Movement description and contact, so a suggestion row is recognisable by more than its number. */
+  private static final String KEY_DESCRIPTION = "description";
+  private static final String KEY_PARTNER_NAME = "partnerName";
   private static final String KEY_GROUP_KEY = "groupKey";
   private static final String KEY_STATEMENT_LINE = "statementLine";
   private static final String KEY_OPERATIONS = "operations";
   private static final String KEY_ORIGIN = "origin";
+  /**
+   * Wire keys for the accounting dimensions a rule can carry into the transaction it generates.
+   * Shared with {@link ReconciliationHandler#createTransactionForRule} — the producer and the
+   * consumer of the {@code createPayment} spec must not drift apart (ETP-4950).
+   */
+  static final String KEY_PROJECT_ID = "projectId";
+  static final String KEY_COSTCENTER_ID = "costcenterId";
+  static final String KEY_PRODUCT_ID = "productId";
 
-  private static final DateTimeFormatter ISO_UTC =
-      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC);
+  /**
+   * Marks a group whose operation only matches within the account's amount/date tolerance, so
+   * applying it will also post the leftover to the account's GL Item Difference. Shared with
+   * {@code ReconciliationHandler}'s candidates payload, which uses the same wire name.
+   *
+   * <p>Deliberately a flag of its own rather than "{@code difference != 0}": {@link #buildMultiGroup}
+   * also emits a non-zero {@code difference} for the rounding slack {@link MatchTolerances#signalGroupTolerance}
+   * allows on a 1:N group, and that is NOT a near match.
+   */
+  static final String KEY_NEAR_MATCH = "nearMatch";
 
   /** Caps the partner/reference subset search to keep the preview predictable and bounded. */
   private static final int MAX_SIGNAL_SUBSET_SIZE = 12;
-  private static final BigDecimal SIGNAL_MATCH_TOLERANCE = new BigDecimal("0.01");
   static final int DEFAULT_DATE_TOL_DAYS = 3;
 
   private AutoMatchSupport() {
@@ -114,7 +133,7 @@ final class AutoMatchSupport {
     return matchByKey(pool, target, tolerance, AutoMatchSupport::referenceKey);
   }
 
-  private static List<FIN_FinaccTransaction> loadUnreconciledSameSign(String accountId,
+  static List<FIN_FinaccTransaction> loadUnreconciledSameSign(String accountId,
       BigDecimal target, java.util.Set<String> usedTxnIds, int dateToleranceDays,
       java.util.Date lineDate) {
     String hql = "select ft from " + FIN_FinaccTransaction.ENTITY_NAME + " as ft"
@@ -133,33 +152,11 @@ final class AutoMatchSupport {
       }
       BigDecimal amt = nullSafe(t.getDepositAmount()).subtract(nullSafe(t.getPaymentAmount()));
       if (amt.signum() == target.signum()
-          && withinDateWindow(lineDate, t.getTransactionDate(), dateToleranceDays)) {
+          && MatchTolerances.withinDateWindow(lineDate, t.getTransactionDate(), dateToleranceDays)) {
         pool.add(t);
       }
     }
     return pool;
-  }
-
-  /** Returns true if the difference between {@code a} and {@code b} is within {@code days}. */
-  static boolean withinDateWindow(java.util.Date a, java.util.Date b, int days) {
-    if (a == null || b == null) {
-      return true;
-    }
-    long diffMs = Math.abs(a.getTime() - b.getTime());
-    return diffMs <= days * 86_400_000L;
-  }
-
-  /**
-   * Computes the effective amount tolerance as max(SIGNAL_MATCH_TOLERANCE, abs(target) * pct/100).
-   * When {@code pct} is zero the floor tolerance is returned (preserving the current behaviour).
-   */
-  static BigDecimal computeAmountTolerance(BigDecimal target, BigDecimal pct) {
-    if (pct == null || pct.signum() == 0) {
-      return SIGNAL_MATCH_TOLERANCE;
-    }
-    BigDecimal derived = target.abs().multiply(pct)
-        .divide(BigDecimal.valueOf(100), 2, java.math.RoundingMode.HALF_UP);
-    return derived.max(SIGNAL_MATCH_TOLERANCE);
   }
 
   /**
@@ -249,8 +246,23 @@ final class AutoMatchSupport {
         nextRemainingAbs, picked);
   }
 
-  private static BigDecimal txnSignedAmount(FIN_FinaccTransaction t) {
+  static BigDecimal txnSignedAmount(FIN_FinaccTransaction t) {
     return nullSafe(t.getDepositAmount()).subtract(nullSafe(t.getPaymentAmount()));
+  }
+
+  /**
+   * Display name of the transaction's business partner — its own, else the payment's. Same
+   * precedence {@link #partnerKey} uses to GROUP by partner, kept in step so a row cannot be
+   * grouped under one partner and labelled with another.
+   */
+  private static String partnerNameOf(FIN_FinaccTransaction t) {
+    if (t.getBusinessPartner() != null) {
+      return StringUtils.trimToEmpty(t.getBusinessPartner().getName());
+    }
+    if (t.getFinPayment() != null && t.getFinPayment().getBusinessPartner() != null) {
+      return StringUtils.trimToEmpty(t.getFinPayment().getBusinessPartner().getName());
+    }
+    return "";
   }
 
   private static String partnerKey(FIN_FinaccTransaction t) {
@@ -331,6 +343,7 @@ final class AutoMatchSupport {
       proposedOp.put(KEY_ID, "new");
       proposedOp.put("glItemId", StringUtils.defaultIfBlank(rule.glItemId, ""));
       proposedOp.put("bpartnerId", StringUtils.defaultIfBlank(rule.bpartnerId, ""));
+      putRuleDimensions(proposedOp, rule);
       proposedOp.put(KEY_AMOUNT, lineAmt);
       proposedOp.put(KEY_IS_NEW, true);
       ops.put(proposedOp);
@@ -353,10 +366,24 @@ final class AutoMatchSupport {
       cp.put("glItemId", StringUtils.defaultIfBlank(rule.glItemId, ""));
       cp.put("bpartnerId", StringUtils.defaultIfBlank(rule.bpartnerId, ""));
       cp.put("transactionTypeId", StringUtils.defaultIfBlank(rule.transactionTypeId, ""));
+      putRuleDimensions(cp, rule);
       cp.put(KEY_AMOUNT, lineAmt);
       group.put("createPayment", cp);
     }
     return group;
+  }
+
+  /**
+   * Copies the rule's accounting dimensions (project, cost center, product) onto a suggestion
+   * payload. Before ETP-4950 these three were loaded by {@link MatchRuleEngine} and then dropped
+   * here, so the movement Automatch generated never carried them. Whether a dimension is actually
+   * assignable is decided later, against the account's active dimensions, in
+   * {@link ReconciliationHandler#createTransactionForRule}.
+   */
+  static void putRuleDimensions(JSONObject target, MatchRuleEngine.Rule rule) throws JSONException {
+    target.put(KEY_PROJECT_ID, StringUtils.defaultIfBlank(rule.projectId, ""));
+    target.put(KEY_COSTCENTER_ID, StringUtils.defaultIfBlank(rule.costCenterId, ""));
+    target.put(KEY_PRODUCT_ID, StringUtils.defaultIfBlank(rule.productId, ""));
   }
 
   static JSONObject lineToJson(FIN_BankStatementLine line) throws JSONException {
@@ -377,6 +404,17 @@ final class AutoMatchSupport {
         ? new Timestamp(txn.getTransactionDate().getTime()) : null));
     j.put("documentNo",
         txn.getFinPayment() != null ? StringUtils.trimToEmpty(txn.getFinPayment().getDocumentNo()) : "");
+    // A payment number alone ("1000181") identifies nothing to the person approving the batch. The
+    // description is what the Movimientos list shows and what makes the row recognisable
+    // ("Factura Nº : 10000215."); the partner name is the same one the candidates panel displays.
+    // Falls back to the payment's description because a payment-backed transaction usually carries
+    // it there rather than on the transaction itself.
+    String description = StringUtils.trimToEmpty(txn.getDescription());
+    if (StringUtils.isBlank(description) && txn.getFinPayment() != null) {
+      description = StringUtils.trimToEmpty(txn.getFinPayment().getDescription());
+    }
+    j.put(KEY_DESCRIPTION, description);
+    j.put(KEY_PARTNER_NAME, partnerNameOf(txn));
     j.put(KEY_AMOUNT, nullSafe(txn.getDepositAmount()).subtract(nullSafe(txn.getPaymentAmount())));
     j.put(KEY_IS_NEW, false);
     return j;
@@ -416,6 +454,7 @@ final class AutoMatchSupport {
   /** Loads the line by id and classifies it; returns {@code pending} when the line is gone. */
   static String classifyPendingLine(FIN_FinancialAccount account, String lineId,
       List<MatchRuleEngine.Rule> rules) {
+    // tenant-ok: lineId comes from PENDING_LINES_SQL, already scoped by client and org
     FIN_BankStatementLine line = OBDal.getInstance().get(FIN_BankStatementLine.class, lineId);
     if (line == null) {
       return STATE_PENDING;
@@ -425,11 +464,29 @@ final class AutoMatchSupport {
 
   static String classifyPendingLine(FIN_FinancialAccount account, String lineId,
       List<MatchRuleEngine.Rule> rules, int dateTolDays, BigDecimal amtTolPct) {
+    // tenant-ok: same, lineId originates in the scoped pending-lines query
     FIN_BankStatementLine line = OBDal.getInstance().get(FIN_BankStatementLine.class, lineId);
     if (line == null) {
       return STATE_PENDING;
     }
     return classifyPendingLine(account, line, rules, dateTolDays, amtTolPct);
+  }
+
+  /**
+   * Same as above, but consuming a shared {@code usedTxnIds}/{@code excludedTxns} accumulator
+   * across the caller's loop over pending lines — see the 7-arg {@code classifyPendingLine}
+   * overload for why this matters.
+   */
+  static String classifyPendingLine(FIN_FinancialAccount account, String lineId,
+      List<MatchRuleEngine.Rule> rules, int dateTolDays, BigDecimal amtTolPct,
+      Set<String> usedTxnIds, List<FIN_FinaccTransaction> excludedTxns) {
+    // tenant-ok: same, lineId originates in the scoped pending-lines query
+    FIN_BankStatementLine line = OBDal.getInstance().get(FIN_BankStatementLine.class, lineId);
+    if (line == null) {
+      return STATE_PENDING;
+    }
+    return classifyPendingLine(account, line, rules, dateTolDays, amtTolPct, usedTxnIds,
+        excludedTxns);
   }
 
   static String classifyPendingLine(FIN_FinancialAccount account, FIN_BankStatementLine line,
@@ -439,19 +496,53 @@ final class AutoMatchSupport {
 
   static String classifyPendingLine(FIN_FinancialAccount account, FIN_BankStatementLine line,
       List<MatchRuleEngine.Rule> rules, int dateTolDays, BigDecimal amtTolPct) {
-    String level = standardMatchLevel(account, line, dateTolDays);
-    if (FIN_MatchedTransaction.STRONG.equals(level)) {
+    return classifyPendingLine(account, line, rules, dateTolDays, amtTolPct, new HashSet<>(),
+        new ArrayList<>());
+  }
+
+  /**
+   * Classifies one pending line as {@code buildAutoMatch} would evaluate it, consuming the SAME
+   * {@code usedTxnIds}/{@code excludedTxns} accumulator across every line the caller classifies in
+   * one pass. Without this, a transaction already claimed by an earlier line (in the same
+   * {@code datetrx, line} order {@code buildAutoMatch} iterates) would still be offered as a
+   * "suggested" match for a later line of the same amount, so the left-panel counter could show
+   * more suggestions than an actual automatch run produces.
+   */
+  static String classifyPendingLine(FIN_FinancialAccount account, FIN_BankStatementLine line,
+      List<MatchRuleEngine.Rule> rules, int dateTolDays, BigDecimal amtTolPct,
+      Set<String> usedTxnIds, List<FIN_FinaccTransaction> excludedTxns) {
+    FIN_MatchedTransaction matched = standardMatch(account, line, dateTolDays, excludedTxns);
+    // Core's STRONG/WEAK distinction is about DOCUMENTARY EVIDENCE (does the reference / partner
+    // corroborate the hit), never about amount or date — both are exact either way. So a WEAK match
+    // has no deviation at all and belongs in "suggested" alongside STRONG. Mapping it to
+    // "difference" (as this did before ETP-4965) made that filter mean two unrelated things and left
+    // it unable to show the one thing its name promises.
+    if (matched != null) {
+      usedTxnIds.add(matched.getTransaction().getId());
+      excludedTxns.add(matched.getTransaction());
       return STATE_SUGGESTED;
     }
     if (account != null && StringUtils.isNotBlank(account.getId())) {
       BigDecimal target = nullSafe(line.getCramount()).subtract(nullSafe(line.getDramount()));
-      BigDecimal amtTol = computeAmountTolerance(target, amtTolPct);
-      if (!findSignalGroup(account.getId(), line, new HashSet<>(), amtTol, dateTolDays).isEmpty()) {
+      BigDecimal amtTol = MatchTolerances.signalGroupTolerance(target, amtTolPct);
+      List<FIN_FinaccTransaction> signalGroup =
+          findSignalGroup(account.getId(), line, usedTxnIds, amtTol, dateTolDays);
+      if (!signalGroup.isEmpty()) {
+        signalGroup.forEach(t -> usedTxnIds.add(t.getId()));
+        excludedTxns.addAll(signalGroup);
         return STATE_SUGGESTED;
       }
-    }
-    if (level != null) {
-      return STATE_DIFFERENCE;
+      // The only path that applies the account's amount/date tolerance to a 1:1 match. Runs after
+      // the exact-match branches so a real suggestion is never downgraded to a difference — and it
+      // can itself return an EXACT hit that Core's narrower pass missed, which is a suggestion too.
+      // Mirrors matchFallback's own labelling, or the left panel's badge would contradict the
+      // automatch modal's for the very same line.
+      FIN_FinaccTransaction nearMatch = NearMatchSupport.findNearMatch(account.getId(), line,
+          usedTxnIds, excludedTxns,
+          NearMatchSupport.differenceTolerance(target, amtTolPct), dateTolDays);
+      if (nearMatch != null) {
+        return MatchTolerances.deviatesFrom(line, nearMatch) ? STATE_DIFFERENCE : STATE_SUGGESTED;
+      }
     }
     String desc = StringUtils.trimToEmpty(line.getDescription());
     String ref = StringUtils.trimToEmpty(line.getReferenceNo());
@@ -469,6 +560,21 @@ final class AutoMatchSupport {
 
   static String standardMatchLevel(FIN_FinancialAccount account, FIN_BankStatementLine line,
       int dateTolDays) {
+    FIN_MatchedTransaction matched = standardMatch(account, line, dateTolDays, new ArrayList<>());
+    return matched == null ? null : matched.getMatchLevel();
+  }
+
+  /**
+   * Runs the account's configured standard matching algorithm against {@code line}, honoring
+   * {@code excluded} exactly like Classic's own auto-match driver
+   * ({@code MatchStatementOnLoadActionHandler.runAutoMatchingAlgorithm}) does — so callers can
+   * accumulate consumed transactions across multiple lines in one run and avoid Core suggesting the
+   * same transaction for two different lines of equal amount. Returns {@code null} when there is no
+   * algorithm configured, the algorithm finds nothing, or the match falls outside the date-tolerance
+   * window.
+   */
+  static FIN_MatchedTransaction standardMatch(FIN_FinancialAccount account,
+      FIN_BankStatementLine line, int dateTolDays, List<FIN_FinaccTransaction> excluded) {
     if (account == null || account.getMatchingAlgorithm() == null
         || StringUtils.isBlank(account.getMatchingAlgorithm().getJavaClassName())) {
       return null;
@@ -476,17 +582,15 @@ final class AutoMatchSupport {
     try {
       FIN_MatchingTransaction matcher =
           new FIN_MatchingTransaction(account.getMatchingAlgorithm().getJavaClassName());
-      FIN_MatchedTransaction matched = matcher.match(line, new ArrayList<>());
+      FIN_MatchedTransaction matched = matcher.match(line, excluded);
       if (matched != null && matched.getTransaction() != null
-          && !FIN_MatchedTransaction.NOMATCH.equals(matched.getMatchLevel())) {
-        if (!withinDateWindow(line.getTransactionDate(),
-            matched.getTransaction().getTransactionDate(), dateTolDays)) {
-          return null;
-        }
-        return matched.getMatchLevel();
+          && !FIN_MatchedTransaction.NOMATCH.equals(matched.getMatchLevel())
+          && MatchTolerances.withinDateWindow(line.getTransactionDate(),
+              matched.getTransaction().getTransactionDate(), dateTolDays)) {
+        return matched;
       }
     } catch (Exception e) {
-      log.debug("Standard match level failed for line {}: {}", line.getId(), e.getMessage());
+      log.debug("Standard match failed for line {}: {}", line.getId(), e.getMessage());
     }
     return null;
   }
@@ -510,15 +614,28 @@ final class AutoMatchSupport {
     }
   }
 
-  /** Increments {@code ETGO_MATCH_RULE.matchcount} for the given rule id. Best-effort (non-fatal). */
+  /**
+   * Increments the rule's match counter. Best-effort (non-fatal).
+   *
+   * <p>Goes through the DAL rather than a raw {@code UPDATE ... WHERE etgo_match_rule_id = ?}: the
+   * id arrives in the request body, and the hand-written statement had no {@code ad_client_id}
+   * predicate, so it happily bumped the counter of another tenant's rule. {@link OBCriteria} adds the
+   * readable-client / readable-organization filter itself, so a foreign id simply matches nothing
+   * (ETP-4950).
+   */
   static void incrementMatchCount(String ruleId) {
     try {
-      Connection conn = OBDal.getInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(
-          "UPDATE etgo_match_rule SET matchcount = matchcount + 1 WHERE etgo_match_rule_id = ?")) { // NOSONAR java:S2077
-        ps.setString(1, ruleId);
-        ps.executeUpdate();
+      OBCriteria<MatchRule> criteria = OBDal.getInstance().createCriteria(MatchRule.class);
+      criteria.add(Restrictions.eq(MatchRule.PROPERTY_ID, ruleId));
+      criteria.setMaxResults(1);
+      MatchRule rule = (MatchRule) criteria.uniqueResult();
+      if (rule == null) {
+        log.warn("Rule {} is not visible for the current tenant; matchCount not incremented", ruleId);
+        return;
       }
+      long current = rule.getMatchCount() == null ? 0L : rule.getMatchCount();
+      rule.setMatchCount(current + 1);
+      OBDal.getInstance().save(rule);
     } catch (Exception e) {
       log.warn("Could not increment matchCount for rule {}", ruleId, e);
     }
@@ -528,8 +645,10 @@ final class AutoMatchSupport {
   // Shared helpers
   // ---------------------------------------------------------------------------
 
+  /** Canonical NEO wire datetime in the server's own zone; see {@link NeoDateFormat} (ETP-5100). */
   private static String formatDate(Timestamp ts) {
-    return ts == null ? "" : ISO_UTC.format(Instant.ofEpochMilli(ts.getTime()));
+    String formatted = NeoDateFormat.toWireDateTime(ts);
+    return formatted == null ? "" : formatted;
   }
 
   static BigDecimal nullSafe(BigDecimal value) {
@@ -537,31 +656,110 @@ final class AutoMatchSupport {
   }
 
   /**
+   * The account-derived configuration one matching pass runs under.
+   *
+   * <p>These three travel together — {@code buildAutoMatch} resolves all of them from the same
+   * account before it loops over the pending lines — so they are one value rather than three more
+   * positional arguments on an already long signature (Sonar java:S107).
+   */
+  static final class MatchSettings {
+    final int dateTolDays;
+    final BigDecimal amtTolPct;
+    /**
+     * Whether the account has a GL Item Difference configured. When it does not, an AMOUNT
+     * deviation is not proposed at all: applying it would fail, and a suggestion the user cannot
+     * accept is worse than no suggestion. A date-only deviation posts nothing and is always
+     * offered — which is why this narrows the near-match tolerance instead of dropping the group
+     * afterwards, so the candidate is never claimed out of a later line's reach.
+     */
+    final boolean canPostDifferences;
+
+    MatchSettings(int dateTolDays, BigDecimal amtTolPct, boolean canPostDifferences) {
+      this.dateTolDays = dateTolDays;
+      this.amtTolPct = amtTolPct;
+      this.canPostDifferences = canPostDifferences;
+    }
+  }
+
+  /**
    * Passes 1b (1:N signal grouping) and 2 (rule engine) of the autoMatch preview — evaluated only
    * when the standard 1:1 algorithm did not match. Appends any group it finds to {@code groups} and
-   * marks the consumed transactions in {@code usedTxnIds}.
+   * marks the consumed transactions in {@code usedTxnIds}/{@code excludedTxns} — the latter is fed
+   * back into the standard algorithm for later lines, same as {@link #standardMatch}.
    *
    * @return int[2] where [0] = opsToLink increment, [1] = willCreate increment
    */
   static int[] matchFallback(String accountId, FIN_BankStatementLine line,
-      Set<String> usedTxnIds, List<MatchRuleEngine.Rule> rules, JSONArray groups)
+      Set<String> usedTxnIds, List<FIN_FinaccTransaction> excludedTxns,
+      List<MatchRuleEngine.Rule> rules, JSONArray groups)
       throws JSONException {
-    return matchFallback(accountId, line, usedTxnIds, rules, groups,
-        DEFAULT_DATE_TOL_DAYS, BigDecimal.ZERO);
+    // canPostDifferences is moot at 0%: differenceTolerance already collapses to "exact amount
+    // only", so no amount deviation can be proposed either way.
+    return matchFallback(accountId, line, usedTxnIds, excludedTxns, rules, groups,
+        new MatchSettings(DEFAULT_DATE_TOL_DAYS, BigDecimal.ZERO, true));
   }
 
   static int[] matchFallback(String accountId, FIN_BankStatementLine line,
-      Set<String> usedTxnIds, List<MatchRuleEngine.Rule> rules, JSONArray groups,
+      Set<String> usedTxnIds, List<FIN_FinaccTransaction> excludedTxns,
+      List<MatchRuleEngine.Rule> rules, JSONArray groups,
       int dateTolDays, BigDecimal amtTolPct) throws JSONException {
+    return matchFallback(accountId, line, usedTxnIds, excludedTxns, rules, groups,
+        new MatchSettings(dateTolDays, amtTolPct, true));
+  }
+
+  /**
+   * @param settings the account-derived configuration this pass runs under
+   */
+  static int[] matchFallback(String accountId, FIN_BankStatementLine line,
+      Set<String> usedTxnIds, List<FIN_FinaccTransaction> excludedTxns,
+      List<MatchRuleEngine.Rule> rules, JSONArray groups,
+      MatchSettings settings) throws JSONException {
+    int dateTolDays = settings.dateTolDays;
+    BigDecimal amtTolPct = settings.amtTolPct;
+    boolean canPostDifferences = settings.canPostDifferences;
     BigDecimal target = ReconciliationSupport.nullSafe(line.getCramount())
         .subtract(ReconciliationSupport.nullSafe(line.getDramount()));
-    BigDecimal amtTol = computeAmountTolerance(target, amtTolPct);
+    BigDecimal amtTol = MatchTolerances.signalGroupTolerance(target, amtTolPct);
     List<FIN_FinaccTransaction> signalGroup =
         findSignalGroup(accountId, line, usedTxnIds, amtTol, dateTolDays);
     if (!signalGroup.isEmpty()) {
       signalGroup.forEach(t -> usedTxnIds.add(t.getId()));
+      excludedTxns.addAll(signalGroup);
       groups.put(buildMultiGroup(line, signalGroup));
       return new int[]{signalGroup.size(), 0};
+    }
+    // Pass 1c (ETP-4965): the 1:1 near match. Sits HERE — after the signal group, before the rule
+    // engine — so this preview proposes groups in exactly the order classifyPendingLine assigns
+    // states. Anywhere else and a line with both a 1:N group and a near match would be counted
+    // "suggested" in the left panel while the automatch offered it as a difference.
+    // `null` is findNearMatch's own "exact amount only", so an account with nowhere to post the
+    // leftover still gets its date-only matches and never sees one it could not apply.
+    BigDecimal nearMatchTolerance = canPostDifferences
+        ? NearMatchSupport.differenceTolerance(target, amtTolPct)
+        : null;
+    FIN_FinaccTransaction nearMatch = NearMatchSupport.findNearMatch(accountId, line,
+        usedTxnIds, excludedTxns, nearMatchTolerance, dateTolDays);
+    if (nearMatch != null) {
+      // findNearMatch also returns EXACT hits now (same amount, same day) — it has to, or the best
+      // candidate stays invisible whenever Core's narrower pass 1 misses it. Such a hit is not a
+      // difference, so it is labelled as the plain suggestion it is: no KEY_NEAR_MATCH, no red
+      // badge, no difference row, and STRONG rather than Core's WEAK diagnostics vocabulary.
+      boolean deviates = MatchTolerances.deviatesFrom(line, nearMatch);
+      // findNearMatch already claimed it in usedTxnIds/excludedTxns. KEY_NEAR_MATCH is the flag
+      // consumers read — see its javadoc for why a non-zero `difference` alone cannot play that role.
+      JSONObject nearMatchGroup = buildStandardGroup(line, nearMatch,
+          deviates ? FIN_MatchedTransaction.WEAK : FIN_MatchedTransaction.STRONG);
+      if (deviates) {
+        nearMatchGroup.put(KEY_NEAR_MATCH, true);
+      }
+      groups.put(nearMatchGroup);
+      // An AMOUNT deviation also creates the GL-item movement that absorbs the leftover
+      // (ReconciliationDifferenceSupport.applyInlineDifference), so it counts on both sides —
+      // reporting only the link is what made the modal promise one movement and create two. A
+      // DATE-only near match has a zero difference and creates nothing, so it stays a plain link.
+      boolean postsDifference = new BigDecimal(nearMatchGroup.optString(STATE_DIFFERENCE, "0"))
+          .compareTo(BigDecimal.ZERO) != 0;
+      return new int[]{1, postsDifference ? 1 : 0};
     }
     MatchRuleEngine.MatchResult ruleResult = MatchRuleEngine.evaluate(
         StringUtils.trimToEmpty(line.getDescription()),

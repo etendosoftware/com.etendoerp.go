@@ -44,6 +44,8 @@ import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
 import org.w3c.dom.Document;
 import org.w3c.dom.NodeList;
 
+import com.etendoerp.go.schemaforge.handlers.GlItemProvisioningSupport;
+
 /**
  * Wires the newly created organization to the general ledger that the onboarding dataset import
  * brings in (Gap A1).
@@ -84,6 +86,9 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
       SAMPLE_DATA_RESOURCE_DIRECTORY + "/C_ELEMENTVALUE.xml";
   private static final String SOURCE_TREENODE_RESOURCE =
       SAMPLE_DATA_RESOURCE_DIRECTORY + "/AD_TREENODE.xml";
+
+  /** ETP-5020 — GL Item auto-provisioning behind subaccounts, shared with {@code ChartOfAccountsHandler}. */
+  private final GlItemProvisioningSupport glItemProvisioning = new GlItemProvisioningSupport();
 
   /**
    * Inserts one account-element tree node, mapping the bundled hierarchy onto the tenant's own
@@ -132,57 +137,8 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
         ensureOrganizationAcctSchema(client, org, ledger);
         wireAccountElementTree(client);
         rebrandImportedChartNames(client, ledger);
+        provisionGlItemsForImportedChart(client, ledger);
         provisionEntityPostingAccounts(client, ledger);
-        flushChanges();
-      } finally {
-        exitAdminMode();
-      }
-    } finally {
-      restoreExecutionContext(previousContext);
-    }
-  }
-
-  /**
-   * Provisions the per-business-partner posting accounts (Gap A2) once the tenant's business
-   * partners exist.
-   *
-   * <p>This is a SECOND, later entry point on purpose. {@link #wire} runs early in the onboarding
-   * chain (right after the dataset import) so it can provision the {@code *_acct} rows for the
-   * entities the import brings in (BP groups, product categories, products). But the tenant's first
-   * business partner — the default customer — is created by {@code OnboardingDefaultCustomerService}
-   * several steps LATER, and {@code C_BPARTNER} is not part of the imported dataset. If the per-BP
-   * accounts were provisioned only inside {@link #wire}, {@code C_BP_CUSTOMER_ACCT} (and
-   * {@code C_BP_VENDOR_ACCT}) would always be empty for a fresh tenant. The onboarding servlet
-   * therefore calls this method again AFTER {@code ensureDefaultCustomer}, when the customer row
-   * exists and is flushed in the same transaction.
-   *
-   * <p>Both inserts are idempotent ({@code NOT EXISTS} guards), so the earlier no-op run inside
-   * {@link #wire} and this run never collide.
-   *
-   * @param clientId    target client identifier
-   * @param orgId       target organization identifier
-   * @param adminUserId administrator user for DAL context
-   * @param adminRoleId administrator role for DAL context
-   */
-  public void wireBusinessPartnerAccounts(String clientId, String orgId, String adminUserId,
-      String adminRoleId) {
-    validateContext(clientId, orgId, adminUserId, adminRoleId);
-    OBContext previousContext = captureCurrentContext();
-    applyExecutionContext(adminUserId, adminRoleId, clientId, orgId);
-    try {
-      enterAdminMode();
-      try {
-        Client client = resolveClient(clientId);
-        if (client == null) {
-          throw new OBException("Client not found for business-partner accounting: " + clientId);
-        }
-        AcctSchema ledger = resolveImportedLedger(client);
-        if (ledger == null) {
-          throw new OBException("No accounting schema was imported for client " + clientId
-              + "; cannot provision business-partner posting accounts");
-        }
-        runEntityAcctInsert(BP_CUSTOMER_ACCT_SQL, clientId, ledger.getId());
-        runEntityAcctInsert(BP_VENDOR_ACCT_SQL, clientId, ledger.getId());
         flushChanges();
       } finally {
         exitAdminMode();
@@ -211,10 +167,9 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
    * <p>Wired as the LAST provisioning step of the onboarding chain (right before the data-fix
    * baseline is stamped), so it runs after every {@code C_BP_Group} row for the tenant has already
    * been created and after {@code C_AcctSchema_Default} has its own values (both dataset-provisioned
-   * in step 1). A THIRD entry point on this class, after {@link #wire} (right after the dataset
-   * import) and {@link #wireBusinessPartnerAccounts} (after the default customer exists) — unlike
-   * those two, this one needs neither a fresh business partner nor a specific schema id: it patches
-   * every schema the tenant has via one client-scoped statement, exactly like its corrective twin.
+   * in step 1). A SECOND entry point on this class, after {@link #wire} (right after the dataset
+   * import) — unlike that one, this needs no specific schema id: it patches every schema the tenant
+   * has via one client-scoped statement, exactly like its corrective twin.
    *
    * <p>Idempotent: {@code COALESCE} only ever fills a NULL, never overwrites an existing value, and
    * the {@code WHERE} clause skips a row that has nothing left to fix.
@@ -581,6 +536,75 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
   }
 
   /**
+   * ETP-5020 — bulk GL Item auto-provisioning for the tenant's imported default chart of accounts
+   * (requirement 2a: "creating a subaccount must auto-create a matching GL Item ... both at
+   * onboarding time for the default chart of accounts, and whenever a user creates a new
+   * subaccount afterward"). The live per-subaccount twin of this step is
+   * {@code ChartOfAccountsHandler.afterHandle}'s POST hook; both share
+   * {@link GlItemProvisioningSupport#ensureGlItemForSubaccount} so the two entry points can never
+   * drift into different behavior.
+   *
+   * <p><b>Placement decision (judgment call, both options were valid per the design doc):</b> wired
+   * right after {@link #rebrandImportedChartNames}, BEFORE {@link #provisionEntityPostingAccounts},
+   * rather than as a new sibling service. Reasoning:
+   * <ul>
+   *   <li>Names must be final BEFORE GL Items are minted — {@link #rebrandImportedChartNames}
+   *   renames the dataset's generic "GOClient" chart names to the tenant's own; a GL Item created
+   *   before that rename would immediately be named "GOClient ..." instead of the tenant's real
+   *   subaccount name, recreating the exact "GL Item can diverge from its subaccount" problem this
+   *   ticket exists to eliminate (see the design doc's dataset-vs-dynamic-onboarding analysis).</li>
+   *   <li>{@link #wireAccountElementTree} must have already run so every leaf {@code ElementValue}
+   *   is placed in the tenant's own tree — not strictly required by this step's own SQL, but
+   *   keeps the whole {@code wire()} chain in one clear "structure, then names, then accounting
+   *   plumbing" order.</li>
+   *   <li>A separate sibling service would need to duplicate this exact same
+   *   {@code client}/{@code ledger} resolution {@link #wire} already did two lines above, for no
+   *   benefit — this class already owns "things that must happen once, right after the dataset
+   *   import, before the tenant's business partners exist" (see {@link #provisionEntityPostingAccounts}'s
+   *   own javadoc for the same reasoning about its two-call-site split).</li>
+   * </ul>
+   *
+   * <p>Idempotent (delegates entirely to {@link GlItemProvisioningSupport}'s own idempotency
+   * guarantees) and best-effort per subaccount: a failure provisioning ONE subaccount's GL Item
+   * never blocks the rest of the chart or the onboarding chain.
+   *
+   * @param client target client
+   * @param ledger the accounting schema whose GL Items are being provisioned (used only to prove
+   *               onboarding reached this far with a resolved ledger; the actual schema set
+   *               provisioned per subaccount is {@link GlItemProvisioningSupport#resolveActiveSchemas}
+   *               — the same one the live {@code ChartOfAccountsHandler} path uses)
+   */
+  protected void provisionGlItemsForImportedChart(Client client, AcctSchema ledger) {
+    if (ledger == null) {
+      return;
+    }
+    List<AcctSchema> activeSchemas = glItemProvisioning.resolveActiveSchemas(client);
+    if (activeSchemas.isEmpty()) {
+      return;
+    }
+    for (ElementValue subaccount : loadLeafElementValues(client)) {
+      glItemProvisioning.ensureGlItemForSubaccount(subaccount, activeSchemas);
+    }
+  }
+
+  /**
+   * Loads every leaf ({@code elementLevel = 'S'}) {@code ElementValue} for {@code client} — the
+   * same "subaccount" population {@code C_ELEMENTVALUE_TRG} auto-creates a natural
+   * {@code C_ValidCombination} for (see {@link GlItemProvisioningSupport} class javadoc). Summary
+   * accounts are excluded here rather than relying solely on
+   * {@link GlItemProvisioningSupport#ensureGlItemForSubaccount}'s own Case-3 filter, so onboarding
+   * never even attempts (and logs, at debug level, zero times) a lookup doomed to find nothing.
+   */
+  protected List<ElementValue> loadLeafElementValues(Client client) {
+    OBCriteria<ElementValue> criteria = OBDal.getInstance().createCriteria(ElementValue.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    criteria.add(Restrictions.eq(ElementValue.PROPERTY_CLIENT, client));
+    criteria.add(Restrictions.eq(ElementValue.PROPERTY_ELEMENTLEVEL, "S"));
+    return criteria.list();
+  }
+
+  /**
    * Provisions the per-entity posting accounts (Gap A2) for the tenant's business-partner groups,
    * product categories, customers, vendors, products, financial accounts and warehouses.
    *
@@ -604,11 +628,14 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
    * already has its posting row); those triggers just never fire for the rows the dataset importer
    * inserts with triggers disabled, which is exactly the gap this method backfills (ETP-4565).
    *
-   * <p>NOTE: at this point in the onboarding chain the only business partners are those carried by
-   * the dataset import (none — {@code C_BPARTNER} is not imported), so the customer/vendor inserts
-   * are no-ops here. The default customer is created several steps later; its posting account is
-   * provisioned by {@link #wireBusinessPartnerAccounts}, which the servlet calls after
-   * {@code ensureDefaultCustomer}.
+   * <p>NOTE: a freshly onboarded tenant has NO business partners at all — {@code C_BPARTNER} is not
+   * in {@code OnboardingDatasetDefinition.INCLUDED_TABLES}, and ETP-5079 removed the synthetic
+   * "Default Customer" that onboarding used to create — so the customer/vendor inserts below match
+   * zero rows here. They are kept because both statements are set-based
+   * ({@code INSERT ... SELECT ... FROM c_bpartner WHERE ...}) and therefore cost nothing on an empty
+   * table, and because this method is the single place that provisions posting accounts for any
+   * business partner the dataset ever does carry. Partners the tenant creates later get their
+   * posting rows from Classic's own {@code c_bpartner_trg}.
    *
    * @param client target client
    * @param ledger the accounting schema whose defaults are copied
@@ -1061,8 +1088,9 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
 
   // Warehouse posting accounts (ETP-4565): M_WAREHOUSE is bulk-imported by the dataset importer
   // with triggers disabled (same INCLUDED_TABLES gap as FIN_FINANCIAL_ACCOUNT above), so Classic's
-  // own m_warehouse_trg AFTER INSERT trigger never fires for the bundled template warehouses
-  // ("Almacen GO", "Almacén Secundario"). Column mapping mirrors that trigger one-for-one.
+  // own m_warehouse_trg AFTER INSERT trigger never fires for the bundled template warehouse
+  // ("Almacen Principal" — ETP-5079 reduced the dataset to a single warehouse). Column mapping
+  // mirrors that trigger one-for-one.
   private static final String WAREHOUSE_ACCT_SQL =
       "INSERT INTO m_warehouse_acct ("
       + "  m_warehouse_acct_id, ad_client_id, ad_org_id, isactive, created, createdby, updated,"

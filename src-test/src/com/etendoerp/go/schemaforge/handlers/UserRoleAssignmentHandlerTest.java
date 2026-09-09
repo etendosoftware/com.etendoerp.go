@@ -36,7 +36,9 @@ import static org.mockito.Mockito.when;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -59,6 +61,7 @@ import com.etendoerp.go.roles.UserRoleCompositionService;
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
 
@@ -276,6 +279,116 @@ public class UserRoleAssignmentHandlerTest {
         .httpMethod("POST")
         .build();
     assertNull(handler.handle(ctx));
+  }
+
+  // ─── handle(): GET list pre-hook — exclude contact-only users (ETP-5019) ─────
+
+  @Test
+  public void handleInjectsUsernameNotBlankPredicateOnListGet() {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    Map<String, String> queryParams = new HashMap<>();
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .queryParams(queryParams)
+        .build();
+
+    assertNull(handler.handle(ctx));
+
+    assertEquals("e.username is not null and e.username <> ''",
+        queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
+  }
+
+  @Test
+  public void handleContactExclusionPredicateFiltersOnUsernameNotRoleCount() {
+    // Regression guard (ETP-5019): a real user can legitimately have zero AD_User_Roles rows
+    // (not yet assigned any role) but always has a non-blank username — see the handler's own
+    // javadoc for excludeContactOnlyUsers. The injected predicate must never reference roles or
+    // AD_User_Roles, only username presence, or it would wrongly hide legitimate
+    // not-yet-assigned real users.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    Map<String, String> queryParams = new HashMap<>();
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .queryParams(queryParams)
+        .build();
+
+    assertNull(handler.handle(ctx));
+
+    String predicate = queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM);
+    assertTrue(predicate.contains("username"));
+    assertFalse(predicate.toLowerCase().contains("role"));
+  }
+
+  @Test
+  public void handleAndsExistingNeoWherePredicateWithContactExclusion() {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    Map<String, String> queryParams = new HashMap<>();
+    queryParams.put(NeoCrudHelper.NEO_WHERE_PARAM, "e.active = true");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .queryParams(queryParams)
+        .build();
+
+    assertNull(handler.handle(ctx));
+
+    assertEquals("(e.active = true) and (e.username is not null and e.username <> '')",
+        queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
+  }
+
+  @Test
+  public void handleLeavesQueryParamsUntouchedOnSingleRecordGet() {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    Map<String, String> queryParams = new HashMap<>();
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .recordId(USER_ID)
+        .queryParams(queryParams)
+        .build();
+
+    assertNull(handler.handle(ctx));
+
+    assertTrue(queryParams.isEmpty());
+  }
+
+  @Test
+  public void handleToleratesNullQueryParamsOnListGet() {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .build();
+
+    assertNull(handler.handle(ctx));
+  }
+
+  @Test
+  public void handleContactFilterAndAfterHandleBootstrapHidingCoexistOnListGetFlow()
+      throws Exception {
+    // Regression guard (ETP-5019): the new pre-hook contact-only filter (query params, handle())
+    // and the pre-existing bootstrap-user hiding (response body, afterHandle()) act on different
+    // phases of the same list GET and must not interfere with each other.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    Map<String, String> queryParams = new HashMap<>();
+    JSONObject body = buildListResponseBody("0", "100", "real-user-1");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .queryParams(queryParams)
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    assertNull(handler.handle(ctx));
+    assertNull(handler.afterHandle(ctx));
+
+    assertEquals("e.username is not null and e.username <> ''",
+        queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
+    JSONObject inner = body.getJSONObject("response");
+    assertEquals(1, inner.getJSONArray("data").length());
+    assertEquals("real-user-1", inner.getJSONArray("data").getJSONObject(0).getString("id"));
   }
 
   // ─── handle(): PUT/PATCH email-immutability guard (ETP-4830 QA BUG-2) ────────

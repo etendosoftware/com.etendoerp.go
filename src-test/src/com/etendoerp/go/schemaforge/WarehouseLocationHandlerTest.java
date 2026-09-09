@@ -209,7 +209,11 @@ class WarehouseLocationHandlerTest {
 
     Country country = mock(Country.class);
     when(country.getId()).thenReturn("country-id");
+    // ETP-5022 — both getters are stubbed on purpose: getName() is the base-language value the
+    // handler must NOT use, getIdentifier() is the translated one it must. Asserting the
+    // translated value below is what fails if a call site ever slips back to getName().
     when(country.getName()).thenReturn("Spain");
+    when(country.getIdentifier()).thenReturn("España");
     when(obDal.get(Country.class, "country-id")).thenReturn(country);
     when(geoLoc.getCountry()).thenReturn(country);
 
@@ -250,7 +254,7 @@ class WarehouseLocationHandlerTest {
     assertEquals("geo-1", rec.getString("id"));
     assertEquals("Springfield, 123 Main St", rec.getString("name"));
     assertEquals("country-id", rec.getString("country"));
-    assertEquals("Spain", rec.getString("country$_identifier"));
+    assertEquals("España", rec.getString("country$_identifier"));
     assertEquals("region-id", rec.getString("region"));
     assertEquals("Catalonia", rec.getString("region$_identifier"));
   }
@@ -406,6 +410,7 @@ class WarehouseLocationHandlerTest {
     Country country = mock(Country.class);
     when(country.getId()).thenReturn("country-id");
     when(country.getName()).thenReturn("Spain");
+    when(country.getIdentifier()).thenReturn("España");
     when(obDal.get(Country.class, "country-id")).thenReturn(country);
 
     Region region = mock(Region.class);
@@ -460,7 +465,11 @@ class WarehouseLocationHandlerTest {
 
     Country country = mock(Country.class);
     when(country.getId()).thenReturn("US");
+    // ETP-5022 — both getters are stubbed on purpose: getName() is the base-language value the
+    // handler must NOT use, getIdentifier() is the translated one it must. Asserting the
+    // translated value below is what fails if a call site ever slips back to getName().
     when(country.getName()).thenReturn("United States");
+    when(country.getIdentifier()).thenReturn("Estados Unidos");
     when(geoLoc.getCountry()).thenReturn(country);
 
     Region region = mock(Region.class);
@@ -483,7 +492,7 @@ class WarehouseLocationHandlerTest {
     assertEquals("Springfield", rec.getString("cityName"));
     assertEquals("62704", rec.getString("postalCode"));
     assertEquals("US", rec.getString("country"));
-    assertEquals("United States", rec.getString("country$_identifier"));
+    assertEquals("Estados Unidos", rec.getString("country$_identifier"));
     assertEquals("IL", rec.getString("region"));
     assertEquals("Illinois", rec.getString("region$_identifier"));
   }
@@ -531,20 +540,24 @@ class WarehouseLocationHandlerTest {
    * When city/address are empty but country alone is present (no region), the
    * display name falls back to the country name alone — the single-value,
    * no-comma branch of {@code joinNonNull} via the region/country fallback.
+   *
+   * ETP-5022: that fallback is the country as the USER sees it, so it must come from
+   * getIdentifier() (translated), not getName() (base language).
    */
   @Test
-  void testGetByIdDisplayNameFallsBackToCountryOnly() throws Exception {
+  void testGetByIdDisplayNameFallsBackToTranslatedCountryOnly() throws Exception {
     Location geoLoc = mock(Location.class);
     when(geoLoc.getId()).thenReturn("geo-country-only");
     Country country = mock(Country.class);
-    when(country.getName()).thenReturn("Portugal");
+    when(country.getName()).thenReturn("Spain");
+    when(country.getIdentifier()).thenReturn("España");
     when(geoLoc.getCountry()).thenReturn(country);
     when(obDal.get(Location.class, "geo-country-only")).thenReturn(geoLoc);
 
     NeoResponse r = handler.handle(buildContext("GET", "geo-country-only", null));
 
     JSONObject rec = r.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
-    assertEquals("Portugal", rec.getString("name"));
+    assertEquals("España", rec.getString("name"));
   }
 
   /**

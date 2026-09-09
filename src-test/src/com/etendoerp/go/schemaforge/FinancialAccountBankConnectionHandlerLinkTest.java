@@ -65,6 +65,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 
+import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
@@ -810,13 +811,19 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
     FinAccPaymentMethod transferFapm = mock(FinAccPaymentMethod.class);
     when(transferFapm.getPaymentMethod()).thenReturn(transferMethod);
 
+    FinaccConnection connection = mock(FinaccConnection.class);
+
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
             mockStatic(SaltEdgeAccountLinkHelper.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, true))
-          .thenReturn(true);
+      // ETP-5097: resolved via getLatestConnectionForFinAcc (matches any status), not the
+      // disconnectFinancialAccount wrapper, whose lookup only matches an "AC" connection.
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getLatestConnectionForFinAcc(finAcc))
+          .thenReturn(connection);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectConnection(connection, true))
+          .thenReturn(false);
 
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
@@ -834,9 +841,10 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
   }
 
   /**
-   * A failed disconnect equally leaves the flag alone, and still reports
-   * {@code disconnected=false}. With the restore gone there is no branch left that could write it,
-   * so this pins the response contract as much as the flag.
+   * A permanent-deletion request against an account with nothing left to disconnect (no
+   * {@link FinaccConnection} record, no stale Salt Edge id) must surface a real error — not the
+   * false {@code 200}/{@code disconnected=false} success this used to report before ETP-5097.
+   * The payment-method flag is equally untouched either way.
    */
   @Test
   public void testDisconnectReportsFailureAndTouchesNothing() throws Exception {
@@ -854,13 +862,14 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
         MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
             mockStatic(SaltEdgeAccountLinkHelper.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, true))
-          .thenReturn(false);
+      // No FinaccConnection record and no Salt Edge id on the account (both unstubbed → null):
+      // there is genuinely nothing to disconnect.
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getLatestConnectionForFinAcc(finAcc))
+          .thenReturn(null);
 
       NeoResponse response = handler.handle(postContext(ACTION_DISCONNECT, body));
 
-      assertEquals(200, response.getHttpStatus());
-      assertEquals(false, dataOf(response).getBoolean("disconnected"));
+      assertEquals(404, response.getHttpStatus());
       verify(transferFapm, never()).setAutomaticWithdrawn(anyBoolean());
     }
   }
@@ -881,12 +890,16 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
 
     FIN_PaymentMethod transferMethod = mock(FIN_PaymentMethod.class);
     FinAccPaymentMethod transferFapm = mock(FinAccPaymentMethod.class);
+    FinaccConnection connection = mock(FinaccConnection.class);
+    when(connection.getConnectionStatus()).thenReturn("AC");
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
             mockStatic(SaltEdgeAccountLinkHelper.class)) {
       stubObContext(obContext);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectFinancialAccount(finAcc, false))
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.getLatestConnectionForFinAcc(finAcc))
+          .thenReturn(connection);
+      linkHelper.when(() -> SaltEdgeAccountLinkHelper.disconnectConnection(connection, false))
           .thenReturn(true);
 
       NeoResponse response = handler.handle(postContext(ACTION_DISCONNECT, body));
@@ -927,12 +940,14 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
   }
 
   /**
-   * Stubs {@code dal.createCriteria(FinAccPaymentMethod.class)} so the payment-method sweep at the
-   * end of {@code linkAccount} ({@code disableMulticurrencyForBankTransfer}, ETP-4503) returns the
-   * given rows instead of hitting a real Hibernate session.
+   * Stubs {@code dal.createCriteria(FinAccPaymentMethod.class)} so any payment-method sweep reached
+   * from {@code linkAccount} returns the given rows instead of hitting a real Hibernate session.
    * Every test that reaches {@code linkAccount} must call this (with an empty list when the
    * behavior is not under test), otherwise the unstubbed {@code OBDal.getInstance()} call blows up
    * and the handler's catch-all turns it into a 500.
+   *
+   * <p>Kept after ETP-5084 removed the multicurrency sweep that originally needed it: the stub is
+   * cheap, and it is what would catch a reintroduced sweep instead of letting it NPE.
    */
   @SuppressWarnings("unchecked")
   private static OBCriteria<FinAccPaymentMethod> stubFinAccPaymentMethods(OBDal dal,

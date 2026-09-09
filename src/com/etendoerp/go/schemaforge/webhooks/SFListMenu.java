@@ -57,6 +57,17 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  *
  * <p>A user with no role assigned gets an empty menu — the query is not even run.</p>
  *
+ * <p><b>Viewer role identity (ETP-5019 follow-up).</b> The response also carries the CALLING
+ * user's own {@code viewerRoleId} (their current {@code AD_Role_ID}) and
+ * {@code viewerIsClientAdmin} (whether that role is the tenant's client-admin role) — reusing
+ * {@code currentRole}, already resolved above for the tree/search filtering itself, rather than
+ * a second endpoint. Absent entirely when the caller has no role (the {@link #emptyResult()}
+ * path). This is what backs {@code useViewerRole()}
+ * (`tools/app-shell/src/hooks/useViewerRole.js` in {@code etendo_schema_forge}) — a standalone
+ * frontend hook for gating viewer-permission-sensitive UI (e.g. the User window's admin
+ * promote/demote buttons) that has nothing to do with menu rendering itself; this endpoint is
+ * just the existing once-per-session call it piggybacks on.</p>
+ *
  * GET /webhooks/SFListMenu         → full tree, filtered by the current role's access
  * GET /webhooks/SFListMenu?q=sales → flat filtered list, filtered by the current role's access
  */
@@ -134,6 +145,13 @@ public class SFListMenu extends BaseWebhookService {
       } else {
         result = buildMenuTree(currentRole);
       }
+
+      // ETP-5019 follow-up (viewer-role gating) — this is the current CALLER's own role
+      // identity, exposed so the frontend can gate viewer-permission-sensitive UI (e.g. the
+      // User window's admin promote/demote buttons) without a second, dedicated endpoint —
+      // currentRole is already resolved above for the tree/search filtering itself.
+      result.put("viewerRoleId", currentRole.getId());
+      result.put("viewerIsClientAdmin", Boolean.TRUE.equals(currentRole.isClientAdmin()));
 
       responseVars.put("result", result.toString());
 

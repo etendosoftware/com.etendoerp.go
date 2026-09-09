@@ -22,13 +22,11 @@ import java.math.RoundingMode;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.util.UUID;
 
 import javax.enterprise.context.ApplicationScoped;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.invoice.Invoice;
@@ -254,8 +252,6 @@ public class InvoiceFromOrderSupport {
         }
       }
 
-      String newId = UUID.randomUUID().toString().replace("-", "").toUpperCase();
-      String userId = OBContext.getOBContext().getUser().getId();
       BigDecimal grandTotal = invoice.getGrandTotalAmount();
 
       // EM_ETGO_Currency_Rate is the org→doc multiplyRate (e.g. EUR→USD = 1.16).
@@ -265,32 +261,12 @@ public class InvoiceFromOrderSupport {
           ? grandTotal.multiply(docRate).setScale(2, RoundingMode.HALF_UP)
           : null;
 
-      String insertSql =
-          "INSERT INTO c_conversion_rate_document ("
-        + " c_conversion_rate_document_id, ad_client_id, ad_org_id, isactive,"
-        + " created, createdby, updated, updatedby,"
-        + " c_invoice_id, c_currency_id, c_currency_id_to, rate, foreign_amount"
-        + ") VALUES (?, ?, ?, 'Y', NOW(), ?, NOW(), ?, ?, ?, ?, ?, ?)";
-
-      try (PreparedStatement ps = conn.prepareStatement(insertSql)) {
-        ps.setString(1, newId);
-        ps.setString(2, invoice.getClient().getId());
-        ps.setString(3, invoice.getOrganization().getId());
-        ps.setString(4, userId);
-        ps.setString(5, userId);
-        ps.setString(6, invoice.getId());
-        ps.setString(7, invoice.getCurrency().getId());
-        ps.setString(8, orgCurrencyId);
-        ps.setBigDecimal(9, docRate);
-        if (foreignAmount != null) {
-          ps.setBigDecimal(10, foreignAmount);
-        } else {
-          ps.setNull(10, java.sql.Types.NUMERIC);
-        }
-        ps.executeUpdate();
-        log.info("[ETP-4027] Created C_Conversion_Rate_Document {} for invoice {} (docRate={}, eTGORate={})",
-            newId, invoice.getId(), docRate, rate);
-      }
+      // Shared with ConversionRateDocumentSync (ETP-4836) — the checkSql above already
+      // guarantees no row exists yet for this invoice+currency pair, so this is always
+      // a plain insert.
+      ConversionRateDocumentSync.insertConversionRateDocument(conn, invoice, orgCurrencyId, docRate, foreignAmount);
+      log.info("[ETP-4027] Created C_Conversion_Rate_Document for invoice {} (docRate={}, eTGORate={})",
+          invoice.getId(), docRate, rate);
 
       // ETP-4029: also persist the rate on the invoice column so summaries/lists can display it.
       invoice.setETGOCurrencyRate(rate);

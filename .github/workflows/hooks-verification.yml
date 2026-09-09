@@ -10,7 +10,7 @@ name: Hooks Verification
 on:
   pull_request:
     types: [opened, synchronize]
-    branches: [main, develop, 'epic/**']
+    branches: [main, develop]
 
 jobs:
   verify:

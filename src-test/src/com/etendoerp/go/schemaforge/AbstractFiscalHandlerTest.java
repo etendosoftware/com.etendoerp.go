@@ -59,6 +59,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 /**
  * Unit tests for routing logic in {@link AbstractFiscalHandler}.
@@ -74,10 +75,16 @@ public class AbstractFiscalHandlerTest {
   private static class StubHandler extends AbstractFiscalHandler {
 
     private final boolean throwFiscalEx;
+    private final RuntimeException fiscalCause;
 
     StubHandler(NeoServlet servlet, boolean throwFiscalEx) {
+      this(servlet, throwFiscalEx, new RuntimeException("fiscal error"));
+    }
+
+    StubHandler(NeoServlet servlet, boolean throwFiscalEx, RuntimeException fiscalCause) {
       super(servlet);
       this.throwFiscalEx = throwFiscalEx;
+      this.fiscalCause   = fiscalCause;
     }
 
     @Override
@@ -89,7 +96,7 @@ public class AbstractFiscalHandlerTest {
     protected void dispatch(String entityName, String orgId, int year, String period,
         HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {
       if (throwFiscalEx) {
-        throw new FiscalHandlerException(new RuntimeException("fiscal error"));
+        throw new FiscalHandlerException(fiscalCause);
       }
       throw new RuntimeException("unexpected dispatch error");
     }
@@ -99,6 +106,10 @@ public class AbstractFiscalHandlerTest {
       return "stub";
     }
   }
+
+  private static final String AD_MESSAGE_KEY = "@AEAT349_Phone_Contact_Mandatory@";
+  private static final String TRANSLATED_MESSAGE =
+      "Debe indicar la persona de contacto y el teléfono de la declaración.";
 
   private NeoServlet servlet;
 
@@ -215,6 +226,152 @@ public class AbstractFiscalHandlerTest {
 
     verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_INTERNAL_SERVER_ERROR),
         anyString());
+  }
+
+  // ── error message translation (ETP-5027) ──────────────────────────
+
+  /**
+   * Regression guard for ETP-5027. Etendo tax-report logic raises errors carrying a raw
+   * AD_Message key (here {@code @AEAT349_Phone_Contact_Mandatory@}, thrown by
+   * {@code AEAT3492010Report}); {@code dispatch} wraps it in a {@link FiscalHandlerException}.
+   * The message that reaches the browser must be the TRANSLATED text — previously the raw key
+   * was forwarded verbatim and users saw the literal code. It must also be free of the
+   * {@code FiscalHandlerException} wrapper's class-name prefix, which
+   * {@code RuntimeException(Throwable)} bakes into {@code getMessage()}.
+   */
+  @Test
+  public void testFiscalHandlerExceptionMessageIsTranslated() throws IOException {
+    HttpServletRequest  req  = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("year")).thenReturn("2026");
+    when(req.getParameter(PERIOD_KEY)).thenReturn("T1");
+
+    StubHandler handler = new StubHandler(servlet, true, new OBException(AD_MESSAGE_KEY));
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      OBContext      ctx = mock(OBContext.class);
+      Organization   org = mock(Organization.class);
+      when(org.getId()).thenReturn("ORG1");
+      when(ctx.getCurrentOrganization()).thenReturn(org);
+      ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
+      msgMock.when(() -> OBMessageUtils.parseTranslation(AD_MESSAGE_KEY))
+          .thenReturn(TRANSLATED_MESSAGE);
+
+      handler.handle("known", "GET", req, resp);
+    }
+
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_INTERNAL_SERVER_ERROR),
+        eq(TRANSLATED_MESSAGE));
+  }
+
+  /**
+   * Without a live OBContext (the situation in every mocked unit test) translation cannot run.
+   * The handler must still produce the underlying message rather than propagate — and it must
+   * be the CAUSE's message, i.e. the bare key with no {@code OBException: } class-name prefix
+   * from the {@link FiscalHandlerException} wrapper.
+   */
+  @Test
+  public void testUserMessageFallsBackToUnwrappedRawText() {
+    StubHandler handler = new StubHandler(servlet, false);
+    FiscalHandlerException ex = new FiscalHandlerException(new OBException(AD_MESSAGE_KEY));
+
+    String message;
+    try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      msgMock.when(() -> OBMessageUtils.parseTranslation(AD_MESSAGE_KEY))
+          .thenThrow(new NullPointerException("no OBContext"));
+      message = handler.userMessage(ex);
+    }
+
+    assertEquals(AD_MESSAGE_KEY, message);
+  }
+
+  /**
+   * Only our own wrapper is unwrapped — any other exception keeps its own message, which is
+   * still run through translation so embedded tokens are resolved.
+   */
+  @Test
+  public void testUserMessageKeepsMessageOfNonWrapperException() {
+    StubHandler handler = new StubHandler(servlet, false);
+
+    String message;
+    try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      msgMock.when(() -> OBMessageUtils.parseTranslation("plain failure"))
+          .thenReturn("plain failure");
+      message = handler.userMessage(new OBException("plain failure"));
+    }
+
+    assertEquals("plain failure", message);
+  }
+
+  /**
+   * A wrapper around a message-less cause must not degrade into a blank error: the wrapper's
+   * own (class-name-derived) message is kept as the last resort.
+   */
+  @Test
+  public void testUserMessageFallsBackWhenCauseHasNoMessage() {
+    StubHandler handler = new StubHandler(servlet, false);
+    FiscalHandlerException ex = new FiscalHandlerException(new RuntimeException());
+
+    String message;
+    try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      msgMock.when(() -> OBMessageUtils.parseTranslation(anyString()))
+          .thenAnswer(inv -> inv.getArgument(0));
+      message = handler.userMessage(ex);
+    }
+
+    assertEquals(ex.getMessage(), message);
+    assertTrue(message != null && !message.isEmpty());
+  }
+
+  /**
+   * ETP-5027 (QA F6): an exception with NO message at all — a bare
+   * {@code NullPointerException} is the everyday case — used to travel as null all the way to
+   * {@code NeoResponse.error}, where jettison drops the null key and the browser receives
+   * {@code {"error":{"status":500}}} with nothing to display. {@code userMessage} is the single
+   * funnel for fiscal error text, so it must never return null or blank.
+   */
+  @Test
+  public void testUserMessageNeverReturnsNullForAMessagelessException() {
+    StubHandler handler = new StubHandler(servlet, false);
+
+    String message;
+    try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      msgMock.when(() -> OBMessageUtils.parseTranslation(anyString()))
+          .thenAnswer(inv -> inv.getArgument(0));
+      message = handler.userMessage(new NullPointerException());
+    }
+
+    assertEquals(AbstractFiscalHandler.GENERIC_ERROR_MESSAGE, message);
+  }
+
+  /** A blank (whitespace-only) message is as useless as a null one and gets the same floor. */
+  @Test
+  public void testUserMessageReplacesABlankMessage() {
+    StubHandler handler = new StubHandler(servlet, false);
+
+    String message;
+    try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      msgMock.when(() -> OBMessageUtils.parseTranslation(anyString()))
+          .thenAnswer(inv -> inv.getArgument(0));
+      message = handler.userMessage(new OBException("   "));
+    }
+
+    assertEquals(AbstractFiscalHandler.GENERIC_ERROR_MESSAGE, message);
+  }
+
+  /** A translation that resolves to blank must not be forwarded either. */
+  @Test
+  public void testUserMessageReplacesABlankTranslation() {
+    StubHandler handler = new StubHandler(servlet, false);
+
+    String message;
+    try (MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      msgMock.when(() -> OBMessageUtils.parseTranslation(AD_MESSAGE_KEY)).thenReturn("");
+      message = handler.userMessage(new OBException(AD_MESSAGE_KEY));
+    }
+
+    assertEquals(AbstractFiscalHandler.GENERIC_ERROR_MESSAGE, message);
   }
 
   // ── writeGeneratedFile ────────────────────────────────────────────

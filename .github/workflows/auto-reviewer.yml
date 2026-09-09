@@ -6,7 +6,7 @@ on:
 
 jobs:
   make-review:
-    if:  github.head_ref != 'develop'
+    if:  github.head_ref != 'main'
     runs-on: ubuntu-latest
     env:
       PULL_REQUEST: ${{ github.event.pull_request.number }}

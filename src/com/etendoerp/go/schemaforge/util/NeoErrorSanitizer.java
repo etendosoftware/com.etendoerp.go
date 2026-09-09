@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge.util;
 
+
 /**
  * Sanitizes exception messages before they are sent in HTTP responses.
  *
@@ -218,6 +219,43 @@ public final class NeoErrorSanitizer {
    */
   public static boolean isDuplicateKeyMessage(String message) {
     return message != null && message.toLowerCase().contains("must be unique");
+  }
+
+  /**
+   * AD message code core raises when its optimistic-locking check fails.
+   *
+   * <p>{@code JsonToDataConverter.setData} compares the {@code updated} value carried in the
+   * write payload against the one the record holds in the database and, when they differ, throws
+   * {@code OBStaleObjectException("@OBJSON_StaleDate@")}.
+   */
+  private static final String STALE_RECORD_MESSAGE_CODE = "OBJSON_StaleDate";
+
+  /**
+   * Returns {@code true} if {@code message} carries core's optimistic-locking message CODE.
+   *
+   * <p>Narrow on purpose. Two richer versions were tried and both failed against a live server:
+   *
+   * <ol>
+   *   <li>matching the code in the failure body — but {@code JsonUtils.convertExceptionToJson}
+   *       runs {@code Utility.translateError} before building it, so on a normal request the code
+   *       is already gone;</li>
+   *   <li>resolving the code through {@code AD_Message} and comparing the texts — but
+   *       {@code OBMessageUtils.messageBD("OBJSON_StaleDate")} does not resolve in this request
+   *       context and echoes the code straight back, even though the row exists in the database.
+   *       That was later proved by the code leaking to a client as the response message.</li>
+   * </ol>
+   *
+   * <p>So the detection that matters no longer looks at messages at all: {@code NeoRecordVersion}
+   * compares the caller's token against the stored row before the write. This method survives as a
+   * narrow backstop for the one path where the code really does arrive intact — a stateless
+   * request, where {@code convertExceptionToJson} skips translation and passes
+   * {@code throwable.getMessage()} through untouched.
+   *
+   * @param message the error message off the RPC failure body; may be {@code null}
+   * @return whether the message carries the stale-record code
+   */
+  public static boolean isStaleRecordMessage(String message) {
+    return message != null && message.contains(STALE_RECORD_MESSAGE_CODE);
   }
 
   /**

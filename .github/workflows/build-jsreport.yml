@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - develop
-      - epic/ETP-3504
     paths:
       - compose/Dockerfile
       - compose/jsreport.config.json

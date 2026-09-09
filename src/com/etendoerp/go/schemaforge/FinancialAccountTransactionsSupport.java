@@ -19,13 +19,12 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.sql.Timestamp;
-import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.Date;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.function.Consumer;
@@ -34,11 +33,15 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
+import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
 /**
@@ -92,7 +95,7 @@ final class FinancialAccountTransactionsSupport {
     String currencyId = body.optString("currencyId", null);
     return StringUtils.isBlank(currencyId)
         ? fallback
-        : OBDal.getInstance().get(Currency.class, currencyId);
+        : TenantOwnership.loadOwned(Currency.class, currencyId);
   }
 
   /** trxType code → Classic "Transaction Type" label (unknown codes pass through). */
@@ -111,8 +114,11 @@ final class FinancialAccountTransactionsSupport {
       "RDNC", "Deposited not Cleared",
       "RPPC", "Payment Cleared");
 
-  private static final DateTimeFormatter DMY_DASH =
-      DateTimeFormatter.ofPattern("dd-MM-yyyy").withZone(ZoneOffset.UTC);
+  // No .withZone(UTC) — same reason as NeoDateFormat.toWireDateTime (ETP-5100): a payment date is
+  // a civil value stored at the server's local midnight, so rendering it as a UTC instant moves
+  // the day. This one is a display label rather than a wire value, so it keeps its own dd-MM-yyyy
+  // pattern, but it is fed a LocalDate exactly like its DMY neighbour below.
+  private static final DateTimeFormatter DMY_DASH = DateTimeFormatter.ofPattern("dd-MM-yyyy");
 
   private static final DateTimeFormatter DMY = DateTimeFormatter.ofPattern("dd/MM/yyyy");
 
@@ -131,7 +137,7 @@ final class FinancialAccountTransactionsSupport {
 
   /** Synthetic "Payment" column: {@code docNo - dd-MM-yyyy - contact - |amount|}. */
   static String buildPaymentLabel(String docNo, Timestamp date, String contact, BigDecimal amount) {
-    String dateStr = date == null ? "" : DMY_DASH.format(Instant.ofEpochMilli(date.getTime()));
+    String dateStr = date == null ? "" : DMY_DASH.format(date.toLocalDateTime().toLocalDate());
     String amt = (amount == null ? BigDecimal.ZERO : amount.abs())
         .stripTrailingZeros().toPlainString();
     StringBuilder sb = new StringBuilder();
@@ -206,10 +212,19 @@ final class FinancialAccountTransactionsSupport {
     }
   }
 
+  /**
+   * Sets an optional FK from a request-supplied id, ignoring it when it resolves to nothing.
+   *
+   * <p>Resolved through {@link TenantOwnership} because every caller feeds this an id straight from
+   * a request body — contact, GL item, project, cost centre, product. A bare {@code OBDal.get} let a
+   * movement of THIS tenant point at another tenant's master data, and the movements list then read
+   * those rows back through {@code LEFT JOIN}s that carry no client predicate, so the foreign name
+   * came out in the response. An id the caller may not see is treated as absent (ETP-4950).
+   */
   static <T extends BaseOBObject> void attachOptional(String id, Class<T> entityClass,
       Consumer<T> setter) {
     if (StringUtils.isBlank(id)) return;
-    T ref = OBDal.getInstance().get(entityClass, id);
+    T ref = TenantOwnership.loadOwned(entityClass, id);
     if (ref != null) setter.accept(ref);
   }
 
@@ -222,6 +237,44 @@ final class FinancialAccountTransactionsSupport {
       Class<T> entityClass, Consumer<T> setter) {
     if (!body.has(key)) return;
     String id = body.optString(key, null);
-    setter.accept(StringUtils.isBlank(id) ? null : OBDal.getInstance().get(entityClass, id));
+    // Tenant-guarded like attachOptional: a foreign id resolves to null, i.e. "clear", never to
+    // another tenant's row (ETP-4950).
+    setter.accept(StringUtils.isBlank(id) ? null : TenantOwnership.loadOwned(entityClass, id));
+  }
+
+  /** The bank-statement line currently matched to {@code trx}, or {@code null} when it is unmatched. */
+  static FIN_BankStatementLine linkedBankStatementLine(FIN_FinaccTransaction trx) {
+    List<FIN_BankStatementLine> lines = trx.getFINBankStatementLineList();
+    return lines.isEmpty() ? null : lines.get(0);
+  }
+
+  /**
+   * Is {@code trx} one of the two legs of a funds transfer, i.e. is it POINTED AT by another
+   * transaction? A transfer creates a paired withdrawal (source) + deposit (destination) that
+   * reference each other through two self-FKs on {@code FIN_FINACC_TRANSACTION}, both
+   * <b>RESTRICT</b>: {@code EM_APRM_FINACC_TRANS_ORIGIN} (Classic, destination &rarr; source) and
+   * {@code EM_ETGO_FINACC_TRANS_DEST} (the mirror half added by {@code FundsTransferDestinationHook},
+   * source &rarr; destination). Removing either leg therefore fails at flush time with a JDBC
+   * constraint violation, which is NOT an {@code OBException} and so used to escape
+   * {@link #runMutation}'s business-error branch and surface as an opaque HTTP 500 (ETP-5085).
+   *
+   * <p>The check is deliberately shaped like the FK itself — "does any row reference me?" — rather
+   * than reading {@code trx}'s own outgoing links: a destination-side bank fee ({@code BF}) also
+   * carries an origin, yet nothing references IT, so it stays deletable. It also covers transfers
+   * created before the mirror column existed, where only the Classic half is set.
+   */
+  static boolean isTransferCounterpart(FIN_FinaccTransaction trx) {
+    return isReferencedBy(FIN_FinaccTransaction.PROPERTY_APRMFINACCTRANSORIGIN, trx)
+        || isReferencedBy(FIN_FinaccTransaction.PROPERTY_ETGOFINACCTRANSDEST, trx);
+  }
+
+  /** {@code OBCriteria} probe: does at least one transaction reference {@code trx} through
+   *  {@code fkProperty}? Same idiom as {@code FinancialAccountDeleteSupport.hasAnyRow}. */
+  private static boolean isReferencedBy(String fkProperty, FIN_FinaccTransaction trx) {
+    OBCriteria<FIN_FinaccTransaction> criteria =
+        OBDal.getInstance().createCriteria(FIN_FinaccTransaction.class);
+    criteria.add(Restrictions.eq(fkProperty, trx));
+    criteria.setMaxResults(1);
+    return criteria.uniqueResult() != null;
   }
 }

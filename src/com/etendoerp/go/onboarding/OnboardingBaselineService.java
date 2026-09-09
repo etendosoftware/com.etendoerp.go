@@ -86,7 +86,22 @@ public class OnboardingBaselineService {
    * Use the exact UTC timestamp prefix of the last incorporated .sql file, e.g.:
    * {@code "20260617T120000Z"} matches {@code 20260617T120000Z__R7-tax-accounts.sql}.</p>
    *
-   * Current watermark: R23 acctdim-centrally-maintained (2026-08-11).
+   * Current watermark: R31 glitem-subaccount-backfill (2026-09-01).
+   *
+   * <p><b>Note (2026-08-26, ETP-4999):</b> gap M1 — the self-registration provisioning chain
+   * ({@code InitialClientSetup} then, separately and later, {@code
+   * EtendoGoJwtServlet#createOrganization}) left the onboarding admin's {@code
+   * Default_Ad_Client_ID}/{@code Default_Ad_Org_ID}/{@code Default_M_Warehouse_ID}/{@code
+   * EM_SMFSWS_Default_WS_Role_ID} all {@code NULL} and their sole {@code AD_User_Roles} row
+   * stuck at the root org {@code '0'} — confirmed live on dozens of self-registered tenants,
+   * zero exceptions. The first breaks SWS login/environment-switch warehouse resolution ({@code
+   * SecureWebServicesUtils.generateToken()} → {@code SMFSWS_OrgHasNoRole}); the second breaks a
+   * self-registered admin inviting themselves into their own real org ({@code
+   * CompanyInvitationDalHelper#hasActiveRoleForOrganization}'s exact-org match against {@code
+   * AD_User_Roles}). Closed by {@code OnboardingAdminIdentityService}, wired as the new step
+   * right before this baseline stamp (after the accounting-wiring steps grant the admin role
+   * {@code AD_Role_OrgAccess} for the real org). Bumped to R26's own timestamp, {@code
+   * 2026-08-26T12:00:00Z}.</p>
    *
    * <p><b>Note (2026-08-11, ETP-4854):</b> gap K1 — {@code AD_Client.Acctdim_Centrally_Maintained}
    * was hardcoded to {@code true} for every new client by classic {@code InitialSetupUtility},
@@ -168,8 +183,75 @@ public class OnboardingBaselineService {
    * {@code C_AcctSchema_Default}, is itself NULL fleet-wide (an R11-adjacent gap, out of this
    * ticket's scope); R21's own {@code @check} already no-ops on them today and will self-heal once
    * that separate gap closes, with no onboarding change needed here.</p>
+   *
+   * <p><b>2026-08-28 (ETP-4947, R29):</b> reverted {@code C_ACCTSCHEMA.AllowNegative} back to
+   * {@code N} (unchecked) in {@code C_ACCTSCHEMA.xml} — ETP-4245/A3's {@code Y} default (justified
+   * at the time by Confluence Test Plan case TC-38) is superseded; TC-38 itself is being
+   * retired/superseded in Confluence by the ticket owner. {@code IsCentrallyMaintained} and the
+   * CC/User1/User2 accounting-dimension rows that A3/R10 also introduced are explicitly OUT of
+   * scope and remain {@code Y} / present, untouched. Corrective twin:
+   * {@code 20260828T140000Z__R29-acctschema-allownegative-revert.sql}. Bumped to R29's own
+   * timestamp, {@code 2026-08-28T14:00:00Z}.</p>
+   *
+   * <p><b>2026-09-01 (ETP-5101 S2.2, gap N1):</b> the preventive front for N1 shipped EARLIER, in
+   * a separate ticket (ETP-5020, merged 2026-08-30) — {@code
+   * GlItemProvisioningSupport#ensureGlItemForSubaccount}, called from both {@code
+   * ChartOfAccountsHandler#afterHandle} (live subaccount POST/PATCH) and {@code
+   * OnboardingAccountingWiringService#provisionGlItemsForImportedChart} (bulk chart-of-accounts
+   * import) — but, like the ETP-4720/A2c precedent above, deliberately did NOT bump this constant
+   * at the time because its corrective {@code .sql} twin did not exist yet. This ticket adds that
+   * twin ({@code R31-glitem-subaccount-backfill}, backfilling {@code C_Glitem}/{@code
+   * C_Glitem_Acct} for leaf subaccounts created before ETP-5020 shipped), so the bump now closes
+   * the loop the same way ETP-4743 did: new tenants are already provisioned correctly by the live
+   * ETP-5020 code, and the runner correctly skips R31 for them via this watermark. This bump is a
+   * pure optimization, not a correctness dependency — R31's own {@code @check} already converges
+   * to 0 rows for any subaccount ETP-5020 already covered, watermark or not. NOT a preventive-front
+   * fix in THIS ticket — {@code GlItemProvisioningSupport}/{@code ChartOfAccountsHandler} are
+   * unchanged here. Bumped to R31's own timestamp, {@code 2026-09-01T14:00:00Z}.
+   * <b>Gap N2, discovered during R31's live validation, FIXED same session on BOTH fronts:</b>
+   * {@code C_Glitem.Name} is {@code varchar(60)} while {@code C_ElementValue.Name} is {@code
+   * varchar(255)} — {@code composeGlItemName}'s {@code "<searchKey>-<name>"} format originally had
+   * no length guard, so a subaccount whose composed name exceeded 60 chars silently failed GL Item
+   * provisioning on BOTH fronts (confirmed live: 294 of GOClient's 658 leaf subaccounts, mostly
+   * long Spanish PGC names) — {@code ensureGlItemForSchema}'s own best-effort try/catch swallowed
+   * the failure per-schema, silent even on a live subaccount save. Fixed via {@code
+   * composeGlItemName}/the new {@code truncateToFit} helper + {@code GL_ITEM_NAME_MAX_LENGTH=60}:
+   * the NAME portion is hard-truncated, the 8-digit CODE always survives intact (it disambiguates
+   * two subaccounts sharing a name — the entire point of appending it). R31's corrective twin
+   * mirrors this EXACT formula in SQL — not merely "no longer diverges going forward", the two
+   * fronts now converge on byte-identical GL Item names (verified 0 mismatches across all 294
+   * previously-blocked GOClient rows) — so no subaccount is skipped anymore; {@code @report} now
+   * lists which names actually got shortened, for operator visibility.</p>
+   *
+   * <p><b>2026-09-02 (ETP-5079):</b> this ticket did NOT bump the constant; the value above comes
+   * from ETP-5101. ETP-5079 corrects the curated GOClient dataset itself (price-list and warehouse
+   * names, sample products and template financial accounts removed, document sequences given a sane
+   * {@code STARTNO}, {@code C_DOCTYPE_TRL} and {@code M_PRODUCT_CATEGORY_TRL} added to {@link
+   * OnboardingDatasetDefinition}'s {@code INCLUDED_TABLES} with real Spanish names, English base
+   * names throughout) and removes the synthetic "Default Customer" business partner from the
+   * provisioning chain. Every one of those makes a NEW tenant born correct.
+   *
+   * <p>Its corrective {@code .sql} is {@code 20260902T120000Z__R31-document-sequence-startno},
+   * which realigns the 11 document sequences' {@code STARTNO}/{@code CURRENTNEXT} on
+   * already-provisioned tenants. It warrants no bump of its own: a newborn tenant already gets
+   * correct sequences straight from the corrected {@code AD_SEQUENCE.xml}, so R31's {@code @check}
+   * returns 0 rows for it and the runner records a clean {@code SKIPPED_NOT_NEEDED} — the same
+   * terminal state a watermark skip produces, reached by actually looking rather than by date.
+   * Reserve CUT bumps for fixes whose {@code @check} WOULD match on a correctly provisioned new
+   * tenant. Same reasoning as G1/G4 (see {@code onboarding-and-datafixes-map.md}): sampledata alone
+   * makes new tenants correct, so no bump is warranted.
+   *
+   * <p>Note for anyone auditing the ETP-5101 bump above against the fixes it now skips: it moves
+   * the cutoff past {@code R30-financial-account-card-ledger-account} (2026-08-30) and {@code
+   * R29-transfer-link-multicurrency} (2026-08-31), neither of which bumped it themselves. That is
+   * harmless, and deliberately so — both are corrective twins whose preventive front already
+   * shipped, so both are no-ops on a newborn tenant. R30 says as much in its own header ("the
+   * preventive front (Task 5, ETP-4872) already shipped this for NEW tenants via the GOClient
+   * onboarding sampledata"), and R29-transfer states it outright: "new tenants are born correct via
+   * the sampledata above". The "CUT bump without its .sql" hazard this constant's contract forbids
+   * is about skipping fixes that WOULD still match — not these.</p>
    */
-  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-08-11T12:00:00Z");
+  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-09-01T14:00:00Z");
 
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("

@@ -139,6 +139,11 @@ public class OnboardingDatasetImportService {
   /**
    * Validates that the imported dataset contains visible seed data for the target organization.
    *
+   * <p><b>ETP-5079:</b> financial accounts are deliberately NOT part of this gate any more. The
+   * curated dataset no longer ships the three template accounts ("Caja"/"Cuenta de Banco"/
+   * "Tarjeta") — a tenant is expected to create its own — so a zero count is now the normal,
+   * correct outcome rather than a failed import. The count is still logged for diagnostics.</p>
+   *
    * @param client the client for which the dataset was imported
    * @param organization the organization for which the dataset was imported
    * @throws OBException if no visible seed data is found for the target organization
@@ -149,26 +154,32 @@ public class OnboardingDatasetImportService {
     logImportedSeedSummary(client, organization, summary);
 
     if (summary.totalProducts() == 0 || summary.totalWarehouses() == 0
-        || summary.totalPriceLists() == 0 || summary.totalFinancialAccounts() == 0) {
+        || summary.totalPriceLists() == 0) {
       throw new OBException("Onboarding dataset import completed but no visible seed data was found "
           + "for client " + client.getId() + "/org " + organization.getId()
           + " [products=" + summary.totalProducts()
           + ", warehouses=" + summary.totalWarehouses()
-          + ", priceLists=" + summary.totalPriceLists()
-          + ", financialAccounts=" + summary.totalFinancialAccounts() + "]");
+          + ", priceLists=" + summary.totalPriceLists() + "]");
     }
   }
 
   /**
    * Returns {@code true} when the curated seed is already fully present for the tenant, i.e. there
-   * is at least one product, warehouse, price list and financial account visible to the target
-   * organization (system-org rows included). Mirrors the success condition of
-   * {@link #validateImportedSeed} and is used to make {@link #importDataset} idempotent on retry.
+   * is at least one product, warehouse and price list visible to the target organization
+   * (system-org rows included). Mirrors the success condition of {@link #validateImportedSeed} and
+   * is used to make {@link #importDataset} idempotent on retry.
+   *
+   * <p><b>ETP-5079:</b> financial accounts were dropped from this probe together with the gate in
+   * {@link #validateImportedSeed}. Keeping them here would be worse than useless: the dataset no
+   * longer seeds any account, so the count would be permanently zero, this method would always
+   * return {@code false}, and a retry after a partial onboarding failure would re-import the whole
+   * dataset and duplicate products, warehouses and price lists — exactly the regression this
+   * idempotency guard exists to prevent.</p>
    */
   protected boolean isSeedAlreadyPresent(Client client, Organization organization) {
     SeedVisibilitySummary summary = buildSeedVisibilitySummary(client, organization);
     return summary.totalProducts() > 0 && summary.totalWarehouses() > 0
-        && summary.totalPriceLists() > 0 && summary.totalFinancialAccounts() > 0;
+        && summary.totalPriceLists() > 0;
   }
 
   private SeedVisibilitySummary buildSeedVisibilitySummary(Client client, Organization organization) {
@@ -267,10 +278,6 @@ public class OnboardingDatasetImportService {
 
     private long totalPriceLists() {
       return priceLists.total();
-    }
-
-    private long totalFinancialAccounts() {
-      return financialAccounts.total();
     }
   }
 }

@@ -40,13 +40,13 @@ import org.openbravo.dal.service.OBDal;
 import com.etendoerp.go.common.PublicUrlResolver;
 
 /**
- * Servlet filter that validates OAuth2 Bearer tokens on requests to /sws/mcp.
+ * Servlet filter that validates OAuth2 Bearer tokens on requests to the MCP endpoints.
  * <p>
  * Uses Hibernate session's JDBC connection via {@code doReturningWork()} to query
  * the token table. This shares the same connection that DalRequestFilter established,
  * avoiding PooledConnection corruption from opening/close separate JDBC connections.
  */
-@WebFilter(urlPatterns = "/sws/mcp")
+@WebFilter(urlPatterns = { "/sws/mcp", "/mcp" })
 public class OAuth2Filter implements Filter {
 
   private static final Logger log = LogManager.getLogger(OAuth2Filter.class);

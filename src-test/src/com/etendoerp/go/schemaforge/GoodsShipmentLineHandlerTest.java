@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -371,28 +372,51 @@ public class GoodsShipmentLineHandlerTest {
     }
   }
 
-  // ── afterCallout() regression (ETP-4671) ──────────────────────────────────
+  // ── afterCallout() — stock-derived movementQuantity (ETP-5062) ───────────
 
   /**
-   * Regression guard for ETP-4671: {@link GoodsReceiptLineHandler} was given an
-   * {@code afterCallout()} override that strips the stock-derived {@code movementQuantity}
-   * update coming from the shared {@code SL_InOutLine_Product} callout, because a purchase
-   * receipt's quantity has nothing to do with what is already on hand. Goods Shipment is the
-   * opposite case — picking from existing stock is the correct, intended behavior for a
-   * shipment — so {@link GoodsShipmentLineHandler} must NOT get this override:
-   * {@code movementQuantity} must keep passing through untouched.
+   * ETP-5062: reverses the ETP-4671 carve-out documented by the (now removed)
+   * {@code testAfterCalloutDoesNotStripMovementQuantity}. That decision assumed prefilling a
+   * manually-added Goods Shipment line with the product's full on-hand quantity was a helpful
+   * default ("pick from what's in stock"). In practice a user can confirm the shipment without
+   * noticing the preselected value and move the entire warehouse stock by accident — the same
+   * risk ETP-4671 already treated as unacceptable for Goods Receipt. {@code afterCallout()} must
+   * now strip the stock-derived {@code movementQuantity} for Goods Shipment too, exactly like
+   * {@link GoodsReceiptLineHandler} already does, so a manually-added line always starts at the
+   * row's own default (0) instead of silently jumping to the on-hand qty.
    */
   @Test
-  public void testAfterCalloutDoesNotStripMovementQuantity() throws Exception {
-    JSONObject updates = new JSONObject().put("movementQuantity", new JSONObject().put("value", 50));
+  public void testAfterCalloutStripsStockDerivedMovementQuantity() throws Exception {
+    // Simulates the exact shape NeoCalloutService.transformResponse() produces after running
+    // SL_InOutLine_Product for a product with 297 units on hand and no pending order import.
+    JSONObject updates = new JSONObject()
+        .put("movementQuantity", new JSONObject().put("value", 297))
+        .put("uOM", new JSONObject().put("value", "Unit"));
     JSONObject prevBody = new JSONObject().put("updates", updates);
     NeoContext ctx = NeoContext.builder().endpointType(NeoEndpointType.CALLOUT)
         .previousResult(NeoResponse.ok(prevBody)).build();
 
     assertNull(new GoodsShipmentLineHandler().afterCallout(ctx));
-    assertTrue("Goods Shipment must keep picking movementQuantity from on-hand stock — only "
-        + "Goods Receipt's own handler strips it",
+
+    assertFalse("movementQuantity must be stripped — a manually-added shipment line must not "
+        + "silently prefill the moved quantity with the product's current on-hand stock",
         prevBody.getJSONObject("updates").has("movementQuantity"));
+    assertTrue("Unrelated fields (e.g. a resolved UOM) must survive untouched",
+        prevBody.getJSONObject("updates").has("uOM"));
+  }
+
+  /**
+   * afterCallout() must leave the response untouched when the callout returned no updates at
+   * all (e.g. a callout on a field other than product).
+   */
+  @Test
+  public void testAfterCalloutLeavesResponseUntouchedWhenNoUpdates() throws Exception {
+    JSONObject prevBody = new JSONObject().put("combos", new JSONObject());
+    NeoContext ctx = NeoContext.builder().endpointType(NeoEndpointType.CALLOUT)
+        .previousResult(NeoResponse.ok(prevBody)).build();
+
+    assertNull(new GoodsShipmentLineHandler().afterCallout(ctx));
+    assertFalse(prevBody.has("updates"));
   }
 
   // ── handle() — storageBin default injection (ETP-4863) ───────────────────

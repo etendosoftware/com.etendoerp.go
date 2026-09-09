@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import static com.etendoerp.go.schemaforge.util.NeoMessageTranslator.safeParseTranslation;
+
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.HashMap;
@@ -38,7 +40,6 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
-import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.structure.BaseOBObject;
@@ -1067,19 +1068,5 @@ public class NeoProcessService {
     }
 
     return NeoResponse.ok(result);
-  }
-
-  /**
-   * Resolves {@code @Key@} AD_Message tokens in {@code text} using the current
-   * {@link org.openbravo.dal.core.OBContext} language. Falls back to returning
-   * the original {@code text} unchanged when no OBContext is available (e.g. in
-   * unit tests that call these methods without a live Etendo application context).
-   */
-  private static String safeParseTranslation(String text) {
-    try {
-      return OBMessageUtils.parseTranslation(text);
-    } catch (Exception e) {
-      return text;
-    }
   }
 }

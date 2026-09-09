@@ -19,86 +19,16 @@ package com.etendoerp.go.schemaforge;
 
 import javax.inject.Named;
 
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONObject;
-
 /**
  * NeoHandler for the Goods Receipt line entity ({@code goodsReceiptLine}).
  *
- * <p>Extends {@link AbstractInOutLineHandler} for the behavior shared with Goods Shipment
- * (invoice-line linking, order/invoice qty and product-code enrichment on GET), and adds two
- * receipt-only fixes (ETP-4671):
- *
- * <h3>POST (create) — pre-hook: default {@code storageBin} to the warehouse's default locator</h3>
- * {@code M_InOutLine.M_Locator_ID} (the {@code storageBin} field) is declared in
- * {@code decisions.json} with {@code form: false} — it is never shown to the user in this
- * window. Its raw AD default ({@code @OnHandLocatorDefault@}) resolves to the locator where the
- * product <em>already</em> has stock, which is the right idea for Goods Shipment (you can only
- * ship from where stock exists) but wrong for a purchase receipt: a brand-new product with zero
- * on-hand stock resolves to nothing, {@code M_Locator_ID} stays {@code NULL}, and the classic
- * {@code M_INOUT_POST} completion procedure then rejects the document with
- * {@code InoutLineWithoutLocator} — regardless of {@code IsSOTrx}. This hook defaults the
- * locator to the receiving warehouse's own default active {@code M_Locator} via
- * {@link NeoHandlerUtils#injectDefaultLocatorIfMissing(JSONObject, Logger)} (the same shared
- * helper {@link GoodsShipmentLineHandler} and {@link ReturnToVendorShipmentLineHandler} use as of
- * ETP-4863), so confirmation succeeds for unstocked products too. An explicit user/import-supplied
- * {@code storageBin} is never overridden.
- *
- * <h3>Callout post-hook: strip stock-derived {@code movementQuantity}</h3>
- * The classic {@code SL_InOutLine_Product} callout (shared by every {@code M_InOutLine}-based
- * window, per its own source comment) echoes back the product selector's on-hand-stock
- * auxiliary value as the new {@code movementQuantity} whenever the line is not created from an
- * order import. That default makes sense for a shipment (pick from what's in stock) but not for
- * a receipt, where the quantity being received has nothing to do with what is already on hand.
- * This hook removes {@code movementQuantity} from the callout response so the frontend keeps the
- * row's own value ({@code decisions.json} defaults it to {@code 1}, editable by the user)
- * instead of silently overwriting it with the stock quantity.
+ * <p>Everything this entity needs — invoice-line linking, order/invoice qty + product-code
+ * enrichment, the storageBin default-locator pre-hook (ETP-4671/ETP-4863), and the stock-derived
+ * {@code movementQuantity} strip (ETP-4671, extended to Goods Shipment by ETP-5062) — is
+ * identical to {@link GoodsShipmentLineHandler}'s, so it all lives in the shared
+ * {@link AbstractInOutLineHandler} base class. This class exists only to bind the
+ * {@code goodsReceiptLineHandler} Java_Qualifier via {@code @Named}.
  */
 @Named("goodsReceiptLineHandler")
 public class GoodsReceiptLineHandler extends AbstractInOutLineHandler {
-
-  private static final Logger log = LogManager.getLogger(GoodsReceiptLineHandler.class);
-  private static final String FIELD_MOVEMENT_QUANTITY = "movementQuantity";
-
-  @Override
-  public NeoResponse handle(NeoContext context) {
-    NeoResponse parentResult = super.handle(context);
-    if (parentResult != null) {
-      return parentResult;
-    }
-    if (context != null && NeoEndpointType.CRUD.equals(context.getEndpointType())
-        && "POST".equalsIgnoreCase(context.getHttpMethod())) {
-      try {
-        NeoHandlerUtils.injectDefaultLocatorIfMissing(context.getRequestBody(), log);
-      } catch (Exception e) {
-        log.warn("[GoodsReceiptLineHandler] Could not default storageBin: {}", e.getMessage(), e);
-      }
-    }
-    return null;
-  }
-
-  /**
-   * Strips the stock-derived {@code movementQuantity} update that {@code SL_InOutLine_Product}
-   * returns on product selection (see class Javadoc). Mutates {@code previousResult} in place —
-   * the same convention {@link InventoryLineHandler#afterCallout} uses to override values — and
-   * returns {@code null} so the dispatcher's additive-only merge never runs.
-   */
-  @Override
-  public NeoResponse afterCallout(NeoContext context) {
-    if (context == null || !NeoEndpointType.CALLOUT.equals(context.getEndpointType())) {
-      return null;
-    }
-    NeoResponse previous = context.getPreviousResult();
-    if (previous == null || previous.getBody() == null) {
-      return null;
-    }
-    JSONObject updates = previous.getBody().optJSONObject("updates");
-    if (updates != null && updates.has(FIELD_MOVEMENT_QUANTITY)) {
-      updates.remove(FIELD_MOVEMENT_QUANTITY);
-      log.debug("[GoodsReceiptLineHandler] Stripped stock-derived movementQuantity from callout "
-          + "response (ETP-4671)");
-    }
-    return null;
-  }
 }

@@ -1,31 +1,11 @@
-/*
- * *************************************************************************
- * The contents of this file are subject to the Etendo License
- * (the "License"), you may not use this file except in compliance with
- * the License.
- * You may obtain a copy of the License at
- * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
- * Software distributed under the License is distributed on an
- * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
- * implied. See the License for the specific language governing rights
- * and limitations under the License.
- * All portions are Copyright © 2021–2026 FUTIT SERVICES, S.L
- * All Rights Reserved.
- * Contributor(s): Futit Services S.L.
- * *************************************************************************
- */
-
 package com.etendoerp.go.schemaforge;
 
 import java.io.IOException;
 import java.io.PrintWriter;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 import javax.servlet.http.HttpServletResponse;
 
@@ -36,17 +16,25 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 
 /**
- * Generic CSV export for any NEO list GET. When a list request carries
- * {@code export=csv}, the servlet delegates here instead of writing JSON: the
- * rows the handler already produced are serialized to CSV and streamed as a
- * file attachment. This is window-agnostic — it operates on the standard JSON
- * envelope ({@code {response:{data:{<key>:[...]}}}}) that any list handler
- * returns, so it works uniformly for generic CRUD lists and custom handlers
- * (bank statements, movements, …) without per-window code.
+ * Generic file export for any NEO list GET. When a list request carries {@code export=csv} or
+ * {@code export=xlsx}, the servlet delegates here instead of writing JSON: the rows the handler
+ * already produced are serialized to a file and streamed as an attachment. This is
+ * window-agnostic — it operates on the JSON envelope any list GET returns, in both of its shapes:
+ * {@code {response:{data:[...]}}} for a generic CRUD list (the standard Openbravo envelope from
+ * {@code DefaultJsonDataService}) and {@code {response:{data:{<key>:[...]}}}} for a custom handler
+ * that nests named collections (bank statements, movements, …). See {@link #locateRows}. No
+ * per-window code either way.
+ *
+ * <p>The class keeps its name for its CSV heritage, but it is now the entry point for both
+ * formats: it locates the rows, resolves the download filename, and hands the work to the writer
+ * for the requested format. Everything about WHICH cells go in the file — column spec, dotted-path
+ * resolution, date reformatting, value translation, the id filter — lives in
+ * {@link NeoExportTable}, shared by both writers so the two formats cannot disagree cell for cell.
+ * The xlsx mechanics live in {@link NeoXlsxExportWriter}.
  *
  * <p>Supported query params (all optional except {@code export}):
  * <ul>
- *   <li>{@code export=csv} — opt into CSV streaming.
+ *   <li>{@code export=csv|xlsx} — opt into file streaming, and pick the format.
  *   <li>{@code ids=a,b,c} — keep only rows whose {@code id} is in the set.
  *       The client sends the already-filtered ids so server-side export honors
  *       the on-screen (client-side) filters without re-implementing them.
@@ -54,7 +42,12 @@ import org.codehaus.jettison.json.JSONObject;
  *       {@code key} may be a dotted path into nested values (e.g.
  *       {@code txns.0.documentNo}). {@code type=date} reformats an ISO date to
  *       {@code dd-MM-yyyy}. When omitted, every key of the first row is used.
- *   <li>{@code filename=Name} — download filename (".csv" appended if missing).
+ *   <li>{@code filename=Name} — download filename (the format's extension is appended if
+ *       missing).
+ *   <li>{@code valueMaps={"col":{"raw":"Label"}}} — per-column value translation, applied
+ *       after the value is read and formatted. Lets a caller export an AD-coded column as
+ *       the word a human reads (and, for an import round trip, re-types) instead of its
+ *       stored code. A value with no entry is written unchanged.
  * </ul>
  */
 final class NeoCsvExportService {
@@ -63,30 +56,31 @@ final class NeoCsvExportService {
 
   static final String EXPORT_PARAM = "export";
   private static final String EXPORT_CSV = "csv";
-  private static final String PARAM_IDS = "ids";
-  private static final String PARAM_COLUMNS = "columns";
+  private static final String EXPORT_XLSX = "xlsx";
   private static final String PARAM_FILENAME = "filename";
-  private static final String TYPE_DATE = "date";
-  private static final String FIELD_ID = "id";
   private static final String DEFAULT_FILENAME = "export";
-  // UTF-8 BOM so spreadsheet apps (Excel) detect the encoding and render accents.
   private static final String UTF8_BOM = "\uFEFF";
   private static final String CRLF = "\r\n";
-  // Spreadsheet formula triggers per CWE-1236; a leading match is neutralized with an apostrophe.
   private static final String FORMULA_TRIGGER_CHARS = "=+-@";
 
   private NeoCsvExportService() {
   }
 
   /**
-   * If {@code queryParams} requests a CSV export, serialize the rows contained
-   * in {@code neoResponse} to CSV, stream them as an attachment, and return
-   * {@code true}. Otherwise return {@code false} so the caller writes the normal
-   * JSON response.
+   * If {@code queryParams} requests a file export, serialize the rows contained in
+   * {@code neoResponse} to the requested format, stream them as an attachment, and return
+   * {@code true}. Otherwise return {@code false} so the caller writes the normal JSON response.
+   *
+   * <p>An unrecognized {@code export} value declines rather than guessing a format: the caller
+   * then writes JSON, which is the same behaviour as before the param existed.
    */
   static boolean tryExport(NeoResponse neoResponse, Map<String, String> queryParams,
       HttpServletResponse response) throws IOException {
-    if (queryParams == null || !EXPORT_CSV.equalsIgnoreCase(queryParams.get(EXPORT_PARAM))) {
+    if (queryParams == null) {
+      return false;
+    }
+    String format = StringUtils.lowerCase(StringUtils.trimToEmpty(queryParams.get(EXPORT_PARAM)));
+    if (!EXPORT_CSV.equals(format) && !EXPORT_XLSX.equals(format)) {
       return false;
     }
     if (neoResponse == null || neoResponse.getBody() == null) {
@@ -94,35 +88,48 @@ final class NeoCsvExportService {
     }
     JSONArray rows = locateRows(neoResponse.getBody());
     if (rows == null) {
-      log.warn("export=csv requested but no rows array was found in the response envelope");
+      log.warn("export={} requested but no rows array was found in the response envelope", format);
       return false;
     }
 
-    List<Column> columns = parseColumns(queryParams.get(PARAM_COLUMNS));
-    Set<String> idFilter = parseIds(queryParams.get(PARAM_IDS));
-    String filename = sanitizeFilename(queryParams.get(PARAM_FILENAME));
+    NeoExportTable table = NeoExportTable.of(rows, queryParams);
+    String filename = sanitizeFilename(queryParams.get(PARAM_FILENAME), format);
 
-    response.setStatus(HttpServletResponse.SC_OK);
-    response.setContentType("text/csv; charset=UTF-8");
-    response.setCharacterEncoding(StandardCharsets.UTF_8.name());
-    response.setHeader("Content-Disposition", "attachment; filename=\"" + filename + "\"");
-
-    PrintWriter writer = response.getWriter();
-    writer.write(UTF8_BOM);
-    writeCsv(writer, rows, columns, idFilter);
-    writer.flush();
+    if (EXPORT_XLSX.equals(format)) {
+      NeoXlsxExportWriter.write(table, filename, response);
+      return true;
+    }
+    writeCsvResponse(table, filename, response);
     return true;
   }
 
-  /** Navigates {@code response.data} and returns the first JSONArray it finds. */
+  /**
+   * Navigates {@code response.data} and returns the rows, in either of the two shapes a NEO list
+   * GET produces.
+   *
+   * <p>A generic CRUD list is served by {@code DefaultJsonDataService.fetch}, whose standard
+   * Openbravo envelope puts the rows in {@code response.data} <b>as the array itself</b>. Custom
+   * handlers (bank statements, movements) instead nest one or more named collections under
+   * {@code response.data}, e.g. {@code {response:{data:{statements:[…]}}}}.
+   *
+   * <p>Only the nested form used to be recognized, so every generic list export silently fell
+   * through to the JSON response — {@code tryExport} returned false and the user downloaded a
+   * {@code .csv} file containing the raw JSON envelope (ETP-4997). The failure was silent because
+   * a missing rows array is a legitimate "this is not an exportable response" answer for a
+   * non-list GET, so it can only warn and decline.
+   */
   private static JSONArray locateRows(JSONObject body) {
     JSONObject responseObj = body.optJSONObject("response");
-    JSONObject data = responseObj != null ? responseObj.optJSONObject("data") : null;
-    if (data == null) {
+    Object data = responseObj != null ? responseObj.opt("data") : null;
+    if (data instanceof JSONArray) {
+      return (JSONArray) data;
+    }
+    if (!(data instanceof JSONObject)) {
       return null;
     }
-    for (Iterator<String> it = data.keys(); it.hasNext();) {
-      Object value = data.opt(it.next());
+    JSONObject dataObj = (JSONObject) data;
+    for (Iterator<String> it = dataObj.keys(); it.hasNext();) {
+      Object value = dataObj.opt(it.next());
       if (value instanceof JSONArray) {
         return (JSONArray) value;
       }
@@ -130,115 +137,62 @@ final class NeoCsvExportService {
     return null;
   }
 
-  private static void writeCsv(PrintWriter writer, JSONArray rows, List<Column> columns,
-      Set<String> idFilter) {
-    List<Column> cols = columns.isEmpty() ? deriveColumns(rows, idFilter) : columns;
+  /**
+   * Streams the table as CSV.
+   *
+   * <p>Uses {@code response.getWriter()}. That is mutually exclusive with
+   * {@code getOutputStream()}, which is what {@link NeoXlsxExportWriter} uses — a servlet
+   * response permits one or the other and throws {@code IllegalStateException} if both are
+   * touched. Only one of the two branches in {@link #tryExport} ever runs, which is what keeps
+   * that safe.
+   */
+  private static void writeCsvResponse(NeoExportTable table, String filename,
+      HttpServletResponse response) throws IOException {
+    response.setStatus(HttpServletResponse.SC_OK);
+    response.setContentType("text/csv; charset=UTF-8");
+    response.setCharacterEncoding(StandardCharsets.UTF_8.name());
+    response.setHeader("Content-Disposition", "attachment; filename=\"" + filename + "\"");
 
-    StringBuilder header = new StringBuilder();
-    for (int i = 0; i < cols.size(); i++) {
-      if (i > 0) {
-        header.append(',');
-      }
-      header.append(csvField(cols.get(i).label));
-    }
-    writer.write(header.toString());
+    PrintWriter writer = response.getWriter();
+    // Excel will not detect UTF-8 in a CSV without the BOM and mangles every accent.
+    writer.write(UTF8_BOM);
+    writeCsv(writer, table);
+    writer.flush();
+  }
+
+  private static void writeCsv(PrintWriter writer, NeoExportTable table) {
+    writer.write(joinCsv(table.headers()));
     writer.write(CRLF);
 
+    JSONArray rows = table.rows();
     for (int r = 0; r < rows.length(); r++) {
       JSONObject row = rows.optJSONObject(r);
-      if (row == null || isFilteredOut(row, idFilter)) {
+      if (!table.isKept(row)) {
         continue;
       }
-      StringBuilder line = new StringBuilder();
-      for (int i = 0; i < cols.size(); i++) {
-        if (i > 0) {
-          line.append(',');
-        }
-        Column col = cols.get(i);
-        line.append(csvField(formatValue(resolveValue(row, col.key), col.type)));
-      }
-      writer.write(line.toString());
+      writer.write(joinCsv(table.cells(row)));
       writer.write(CRLF);
     }
   }
 
-  private static boolean isFilteredOut(JSONObject row, Set<String> idFilter) {
-    if (idFilter.isEmpty()) {
-      return false;
-    }
-    String id = row.optString(FIELD_ID, null);
-    return id == null || !idFilter.contains(id);
-  }
-
-  /** When no column spec is given, fall back to all keys of the first kept row. */
-  private static List<Column> deriveColumns(JSONArray rows, Set<String> idFilter) {
-    List<Column> cols = new ArrayList<>();
-    JSONObject sample = firstKeptRow(rows, idFilter);
-    if (sample != null) {
-      for (Iterator<String> it = sample.keys(); it.hasNext();) {
-        String key = it.next();
-        cols.add(new Column(key, key, ""));
+  private static String joinCsv(List<String> values) {
+    StringBuilder line = new StringBuilder();
+    for (int i = 0; i < values.size(); i++) {
+      if (i > 0) {
+        line.append(',');
       }
+      line.append(csvField(values.get(i)));
     }
-    return cols;
-  }
-
-  /** First row that passes the id filter, or {@code null} when there is none. */
-  private static JSONObject firstKeptRow(JSONArray rows, Set<String> idFilter) {
-    for (int r = 0; r < rows.length(); r++) {
-      JSONObject row = rows.optJSONObject(r);
-      if (row != null && !isFilteredOut(row, idFilter)) {
-        return row;
-      }
-    }
-    return null;
-  }
-
-  /** Resolves a flat key or a dotted path ({@code txns.0.documentNo}) on a row. */
-  private static Object resolveValue(JSONObject row, String path) {
-    if (path.indexOf('.') < 0) {
-      return row.opt(path);
-    }
-    Object current = row;
-    for (String segment : path.split("\\.")) {
-      if (current instanceof JSONObject) {
-        current = ((JSONObject) current).opt(segment);
-      } else if (current instanceof JSONArray) {
-        try {
-          current = ((JSONArray) current).opt(Integer.parseInt(segment));
-        } catch (NumberFormatException e) {
-          return null;
-        }
-      } else {
-        return null;
-      }
-    }
-    return current;
-  }
-
-  private static String formatValue(Object value, String type) {
-    if (value == null || JSONObject.NULL.equals(value)) {
-      return "";
-    }
-    String str = String.valueOf(value);
-    if (TYPE_DATE.equals(type)) {
-      return formatDateDayMonthYear(str);
-    }
-    return str;
-  }
-
-  /** Reformats an ISO {@code yyyy-MM-dd[...]} value to {@code dd-MM-yyyy}. */
-  private static String formatDateDayMonthYear(String iso) {
-    if (StringUtils.isBlank(iso) || iso.length() < 10 || iso.charAt(4) != '-'
-        || iso.charAt(7) != '-') {
-      return iso;
-    }
-    return iso.substring(8, 10) + "-" + iso.substring(5, 7) + "-" + iso.substring(0, 4);
+    return line.toString();
   }
 
   /**
    * RFC 4180 field: always quoted, with inner quotes doubled. Neutralizes spreadsheet formula
    * injection by prepending a single quote when starting with formula trigger characters.
+   *
+   * <p>CSV-only, deliberately. The xlsx writer must not do this: a workbook string cell is inert
+   * (a formula is a different cell type), so the apostrophe would be a literal character in the
+   * user's spreadsheet rather than a defence against anything.
    */
   private static String csvField(String value) {
     String safe = value == null ? "" : value;
@@ -261,57 +215,18 @@ final class NeoCsvExportService {
     return i < value.length() && FORMULA_TRIGGER_CHARS.indexOf(value.charAt(i)) >= 0;
   }
 
-  private static List<Column> parseColumns(String spec) {
-    List<Column> cols = new ArrayList<>();
-    if (StringUtils.isBlank(spec)) {
-      return cols;
-    }
-    for (String part : spec.split("\\|")) {
-      if (StringUtils.isBlank(part)) {
-        continue;
-      }
-      String[] fields = part.split(":", 3);
-      String key = fields[0].trim();
-      String label = fields.length > 1 && StringUtils.isNotBlank(fields[1]) ? fields[1].trim() : key;
-      String type = fields.length > 2 ? fields[2].trim() : "";
-      cols.add(new Column(key, label, type));
-    }
-    return cols;
-  }
-
-  /** Parses the comma-separated id filter. Empty set means "no filter". */
-  private static Set<String> parseIds(String spec) {
-    Set<String> ids = new HashSet<>();
-    if (StringUtils.isBlank(spec)) {
-      return ids;
-    }
-    for (String id : spec.split(",")) {
-      if (StringUtils.isNotBlank(id)) {
-        ids.add(id.trim());
-      }
-    }
-    return ids;
-  }
-
-  private static String sanitizeFilename(String name) {
+  /** Sanitizes the requested filename and guarantees the extension matching the format. */
+  private static String sanitizeFilename(String name, String format) {
+    String extension = "." + format;
     String base = StringUtils.isBlank(name) ? DEFAULT_FILENAME : name.trim();
     base = base.replaceAll("[^\\w.\\-]+", "_");
-    if (!StringUtils.endsWithIgnoreCase(base, ".csv")) {
-      base = base + ".csv";
+    // A caller that asked for "contacts-export.csv" but requested xlsx gets
+    // "contacts-export.xlsx", not a .csv name on a workbook — the extension follows the format,
+    // never the request. The frontend sends one filename for both formats for exactly this
+    // reason.
+    if (StringUtils.endsWithIgnoreCase(base, ".csv") || StringUtils.endsWithIgnoreCase(base, ".xlsx")) {
+      base = base.substring(0, base.lastIndexOf('.'));
     }
-    return base;
-  }
-
-  /** One CSV column: source {@code key} (dotted path allowed), header {@code label}, optional {@code type}. */
-  private static final class Column {
-    private final String key;
-    private final String label;
-    private final String type;
-
-    Column(String key, String label, String type) {
-      this.key = key;
-      this.label = label;
-      this.type = type;
-    }
+    return base + extension;
   }
 }

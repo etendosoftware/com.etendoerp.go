@@ -1163,6 +1163,77 @@ class PaymentRegistrationServiceAdvancedTest {
   }
 
   /**
+   * ETP-5084 — the ticket's own case: a USD invoice paid from a connected EUR account. The bank is
+   * instructed in the ACCOUNT's currency, so the amount that reaches
+   * {@code initiateDeferredPisPayment} must be the CONVERTED one (100.00 x 0.92 = 92.00 EUR), never
+   * the raw invoice figure. Before this change the request was rejected outright by the
+   * invoice-currency eligibility gate; had it passed, 100.00 would have been sent as if it were
+   * euros — a 8.00 EUR overpayment to the supplier.
+   *
+   * <p>The rate is deliberately the one from the request body, i.e. the same value the replayed
+   * payment is later booked at ({@code financialTransactionAmount}), so the instructed and the
+   * booked amount cannot diverge.
+   */
+  @Test
+  @DisplayName("ETP-5084: a USD invoice on an EUR account instructs the bank for the CONVERTED "
+      + "amount (100.00 x 0.92 = 92.00 EUR), not the invoice amount")
+  @SuppressWarnings("unchecked")
+  void testAdvancedPisConfirmConvertsAmountToAccountCurrency() throws Exception {
+    stubAdvancedBasics();
+    stubPendingPSDs(new BigDecimal("100.00"));
+    stubForeignEurAccount();
+
+    // PIS eligibility now keys off the ACCOUNT currency (EUR, above); the invoice is USD.
+    when(account.getPSD2ConnectionStatus())
+        .thenReturn(BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED);
+    when(method.getName()).thenReturn("Bank Transfer");
+    when(currency.getISOCode()).thenReturn("USD");
+
+    when(invoice.getDocumentNo()).thenReturn("INV-5084");
+    OBCriteria<PisPayment> attemptCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(PisPayment.class)).thenReturn(attemptCrit);
+    when(attemptCrit.add(any(Criterion.class))).thenReturn(attemptCrit);
+    when(attemptCrit.count()).thenReturn(0);
+
+    BankIntegrationPISUtils.PISCreatePaymentResult bridgeResult =
+        mock(BankIntegrationPISUtils.PISCreatePaymentResult.class);
+    when(bridgeResult.getPaymentId()).thenReturn("se-adv-5084");
+    when(bridgeResult.getPaymentUrl()).thenReturn("https://sca.saltedge/5084");
+    PisPayment localPis = mock(PisPayment.class);
+    when(localPis.getId()).thenReturn("local-adv-5084");
+    when(localPis.getStatus()).thenReturn("requested");
+
+    JSONObject body = advancedBody("100.00", CONFIRM)
+        .put("pis", true)
+        .put("conversionRate", "0.92")
+        .put("pisTemplate", "SEPA")
+        .put("pisCreditorIban", "ES9121000418450200051332");
+
+    ArgumentCaptor<BigDecimal> bankAmountCaptor = ArgumentCaptor.forClass(BigDecimal.class);
+    try (MockedStatic<PisPaymentBridge> bridgeMock = mockStatic(PisPaymentBridge.class);
+         MockedStatic<PISPaymentDao> pisDaoMock = mockStatic(PISPaymentDao.class)) {
+      bridgeMock.when(() -> PisPaymentBridge.initiateDeferredPisPayment(
+          eq(invoice), eq(account), any(), anyString(), any(), any())).thenReturn(bridgeResult);
+      pisDaoMock.when(() -> PISPaymentDao.findBySaltedgePaymentId("se-adv-5084"))
+          .thenReturn(localPis);
+
+      NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+          INVOICE_ID, body, true);
+
+      assertEquals(201, response.getHttpStatus());
+      bridgeMock.verify(() -> PisPaymentBridge.initiateDeferredPisPayment(
+          eq(invoice), eq(account), bankAmountCaptor.capture(), anyString(), any(), any()));
+      assertEquals(0, new BigDecimal("92.00").compareTo(bankAmountCaptor.getValue()),
+          "the bank must be instructed for the account-currency amount, got "
+              + bankAmountCaptor.getValue());
+      // Still no payment at confirm time (ETP-4895) — only the snapshot.
+      finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
+          any(), any(), anyString(), any(), anyString()), never());
+      verify(localPis).setETGOPaymentIntent(anyString());
+    }
+  }
+
+  /**
    * A {@code pis=true} confirm against an account with no bank connection fails eligibility before any
    * payment is processed: {@code validatePisEligibility} throws {@link OBException}.
    */
@@ -1797,11 +1868,13 @@ class PaymentRegistrationServiceAdvancedTest {
    * Makes the selected financial account foreign to the invoice: EUR with a standard precision of
    * 2 decimals, while the invoice keeps the global (USD-like) test currency.
    */
-  private void stubForeignEurAccount() {
+  private Currency stubForeignEurAccount() {
     Currency accountCurrency = mock(Currency.class);
     when(accountCurrency.getId()).thenReturn("EUR-ID");
+    when(accountCurrency.getISOCode()).thenReturn("EUR");
     when(accountCurrency.getStandardPrecision()).thenReturn(2L);
     when(account.getCurrency()).thenReturn(accountCurrency);
+    return accountCurrency;
   }
 
   /**

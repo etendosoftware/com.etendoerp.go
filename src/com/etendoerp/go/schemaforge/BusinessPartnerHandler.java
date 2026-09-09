@@ -16,6 +16,11 @@
  */
 package com.etendoerp.go.schemaforge;
 
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import java.sql.Connection;
@@ -85,6 +90,12 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   private static final String FIELD_FIRSTNAME = "etgoFirstname";
   private static final String FIELD_LASTNAME = "etgoLastname";
   private static final String FIELD_EMAIL = "etgoEmail";
+  // ETP-4997 — opt-in flag asking this handler to attach the child records a LIST row does not
+  // carry, under FIELD_CHILD_DATA. Opt-in because the normal grid does not need them and would
+  // pay two extra queries per page; the CSV export sends it so an exported file can be edited
+  // and re-imported with its contact person and address intact.
+  private static final String PARAM_INCLUDE_CHILD_DATA = "includeChildData";
+  private static final String FIELD_CHILD_DATA = "etgoChildData";
   private static final String FIELD_CURRENCY = "bPCurrencyID";
   private static final String FIELD_CUSTOMER = "customer";
   private static final String FIELD_VENDOR = "vendor";
@@ -343,11 +354,39 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
     }
   }
 
+  /**
+   * POST only: replaces the placeholder {@code searchKey} the create had to invent with the
+   * identifier the database computed, both in C_BPartner and in the response being returned.
+   *
+   * <p>Extracted from {@link #afterHandle} (ETP-4997) when the list GET's child-data branch took
+   * that method past its cognitive-complexity budget. Behaviour is unchanged, including the
+   * short-circuit: {@code applySearchKeyUpdate} is still never called for a blank identifier.
+   *
+   * @return whether {@code body} was patched, which is what tells the caller to return a new
+   *     response instead of {@code null}.
+   */
+  private boolean applyPostCreateSearchKey(JSONObject body) throws Exception {
+    String recordId = extractRecordId(body);
+    if (recordId == null) {
+      return false;
+    }
+    String identifier = queryIdentifier(recordId);
+    if (StringUtils.isBlank(identifier) || !applySearchKeyUpdate(recordId, identifier)) {
+      return false;
+    }
+    patchSearchKeyInResponse(body, identifier);
+    return true;
+  }
+
   @Override
   public NeoResponse afterHandle(NeoContext ctx) {
     String method = ctx.getHttpMethod();
     if ("GET".equals(method)) {
-      return fillContactEmailFallback(ctx);
+      // A list GET can ask for its child records (ETP-4997); a single-record GET gets the
+      // contact-email fallback. Neither applies to the other, so the first that declines
+      // (returns null) falls through to the other.
+      NeoResponse withChildData = attachChildData(ctx);
+      return withChildData != null ? withChildData : fillContactEmailFallback(ctx);
     }
     boolean isWrite = "POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method);
     if (!isWrite) {
@@ -362,14 +401,7 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       boolean modified = false;
 
       if ("POST".equals(method)) {
-        String recordId = extractRecordId(body);
-        if (recordId != null) {
-          String identifier = queryIdentifier(recordId);
-          if (StringUtils.isNotBlank(identifier) && applySearchKeyUpdate(recordId, identifier)) {
-            patchSearchKeyInResponse(body, identifier);
-            modified = true;
-          }
-        }
+        modified = applyPostCreateSearchKey(body);
       } else {
         // PUT/PATCH: flipping vendor/customer to Y on an already-persisted BP never runs through
         // c_bpartner_trg (it only fires on TG_OP='INSERT'), so backfill whichever posting-account
@@ -467,6 +499,198 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
     } catch (Exception e) {
       log.warn("BusinessPartnerHandler: could not inject VIES message", e);
       return false;
+    }
+  }
+
+  /**
+   * Primary address per business partner, flattened out of {@code C_Location}.
+   *
+   * <p>The ranking mirrors {@code ETGO_GET_LOCATION} (the SQL function behind the
+   * {@code eTGOLocation} column the Contacts list already shows) EXACTLY — bill-to, then
+   * ship-to, then most recently created — so the address a user reads in the grid is the address
+   * they get in the exported file. Inventing a second rule here would let the two disagree.
+   *
+   * <p>Country and region are emitted as {@code C_Country.name}/{@code C_Region.name}, the base
+   * names the import's own simSearch resolves against, so the values round-trip. Region falls
+   * back to {@code C_Location.regionname}, the free-text column Etendo uses for a country with no
+   * predefined regions — without it those addresses would export a blank province.
+   *
+   * <p>The postal column is {@code C_Location.postal}. It is NOT {@code postcode}: that name shipped
+   * once (ETP-4997) and, because a failed enrichment is deliberately non-fatal, the SQLException
+   * surfaced only as silently empty columns in the exported file. {@code BusinessPartnerHandlerDbTest}
+   * now executes both statements against a real schema so a wrong column name fails a test instead.
+   *
+   * <p>One statement for the whole page (a window function, not a per-row query): a 5000-row
+   * export must not turn into 5000 round trips.
+   */
+  static final String PRIMARY_LOCATIONS_SQL =
+      "SELECT c_bpartner_id, address1, city, postal, country, region FROM ("
+          + "  SELECT bploc.c_bpartner_id,"
+          + "         loc.address1, loc.city, loc.postal,"
+          + "         cty.name AS country, COALESCE(reg.name, loc.regionname) AS region,"
+          + "         row_number() OVER ("
+          + "           PARTITION BY bploc.c_bpartner_id"
+          + "           ORDER BY CASE WHEN bploc.isbillto = 'Y' THEN 1"
+          + "                         WHEN bploc.isshipto = 'Y' THEN 2"
+          + "                         ELSE 3 END,"
+          + "                    bploc.created DESC"
+          + "         ) AS rn"
+          + "    FROM c_bpartner_location bploc"
+          + "    JOIN c_location loc ON loc.c_location_id = bploc.c_location_id"
+          + "    LEFT JOIN c_country cty ON cty.c_country_id = loc.c_country_id"
+          + "    LEFT JOIN c_region reg ON reg.c_region_id = loc.c_region_id"
+          + "   WHERE bploc.isactive = 'Y' AND bploc.c_bpartner_id = ANY(?)"
+          + ") ranked WHERE rn = 1";
+
+  /**
+   * Primary contact person per business partner.
+   *
+   * <p>"Primary" is the oldest active contact — the SAME one {@link #queryContactEmail} already
+   * picks for the {@code etgoEmail} fallback, so the export and that fallback can never name
+   * different people for one partner.
+   */
+  static final String PRIMARY_CONTACTS_SQL =
+      "SELECT c_bpartner_id, firstname, lastname, email, phone, title FROM ("
+          + "  SELECT u.c_bpartner_id, u.firstname, u.lastname, u.email, u.phone, u.title,"
+          + "         row_number() OVER (PARTITION BY u.c_bpartner_id ORDER BY u.created) AS rn"
+          + "    FROM ad_user u"
+          + "   WHERE u.isactive = 'Y' AND u.c_bpartner_id = ANY(?)"
+          + ") ranked WHERE rn = 1";
+
+  // PRIMARY_LOCATIONS_SQL / PRIMARY_CONTACTS_SQL and the four arrays below are package-visible
+  // ONLY so BusinessPartnerHandlerDbTest can execute each statement against a live schema and
+  // assert its result set really exposes the columns queryChildData() reads by name; nothing else
+  // reads them. They are constants rather than literals inlined at the call site precisely so the
+  // test cannot drift from the code it guards: a column renamed here is renamed for both.
+
+  /** Result-set columns {@link #PRIMARY_LOCATIONS_SQL} exposes, positionally paired with {@link #LOCATION_KEYS}. */
+  static final String[] LOCATION_COLUMNS = { "address1", "city", "postal", "country", "region" };
+  /** Response keys the address columns are attached under (see {@code importExportColumns.js}). */
+  static final String[] LOCATION_KEYS = { "address", "city", "postal", "country", "region" };
+  /** Result-set columns {@link #PRIMARY_CONTACTS_SQL} exposes, positionally paired with {@link #CONTACT_KEYS}. */
+  static final String[] CONTACT_COLUMNS = { "firstname", "lastname", "email", "phone", "title" };
+  /** Response keys the contact-person columns are attached under (see {@code importExportColumns.js}). */
+  static final String[] CONTACT_KEYS = { "firstName", "lastName", "email", "phone", "position" };
+
+  /** Row ids of a list response, in order, skipping any record without one. */
+  private static List<String> collectRecordIds(JSONObject body) {
+    List<String> ids = new ArrayList<>();
+    JSONArray data = locateRecords(body);
+    if (data == null) {
+      return ids;
+    }
+    for (int i = 0; i < data.length(); i++) {
+      JSONObject recordNode = data.optJSONObject(i);
+      String id = recordNode != null ? recordNode.optString("id", null) : null;
+      if (StringUtils.isNotBlank(id)) {
+        ids.add(id);
+      }
+    }
+    return ids;
+  }
+
+  /** The record array of a response body, under {@code response.data} or top-level {@code data}. */
+  private static JSONArray locateRecords(JSONObject body) {
+    JSONObject response = body.optJSONObject(RESPONSE_KEY);
+    return (response != null) ? response.optJSONArray("data") : body.optJSONArray("data");
+  }
+
+  /**
+   * Runs one of the two child queries and returns {@code bpId -> {key: value}}, keyed by the
+   * response field names the CSV export addresses (see {@code importExportColumns.js}).
+   */
+  private static Map<String, JSONObject> queryChildData(String sql, List<String> bPartnerIds,
+      String[] columns, String[] keys) throws SQLException {
+    Map<String, JSONObject> byPartner = new HashMap<>();
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setArray(1, conn.createArrayOf("varchar", bPartnerIds.toArray()));
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          JSONObject values = new JSONObject();
+          for (int i = 0; i < columns.length; i++) {
+            String value = StringUtils.trimToNull(rs.getString(columns[i]));
+            if (value != null) {
+              try {
+                values.put(keys[i], value);
+              } catch (Exception e) {
+                log.warn("BusinessPartnerHandler: could not attach {}", keys[i], e);
+              }
+            }
+          }
+          byPartner.put(rs.getString("c_bpartner_id"), values);
+        }
+      }
+    }
+    return byPartner;
+  }
+
+  /**
+   * On a LIST GET carrying {@code includeChildData=1}, attaches each partner's primary contact
+   * person and primary address under {@code etgoChildData}, so the CSV export can emit the
+   * columns its import template declares (they live on {@code AD_User} and
+   * {@code C_BPartner_Location}/{@code C_Location}, which a {@code C_BPartner} row does not
+   * carry — the only address-shaped property on it is {@code eTGOLocation}, one concatenated
+   * display string that cannot be split back into columns).
+   *
+   * <p>Nested rather than flattened onto the row: the export's {@code columns} spec already
+   * understands dotted paths ({@code etgoChildData.city}), and a nested object cannot collide
+   * with a present or future DAL property name.
+   *
+   * <p>Returns {@code null} — leaving the default result untouched — when the flag is absent,
+   * on a single-record GET, or when anything fails. A failed enrichment must cost the user empty
+   * columns, never their export.
+   */
+  private NeoResponse attachChildData(NeoContext ctx) {
+    Map<String, String> params = ctx.getQueryParams();
+    if (params == null || StringUtils.isBlank(params.get(PARAM_INCLUDE_CHILD_DATA))) {
+      return null;
+    }
+    if (StringUtils.isNotBlank(ctx.getRecordId())) {
+      return null; // single-record GET: the detail view reads the child tabs directly
+    }
+    NeoResponse previousResult = ctx.getPreviousResult();
+    if (previousResult == null || previousResult.getBody() == null) {
+      return null;
+    }
+    JSONObject body = previousResult.getBody();
+    List<String> ids = collectRecordIds(body);
+    if (ids.isEmpty()) {
+      return null;
+    }
+    try {
+      Map<String, JSONObject> locations =
+          queryChildData(PRIMARY_LOCATIONS_SQL, ids, LOCATION_COLUMNS, LOCATION_KEYS);
+      Map<String, JSONObject> contacts =
+          queryChildData(PRIMARY_CONTACTS_SQL, ids, CONTACT_COLUMNS, CONTACT_KEYS);
+
+      JSONArray data = locateRecords(body);
+      for (int i = 0; i < data.length(); i++) {
+        JSONObject recordNode = data.optJSONObject(i);
+        String id = recordNode != null ? recordNode.optString("id", null) : null;
+        if (StringUtils.isBlank(id)) {
+          continue;
+        }
+        JSONObject childData = new JSONObject();
+        mergeInto(childData, locations.get(id));
+        mergeInto(childData, contacts.get(id));
+        recordNode.put(FIELD_CHILD_DATA, childData);
+      }
+      return NeoResponse.ok(body);
+    } catch (Exception e) {
+      log.warn("BusinessPartnerHandler: could not attach child data for {} partners", ids.size(), e);
+      return null;
+    }
+  }
+
+  /** Copies every key of {@code source} into {@code target}; a null source is a no-op. */
+  private static void mergeInto(JSONObject target, JSONObject source) throws Exception {
+    if (source == null) {
+      return;
+    }
+    for (Iterator<String> keys = source.keys(); keys.hasNext();) {
+      String key = keys.next();
+      target.put(key, source.get(key));
     }
   }
 

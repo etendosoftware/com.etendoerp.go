@@ -596,15 +596,41 @@ class NeoCrudHandlerTest {
       assertTrue(msg.contains("PATCH"));
     }
 
+    /**
+     * ETP-5073 / DOC-04 changed this contract. A record ID used to be the only requirement; an
+     * update must now also carry the {@code updated} value of the record as it was read, because
+     * that value is what lets the concurrency check evaluate at all. Before the ticket our layer
+     * stripped it from every write, so the check never ran for any entity and the second of two
+     * concurrent editors silently erased the first.
+     *
+     * <p>Kept as two cases rather than adjusted in place: the refusal and the pass are both worth
+     * pinning, and the refusal is the half that regresses silently — an update that goes through
+     * without the token writes without a check and nothing anywhere reports it.
+     */
     @Test
-    @DisplayName("Returns null when PUT/PATCH has record ID")
-    void updateWithRecordIdReturnsNull() throws Exception {
+    @DisplayName("Returns null when PUT/PATCH has both a record ID and `updated`")
+    void updateWithRecordIdAndVersionReturnsNull() throws Exception {
+      JSONObject body = new JSONObject();
+      body.put("updated", "2026-08-21T16:20:38+00:00");
+      NeoContext context = buildContext("PATCH", "REC-123", mock(Tab.class),
+          mock(SFEntity.class), body, null);
+
+      NeoResponse result = invokeValidateUpdate(context);
+
+      assertNull(result);
+    }
+
+    @Test
+    @DisplayName("Refuses PUT/PATCH that has a record ID but no `updated`")
+    void updateWithRecordIdButNoVersionIsRefused() throws Exception {
       NeoContext context = buildContext("PATCH", "REC-123", mock(Tab.class),
           mock(SFEntity.class), null, null);
 
       NeoResponse result = invokeValidateUpdate(context);
 
-      assertNull(result);
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      assertEquals("missing_updated", result.getBody().getString("error"));
     }
   }
 
@@ -3062,6 +3088,29 @@ class NeoCrudHandlerTest {
         // Should not throw NPE
         cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
             any(), any(), any(), any(), any()));
+      }
+    }
+
+    @Test
+    @DisplayName("Runs the tab-aware document type resolver for every CRUD create path")
+    void runsTabAwareDocumentTypeResolver() throws Exception {
+      Tab adTab = mock(Tab.class);
+      when(adTab.getTabLevel()).thenReturn(0L);
+      JSONObject body = new JSONObject().put("documentType", "quotation");
+      NeoContext context = buildContext("POST", null, adTab,
+          mock(SFEntity.class), body, null);
+
+      try (MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+               Mockito.mockStatic(NeoDefaultsCascadeHelper.class);
+           MockedStatic<DocTypeResolver> docTypeMock =
+               Mockito.mockStatic(DocTypeResolver.class)) {
+        invokePrivate(handler, "executePostCalloutCascade",
+            new Class<?>[] { JSONObject.class, Tab.class, NeoContext.class,
+                String.class, java.util.Set.class },
+            body, adTab, context, null, Collections.emptySet());
+
+        docTypeMock.verify(() -> DocTypeResolver.reapplyDocTypeFromTabFilter(
+            body, adTab, context, Collections.emptySet()));
       }
     }
   }

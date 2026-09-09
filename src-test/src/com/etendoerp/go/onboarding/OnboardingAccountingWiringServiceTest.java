@@ -52,9 +52,12 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.utility.Tree;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.OrganizationAcctSchema;
+import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.accounting.coa.Element;
 import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
+import org.openbravo.model.financialmgmt.gl.GLItem;
+import org.openbravo.model.financialmgmt.gl.GLItemAccounts;
 
 /**
  * Unit tests for {@link OnboardingAccountingWiringService} (Gap A1/A2).
@@ -174,62 +177,30 @@ public class OnboardingAccountingWiringServiceTest {
     assertEquals(1, service.ensureAcctSchemaCount);
     assertEquals(1, service.wireTreeCount);
     assertEquals(1, service.rebrandCount);
+    assertEquals(1, service.provisionGlItemsCount);
     assertEquals(1, service.provisionEntityCount);
     assertTrue("wire() must flush", service.flushed);
     assertSame("wire() must restore the previous context", previous, OBContext.getOBContext());
   }
 
-  // ---------------------------------------------------------------------------------------------
-  // wireBusinessPartnerAccounts()
-  // ---------------------------------------------------------------------------------------------
-
+  /**
+   * ETP-5020 — GL Items must be provisioned AFTER chart names are finalized (a GL Item created
+   * against the dataset's generic "GOClient" names would immediately diverge from the rebranded
+   * subaccount name) and BEFORE the unrelated per-entity posting-account provisioning step, per
+   * the placement rationale documented on {@code provisionGlItemsForImportedChart}.
+   */
   @Test
-  public void testWireBusinessPartnerAccountsFailsWhenClientIdMissing() {
-    try {
-      new TestableService().wireBusinessPartnerAccounts(null, "ORG-1", "USER-1", "ROLE-1");
-      fail("Expected OBException for missing client");
-    } catch (OBException e) {
-      assertTrue(e.getMessage().contains("Missing client"));
-    }
-  }
-
-  @Test
-  public void testWireBusinessPartnerAccountsFailsWhenClientNotFound() {
+  public void testWireProvisionsGlItemsAfterRebrandBeforePosting() {
     TestableService service = new TestableService();
-    service.clientMissing = true;
+    service.wire("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
 
-    try {
-      service.wireBusinessPartnerAccounts("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
-      fail("Expected OBException for missing client");
-    } catch (OBException e) {
-      assertTrue(e.getMessage().contains("Client not found for business-partner accounting"));
-    }
-  }
+    int rebrandIndex = service.callOrder.indexOf("rebrand");
+    int glItemsIndex = service.callOrder.indexOf("provisionGlItems");
+    int postingIndex = service.callOrder.indexOf("provisionEntity");
 
-  @Test
-  public void testWireBusinessPartnerAccountsFailsWhenNoLedgerImported() {
-    TestableService service = new TestableService();
-    service.ledgerMissing = true;
-
-    try {
-      service.wireBusinessPartnerAccounts("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
-      fail("Expected OBException for missing accounting schema");
-    } catch (OBException e) {
-      assertTrue(e.getMessage().contains("cannot provision business-partner posting accounts"));
-    }
-  }
-
-  @Test
-  public void testWireBusinessPartnerAccountsRunsTwoInsertsFlushesAndRestoresContext() {
-    OBContext previous = mock(OBContext.class);
-    OBContext.setOBContext(previous);
-
-    TestableService service = new TestableService();
-    service.wireBusinessPartnerAccounts("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
-
-    assertEquals("exactly two posting-account inserts", 2, service.acctInserts.size());
-    assertTrue("wireBusinessPartnerAccounts() must flush", service.flushed);
-    assertSame("must restore the previous context", previous, OBContext.getOBContext());
+    assertTrue("rebrand must run before GL Item provisioning", rebrandIndex < glItemsIndex);
+    assertTrue("GL Item provisioning must run before posting-account provisioning",
+        glItemsIndex < postingIndex);
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -275,7 +246,7 @@ public class OnboardingAccountingWiringServiceTest {
 
   @Test
   public void testPatchBpGroupAcctMissingColumnsDoesNotResolveClientOrLedger() {
-    // Unlike wire()/wireBusinessPartnerAccounts(), this method needs neither a Client entity nor a
+    // Unlike wire(), this method needs neither a Client entity nor a
     // resolved AcctSchema — it patches every schema the tenant has via one client-scoped statement
     // (see the corrective R21 fix it mirrors). Prove that by leaving clientMissing/ledgerMissing
     // set and confirming no exception is thrown (those seams are never consulted).
@@ -328,8 +299,11 @@ public class OnboardingAccountingWiringServiceTest {
    * {@code warehouse}: {@code FIN_FINANCIAL_ACCOUNT} and {@code M_WAREHOUSE} are bulk-imported by
    * the onboarding dataset importer (triggers disabled during that import — see
    * {@code OnboardingDatasetDefinition.INCLUDED_TABLES}), so their native {@code _trg} triggers
-   * never fire for the bundled template rows ("Caja"/"Cuenta de Banco"/"Tarjeta",
-   * "Almacen GO"/"Almacén Secundario"). Every other included entity in this same method
+   * never fire for the bundled template rows. (ETP-5079 later removed the three template financial
+   * accounts from the dataset entirely and reduced the warehouses to a single "Almacen Principal",
+   * so the FIN_Financial_Account_Acct backfill is now a no-op on a freshly onboarded tenant and
+   * only matters for accounts the tenant creates itself.) Every other included entity in this same
+   * method
    * (BP group, product category, BP customer/vendor, product, tax) already gets a matching
    * backfill {@code runEntityAcctInsert} call right here; {@code FIN_Financial_Account_Acct} and
    * {@code M_Warehouse_Acct} do not, which is the gap this ticket closes.
@@ -975,6 +949,110 @@ public class OnboardingAccountingWiringServiceTest {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // provisionGlItemsForImportedChart() / loadLeafElementValues() — ETP-5020
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testProvisionGlItemsForImportedChartNoOpsWhenLedgerNull() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    // No OBDal mocking at all — a real (unmocked) static touch would blow up this test if the
+    // null-ledger guard did not return immediately.
+    service.provisionGlItemsForImportedChart(mock(Client.class), null);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testProvisionGlItemsForImportedChartNoOpsWhenNoActiveSchemas() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    Client client = mock(Client.class);
+    AcctSchema ledger = mock(AcctSchema.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AcctSchema> schemaCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AcctSchema.class)).thenReturn(schemaCrit);
+    when(schemaCrit.list()).thenReturn(Collections.emptyList());
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.provisionGlItemsForImportedChart(client, ledger);
+      verify(dal, never()).createCriteria(ElementValue.class);
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testProvisionGlItemsForImportedChartProvisionsOneGlItemPerLeaf() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    Client client = mock(Client.class);
+    AcctSchema ledger = mock(AcctSchema.class);
+    AcctSchema activeSchema = mock(AcctSchema.class);
+
+    ElementValue leaf1 = mock(ElementValue.class);
+    ElementValue leaf2 = mock(ElementValue.class);
+    AccountingCombination combo1 = mock(AccountingCombination.class);
+    AccountingCombination combo2 = mock(AccountingCombination.class);
+    GLItem glItem1 = mock(GLItem.class);
+    GLItem glItem2 = mock(GLItem.class);
+    GLItemAccounts link1 = mock(GLItemAccounts.class);
+    GLItemAccounts link2 = mock(GLItemAccounts.class);
+
+    OBDal dal = mock(OBDal.class);
+
+    OBCriteria<AcctSchema> schemaCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AcctSchema.class)).thenReturn(schemaCrit);
+    when(schemaCrit.list()).thenReturn(Collections.singletonList(activeSchema));
+
+    OBCriteria<ElementValue> evCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(ElementValue.class)).thenReturn(evCrit);
+    when(evCrit.list()).thenReturn(Arrays.asList(leaf1, leaf2));
+
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(combo1, combo2); // one natural combo per leaf
+    when(comboCrit.list()).thenReturn(Collections.emptyList()); // no cross-schema GL Item to reuse
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(null, null); // neither leaf provisioned yet
+
+    OBProvider obProviderInstance = mock(OBProvider.class);
+    when(obProviderInstance.get(GLItem.class)).thenReturn(glItem1, glItem2);
+    when(obProviderInstance.get(GLItemAccounts.class)).thenReturn(link1, link2);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obProvider.when(OBProvider::getInstance).thenReturn(obProviderInstance);
+
+      service.provisionGlItemsForImportedChart(client, ledger);
+
+      verify(obProviderInstance, times(2)).get(GLItem.class);
+      verify(dal).save(glItem1);
+      verify(dal).save(glItem2);
+      verify(link1).setGlitemDebitAcct(combo1);
+      verify(link2).setGlitemDebitAcct(combo2);
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testLoadLeafElementValuesReturnsCriteriaListResult() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    Client client = mock(Client.class);
+    ElementValue leaf = mock(ElementValue.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<ElementValue> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(ElementValue.class)).thenReturn(crit);
+    when(crit.list()).thenReturn(Collections.singletonList(leaf));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertEquals(Collections.singletonList(leaf), service.loadLeafElementValues(client));
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Test double
   // ---------------------------------------------------------------------------------------------
 
@@ -1005,12 +1083,16 @@ public class OnboardingAccountingWiringServiceTest {
     int ensureAcctSchemaCount;
     int wireTreeCount;
     int rebrandCount;
+    int provisionGlItemsCount;
     int provisionEntityCount;
     int bpGroupAcctPatchCount;
     String bpGroupAcctPatchClientId;
     int bpGroupAcctPatchRowsToReturn;
 
     final List<AcctInsert> acctInserts = new ArrayList<>();
+
+    /** ETP-5020 — records call order for {@link #testWireProvisionsGlItemsAfterRebrandBeforePosting}. */
+    final List<String> callOrder = new ArrayList<>();
 
     // --- OnboardingContextSupport seams ---------------------------------------------------------
 
@@ -1085,11 +1167,19 @@ public class OnboardingAccountingWiringServiceTest {
     @Override
     protected void rebrandImportedChartNames(Client client, AcctSchema ledger) {
       rebrandCount++;
+      callOrder.add("rebrand");
+    }
+
+    @Override
+    protected void provisionGlItemsForImportedChart(Client client, AcctSchema ledger) {
+      provisionGlItemsCount++;
+      callOrder.add("provisionGlItems");
     }
 
     @Override
     protected void provisionEntityPostingAccounts(Client client, AcctSchema ledger) {
       provisionEntityCount++;
+      callOrder.add("provisionEntity");
     }
 
     @Override
