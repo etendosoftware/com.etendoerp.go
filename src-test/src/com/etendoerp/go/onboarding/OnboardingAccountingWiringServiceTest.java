@@ -842,7 +842,7 @@ public class OnboardingAccountingWiringServiceTest {
     // schema A can never be written onto schema B's row:
     //   1) the natural-combination SOURCE (the "resolved" derived table, aliased d2) filters its
     //      c_acctschema_default rows by client id together with the caller's schema id — it never
-    //      considers a c_acctschema_default row belonging to a different accounting schema;
+    //      considers a c_acctschema_default row belonging to a different accounting schema.
     //   2) the UPDATE TARGET (aliased d) is correlated back to that resolved row by its primary key,
     //      AND independently re-asserts the same client id + schema id filter on its own row — so
     //      the correlation alone (by primary key) is not trusted to carry the scoping.
