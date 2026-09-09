@@ -128,7 +128,10 @@ final class AddPaymentService {
     AdvPaymentMngtDao dao = new AdvPaymentMngtDao();
 
     // ── Create the payment ──────────────────────────────────────────────────
-    String docNo = FIN_Utility.getDocumentNo(docType, "FIN_Payment");
+    // ETP-5230: the AR Receipt / AP Payment sequence lives at org *, which an Organization-level role
+    // may not write.
+    String docNo = StarOrgWriteScope.withWritableStarOrg(
+        () -> FIN_Utility.getDocumentNo(docType, "FIN_Payment"));
     String referenceNo = body.optString("referenceNo", "");
     FIN_Payment payment = dao.getNewPayment(isReceipt, org, docType, docNo, bp, paymentMethod,
         account, "0", paymentDate, referenceNo, currency, BigDecimal.ONE, amount);
@@ -176,8 +179,10 @@ final class AddPaymentService {
     if (!overpaid || !"refund".equals(overpaymentAction)) {
       return null;
     }
-    FIN_Payment refundPayment = FIN_AddPayment.createRefundPayment(conn, vars, payment,
-        leftover.negate(), null);
+    // ETP-5230: createRefundPayment numbers the refund off the AP Payment sequence (org *) and
+    // flushes internally, so the whole call has to sit inside the scope.
+    FIN_Payment refundPayment = StarOrgWriteScope.withWritableStarOrg(
+        () -> FIN_AddPayment.createRefundPayment(conn, vars, payment, leftover.negate(), null));
     failOnError(FIN_AddPayment.processPayment(vars, conn,
         PaymentRegistrationService.resolveProcessAction(refundPayment, false), refundPayment, "",
         "(" + payment.getId() + ")"));
