@@ -334,6 +334,47 @@ user through the initial setup tasks. Its progress is persisted server-side in
 `{ "v": 1, "seen": true, "completed": ["company-data", "products"] }`), so the
 checklist keeps its state across logins and devices.
 
+### Which steps a tenant is shown (plan gate)
+
+The checklist is **shorter on a trial**. Two steps carry `productiveOnly` in
+`firstStepsConfig.js` — invoice numbering and the fiscal configuration — and are hidden while
+the tenant is on the free plan:
+
+| Plan | Steps shown | Counter |
+|---|---|---|
+| free / trial | create-account, company-data, products, contacts, team | `x/5` |
+| productive | the five above plus fiscal-config and invoice-sequence | `x/7` |
+
+The reason is functional, not cosmetic: a document series a tenant abandons after the trial
+numbers nothing, and the fiscal setup is what the productive environment gets created with.
+Before the gate a trial tenant could never finish the checklist — the two rows it had no way to
+act on held it at 5/7 permanently.
+
+**Where the plan comes from.** No endpoint answers "what plan is the environment I am inside
+on". `GET /sws/go/onboarding/first-steps` and `/sws/go/me` are account-scoped and do not know
+which client the shell opened; `POST /sws/go/login` returns only a JWT and the role list. So the
+browser derives it: `GET /sws/go/environments` reports `plan` per environment (ETP-4686) and the
+session's client id is in `localStorage.sf_auth_client_id` — `useTenantPlan` matches the two. It
+uses the same predicate as the company switcher's Demo/Productivo badge, so the badge and the
+checklist length cannot disagree.
+
+**An unknown plan shows everything.** `useTenantPlan` answers `null` when it cannot know — no
+platform token, a failed request, or a client id with no matching row — and
+`isProductivePlan(null)` is deliberately `true`. Hiding invoice numbering from a tenant that
+paid for it is a worse failure than showing a trial two extra rows, and it is also what every
+tenant saw before the gate existed.
+
+**The server allowlist is NOT gated.** `FIRST_STEPS_IDS` stays the full set of six toggleable
+ids: it has no notion of a plan, and a tenant that goes productive must be able to persist the
+two steps that just appeared. The narrowing happens client-side — `FirstStepsProvider` passes
+`toggleableStepIds(plan)` to `useFirstSteps` as its write allowlist, so a step the current plan
+does not show cannot be written by accident. The two lists are allowed to differ; only the
+client's may be the smaller one.
+
+**Progress is counted over the visible list**, not over the stored ids. A tenant that completed
+everything while productive and is later reported free (an `/environments` hiccup) would
+otherwise render `7/5`.
+
 Endpoints (session-token auth, same Bearer model as `/me`):
 
 - `GET  /sws/go/onboarding/first-steps` — returns `{ status, firstSteps }`;

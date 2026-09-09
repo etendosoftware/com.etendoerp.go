@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge.handlers;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -279,7 +280,7 @@ class DocumentSequenceHandlerTest {
     }
 
     @Test
-    @DisplayName("narrows a list GET to the eleven sequence names, as an inSet clause")
+    @DisplayName("narrows a list GET to the seven sequence names, as an inSet clause")
     void narrowsListByName() throws JSONException {
       // A provisioned tenant has 242 sequences; all but these are record-ID and internal
       // counters. Injected as criteria rather than filtered out of the response so the
@@ -298,15 +299,30 @@ class DocumentSequenceHandlerTest {
     }
 
     @Test
-    @DisplayName("carries the exact eleven names the product asked for")
+    @DisplayName("carries the exact seven names the product asked for")
     void allowlistContentIsTheAgreedList() {
       // Verified against the instance: every one of these exists, by this exact name, in a
       // provisioned client. Renaming or dropping one is a product change, not a refactor.
       assertEquals(java.util.List.of(
           "AR Invoice", "AP Payment", "AR Receipt", "MM Shipment", "Standard Order",
-          "Purchase Order", "DocumentNo_C_Invoice", "Secuencia TICKETBAI",
-          "DocumentNo_M_InOut", "DocumentNo_M_Movement", "DocumentNo_A_Asset"),
+          "Purchase Order", "Secuencia TICKETBAI"),
           DocumentSequenceHandler.VISIBLE_SEQUENCE_NAMES);
+    }
+
+    @Test
+    @DisplayName("holds no DocumentNo_* fallback counter, which would be unsafe to edit")
+    void allowlistExcludesTableLevelFallbacks() {
+      // REGRESSION GUARD, and the reason is data, not taste. Provisioning creates every
+      // DocumentNo_* row twice (6912 surplus rows across 72 of 94 clients when measured), and
+      // ad_sequence_doc increments every row matching the name before reading one back with a
+      // non-STRICT SELECT INTO. The duplicates therefore advance in lockstep and numbering
+      // works — until someone edits ONE of them here, at which point the rows diverge and the
+      // prefix or counter that is actually used becomes non-deterministic. Re-adding one of
+      // these names puts that back; de-duplicate the data first.
+      for (String name : DocumentSequenceHandler.VISIBLE_SEQUENCE_NAMES) {
+        assertFalse(name.startsWith("DocumentNo_"),
+            name + " is a duplicated table-level counter and must not be editable");
+      }
     }
 
     @Test

@@ -103,10 +103,33 @@ public class DocumentSequenceHandler implements NeoHandler {
    * Adding a sequence to the product means adding its name here.
    *
    * <p>Matched on the name because that is what identifies these rows across tenants: every one
-   * of the eleven was verified to exist, by this exact name, in a provisioned client. Four of
-   * them ({@code DocumentNo_*}) legitimately appear TWICE per client — Etendo creates the
-   * table-level sequence more than once — and both rows are shown rather than one being guessed
-   * at; see the window's guide for that gap.
+   * of the seven was verified to exist, by this exact name, exactly once per organization, in a
+   * provisioned client.
+   *
+   * <p><b>Every {@code DocumentNo_*} name is deliberately absent</b>, for two independent
+   * reasons.
+   *
+   * <p>They are DUPLICATED in the data — provisioning creates each twice (6912 surplus rows
+   * across 72 of 94 clients), because the client setup writes them and
+   * {@code generateOnboardingSequences} then runs Etendo's Create Sequences over the same
+   * client. Numbering survives that by accident: {@code ad_sequence_doc} increments every row
+   * matching the name and reads one back with a non-{@code STRICT} {@code SELECT INTO}, so both
+   * copies advance in lockstep and either answer is the same. Editing ONE of a pair breaks
+   * exactly that — the rows diverge, an arbitrary one still answers, and PostgreSQL relocates an
+   * updated row, so a prefix would apply intermittently.
+   *
+   * <p>And for the one series a tenant might actually want to prefix there is nothing to
+   * configure: {@code DocumentNo_C_Invoice} numbers purchase invoices, but {@code AP Invoice}
+   * carries {@code IsDocNoControlled='N'} and no sequence in 76 of 76 doctypes across all 75
+   * clients, while every other invoice doctype has both. That is stock Openbravo semantics for
+   * "the number comes from outside" — the supplier numbers a purchase invoice, and the fallback
+   * counter only supplies a proposed value. So de-duplicating the data would NOT make these
+   * names worth exposing; do not treat that data-fix as a prerequisite for re-adding them.
+   *
+   * <p>What their absence costs: the doctypes without a sequence of their own are unreachable
+   * from here — {@code AP Invoice} and {@code AP CreditMemo}, {@code MM Receipt}, plus asset and
+   * internal-movement numbering. One fallback row is SHARED by every doctype lacking a
+   * sequence, so that entry point changed all of them at once. See the window's guide.
    */
   static final List<String> VISIBLE_SEQUENCE_NAMES = List.of(
       "AR Invoice",
@@ -115,11 +138,7 @@ public class DocumentSequenceHandler implements NeoHandler {
       "MM Shipment",
       "Standard Order",
       "Purchase Order",
-      "DocumentNo_C_Invoice",
-      "Secuencia TICKETBAI",
-      "DocumentNo_M_InOut",
-      "DocumentNo_M_Movement",
-      "DocumentNo_A_Asset");
+      "Secuencia TICKETBAI");
 
   /** Contract field name of {@code AD_Sequence.Prefix} (see the window's decisions.json). */
   static final String FIELD_PREFIX = "prefix";
