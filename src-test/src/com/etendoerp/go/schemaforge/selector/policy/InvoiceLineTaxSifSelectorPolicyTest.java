@@ -21,6 +21,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -521,6 +522,183 @@ public class InvoiceLineTaxSifSelectorPolicyTest {
 
       assertFalse(result.getBody().getJSONArray("items").getJSONObject(0).has("EM_Tbai_Claveregimeniva"));
       dalMock.verifyNoInteractions();
+    }
+  }
+
+  // ── ETP-5122: per-organization ETSG_Tax_SIF_Config override join ──────────
+
+  /**
+   * The context param key carrying the requesting document's organization, read via
+   * reflection off the production field instead of hardcoded — mirrors the same
+   * anti-drift technique {@link #productionTargetEntityConstantMatchesTheGeneratedDalModelEntityName}
+   * already uses for {@code TAX_TARGET_ENTITY}, so a rename of the constant fails this test
+   * loudly instead of silently making the "with AD_Org_ID" tests below exercise the
+   * no-override code path by accident.
+   */
+  private static String adOrgIdParamName() throws Exception {
+    Field field = InvoiceLineTaxSifSelectorPolicy.class.getDeclaredField("AD_ORG_ID_PARAM");
+    field.setAccessible(true);
+    return (String) field.get(null);
+  }
+
+  private static Map<String, String> ctxWithOrg(String sourceEntity, String windowId, String orgId)
+      throws Exception {
+    Map<String, String> params = ctx(sourceEntity, windowId);
+    if (orgId != null) {
+      params.put(adOrgIdParamName(), orgId);
+    }
+    return params;
+  }
+
+  /**
+   * With an in-scope {@code AD_Org_ID} present, the query must LEFT JOIN
+   * {@code etsg_tax_sif_config} scoped through {@code ad_get_org_le_bu(?, 'LE')}, COALESCE each
+   * of the 8 SIF VALUE columns against the override, bind the organization id as the FIRST
+   * parameter (before the tax ids), and the resolved (effective) value returned by the DB must
+   * still be written onto the item under the exact same JSON key as the no-override path.
+   */
+  @Test
+  public void enrichJoinsOrganizationOverrideAndBindsOrgIdBeforeTaxIdsWhenAdOrgIdPresent()
+      throws Exception {
+    JSONArray items = new JSONArray().put(new JSONObject().put("id", "tax-1"));
+    NeoResponse response = new NeoResponse(200, new JSONObject().put("items", items));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Connection conn = wireConnection(dalMock);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      when(conn.prepareStatement(sqlCaptor.capture())).thenReturn(ps);
+
+      Map<String, String> row = new HashMap<>();
+      row.put("c_tax_id", "tax-1");
+      // Simulates the effective value COALESCE already resolved server-side (e.g. the
+      // override value, since the tax-level column was blank) — this unit test cannot
+      // execute real SQL, so it only proves the value the DB returns still flows through
+      // to the item unchanged.
+      row.put("em_etvfac_vat_regime", "09");
+      stubResultSetForTax(ps, row);
+
+      policy.enrich(response, metaFor(TARGET_TAX_RATE),
+          ctxWithOrg(ENTITY_LINES, WINDOW_SALES_INVOICE, "org-le-1"));
+
+      String sql = sqlCaptor.getValue().toLowerCase();
+      assertTrue("must LEFT JOIN the override table",
+          sql.contains("left join etsg_tax_sif_config"));
+      assertTrue("must scope the override by legal entity via ad_get_org_le_bu",
+          sql.contains("ad_get_org_le_bu(?, 'le')"));
+      assertTrue("must COALESCE the SIF value column against the override",
+          sql.contains("coalesce(nullif(trim(t.em_etvfac_vat_regime), ''), "
+              + "nullif(trim(ovr.em_etvfac_vat_regime), ''))"));
+
+      // Organization id is the FIRST bound parameter (used by the JOIN clause), the tax
+      // id is bound AFTER it (used by the WHERE ... IN clause).
+      verify(ps).setString(1, "org-le-1");
+      verify(ps).setString(2, "tax-1");
+
+      assertEquals("09", items.getJSONObject(0).getString("EM_Etvfac_Vat_Regime"));
+    }
+  }
+
+  /**
+   * Without an {@code AD_Org_ID} in the context (e.g. a selector call whose context
+   * organization could not be resolved), the query must fall back to the plain pre-ETP-5122
+   * SQL — no JOIN, no COALESCE, only the tax ids bound as parameters — and enrichment must
+   * still succeed without throwing.
+   */
+  @Test
+  public void enrichSkipsOrganizationJoinAndBindsOnlyTaxIdsWhenAdOrgIdMissing() throws Exception {
+    JSONArray items = new JSONArray().put(new JSONObject().put("id", "tax-1"));
+    NeoResponse response = new NeoResponse(200, new JSONObject().put("items", items));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Connection conn = wireConnection(dalMock);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      when(conn.prepareStatement(sqlCaptor.capture())).thenReturn(ps);
+
+      Map<String, String> row = new HashMap<>();
+      row.put("c_tax_id", "tax-1");
+      row.put("em_etvfac_vat_regime", "01");
+      stubResultSetForTax(ps, row);
+
+      policy.enrich(response, metaFor(TARGET_TAX_RATE), ctx(ENTITY_LINES, WINDOW_SALES_INVOICE));
+
+      String sql = sqlCaptor.getValue().toLowerCase();
+      assertFalse("must not reference the override table at all",
+          sql.contains("etsg_tax_sif_config"));
+      assertFalse("must not COALESCE anything", sql.contains("coalesce"));
+
+      // Only the tax id is bound — no organization parameter ever set.
+      verify(ps, times(1)).setString(1, "tax-1");
+      verify(ps, times(1)).setString(anyInt(), anyString());
+
+      assertEquals("01", items.getJSONObject(0).getString("EM_Etvfac_Vat_Regime"));
+    }
+  }
+
+  /**
+   * A blank (whitespace-only) {@code AD_Org_ID} must be treated exactly like a missing one —
+   * {@code StringUtils.trimToNull} collapses it before the "with override" branch is chosen —
+   * so the override join must NOT be added.
+   */
+  @Test
+  public void enrichTreatsBlankAdOrgIdSameAsMissing() throws Exception {
+    JSONArray items = new JSONArray().put(new JSONObject().put("id", "tax-1"));
+    NeoResponse response = new NeoResponse(200, new JSONObject().put("items", items));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Connection conn = wireConnection(dalMock);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      when(conn.prepareStatement(sqlCaptor.capture())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      policy.enrich(response, metaFor(TARGET_TAX_RATE),
+          ctxWithOrg(ENTITY_LINES, WINDOW_SALES_INVOICE, "   "));
+
+      String sql = sqlCaptor.getValue().toLowerCase();
+      assertFalse("blank AD_Org_ID must not trigger the override join",
+          sql.contains("etsg_tax_sif_config"));
+      verify(ps, times(1)).setString(1, "tax-1");
+    }
+  }
+
+  /**
+   * The 3 compound/summary-tax STRUCTURAL columns (linkage only, no per-org override) must
+   * never be wrapped in the COALESCE/override expression, even when {@code AD_Org_ID} is
+   * present and every SIF VALUE column IS wrapped — they are always read straight off
+   * {@code c_tax}.
+   */
+  @Test
+  public void enrichNeverWrapsStructuralColumnsInCoalesceEvenWithAdOrgIdPresent() throws Exception {
+    JSONArray items = new JSONArray().put(new JSONObject().put("id", "tax-1"));
+    NeoResponse response = new NeoResponse(200, new JSONObject().put("items", items));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Connection conn = wireConnection(dalMock);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      when(conn.prepareStatement(sqlCaptor.capture())).thenReturn(ps);
+
+      Map<String, String> row = new HashMap<>();
+      row.put("c_tax_id", "tax-1");
+      row.put("issummary", "N");
+      stubResultSetForTax(ps, row);
+
+      policy.enrich(response, metaFor(TARGET_TAX_RATE),
+          ctxWithOrg(ENTITY_LINES, WINDOW_SALES_INVOICE, "org-le-1"));
+
+      String sql = sqlCaptor.getValue().toLowerCase();
+      for (String structuralColumn : new String[] {
+          "istaxexempt", "isnotaxable", "issummary", "parent_tax_id",
+          "em_obspti_isequivalentcharge" }) {
+        assertTrue("structural column " + structuralColumn + " must be projected plainly",
+            sql.contains("t." + structuralColumn + " as " + structuralColumn));
+        assertFalse("structural column " + structuralColumn + " must never be COALESCEd",
+            sql.contains("coalesce(nullif(trim(t." + structuralColumn));
+      }
     }
   }
 }

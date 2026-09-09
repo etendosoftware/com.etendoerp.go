@@ -48,7 +48,6 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
-import com.etendoerp.go.schemaforge.handlers.FinancialAccountAccountingDefaultsSupport;
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.ProviderCatalogUtils;
 
@@ -275,11 +274,13 @@ public class FinancialAccountHandler implements NeoHandler {
       }
       FIN_FinancialAccount account = loadAccount(accountId);
       if (account != null) {
-        FinancialAccountSupport.assignDefaultPaymentMethods(account);
-        FinancialAccountAccountingDefaultsSupport.applyDefaultAccountingConfiguration(account);
+        // Everything a newly created account must receive — one shared seam, so the bank-connection
+        // creation flow (FinancialAccountBankConnectionHandler#handleCreateAndLink) cannot drift
+        // from this one again. Add new defaults in provisionNewAccount, never inline here.
+        FinancialAccountSupport.provisionNewAccount(account);
       }
     } catch (Exception e) {
-      log.error("financial-account afterHandle: failed to assign default payment methods", e);
+      log.error("financial-account afterHandle: failed to provision the new financial account", e);
     } finally {
       exitAdminMode();
     }

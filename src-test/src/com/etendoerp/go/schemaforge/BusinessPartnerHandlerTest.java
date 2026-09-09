@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.doThrow;
@@ -39,8 +40,12 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Savepoint;
 
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+
+import javax.servlet.http.HttpServletRequest;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -52,10 +57,13 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 
 /**
  * Unit tests for {@link BusinessPartnerHandler}.
@@ -1466,5 +1474,196 @@ class BusinessPartnerHandlerTest {
     // No child data attached; the email fallback found nothing, so the default result stands.
     NeoResponse result = runAfterHandleGet(connMock);
     assertNull(result);
+  }
+
+  // ── handle() — SELECTOR: Payment Method filtering (ETP-5183) ─────────────────
+  //
+  // Ported from the superseded ContactsPaymentMethodSelectorHandler (deleted — its logic now
+  // lives in BusinessPartnerHandler.handlePaymentMethodSelector(), reached via the SELECTOR
+  // branch at the top of handle()). Pins the confirmed design: paymentMethod is filtered by
+  // Payin_Allow only and pOPaymentMethod by Payout_Allow only — no FIN_FinAcc_PaymentMethod
+  // account-linkage join — and the handler falls through (null) for every other field/entity/
+  // endpoint type so no other window sharing the same columns or the same AD_Val_Rule is
+  // affected.
+
+  private static final String PAYMENT_METHOD_ID = "PM_001";
+  private static final String PAYMENT_METHOD_NAME = "Bank Transfer";
+
+  @Test
+  void testHandlePaymentMethodSelectorReturnsNullForNonSelectorEndpoint() {
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("GET");
+
+    assertNull(handler.handle(ctx));
+  }
+
+  @Test
+  void testHandlePaymentMethodSelectorReturnsNullForUnrelatedSelectorField() {
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.SELECTOR);
+    when(ctx.getFieldName()).thenReturn("salesRepresentative");
+    when(ctx.getHttpMethod()).thenReturn("GET");
+
+    assertNull(handler.handle(ctx));
+  }
+
+  @Test
+  void testHandlePaymentMethodSelectorReturnsNullForBlankFieldName() {
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.SELECTOR);
+    when(ctx.getFieldName()).thenReturn("");
+    when(ctx.getHttpMethod()).thenReturn("GET");
+
+    assertNull(handler.handle(ctx));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandlePaymentMethodFieldFiltersByPayinAllowOnly() throws Exception {
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.SELECTOR);
+    when(ctx.getFieldName()).thenReturn("paymentMethod");
+
+    try (MockedStatic<RequestContext> reqCtx = mockStatic(RequestContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class)) {
+      stubEmptySelectorRequest(reqCtx);
+
+      OBDal obDalMock = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      OBCriteria<FIN_PaymentMethod> criteria = mock(OBCriteria.class);
+      FIN_PaymentMethod paymentMethod = mock(FIN_PaymentMethod.class);
+      when(paymentMethod.getId()).thenReturn(PAYMENT_METHOD_ID);
+      when(paymentMethod.getName()).thenReturn(PAYMENT_METHOD_NAME);
+
+      when(obDalMock.createCriteria(FIN_PaymentMethod.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.addOrderBy(any(), org.mockito.ArgumentMatchers.anyBoolean())).thenReturn(criteria);
+      when(criteria.setMaxResults(org.mockito.ArgumentMatchers.anyInt())).thenReturn(criteria);
+      when(criteria.setFirstResult(org.mockito.ArgumentMatchers.anyInt())).thenReturn(criteria);
+      when(criteria.count()).thenReturn(1);
+      when(criteria.list()).thenReturn(Collections.singletonList(paymentMethod));
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(200, response.getHttpStatus());
+      JSONArray items = response.getBody().getJSONArray("items");
+      assertEquals(1, items.length());
+      JSONObject item = items.getJSONObject(0);
+      assertEquals(PAYMENT_METHOD_ID, item.getString("id"));
+      assertEquals(PAYMENT_METHOD_NAME, item.getString("label"));
+      assertEquals(1, response.getBody().getInt("totalCount"));
+      assertFalse(response.getBody().getBoolean("hasMore"));
+
+      // The restriction list must reference payinAllow, never payoutAllow, and never the
+      // FIN_FinAcc_PaymentMethod account-linkage join.
+      List<Object> capturedRestrictions = capturedPaymentMethodRestrictions(criteria);
+      assertTrue(capturedRestrictions.stream()
+          .anyMatch(r -> r.toString().toLowerCase().contains("payinallow")));
+      assertFalse(capturedRestrictions.stream()
+          .anyMatch(r -> r.toString().toLowerCase().contains("payoutallow")));
+      assertFalse(capturedRestrictions.stream()
+          .anyMatch(r -> r.toString().toLowerCase().contains("finaccpaymentmethod")));
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandlePoPaymentMethodFieldFiltersByPayoutAllowOnly() throws Exception {
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.SELECTOR);
+    when(ctx.getFieldName()).thenReturn("pOPaymentMethod");
+
+    try (MockedStatic<RequestContext> reqCtx = mockStatic(RequestContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class)) {
+      stubEmptySelectorRequest(reqCtx);
+
+      OBDal obDalMock = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(obDalMock);
+
+      OBCriteria<FIN_PaymentMethod> criteria = mock(OBCriteria.class);
+      when(obDalMock.createCriteria(FIN_PaymentMethod.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.addOrderBy(any(), org.mockito.ArgumentMatchers.anyBoolean())).thenReturn(criteria);
+      when(criteria.setMaxResults(org.mockito.ArgumentMatchers.anyInt())).thenReturn(criteria);
+      when(criteria.setFirstResult(org.mockito.ArgumentMatchers.anyInt())).thenReturn(criteria);
+      when(criteria.count()).thenReturn(0);
+      when(criteria.list()).thenReturn(Collections.emptyList());
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(200, response.getHttpStatus());
+      assertEquals(0, response.getBody().getJSONArray("items").length());
+
+      List<Object> capturedRestrictions = capturedPaymentMethodRestrictions(criteria);
+      assertTrue(capturedRestrictions.stream()
+          .anyMatch(r -> r.toString().toLowerCase().contains("payoutallow")));
+      assertFalse(capturedRestrictions.stream()
+          .anyMatch(r -> r.toString().toLowerCase().contains("payinallow")));
+      assertFalse(capturedRestrictions.stream()
+          .anyMatch(r -> r.toString().toLowerCase().contains("finaccpaymentmethod")));
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandlePaymentMethodSelectorAcceptsRawColumnNameForBothDirections() throws Exception {
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.SELECTOR);
+    when(ctx.getFieldName()).thenReturn("FIN_Paymentmethod_ID");
+
+    try (MockedStatic<RequestContext> reqCtx = mockStatic(RequestContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class)) {
+      stubEmptySelectorRequest(reqCtx);
+      OBDal obDalMock = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(obDalMock);
+      OBCriteria<FIN_PaymentMethod> criteria = mock(OBCriteria.class);
+      when(obDalMock.createCriteria(FIN_PaymentMethod.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.addOrderBy(any(), org.mockito.ArgumentMatchers.anyBoolean())).thenReturn(criteria);
+      when(criteria.setMaxResults(org.mockito.ArgumentMatchers.anyInt())).thenReturn(criteria);
+      when(criteria.setFirstResult(org.mockito.ArgumentMatchers.anyInt())).thenReturn(criteria);
+      when(criteria.count()).thenReturn(0);
+      when(criteria.list()).thenReturn(Collections.emptyList());
+
+      NeoResponse response = handler.handle(ctx);
+      assertNotNull(response);
+      assertEquals(200, response.getHttpStatus());
+    }
+  }
+
+  /**
+   * Confirms zero regression: BusinessPartnerHandler's existing name-derivation/currency/VIES/
+   * accounting-backfill logic must be completely untouched by the new SELECTOR branch — a POST
+   * (CRUD, not SELECTOR) still runs the original decision tree exactly as before.
+   */
+  @Test
+  void testHandlePostStillDerivesNameWhenEndpointTypeIsCrud() throws Exception {
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    JSONObject body = new JSONObject();
+    body.put("etgoFirstname", "Juan");
+    body.put("etgoLastname", "García");
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    handler.handle(ctx);
+
+    assertEquals("Juan García", body.getString("name"));
+  }
+
+  private void stubEmptySelectorRequest(MockedStatic<RequestContext> reqCtx) {
+    RequestContext requestContext = mock(RequestContext.class);
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    reqCtx.when(RequestContext::get).thenReturn(requestContext);
+    when(requestContext.getRequest()).thenReturn(request);
+    when(request.getParameter(anyString())).thenReturn(null);
+  }
+
+  @SuppressWarnings("unchecked")
+  private List<Object> capturedPaymentMethodRestrictions(OBCriteria<FIN_PaymentMethod> criteria) {
+    ArgumentCaptor<org.hibernate.criterion.Criterion> captor =
+        ArgumentCaptor.forClass(org.hibernate.criterion.Criterion.class);
+    verify(criteria, org.mockito.Mockito.atLeastOnce()).add(captor.capture());
+    return (List<Object>) (List<?>) captor.getAllValues();
   }
 }

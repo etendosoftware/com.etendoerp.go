@@ -38,6 +38,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
+import com.etendoerp.go.schemaforge.handlers.FinancialAccountAccountingDefaultsSupport;
+
 /**
  * Helper for creating {@link FIN_FinancialAccount} records programmatically, outside the generic
  * CRUD path. Used by the bank connection bridge ({@link FinancialAccountBankConnectionHandler}) for the "connect first,
@@ -159,16 +161,57 @@ final class FinancialAccountSupport {
   }
 
   /**
+   * THE single entry point for "everything a newly created financial account must receive",
+   * whatever path created it. Both creation flows call exactly this and nothing else:
+   *
+   * <ul>
+   *   <li>manual "sin conexión" — the generic NEO CRUD inserts the record, then
+   *       {@link FinancialAccountHandler#afterHandle}'s POST branch calls this;</li>
+   *   <li>bank connection (Salt Edge) —
+   *       {@link FinancialAccountBankConnectionHandler#handleCreateAndLink} builds the record via
+   *       {@link #createAccount} and then calls this, before its own Salt Edge linking.</li>
+   * </ul>
+   *
+   * <p><b>Why this exists (ETP-5207).</b> The two flows used to duplicate the provisioning call
+   * list, and they drifted — twice. ETP-4872 added
+   * {@code applyDefaultAccountingConfiguration} to the manual path only, and ETP-5207's first pass
+   * fixed the cleared-payment-account defect on the manual path only; the bank-connection handler
+   * carried a comment claiming to "mirror the manual flow" while calling just
+   * {@link #assignDefaultPaymentMethods} — half a mirror. QA caught it in the running app: an
+   * account created via CONNECT ACCOUNT was still born with "Cleared payment account" IN/OUT set
+   * to the ledger asset account, so its reconciliations still posted.
+   *
+   * <p><b>Contract for whoever adds the next default:</b> add it HERE, never inline in a handler.
+   * Anything every new account needs belongs in this method and reaches both flows automatically.
+   * Path-specific work does NOT belong here — it stays in the calling handler (e.g. the Salt Edge
+   * account linking, which only the connection flow performs).
+   *
+   * <p>Ordering matters and is deliberate: payment methods first, then accounting configuration.
+   * The caller must have already flushed the account, because core's AFTER INSERT trigger
+   * {@code FIN_FINANCIAL_ACCOUNT_TRG} is what creates the {@code fin_financial_account_acct} row
+   * the accounting step then corrects. Best-effort throughout: neither step may break account
+   * creation, and each swallows its own failures.
+   *
+   * @param account
+   *     the freshly created and flushed financial account; {@code null} is a no-op
+   */
+  static void provisionNewAccount(FIN_FinancialAccount account) {
+    if (account == null) {
+      return;
+    }
+    assignDefaultPaymentMethods(account);
+    FinancialAccountAccountingDefaultsSupport.applyDefaultAccountingConfiguration(account);
+  }
+
+  /**
    * Links the default payment methods that correspond to {@code account}'s type
    * ({@link #PAYMENT_METHODS_BY_TYPE}), so a Cash/Bank/Card account is usable for
    * receipts/payments without manual setup. Idempotent: existing links are left
    * untouched. Failures never propagate — callers persist the account first, so the
    * assignment is always best-effort on top of an already-committed record.
    *
-   * <p>Shared by {@link FinancialAccountHandler#afterHandle} (manual "sin conexión"
-   * creation) and {@link FinancialAccountBankConnectionHandler#handleCreateAndLink} (Salt Edge
-   * "create and link" flow), so every financial account gets the same treatment
-   * regardless of how it was created.
+   * <p>Not called directly by the creation flows any more — reach it through
+   * {@link #provisionNewAccount}, which is the shared seam both of them use.
    */
   static void assignDefaultPaymentMethods(FIN_FinancialAccount account) {
     List<String> methodNames = PAYMENT_METHODS_BY_TYPE.get(account.getType());
