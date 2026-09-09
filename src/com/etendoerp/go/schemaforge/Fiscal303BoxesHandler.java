@@ -277,7 +277,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
    *     {@link #VALID_DECL_TYPES}
    */
   static String resolveDeclType(String tipo) {
-    if (VALID_DECL_TYPES.contains(tipo)) {
+    if (tipo != null && VALID_DECL_TYPES.contains(tipo)) {
       return tipo;
     }
     // Message lists a fixed, deterministic order — VALID_DECL_TYPES is a Set.of(...), whose
