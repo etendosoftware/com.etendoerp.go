@@ -1285,6 +1285,153 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         assertEquals("Conversion Rates", windows.getJSONObject(0).getString("name"));
     }
 
+    // ── ETP-5116: fiscal-family duplicate rows excluded ──────────────────
+
+    /**
+     * ETP-5116 (QA fix) — "Fiscal Monitor" and "Fiscal Configuration" each aggregate 3 classic
+     * windows into a single Etendo Go page, with a human-chosen representative window standing
+     * in for the whole page in the {@code matrix} (SII Monitor / SII Configuration). The other 2
+     * windows of each trio must never surface as their OWN separate matrix rows — confirmed live
+     * via a QA screenshot for the "Fiscal Monitor" pair — while the representatives keep
+     * producing their own real row. Mirrors {@link #testUiExcludedWindowNeverReachesTheResponse}'s
+     * shape for the pre-existing ETP-5068 exclusion, extended to also assert the representatives
+     * survive.
+     */
+    @Test
+    @DisplayName("ETP-5116: fiscal-family duplicate windows never appear as their own matrix rows, but their representatives do")
+    void testFiscalFamilyDuplicateWindowsAreExcludedButRepresentativesSurvive() throws Exception {
+        givenSystemAdminCallerRole();
+
+        Window siiMonitor = mockWindow(FISCAL_MONITOR_PROXY_ID, "SII Monitor");
+        Window monitorVerifactu = mockWindow("F4675DAB02134762B66881DAE4672AD0", "Monitor Verifactu");
+        Window tbaiFacturas = mockWindow("71F24BF89DE748B483BE87594747D6FB", "TBAI Facturas Enviadas");
+        Window siiConfig = mockWindow("C1D3A2A017AC4B82B9FEE6F4D2A0C55A", "SII Configuration");
+        Window tbaiConfig = mockWindow("C327DE215AC945F69363905840118177", "Configuración TBAI");
+        Window verifactuConfig = mockWindow("27A453FA86974745977672F1A8DCCEFF", "Configuración Verifactu");
+
+        stubBaselineQueries(standardTenantRoles(), Arrays.asList(
+                siiMonitor, monitorVerifactu, tbaiFacturas, siiConfig, tbaiConfig, verifactuConfig));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        assertNull(responseVars.get(ERROR));
+        String rawResult = responseVars.get(RESULT);
+        // Blunt but decisive, same convention as ETP-5068's own exclusion test: the excluded ids
+        // must not appear ANYWHERE in the payload, whichever structure a future refactor adds
+        // them to.
+        assertFalse(rawResult.contains("F4675DAB02134762B66881DAE4672AD0"),
+                "Monitor Verifactu must not appear anywhere in the response");
+        assertFalse(rawResult.contains("71F24BF89DE748B483BE87594747D6FB"),
+                "TBAI Facturas Enviadas must not appear anywhere in the response");
+        assertFalse(rawResult.contains("C327DE215AC945F69363905840118177"),
+                "Configuración TBAI must not appear anywhere in the response");
+        assertFalse(rawResult.contains("27A453FA86974745977672F1A8DCCEFF"),
+                "Configuración Verifactu must not appear anywhere in the response");
+
+        JSONObject result = new JSONObject(rawResult);
+        JSONArray categories = result.getJSONObject("matrix").getJSONArray("categories");
+        // categoryQuery defaults to empty (see setUp()) — every row here falls back to "Other":
+        // siiMonitor + siiConfig (the 2 real, non-excluded windows) plus the 2 ETP-5071 proxy
+        // rows never backed by an active spec here (Fiscal Models, Not Posted Documents) —
+        // Fiscal Monitor's own proxy id collides with siiMonitor's real id and is skipped by
+        // buildMatrix's pre-existing duplicate-id guard.
+        assertEquals(1, categories.length());
+        JSONArray windows = categories.getJSONObject(0).getJSONArray("windows");
+        assertEquals(4, windows.length());
+
+        java.util.Set<String> windowIds = new java.util.HashSet<>();
+        for (int i = 0; i < windows.length(); i++) {
+            windowIds.add(windows.getJSONObject(i).getString("id"));
+        }
+        assertTrue(windowIds.contains(FISCAL_MONITOR_PROXY_ID), "SII Monitor's own row must survive");
+        assertTrue(windowIds.contains("C1D3A2A017AC4B82B9FEE6F4D2A0C55A"),
+                "SII Configuration's own row must survive");
+        assertFalse(windowIds.contains("F4675DAB02134762B66881DAE4672AD0"));
+        assertFalse(windowIds.contains("71F24BF89DE748B483BE87594747D6FB"));
+        assertFalse(windowIds.contains("C327DE215AC945F69363905840118177"));
+        assertFalse(windowIds.contains("27A453FA86974745977672F1A8DCCEFF"));
+    }
+
+    /**
+     * ETP-5116 (QA fix, second pass) — 5 more rows confirmed via live DB lookup plus a cross
+     * check against {@code etendo_schema_forge}'s {@code menu.json}/{@code artifacts/} (none of
+     * the 5 appears there): "End Year Close" (lives inside the Fiscal Calendar window, {@code
+     * AD_Window_ID = 117}), "Location" and "Transaction Type" (classic embedded reference
+     * windows, not independent pages), and the two dead return windows {@code
+     * TemplateRoleWindowAccess} already stopped granting this same ticket — "Return to Vendor"
+     * (replaced by "Return to Vendor Shipment") and "Return from Customer" (replaced by "Return
+     * Receipt"). Mirrors {@link
+     * #testFiscalFamilyDuplicateWindowsAreExcludedButRepresentativesSurvive}'s shape: the 5
+     * excluded ids must never appear anywhere in the payload, while Fiscal Calendar (117), Return
+     * to Vendor Shipment and Return Receipt keep producing their own real rows. Location and
+     * Transaction Type have no single "representative" window — they are generic reference
+     * windows embedded in many places, not a 1:1 duplicate pair — so no paired-survivor
+     * assertion is made for those two.
+     */
+    @Test
+    @DisplayName("ETP-5116: non-independent windows never appear as their own matrix rows, but their real counterparts do")
+    void testNonIndependentWindowsAreExcludedButRealCounterpartsSurvive() throws Exception {
+        givenSystemAdminCallerRole();
+
+        Window endYearClose = mockWindow("B5673F73F613496C8BEA22FB55E4E1E4", "End Year Close");
+        Window fiscalCalendar = mockWindow("117", "Fiscal Calendar");
+        Window location = mockWindow("121", "Location");
+        Window transactionType = mockWindow("82922976BB524D1BAA3CF8462B9219FE", "Transaction Type");
+        Window returnToVendorDead = mockWindow("C50A8AEE6F044825B5EF54FAAE76826F", "Return to Vendor");
+        Window returnToVendorShipment = mockWindow("273673D2ED914C399A6C51DB758BE0F9",
+                "Return to Vendor Shipment");
+        Window returnFromCustomerDead = mockWindow("FF808081330213E60133021822E40007",
+                "Return from Customer");
+        Window returnReceipt = mockWindow("123271B9AD60469BAE8A924841456B63", "Return Receipt");
+
+        stubBaselineQueries(standardTenantRoles(), Arrays.asList(
+                endYearClose, fiscalCalendar, location, transactionType,
+                returnToVendorDead, returnToVendorShipment, returnFromCustomerDead, returnReceipt));
+
+        invokeWebhookWithNoTemplateComposition();
+
+        assertNull(responseVars.get(ERROR));
+        String rawResult = responseVars.get(RESULT);
+        // Blunt but decisive, same convention as the other UI-exclusion tests: the excluded ids
+        // must not appear ANYWHERE in the payload, whichever structure a future refactor adds
+        // them to.
+        assertFalse(rawResult.contains("B5673F73F613496C8BEA22FB55E4E1E4"),
+                "End Year Close must not appear anywhere in the response");
+        assertFalse(rawResult.contains("\"121\""),
+                "Location must not appear anywhere in the response");
+        assertFalse(rawResult.contains("82922976BB524D1BAA3CF8462B9219FE"),
+                "Transaction Type must not appear anywhere in the response");
+        assertFalse(rawResult.contains("C50A8AEE6F044825B5EF54FAAE76826F"),
+                "The dead Return to Vendor window must not appear anywhere in the response");
+        assertFalse(rawResult.contains("FF808081330213E60133021822E40007"),
+                "The dead Return from Customer window must not appear anywhere in the response");
+
+        JSONObject result = new JSONObject(rawResult);
+        JSONArray categories = result.getJSONObject("matrix").getJSONArray("categories");
+        // categoryQuery defaults to empty (see setUp()) — every row here falls back to "Other":
+        // fiscalCalendar + returnToVendorShipment + returnReceipt (the 3 real, non-excluded
+        // windows) plus all 3 ETP-5071 proxy rows, none of which collide with any window mocked
+        // here (Fiscal Monitor, Fiscal Models, Not Posted Documents).
+        assertEquals(1, categories.length());
+        JSONArray windows = categories.getJSONObject(0).getJSONArray("windows");
+        assertEquals(6, windows.length());
+
+        java.util.Set<String> windowIds = new java.util.HashSet<>();
+        for (int i = 0; i < windows.length(); i++) {
+            windowIds.add(windows.getJSONObject(i).getString("id"));
+        }
+        assertTrue(windowIds.contains("117"), "Fiscal Calendar's own row must survive");
+        assertTrue(windowIds.contains("273673D2ED914C399A6C51DB758BE0F9"),
+                "Return to Vendor Shipment's own row must survive");
+        assertTrue(windowIds.contains("123271B9AD60469BAE8A924841456B63"),
+                "Return Receipt's own row must survive");
+        assertFalse(windowIds.contains("B5673F73F613496C8BEA22FB55E4E1E4"));
+        assertFalse(windowIds.contains("121"));
+        assertFalse(windowIds.contains("82922976BB524D1BAA3CF8462B9219FE"));
+        assertFalse(windowIds.contains("C50A8AEE6F044825B5EF54FAAE76826F"));
+        assertFalse(windowIds.contains("FF808081330213E60133021822E40007"));
+    }
+
     // ── ETP-5071: proxy access rows ──────────────────────────────────────
 
     /**
