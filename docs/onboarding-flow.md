@@ -326,6 +326,71 @@ account has zero environments, restores step + form, shows a one-time
 "progress restored" banner, and autosaves changes debounced (1.5 s) while the
 wizard is visible and not running.
 
+## First Steps Checklist (post-signup onboarding window)
+
+After an environment exists, the app shows a "First Steps" window that walks the
+user through the initial setup tasks. Its progress is persisted server-side in
+`ETGO_ACCOUNT.FIRST_STEPS` (nullable `VARCHAR(1000)` JSON blob:
+`{ "v": 1, "seen": true, "completed": ["company-data", "products"] }`), so the
+checklist keeps its state across logins and devices.
+
+Endpoints (session-token auth, same Bearer model as `/me`):
+
+- `GET  /sws/go/onboarding/first-steps` — returns `{ status, firstSteps }`;
+  `firstSteps` is the stored object or `null` when nothing has been saved yet.
+  Invalid stored JSON is logged as a warning and reported as `null`, never as an
+  error — a corrupt value can never lock the user out of the window.
+- `POST /sws/go/onboarding/first-steps` — body
+  `{ "firstSteps": { "v", "seen", "completed" } }` saves; `{ "firstSteps": null }`
+  clears the stored value.
+
+Both endpoints answer `401` without a valid `Authorization: Bearer <session_token>`
+header (via `runWithAuthenticatedAccount`, the same template the draft endpoints use).
+
+### Sanitization on write
+
+The client payload is never persisted as-is. `sanitizeFirstSteps` rebuilds the
+stored object field by field:
+
+| Field | Stored as |
+|---|---|
+| `v` | always `1` (`FIRST_STEPS_VERSION`), whatever the client sent |
+| `seen` | coerced to a real boolean, defaulting to `false` |
+| `completed` | the client array intersected with a fixed allowlist of step ids |
+
+The step-id allowlist is, in stored order:
+
+`company-data`, `fiscal-config`, `products`, `contacts`, `invoice-sequence`, `team`
+
+That is the order the checklist renders (`firstStepsConfig.js`), so a stored value reads
+the way the user saw it. The order is cosmetic — the frontend only tests membership — but
+keeping the two lists aligned is what makes a stored blob readable at a glance.
+
+Consequences of the intersection, all deliberate:
+
+- **Unknown step ids are dropped silently**, not rejected — an older or newer
+  frontend never gets a `400` for sending an id this backend does not know.
+- `create-account` is deliberately **not** allowlisted: it is implicit, the account
+  already exists. A client sending it has it dropped.
+- Non-string entries (numbers, `null`, nested objects) are dropped.
+- Duplicates collapse, and the stored array is always emitted in allowlist
+  order, so the persisted value is stable regardless of the order the client
+  sent its ids.
+- A `completed` value that is not an array at all is treated as empty.
+
+### Size cap
+
+The serialized value is capped at 1000 chars (`FIRST_STEPS_MAX_LENGTH`, matching
+the column width); a longer payload gets a `400 First steps payload is too large`.
+Because the sanitizer emits a fixed-shape object drawn from a closed allowlist,
+the current maximum output is well under 100 chars — the cap is a defensive guard
+that only becomes reachable if the allowlist grows substantially, and it exists so
+the endpoint can never write a value the column cannot hold.
+
+Unlike the onboarding draft, this value is **not** cleared by
+`POST /sws/go/onboarding` — the checklist is about what the user has done *after*
+the environment exists, so it must survive environment creation.
+
 ## Startup Access Self-Healer (`NeoAccessStartup`)
 
 `com.etendoerp.go.startup.NeoAccessStartup` is an `ApplicationInitializer`
@@ -374,3 +439,130 @@ self-healed existing tenants converge on the same access set.
   `AD_ROLE` row, so it can never trigger `AD_ROLE_TRG`'s destructive rebuild.
 - **Idempotent.** Re-running on the next restart grants nothing new.
 - **No SQL migration.** Existing databases self-heal on the next Tomcat restart.
+
+## Invoice numbering (First Steps step)
+
+Invoice numbering is configured in the **Document Sequence** window (`document-sequence`,
+AD window `112`), which the "Customize your invoices" First Steps step navigates to. There is no
+onboarding endpoint for it: the window is an ordinary NEO CRUD spec over `AD_Sequence`, so the
+prefix, suffix, starting number and next number are edited through the generic
+`/sws/neo/document-sequence` path like any other window.
+
+An earlier iteration of this step edited the sales and purchase prefixes inline through
+`GET`/`POST /sws/go/onboarding/invoice-sequence`. Both endpoints and
+`OnboardingInvoiceSequenceService` were removed when the window landed — a form that reached
+exactly two of a tenant's sequences was a narrower answer than the window, and keeping both
+meant two ways to write the same rows.
+
+### Prefix validation
+
+`DocumentSequenceHandler` (a `NeoHandler` bound to the spec's `Java_Qualifier`) rejects a prefix
+the Spanish fiscal localizations would refuse, **before** it is stored — see
+`docs/neo-headless-extensibility.md` for the handler pattern. Classic validates the same rules,
+but only inside `ProcessInvoiceTbaiHook.preProcess`, which runs when a *rectificative* invoice is
+completed in a TicketBAI-configured organization. A prefix chosen during onboarding therefore
+went unchecked for as long as it took to issue that first corrective invoice.
+
+The rules, taken from that hook:
+
+| Rule | Rejects |
+|---|---|
+| length | more than 20 characters |
+| lowercase / accents | `[a-záéíóúüñ]` |
+| forbidden letters | `[IOYWÑ]` |
+| character set | anything outside `A-Z0-9-` |
+
+They are applied **only when the organization's country is Spain** (`AD_OrgInfo` →
+`C_Location` → `C_Country.CountryCode = 'ES'`), because they are localization rules, not Etendo
+ones: `W`, for instance, is a perfectly ordinary prefix letter elsewhere. Widening or narrowing
+that gate is a Localization-team decision, not a GO one.
+
+
+## Tax identifier validation (NIF / CIF / NIE)
+
+A tenant sets its own fiscal identifier at exactly two moments, and both are guarded by
+`com.etendoerp.go.common.SpanishTaxIdValidator`:
+
+| Moment | Guard | Answer |
+|---|---|---|
+| Signup wizard (`fiscalIdValue`) | `EtendoGoJwtServlet#validateOnboardingTaxId`, called from `parseOnboardingRequest` | `400` before the NDJSON provisioning stream opens |
+| Signup wizard, in the browser | `CompanyStepWithTaxId` (`pages/onboarding/onboardingSteps.jsx`) | on blur and on **Empezar** — the click does not advance the view |
+| Organización window (`AD_OrgInfo.TaxID`) | `OrganizationInformationHandler` (`Java_Qualifier` `organization-information`) | `400` from the NEO CRUD write |
+
+The browser runs the same three rules in `tools/app-shell/src/lib/taxIdValidation.js` so the user
+is told before the round trip; the two Java call sites are what make it binding.
+
+The wizard's own step lives in the published `@etendosoftware/etendo-go-core` package, whose
+`CompanyStep` takes no validator from `config` — so it is guarded from the consuming repo instead:
+`coreSteps` is a plain `{ id, component }` array and `onNext` is a prop, so
+`pages/onboarding/onboardingSteps.jsx` swaps in a wrapper that validates before delegating.
+Two constraints shaped that wrapper and are worth knowing before changing it: it adds **no DOM of
+its own** (`OnboardingFlow` renders the step as a direct child of a `lg:grid-cols-[...]`
+container, so a wrapping `<div>` collapses the two-column layout), and it can show **no inline
+message under the field** (no error slot exists), so the message is a toast plus `aria-invalid`
+on the input. All three
+implementations share one case list — see `SpanishTaxIdValidatorTest` and
+`taxIdValidation.test.js`, which are deliberately the same values.
+
+### What classic validates, and why that was not enough
+
+Nothing validates `AD_OrgInfo.TaxID`: no callout, no validation rule, no event handler
+(verified against the instance's `AD_COLUMN`). The only check that ever looks at an
+organization's own identifier is `com.etendoerp.verifactu`'s `InitialValidator`, which calls
+`NIFValidator.validateCompanyNIF(VerifactuUtils.getTaxIDIssuer(...))` while **completing an
+invoice** — so a wrong NIF typed at signup surfaced as a failure to invoice, weeks later, on a
+value already stamped across the tenant's fiscal configuration.
+
+What classic does observe is the **business partner** identifier, through
+`org.openbravo.module.bptaxidkey`'s `ViesStatusObserver`. That one is not a substitute: it
+records a `V`/`I`/`P` status in `EM_OBTIK_VIESStatus`, logs and swallows its own failures
+("VIES check failed (non-fatal)"), and so never rejects anything — and it needs the
+country-prefixed form (`ES12345678Z`), whereas a bare NIF makes its `substring(0, 2)` read `12`
+as a country code.
+
+### The three accepted shapes
+
+| Shape | Pattern | Check digit |
+|---|---|---|
+| CIF (company) | `[ABCDEFGHJKLMNPQRSUVW]\d{7}[0-9A-J]` | Luhn-like mod 10; **both** the digit and its `JABCDEFGHI` letter are accepted |
+| DNI/NIF (natural person) | `\d{8}[A-Z]` | number mod 23 → `TRWAGMYFPDXBNJZSQVHLCKE` |
+| NIE (foreign resident) | `[XYZ]\d{7}[A-Z]` | same, with `X`/`Y`/`Z` read as a leading `0`/`1`/`2` |
+
+Accepting all three is not thoroughness for its own sake: the wizard offers `businessType`
+`company` / `freelancer`, and an autónomo has a personal DNI rather than a company CIF.
+Validating only the CIF form would have refused every freelancer in the product.
+
+The CIF algorithm is the one in Verifactu's `NIFValidator#validateCompanyNIF`, re-implemented
+rather than called: Verifactu is a Spain-localization module that is not installed on every
+instance, so depending on it would break the deployments that lack it. The person and NIE check
+digits are not in that class at all.
+
+### Gates and non-rules
+
+- **Blank is accepted.** The wizard marks the field optional and `wireOrgInfo()` only persists
+  a non-blank value; on the Organización window requiredness is a separate check that runs
+  first, so an emptied field reports "required", not "invalid format".
+- **A value made only of separators is rejected.** `normalize()` strips whitespace, `.` and
+  `-`, so `"---"` would otherwise normalize to empty and be waved through — and the window's
+  required check passes it too, since that one only tests for blankness.
+- **Applied only for Spain.** The signup path gates on the payload's `countryCode`, the handler
+  on the organization's `C_Country` (via `OrganizationCountrySupport`, shared with the
+  invoice-prefix rules). The browser module does NOT gate: `OnboardingPage.jsx` hardcodes
+  `countryCodes: ['ES']`, and the Organización screen has no ISO code to gate on — only a
+  country label derived from the address identifier. Shipping a second country means giving
+  that module the gate too.
+
+## Which tenant an onboarding endpoint writes to
+
+Applies to every account-authenticated onboarding endpoint — `/onboarding/first-steps`,
+`/onboarding/company-data` and `/onboarding/draft`.
+
+The onboarding endpoints authenticate an **account**, and an account can own several
+environments — so the account alone does not say which tenant to write to. The token the app
+sends from inside an environment is the NEO session JWT (the branch
+`findActiveAccountByBearerToken` resolves through the `user` claim), and it carries the
+session's own `client` and `organization` claims. Those scope the request.
+
+`resolveTenantSession` then re-checks the claimed client against the account that owns it, so a
+token can never name a client its account does not own. A pure account-session token, which has
+no environment behind it, is answered `400`.
