@@ -46,6 +46,7 @@ import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -54,6 +55,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
@@ -430,6 +432,53 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
       verify(finAcc).setPSD2ImportFromDate(any());
       verify(finAcc).setPSD2StatementFrequency("MONTHLY");
       verify(finAcc, Mockito.never()).setPSD2ImportToDate(any());
+      verify(dal).save(finAcc);
+      verify(dal).flush();
+    }
+  }
+
+  /**
+   * ETP-5181 — an "Importar desde" far beyond the provider's published {@code max_fetch_interval}
+   * is still saved, byte-for-byte, and is NOT rejected with a 400.
+   *
+   * <p>This pins the product decision behind the whole ticket: advise, but allow saving. The range
+   * is applied as a LOCAL filter over whatever the provider returns (Salt Edge ignores
+   * from_date/to_date — see {@code BankIntegrationUtils.buildSaltEdgeTransactionsEndpoint}), so an
+   * over-long range loses nothing inside the window that IS available; the notice exists only to
+   * stop the user expecting history the bank will never hand over. Without this test the next
+   * person to read the advisory naturally "completes" it into a hard validation here, next to the
+   * ETP-5104 inverted-range guard, and silently breaks every account whose history predates its
+   * provider's window.
+   *
+   * <p>The stored value is captured rather than matched with {@code any()} so a "helpful" clamp to
+   * the earliest served day fails too, not just an outright rejection.
+   */
+  @Test
+  public void testImportSettingsAcceptsRangeBeyondFetchInterval() throws Exception {
+    // Years beyond any published interval, and deliberately with no upper bound so the ETP-5104
+    // inverted-range guard cannot be what accepts or rejects this request.
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put("importFromDate", "2019-03-01");
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = handler.handle(postContext("import-settings", body));
+
+      assertEquals("an out-of-range import date is advisory, never a 400", 200,
+          response.getHttpStatus());
+      assertTrue(dataOf(response).getBoolean("saved"));
+
+      ArgumentCaptor<Date> stored = ArgumentCaptor.forClass(Date.class);
+      verify(finAcc).setPSD2ImportFromDate(stored.capture());
+      assertEquals("the requested date must be stored unchanged, not clamped",
+          FinancialAccountBankConnectionSupport.parseDate("2019-03-01"), stored.getValue());
       verify(dal).save(finAcc);
       verify(dal).flush();
     }

@@ -70,6 +70,19 @@ final class McpBusinessFilters {
     return operatorKey == null ? null : OPERATORS.get(operatorKey);
   }
 
+  /**
+   * Every recognized operator key, for the {@code available} list of an unknown-operator refusal
+   * (ETP-5184). {@code between} is appended because it is handled outside {@link #OPERATORS} but
+   * is just as valid a thing for a caller to have meant.
+   *
+   * @return the operator keys in documentation order, {@code between} last
+   */
+  static java.util.List<String> operatorKeys() {
+    java.util.List<String> keys = new java.util.ArrayList<>(OPERATORS.keySet());
+    keys.add(OP_BETWEEN);
+    return keys;
+  }
+
   /** @return {@code true} if {@code key} is any recognized range operator (including {@code between}). */
   static boolean isRangeOperator(String key) {
     return OP_BETWEEN.equals(key) || OPERATORS.containsKey(key);

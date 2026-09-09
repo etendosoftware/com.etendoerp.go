@@ -29,6 +29,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.same;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
@@ -52,6 +53,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -62,6 +64,7 @@ import com.etendoerp.payment.removal.util.TransactionRemovalUtil;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Criterion;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -84,6 +87,7 @@ import org.openbravo.base.model.Property;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
@@ -135,6 +139,8 @@ public class ReconciliationHandlerTest {
   private static final String LINE_ID = "line-1";
   private static final String CLIENT_ID = "client-1";
   private static final String ORG_ID = "org-1";
+  /** Id {@code createTransactionForRule} is stubbed to return for a rule-origin group. */
+  private static final String TRX_RULE_ID = "T-NEW";
 
   private ReconciliationHandler handler;
 
@@ -571,6 +577,12 @@ public class ReconciliationHandlerTest {
     FIN_FinancialAccount acc = mock(FIN_FinancialAccount.class);
     when(acc.getId()).thenReturn(accountId);
     when(bs.getAccount()).thenReturn(acc);
+    // ETP-5121: the write guards require a PROCESSED statement, and an unstubbed Mockito Boolean is
+    // null. isOnDraftStatement fails CLOSED, so null would read as "draft" and reject every line
+    // this fixture builds. Default the shared fixture to the ordinary case — a processed statement,
+    // which is the only state in which a line is reconcilable at all — and let the handful of tests
+    // that need a reactivated statement override it with thenReturn(Boolean.FALSE).
+    when(bs.isProcessed()).thenReturn(Boolean.TRUE);
     when(line.getBankStatement()).thenReturn(bs);
     when(line.getCramount()).thenReturn(credit);
     when(line.getDramount()).thenReturn(debit);
@@ -914,6 +926,31 @@ public class ReconciliationHandlerTest {
   // ── applySuggestions ─────────────────────────────────────────────────────────
 
   /**
+   * An {@code applySuggestions} payload holding ONE rule-origin group: a {@code createPayment} spec
+   * for a GL-item movement of -12.50, which balances the 12.50 withdrawal
+   * {@code lineFor(ACC_ID, ZERO, 12.50, null)} builds.
+   *
+   * <p>Shared by the happy path below and by the ETP-5121 draft-statement rejection at the end of
+   * this file, so those two differ in NOTHING but the statement's processed flag — which is what
+   * makes the rejection's {@code never()} on {@code createTransactionForRule} meaningful rather
+   * than vacuous.
+   *
+   * @return the request body
+   * @throws Exception if building the JSON fails
+   */
+  private static JSONObject ruleGroupBody() throws Exception {
+    JSONObject createPayment = new JSONObject()
+        .put("glItemId", "GL-1").put("ruleId", "R1").put("amount", "-12.50");
+    JSONObject group = new JSONObject()
+        .put("statementLineId", LINE_ID)
+        .put("operationIds", new JSONArray())
+        .put("createPayment", createPayment);
+    return new JSONObject()
+        .put("financialAccountId", ACC_ID)
+        .put("groups", new JSONArray().put(group));
+  }
+
+  /**
    * A rule-origin group carrying a createPayment spec materializes the GL-item transaction via
    * {@code createTransactionForRule} and reconciles the resulting transaction against the line.
    *
@@ -929,28 +966,18 @@ public class ReconciliationHandlerTest {
 
     doReturn(account).when(handler).loadAccount(ACC_ID);
     doReturn(line).when(handler).loadLine(LINE_ID);
-    doReturn("T-NEW").when(handler).createTransactionForRule(eq(account), eq(line), any());
+    doReturn(TRX_RULE_ID).when(handler).createTransactionForRule(eq(account), eq(line), any());
     // The created transaction must balance the line (-12.50) so validateOperations passes.
     doReturn(trxFor(ACC_ID, BigDecimal.ZERO, new BigDecimal("12.50"), null))
-        .when(handler).loadTransaction("T-NEW");
+        .when(handler).loadTransaction(TRX_RULE_ID);
     stubReconciliationCompose(rec, "Success");
 
-    JSONObject createPayment = new JSONObject()
-        .put("glItemId", "GL-1").put("ruleId", "R1").put("amount", "-12.50");
-    JSONObject group = new JSONObject()
-        .put("statementLineId", LINE_ID)
-        .put("operationIds", new JSONArray())
-        .put("createPayment", createPayment);
-    JSONObject body = new JSONObject()
-        .put("financialAccountId", ACC_ID)
-        .put("groups", new JSONArray().put(group));
-
-    NeoResponse response = handler.applySuggestions(body);
+    NeoResponse response = handler.applySuggestions(ruleGroupBody());
 
     assertEquals(201, response.getHttpStatus());
     verify(handler).createTransactionForRule(eq(account), eq(line), any());
     // The created transaction id is the one reconciled against the line.
-    verify(handler).matchBankStatementLine(eq(line), argThat(ops -> ops.contains("T-NEW")), eq(rec));
+    verify(handler).matchBankStatementLine(eq(line), argThat(ops -> ops.contains(TRX_RULE_ID)), eq(rec));
   }
 
   // ── buildPendingLines: state + counts (T7) ────────────────────────────────────
@@ -1894,27 +1921,138 @@ public class ReconciliationHandlerTest {
     }
   }
 
-  /** loadPendingLines binds the account id and returns the session query results. */
-  @Test
-  public void testLoadPendingLinesQueriesSession() {
-    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+  // ── loadPendingLines: the criteria the Automatch is built from (ETP-5121) ────
+  //
+  // This seam replaced a raw getSession().createQuery(hql) with an OBCriteria (the ETP-4950
+  // pattern), so the old "stub session.createQuery and assert the bound parameter" test is gone:
+  // the method no longer touches getSession() at all, and that test asserted nothing about the
+  // WHERE clause anyway — it would have stayed green through the very regression QA reported.
+  //
+  // What IS observable without a database is the SHAPE of the criteria: the Criterion objects the
+  // handler hands to OBCriteria.add(). Hibernate renders them predictably —
+  // SimpleExpression.toString() is propertyName + op + value ("bs.processed=true") and
+  // NullExpression.toString() is propertyName + " is null" — so the restrictions can be read back
+  // off the captured arguments. Both formats were verified against hibernate-core 5.6.15's
+  // bytecode, and the same technique is already used in UserRoleCompositionServiceTest. If a
+  // Hibernate upgrade ever changes those renderings these two tests fail loudly (wrong string, not
+  // silently green), which is the acceptable failure mode.
+
+  /** Alias {@code loadPendingLines} joins the parent bank statement under. */
+  private static final String STATEMENT_ALIAS = "bs";
+  /** {@code Restrictions.eq(bs.processed, true)} as Hibernate renders it. */
+  private static final String CRITERION_PROCESSED_GATE =
+      STATEMENT_ALIAS + "." + FIN_BankStatement.PROPERTY_PROCESSED + "=true";
+  /** {@code Restrictions.isNull(financialAccountTransaction)} as Hibernate renders it. */
+  private static final String CRITERION_UNMATCHED =
+      FIN_BankStatementLine.PROPERTY_FINANCIALACCOUNTTRANSACTION + " is null";
+
+  /** The criteria mock the last {@link #capturePendingLinesCriteria} call drove. */
+  private OBCriteria<FIN_BankStatementLine> pendingLinesCriteria;
+
+  /**
+   * Runs {@code loadPendingLines} against a mocked {@link OBCriteria} and returns every
+   * {@link Criterion} it added, rendered via {@code toString()}. The criteria mock itself is left in
+   * {@link #pendingLinesCriteria} so a caller can verify its other interactions (the joins).
+   *
+   * <p>These tests cannot go vacuously green if the seam is ever rewritten back to raw HQL: such a
+   * version would never call {@code createCriteria}, so {@code add} would be captured zero times
+   * and the {@code atLeastOnce()} verification would fail rather than trivially pass.
+   *
+   * @param rows what the criteria should return, i.e. the rows the Automatch would receive
+   * @return the rendered restrictions, in the order the handler added them
+   */
+  @SuppressWarnings("unchecked")
+  private List<String> capturePendingLinesCriteria(List<FIN_BankStatementLine> rows) {
+    OBCriteria<FIN_BankStatementLine> criteria = mock(OBCriteria.class);
+    pendingLinesCriteria = criteria;
+    List<String> rendered = new ArrayList<>();
     try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
-      org.hibernate.Session session = mock(org.hibernate.Session.class);
-      when(dal.getSession()).thenReturn(session);
-      @SuppressWarnings("unchecked")
-      org.hibernate.query.Query<FIN_BankStatementLine> query =
-          mock(org.hibernate.query.Query.class);
-      when(session.createQuery(anyString(), eq(FIN_BankStatementLine.class))).thenReturn(query);
-      when(query.setParameter(anyString(), any())).thenReturn(query);
-      when(query.list()).thenReturn(new ArrayList<>(Arrays.asList(line)));
+      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(criteria);
+      when(criteria.add(any(Criterion.class))).thenReturn(criteria);
+      when(criteria.list()).thenReturn(rows);
 
       List<FIN_BankStatementLine> result = handler.loadPendingLines(ACC_ID);
+      assertEquals("the criteria's rows must be returned verbatim", rows.size(), result.size());
 
-      assertEquals(1, result.size());
-      verify(query).setParameter("accountId", ACC_ID);
+      ArgumentCaptor<Criterion> captor = ArgumentCaptor.forClass(Criterion.class);
+      verify(criteria, atLeastOnce()).add(captor.capture());
+      for (Criterion criterion : captor.getAllValues()) {
+        rendered.add(criterion.toString());
+      }
     }
+    return rendered;
+  }
+
+  /**
+   * ETP-5121 (QA round). {@code loadPendingLines} is the ONLY source of lines
+   * {@code buildAutoMatch} proposes, and it must not offer a line whose bank statement is still in
+   * DRAFT. Before this change the query had no {@code processed} predicate at all: reactivating a
+   * statement removed its pending line from the left panel — which gates on it through
+   * {@code PENDING_LINES_SQL} — while the Automatch modal went on suggesting that same line, and
+   * applying the suggestion succeeded. Two independent line-selection paths, one rule; this test
+   * pins the missing half.
+   *
+   * <p><b>What this proves:</b> the restriction {@code bs.processed = true} is handed to the DAL,
+   * on the alias joined to the line's own {@code bankStatement}, together with the unmatched
+   * restriction that makes it a "pending" line at all.
+   *
+   * <p><b>What it does NOT prove:</b> that the database then excludes the row. No criteria is ever
+   * executed here — {@code list()} is stubbed — so the mapping from these Criterion objects to SQL,
+   * and the SQL's own behaviour, are outside this test. The criteria shape is the only thing
+   * observable without a database; end-to-end filtering is covered by the QA scenario itself.
+   */
+  @Test
+  public void testLoadPendingLinesOnlyProposesLinesOfAProcessedStatement() {
+    List<String> restrictions =
+        capturePendingLinesCriteria(Arrays.asList(mock(FIN_BankStatementLine.class)));
+
+    assertTrue("the Automatch must not propose a DRAFT statement's lines: expected the restriction "
+            + CRITERION_PROCESSED_GATE + " among " + restrictions,
+        restrictions.contains(CRITERION_PROCESSED_GATE));
+    assertTrue("a proposable line is by definition still unmatched; expected "
+            + CRITERION_UNMATCHED + " among " + restrictions,
+        restrictions.contains(CRITERION_UNMATCHED));
+    // The processed flag lives on the statement, so it is only readable through the join.
+    verify(pendingLinesCriteria)
+        .createAlias(FIN_BankStatementLine.PROPERTY_BANKSTATEMENT, STATEMENT_ALIAS);
+  }
+
+  /**
+   * ETP-5121: the already-reconciled exception {@code PENDING_LINES_SQL} carries is deliberately
+   * ABSENT here, and that asymmetry is intentional rather than an oversight.
+   *
+   * <p>The panel's query lets a reconciled line of a reactivated statement through because it still
+   * has to list it under "Conciliadas". That exception requires a NON-NULL
+   * {@code FIN_FinAcc_Transaction_ID}, which directly contradicts this query's own
+   * {@code financialAccountTransaction is null} restriction — the intersection is empty, so
+   * repeating it here would add a join and a disjunction that no row could ever satisfy. The
+   * Automatch only ever looks at unmatched lines; a reconciled one has nothing left to suggest.
+   *
+   * <p>This test exists so a future "restore parity with PENDING_LINES_SQL" edit fails loudly
+   * instead of silently adding dead SQL: it asserts no restriction mentions a reconciliation and
+   * none is a disjunction, and that the join count stays at one.
+   */
+  @Test
+  public void testLoadPendingLinesAddsNoAlreadyReconciledException() {
+    List<String> restrictions = capturePendingLinesCriteria(Collections.emptyList());
+
+    for (String restriction : restrictions) {
+      assertFalse("no restriction may reference a reconciliation — the unmatched gate already makes "
+              + "the exception unsatisfiable (ETP-5121); got: " + restriction,
+          restriction.toLowerCase(Locale.ROOT).contains("reconciliation"));
+      // Hibernate's Junction renders as "(a or b)"; the exception could only be expressed that way.
+      assertFalse("the processed gate must stay unconditional here, with no OR-ed exception; got: "
+          + restriction, restriction.contains(" or "));
+    }
+    // The unmatched restriction is what makes the exception unsatisfiable, so it must still be there.
+    assertTrue("the unmatched restriction is the reason the exception is redundant; got: "
+        + restrictions, restrictions.contains(CRITERION_UNMATCHED));
+    // A reconciliation exception would need a second join to read rec.processed through. Only the
+    // two-argument overload is counted — the one the statement join itself uses, and the natural
+    // way such an edit would be written.
+    verify(pendingLinesCriteria, times(1)).createAlias(anyString(), anyString());
   }
 
   // ── buildInvoiceCandidates: invoice-mode right panel ──────────────────────────
@@ -5645,5 +5783,186 @@ public class ReconciliationHandlerTest {
     JSONObject counts = data.getJSONObject(ReconciliationHandler.KEY_COUNTS);
     assertEquals(2, counts.getInt("all"));
     assertEquals(1, counts.getInt("reconciled"));
+  }
+
+  // ── ETP-5121 (QA round): the write paths refuse a line of a DRAFT statement ──
+  //
+  // QA's report was "si el extracto está en borrador, no debería sugerir con el automatch
+  // transacciones" — but hiding the suggestion is only half a fix. loadPendingLines (asserted
+  // above) stops the Automatch from PROPOSING the line; these tests cover the other half, the
+  // write paths refusing to ACT on one. Both halves are needed: a preview taken before a
+  // reactivation is still in the browser afterwards, and applying it used to succeed.
+  //
+  // Two shapes of assertion recur here, and each pins a distinct decision in the production code:
+  //
+  //   1. The message is compared to ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT by EQUALITY,
+  //      not just by fragment. The frontend maps backend text to a locale key by exact match, so
+  //      two paths spelling the rejection differently would need two map entries and one of them
+  //      would inevitably be forgotten. Equality across paths is what makes the shared constant a
+  //      real constraint rather than a convention.
+  //   2. A never() on the first write BELOW the guard. Returning a NeoResponse.error does NOT roll
+  //      back — Hibernate flushes whatever the request already touched — so a guard placed one
+  //      statement too low leaves a committed orphan behind while still answering 409. The status
+  //      alone cannot distinguish the two placements; only the never() can.
+  //
+  // Each test stubs the request for FULL SUCCESS apart from the draft flag, so removing the guard
+  // makes it fail with a 201/created rather than pass for an unrelated reason.
+
+  /** Distinctive fragment of the rejection text, i.e. what a user actually reads. */
+  private static final String DRAFT_MESSAGE_FRAGMENT = "in draft";
+
+  /**
+   * Reads the human-readable text out of the {@code {error: {message, status}}} body every
+   * {@code NeoResponse.error(int, String)} builds.
+   *
+   * @param body the response body
+   * @return the nested {@code error.message}
+   * @throws Exception if the body does not have that shape
+   */
+  private static String errorMessageOf(JSONObject body) throws Exception {
+    return body.getJSONObject("error").getString("message");
+  }
+
+  /**
+   * Reads the status echoed inside the error payload — the only place it survives for a per-group
+   * {@code applySuggestions} result, whose envelope is a 200/201 for the batch as a whole.
+   *
+   * @param body the response body
+   * @return the nested {@code error.status}
+   * @throws Exception if the body does not have that shape
+   */
+  private static int errorStatusOf(JSONObject body) throws Exception {
+    return body.getJSONObject("error").getInt("status");
+  }
+
+  /**
+   * {@code reconcileGroup} (the manual path: the user picks a line and an operation and confirms)
+   * refuses a line whose statement was returned to Borrador.
+   *
+   * <p>Everything else about the request is valid and stubbed through to a successful compose, so
+   * without the guard the handler answers 201.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testReconcileGroupRejectsALineOfADraftStatement() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
+    FIN_BankStatementLine line = lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null);
+    // The single difference from testReconcileGroupHappy1to1: the statement is back in draft.
+    when(line.getBankStatement().isProcessed()).thenReturn(Boolean.FALSE);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-draft");
+    when(rec.getEndingBalance()).thenReturn(new BigDecimal("100.00"));
+
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    doReturn(trxFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, null))
+        .when(handler).loadTransaction("t1");
+    stubReconciliationCompose(rec, "Success");
+
+    NeoResponse response = handler.reconcileGroup(reconcileBody(ACC_ID, LINE_ID, "t1"));
+
+    assertEquals("a draft statement is a state conflict, not a malformed request",
+        409, response.getHttpStatus());
+    String message = errorMessageOf(response.getBody());
+    assertTrue("the user must be told the statement is the problem; got: " + message,
+        message.contains(DRAFT_MESSAGE_FRAGMENT));
+    assertEquals("every write path must answer with the SAME shared constant, or the frontend's "
+            + "exact-match locale mapping silently degrades to raw English",
+        ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT, message);
+    // Nothing may have been written. The reconciliation document is the first thing compose
+    // creates, and processing it is what makes the match permanent — a returned error would COMMIT
+    // either of them, leaving an orphan draft reconciliation per rejected request.
+    verify(handler, never()).addNewDraftReconciliation(any());
+    verify(handler, never()).processReconciliation(any());
+  }
+
+  /**
+   * Guard ORDERING: a line that is BOTH already reconciled and on a draft statement gets the
+   * already-reconciled answer, not the draft one.
+   *
+   * <p>That combination is a real state, not a contrived one — "Reactivar" on a statement only
+   * clears {@code FIN_BankStatement.Processed}; it does not detach the lines' transactions from
+   * their reconciliations (the invariant the pendingLines suite above covers). So a reactivated
+   * statement routinely holds reconciled lines, and the draft guard sits deliberately BELOW the
+   * already-reconciled check: telling the user "the statement is in draft" would send them off to
+   * process a statement when the actual obstacle is a reconciliation they must undo first.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testReconcileGroupPrefersAlreadyReconciledOverDraft() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
+    FIN_FinaccTransaction matched =
+        trxFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, mock(FIN_Reconciliation.class));
+    FIN_BankStatementLine line =
+        lineFor(ACC_ID, new BigDecimal("100.00"), BigDecimal.ZERO, matched);
+    when(line.getBankStatement().isProcessed()).thenReturn(Boolean.FALSE);
+
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+
+    NeoResponse response = handler.reconcileGroup(reconcileBody(ACC_ID, LINE_ID, "t1"));
+
+    assertEquals(409, response.getHttpStatus());
+    String message = errorMessageOf(response.getBody());
+    assertEquals("the more specific obstacle wins: the line's own reconciliation, not its "
+            + "statement's status", ReconciliationHandler.MSG_LINE_ALREADY_RECONCILED, message);
+    assertFalse("the draft guard must not shadow the already-reconciled one; got: " + message,
+        message.contains(DRAFT_MESSAGE_FRAGMENT));
+    verify(handler, never()).addNewDraftReconciliation(any());
+  }
+
+  /**
+   * {@code prepareGroup} — the per-group validation {@code applySuggestions} folds in, i.e. the
+   * Automatch "apply" button — refuses a group whose line sits on a draft statement, and reports it
+   * as that group's error instead of failing the whole batch.
+   *
+   * <p>This is the path the QA scenario actually took: the modal had already been opened (the
+   * preview is client-side state), so a stale suggestion can still be submitted after the statement
+   * was reactivated. It is modelled on {@code testApplySuggestionsCreatesTransactionForRuleGroup},
+   * with a {@code createPayment} spec, precisely so the {@code createTransactionForRule} assertion
+   * is not vacuous: with a processed statement that same body DOES create a transaction. That call
+   * persists a movement, and an error returned after it still commits, so a guard one statement too
+   * low would leave one orphan movement per rejected group.
+   *
+   * @throws Exception if building the body or stubbing the seams fails
+   */
+  @Test
+  public void testApplySuggestionsRejectsAGroupOnADraftStatement() throws Exception {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getId()).thenReturn(ACC_ID);
+    FIN_BankStatementLine line = lineFor(ACC_ID, BigDecimal.ZERO, new BigDecimal("12.50"), null);
+    when(line.getBankStatement().isProcessed()).thenReturn(Boolean.FALSE);
+    FIN_Reconciliation rec = mock(FIN_Reconciliation.class);
+    when(rec.getId()).thenReturn("rec-draft-batch");
+
+    doReturn(account).when(handler).loadAccount(ACC_ID);
+    doReturn(line).when(handler).loadLine(LINE_ID);
+    doReturn(TRX_RULE_ID).when(handler).createTransactionForRule(eq(account), eq(line), any());
+    doReturn(trxFor(ACC_ID, BigDecimal.ZERO, new BigDecimal("12.50"), null))
+        .when(handler).loadTransaction(TRX_RULE_ID);
+    stubReconciliationCompose(rec, "Success");
+
+    // The SAME payload the happy path above submits — the only difference is the draft statement.
+    NeoResponse response = handler.applySuggestions(ruleGroupBody());
+
+    JSONObject result = response.getBody().getJSONObject("response").getJSONObject("data")
+        .getJSONArray("results").getJSONObject(0);
+    String message = errorMessageOf(result);
+    assertTrue("the rejected group must say why; got: " + message,
+        message.contains(DRAFT_MESSAGE_FRAGMENT));
+    assertEquals("the batch path must reuse the manual path's constant verbatim",
+        ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT, message);
+    assertEquals(409, errorStatusOf(result));
+    // prepareAllGroups stamps the line id onto each failure, which is what lets the client say
+    // WHICH suggestion was refused — results[] is not aligned with the submitted groups.
+    assertEquals(LINE_ID, result.getString("statementLineId"));
+    // The guard precedes the write: no movement was created for the rejected group, so there is no
+    // orphan transaction left behind by the committed error response.
+    verify(handler, never()).createTransactionForRule(any(), any(), any());
+    verify(handler, never()).matchBankStatementLine(any(), any(), any());
   }
 }

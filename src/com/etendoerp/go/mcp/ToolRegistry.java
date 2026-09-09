@@ -17,6 +17,14 @@
 
 package com.etendoerp.go.mcp;
 
+import static com.etendoerp.go.mcp.McpJsonSchema.KEY_REQUIRED;
+import static com.etendoerp.go.mcp.McpJsonSchema.buildObjectSchema;
+import static com.etendoerp.go.mcp.McpJsonSchema.enumProp;
+import static com.etendoerp.go.mcp.McpJsonSchema.numericProp;
+import static com.etendoerp.go.mcp.McpJsonSchema.objectProp;
+import static com.etendoerp.go.mcp.McpJsonSchema.stringArrayProp;
+import static com.etendoerp.go.mcp.McpJsonSchema.stringProp;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -35,6 +43,7 @@ import org.openbravo.model.ad.ui.Process;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 import com.etendoerp.go.schemaforge.util.NeoReportContract;
 import com.etendoerp.go.schemaforge.util.NeoReportParam;
@@ -63,8 +72,6 @@ public class ToolRegistry {
 
   private static final Logger log = LogManager.getLogger(ToolRegistry.class);
 
-  /** The JSON-schema {@code required} keyword, kept as one constant so it is not re-typed. */
-  private static final String KEY_REQUIRED = "required";
   /** JSON-schema numeric type used by integer-valued MCP arguments. */
   private static final String TYPE_INTEGER = "integer";
 
@@ -110,6 +117,15 @@ public class ToolRegistry {
 
     registerCrudTools(tools, accessibleWindowSpecs, creatableWindowSpecs,
         updatableWindowSpecs, deletableWindowSpecs, permissions);
+
+    // ETP-5184: the image-upload tools are built-in and type-driven, not spec-driven — they create
+    // an AD_Image row and nothing else, and the same three tools serve every image-typed field in
+    // the instance. Gated on write scope because they do write a row.
+    if (permissions.canWrite) {
+      tools.add(buildRequestImageUploadTool());
+      tools.add(buildUploadImageTool());
+      tools.add(buildGetImageUploadTool());
+    }
 
     log.debug("Generated {} MCP tools for scopes {}", tools.size(), scopes);
     return tools;
@@ -323,6 +339,12 @@ public class ToolRegistry {
       case "neo_action":
       case McpConstants.TOOL_NEO_WIDGET:
       case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
+      // ETP-5184: listed here so resolveSpecName does not derive a spec name from the tool name.
+      // These tools address no spec at all — they create an AD_Image row — and "neo-upload-image"
+      // would be looked up as a spec and denied.
+      case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
+      case McpConstants.TOOL_NEO_UPLOAD_IMAGE:
+      case McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD:
         return true;
       default:
         return false;
@@ -510,7 +532,8 @@ public class ToolRegistry {
     return new McpToolDefinition(
         "neo_get",
         "Get a single record by ID from a NEO Headless API spec. Supports field projection "
-            + "(`fields` / view:\"summary\").",
+            + "(`fields` / view:\"summary\"). "
+            + McpConstants.RECORD_URL_NOTE,
           buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY, "id")));
   }
 
@@ -529,7 +552,8 @@ public class ToolRegistry {
             + "user for every field or guessing values that already have a sensible default "
             + "(document number, dates, prices, etc.). "
             + "Dates must be ISO-8601: 'YYYY-MM-DD' for date fields and "
-            + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported.",
+            + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported. "
+            + McpConstants.RECORD_URL_NOTE,
         buildObjectSchema(props,
           List.of("spec", McpConstants.PARAM_ENTITY, McpConstants.PARAM_FIELDS)));
   }
@@ -948,62 +972,69 @@ public class ToolRegistry {
     return paramProps;
   }
 
-  // ── JSON Schema builder helpers ────────────────────────────────────────
+  // ── Image upload tools (ETP-5184) ─────────────────────────────────────
 
-  private Map<String, Object> buildObjectSchema(Map<String, Object> properties,
-      List<String> required) {
-    Map<String, Object> schema = new LinkedHashMap<>();
-    schema.put("type", McpConstants.TYPE_OBJECT);
-    schema.put(McpConstants.KEY_PROPERTIES, properties);
-    if (required != null && !required.isEmpty()) {
-      schema.put(KEY_REQUIRED, required);
-    }
-    return schema;
+  /**
+   * Description of {@link McpConstants#TOOL_NEO_REQUEST_IMAGE_UPLOAD}.
+   *
+   * <p>Held as a constant because a test asserts it names the cheap path and the cap: the guidance
+   * an agent reads and the validation the server enforces must not be able to drift apart.
+   */
+  static final String REQUEST_IMAGE_UPLOAD_DESCRIPTION =
+      "Returns a single-use URL to upload an image to Etendo, plus a ready-to-run curl command. "
+      + "Prefer this over " + McpConstants.TOOL_NEO_UPLOAD_IMAGE + " whenever you can run a shell "
+      + "command or the user can open a link: the image bytes never pass through the conversation, "
+      + "so it costs almost no tokens. After the upload succeeds you get an imageId — write it to "
+      + "any field of type 'image' with neo_update. The URL works exactly once and expires in 10 "
+      + "minutes.";
+
+  /** Description of {@link McpConstants#TOOL_NEO_UPLOAD_IMAGE}. See above for why it is a constant. */
+  static final String UPLOAD_IMAGE_DESCRIPTION =
+      "Uploads an image inline as base64 and returns its imageId. Use only for images under 256 KB: "
+      + "base64 in a tool argument is model output, so ~100 KB of image costs ~100k tokens. If you "
+      + "can run a shell command, use " + McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD + " instead. "
+      + "image/png or image/jpeg only; resize to max 1024 px on the long side before encoding.";
+
+  /** Description of {@link McpConstants#TOOL_NEO_GET_IMAGE_UPLOAD}. */
+  static final String GET_IMAGE_UPLOAD_DESCRIPTION =
+      "Looks up an upload ticket returned by " + McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD
+      + " and reports whether the file has arrived, plus the imageId once it has. Use it only when "
+      + "you did not see the output of the upload itself — the PUT already returns the imageId.";
+
+  private McpToolDefinition buildRequestImageUploadTool() {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("name", stringProp(
+        "Optional name for the stored image (defaults to 'image')."));
+    props.put("mime_type", enumProp(
+        "Optional expected type. Omit it and the type is detected from the uploaded bytes; if you "
+            + "do send it, it is cross-checked against them and a mismatch is rejected.",
+        NeoImageHelper.ALLOWED_MIME_TYPES));
+    return new McpToolDefinition(McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD,
+        REQUEST_IMAGE_UPLOAD_DESCRIPTION, buildObjectSchema(props, null));
   }
 
-  private Map<String, Object> stringProp(String description) {
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", McpConstants.TYPE_STRING);
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    return prop;
+  private McpToolDefinition buildUploadImageTool() {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("data_base64", stringProp(
+        "The image file encoded as base64. A 'data:image/png;base64,' prefix is accepted and "
+            + "stripped. Hard limit: 256 KB decoded — over that the call is rejected and points you "
+            + "at " + McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD + "."));
+    props.put("name", stringProp(
+        "Optional name for the stored image (defaults to 'image')."));
+    props.put("mime_type", enumProp(
+        "Optional. Cross-checked against the actual bytes; omit it and the type is detected.",
+        NeoImageHelper.ALLOWED_MIME_TYPES));
+    return new McpToolDefinition(McpConstants.TOOL_NEO_UPLOAD_IMAGE, UPLOAD_IMAGE_DESCRIPTION,
+        buildObjectSchema(props, List.of("data_base64")));
   }
 
-  private Map<String, Object> enumProp(String description, List<String> values) {
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", McpConstants.TYPE_STRING);
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    prop.put("enum", values);
-    return prop;
+  private McpToolDefinition buildGetImageUploadTool() {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("token", stringProp("The token returned by "
+        + McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD + "."));
+    return new McpToolDefinition(McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD,
+        GET_IMAGE_UPLOAD_DESCRIPTION, buildObjectSchema(props, List.of("token")));
   }
-
-  private Map<String, Object> numericProp(String type, String description) {
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", type);
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    return prop;
-  }
-
-  private Map<String, Object> objectProp(String description, Map<String, Object>... nestedProps) {
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", McpConstants.TYPE_OBJECT);
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    if (nestedProps.length > 0 && nestedProps[0] != null && !nestedProps[0].isEmpty()) {
-      prop.put(McpConstants.KEY_PROPERTIES, nestedProps[0]);
-    }
-    return prop;
-  }
-
-  /** A JSON-schema array of strings, used for the IMP-2 {@code fields} projection whitelist. */
-  private Map<String, Object> stringArrayProp(String description) {
-    Map<String, Object> items = new LinkedHashMap<>();
-    items.put("type", McpConstants.TYPE_STRING);
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", "array");
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    prop.put("items", items);
-    return prop;
-  }
-
 
   // ── Naming helpers ─────────────────────────────────────────────────────
 
