@@ -5,6 +5,9 @@
         <default/>
       </parameter>
       <body><![CDATA[v_estado character varying;
+  v_ad_org_id character varying;
+  v_date_invoiced timestamp without time zone;
+  v_adoption_date timestamp without time zone;
 BEGIN
   -- TOTAL FUNCTION. Refresh_Mode = 'S' runs this inside the business transaction,
   -- so ANY exception raised here rolls back the invoice save itself. Every edge
@@ -15,6 +18,58 @@ BEGIN
   -- surprise: answer the "no submission" state explicitly.
   IF p_c_invoice_id IS NULL THEN
     RETURN 'Pendiente';
+  END IF;
+
+  -- ADOPTION-DATE GATE (ETP-5216 follow-up). An invoice dated before the
+  -- organization joined TicketBAI/Batuz is never submitted, so reporting it as
+  -- 'Pendiente' states something false: it is not pending, it does not apply.
+  -- This gate used to live in the React cell (`isSifEligibleByDate`, ETP-5122),
+  -- which left the backend filter unable to see it - filtering by 'Pendiente'
+  -- returned rows the grid then rendered as a dash. Worse, the cell compared
+  -- every row against the adoption date of the SELECTED organization rather
+  -- than the invoice's own, so a list spanning organizations measured them all
+  -- with the wrong yardstick. Deciding it here makes the stored value the one
+  -- truth for cell, filter and sort alike.
+  SELECT i.ad_org_id, i.dateinvoiced
+    INTO v_ad_org_id, v_date_invoiced
+    FROM c_invoice i
+   WHERE i.c_invoice_id = p_c_invoice_id;
+
+  -- Edge case - the invoice row is gone (deleted between enqueue and recompute).
+  -- Nothing to gate on; answer the "no submission" state rather than raising.
+  IF v_ad_org_id IS NULL THEN
+    RETURN 'Pendiente';
+  END IF;
+
+  -- Matched on the invoice's OWN organization, exactly (no org-tree walk), which
+  -- is what Classic's TBAI_ExistConfigAndIsAvailable auxiliary input does. An
+  -- organization is capped at one config row today (verified in the AD), but the
+  -- ORDER BY ... LIMIT 1 keeps this single-valued and DETERMINISTIC even if that
+  -- ever changes - the engine writes unconditionally on every recompute, so an
+  -- arbitrary pick would make ad_scd_check report permanent phantom drift.
+  SELECT c.tbaisystemdate
+    INTO v_adoption_date
+    FROM tbai_config c
+   WHERE c.ad_org_id = v_ad_org_id
+     AND c.isactive = 'Y'
+   ORDER BY c.tbaisystemdate ASC, c.tbai_config_id ASC
+   LIMIT 1;
+
+  -- No active config: the organization never joined, so no invoice of it applies.
+  -- The dependency on tbai_config recomputes these the moment a config is
+  -- inserted, so an organization joining later is picked up automatically.
+  IF v_adoption_date IS NULL THEN
+    RETURN 'NoAplica';
+  END IF;
+
+  -- A null invoice date cannot be proven eligible, so it is not. Same fail-safe
+  -- direction the React gate took (`parseCalendarDate` returning null -> false).
+  -- The comparison itself is NOT truncated to a day: Classic compares
+  -- TO_TIMESTAMP(DateInvoiced) >= conf.tbaisystemdate, so a config carrying a
+  -- time-of-day excludes invoices dated that same calendar day. Truncating here
+  -- would silently disagree with Classic on exactly those rows.
+  IF v_date_invoiced IS NULL OR v_date_invoiced < v_adoption_date THEN
+    RETURN 'NoAplica';
   END IF;
 
   -- Edge case 2 - invoice with NO row in tbai_syncinvoice (never submitted, or

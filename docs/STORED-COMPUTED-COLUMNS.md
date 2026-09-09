@@ -197,6 +197,32 @@ SELECT OLD.c_order_id FROM dual WHERE OLD.c_order_id IS NOT NULL
 > **Rule of thumb:** immutable mapping → `COALESCE`. Walkable/reassignable FK → `UNION` form —
 > otherwise every reparenting update corrupts one aggregate.
 
+**Pattern 3 — configuration fan-out** (the source is a *config* row that governs many targets, so
+one change invalidates all of them):
+
+```sql
+SELECT i.c_invoice_id FROM c_invoice i
+ WHERE i.ad_client_id = COALESCE(NEW.ad_client_id, OLD.ad_client_id)
+   AND i.ad_org_id = COALESCE(NEW.ad_org_id, OLD.ad_org_id)
+```
+
+- **No `FROM dual` here.** The rule above applies to resolvers with *no* `FROM` clause; this one
+  selects from a real table and is portable as written.
+- **Filter on the columns of an existing index**, not only the one you conceptually need. Adding
+  `ad_client_id` lets this enter through `c_invoice_client_org_date_doc` instead of scanning
+  `c_invoice` on every config save.
+- **Size the blast radius before choosing this pattern.** With `Refresh_Mode = 'S'` the whole
+  fan-out recomputes *inside the transaction that saves the config row*, so the user waits for it
+  and a single failing row blocks the save. It is the right trade when the config changes rarely
+  (an adoption date, a fiscal regime) and wrong when it is edited routinely.
+- The alternative — omitting the dependency and relying on `ad_scd_rebuild` — is worse than it
+  looks: nothing detects the omission. `ad_scd_check` reports 0 because the engine was never told
+  those rows are stale, so the column reads clean while being wrong.
+
+Real example: `EM_ETGO_Tbai_Status` depends on `TBAI_Config` this way (ETP-5216), so an
+organization that adopts TicketBAI later has its existing invoices reclassified automatically
+instead of keeping a stale "does not apply" forever.
+
 ---
 
 ## 6. Chaining: `Computation_Sequence_Number`
