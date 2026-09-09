@@ -38,6 +38,11 @@ import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
  * how many rows were dropped through the {@code APRM_ZeroAmountNotInserted}
  * message.
  *
+ * <p><b>One deliberate divergence from Classic (ETP-4954):</b> a line with ANY
+ * negative amount is dropped too, not just the both-zero one. See
+ * {@link #hasUnusableAmounts} for why, and {@code BankStatementLinePrunerTest} for
+ * the cases that pin it.
+ *
  * <p>It deliberately operates on the already-persisted lines of a statement
  * rather than inside a specific parser, exactly like Classic does: the rule
  * lives above the importer so it applies to every format (generic CSV and
@@ -77,11 +82,10 @@ final class BankStatementLinePruner {
   }
 
   /**
-   * Removes every line of {@code statement} whose {@code cramount} and
-   * {@code dramount} are both zero, then renumbers the survivors 10, 20, 30…
-   * in line-number order so the discarded rows leave no gap. Mirrors Classic's
-   * behaviour, including the fact that a partially pruned import is still a
-   * successful import.
+   * Removes every line of {@code statement} that carries no usable amount — both sides zero, or ANY
+   * side negative or both sides at once (see {@link #hasUnusableAmounts}) — then renumbers the survivors 10, 20, 30… in
+   * line-number order so the discarded rows leave no gap. Mirrors Classic's behaviour, including the
+   * fact that a partially pruned import is still a successful import.
    *
    * <p>The caller must have flushed the parsed lines first — this reads them
    * back from the DB.
@@ -98,7 +102,7 @@ final class BankStatementLinePruner {
     List<FIN_BankStatementLine> discarded = new ArrayList<>();
     long counter = 0L;
     for (FIN_BankStatementLine line : lines) {
-      if (hasNoAmount(line)) {
+      if (hasUnusableAmounts(line)) {
         discarded.add(line);
         continue;
       }
@@ -138,11 +142,52 @@ final class BankStatementLinePruner {
     return lines == null ? new ArrayList<>() : lines;
   }
 
-  private static boolean hasNoAmount(FIN_BankStatementLine line) {
-    return isZero(line.getCramount()) && isZero(line.getDramount());
+  /**
+   * A line is unusable when it carries no amount at all (both sides zero/null) OR when ANY side is
+   * negative (ETP-4954).
+   *
+   * <p>The negative half is a deliberate divergence from Classic, decided with product. Classic's
+   * condition is only "not both zero", which let a line like {@code (cr = -20, dr = -50)} through —
+   * and because the read path collapses the pair into {@code amount = cr - dr}
+   * ({@link BankStatementsSupport#mapLineRow}), that row then displayed as an Entrada of +30. A
+   * statement line never legitimately carries a negative amount: a negative Salida is conceptually an
+   * Entrada, so netting it into the opposite column silently invents a movement the bank never
+   * reported. The manual flow already rejected any non-positive line
+   * ({@code ManualStatementModal}'s {@code isLineComplete} requires a strictly positive side), so
+   * this also makes the two flows agree, which is what ETP-4954 set out to do.
+   *
+   * @param line the parsed line to classify
+   * @return whether the line must be dropped instead of imported
+   */
+  private static boolean hasUnusableAmounts(FIN_BankStatementLine line) {
+    return (isZero(line.getCramount()) && isZero(line.getDramount()))
+        || isNegative(line.getCramount())
+        || isNegative(line.getDramount())
+        || hasBothSides(line);
+  }
+
+  /**
+   * Both sides carrying an amount (ETP-4954). Reachable on this path: the generic CSV importer
+   * fills {@code dramount} and {@code cramount} from two independent columns
+   * ({@code GenericCsvBankStatementImporter.saveLine}), so a file with both columns populated
+   * produces such a line. It is not a movement the bank reported — the read path collapses the
+   * pair into {@code cramount - dramount}, so 100/30 surfaces as a -70 that appears in no
+   * statement and 50/50 reads as zero, which is exactly what the both-zero rule above exists to
+   * prevent. {@code ReactivationSupport.applyBankStatementAmounts} already refuses to leave a
+   * line in that state.
+   *
+   * @param line the parsed line to classify
+   * @return whether both sides carry a non-zero amount
+   */
+  private static boolean hasBothSides(FIN_BankStatementLine line) {
+    return !isZero(line.getCramount()) && !isZero(line.getDramount());
   }
 
   private static boolean isZero(BigDecimal amount) {
     return amount == null || amount.compareTo(BigDecimal.ZERO) == 0;
+  }
+
+  private static boolean isNegative(BigDecimal amount) {
+    return amount != null && amount.compareTo(BigDecimal.ZERO) < 0;
   }
 }

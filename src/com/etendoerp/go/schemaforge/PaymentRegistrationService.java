@@ -871,7 +871,11 @@ public final class PaymentRegistrationService {
   static FIN_Payment createDraftPayment(DraftPaymentRequest req, BigDecimal rate,
       BigDecimal amount, BigDecimal txnAmount) throws Exception {
     DocumentType docType = resolveArApDocType(req.invoice().getOrganization(), req.isReceipt());
-    String docNo = FIN_Utility.getDocumentNo(docType, "FIN_Payment");
+    // ETP-5230: the AR Receipt / AP Payment sequence lives at org *, which an Organization-level role
+    // may not write. This is the single choke point for all three createDraftPayment callers,
+    // including ReconciliationPaymentService#registerReconciliationPayment.
+    String docNo = StarOrgWriteScope.withWritableStarOrg(
+        () -> FIN_Utility.getDocumentNo(docType, "FIN_Payment"));
     VariablesSecureApp vars = NeoDefaultsService.buildVariablesSecureApp(OBContext.getOBContext());
     RequestContext.get().setVariableSecureApp(vars);
     FIN_Payment payment = req.dao().getNewPayment(req.isReceipt(), req.invoice().getOrganization(),
