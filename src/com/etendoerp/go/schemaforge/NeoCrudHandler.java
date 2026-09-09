@@ -809,7 +809,14 @@ class NeoCrudHandler {
     String javaQualifier = context.getSfEntity() != null
         ? context.getSfEntity().getJavaQualifier() : null;
     if (StringUtils.isNotBlank(javaQualifier)) {
-      NeoHandler handler = servlet.lookupHandler(javaQualifier);
+      // Resolved statically, NOT through `servlet`. This runs in the DEFAULT create path, which
+      // BatchService.forBatchOnly() is allowed to reach with a null servlet — its javadoc states
+      // that contract ("only handleWithHooks touches the owning servlet"). Going through
+      // servlet.lookupHandler here broke it: every neo_batch create on an entity with a
+      // Java_Qualifier died with an NPE on `this.servlet`. NeoServlet.lookupHandler is itself a
+      // one-line delegation to this same static, so the behaviour is identical on both paths
+      // (same precedent as NeoActionSurface's CDI_RESOLVER).
+      NeoHandler handler = NeoServletSupport.lookupHandler(javaQualifier);
       if (handler != null) {
         protectedCalloutFields.addAll(handler.protectedCreateCalloutFields(context));
       }
@@ -968,7 +975,7 @@ class NeoCrudHandler {
     // ETP-5073 / DOC-04: same capture-before-filter dance, same reason, for `updated`.
     // filterWriteRequest drops it because it is not in `writableFields` (it cannot be: it is not
     // an AD field, so push-to-neo registers no row for it, and NeoFieldFilter deliberately keeps
-    // ALWAYS_READABLE_KEYS out of the writable set so a client can never author its own audit
+    // ALWAYS_READABLE_PROPS out of the writable set so a client can never author its own audit
     // stamp). Dropping it silently disabled core's concurrency check for every entity. Re-injected
     // after filtering so the check evaluates — the value is a token the client echoes back from
     // its read, never data we persist: core reads it, compares it, and overwrites the column with

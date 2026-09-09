@@ -56,6 +56,39 @@ public interface EmailContract {
   }
 
   /**
+   * Indicates whether every send attempt of this contract is recorded in the readable
+   * per-document history ({@code ETGO_Email_Send_Log}).
+   *
+   * <p>Opt-in, and off by default on purpose. The history table stores recipients, subject and
+   * the operator's message in clear so a document's window can show what was sent; that is the
+   * right trade for a document a tenant's own operator emailed to a business partner, and the
+   * wrong one for the account/auth family (invitation, reset password, login alert), whose
+   * recipients are the platform's own users and whose copy carries single-use links. Those
+   * contracts inherit {@code false} and never reach the table. The anti-abuse ledger
+   * {@code ETGO_Email_Safety} is written for every contract either way, unchanged, with hashed
+   * recipients and no copy.</p>
+   *
+   * @return {@code true} when send attempts must be written to the readable history
+   */
+  default boolean logsSendHistory() {
+    return false;
+  }
+
+  /**
+   * Returns the NEO spec (Schema Forge window) the documents of this contract belong to.
+   *
+   * <p>Recorded alongside each history row so the read endpoint can scope a lookup to one
+   * window, and so the row can resolve the document's own {@code AD_Table}. Only meaningful for
+   * contracts that {@link #logsSendHistory() log history}; everything else returns {@code null}.
+   * </p>
+   *
+   * @return kebab-case spec name, or {@code null} when the contract is not window-scoped
+   */
+  default String getSpecName() {
+    return null;
+  }
+
+  /**
    * Resolves anti-abuse policy for this send attempt.
    *
    * @param command contract command received by the executor

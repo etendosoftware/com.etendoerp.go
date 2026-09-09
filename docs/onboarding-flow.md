@@ -106,6 +106,27 @@ the chart names are rebranded (a GL Item minted against the dataset's generic
 name — exactly the divergence ETP-5020 exists to prevent) and BEFORE the
 unrelated per-entity posting-account provisioning.
 
+`provisionEntityPostingAccounts` provisions `FIN_FINANCIAL_ACCOUNT_ACCT` and
+`M_WAREHOUSE_ACCT` (ETP-4565) because `FIN_FINANCIAL_ACCOUNT` / `M_WAREHOUSE`
+are bulk-imported with triggers disabled, so core's own
+`fin_financial_account_trg` / `m_warehouse_trg` never fire for the bundled
+template rows. `FIN_FINANCIAL_ACCOUNT_ACCT_SQL` mirrors that trigger's column
+mapping with **one deliberate divergence (ETP-5207)**: it does NOT select
+`fin_out_clear_acct` / `fin_in_clear_acct`, so a new tenant's template accounts
+are born with "Cleared payment account" IN/OUT **empty**. The trigger seeds both
+with the ledger asset account, and a non-null cleared account is exactly what
+makes `DocFINReconciliation#getDocumentConfirmation` queue a reconciliation for
+posting — which produced accounting entries that distorted the accounting
+reports. Note this SQL, **not** the bundled
+`GOClient/FIN_FINANCIAL_ACCOUNT_ACCT.xml`, is what a tenant actually gets:
+`FIN_FINANCIAL_ACCOUNT_ACCT` is absent from
+`OnboardingDatasetDefinition.INCLUDED_TABLES`, so that XML is never imported
+(see "Dataset Included Tables" below). Lockstep partners that must stay
+consistent with this decision:
+`FinancialAccountAccountingDefaultsSupport` (the live create path, which
+actively clears the pair after the trigger has run) and data-fix
+`R34-fin-account-cleared-payment-accounts` (already-provisioned tenants).
+
 `provisionGlItemsForImportedChart` iterates every leaf (`elementLevel = 'S'`)
 `ElementValue` of the tenant's freshly-imported chart and calls
 `GlItemProvisioningSupport#ensureGlItemForSubaccount` for each — the SAME

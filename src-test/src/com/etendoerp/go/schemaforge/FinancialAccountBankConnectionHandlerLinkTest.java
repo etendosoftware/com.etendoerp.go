@@ -46,6 +46,7 @@ import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -54,6 +55,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.mockito.junit.MockitoJUnitRunner;
@@ -65,6 +67,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 
+import com.etendoerp.go.schemaforge.handlers.FinancialAccountAccountingDefaultsSupport;
 import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
@@ -221,8 +224,9 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
   /**
    * createAndLink happy path creates the FA from the chosen Salt Edge account, links it and returns
    * a 201 Created with the new account id and name. Also verifies the ETP-4331-adjacent fix: the
-   * newly created account gets its default payment methods assigned (previously this Salt
-   * Edge-created path bypassed the generic CRUD hook that does this for offline-created accounts).
+   * newly created account is handed to the shared provisioning seam
+   * {@link FinancialAccountSupport#provisionNewAccount} (previously this Salt Edge-created path
+   * bypassed entirely the wiring the generic CRUD hook does for offline-created accounts).
    */
   @Test
   public void testCreateAndLinkHappyReturns201() throws Exception {
@@ -242,22 +246,8 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
             mockStatic(SaltEdgeAccountLinkHelper.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       stubObContext(obContext);
-      utils.when(() -> BankIntegrationUtils.getPsd2ApiKey(any())).thenReturn(API_KEY);
-      utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
-          .thenReturn(nodes);
-      utils.when(() -> BankIntegrationUtils.getSaltEdgeConnectionDetails(CONNECTION_ID, API_KEY))
-          .thenReturn(details);
-      support.when(() -> FinancialAccountSupport.findCurrencyByIsoCode("EUR")).thenReturn(currency);
-      support.when(() -> FinancialAccountSupport.createAccount(any(), any(), eq(currency),
-          anyString(), eq("B"))).thenReturn(created);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(any(), anyString()))
-          .thenReturn(null);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(created),
-          eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(), any())).thenReturn("");
-
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      stubFinAccPaymentMethods(dal, Collections.emptyList());
+      stubCreateAndLinkHappyPath(utils, support, linkHelper, obDal, nodes, details, "B", currency,
+          created);
 
       NeoResponse response = handler.handle(postContext(ACTION_CREATE_AND_LINK, body));
 
@@ -265,16 +255,18 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
       JSONObject data = dataOf(response);
       assertEquals("FA-NEW", data.getString("financialAccountId"));
       assertEquals("BBVA - Ahorro", data.getString("name"));
-      support.verify(() -> FinancialAccountSupport.assignDefaultPaymentMethods(created));
+      support.verify(() -> FinancialAccountSupport.provisionNewAccount(created));
     }
   }
 
   /**
-   * createAndLink for a Card-type ({@code CA}) account also gets its default payment methods
-   * assigned — the fix applies regardless of the chosen account type, not just Bank.
+   * createAndLink for a Card-type ({@code CA}) account is provisioned too — the fix applies
+   * regardless of the chosen account type, not just Bank. Worth its own case because the type is
+   * what selects both the payment-method list and the deposit/withdrawal accounts inside the seam,
+   * so a type-conditional call site here would silently under-provision cards only.
    */
   @Test
-  public void testCreateAndLinkCardTypeAssignsDefaultPaymentMethods() throws Exception {
+  public void testCreateAndLinkCardTypeAlsoProvisionsCreatedAccount() throws Exception {
     JSONObject body = new JSONObject()
         .put(PARAM_TYPE, "CA")
         .put(PARAM_CONNECTION_ID, CONNECTION_ID)
@@ -294,27 +286,88 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
             mockStatic(SaltEdgeAccountLinkHelper.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       stubObContext(obContext);
-      utils.when(() -> BankIntegrationUtils.getPsd2ApiKey(any())).thenReturn(API_KEY);
-      utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
-          .thenReturn(nodes);
-      utils.when(() -> BankIntegrationUtils.getSaltEdgeConnectionDetails(CONNECTION_ID, API_KEY))
-          .thenReturn(details);
-      support.when(() -> FinancialAccountSupport.findCurrencyByIsoCode("EUR")).thenReturn(currency);
-      support.when(() -> FinancialAccountSupport.createAccount(any(), any(), eq(currency),
-          anyString(), eq("CA"))).thenReturn(created);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(any(), anyString()))
-          .thenReturn(null);
-      linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(created),
-          eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(), any())).thenReturn("");
-
-      OBDal dal = mock(OBDal.class);
-      obDal.when(OBDal::getInstance).thenReturn(dal);
-      stubFinAccPaymentMethods(dal, Collections.emptyList());
+      stubCreateAndLinkHappyPath(utils, support, linkHelper, obDal, nodes, details, "CA", currency,
+          created);
 
       NeoResponse response = handler.handle(postContext(ACTION_CREATE_AND_LINK, body));
 
       assertEquals(201, response.getHttpStatus());
-      support.verify(() -> FinancialAccountSupport.assignDefaultPaymentMethods(created));
+      support.verify(() -> FinancialAccountSupport.provisionNewAccount(created));
+    }
+  }
+
+  /**
+   * ETP-5207 regression guard for the <b>two-path divergence</b>. There are two ways to create a
+   * financial account in Etendo GO:
+   *
+   * <ul>
+   *   <li>manual ("sin conexión") — generic NEO CRUD, then {@code FinancialAccountHandler
+   *       .afterHandle}'s POST branch;</li>
+   *   <li>bank connection ("CONNECT ACCOUNT" / Salt Edge) — this {@code createAndLink} action.</li>
+   * </ul>
+   *
+   * <p>They used to duplicate the provisioning call list, and they drifted twice: ETP-4872's
+   * accounting defaults never reached this flow, and ETP-5207's first pass didn't either, while a
+   * comment here claimed to "mirror the manual flow". The consequence was not a missing default but
+   * a <b>wrong</b> one: {@code FinancialAccountSupport.createAccount} flushes, which fires core's
+   * AFTER INSERT trigger {@code FIN_FINANCIAL_ACCOUNT_TRG}, and that trigger creates the
+   * {@code fin_financial_account_acct} row already seeding {@code FIN_IN_CLEAR_ACCT} /
+   * {@code FIN_OUT_CLEAR_ACCT} (DAL {@code clearedPaymentAccount} /
+   * {@code clearedPaymentAccountOUT}) with the ledger asset account. Those must end up EMPTY,
+   * because a non-null cleared account is exactly what makes {@code DocFINReconciliation
+   * #getDocumentConfirmation} queue a reconciliation for posting. So a connected account was born
+   * with 57200000 in both fields while a manually created one came up empty — reproduced in the
+   * running app against a Fake Demo Bank connection.
+   *
+   * <p>The divergence is now structurally impossible because both flows call the one shared seam,
+   * {@link FinancialAccountSupport#provisionNewAccount}. This test pins that decomposition from
+   * <b>both</b> sides, which is what the sibling happy-path tests above do not do:
+   *
+   * <ul>
+   *   <li>the seam IS called with the created account — the connect path provisions at all;</li>
+   *   <li>the individual steps are NOT called inline here. This is the half-a-mirror bug class
+   *       itself: re-inlining one step at this call site (rather than adding it to the seam) is
+   *       exactly how the two lists drifted apart twice, and it is invisible to a test that only
+   *       checks the steps happened.</li>
+   * </ul>
+   *
+   * <p>What provisioning consists of is deliberately NOT asserted here — that lives at the seam, in
+   * {@code FinancialAccountSupportTest#testProvisionNewAccountPerformsPaymentMethodsThenAccounting}.
+   * The two tests are a pair: this one alone would pass against a gutted {@code provisionNewAccount}.
+   */
+  @Test
+  public void testCreateAndLinkProvisionsOnlyThroughTheSharedSeam() throws Exception {
+    JSONObject body = createAndLinkBody();
+    JSONArray nodes = new JSONArray().put(new JSONObject()
+        .put("id", SALT_EDGE_ACCOUNT_ID).put("name", "Ahorro").put("currency_code", "EUR"));
+    JSONObject details = new JSONObject().put("provider_name", "BBVA");
+    Currency currency = mock(Currency.class);
+    FIN_FinancialAccount created = mock(FIN_FinancialAccount.class);
+    when(created.getId()).thenReturn("FA-NEW");
+    when(created.getName()).thenReturn("BBVA - Ahorro");
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<FinancialAccountSupport> support = mockStatic(FinancialAccountSupport.class);
+        MockedStatic<FinancialAccountAccountingDefaultsSupport> acctDefaults =
+            mockStatic(FinancialAccountAccountingDefaultsSupport.class);
+        MockedStatic<SaltEdgeAccountLinkHelper> linkHelper =
+            mockStatic(SaltEdgeAccountLinkHelper.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      stubCreateAndLinkHappyPath(utils, support, linkHelper, obDal, nodes, details, "B", currency,
+          created);
+
+      NeoResponse response = handler.handle(postContext(ACTION_CREATE_AND_LINK, body));
+
+      assertEquals(201, response.getHttpStatus());
+      // Routes through the seam — the same one the manual path uses.
+      support.verify(() -> FinancialAccountSupport.provisionNewAccount(created));
+      // ...and does NOT reach past it to the individual steps. Note the seam itself is mocked out
+      // here, so any invocation of these two could only come from an inlined call in the handler.
+      support.verify(() -> FinancialAccountSupport.assignDefaultPaymentMethods(any()), never());
+      acctDefaults.verify(() -> FinancialAccountAccountingDefaultsSupport
+          .applyDefaultAccountingConfiguration(any()), never());
     }
   }
 
@@ -379,6 +432,53 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
       verify(finAcc).setPSD2ImportFromDate(any());
       verify(finAcc).setPSD2StatementFrequency("MONTHLY");
       verify(finAcc, Mockito.never()).setPSD2ImportToDate(any());
+      verify(dal).save(finAcc);
+      verify(dal).flush();
+    }
+  }
+
+  /**
+   * ETP-5181 — an "Importar desde" far beyond the provider's published {@code max_fetch_interval}
+   * is still saved, byte-for-byte, and is NOT rejected with a 400.
+   *
+   * <p>This pins the product decision behind the whole ticket: advise, but allow saving. The range
+   * is applied as a LOCAL filter over whatever the provider returns (Salt Edge ignores
+   * from_date/to_date — see {@code BankIntegrationUtils.buildSaltEdgeTransactionsEndpoint}), so an
+   * over-long range loses nothing inside the window that IS available; the notice exists only to
+   * stop the user expecting history the bank will never hand over. Without this test the next
+   * person to read the advisory naturally "completes" it into a hard validation here, next to the
+   * ETP-5104 inverted-range guard, and silently breaks every account whose history predates its
+   * provider's window.
+   *
+   * <p>The stored value is captured rather than matched with {@code any()} so a "helpful" clamp to
+   * the earliest served day fails too, not just an outright rejection.
+   */
+  @Test
+  public void testImportSettingsAcceptsRangeBeyondFetchInterval() throws Exception {
+    // Years beyond any published interval, and deliberately with no upper bound so the ETP-5104
+    // inverted-range guard cannot be what accepts or rejects this request.
+    JSONObject body = new JSONObject()
+        .put(PARAM_ACCOUNT_ID, ACCOUNT_ID)
+        .put("importFromDate", "2019-03-01");
+    FIN_FinancialAccount finAcc = mock(FIN_FinancialAccount.class);
+    doReturn(finAcc).when(handler).loadAccount(ACCOUNT_ID);
+
+    try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      stubObContext(obContext);
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse response = handler.handle(postContext("import-settings", body));
+
+      assertEquals("an out-of-range import date is advisory, never a 400", 200,
+          response.getHttpStatus());
+      assertTrue(dataOf(response).getBoolean("saved"));
+
+      ArgumentCaptor<Date> stored = ArgumentCaptor.forClass(Date.class);
+      verify(finAcc).setPSD2ImportFromDate(stored.capture());
+      assertEquals("the requested date must be stored unchanged, not clamped",
+          FinancialAccountBankConnectionSupport.parseDate("2019-03-01"), stored.getValue());
       verify(dal).save(finAcc);
       verify(dal).flush();
     }
@@ -937,6 +1037,39 @@ public class FinancialAccountBankConnectionHandlerLinkTest {
 
   private static JSONObject dataOf(NeoResponse response) throws Exception {
     return response.getBody().getJSONObject("response").getJSONObject("data");
+  }
+
+  /**
+   * Stubs everything {@code createAndLink} needs to get past the Salt Edge fetches, the currency
+   * lookup and the account creation, so a test can assert only what happens <i>after</i> the
+   * account exists. Shared by the three {@code createAndLink} happy-path tests, whose setup is
+   * otherwise byte-identical apart from the account {@code type} (Sonar duplication gate).
+   *
+   * @param type the account type {@code createAccount} is expected to be called with ({@code B},
+   *     {@code C} or {@code CA}); the stub only matches that value, so a handler that passed a
+   *     different type would get a {@code null} account back and fail the calling test
+   */
+  private static void stubCreateAndLinkHappyPath(MockedStatic<BankIntegrationUtils> utils,
+      MockedStatic<FinancialAccountSupport> support,
+      MockedStatic<SaltEdgeAccountLinkHelper> linkHelper, MockedStatic<OBDal> obDal,
+      JSONArray nodes, JSONObject details, String type, Currency currency,
+      FIN_FinancialAccount created) {
+    utils.when(() -> BankIntegrationUtils.getPsd2ApiKey(any())).thenReturn(API_KEY);
+    utils.when(() -> BankIntegrationUtils.getSaltEdgeAccountsForConnection(CONNECTION_ID, API_KEY))
+        .thenReturn(nodes);
+    utils.when(() -> BankIntegrationUtils.getSaltEdgeConnectionDetails(CONNECTION_ID, API_KEY))
+        .thenReturn(details);
+    support.when(() -> FinancialAccountSupport.findCurrencyByIsoCode("EUR")).thenReturn(currency);
+    support.when(() -> FinancialAccountSupport.createAccount(any(), any(), eq(currency),
+        anyString(), eq(type))).thenReturn(created);
+    linkHelper.when(() -> SaltEdgeAccountLinkHelper.resolveConsentExpiresAt(any(), anyString()))
+        .thenReturn(null);
+    linkHelper.when(() -> SaltEdgeAccountLinkHelper.linkAccountToFinancialAccount(eq(created),
+        eq(SALT_EDGE_ACCOUNT_ID), eq(CONNECTION_ID), any(), any())).thenReturn("");
+
+    OBDal dal = mock(OBDal.class);
+    obDal.when(OBDal::getInstance).thenReturn(dal);
+    stubFinAccPaymentMethods(dal, Collections.emptyList());
   }
 
   /**

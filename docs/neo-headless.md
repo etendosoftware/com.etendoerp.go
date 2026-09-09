@@ -75,6 +75,7 @@ Top-level specification record. Each spec maps to either an AD_Window (CRUD) or 
 | `AD_WINDOW_ID` | VARCHAR (FK) | Required when `SPEC_TYPE = 'W'`. |
 | `AD_PROCESS_ID` | VARCHAR (FK) | Required when `SPEC_TYPE = 'P'`. |
 | `AD_MODULE_ID` | VARCHAR (FK) | Module that owns this spec. |
+| `MCP_CONFIG` | VARCHAR | JSON, MCP-only configuration. See §4.12.6. |
 | `ISACTIVE` | CHAR(1) | Only active specs are served. |
 | `AD_CLIENT_ID` | VARCHAR (FK) | Standard Etendo audit column. |
 | `AD_ORG_ID` | VARCHAR (FK) | Standard Etendo audit column. |
@@ -99,6 +100,7 @@ Represents a tab (for window specs) or the process itself (for process specs) wi
 | `ISDELETE` | CHAR(1) | Enable DELETE. |
 | `JAVA_QUALIFIER` | VARCHAR | CDI `@Named` qualifier for a custom `NeoHandler`. |
 | `SEQNO` | NUMERIC | Display/processing order. |
+| `MCP_CONFIG` | VARCHAR | JSON, MCP-only configuration (`parent`, `fields`). See §4.12.6. |
 | `AD_MODULE_ID` | VARCHAR (FK) | Module that owns this entity. |
 
 ### ETGO_SF_FIELD
@@ -114,7 +116,10 @@ Represents a column (for window specs) or a process parameter (for process specs
 | `ISREADONLY` | CHAR(1) | Field-level read-only flag. |
 | `DEFAULTVALUE` | VARCHAR | Default value override. For process specs, stores the parameter default. |
 | `JAVA_QUALIFIER` | VARCHAR | For process specs: stores the parameter DB column name. |
+| `VISIBILITY` | VARCHAR | Curated `editable`/`readOnly`/`system`/`discarded`. Frequently `NULL`; the REST layer does not gate on it, the MCP does. See §4.12.6. |
+| `ISBUSINESSCRITICAL` | CHAR(1) | Marks the field part of the entity's curated summary. |
 | `SEQNO` | NUMERIC | Display/processing order. |
+| `MCP_CONFIG` | VARCHAR | JSON, MCP-only configuration (`fields`). See §4.12.6. |
 | `AD_MODULE_ID` | VARCHAR (FK) | Module that owns this field. |
 
 ### ETGO_PREVIEW_FILE
@@ -1128,12 +1133,14 @@ GET /sws/neo/debuginvitationbypass?Action=forceAccept&Email=<email>       (dev/Q
 GET /sws/neo/debuginvitationbypass?Action=forceStatus&Email=<email>&Status=<status>  (dev/QA only — §8g)
 GET /sws/neo/resendinvitation?AdUserId=<id>                               (§8h)
 GET /sws/neo/promoteuserrole?UserId=<id>&Mode=promote|demote              (§8i)
+GET /sws/neo/documentemailhistory?recordId=<id>[&specName=<spec>]         (§8j)
 Authorization: Bearer {token}
 ```
 
 `NeoGoWebhookBridge` runs `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview`/`SFAssignUserRoles`/
 `SFUserRoleAssignments`/`SFSystemRoleTemplates`/`SFDebugInvitationBypass`/`SFResendInvitation`/
-`SFPromoteUserRole` (§8, §8b, §8c, §8d, §8e, §8f, §8g, §8h, §8i) through NEO's own
+`SFPromoteUserRole`/`SFDocumentEmailHistory` (§8, §8b, §8c, §8d, §8e, §8f, §8g, §8h, §8i, §8j)
+through NEO's own
 JWT authentication instead of the Webhooks module's HTTP dispatch — the same pattern
 `NeoSimSearchEndpoint` (§4.9) already used for `SimSearch`. Each of these pseudo-specs constructs
 the corresponding `BaseWebhookService` and calls its unchanged `get(Map, Map)` method directly;
@@ -1145,13 +1152,16 @@ original `/webhooks/*` paths too — the Webhooks module dispatch was not remove
 `/sws/neo/*` is the path the Go SPA (`tools/app-shell` in `etendo_schema_forge`) actually calls,
 and no `SMFWHE_DEFINEDWEBHOOK_ROLE` grant is required for it. `SFAssignUserRoles` (ETP-4852),
 `SFUserRoleAssignments` (ETP-4906), `SFSystemRoleTemplates` (ETP-4906),
-`SFDebugInvitationBypass` (ETP-4830), `SFResendInvitation` (ETP-4830), and `SFPromoteUserRole`
-(ETP-5019) are `/sws/neo/*`-only — all six were authored after this pattern was already
-established, so none ever had a legacy `/webhooks/*` path to keep.
+`SFDebugInvitationBypass` (ETP-4830), `SFResendInvitation` (ETP-4830), `SFPromoteUserRole`
+(ETP-5019), and `SFDocumentEmailHistory` (ETP-5069) are `/sws/neo/*`-only — all seven were
+authored after this pattern was already established, so none ever had a legacy `/webhooks/*`
+path to keep.
 
 Each webhook's own access rule is unaffected and still enforced inside its `get()` — see
-§8/§8b/§8c/§8d/§8e/§8f/§8g/§8h/§8i for what each one checks (`NeoAccessHelper.isAdminOrClientAdmin`,
-window/process access checks, etc.). Non-`GET` requests get `405`; a webhook that throws gets
+§8/§8b/§8c/§8d/§8e/§8f/§8g/§8h/§8i/§8j for what each one checks
+(`NeoAccessHelper.isAdminOrClientAdmin`, window/process access checks, and — for
+`documentemailhistory` alone — DAL's own readable-client/org filtering, §8j). Non-`GET`
+requests get `405`; a webhook that throws gets
 `500` with the exception message (except `SFAssignUserRoles`'s own expected domain-validation
 rejections, `SFUserRoleAssignments`'s own expected domain rejections, and `SFPromoteUserRole`'s
 own expected domain rejections — see §8d/§8e/§8i for why those are a `200` result instead).
@@ -1553,15 +1563,319 @@ A requested `$_identifier` companion is normalised to its base property, for bot
 the validation — `fields:["businessPartner$_identifier"]` returns the FK *and* its label (it used to
 return only `id`) and is never mislabelled as unknown.
 
-The always-readable audit keys are known too (ETP-5073). `updated` is an AD *column* on every table
-but not an AD *field*, so no `ETGO_SF_FIELD` row exists for it and no window can opt in; the read
-path serves it anyway (`NeoFieldFilter.ALWAYS_READABLE_KEYS`, ETP-4787). Until ETP-5073 the emittable
-set omitted it, so `fields:["name","updated"]` returned `updated` in `data` **and** listed it in
-`unknownFields` — a response contradicting itself, which for an agent consumer is worse than no
-signal at all. The set is now unioned into `emittableResponseKeys()` only: `updated` stays
-unwritable, and a client that sends it on a create is still filtered/rejected exactly as before.
+The always-readable audit keys are known too (ETP-5073). `updated` and `created` are AD *columns* on
+every table but not AD *fields*, so no `ETGO_SF_FIELD` row exists for either and no window can opt
+in; the read path serves them anyway (`NeoFieldFilter.ALWAYS_READABLE_PROPS`, ETP-4787 for `updated`,
+ETP-5122 for `created`). Until ETP-5073 the emittable set omitted `updated`, so
+`fields:["name","updated"]` returned it in `data` **and** listed it in `unknownFields` — a response
+contradicting itself, which for an agent consumer is worse than no signal at all. The set is now
+unioned into `emittableResponseKeys()` only: both keys stay unwritable, and a client that sends
+either on a create is still filtered/rejected exactly as before.
+
+**`created` is served under an alias, and the DAL name is the trap (ETP-5122).** The exemption set is
+matched against raw `DataToJsonConverter` output, whose keys are DAL *property* names — and DAL does
+not name the `Created` column `created`. `Property` forces every name through
+`NamingUtil.getStaticPropertyName`, which resolves that column to the generated
+`PROPERTY_CREATIONDATE` constant, i.e. **`creationDate`** (`Updated`, by contrast, keeps the name
+`updated`). So a raw row never contains a key spelled `created`: ETP-5122's first attempt exempted
+`created`, which matched nothing, while `creationDate` went on being stripped — an entirely silent
+no-op, no failing test and no log line. `ALWAYS_READABLE_PROPS` therefore holds `creationDate`, and
+`AUDIT_PROP_TO_API_KEY` renames it to `created` on the way out, so clients see one key, `created`, and
+`emittableResponseKeys()` advertises that same name and never `creationDate`. The alias is read-side
+only — deliberately not merged into `apiKeyToPropName`, or `remapApiKeys` would turn a client-sent
+`created` into a writable `creationDate` on the write path.
+
+#### 4.12.6 `MCP_CONFIG` — the MCP's own configuration column (ETP-5184)
+
+`ETGO_SF_SPEC`, `ETGO_SF_ENTITY` and `ETGO_SF_FIELD` each carry an `MCP_CONFIG` text column holding
+a JSON object that maps **section name → section body**. It is the MCP's private configuration
+layer: nothing outside `src/com/etendoerp/go/mcp/` reads it, so a value written here changes what
+agents are offered and leaves the REST and React contracts untouched.
+
+Resolution is a chain, `spec` → `entity` → `field`, merged by `McpEntityConfig`. Each section
+declares how its levels combine — `REPLACE` (the most specific level that defines the section wins
+outright) or `ADDITIVE` (every level contributes). Both current sections are `REPLACE`.
+
+Sections are registered in `McpConfigSections.ensureRegistered()`, and `McpEntityConfig` calls that
+before it parses anything. **An unknown section name, or an unknown key inside a known section, is
+an error, not a value that is quietly dropped** — for this column an absent key means
+"unconfigured", which for a section that gates access is the permissive answer, so a typo must not
+be indistinguishable from an omission. Problems are reported through `neo_discover` rather than
+thrown, and a body that failed validation is never acted on.
+
+Adding a section is one class plus one line in `McpConfigSections` — no model change and no AD
+metadata.
+
+**Registered sections:**
+
+| Section | Level | Purpose |
+|---|---|---|
+| `parent` | entity | How a child entity identifies its parent, and for which verbs the parent key is required (`field`, `entity`, `optionalFor`, `mode`, `reason`). See §6. |
+| `fields` | spec / entity / field | Reclassifies the MCP's view of field curation — `visibility`, `readOnly`, `businessCritical`, `reason`. |
+
+##### The `fields` section
+
+```json
+{
+  "fields": {
+    "visibility": "editable",
+    "readOnly": false,
+    "businessCritical": true,
+    "reason": "why the shared curation is wrong for agent use"
+  }
+}
+```
+
+- `visibility` — one of `editable`, `readOnly`, `system`, `discarded`. An unknown value is a
+  validation error.
+- `readOnly`, `businessCritical` — JSON booleans, unquoted. An absent key is *not* a configured
+  `false`: it leaves the `ETGO_SF_FIELD` value standing.
+- `reason` — **mandatory** whenever the section is present, and non-blank. Every row of this section
+  asserts that the shared curation is wrong for agent use; that claim has to be auditable on the row
+  that makes it.
+- An empty section body is a validation error — remove the section instead.
+
+Written at entity level it reclassifies every field of that entity at once; at field level it
+reclassifies one.
+
+**It reclassifies curation, never permissions.** Curation decides whether `neo_schema` advertises a
+field and whether `McpToolRouter` publishes `POST`/`PUT` for the entity at all. Whether a role may
+actually write a column on a record is settled downstream by the DAL and `NeoCrudHandler`, exactly
+as before — an AD-level non-writable column still fails. The override widens what is *offered*, not
+what is *allowed*.
+
+**Why it exists.** `McpToolRouter` publishes a write verb for an entity only if at least one field
+is agent-suppliable (`McpSchemaFieldBuilder.isAgentSuppliable`: `visibility == "editable"` and not
+read-only). All ten `ETGO_SF_FIELD` rows for `C_Location` carry `VISIBILITY = NULL` — a curation
+omission, not a decision — so `bp-location/bpLocation` advertised `["GET","DELETE"]` despite
+`ISPOST = 'Y'` and `ISPUT = 'Y'`, and since it is the only entity mapping `C_Location`, no
+business-partner address could be created through an agent at all (`contacts/locationAddress`
+requires an existing `C_Location_ID`).
+
+Backfilling `VISIBILITY` is the deeper fix and the one to make eventually — 18 entities share this
+gap. It was not taken here because that column is read by the REST and React layers too, so a
+backfill changes the shared contract for every existing consumer. The override is the deliberately
+low-risk path: MCP-only, blast radius of one entity. Only `bpLocation` carries it today.
+
+**One resolver, three readers.** `McpFieldView.of(SFField)` applies the resolved section and is the
+single source of `visibility` / `readOnly` / `businessCritical` / `isEditable` for all three places
+that previously derived them independently — `McpSchemaFieldBuilder.loadFieldMetadata`
+(`neo_schema`), `McpQuerySupport.editablePropertyNames` (`neo_selectors`, which computed its own
+`isIncluded && !isReadOnly`) and `McpResourceProvider`. Without it an override honoured by only the
+first reader would have `neo_schema` and `neo_selectors` contradicting each other about the same
+field. A field that neither the row nor the override classifies still reports **no** `visibility`
+key, exactly as before.
+
+##### Entity-level `AGENT_PROMPT` — a sibling column, not an `MCP_CONFIG` section
+
+`ETGO_SF_ENTITY.AGENT_PROMPT` is curated free text: whatever an agent must know about this entity
+that the AD dictionary cannot express. It is not part of `MCP_CONFIG` (it predates it, ETP-4278) and
+it is not validated — it is prose handed to the model verbatim, trimmed, and omitted entirely when
+the column is blank so the 285 entities without one stay byte-for-byte lean.
+
+It is now emitted by **both** discovery tools, from the same trim/blank check:
+
+| Tool | Where |
+|---|---|
+| `neo_discover` | `McpSupportInternals` — per-entity item, key `agentPrompt` |
+| `neo_schema` (full) | `McpToolRouter.handleSchema` — alongside `spec`/`entity`/`table`, ahead of `fields` |
+| `neo_schema` with `view:"create"` | `McpSchemaCreateView.buildResponse` — after `entity`, before `required` |
+
+ETP-5184 added the last two. `neo_discover` is a catalogue an agent reads once at the start of a
+session; `neo_schema` is what it reads immediately before writing, so guidance that lived only in
+discover was guidance already paged out by the time it mattered.
+
+**Why it earns its place on a handler-backed entity.** For the 92 of 287 active entities that carry
+a `JAVA_QUALIFIER`, a `NeoHandler` may implement a contract other than the one `neo_schema` derives
+from the dictionary, and the prompt is currently the only place that divergence can be stated.
+`contacts/locationAddress` is the worked example: `view:"create"` advertises `locationAddress` as a
+**required** Search field, while `ContactsLocationAddressHandler` creates the `C_Location` itself and
+discards whatever id was sent (a live create passing an existing location id came back holding a
+brand-new one). The fields the handler actually reads — `addressLine1`, `cityName`, `country`,
+`postalCode`, `regionName` — belong to `C_Location`, a different table, so they are absent from that
+entity's schema and undiscoverable. Omitting the id fails the generic mandatory-field check with a
+422; sending it without address fields fails with a constraint violation. Only "a throwaway id plus
+the address fields" works, and nothing in the machine-readable contract says so — hence the prompt.
+
+Note which level serves that example, because the two are easy to conflate: `contacts/locationAddress`
+is fixed by a **field**-level prompt on `ETGO_SF_FIELD.AGENT_PROMPT` for `C_Location_ID`, which
+predates ETP-5184 and reaches the response through `McpSchemaFieldBuilder`'s per-field
+`addAgentPrompt`. The **entity**-level prompt ETP-5184 added to `neo_schema` is a separate path with
+its own two consumers — `contacts/bankAccount` and `financial-account/account`, both disambiguating
+a contact's own bank account from the company's. `contacts/locationAddress` carries no entity-level
+prompt at all.
+
+Making the schema itself tell the truth is the deeper fix and is proposed, not implemented, in
+`schema_forge/docs/plans/2026-09-07-mcp-handler-contract-section.md` (a `handlerContract`
+`MCP_CONFIG` section). It touches `validateMandatoryFields`, the write gate for the whole MCP, so it
+was deferred to its own cycle.
 
 ---
+
+### 4.13 Image Fields and Image Upload (ETP-5184)
+
+An `Image BLOB` column (`AD_Reference_ID = 4AA6C3BE9D3B4D84A3B80489505A23E5`) is an FK to
+`AD_Image`, whose bytes live in `AD_Image.BinaryData` alongside `Mimetype` and `Name`.
+`M_Product.AD_Image_ID` and `AD_OrgInfo.Your_Company_Document_Image` are the two such fields
+Schema Forge exposes as editable today; everything below is driven by the column's reference, so
+enabling another one needs no code.
+
+#### The field contract
+
+`mapColumnType()` maps the reference to its own type, `image` — deliberately **not**
+`foreignKey`: there is no selector an agent can query for an image, and the id it needs does not
+exist until something uploads bytes. `McpImageFieldSupport.decorateImageField()` then adds the
+contract to the field descriptor in `neo_schema`, `formState` and the create view:
+
+```json
+"image": {
+  "type": "image",
+  "format": "etendo-image-id",
+  "valueType": "string",
+  "hint": "Holds an AD_Image id (32 hex chars), not the image itself. Do NOT send base64 and do NOT send a URL here ... call neo_request_image_upload ... or neo_upload_image for an image under 256 KB ... Then write the returned imageId to this field with neo_update."
+}
+```
+
+The hint is written to **both** `description` and `hint`. `hint` is the durable one:
+`description` is overlaid by `applyCuratedLabels` whenever the AD field carries help text, and
+losing the AD author's own words would be the wrong trade — so `description` carries the guidance
+only when AD has nothing to say.
+
+`neo_create` / `neo_update` reject a value on an image field that is not a resolvable `AD_Image`
+id (`error: "invalid_image_reference"`), with a message that names the upload tools. The point is
+that the agent can fix itself: the alternative is a raw FK violation from DAL.
+
+#### Why the bytes do not travel as tool arguments
+
+A tool argument is model **output**, generated token by token, and no MCP client elides argument
+content — so base64 inline always costs output tokens (roughly 1.4 characters per token: ~100 KB
+of image ≈ 100k tokens). There is no way to mark an argument as not-for-the-model. The only way
+not to pay is to keep the bytes out of the argument, which is what the ticket below does.
+
+This is also where the protocol is heading: MCP has no client-to-server file-upload primitive
+today, and the File Uploads working group's SEP-2356 routes large files through URL-mode
+elicitation — i.e. it formalizes the ticket pattern. Server-side fetching of a `source_url` was
+considered and **rejected**: it would make the ERP an outbound HTTP client. The ticket is inbound,
+the same direction as every other NEO call.
+
+#### `neo_request_image_upload` — the primary path (~50 tokens)
+
+| Param | Required | Notes |
+|---|---|---|
+| `name` | no | name for the stored image (defaults to `image`) |
+| `mime_type` | no | `image/png` or `image/jpeg`; omit it and the type is detected from the bytes, and if you do send it a mismatch is rejected |
+
+Returns `token`, `uploadUrl`, `expiresAt`, `maxBytes`, `acceptedMimeTypes`, and a ready-to-run
+`curlExample`. Whoever holds the file PUTs the raw bytes:
+
+`uploadUrl` is built on the **Etendo Go app's public base** (`etendo.go.app.baseUrl`, the same
+property the transactional emails use), because the uploader is a shell, a browser or an agent
+talking to the app — not to Tomcat. `context.url` is only the fallback for an instance reached
+directly on Tomcat with no app in front: it is the internal backend address and can be unreachable
+for the client behind a proxy or a tunnel. **If the app is behind a proxy, set
+`etendo.go.app.baseUrl`** or the URL handed to the agent will point at the backend.
+
+
+```bash
+curl -X PUT --upload-file ./photo.jpg "https://<host>/sws/neo/image/upload/<token>"
+```
+
+The response of the PUT carries `{ imageId, name, mimeType, bytes }`. **The file never enters the
+conversation — only its path and the URL do.** A person with a browser can use the same URL.
+
+#### `PUT /sws/neo/image/upload/{token}` — intentionally unauthenticated
+
+This endpoint has a pre-authentication entry point in `NeoServlet`, on the same basis as the
+document-download links: the **token is the credential**. It is single-use, expires in 10 minutes,
+carries 192 bits of `SecureRandom`, and holds the client/org/user of the MCP session it was issued
+to. It has to work this way — the whole point is that whoever holds the FILE uploads it directly,
+and that party has no session. `NeoImageHelper` validates the token, the size and the magic bytes
+before anything is stored, and the row's client/organization come from the ticket rather than from
+the admin context the upload runs in, so the elevation grants no scope the requesting MCP session
+did not already have.
+
+Tickets live in `NeoImageUploadTickets`, an in-memory single-node store: at most
+`MAX_PENDING_PER_SESSION` (10) unused tickets per session, expiry checked on read plus a lazy
+sweep on each issue. **Tickets are lost on restart/redeploy and are invisible to another node** —
+acceptable at a 10-minute TTL because a lost ticket surfaces as the same self-correctable error as
+an expired one. If Etendo GO ever runs multi-node, or behind a load balancer that does not pin a
+client to a node, that class must be replaced by a small AD table; the class Javadoc states the
+condition and the replacement.
+
+#### `neo_upload_image` — the base64 fallback
+
+| Param | Required | Notes |
+|---|---|---|
+| `data_base64` | **yes** | a `data:image/png;base64,` prefix is accepted and stripped |
+| `name` | no | as above |
+| `mime_type` | no | cross-checked against the actual bytes |
+
+**Hard limit: 256 KB decoded** — deliberately far below the servlet's 10 MB, so nobody discovers
+the token cost by paying it. Over the cap the call is rejected with a message naming
+`neo_request_image_upload`. Type is sniffed from magic bytes and cross-checked against a supplied
+`mime_type`, so a lying `mime_type` cannot store an arbitrary blob.
+
+#### `neo_get_image_upload`
+
+Takes the `token` and returns `{ status: "pending" | "completed", expiresAt }` plus `imageId` once
+completed — for an agent that did not see the PUT's own output. Read-only, same token.
+
+#### Both upload tools create the `AD_Image` row only
+
+Attaching it to a record stays an explicit `neo_update` of the image field. That keeps the tools
+generic across every image field and keeps the audit trail obvious.
+
+Design record, including the rejected alternatives and the phases not yet built (the read path:
+a `neo://image/{id}` resource, `resource_link` in `neo_get`, and a downscaling `neo_get_image`):
+`docs/plans/2026-09-07-mcp-image-field-support-plan.md`.
+
+### 4.14 Record Links in the App (ETP-5200)
+
+An agent asked for "the link to that order" used to have nothing to work with: no MCP response
+carried a URL. It invented one, guessing the legacy backoffice shape
+`https://<host>/etendo/?tabId=186&recordId=<id>` — which on a Go deployment resolves to a
+different application altogether.
+
+The React app routes a record at `:windowName/:recordId`, where `windowName` is the kebab-case
+spec name — the exact string the tools already take as their `spec` argument. So a link is simply:
+
+```
+<appBaseUrl>/<spec>/<recordId>
+https://go.experimental.etendo.cloud/sales-order/4B2DBECAC0D34E309AA5C8C86DC81519
+```
+
+Two things now emit it (`McpRecordUrls`):
+
+**`neo_discover` advertises the recipe once per session**, next to `guidance`:
+
+```json
+"app": {
+  "baseUrl": "https://go.experimental.etendo.cloud",
+  "recordUrlTemplate": "{baseUrl}/{spec}/{id}",
+  "hint": "Build a link to any record as {baseUrl}/{spec}/{id}, … Only a spec's primaryEntity has a page of its own — link a line record to its header."
+}
+```
+
+That costs a couple of dozen tokens once and lets the agent link any record it later sees,
+including the rows of a 100-record `neo_list`, which deliberately carries no URLs of its own.
+
+**`neo_get` and `neo_create` add a ready-made `url`** to the record they return — the two moments
+an agent hands the user a link.
+
+Two rules keep the links honest, and both are enforced in code:
+
+1. **No configured base, no link.** The base comes from
+   `PublicUrlResolver.resolveConfiguredAppBaseUrl()` (`etendo.go.app.baseUrl` / `ETGO_APP_BASE_URL`)
+   and nowhere else; when it is unset, the `app` block and the `url` field are omitted entirely.
+   There is deliberately **no fallback to `context.url`** — that is the *internal* Tomcat address,
+   and using it is exactly what produced `http://localhost:8080/…` instead of
+   `http://localhost:3100/…` for the image upload URL in ETP-5184. A wrong link is worse than no
+   link, because an agent publishes it either way.
+2. **Only a spec's primary entity (tab level 0) has a route.** A line record gets no `url`; the
+   agent is told to link to its header.
+
+A proxied deployment therefore **must** set `etendo.go.app.baseUrl` to the public app URL, the same
+property the image upload URL depends on.
 
 ## 5. Configuration
 
@@ -1716,6 +2030,57 @@ response shape, call `error(status, JSONObject)`; only call `error(status, Strin
 standard nested envelope built for you.
 
 Responses support custom headers via `withHeader(name, value)`.
+
+**Real-world example — `DocumentPostingService` invalid-account message enrichment (ETP-4706 baseline + ETP-5175 addenda):** `schemaforge/handlers/DocumentPostingService.java` is deliberately **not** a `NeoHandler` — it's a plain injectable bean reused by `handleAction` in every document-window handler (and the shared `DocumentActionHandler`) for the `post`/`unpost` actions covered in this pitfall note above. Its `errorMessageOf` → `enrichWithFailingEntity` chain enriches one specific, otherwise-generic core Etendo failure.
+
+Core Etendo's accounting engine (`AcctServer`) doesn't always say *which* entity caused an "account could not be found" failure: several `Doc*` subclasses can leave an account null and fall through to `AcctServer#post`'s parameterless fallback, which resolves to the bare `@InvalidAccount@` message ("Account could not be found.") — no account type, no owning entity, nothing to grep server logs for. `enrichWithFailingEntity` only fires when `acct.getStatus()` equals `AcctServer.STATUS_InvalidAccount`; every other status already carries its own detailed message from core Etendo and is left untouched.
+
+- **BP + BP Group detail (ETP-4706 baseline).** `resolveBusinessPartnerDetail` resolves the transaction's Business Partner from the public `C_BPartner_ID` `AcctServer` sets for every document type it posts (not specific to Goods Receipts or to any one account type — any document/account-type combination that hits this same fallback benefits). If the BP resolves but has no BP Group, the message is suffixed via `AD_MESSAGE` key `ETGO_InvalidAccountBpOnly` (`@bpName@` only); if it has a BP Group, `ETGO_InvalidAccountBpAndGroup` is used instead (`@bpName@` + `@bpGroup@`). Both keys are English-only by design — no `AD_MESSAGE_TRL` exists for this catalog.
+- **Missing-accounts addendum (ETP-5175).** When a BP Group resolves, `resolveMissingAccountsDetail` goes one step further and names *which* `C_BP_Group_Acct` account(s) are unconfigured (null) for that BP Group + accounting schema — the actual root cause behind most `InvalidAccount` failures triggered by BP-Group-derived accounts. It checks a curated, fixed subset of six columns on the `CategoryAccounts` OBDal entity (`BP_GROUP_ACCOUNT_COLUMNS`), tied to the document types this app supports today — **not** exhaustive of every nullable column on `C_BP_Group_Acct`:
+
+  | Label (English, `@missingAccounts@`) | `CategoryAccounts` getter |
+  |---|---|
+  | Non-Invoiced Receipts | `getNonInvoicedReceipts()` |
+  | Non-Invoiced Receivables | `getNonInvoicedReceivables()` |
+  | Customer Receivables No. | `getCustomerReceivablesNo()` |
+  | Vendor Liability | `getVendorLiability()` |
+  | Customer Prepayment | `getCustomerPrepayment()` |
+  | Vendor Prepayment | `getVendorPrepayment()` |
+
+  When configured, the addendum is appended via `AD_MESSAGE` key `ETGO_InvalidAccountMissingBpGroupAccounts`, listing every missing label (comma-joined). When no `CategoryAccounts` row exists at all for that BP Group + schema, every curated column is reported missing — itself a useful signal ("no configuration whatsoever"). **`Vendor Liability` can never actually appear in that list**: `V_Liability_Acct` is a DB `NOT NULL` column on `C_BP_Group_Acct`, so its null-check is structurally dead — kept in the curated list only for completeness/future-proofing, not because it's reachable today.
+- **Fails closed, independently of the BP+Group detail.** If the accounting schema can't be resolved (`resolveAcctSchemaId` returns `null`), the addendum is skipped and the message is left unchanged. If the missing-accounts lookup itself throws (transient DB error, mapping issue), the exception is caught **inside `resolveMissingAccountsDetail`**, not let bubble up to `resolveBusinessPartnerDetail` — an earlier revision let a lookup failure there discard the already-built BP + BP Group detail along with it, a QA regression caught during ETP-5175 review.
+- **Known limitation — accounting schema resolution (ETP-5214, filed as a follow-up, not fixed here):** `resolveAcctSchemaId` reads `acct.m_as[0]` — the *first* accounting schema on the `AcctServer` instance, resolved the same way the rest of `AcctServer` does — not necessarily the schema whose account actually failed in a multi-GL (multiple active accounting schemas per client) setup. Low impact today: Etendo GO is effectively single-schema-per-client in practice, so `m_as[0]` and the failing schema coincide in the overwhelming majority of real tenants.
+- **Matched-Purchase-Invoice product-accounts addendum (ETP-5175, second increment on this same fix).** Core Etendo's `DocMatchInv#createFact` — the accounting engine subclass that posts a Matched Purchase Invoice — resolves **three** accounts, not one: Non-Invoiced Receipts from `C_BP_Group_Acct` (the BP-Group check documented above) plus two more from `M_Product_Acct`, keyed by the invoice line's **product**, not the Business Partner's group: Product Expense and Invoice Price Variance. A failure on the BP-Group account short-circuits `createFact` before the product-level ones are even reached; a failure on either product account is independent of the BP-Group one and is what this addendum diagnoses. Because these two account types only exist in the Matched-Purchase-Invoice posting flow, `resolveMissingProductAccountsDetail` is gated to run **only** when `AcctServer.DocumentType` equals `AcctServer.DOCTYPE_MatMatchInv` (`"MXI"`) — unlike the BP-Group check, which is generic across every document type this app posts.
+
+  The product is resolved from `acct.Record_ID` — the `M_MatchInv_ID` on a Matched Purchase Invoice failure — via the OBDal entity `org.openbravo.model.procurement.ReceiptInvoiceMatch`: `OBDal.getInstance().get(ReceiptInvoiceMatch.class, acct.Record_ID).getProduct()`. The resolved product plus the accounting schema (reusing the same `resolveAcctSchemaId(acct)` helper) key the lookup into `org.openbravo.model.common.plm.ProductAccounts` (the `M_Product_Acct` table), checking two curated columns:
+
+  | Label (English, `@missingAccounts@`) | `ProductAccounts` getter | DB column | Notes |
+  |---|---|---|---|
+  | Product Expense | `getProductExpense()` | `P_Expense_Acct` | DB `NOT NULL` — structurally can never appear in the list on an existing row; kept only for symmetry with the BP-Group table's `Vendor Liability` entry |
+  | Invoice Price Variance | `getInvoicePriceVariance()` | `P_InvoicePriceVariance_Acct` | Nullable — the one that actually fires in practice |
+
+  When configured, the addendum is appended via the new `AD_MESSAGE` key `ETGO_InvalidAccountMissingProductAccounts` — distinct from the BP-Group addendum's `ETGO_InvalidAccountMissingBpGroupAccounts`; the two are independent and both can appear in the same enriched message when both are missing. When no `ProductAccounts` row exists at all for that product + schema, every curated column is reported missing (same "no configuration whatsoever" signal as the BP-Group lookup's "no row" case).
+
+  Same fail-closed isolation as the BP-Group addendum, built in from the start on this increment (learned directly from the BP-Group check's own reject-cycle bug, where an unguarded lookup failure discarded the already-built BP + BP Group detail): `resolveMissingProductAccountsDetail` wraps its own lookup in a local try/catch, logs at `debug`, and returns `null` on failure rather than letting the exception unwind into `resolveBusinessPartnerDetail`.
+
+  This addendum was scoped after empirically tracing it as the likely actual cause of the original bug report, not speculatively: both the local dev DB and the experimental server's `Valeria Garcia 2` tenant show several products (including one named "Fernet") with `P_InvoicePriceVariance_Acct` null while their BP Group's own accounts are fully configured — exactly the case the BP-Group-only check (ETP-4706/base ETP-5175) could not have diagnosed.
+- **i18n + wording refinement (ETP-5175, third increment — prompted by the user's own live end-to-end repro, not a hypothesis).** Three problems surfaced by that repro, all fixed together:
+  1. **Account labels are now bilingual.** Both `BpGroupAccountColumn` and `ProductAccountColumn` carry an `(labelEn, labelEs, getter)` triple instead of a single label, with a `label(String lang)` method that picks the Spanish pair when `lang` equals the constant `LANGUAGE_ES_ES` (`"es_ES"`, exact-match) and falls back to English otherwise — the same exact-match precedent as `NotPostedDocumentsHandler#getTranslatedName`. Both `resolveMissingBpGroupAccounts` and `resolveMissingProductAccounts` now resolve `OBContext.getOBContext().getLanguage().getLanguage()` once per call and pass it through, instead of the previous hardcoded English literals that ignored the session's language entirely.
+  2. **`NotInvoicedReceivables_Acct` was dropped from `BP_GROUP_ACCOUNT_COLUMNS`** (six curated columns → five). This is a real dead-code finding, not just a tidy-up: an exhaustive search of `AcctServer.java`, every `Doc*.java`/`.xsql` posting handler under `ad_forms`, and `modules_core` found **zero references** to that column in any posting engine — only onboarding-provisioning code ever touches it, so it can never legitimately be the cause of an Invalid-Account posting failure. Leaving it in the curated list had produced exactly the confusing symptom the user's repro hit: the BP Group's actual `Non-Invoiced Receipts` column (the one `DocMatchInv` reads) was fine, but the unrelated, unread `Non-Invoiced Receivables` column happened to also be null and got wrongly surfaced as "the" missing account.
+  3. **Both addendum message templates were reworded for clarity.** The old parenthesized form — `"(Missing account setup on BP Group: @missingAccounts@)"` / `"(Missing account setup on Product: @missingAccounts@)"` — read ambiguously, since `@missingAccounts@` could be misread as naming the BP Group/Product itself rather than its missing account labels. Both `AD_MESSAGE` (`ETGO_InvalidAccountMissingBpGroupAccounts`, `ETGO_InvalidAccountMissingProductAccounts`) entries were reworded to plain sentences: `"Please review the BP Group's accounting setup: @missingAccounts@."` / `"Please review the Product's accounting setup: @missingAccounts@."` (Spanish: `"Revise la configuración contable del Grupo de Terceros: @missingAccounts@."` / `"Revise la configuración contable del Producto: @missingAccounts@."`).
+- **Spanish translations added for all four message keys in the chain (ETP-5175, same increment).** `src-db/database/sourcedata/AD_MESSAGE_TRL.xml` — a new file, this table had no rows for this catalog before — now carries `es_ES` rows for the two reworded ETP-5175 addendum keys above **and** for the two pre-existing ETP-4706 baseline keys (`ETGO_InvalidAccountBpAndGroup` → `"(Contacto: @bpName@, Grupo de Terceros: @bpGroup@)"`, `ETGO_InvalidAccountBpOnly` → `"(Contacto: @bpName@)"`), which predate ETP-5175 but were found untranslated during the same live-testing session. All four rows are `ISTRANSLATED='Y'` real translations, not placeholders.
+  - **Hand-authored, not machine-exported — flag for whoever runs a clean `export.database` next.** The canonical DB-first flow (SQL `UPDATE`/`INSERT` the rows, then `./gradlew export.database` to regenerate sourcedata) was attempted, but `export.database` fails in this checkout on a **pre-existing, unrelated** issue: `ETGO_EMAIL_SEND_LOG.STATUS` has a `FieldLength`/actual-column drift left over from ETP-5069 (`AD_Column` says 60, the model XML and the live DB column both say 40). Not fixed here (out of scope). `AD_MESSAGE_TRL.xml` was therefore hand-authored to match the table model and the existing `AD_MESSAGE.xml`'s `<!--ID-->`-comment format; the four rows were verified present and correct in the live local DB via direct `psql` queries. Whoever next gets a clean `export.database` run on this module should diff the machine-generated `AD_MESSAGE_TRL.xml` against this hand-authored one to confirm they match — the export format could differ in some detail (whitespace, `MSGTIP` handling) that couldn't be verified without a working export.
+  - **Reject-cycle lesson worth documenting.** The first pass at the Spanish translations for the two ETP-4706 baseline keys dropped the enclosing parentheses that the English `AD_MESSAGE` text has (`"Contacto: @bpName@"` instead of `"(Contacto: @bpName@)"`), producing a run-on sentence once the ETP-5175 addendum sentence got appended after it — reintroducing, in Spanish only, the exact ambiguity problem this whole feature exists to solve. Fixed in commit `71aeb484` (restored parentheses on both rows, live DB synced via targeted `UPDATE`s). The bug is now guarded by a new XML-level test, `AccountErrorMessageTrlSampleDataTest` (`src-test/src/com/etendoerp/go/schemaforge/handlers/AccountErrorMessageTrlSampleDataTest.java`, added in `5487573b`, same direct-XML-parsing pattern as `BpGroupAcctSampleDataTest`), which parses `AD_MESSAGE_TRL.xml` itself and asserts both `MSGTEXT` values stay wrapped in parentheses — verified to fail against the pre-fix XML and pass against the corrected one. This is worth calling out precisely because the *original* pinning regression test for this message chain (`DocumentPostingServiceTest#postComposesExactSpanishMessageForBpGroupAndProductScenario`) mocks `OBMessageUtils.messageBD(...)` with hardcoded Java strings and never reads the XML at all — it could not have caught this regression, and was deliberately left as-is (its own javadoc already flags the gap for a future update) rather than patched over.
+  - **Final example strings**, illustrating labels, wording, and translation together on the same repro scenario (Business Partner "Blanquiceleste S.A.", BP Group "Proveedora", missing `Invoice Price Variance` on the product):
+    - EN: `"Account could not be found. (Business Partner: Blanquiceleste S.A., BP Group: Proveedora) Please review the Product's accounting setup: Invoice Price Variance."`
+    - ES: `"No se pudo encontrar la cuenta. (Contacto: Blanquiceleste S.A., Grupo de Terceros: Proveedora) Revise la configuración contable del Producto: Desviación Pr. Factura."`
+- **Base-sentence locale fix (ETP-5175, fourth increment on this same fix).** All three increments above only ever touched the *addendum* text appended after the base sentence — the base sentence itself (`"Account could not be found."` / `@InvalidAccount@`) never respected the GO locale at all: it always rendered in English regardless of the session's `Accept-Language`, even after every addendum around it had already been fixed to be bilingual.
+
+  **Root cause, worth documenting precisely — it's a genuinely subtle platform interaction.** Core Etendo's `AcctServer#setMessageResult(...)` always derives the message-resolution language from the classic `HttpServletRequest`/session mechanism whenever a request is present on the thread — and a NEO Headless call always has one. This ignores the `Accept-Language`-driven `OBContext` language that `NeoAuthenticator`/`NeoLanguage` (`schemaforge/util/NeoLanguage.java`) apply for the GO locale on every NEO request. So by the time `errorMessageOf` ever reads `acct.getMessageResult()`, the base text is already permanently baked into the wrong language — there is no way to fix this by post-processing the string itself, and `AcctServer` is core code, out of scope to change directly here.
+
+  **The fix.** `errorMessageOf(AcctServer acct)` now re-resolves the base message itself, via `OBMessageUtils.messageBD(MSG_INVALID_ACCOUNT_BASE)` (`MSG_INVALID_ACCOUNT_BASE = "InvalidAccount"`, the same `AD_MESSAGE.VALUE` as core's `@InvalidAccount@`, confirmed against `AD_MESSAGE_ID = FF8080812EA11CED012EA1CCB28700F0` in core's `AD_MESSAGE.xml`), but **only** when `acct.getStatus()` equals `AcctServer.STATUS_InvalidAccount` — every other status keeps using `result.getMessage()` unchanged, exactly as before. `OBMessageUtils.messageBD` DOES correctly follow `OBContext`'s language (the same primitive the addendum messages above already rely on); it also internally catches its own lookup exceptions and falls back to base-language text when no translation row exists for the requested language, so this call is fail-closed by construction — verified against `OBMessageUtils.java` source, not assumed. No core change was needed.
+
+  **QA-closed coverage gap (commit `758dbf75`).** The two pre-existing "composes exact message" pinning tests (`postComposesExactSpanishMessageForBpGroupAndProductScenario` and its English counterpart) never stub `OBMessageUtils.messageBD("InvalidAccount")` — with `OBMessageUtils` fully mocked, that unstubbed call falls through to Mockito's default `null`, and `errorMessageOf` silently keeps `result.getMessage()`, which those two tests had *already* seeded with the correct-language text. They therefore pinned the full composed message without ever exercising this new re-resolution branch — a regression that broke only this branch (wrong message key, a swallowed exception, the guard condition itself) would not have failed either test. QA added `postComposesFullSpanishMessageWithReResolvedBaseAndEnrichment` to close that gap: it deliberately seeds `acct.getMessageResult()` with the *wrong* (English) text — mimicking core's own bug — while stubbing `messageBD("InvalidAccount")` to return the correct Spanish base text, in the same BP-Group + Product enrichment scenario as the pre-existing test. Asserting the full composed string proves the re-resolved base and both enrichment addenda compose consistently end-to-end in one language, not just in isolation.
 
 **Real-world example — `ChartOfAccountsHandler` GL Item auto-management (ETP-5020):** `schemaforge/handlers/ChartOfAccountsHandler.java` (`@Named("chart-of-accounts")`, wired on the chart-of-accounts spec) keeps Etendo Classic's `C_Glitem` plumbing invisible behind the `C_ElementValue` subaccount UI.
 
@@ -1963,7 +2328,15 @@ NEO Headless enforces security at multiple levels:
 
 **Report spec access control (ETP-4596):** `NeoAccessHelper.hasReportSpecAccess(SFSpec, String)` is the single gate now shared by all 4 access-check call sites that previously either skipped `SPEC_TYPE = 'R'` report specs entirely or fell through a `spec.getProcess() == null` guard that was always true for them — `NeoRequestRouter.handleReportSpecRequest` (the real HTTP data-access gate, which previously had zero check), `NeoDiscoveryHelper.isSpecAccessible`, `McpToolRouterSupport.hasSpecAccess`, and `ToolRegistry`. It checks a linked `AD_Process`/`OBUIAPP_Process` first when the spec has one (delegating to items 5/6 above), else falls back to the same constituent-window check from item 4, keyed off each active/included `SFEntity`'s `AD_TAB_ID`. Five of the 8 report specs now have `AD_TAB_ID` populated and gate on the classic "Financial Account" window (`AD_Window_ID=94EAA455D2644E04AB25D93BE5157B6D`): `financial-accounts-page`, `financial-account-transactions`, `bank-statements`, `bank-reconciliation`, `financial-account-bank-connection`. Verified end-to-end against real roles: `403` for a role lacking Financial Account window access, `200` for a role that has it; discovery listing correctly excludes these specs for an unauthorized role while still showing them to an authorized one.
 
-**Known limitations (ETP-4596):** two report specs — `tax-report` and `inventory-stock-report` — are wired to neither a classic `AD_Process` nor a populated `AD_TAB_ID` yet, so they still hit `hasReportSpecAccess`'s permissive fallback and remain reachable by any authenticated role regardless of `AD_Window_Access`. Closing this needs a functional decision on their process/window mapping (pending, tracked separately); once linked, they gate with zero further code changes. Unrelated to access control: `bank-reconciliation`'s handler currently returns `500` for correctly-authorized roles due to a pre-existing `ReconciliationHandler` dispatch bug ("No AD_Tab linked to entity") — the RBAC gate added above is confirmed correct for it; the report itself is separately non-functional today even for authorized users.
+**Known limitations (ETP-4596):** one report spec — `tax-report` — is wired to neither a classic `AD_Process` nor a populated `AD_TAB_ID` yet, so it still hits `hasReportSpecAccess`'s permissive fallback and remains reachable by any authenticated role regardless of `AD_Window_Access`. Closing this needs a functional decision on its process/window mapping (pending, tracked separately); once linked, it gates with zero further code changes. Unrelated to access control: `bank-reconciliation`'s handler currently returns `500` for correctly-authorized roles due to a pre-existing `ReconciliationHandler` dispatch bug ("No AD_Tab linked to entity") — the RBAC gate added above is confirmed correct for it; the report itself is separately non-functional today even for authorized users.
+
+**`inventory-stock-report` is no longer on this list — resolved by a still-later ETP-5116 pass.** Same underlying gap as above (no `AD_Process`, no `AD_TAB_ID`, so `hasReportSpecAccess`'s discovery-listing fallback still applies), but this one was confirmed over-permissive in **production** — every authenticated role, including ones that should have none, could retrieve this data — so it was closed at the handler level directly rather than waiting on the generic mechanism: a brand-new pseudo-`AD_Window` (`6346B88619F948F9A42224BDB0B239FA`, 0 tabs, permission anchor only) was created, `TemplateRoleWindowAccess` grants it to Compras/Financiero/Almacén (not Ventas), and `InventoryStockReportHandler#handle` now calls `NeoAccessHelper.hasWindowAccess` on that window id explicitly at the top of the method — a real, explicit gate, not a proxy hoping the discovery-listing fallback happens to line up. The MCP tool-discovery/listing path is unaffected (still permissive, a separate and smaller informational-leak issue, tracked separately) — only the actual data-serving `handle()` call is now denied.
+
+**Document-number writes at org `*` — the one deliberate, scoped bypass of item 2 (ETP-5230):** item 2 above says every DAL query respects the user's organization access. One narrow class of write cannot: bumping a document-number sequence. Every fixed GO role and every per-user personal composition role carries `AD_Role.UserLevel = "  O"` (`SystemRoleTemplates#FIXED_ROLE_USER_LEVEL`), and core's `OBContext#setWritableOrganizations` removes `"0"` from the writable-organization set of any role at exactly that level — silently, and regardless of the role actually holding `AD_Role_OrgAccess` to `*`. Meanwhile every document sequence the onboarding dataset ships lives at org `*`. The APRM numbering path (`FIN_Utility#getDocumentNo` → `Fin_UtilityLegacy#incrementSeqIfUpdateNext`) increments the counter through the DAL, so the write is security-checked and rejected with `Organization 0 of object (ADSequence(…)) is not present in OrganizationList […]`. Net effect before the fix: no invited user could reconcile, register a payment or close a cash drawer — only the tenant owner, whose role ships `" CO"` and therefore keeps `"0"`. Classic's own equivalent flows are still affected; only GO's five call sites are covered.
+
+  `StarOrgWriteScope#withWritableStarOrg` (`schemaforge/StarOrgWriteScope.java`) grants org `*` write access for the duration of one document-number expression, flushes the counter while the grant is open, and restores the organization lists in a `finally` — mirroring core's own `InitialOrgSetup`, which does the same for the same kind of write. Five call sites use it: `ReconciliationHandler#addNewDraftReconciliation`, `PaymentRegistrationService#createDraftPayment` (the choke point for all three of its callers, including `ReconciliationPaymentService#registerReconciliationPayment`), `AddPaymentService#doAddPayment`, `AddPaymentService#processAndRefund` (the refund) and `CashCloseHandler#createDraft`.
+
+  Three rules when touching it. **(a)** `OBContext.setAdminMode(false)` is not an alternative and fails silently — `doOrgClientAccessCheck` reads the *innermost* admin frame, and core pushes its own `setAdminMode(true)` inside `APRM_MatchingUtility#addNewDraftReconciliation`, so an outer frame is never the one consulted. The grant has to change the writable-organization *set*. **(b)** The flush belongs inside the scope, because the check fires on flush, not on save; at the cash-close site nothing flushes in the enclosing method at all. **(c)** Never widen a scope to enclose a `TenantOwnership.loadOwned` call — that guard consults the readable-organization list, so it would be transiently relaxed for org `"0"`. Resolve request-supplied ids before entering.
 
 ---
 
@@ -2092,12 +2465,12 @@ Folder nodes are never filtered directly: their children are filtered first (pos
 }
 ```
 
-`windowAccess` keys are `AD_Window_ID`s; a window with no active `AD_Window_Access` row for the role is simply absent — the frontend treats a missing key as `"none"`.
+`windowAccess` keys are `AD_Window_ID`s; for a non-admin role, a window with no active `AD_Window_Access` row for that role is simply absent. Admin/client-admin roles use the union in step 2 below instead. The frontend treats a missing key as `"none"`.
 
 **Resolution order** (mirrors `NeoAccessHelper.hasWindowAccess(Role, String, String)`, §7 item 3):
 
 1. No role assigned → `{"windowAccess": {}, "capabilities": {}}`, without querying the database — same convention as `SFListMenu`: the role is captured once, at the very top of the request, before the servlet enters `OBContext.setAdminMode()`.
-2. System Administrator role (`"0"`) or a client-admin role (`NeoAccessHelper.isAdminOrClientAdmin(Role)`, now `public` specifically so this webhook can reuse it) → every distinct `AD_Window` backing an active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` resolves to `"full"`, and `capabilities.showAccountingFields` / `capabilities.isAdminOrClientAdmin` are both always `true` — the accounting column is never even queried for this branch.
+2. System Administrator role (`"0"`) or a client-admin role (`NeoAccessHelper.isAdminOrClientAdmin(Role)`, now `public` specifically so this webhook can reuse it): every distinct window ID in the **union** of (a) `AD_Window` references from active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` rows (`resolveActiveEtendoGoWindowIds()`) and (b) windows with at least one active `AD_Window_Access` row across **any role** (`resolveWindowsWithAnyGrant()`) resolves to `"full"`. Both queries skip null window references, and the union deduplicates IDs. The grant query has no per-role or explicit client/tenant restriction and does not require a spec, menu node, or read-write grant; neither query explicitly filters `AD_Window.IsActive`. This includes permission-anchor windows such as Financial Reports, Smart Scan, and Inventory Stock Report, which have grants but no backing spec (ETP-5240). `capabilities.showAccountingFields` / `capabilities.isAdminOrClientAdmin` are both always `true`; the accounting column is never queried for this branch.
 3. Otherwise, for every active `AD_Window_Access` row the role has: `IsReadWrite = true` → `"full"`; `IsReadWrite = false` → `"read-only"`. `capabilities.showAccountingFields` is read directly off the new `AD_Role.EM_ETGO_Show_Acct_Fields` boolean extension column (ETP-4520) for the resolved role, via a native SQL lookup rather than the DAL entity model (the column was added straight to the physical table and is not yet mapped as a typed entity property). `capabilities.isAdminOrClientAdmin` is always `false` in this branch — reaching it at all already proves the bypass check in step 2 failed for this role.
 
 **`AD_Role.EM_ETGO_Show_Acct_Fields`:** a Yes/No extension column added by this module (`AD_Column_ID = A0F2D12B5B4A48C2855EE73E3E93E274`, default `N`) and exposed as a real field (`AD_Field_ID = 98C71197D0744EED96856A497E49F159`) on the classic `AD_Role` window/tab, so a functional consultant can toggle it like any other role attribute. It gates accounting-sensitive field/tab visibility in Etendo GO — e.g. the `Posted` status pill on invoice windows and the financial-account edit form's "Cuentas contables" tab — independently of per-window `AD_Window_Access`. **`resolveShowAccountingFields` above reads it as a flat stored value with no join to `AD_Role_Inheritance` — it is a DERIVED fact, not an independent one, for any role composed via `UserRoleCompositionService` (ETP-4852).** `UserRoleCompositionService#syncShowAccountingFieldsFlag` (ETP-4877), called unconditionally at the end of every `reconcileInheritances`, keeps a personal role's column in sync with whether it currently inherits from the system Finance template (`'Y'` iff yes, `'N'` otherwise — both directions, including Finance being removed). The retroactive half for personal roles that predate this sync (or were never touched by a live composition call) is `R26-tenant-owner-and-personal-role-retrofit.sql` Step 8b in `etendo_schema_forge`, plus a one-time system-level health check (Step 8a) correcting the Finance template's own column, found stale (`'N'`) on the local dev DB. Both predicates must be kept in lockstep.
@@ -2233,6 +2606,24 @@ Both paths can appear side-by-side within one response (a tenant may have migrat
 **`windows`/`matrix` window universe:** every distinct `AD_Window` backing an active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` — i.e. every window Etendo GO actually exposes today — so inherited/legacy grants to native-only Etendo windows don't leak into either structure. Each `windows[]` entry's `tier` resolves the same way as `SFWindowAccessMap`: `IsReadWrite = true` → `"full"`, `IsReadWrite = false` → `"read-only"`; a role's `windows` array only lists windows it can actually reach (sorted by name).
 
 **`matrix`** additionally covers **every** Etendo GO window — including ones no role in the response can reach at all (`"none"`) — grouped by the window's top-level `AD_Menu` folder (tree `'10'`, the same tree `SFListMenu` walks) via one recursive-CTE native query; a window linked from two different top-level folders deterministically picks the alphabetically-first one, and a window with no resolvable folder falls back to the `"Other"` bucket. Categories are sorted by name; each category's windows are sorted by name.
+
+**Proxy rows for 3 windowless items (ETP-5071).** "Fiscal Monitor", "Fiscal Models", and "Not
+Posted Documents" have no `AD_Window_ID`/`AD_Process_ID` of their own, so none of the query-driven
+resolution above can produce a row for them. `matrix` now appends 3 synthetic rows for these ids,
+each resolving its per-role access via a human-chosen PROXY entity instead — Fiscal Monitor
+through the SII Monitor window's access, Fiscal Models through the Tax Report window's access, and
+Not Posted Documents through a specific process's access — including a duplicate-row guard for the
+case where a proxy (SII Monitor) already produces its own real row from the query above. This is a
+**display-only** resolution scoped entirely to this endpoint's `matrix`/frontend `RolesAccessMatrix`
+consumption; it does not touch `AD_Window_Access` grants, `windows`/`windowCount`, or any
+provisioning path. Full mechanism (exact proxy ids, category-lookup handling, the duplicate guard):
+`SFRolesOverview.java`'s own javadoc (`PROXY_MATRIX_ROWS`, `FISCAL_MONITOR_PROXY_WINDOW_ID`,
+`TAX_MODELS_PROXY_WINDOW_ID`, `NOT_POSTED_DOCS_PROXY_PROCESS_ID`) — not duplicated here. See also
+§8d's "Six matrix rows" note below: this proxy resolution is unrelated to (and does not close)
+that separate, provisioning-side gap — as of ETP-5116, ALL 3 of these windowless items (Monitor
+fiscal, Modelos fiscales, and now Not Posted Documents too, via the new standalone-process
+mechanism) also have a real provisioning-side grant (see that note); this display-side proxy
+resolution remains independently needed regardless, since it serves a different endpoint/purpose.
 
 ---
 
@@ -2449,6 +2840,31 @@ own access (this script's only job) is sufficient — `UserRoleCompositionServic
 changes at all for personal roles to inherit these new grants, the same way they already inherit
 window access.
 
+**ETP-5116 — `reconcileStandaloneProcessAccess`, a second, genuinely separate process-access
+mechanism (not layered on `reconcileProcessAccess` above).** `reconcileProcessAccess` can only
+ever reach a process that is a button on a window some role already has FULL access to — it has
+no path to a process whose `AD_Menu` entry has `ad_window_id IS NULL`. Three such processes were
+confirmed real (via the `AD_Menu.em_obuiapp_process_id` FK chain) and needed direct grants: the
+"Documentos no contabilizados" proxy (`D6AB95CE52D34E1599590526115E26C6`, Financiero only) and
+both `AgingReportHandler` processes — Receivables (`0D37A9F6109549DEB058373EF2DAEB6A`, Ventas +
+Financiero) and Payables (`EB4C4053F3B94A17A08D1DD7E89CEB7E`, Compras + Financiero); Financiero
+holds all three per the v2 target matrix. `TemplateRoleWindowAccess#standaloneProcessGrantsByRoleId()`
+is this mechanism's own per-role data (mirroring `byRoleId()`'s `WindowGrant` matrix, but a plain
+`List<String>` of `OBUIAPP_Process_Access` ids — there is no read-only variant, since
+`obuiapp_process_access` rows are always written with `IsReadWrite='Y'`), and
+`EnsureSystemRoleTemplatesScript#reconcileStandaloneProcessAccess` is called from the exact same
+per-role loop in `execute()` that calls `reconcileWindowAccess`/`reconcileProcessAccess`, so it
+runs on every `update.database` too.
+
+Both mechanisms write to the SAME `obuiapp_process_access` table for the SAME role, so a naive
+"delete every active row not in my desired set" stale-removal in the new method would delete the
+OTHER mechanism's window-button-derived grants (and vice-versa). `reconcileStandaloneProcessAccess`
+avoids that by scoping its delete to a fixed, known universe — every id it is EVER capable of
+granting across all four templates (`ALL_STANDALONE_PROCESS_IDS`) — so it can only ever touch rows
+it itself owns, never a row `reconcileProcessAccess` wrote. Insert-side idempotency reuses
+`upsertObuiappProcessAccess` as-is (insert if missing, reactivate if inactive, no-op if already
+active), the same guarantee every other reconciliation in this class already relies on.
+
 **Cross-template `AD_Window_Access` overlap — self-contained fix for a latent core bug (found via
 ETP-4878's overlapping matrix, QA/Sentinel; fixed here, not in core, per an explicit human
 decision).** Composing a personal role from 2+ templates that grant the SAME window used to throw
@@ -2631,20 +3047,84 @@ shared `com.etendoerp.go.roles.overlap` package (`ActiveTemplateInheritance`,
 loud `ConstraintViolationException` — see `ObuiappProcessAccessOverlapCorruptionGuard`'s own
 class/method javadoc for the full detail.
 
-**Twelve matrix rows are a documented, deliberate gap — not yet implementable.** Every one of
-them has NO `AD_Window_ID` at all backing it in this environment (either a pure custom/aggregate
-Schema Forge page with zero classic-AD entity, or a report-type spec whose access resolves via a
-different, non-window mechanism), so `AD_Window_Access` cannot express a grant for it at all:
-**Inicio (Dashboard)**, **Favoritos**, **Copilot (Asistente IA)**, **Informes de inventario**,
-**Documentos no contabilizados**, **Monitor fiscal**, **Modelos fiscales**, **Informes
-financieros**, **Informe Antigüedad de Cobros**, **Informe Antigüedad de Pagos**, **Escaneo
-inteligente**, **Configuración fiscal**. Full per-row resolution detail (which spec/artifact was
-checked, why it has no window) lives in `EnsureSystemRoleTemplatesScript`'s own class javadoc.
-Closing this gap needs either building the missing AD entity/spec first, or a different grant
-mechanism entirely — left for a follow-up ticket. Separately, "Roles", "Usuario", and "Conectar
-asistente de IA" DO resolve to real `AD_Window_ID`s but are deliberately granted to none of the
-four templates — the matrix shows "—" for all four non-Admin roles on all three, so they stay
-Admin-only.
+**Three matrix rows remain a documented, deliberate gap — not yet implementable (down from six as
+of the ETP-5116 arc).** Every one of them has NO `AD_Window_ID` at all backing it in this
+environment (either a pure custom/aggregate Schema Forge page with zero classic-AD entity, or a
+report-type spec whose access resolves via a different, non-window mechanism), so
+`AD_Window_Access` cannot express a grant for it at all: **Inicio (Dashboard)**, **Favoritos**,
+**Copilot (Asistente IA)**. Full per-row resolution detail (which spec/artifact was checked, why
+it has no window) lives in `EnsureSystemRoleTemplatesScript`'s own class javadoc. Closing this gap
+needs either building the missing AD entity/spec first, or a different grant mechanism entirely —
+left for a follow-up ticket. Separately, "Roles", "Usuario", and "Conectar asistente de IA" DO
+resolve to real `AD_Window_ID`s but are deliberately granted to none of the four templates — the
+matrix shows "—" for all four non-Admin roles on all three, so they stay Admin-only.
+
+**"Informes financieros" and "Escaneo inteligente" are off this list too — resolved by a later
+ETP-5116 pass, via two brand-new pseudo-`AD_Window` records created specifically as permission
+anchors for these frontend-only report pages (0 tabs each, never opened directly).** Neither is a
+proxy onto a pre-existing window like SII Monitor/Tax Report above — the new window IDs anchor
+these pages directly. "Informes financieros" (`D647D118F5014D00AF47A636B2CD0DD3`) is granted FULL
+to Financiero only. "Escaneo inteligente" (`33705E0F52874D91B0BB2FF8BB648B8E`) is granted FULL to
+all four non-Admin templates — a deliberate product decision that this page stays open to
+everyone once real access control exists, replacing what was previously just a cosmetic
+`hidden: true` in the frontend menu with zero real enforcement. Admin needs no explicit row for
+either: `NeoAccessHelper#isAdminOrClientAdmin` already bypasses window-access checks entirely for
+the System Administrator role and any per-client `is_client_admin='Y'` role.
+
+**"Informes de inventario" is off this list too — resolved by a still-later ETP-5116 pass, the
+same brand-new-pseudo-`AD_Window` pattern as the two rows above (`6346B88619F948F9A42224BDB0B239FA`,
+0 tabs, permission anchor only), but unlike them this one closes a CONFIRMED production
+over-permission rather than a merely-theoretical one.** `inventory-stock-report` is a raw-SQL
+`spec_type='R'` report handler (`InventoryStockReportHandler`) with no linked `AD_Process` and no
+`AD_TAB_ID` anywhere, so every authenticated role — including ones that should have none — could
+retrieve this data in production: `NeoAccessHelper#hasReportSpecAccess` falls through to its
+documented permissive default when there is no combination data to check at all, and the handler
+itself made zero access-control calls of its own. Per the v2 target matrix this window is granted
+FULL to Compras, Financiero and Almacén — Ventas gets nothing. Because the window/grant alone
+protects nothing for a spec whose data-serving path never consulted it,
+`InventoryStockReportHandler#handle` was ALSO given an explicit `NeoAccessHelper.hasWindowAccess`
+gate on this same window id, at the very top of the method — the actual security fix; the window
+and its grants are the permission anchor the gate checks against, not a fix on their own. The
+MCP tool-discovery/listing path for this spec may still surface it as discoverable (the same
+permissive fallback still applies there) — a known, separate, smaller informational-leak issue,
+out of scope for this pass. Admin needs no explicit row, same bypass rationale as above.
+
+**"Documentos no contabilizados", "Informe Antigüedad de Cobros" and "Informe Antigüedad de
+Pagos" are off this list — resolved by this ETP-5116 pass, but via the new standalone-process
+mechanism above, NOT `AD_Window_Access`.** All three target a real `OBUIAPP_Process_Access` grant
+with no backing window at all; see `reconcileStandaloneProcessAccess` above and
+`TemplateRoleWindowAccess`'s own javadoc for the per-role breakdown (Financiero holds all three;
+Ventas only the Receivables schedule; Compras only the Payables one).
+
+> **Scope note (ETP-5071/ETP-5116) — this gap is PROVISIONING-side, and is now fully closed.**
+> This paragraph is about `TemplateRoleWindowAccess`/`EnsureSystemRoleTemplatesScript` — whether
+> the 4 system role templates can be GRANTED `AD_Window_Access`/`OBUIAPP_Process_Access` for these
+> rows at all. Of the three names ETP-5071 first proxied on the DISPLAY side (`SFRolesOverview`'s
+> "Configuración > Roles" admin screen, §8c above, via `PROXY_MATRIX_ROWS`) — **Documentos no
+> contabilizados**, **Monitor fiscal**, **Modelos fiscales** — an earlier ETP-5116 pass closed the
+> provisioning-side gap for the latter two: Finance now holds a real `AD_Window_Access` grant on
+> the same two proxy windows (SII Monitor, Tax Report) via
+> `TemplateRoleWindowAccess#financeGrants()`, so they are OFF this row list entirely (see the
+> class's own javadoc). A LATER ETP-5116 pass separately closed **Configuración fiscal** too — not
+> via a proxy but via 3 DIRECT grants onto its real sibling windows (SII/TBAI/Verifactu
+> Configuration, product decision), so it is off this list as well. **Documentos no contabilizados
+> is now closed too**, via a genuinely new mechanism: its target is a standalone
+> `OBUIAPP_Process_Access` grant (process `D6AB95CE52D34E1599590526115E26C6`, the same id
+> `SFRolesOverview` already proxies for display) with no backing window at all, and
+> `EnsureSystemRoleTemplatesScript#reconcileProcessAccess` only ever DERIVES process access from a
+> role's FULL window grants — it has no path to a standalone process id that isn't reachable as a
+> button on any granted window. This pass built exactly that missing mechanism
+> (`reconcileStandaloneProcessAccess`, documented above) and Financiero now holds the grant.
+> **A fresh ETP-5116 investigation found Informe Antigüedad de Cobros/Pagos hit the exact same
+> gap, and both are now closed the same way:** `AgingReportHandler`'s own access gate was ALSO
+> found to be a real bug — hardcoded to the receivables OBUIAPP process regardless of the
+> request's `recOrPay`, so a payables request never actually checked payables access — and that
+> bug is now fixed (the gate branches on `recOrPay`). The target grants (Ventas → receivables
+> process, Compras → payables process, Financiero → both) were blocked on the identical missing
+> mechanism — both processes are real, confirmed OBUIAPP process ids with no backing `AD_Window`
+> at all (`AD_Menu.ad_window_id` is null on both "Receivables Aging Schedule" and "Payables Aging
+> Schedule"), so there was no window to proxy through either — and now hold their standalone
+> grants via the same new mechanism.
 
 **Still open (ETP-4877, unchanged by ETP-4878):** the ~21 existing tenants still holding
 per-client duplicated role copies are untouched by this mechanism (a migration, not a runtime
@@ -2958,6 +3438,99 @@ creating a fresh one, the same `createPersonalRole` path `resolveOrCreatePersona
 
 **Frontend counterpart:** Task 4 of this plan (`etendo_schema_forge`) — a thin client calling this
 endpoint with the same `UserId`/`Mode` params, wired to the `user` window's detail-header actions.
+
+---
+
+## 8j. Document Email History (SFDocumentEmailHistory Webhook, ETP-5069)
+
+`SFDocumentEmailHistory` (`GET /sws/neo/documentemailhistory?recordId=<id>[&specName=<spec>]` —
+reached ONLY through the NEO pseudo-spec bridge, §4.10/§4.11; no legacy `/webhooks/*` path, same
+as `SFAssignUserRoles` and every sibling authored after the pattern existed) returns one
+document's readable email send history, newest first. It backs the Emails card in the document
+preview panel (`tools/app-shell/src/windows/custom/shared/preview-cards/EmailsCard.jsx` in
+`etendo_schema_forge`), which until ETP-5069 was a static "no emails sent yet" placeholder even
+immediately after a successful send.
+
+**Access rule: DAL's own client/org filtering, and deliberately NO admin mode.** This is the one
+webhook in the family that neither enters `OBContext.setAdminMode()` nor runs a
+`NeoAccessHelper` role check, and the difference is structural rather than a relaxation.
+`SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview` must capture the caller's role first and then
+enter admin mode because they read client-0 (system-owned) menu and window metadata the caller
+cannot see on their own; having discarded DAL's filtering, they then have to re-implement the
+access decision by hand. `SFDocumentEmailHistory` reads only `ETGO_Email_Send_Log`, a
+Client/Organization table (`ACCESSLEVEL` 3) whose every row carries the sending tenant, so a plain
+`OBDal.createQuery(entityName, where)` is already scoped by `OBQuery`'s
+`filterOnReadableClients`/`filterOnReadableOrganizations` defaults (both `true`) — that filtering
+IS the access rule, and it is strictly stronger than a hand-rolled check. Calling
+`setFilterOnReadableClients(false)` here, or wrapping the read in admin mode, would be the
+security regression. There is also no role gate on purpose: reading the mail that was sent on
+documents you can already see is not an admin-only capability.
+
+**Response.** The bridge's usual envelope — `{"result": "<JSON string>"}`, where `result` is a
+STRING the caller parses, not a nested array — or `{"error": "<message>"}` (HTTP 500) when
+`recordId` is missing or the read fails. Results are capped at 200 rows and ordered by `SENT_AT`
+descending.
+
+```json
+[
+  {
+    "id": "A1B2...",
+    "sentAt": "2026-08-20T09:31:00Z",
+    "status": "SENT",
+    "recipientsTo": ["customer@example.com"],
+    "recipientsCc": [],
+    "subject": "Your invoice INV/0001",
+    "messageBody": "Please find the attached document.",
+    "downloadLink": "https://.../sws/neo/document-download?token=...",
+    "contractName": "sales-invoice-send",
+    "specName": "sales-invoice",
+    "errorMessage": null,
+    "sentBy": "Irina Urricelqui"
+  }
+]
+```
+
+- `sentAt` is an ISO-8601 **instant** (`DateTimeFormatter.ISO_INSTANT`), not a calendar date.
+- `recipientsTo`/`recipientsCc` are always JSON **arrays**. The column stores a joined string so
+  the backoffice window stays readable; the endpoint splits it so no caller has to guess the
+  separator.
+- `status` is one of `TransactionalEmailService`'s `STATUS_*` values — `SENT`,
+  `VALIDATION_FAILED`, `PROVIDER_FAILED`, `UNAUTHORIZED`, `DUPLICATE`, `THROTTLED`, `SUPPRESSED`,
+  `NO_RECIPIENT`. There is **no** `DELIVERY_FAILED` here; that value belongs to
+  `ETGO_INVITATION.STATUS`, a different subsystem.
+- `messageBody` is the operator's own message as they typed it, **not** the provider's rendered
+  `body` (a multi-kilobyte HTML document produced by `EmailLayout.render`). A send that used the
+  contract's default copy has no operator message and reports `null`; its `subject` is still
+  recorded.
+- `sentBy` is the sender's display name, resolved from the row's `CreatedBy`. That column holds
+  the real sending user precisely because `DalEmailSendLogStore` writes **without** admin mode —
+  which also closes the long-standing null-`userId` gap the client-0 anti-abuse ledger has.
+
+**Where the rows come from.** `TransactionalEmailService#recordAudit` — the single choke point all
+eight audit call sites funnel through — writes the history row immediately BEFORE
+`EmailSafetyStore#recordAudit`, so both land in the same transaction (the DAL safety store ends a
+successful send with `SessionHandler.commitAndStart()`). The gate is declarative:
+`EmailContract#logsSendHistory()` defaults to `false` and is overridden `true` once, in
+`DefaultDocumentSendEmailContract`, so the six document-send contracts opt in automatically while
+the account/auth family (invitation, reset password, login alert, organization joined) stays out.
+There is no contract-name list anywhere.
+
+**Two ledgers, on purpose.** `ETGO_Email_Send_Log` (this one) is client-level and readable:
+recipients in clear, subject, operator message, download link. `ETGO_Email_Safety` remains the
+anti-abuse ledger: client 0, SHA-256 recipient hashes, no subject and no body — an invariant
+asserted by `DalEmailSafetyStoreTest` and left untouched by ETP-5069.
+
+**Accepted limitation.** The rejection paths that answer before the `EmailSendContext` is built —
+unknown contract, forbidden provider field, failed authorization, unresolved recipient — write no
+audit row today and therefore write no history row either. A send that never got as far as a
+resolved recipient shows nothing in the panel. There is also no retention or purge process for the
+table yet; that was deferred on measured sizing.
+
+Storage mechanics, the write gate, the six-contracts-five-windows asymmetry and the retention
+sizing live in `docs/transactional-email-contracts.md` → *Readable send history (ETP-5069)*; the
+privacy decision and its operational rules live in the functional repo's
+`docs/ops/transactional-email-security.md` → *Email Audit Redaction & Storage Policy*. This section
+stays the reference for the endpoint itself.
 
 ---
 

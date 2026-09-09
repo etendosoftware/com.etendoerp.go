@@ -29,6 +29,7 @@ import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseAmount;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseIsoDate;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseStatementIds;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.truncate;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.validateLineAmounts;
 
 import com.etendoerp.go.schemaforge.BankStatementFormatDetector.StatementFormat;
 
@@ -63,6 +64,8 @@ import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatement;
 import org.openbravo.model.financialmgmt.payment.FIN_BankStatementLine;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
+
+import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 
 /**
  * NeoHandler powering the bank-statements endpoint introduced by ETP-4121.
@@ -137,11 +140,20 @@ public class BankStatementsHandler implements NeoHandler {
   // caller; this check turns that into a clean 400 instead of a raw DB trigger exception.
   private static final String MSG_HAS_MATCHED_LINES =
       "The statement has matched lines; unreconcile them before deleting";
+  /**
+   * Business rejection for {@code ?action=delete} on a statement whose financial account is
+   * connected to the bank through PSD2 / Salt Edge (see {@link #handleDelete}). Statements on such
+   * an account are re-fetched from the bank, so deleting one locally desynchronises the account.
+   * Kept in ENGLISH and byte-for-byte in sync with the frontend's {@code BACKEND_ERROR_MAP} key
+   * {@code backendError.statementBankConnectedNotDeletable} (lib/backendErrors.js), which matches
+   * it by EXACT text after {@code .trim()} — rewording this string silently drops users back to
+   * English.
+   */
+  private static final String MSG_STATEMENT_BANK_CONNECTED =
+      "Statements from a bank-connected account cannot be deleted.";
   private static final String MSG_LINE_REQUIRED = "At least one line is required";
   private static final String MSG_NO_VALID_LINES =
       "The file contains no valid lines to import";
-  private static final String MSG_ZERO_AMOUNT_LINE =
-      "Every line must have an amount in either Deposit or Withdrawal";
   private static final String CODE_NO_VALID_LINES = "NO_VALID_LINES";
   private static final String FIELD_DISCARDED_LINES = "discardedLines";
 
@@ -692,6 +704,13 @@ public class BankStatementsHandler implements NeoHandler {
    * {@code ?action=delete} — permanently removes a draft statement and its
    * lines. Only drafts can be deleted; processed statements are protected.
    * Body: {@code { "id": "..." }}.
+   *
+   * <p>A statement whose account is bank-connected (PSD2 / Salt Edge) is rejected with a 409
+   * ({@link #MSG_STATEMENT_BANK_CONNECTED}): those statements are owned by the bank feed, so
+   * deleting one locally only desynchronises the account. This is the server-side enforcement for
+   * the bulk path, the REST API and MCP — the UI no longer disables the delete affordance, it lets
+   * the attempt through and explains the failure (ETP-5111). Note this also covers an old manual
+   * statement on an account that has since been connected.
    */
   private NeoResponse handleDelete(NeoContext context) {
     JSONObject body = context.getRequestBody();
@@ -702,6 +721,13 @@ public class BankStatementsHandler implements NeoHandler {
       // a statement that is about to vanish.
       BankStatementLineAggregateHandler.suppress();
       FIN_BankStatement statement = requireDraft(body.optString(FIELD_ID, null));
+      // Same predicate as every other PSD2 connection check in this module. It is kept in
+      // lockstep with the copies in the payment-registration, PIS-payment and bank-connection
+      // handlers, so a change to what "connected" means has to touch all of them.
+      if (BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED
+          .equals(statement.getAccount().getPSD2ConnectionStatus())) {
+        return NeoResponse.error(409, MSG_STATEMENT_BANK_CONNECTED);
+      }
       // A reactivated draft can still carry matched lines (ETP-4921 — reactivation no longer
       // requires them to be unreconciled first). Deleting the whole statement would delete
       // those lines too, which the core trigger never allows — reject up front with a clear
@@ -899,12 +925,7 @@ public class BankStatementsHandler implements NeoHandler {
       line.setTransactionDate(parseIsoDate(l.optString("date", null), statement.getTransactionDate()));
       BigDecimal crAmount = parseAmount(l.optString("in", null));
       BigDecimal drAmount = parseAmount(l.optString("out", null));
-      // A line the user actually filled in must carry an amount. Unlike the file
-      // import — which silently drops amount-less rows, as Classic does — here it
-      // is a validation error: the manual form has a user to fix it.
-      if (crAmount.signum() == 0 && drAmount.signum() == 0) {
-        throw new OBException(MSG_ZERO_AMOUNT_LINE);
-      }
+      validateLineAmounts(crAmount, drAmount);
       line.setCramount(crAmount);
       line.setDramount(drAmount);
 

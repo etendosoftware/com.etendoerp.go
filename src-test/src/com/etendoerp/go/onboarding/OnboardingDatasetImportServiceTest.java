@@ -251,9 +251,11 @@ public class OnboardingDatasetImportServiceTest {
   }
 
   /**
-   * ETP-5079: a tenant with no financial account is now a VALID import — the curated dataset
-   * deliberately stopped seeding "Caja"/"Cuenta de Banco"/"Tarjeta", so keeping them in the gate
-   * would make every single onboarding fail.
+   * ETP-5079: a tenant with no financial account is now a VALID import — "Caja"/"Cuenta de Banco"/
+   * "Tarjeta" are deliberately dropped from the onboarding dataset (by
+   * {@code OnboardingDatasetNormalizer}'s {@code DemoMasterDataFilter}; the source XML still ships
+   * them for the GOClient sample client), so keeping them in the gate would make every single
+   * onboarding fail.
    */
   @Test
   @DisplayName("validateImportedSeed passes when the tenant has no financial accounts")

@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.belongsToAccount;
+import static com.etendoerp.go.schemaforge.ReconciliationSupport.isOnDraftStatement;
 import static com.etendoerp.go.schemaforge.ReconciliationSupport.nullSafe;
 
 import java.math.BigDecimal;
@@ -68,7 +69,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  * <p><b>Tolerance semantics — deliberate divergence, documented on purpose.</b> The gate reuses the
  * per-account {@code EM_ETGO_Amount_Tolerance} percentage, and reads an unset/zero percentage as
  * "no difference may be posted", i.e. the action is inert until an administrator configures it.
- * Note that {@code AutoMatchSupport.signalGroupTolerance} reads the SAME column with the opposite
+ * Note that {@code MatchTolerances.signalGroupTolerance} reads the SAME column with the opposite
  * convention (zero means "one cent of slack, never zero"). Two meanings for one field is a support
  * trap, so the 400 message spells out the configured percentage and the resulting limit.
  */
@@ -216,6 +217,14 @@ final class ReconciliationDifferenceSupport {
     NeoResponse stateError = checkLineState(line, snap);
     if (stateError != null) {
       return Preflight.failed(stateError);
+    }
+    // ETP-5121: a partially reconciled group survives its statement's reactivation intact, so this
+    // path stays reachable on a draft statement even though the Automatch no longer proposes one.
+    // Placed after checkLineState so an already-reconciled line keeps its more specific answer,
+    // matching reconcileGroup and prepareGroup. Everything here is read-only, so returning is safe.
+    if (isOnDraftStatement(line)) {
+      return Preflight.failed(NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT));
     }
 
     NeoResponse toleranceError = checkTolerance(handler, accountId, snap);

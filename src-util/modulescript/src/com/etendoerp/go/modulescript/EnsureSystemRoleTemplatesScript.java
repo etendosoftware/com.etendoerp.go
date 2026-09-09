@@ -19,6 +19,7 @@ package com.etendoerp.go.modulescript;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -72,10 +73,31 @@ import org.openbravo.modulescript.ModuleScript;
  * <p><b>ETP-4878 — real permission matrix (supersedes the old 2-window-per-role smoke test).</b>
  * Each template now carries the full window-access matrix from the ticket (Ventas/Compras/
  * Financiero/Almacén columns; "Admin" stays client-level and is out of scope). Grant counts:
- * Sales 13, Purchasing 12, Finance 28, Inventory 13 (34 distinct windows, some shared across more
- * than one role at different access levels — e.g. "Categoría del producto" is read-only for
- * Sales/Purchasing but full for Finance/Inventory); ETP-5075 later added window 107 (Receipt-
- * Invoice Link, read-only) to Purchasing and Finance, +1 grant each over the original matrix.
+ * Sales 13, Purchasing 14, Finance 34, Inventory 15 (76 grants, 42 distinct windows, some shared
+ * across more than one role at different access levels — e.g. "Categoría del producto" is
+ * read-only for Sales/Purchasing but full for Finance/Inventory); ETP-5075 added window 107
+ * (Receipt-Invoice Link, read-only) to Purchasing and Finance, +1 grant each over the original
+ * matrix. ETP-5116 then (a) removed 2 known over-grants — {@code full("168")} (Inventario
+ * físico) from BOTH Sales and Finance, and {@code full("144")} (Categoría del producto) from
+ * Finance — since neither role should have had that access, (b) added 2 new proxy grants to
+ * Finance for the previously-windowless "Monitor fiscal"/"Modelos fiscales" rows (SII Monitor,
+ * {@code FEF76C3E0F104F06A89AAD15A4A4A35C}, and Tax Report, {@code 3E8FEA1EA7404D979306C9EE7FD2E7E8}
+ * — same two proxy ids {@code SFRolesOverview} already uses for its own read-side resolution), (c),
+ * in a later ETP-5116 pass, added 3 more direct (non-proxy) grants to Finance for
+ * "Configuración fiscal" — SII Configuration ({@code C1D3A2A017AC4B82B9FEE6F4D2A0C55A}), TBAI
+ * Configuration ({@code C327DE215AC945F69363905840118177}), and Verifactu Configuration
+ * ({@code 27A453FA86974745977672F1A8DCCEFF}), a product decision confirming that label maps to
+ * exactly those 3 real sibling windows, (d), in a still-later ETP-5116 pass, added 2 more
+ * grants for two brand-new pseudo-window permission anchors: "Informes financieros" / Financial
+ * Reports ({@code D647D118F5014D00AF47A636B2CD0DD3}, Finance-only) and "Escaneo inteligente" /
+ * Smart Scan ({@code 33705E0F52874D91B0BB2FF8BB648B8E}, all four non-Admin templates), and (e), in
+ * a yet-later ETP-5116 pass, added a third brand-new pseudo-window permission anchor: "Informes de
+ * inventario" / Inventory Stock Report ({@code 6346B88619F948F9A42224BDB0B239FA}), granted to
+ * Purchasing, Finance and Inventory — NOT Sales. Net effect of the whole ETP-5116 arc: Sales +0
+ * (-1 over-grant, +1 Smart Scan), Purchasing +2 (Smart Scan, Inventory Stock Report), Finance +6
+ * net (2 removed, 8 added), Inventory +2 (Smart Scan, Inventory Stock Report) — 42 distinct
+ * windows total (39 before the Financial Reports/Smart Scan pass, +2 for those, +1 more for
+ * Inventory Stock Report; Smart Scan counts once despite being granted to all four roles).
  * "Asientos manuales" resolves to the
  * <b>Simple G/L Journal</b> window ({@code B917E8A7B0864ACEA9D941E3B7494E53}), not the classic
  * {@code G/L Journal} (window {@code 132}, which literally carries the ES label "Asientos
@@ -85,7 +107,8 @@ import org.openbravo.modulescript.ModuleScript;
  *
  * <p><b>ETP-4830 item #6.3 — process/report access, mechanical follow-up to the window matrix
  * above.</b> A real-DB audit found all four templates had ZERO {@code AD_Process_Access}/
- * {@code obuiapp_process_access} rows despite the (then-64, now 66) window grants — a composed user could open
+ * {@code obuiapp_process_access} rows despite the (then-64, now 76 after ETP-5075/ETP-5116) window
+ * grants — a composed user could open
  * a window but not click any action button on it. {@link #reconcileProcessAccess} closes this
  * for every window a role has FULL access to: every classic/OBUIAPP process reachable as a
  * button on that window is granted, queried LIVE from the DB every run (not a hardcoded list,
@@ -96,44 +119,107 @@ import org.openbravo.modulescript.ModuleScript;
  * not tied to any window button remain a separate, known gap. See that method's own javadoc for
  * the full rule and rationale.</p>
  *
- * <p><b>Twelve matrix rows are deliberately NOT implemented — known gap, follow-up ticket
- * pending.</b> Every one of these has NO {@code AD_Window_ID} at all backing it (either a pure
- * custom/aggregate Schema Forge page with zero classic-AD entity, or a report-type spec whose
+ * <p><b>Three matrix rows are deliberately NOT implemented — known gap, follow-up ticket pending
+ * (down from six as of this later ETP-5116 pass).</b> Every one of these has NO {@code AD_Window_ID}
+ * at all backing it (either a pure custom/aggregate Schema Forge page with zero classic-AD
+ * entity, or a report-type spec whose
  * access is resolved via a different, non-window mechanism) — {@code AD_Window_Access} cannot
- * express a grant against something that has no window. Listed here so the gap is visible from
- * the class that would otherwise silently look complete:
+ * express a grant against something that has no window. "Monitor fiscal" and "Modelos fiscales"
+ * used to be on this list too, but ETP-5116 resolved both for Finance via a window PROXY grant
+ * (SII Monitor / Tax Report — see {@code TemplateRoleWindowAccess}'s own javadoc), and
+ * "Configuración fiscal" used to be here too but a later ETP-5116 pass resolved it for Finance via
+ * 3 DIRECT (non-proxy) grants onto its real sibling windows (SII/TBAI/Verifactu Configuration —
+ * see that same javadoc). "Informes financieros", "Escaneo inteligente" and "Informes de
+ * inventario" also used to be on this list, but later ETP-5116 passes resolved all three too — via
+ * three brand-new pseudo-{@code AD_Window} records (0 tabs, permission anchors only) created
+ * specifically for these frontend-only report pages, so none is a proxy onto a pre-existing
+ * window. None of these six are windowless gaps anymore. Listed here so the remaining gap is
+ * visible from the class that would otherwise silently look complete:
  * <ul>
  *   <li><b>Inicio (Dashboard)</b> — {@code dashboard} spec is pure widget-handler qualifiers, no
  *       {@code ad_tab_id}/{@code ad_window_id} anywhere.</li>
  *   <li><b>Favoritos</b> — no backing AD entity of any kind found (app-shell client feature).</li>
  *   <li><b>Copilot (Asistente IA)</b> — {@code AD_Menu} "Copilot" exists but its
  *       {@code ad_window_id} is null (points at an embedded chat feature, not a window).</li>
- *   <li><b>Informes de inventario</b> — {@code inventory-stock-report} spec, type R, no window,
- *       no tab; pure webhook handler.</li>
  *   <li><b>Documentos no contabilizados</b> — {@code not-posted-documents} spec, type W but
- *       {@code ad_window_id} null; fully custom, no classic window backing it.</li>
- *   <li><b>Monitor fiscal</b> — {@code fiscal-monitor} artifact is {@code category: "custom"},
- *       {@code entities: {}}; not even pushed to {@code ETGO_SF_SPEC}.</li>
- *   <li><b>Modelos fiscales</b> — {@code fiscal-models} artifact has no {@code decisions.json} at
- *       all yet (only mock data) — earliest possible pipeline stage.</li>
+ *       {@code ad_window_id} null; fully custom, no classic window backing it. RESOLVED by this
+ *       ETP-5116 pass, but NOT via {@link #reconcileProcessAccess} (which only ever DERIVES
+ *       process access from a role's FULL window grants): Financiero now holds a standalone
+ *       {@code OBUIAPP_Process_Access} grant on process {@code D6AB95CE52D34E1599590526115E26C6}
+ *       (proxying "Not Posted Documents") via the new {@link #reconcileStandaloneProcessAccess}.</li>
+ *   <li><b>Informes de inventario</b> — {@code inventory-stock-report} spec, type R, no window,
+ *       no tab; pure webhook handler ({@code InventoryStockReportHandler}). Confirmed
+ *       over-permissive in production: every authenticated role could retrieve this data because
+ *       {@code NeoAccessHelper#hasReportSpecAccess} falls through to its documented permissive
+ *       default with no combination data to check. RESOLVED by a yet-later ETP-5116 pass: a
+ *       brand-new pseudo-{@code AD_Window} ({@code 6346B88619F948F9A42224BDB0B239FA}, 0 tabs,
+ *       permission anchor only) was created, Purchasing/Finance/Inventory now hold a real, direct
+ *       {@code AD_Window_Access} grant on it (Sales gets nothing), AND — unlike the two anchors
+ *       above — {@code InventoryStockReportHandler#handle} was also given an explicit {@code
+ *       NeoAccessHelper#hasWindowAccess} gate of its own, since this handler makes zero
+ *       access-control calls on its own and the window grant alone would protect nothing.</li>
  *   <li><b>Informes financieros</b> — no single window backs this label; multiple jsreport-print
  *       candidates exist ({@code profit-loss}, {@code balance-sheet}, {@code tax-report}, the
  *       {@code reports} index, …), none with an {@code AD_Window_ID} — likely a menu category,
- *       not one window.</li>
+ *       not one window. RESOLVED by a later ETP-5116 pass: a brand-new pseudo-{@code AD_Window}
+ *       ({@code D647D118F5014D00AF47A636B2CD0DD3}, 0 tabs, permission anchor only) was created as
+ *       an anchor for the {@code report-viewer-finance} menu item, and Financiero now holds a
+ *       real, direct {@code AD_Window_Access} grant on it — Ventas/Compras/Almacén get
+ *       nothing.</li>
  *   <li><b>Informe Antigüedad de Cobros</b> — {@code aging-receivable} spec exists (type R) but
  *       has neither {@code ad_window_id} nor {@code ad_tab_id}; same report-access-mechanism gap
- *       as ETP-4596.</li>
+ *       as ETP-4596. RESOLVED by this ETP-5116 pass via {@link #reconcileStandaloneProcessAccess}:
+ *       Ventas (and Financiero) now hold a standalone grant on the real, confirmed OBUIAPP process
+ *       {@code 0D37A9F6109549DEB058373EF2DAEB6A} (Receivables Aging Schedule; {@code AD_Menu} row
+ *       {@code CC226771DE354AEEAA5D69F696F1A676}, {@code ad_window_id} still null — there is no
+ *       window to proxy through, hence the standalone mechanism).</li>
  *   <li><b>Informe Antigüedad de Pagos</b> — no {@code ETGO_SF_SPEC} row exists at all (only a
- *       jsreport template artifact); more severe than its sibling above.</li>
+ *       jsreport template artifact); more severe than its sibling above. RESOLVED the same way:
+ *       Compras (and Financiero) now hold a standalone grant on OBUIAPP process
+ *       {@code EB4C4053F3B94A17A08D1DD7E89CEB7E} (Payables Aging Schedule; {@code AD_Menu} row
+ *       {@code B6D984F9FEFB412D827A37BACF2F1D66}, also {@code ad_window_id} null).</li>
  *   <li><b>Escaneo inteligente</b> — {@code smart-scan} artifact is an aggregate/custom route
- *       page ({@code /smart-scan}); no {@code ad_window}/{@code ad_menu} entry whatsoever.</li>
- *   <li><b>Configuración fiscal</b> — {@code fiscal-config} artifact is {@code category:
- *       "configuration"}, {@code entities: {}}; not in {@code ETGO_SF_SPEC}.</li>
+ *       page ({@code /smart-scan}); no {@code ad_window}/{@code ad_menu} entry whatsoever.
+ *       RESOLVED by a later ETP-5116 pass: a brand-new pseudo-{@code AD_Window} ({@code
+ *       33705E0F52874D91B0BB2FF8BB648B8E}, 0 tabs, permission anchor only) was created as an
+ *       anchor for this page's menu item, and ALL FOUR non-Admin templates now hold a real,
+ *       direct {@code AD_Window_Access} grant on it — a deliberate product decision that this
+ *       page stays open to everyone once real access control exists, replacing what was
+ *       previously just a cosmetic {@code hidden: true} in the frontend menu with zero real
+ *       enforcement behind it.</li>
  * </ul>
  * See {@code docs/neo-headless.md} (in this module) for the same list with the research
- * dispatch's full resolution table. Populating these 12 requires either building the missing AD
- * entity/spec first or a different, non-{@code AD_Window_Access} grant mechanism — out of scope
- * for this script until that follow-up ticket lands.</p>
+ * dispatch's full resolution table. Populating the remaining 3 (the ones NOT marked RESOLVED
+ * above) requires either building the missing AD entity/spec first or a different, non-{@code
+ * AD_Window_Access} grant mechanism — out of scope for this script until that follow-up ticket
+ * lands.</p>
+ *
+ * <p><b>ETP-5116 — {@link #reconcileStandaloneProcessAccess}, a new mechanism parallel to {@link
+ * #reconcileProcessAccess}.</b> The window-button-derived mechanism above can only ever reach a
+ * process that is a button on a window some role already has FULL access to — it has no path to a
+ * process whose {@code AD_Menu} entry has {@code ad_window_id IS NULL}. Three such processes were
+ * confirmed real via the {@code AD_Menu.em_obuiapp_process_id} FK chain (see the windowless-gap
+ * list above) and needed direct grants: the "Documentos no contabilizados" proxy
+ * ({@code D6AB95CE52D34E1599590526115E26C6}, Financiero only) and the two
+ * {@code AgingReportHandler} processes, Receivables ({@code 0D37A9F6109549DEB058373EF2DAEB6A},
+ * Ventas + Financiero) and Payables ({@code EB4C4053F3B94A17A08D1DD7E89CEB7E}, Compras +
+ * Financiero) — Financiero holds all three per the v2 target matrix. {@link
+ * #standaloneProcessGrantsByRoleId()} is this script's own inlined copy of {@code
+ * TemplateRoleWindowAccess#standaloneProcessGrantsByRoleId()} (same self-containment rule as the
+ * window matrix above), and {@link #reconcileStandaloneProcessAccess} is called from the exact
+ * same per-role loop in {@link #execute()} that calls {@link #reconcileWindowAccess}/{@link
+ * #reconcileProcessAccess}, so it runs on every {@code update.database} too.
+ *
+ * <p>Deliberately a genuinely separate mechanism, not layered on top of {@link
+ * #reconcileProcessAccess}: it grants every desired process id directly, independent of any
+ * window grant, reusing {@link #upsertObuiappProcessAccess} as-is for idempotent insert (no
+ * duplicate row on a re-run — the existing check-then-insert/reactivate guard already handles
+ * that). The one new piece is stale-removal: both mechanisms write to the SAME {@code
+ * obuiapp_process_access} table for the SAME role, so a naive "delete every active row not in
+ * my desired set" would delete the OTHER mechanism's grants. {@link
+ * #removeStaleStandaloneProcessAccess} avoids that by scoping its delete to {@link
+ * #ALL_STANDALONE_PROCESS_IDS} — the fixed, known universe of ids this mechanism ever grants —
+ * so it can only ever touch rows it itself owns, never a window-button-derived grant.</p>
  *
  * <p><b>"Roles", "Usuario", and "Conectar asistente de IA" resolve to real {@code AD_Window_ID}s
  * (111, 108, and {@code 6006F3B3DDF74D618CBEE21BEFD398DC} respectively) but are deliberately NOT
@@ -179,6 +265,22 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
   private static final String PURCHASING_ROLE_ID = "5E279F5102F9410F9B8CCBA424741F46";
   private static final String INVENTORY_ROLE_ID = "73581A7B4F414A2C9059C83CE7BE97BF";
 
+  /**
+   * {@code AD_Window_ID} for the "Escaneo inteligente" / Smart Scan pseudo-window permission
+   * anchor (ETP-5116) — granted to all four non-Admin templates. Inlined copy of
+   * {@code TemplateRoleWindowAccess#SMART_SCAN_WINDOW_ID} — see that class's javadoc for why this
+   * window exists.
+   */
+  private static final String SMART_SCAN_WINDOW_ID = "33705E0F52874D91B0BB2FF8BB648B8E";
+
+  /**
+   * {@code AD_Window_ID} for the "Informes de inventario" / Inventory Stock Report pseudo-window
+   * permission anchor (ETP-5116) — granted to Compras/Financiero/Almacén, NOT Ventas. Inlined
+   * copy of {@code TemplateRoleWindowAccess#INVENTORY_STOCK_REPORT_WINDOW_ID} — see that class's
+   * javadoc for why this window exists.
+   */
+  private static final String INVENTORY_STOCK_REPORT_WINDOW_ID = "6346B88619F948F9A42224BDB0B239FA";
+
   /** English names for the role INSERT, keyed by the literal ids above. */
   private static final Map<String, String> ROLE_NAMES_BY_ID = namesByRoleId();
 
@@ -223,9 +325,12 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
   }
 
   /**
-   * Sales ("Ventas") column of the ETP-4878 matrix — 13 grants. Comments name the matrix row in
-   * Spanish (matching the ticket) followed by the AD_Window's own English name. Inlined copy of
-   * {@code TemplateRoleWindowAccess#salesGrants()}.
+   * Sales ("Ventas") column of the ETP-4878 matrix — 13 grants (13 in the original ticket matrix,
+   * minus the {@code full("168")} over-grant on Inventario físico / Physical Inventory removed by
+   * ETP-5116, plus {@code full("33705E0F52874D91B0BB2FF8BB648B8E")} — Smart Scan, granted to all
+   * four non-Admin templates per a later ETP-5116 pass, see class javadoc). Comments name the
+   * matrix row in Spanish (matching the ticket) followed by the AD_Window's own English name.
+   * Inlined copy of {@code TemplateRoleWindowAccess#salesGrants()}.
    */
   private static List<WindowGrant> salesGrants() {
     return List.of(
@@ -234,22 +339,27 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("143"),                                           // Pedido de venta — Sales Order
         full("169"),                                           // Albarán de venta — Goods Shipment
         full("167"),                                           // Factura de venta — Sales Invoice
-        full("FF808081330213E60133021822E40007"),              // Albarán de devolución — Return from Customer
+        full("123271B9AD60469BAE8A924841456B63"),              // Albarán de devolución — Return Receipt (ETP-5116, corrects the dead FF808081... window)
         full("140"),                                           // Producto — Product
         readOnly("144"),                                       // Categoría del producto — Product Category
-        full("168"),                                           // Inventario físico — Physical Inventory
         full("E547CE89D4C04429B6340FFA44E70716"),              // Cobro — Payment In
         full("146"),                                           // Tarifa — Price List
         readOnly("141"),                                       // Condiciones de pago — Payment Term
-        readOnly("192"));                                      // Categoría de contacto — Business Partner Category
+        readOnly("192"),                                       // Categoría de contacto — Business Partner Category
+        full(SMART_SCAN_WINDOW_ID));             // Escaneo inteligente — Smart Scan (ETP-5116)
   }
 
   /**
-   * Purchasing ("Compras") column of the ETP-4878 matrix — 11 grants, plus {@code 107}
-   * (Receipt-Invoice Link, added after the original matrix by ETP-5075 — granted FULL so its
-   * accounting posting action, a {@code POST} on the action sub-endpoint, clears
-   * {@code NeoAccessHelper#hasWindowAccess}'s {@code IsReadWrite='Y'} requirement for write
-   * methods; the data itself stays read-only via {@code ETGO_SF_ENTITY}, a separate gate).
+   * Purchasing ("Compras") column of the ETP-4878 matrix — 14 grants: 11 from the original
+   * matrix, plus {@code 107} (Receipt-Invoice Link, added after the original matrix by
+   * ETP-5075 — granted FULL so its accounting posting action, a {@code POST} on the action
+   * sub-endpoint, clears {@code NeoAccessHelper#hasWindowAccess}'s {@code IsReadWrite='Y'}
+   * requirement for write methods; the data itself stays read-only via {@code ETGO_SF_ENTITY}, a
+   * separate gate), plus {@code full("33705E0F52874D91B0BB2FF8BB648B8E")} — Smart Scan, granted
+   * to all four non-Admin templates per a later ETP-5116 pass, plus {@code
+   * full("6346B88619F948F9A42224BDB0B239FA")} — Informes de inventario / Inventory Stock Report,
+   * granted to Compras/Financiero/Almacén (NOT Ventas) per a still-later ETP-5116 pass, see class
+   * javadoc.
    * Inlined copy of {@code TemplateRoleWindowAccess#purchasingGrants()}.
    */
   private static List<WindowGrant> purchasingGrants() {
@@ -259,19 +369,32 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("184"),                                          // Albarán de compra — Goods Receipt
         full("183"),                                          // Factura de compra — Purchase Invoice
         full("107"),                                          // Relación albarán-factura — Receipt-Invoice Link (ETP-5075)
-        full("C50A8AEE6F044825B5EF54FAAE76826F"),              // Devolución a proveedor — Return to Vendor
+        full("273673D2ED914C399A6C51DB758BE0F9"),              // Devolución a proveedor — Return to Vendor Shipment (ETP-5116, corrects the dead C50A8AEE window)
         full("140"),                                          // Producto — Product
         readOnly("144"),                                       // Categoría del producto — Product Category
         full("6F8F913FA60F4CBD93DC1D3AA696E76E"),              // Pago — Payment Out
         full("146"),                                          // Tarifa — Price List
         readOnly("141"),                                       // Condiciones de pago — Payment Term
-        readOnly("192"));                                      // Categoría de contacto — Business Partner Category
+        readOnly("192"),                                       // Categoría de contacto — Business Partner Category
+        full(SMART_SCAN_WINDOW_ID),              // Escaneo inteligente — Smart Scan (ETP-5116)
+        full(INVENTORY_STOCK_REPORT_WINDOW_ID));             // Informes de inventario — Inventory Stock Report (ETP-5116)
   }
 
   /**
-   * Finance ("Financiero") column of the ETP-4878 matrix — 27 grants, plus {@code 107}
-   * (Receipt-Invoice Link, ETP-5075 — see {@link #purchasingGrants()}). Inlined copy of
-   * {@code TemplateRoleWindowAccess#financeGrants()}.
+   * Finance ("Financiero") column of the ETP-4878 matrix — 34 grants: 25 from the original ticket
+   * matrix (27 minus the two ETP-5116 over-grants removed below — Categoría del producto /
+   * Product Category and Inventario físico / Physical Inventory, neither of which Financiero
+   * should have access to), plus {@code 107} (Receipt-Invoice Link, ETP-5075 — see {@link
+   * #purchasingGrants()}), 2 ETP-5116 proxy grants (SII Monitor and Tax Report — see the class
+   * javadoc's "Monitor fiscal"/"Modelos fiscales" note), 3 more ETP-5116 grants for
+   * "Configuración fiscal" (SII/TBAI/Verifactu Configuration — see the class javadoc's own note),
+   * 2 more ETP-5116 grants from a later pass: "Informes financieros" / Financial Reports
+   * ({@code D647D118F5014D00AF47A636B2CD0DD3}, Financiero-only) and "Escaneo inteligente" / Smart
+   * Scan ({@code 33705E0F52874D91B0BB2FF8BB648B8E}, shared with every other non-Admin template),
+   * and 1 more grant from a still-later ETP-5116 pass: "Informes de inventario" / Inventory Stock
+   * Report ({@code 6346B88619F948F9A42224BDB0B239FA}, shared with Compras/Almacén, NOT Ventas —
+   * see class javadoc).
+   * Inlined copy of {@code TemplateRoleWindowAccess#financeGrants()}.
    */
   private static List<WindowGrant> financeGrants() {
     return List.of(
@@ -283,8 +406,6 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("183"),                                          // Factura de compra — Purchase Invoice
         full("107"),                                          // Relación albarán-factura — Receipt-Invoice Link (ETP-5075)
         full("140"),                                          // Producto — Product
-        full("144"),                                          // Categoría del producto — Product Category
-        full("168"),                                          // Inventario físico — Physical Inventory
         full("139"),                                          // Almacén — Warehouse and Storage Bins
         full("E547CE89D4C04429B6340FFA44E70716"),              // Cobro — Payment In
         full("6F8F913FA60F4CBD93DC1D3AA696E76E"),              // Pago — Payment Out
@@ -302,28 +423,42 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         full("137"),                                          // Impuesto — Tax Rate
         full("138"),                                          // Categoría de impuesto — Tax Category
         full("192"),                                          // Categoría de contacto — Business Partner Category
-        full("6FEBA130CDE24CC09041FFA6117ADFA9"));             // Registro descarga tipos de cambio — Conversion Rate Downloader Log
+        full("6FEBA130CDE24CC09041FFA6117ADFA9"),             // Registro descarga tipos de cambio — Conversion Rate Downloader Log
+        full("FEF76C3E0F104F06A89AAD15A4A4A35C"),              // SII Monitor — proxies "Monitor Fiscal" (ETP-5116)
+        full("3E8FEA1EA7404D979306C9EE7FD2E7E8"),              // Tax Report — proxies "Modelos Fiscales" (ETP-5116)
+        full("C1D3A2A017AC4B82B9FEE6F4D2A0C55A"),              // SII Configuration — "Configuración fiscal" (ETP-5116)
+        full("C327DE215AC945F69363905840118177"),              // TBAI Configuration — "Configuración fiscal" (ETP-5116)
+        full("27A453FA86974745977672F1A8DCCEFF"),              // Verifactu Configuration — "Configuración fiscal" (ETP-5116)
+        full("D647D118F5014D00AF47A636B2CD0DD3"),              // Informes financieros — Financial Reports (ETP-5116, Financiero-only)
+        full(SMART_SCAN_WINDOW_ID),              // Escaneo inteligente — Smart Scan (ETP-5116)
+        full(INVENTORY_STOCK_REPORT_WINDOW_ID));             // Informes de inventario — Inventory Stock Report (ETP-5116)
   }
 
   /**
-   * Inventory ("Almacén") column of the ETP-4878 matrix — 13 grants. Inlined copy of
-   * {@code TemplateRoleWindowAccess#inventoryGrants()}.
+   * Inventory ("Almacén") column of the ETP-4878 matrix — 15 grants: 13 from the original
+   * matrix, plus {@code full("33705E0F52874D91B0BB2FF8BB648B8E")} — Smart Scan, granted to all
+   * four non-Admin templates per a later ETP-5116 pass, plus {@code
+   * full("6346B88619F948F9A42224BDB0B239FA")} — Informes de inventario / Inventory Stock Report,
+   * granted to Compras/Financiero/Almacén (NOT Ventas) per a still-later ETP-5116 pass, see class
+   * javadoc. Inlined copy of {@code TemplateRoleWindowAccess#inventoryGrants()}.
    */
   private static List<WindowGrant> inventoryGrants() {
     return List.of(
         readOnly("123"),                                      // Contactos — Business Partner
         readOnly("143"),                                       // Pedido de venta — Sales Order
         full("169"),                                          // Albarán de venta — Goods Shipment
-        full("FF808081330213E60133021822E40007"),              // Albarán de devolución — Return from Customer
+        full("123271B9AD60469BAE8A924841456B63"),              // Albarán de devolución — Return Receipt (ETP-5116, corrects the dead FF808081... window)
         readOnly("181"),                                       // Pedido de compra — Purchase Order
         full("184"),                                          // Albarán de compra — Goods Receipt
-        full("C50A8AEE6F044825B5EF54FAAE76826F"),              // Devolución a proveedor — Return to Vendor
+        full("273673D2ED914C399A6C51DB758BE0F9"),              // Devolución a proveedor — Return to Vendor Shipment (ETP-5116, corrects the dead C50A8AEE window)
         full("140"),                                          // Producto — Product
         full("144"),                                          // Categoría del producto — Product Category
         full("168"),                                          // Inventario físico — Physical Inventory
         full("170"),                                          // Movimiento entre almacenes — Goods Movements
         full("800076"),                                       // Consumo interno — Internal Consumption
-        full("139"));                                          // Almacén — Warehouse and Storage Bins
+        full("139"),                                          // Almacén — Warehouse and Storage Bins
+        full(SMART_SCAN_WINDOW_ID),              // Escaneo inteligente — Smart Scan (ETP-5116)
+        full(INVENTORY_STOCK_REPORT_WINDOW_ID));             // Informes de inventario — Inventory Stock Report (ETP-5116)
   }
 
   /**
@@ -340,16 +475,74 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
     return map;
   }
 
+  /**
+   * Financiero's ETP-5116 standalone-process column — all three: the "Documentos no
+   * contabilizados" proxy plus BOTH aging schedules, per the v2 target matrix. Inlined copy of
+   * {@code TemplateRoleWindowAccess#financeStandaloneProcessGrants()}.
+   */
+  private static List<String> financeStandaloneProcessGrants() {
+    return List.of(
+        "D6AB95CE52D34E1599590526115E26C6",   // Documentos no contabilizados (Not Posted Documents proxy)
+        "0D37A9F6109549DEB058373EF2DAEB6A",   // Informe Antigüedad de Cobros (Receivables Aging Schedule)
+        "EB4C4053F3B94A17A08D1DD7E89CEB7E");  // Informe Antigüedad de Pagos (Payables Aging Schedule)
+  }
+
+  /**
+   * Ventas's ETP-5116 standalone-process column — only the Receivables aging schedule. Inlined
+   * copy of {@code TemplateRoleWindowAccess#salesStandaloneProcessGrants()}.
+   */
+  private static List<String> salesStandaloneProcessGrants() {
+    return List.of(
+        "0D37A9F6109549DEB058373EF2DAEB6A");  // Informe Antigüedad de Cobros (Receivables Aging Schedule)
+  }
+
+  /**
+   * Compras's ETP-5116 standalone-process column — only the Payables aging schedule. Inlined copy
+   * of {@code TemplateRoleWindowAccess#purchasingStandaloneProcessGrants()}.
+   */
+  private static List<String> purchasingStandaloneProcessGrants() {
+    return List.of(
+        "EB4C4053F3B94A17A08D1DD7E89CEB7E");  // Informe Antigüedad de Pagos (Payables Aging Schedule)
+  }
+
+  /**
+   * The full role→standalone-process-grant-list map, keyed by {@code AD_Role_ID}. Inlined copy of
+   * {@code TemplateRoleWindowAccess#standaloneProcessGrantsByRoleId()} — every one of the four
+   * template roles is a key, even Inventory (empty list).
+   */
+  private static Map<String, List<String>> standaloneProcessGrantsByRoleId() {
+    Map<String, List<String>> map = new LinkedHashMap<>();
+    map.put(FINANCE_ROLE_ID, financeStandaloneProcessGrants());
+    map.put(SALES_ROLE_ID, salesStandaloneProcessGrants());
+    map.put(PURCHASING_ROLE_ID, purchasingStandaloneProcessGrants());
+    map.put(INVENTORY_ROLE_ID, Collections.emptyList());
+    return map;
+  }
+
+  /**
+   * The fixed universe of every {@code obuiapp_process_id} ever granted through {@link
+   * #reconcileStandaloneProcessAccess}, across all four templates combined — used to scope {@link
+   * #removeStaleStandaloneProcessAccess}'s stale-removal to ONLY these ids, so it can never touch
+   * a window-button-derived grant {@link #reconcileProcessAccess} wrote for the same role in the
+   * very same {@code obuiapp_process_access} table.
+   */
+  private static final Set<String> ALL_STANDALONE_PROCESS_IDS = Set.of(
+      "D6AB95CE52D34E1599590526115E26C6",
+      "0D37A9F6109549DEB058373EF2DAEB6A",
+      "EB4C4053F3B94A17A08D1DD7E89CEB7E");
+
   @Override
   public void execute() {
     try {
       ConnectionProvider cp = getConnectionProvider();
       Map<String, List<WindowGrant>> grantsByRoleId = windowAccessByRoleId();
+      Map<String, List<String>> standaloneProcessGrantsByRoleId = standaloneProcessGrantsByRoleId();
       for (Map.Entry<String, List<WindowGrant>> entry : grantsByRoleId.entrySet()) {
         String roleId = entry.getKey();
         ensureRole(cp, roleId, ROLE_NAMES_BY_ID.get(roleId));
         reconcileWindowAccess(cp, roleId, entry.getValue());
         reconcileProcessAccess(cp, roleId, entry.getValue());
+        reconcileStandaloneProcessAccess(cp, roleId, standaloneProcessGrantsByRoleId.get(roleId));
       }
     } catch (Exception e) {
       handleError(e);
@@ -748,22 +941,91 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
   private void removeStaleObuiappProcessAccess(ConnectionProvider cp, String roleId,
       Set<String> desiredObuiappProcessIds) throws Exception {
     List<String> staleIds = new ArrayList<>();
+    for (String obuiappProcessId : activeObuiappProcessIds(cp, roleId)) {
+      if (!desiredObuiappProcessIds.contains(obuiappProcessId)) {
+        staleIds.add(obuiappProcessId);
+      }
+    }
+    deleteObuiappProcessAccessRows(cp, roleId, staleIds);
+  }
+
+  /**
+   * ETP-5116 — reconciles {@code roleId}'s standalone {@code obuiapp_process_access} grants (this
+   * script's own inlined copy of {@code TemplateRoleWindowAccess}'s standalone-process matrix) —
+   * for processes with NO backing {@code AD_Window} at all, so neither {@link
+   * #reconcileWindowAccess} nor the window-button-derived {@link #reconcileProcessAccess} can
+   * reach them (both need an {@code AD_Window_ID} to start from). Deliberately a separate,
+   * parallel mechanism, not layered on top of {@link #reconcileProcessAccess}: it grants every
+   * desired process id directly, independent of any window grant.
+   *
+   * <p>Idempotent the same way every other reconciliation in this class is: {@link
+   * #upsertObuiappProcessAccess} is reused as-is (insert if missing, reactivate if inactive,
+   * no-op if already active) — running this twice on an unchanged {@code desiredProcessIds} never
+   * creates a duplicate row. Stale removal is scoped to {@link #ALL_STANDALONE_PROCESS_IDS} only
+   * (never "every active row not in {@code desiredProcessIds}", unlike {@link
+   * #removeStaleObuiappProcessAccess}), so it can never delete a window-button-derived grant
+   * {@link #reconcileProcessAccess} wrote for the same role in the very same table — the two
+   * mechanisms coexist safely because each only ever touches the process ids it owns.</p>
+   */
+  private void reconcileStandaloneProcessAccess(ConnectionProvider cp, String roleId,
+      List<String> desiredProcessIds) throws Exception {
+    for (String processId : desiredProcessIds) {
+      upsertObuiappProcessAccess(cp, roleId, processId);
+    }
+    removeStaleStandaloneProcessAccess(cp, roleId, desiredProcessIds);
+  }
+
+  /**
+   * Deletes every active {@code obuiapp_process_access} row for {@code roleId} whose process id
+   * is in {@link #ALL_STANDALONE_PROCESS_IDS} (the fixed universe this mechanism owns) but NOT in
+   * {@code desiredProcessIds}. Scoped this way — rather than "every active row not desired",
+   * unlike {@link #removeStaleObuiappProcessAccess} — so it never touches a window-button-derived
+   * grant {@link #reconcileProcessAccess} wrote for the same role on the same table.
+   */
+  private void removeStaleStandaloneProcessAccess(ConnectionProvider cp, String roleId,
+      List<String> desiredProcessIds) throws Exception {
+    Set<String> desired = new HashSet<>(desiredProcessIds);
+    List<String> staleIds = new ArrayList<>();
+    for (String obuiappProcessId : activeObuiappProcessIds(cp, roleId)) {
+      if (ALL_STANDALONE_PROCESS_IDS.contains(obuiappProcessId) && !desired.contains(obuiappProcessId)) {
+        staleIds.add(obuiappProcessId);
+      }
+    }
+    deleteObuiappProcessAccessRows(cp, roleId, staleIds);
+  }
+
+  /**
+   * Every active {@code obuiapp_process_id} currently granted to {@code roleId} — shared read
+   * used by both {@link #removeStaleObuiappProcessAccess} and {@link
+   * #removeStaleStandaloneProcessAccess} so the two mechanisms' stale-removal logic differs only
+   * in which ids they consider "theirs", not in how they read the table.
+   */
+  private List<String> activeObuiappProcessIds(ConnectionProvider cp, String roleId)
+      throws Exception {
+    List<String> ids = new ArrayList<>();
     String selectSql = "SELECT obuiapp_process_id FROM obuiapp_process_access "
         + "WHERE AD_Role_ID = ? AND IsActive = 'Y'";
     try (PreparedStatement ps = cp.getPreparedStatement(selectSql)) {
       ps.setString(1, roleId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          String obuiappProcessId = rs.getString(1);
-          if (!desiredObuiappProcessIds.contains(obuiappProcessId)) {
-            staleIds.add(obuiappProcessId);
-          }
+          ids.add(rs.getString(1));
         }
       }
     }
+    return ids;
+  }
+
+  /**
+   * Hard-deletes the given active {@code obuiapp_process_access} rows for {@code roleId} — shared
+   * delete used by both {@link #removeStaleObuiappProcessAccess} and {@link
+   * #removeStaleStandaloneProcessAccess}.
+   */
+  private void deleteObuiappProcessAccessRows(ConnectionProvider cp, String roleId,
+      List<String> obuiappProcessIds) throws Exception {
     String deleteSql = "DELETE FROM obuiapp_process_access WHERE AD_Role_ID = ? "
         + "AND obuiapp_process_id = ? AND IsActive = 'Y'";
-    for (String obuiappProcessId : staleIds) {
+    for (String obuiappProcessId : obuiappProcessIds) {
       try (PreparedStatement ps = cp.getPreparedStatement(deleteSql)) {
         ps.setString(1, roleId);
         ps.setString(2, obuiappProcessId);

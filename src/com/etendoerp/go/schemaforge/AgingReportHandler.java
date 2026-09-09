@@ -74,6 +74,8 @@ public class AgingReportHandler implements NeoHandler {
   private static final String DEFAULT_COL4       = "120";
   private static final String BUCKET_SENTINEL    = "99999";
   private static final String DATE_FORMAT        = "yyyy-MM-dd";
+  private static final String REC_OR_PAY_RECEIVABLES = "RECEIVABLES";
+  private static final String REC_OR_PAY_PAYABLES     = "PAYABLES";
   private static final String PARAM_REC_OR_PAY   = "recOrPay";
   private static final String PARAM_CURRENT_DATE = "currentDate";
   private static final String PARAM_COLUMN1      = "column1";
@@ -94,6 +96,19 @@ public class AgingReportHandler implements NeoHandler {
    * process without re-confirming that same FK chain (ETP-4510, follow-up to BUG-3).
    */
   private static final String AGING_RECEIVABLE_PROCESS_ID = "0D37A9F6109549DEB058373EF2DAEB6A";
+
+  /**
+   * OBUIAPP process id for the classic "Aging Balance Process Definition for Payables" process —
+   * this report's other side (ETP-5116). Confirmed via the same FK chain as {@link
+   * #AGING_RECEIVABLE_PROCESS_ID}: the {@code AD_Menu.em_obuiapp_process_id} FK on {@code AD_Menu}
+   * row {@code B6D984F9FEFB412D827A37BACF2F1D66} ("Payables Aging Schedule"). Like its receivables
+   * sibling, this {@code AD_Menu} row has a {@code null ad_window_id} — a real classic OBUIAPP
+   * process with no backing {@code AD_Window}, which is exactly why neither side of this report can
+   * be granted through {@code TemplateRoleWindowAccess}'s window-grant matrix (see that class's
+   * javadoc — "Informe Antigüedad de Cobros"/"Informe Antigüedad de Pagos" are both listed among
+   * the windowless rows, same category as "Documentos no contabilizados").
+   */
+  private static final String AGING_PAYABLE_PROCESS_ID = "EB4C4053F3B94A17A08D1DD7E89CEB7E";
 
   // -------------------------------------------------------------------------
   // Inner value types
@@ -195,10 +210,36 @@ public class AgingReportHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    if (!NeoAccessHelper.hasObuiappProcessAccess(AGING_RECEIVABLE_PROCESS_ID)) {
+    String method = context.getHttpMethod();
+    // Which side this request is gated against must match how it is actually being served,
+    // because the write path and the read path learn the requested side from two different
+    // places. A write request carries that selection in its body; a read request has no body,
+    // but can carry the same selection as a query parameter instead, and both fall back to the
+    // receivables side when nothing is supplied — so a bare read request with no query parameter
+    // keeps behaving exactly as it did before this fix. Only the write and read paths ever serve
+    // a real report side; every other method falls through to the receivables default below,
+    // since it never reaches either side.
+    //
+    // Before this fix, the read path always checked access against the receivables side, no
+    // matter which side was actually requested. That meant a role granted only the payables side
+    // was denied a request that returns no financial data at all (just the static parameter
+    // descriptions), even though the role legitimately had access to it once the requested side
+    // was correctly taken into account.
+    String gatedProcessId;
+    if ("POST".equals(method)) {
+      gatedProcessId = resolveGatedProcessId(context.getRequestBody());
+    } else if ("GET".equals(method)) {
+      Map<String, String> queryParams = context.getQueryParams();
+      String recOrPay = queryParams == null
+          ? REC_OR_PAY_RECEIVABLES
+          : queryParams.getOrDefault(PARAM_REC_OR_PAY, REC_OR_PAY_RECEIVABLES);
+      gatedProcessId = resolveGatedProcessId(recOrPay);
+    } else {
+      gatedProcessId = AGING_RECEIVABLE_PROCESS_ID;
+    }
+    if (!NeoAccessHelper.hasObuiappProcessAccess(gatedProcessId)) {
       return NeoResponse.error(403, "Access denied");
     }
-    String method = context.getHttpMethod();
     if ("GET".equals(method)) {
       return describeReport();
     }
@@ -206,6 +247,38 @@ public class AgingReportHandler implements NeoHandler {
       return executeReport(context);
     }
     return NeoResponse.error(405, "Method not allowed");
+  }
+
+  /**
+   * Resolves which OBUIAPP process a POST request's {@code recOrPay} body param must be gated
+   * on. Mirrors {@link #executeReport}'s own {@code recOrPay} default (RECEIVABLES) so the gate
+   * and the actual query always agree on which side is being served.
+   *
+   * @param body the POST request body, or {@code null} (the 400 for a missing body is raised
+   *     later in {@link #executeReport}, after the gate — a missing body still defaults to
+   *     RECEIVABLES for gating purposes)
+   * @return the receivables or payables OBUIAPP process id, matching {@code recOrPay}
+   */
+  private static String resolveGatedProcessId(JSONObject body) {
+    String recOrPay = body == null
+        ? REC_OR_PAY_RECEIVABLES
+        : body.optString(PARAM_REC_OR_PAY, REC_OR_PAY_RECEIVABLES);
+    return resolveGatedProcessId(recOrPay);
+  }
+
+  /**
+   * Resolves which OBUIAPP process a request must be gated on, given an already-resolved
+   * {@code recOrPay} value (from either a POST body or a GET query param — see {@link #handle}).
+   *
+   * @param recOrPay {@code RECEIVABLES} or {@code PAYABLES} (case-insensitive); any other value,
+   *     including {@code null}, resolves to RECEIVABLES — the same default {@link #executeReport}
+   *     applies
+   * @return the receivables or payables OBUIAPP process id, matching {@code recOrPay}
+   */
+  private static String resolveGatedProcessId(String recOrPay) {
+    return REC_OR_PAY_PAYABLES.equalsIgnoreCase(recOrPay)
+        ? AGING_PAYABLE_PROCESS_ID
+        : AGING_RECEIVABLE_PROCESS_ID;
   }
 
   // -------------------------------------------------------------------------
@@ -244,7 +317,7 @@ public class AgingReportHandler implements NeoHandler {
         return NeoResponse.error(400, "Request body is required");
       }
 
-      String recOrPay    = body.optString(PARAM_REC_OR_PAY, "RECEIVABLES");
+      String recOrPay    = body.optString(PARAM_REC_OR_PAY, REC_OR_PAY_RECEIVABLES);
       String dateStr     = body.optString(PARAM_CURRENT_DATE, "");
       boolean showDetails = body.optBoolean(PARAM_SHOW_DETAILS, false);
 

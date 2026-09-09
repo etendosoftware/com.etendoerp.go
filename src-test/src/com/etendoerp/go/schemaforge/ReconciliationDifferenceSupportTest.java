@@ -116,6 +116,8 @@ public class ReconciliationDifferenceSupportTest {
   private static final String KEY_MESSAGE = "message";
   private static final String KEY_OPERATION_IDS = "operationIds";
   private static final String PCT_FIVE = "5";
+  /** Distinctive fragment of {@code MSG_LINE_ON_DRAFT_STATEMENT}, i.e. what a user reads. */
+  private static final String DRAFT_MESSAGE_FRAGMENT = "in draft";
 
   private ReconciliationHandler handler;
   private FIN_FinancialAccount account;
@@ -139,6 +141,12 @@ public class ReconciliationDifferenceSupportTest {
 
     statement = mock(FIN_BankStatement.class);
     when(statement.getAccount()).thenReturn(account);
+    // ETP-5121: preflight now refuses a line whose statement is in Borrador, and the draft
+    // predicate fails CLOSED, so an unstubbed Mockito Boolean would come back null, read as
+    // "draft", and turn every orchestration test in this class into a 409. The shared statement
+    // therefore defaults to PROCESSED, the only state in which its lines are reconcilable at all.
+    // The draft test overrides it.
+    when(statement.isProcessed()).thenReturn(Boolean.TRUE);
   }
 
   @After
@@ -302,7 +310,7 @@ public class ReconciliationDifferenceSupportTest {
 
   /**
    * A zero / negative / unset percentage disables the action (limit 0) — the deliberate divergence
-   * from {@code AutoMatchSupport.signalGroupTolerance}, which reads the same column as "one cent".
+   * from {@code MatchTolerances.signalGroupTolerance}, which reads the same column as "one cent".
    */
   @Test
   public void testDifferenceLimitZeroWhenPercentageUnsetOrNonPositive() {
@@ -745,6 +753,66 @@ public class ReconciliationDifferenceSupportTest {
     assertEquals(REM_ID, response.getBody().getString("remainderLineId"));
     verify(handler, never()).createTransactionForRule(any(), any(), any());
     verify(handler, never()).reconcileGroup(any());
+  }
+
+  /**
+   * ETP-5121 (QA round) — the third write path that consumes a suggestion refuses a line whose bank
+   * statement was returned to Borrador, with the SAME 409 and the SAME shared message constant as
+   * {@code reconcileGroup} and {@code prepareGroup} (the frontend maps backend text to a locale key
+   * by exact match, so a second spelling would silently degrade to raw English).
+   *
+   * <p>Unlike the other two paths, this one is not reachable via a stale Automatch preview: it
+   * needs a PARTIALLY reconciled group, which survives its statement's reactivation intact — the
+   * head keeps its transaction, the remainder stays pending. So the guard is not redundant with
+   * {@code loadPendingLines}: a user can open the reactivated statement's remainder row and press
+   * "post the difference" directly.
+   *
+   * <p>The fixture is {@link #testHappyPathReconcilesRemainderWithTheNewTransaction}'s, with the
+   * statement flipped to draft and nothing else changed — so without the guard this request
+   * succeeds with a 201 and the test cannot pass for an unrelated reason. The {@code assertNoWrite}
+   * is what pins the guard's PLACEMENT rather than its mere existence: {@code createTransactionForRule}
+   * is the first write below it and a returned error commits, so a guard one statement lower would
+   * still answer 409 while leaving an orphan adjustment movement behind.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testDraftStatementReturns409AndWritesNothing() throws Exception {
+    stubPartialGroup("12.00", null, "0.50", null);
+    when(statement.isProcessed()).thenReturn(Boolean.FALSE);
+
+    NeoResponse response = runAction(body(ACC_ID, REM_ID));
+
+    assertEquals(409, response.getHttpStatus());
+    assertEquals(ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT, errorMessage(response));
+    assertTrue("the user must be told the statement is the obstacle; got: "
+        + errorMessage(response), errorMessage(response).contains(DRAFT_MESSAGE_FRAGMENT));
+    assertNoWrite();
+  }
+
+  /**
+   * Guard ORDERING — a line that is BOTH already reconciled and on a draft statement keeps the
+   * already-reconciled answer (with its remainder id), because that is the more specific and more
+   * actionable obstacle: telling the user to process the statement would send them the wrong way
+   * when what they must do is undo a reconciliation. The draft check sits deliberately AFTER
+   * {@code checkLineState}, matching {@code reconcileGroup} and {@code prepareGroup}.
+   *
+   * @throws Exception if the mocked interaction fails
+   */
+  @Test
+  public void testAlreadyReconciledLineOnADraftStatementKeepsItsOwnMessage() throws Exception {
+    stubPartialGroup("12.00", null, "0.50", null);
+    when(statement.isProcessed()).thenReturn(Boolean.FALSE);
+
+    // HEAD_ID is the matched row, so checkLineState rejects it before the draft guard is reached.
+    NeoResponse response = runAction(body(ACC_ID, HEAD_ID));
+
+    assertEquals(409, response.getHttpStatus());
+    assertEquals(ReconciliationHandler.MSG_LINE_ALREADY_RECONCILED, errorMessage(response));
+    assertFalse("the draft guard must not shadow the already-reconciled one; got: "
+        + errorMessage(response), errorMessage(response).contains(DRAFT_MESSAGE_FRAGMENT));
+    assertEquals(REM_ID, response.getBody().getString("remainderLineId"));
+    assertNoWrite();
   }
 
   /**

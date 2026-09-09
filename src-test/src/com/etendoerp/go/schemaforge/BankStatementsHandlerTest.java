@@ -86,6 +86,25 @@ import org.openbravo.model.financialmgmt.payment.FIN_Reconciliation;
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class BankStatementsHandlerTest {
 
+  /**
+   * PSD2 connection status meaning "connected to the bank". Mirrors
+   * {@code BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED} deliberately by VALUE rather
+   * than importing it: the point of the assertion below is that the handler recognises this exact
+   * code, so a test that reused the same constant could not catch it changing on one side only.
+   */
+  private static final String PSD2_CONNECTED = "CO";
+
+  /** The model's default connection status for a financial account, i.e. not bank-connected. */
+  private static final String PSD2_DISCONNECTED = "DC";
+
+  /**
+   * The bank-connected delete rejection (ETP-5111), byte-for-byte in sync with the handler's own
+   * constant and with the frontend's {@code backendError.statementBankConnectedNotDeletable}
+   * entry, which matches it by EXACT text after {@code trim()}.
+   */
+  private static final String MSG_STATEMENT_BANK_CONNECTED =
+      "Statements from a bank-connected account cannot be deleted.";
+
   private BankStatementsHandler handler;
   private MockedStatic<BankStatementAggregates> aggMock;
   private MockedStatic<BankStatementLinePruner> prunerMock;
@@ -1020,6 +1039,269 @@ public class BankStatementsHandlerTest {
     }
   }
 
+  /**
+   * ETP-4954 (QA retest): the API-level half of the "no negative amounts" rule. The modal already
+   * refused this pair, but {@code createLines}' old guard was only "not both zero", so an MCP/REST
+   * caller could persist {@code (cr = -20, dr = -50)} — which the read path then collapsed into an
+   * Entrada of +30. The negative side must be rejected here too, and nothing may be saved.
+   */
+  @Test
+  public void handleCreateRejectsALineWithNegativeAmounts() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("name", "Extracto manual");
+    JSONArray lines = new JSONArray();
+    JSONObject negative = new JSONObject();
+    negative.put("date", "2026-06-02T00:00:00Z");
+    negative.put("reference", "REF-1"); // non-blank → not skipped as an empty row
+    negative.put("in", -20);
+    negative.put("out", -50);
+    lines.put(negative);
+    body.put("lines", lines);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+
+    doReturn(statement).when(handler).newManualBankStatement(any(), any());
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(account);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FIN_BankStatementLine.class)).thenReturn(line);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "create"));
+      assertEquals(400, r.getHttpStatus());
+      assertTrue(r.getBody().getJSONObject("error").getString("message")
+          .contains("negative"));
+      verify(handler, never()).processStatement(any());
+      verify(dal, never()).save(line);
+      // Validation must run BEFORE the setters: a managed entity is flushed even on a 400.
+      verify(line, never()).setCramount(any());
+      verify(line, never()).setDramount(any());
+    }
+  }
+
+  /**
+   * ETP-4954: a single negative side is rejected too, not just the both-negative pair — the rule is
+   * "no negative amounts", matching the modal's isLineComplete (which needs a strictly positive side).
+   */
+  @Test
+  public void handleCreateRejectsALineWithASingleNegativeAmount() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("name", "Extracto manual");
+    JSONArray lines = new JSONArray();
+    JSONObject negative = new JSONObject();
+    negative.put("date", "2026-06-02T00:00:00Z");
+    negative.put("reference", "REF-1");
+    negative.put("in", 0);
+    negative.put("out", -50);
+    lines.put(negative);
+    body.put("lines", lines);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+
+    doReturn(statement).when(handler).newManualBankStatement(any(), any());
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(account);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FIN_BankStatementLine.class)).thenReturn(line);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "create"));
+      assertEquals(400, r.getHttpStatus());
+      assertTrue(r.getBody().getJSONObject("error").getString("message")
+          .contains("negative"));
+      verify(dal, never()).save(line);
+    }
+  }
+
+  /**
+   * ETP-4954 (product decision) — the API-level half of the EXACTLY ONE SIDE clause:
+   *
+   * <p>a statement line must carry an amount on exactly one side — at least one amount above
+   * zero, no amount below zero, and NEVER both sides filled.
+   *
+   * <p>The clause landed with no coverage anywhere: the whole suite passed with zero failures
+   * when it was added, so nothing had ever posted a line with both {@code in} and {@code out}
+   * above zero. This endpoint is reachable from MCP/REST as well as from the two modals, and its
+   * older guards were only "not both zero" and "no negative side" — both of which a
+   * {@code (in = 30, out = 100)} line satisfies. It persisted, and
+   * {@code BankStatementsSupport#mapLineRow} then collapsed the pair into {@code cr - dr}, so
+   * the row DISPLAYED as a Salida of 70: a movement the caller never described.
+   *
+   * <p>{@code ReactivationSupport.applyBankStatementAmounts} already refuses to leave both sides
+   * filled, netting them onto one side under Classic's sign normalization. This endpoint rejects
+   * instead — an inbound line with both sides filled is bad input, not two records being merged.
+   */
+  @Test
+  public void handleCreateRejectsALineFilledOnBothSides() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("name", "Extracto manual");
+    JSONArray lines = new JSONArray();
+    JSONObject bothSides = new JSONObject();
+    bothSides.put("date", "2026-06-02T00:00:00Z");
+    bothSides.put("reference", "REF-1"); // non-blank → not skipped as an empty row
+    bothSides.put("in", 30);
+    bothSides.put("out", 100);
+    lines.put(bothSides);
+    body.put("lines", lines);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+
+    doReturn(statement).when(handler).newManualBankStatement(any(), any());
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(account);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FIN_BankStatementLine.class)).thenReturn(line);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "create"));
+      assertEquals(400, r.getHttpStatus());
+      String message = r.getBody().getJSONObject("error").getString("message");
+      // Its OWN message, not the zero-amount or the negative one — the caller has to be told
+      // which of the two amounts to drop, and both of the other guards would also fire a 400
+      // on a bad line, so a status-only assertion could not tell them apart.
+      assertTrue(message, message.contains("not in both"));
+      assertTrue(message, !message.contains("negative"));
+      verify(handler, never()).processStatement(any());
+      verify(dal, never()).save(line);
+      // Validation must run BEFORE the setters: a managed entity is flushed even on a 400, so
+      // a guard placed after setCramount/setDramount would persist the very row it rejects.
+      verify(line, never()).setCramount(any());
+      verify(line, never()).setDramount(any());
+    }
+  }
+
+  /**
+   * ETP-4954 — the case that MOTIVATED the clause: two EQUAL sides. It clears every other guard
+   * (neither side zero, neither negative), so it persisted, and the read path then collapsed it
+   * to {@code 50 - 50 = 0}: a line reading 0,00 €, which is exactly what
+   * {@code MSG_ZERO_AMOUNT_LINE} rejects at the front door. Nothing else in this class reaches
+   * it.
+   */
+  @Test
+  public void handleCreateRejectsALineWithTwoEqualSides() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("name", "Extracto manual");
+    JSONArray lines = new JSONArray();
+    JSONObject equalSides = new JSONObject();
+    equalSides.put("date", "2026-06-02T00:00:00Z");
+    equalSides.put("reference", "REF-1");
+    equalSides.put("in", 50);
+    equalSides.put("out", 50);
+    lines.put(equalSides);
+    body.put("lines", lines);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+
+    doReturn(statement).when(handler).newManualBankStatement(any(), any());
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(account);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FIN_BankStatementLine.class)).thenReturn(line);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "create"));
+      assertEquals(400, r.getHttpStatus());
+      String message = r.getBody().getJSONObject("error").getString("message");
+      assertTrue(message, message.contains("not in both"));
+      verify(dal, never()).save(line);
+      verify(line, never()).setCramount(any());
+      verify(line, never()).setDramount(any());
+    }
+  }
+
+  /**
+   * The DISCRIMINATOR for the clause. Without it, "exactly one side" could just as well have
+   * been implemented as "reject a line whose two amount keys are both present", which would
+   * reject every ordinary payload the two modals send: both of them always post BOTH keys, with
+   * an explicit {@code 0} on the unused side ({@code toPayloadLine} writes
+   * {@code in: parseStatementAmount(row.in) || 0}). A zero is not an amount.
+   */
+  @Test
+  public void handleCreateAcceptsALineWithAnExplicitZeroOnTheUnusedSide() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    JSONObject body = new JSONObject();
+    body.put("FIN_Financial_Account_ID", "acc-1");
+    body.put("name", "Extracto manual");
+    JSONArray lines = new JSONArray();
+    // Both keys present on both lines, with an EXPLICIT 0 on the unused side — the exact shape
+    // ManualStatementModal and the import wizard always post.
+    lines.put(createLine("2026-06-02T00:00:00Z", "CARGO", "Acme", 0, 150));
+    lines.put(createLine("2026-06-03T00:00:00Z", "INGRESO", "Acme", 150, 0));
+    body.put("lines", lines);
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    FIN_BankStatement statement = mock(FIN_BankStatement.class);
+    when(statement.getId()).thenReturn("stmt-new");
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+
+    doReturn(statement).when(handler).newManualBankStatement(any(), any());
+    doNothing().when(handler).processStatement(any());
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_FinancialAccount.class), eq("acc-1"))).thenReturn(account);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FIN_BankStatementLine.class)).thenReturn(line);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "create"));
+      assertEquals(201, r.getHttpStatus());
+      // Both lines were created — an explicit zero on the unused side is not "both sides".
+      JSONObject data = r.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals(2, data.getInt("lineCount"));
+      verify(dal, times(2)).save(line);
+      // One amount landed on each side: the withdrawal on Dr, the deposit on Cr. Asserted at
+      // scale 0 because parseAmount reads the JSON's own "150" verbatim into a BigDecimal, and
+      // BigDecimal#equals is scale-sensitive.
+      verify(line).setCramount(new BigDecimal("150"));
+      verify(line).setDramount(new BigDecimal("150"));
+    }
+  }
+
   @Test
   public void handleCreateSaveAsDraftSkipsProcessing() throws Exception {
     NeoContext ctx = mock(NeoContext.class);
@@ -1082,12 +1364,33 @@ public class BankStatementsHandlerTest {
 
   // ── ?action=process / update / delete (draft row actions) ──────────────
 
-  /** A draft (unprocessed) statement mock. */
+  /**
+   * A draft (unprocessed) statement mock, on an account that is NOT bank-connected.
+   *
+   * <p>The account is stubbed because {@code handleDelete}'s PSD2 guard (ETP-5111) dereferences
+   * {@code statement.getAccount().getPSD2ConnectionStatus()}. An unstubbed {@code getAccount()}
+   * returns null, the guard NPEs, and {@code catch (Exception)} swallows it into a 500 — so the
+   * delete tests below would fail for a reason that has nothing to do with what they assert.
+   * {@link #PSD2_DISCONNECTED} is the model's own default for the column, i.e. the ordinary case.
+   */
   private static FIN_BankStatement draftStatement(String id) {
     FIN_BankStatement s = mock(FIN_BankStatement.class);
     when(s.getId()).thenReturn(id);
     when(s.isProcessed()).thenReturn(false);
+    // The account MUST be built before when(...) opens: inlining the helper call as the
+    // thenReturn() argument runs a second when(...) while this one is still unfinished, which
+    // Mockito rejects with UnfinishedStubbingException (and it surfaces on whichever test runs
+    // first, not on the line at fault).
+    FIN_FinancialAccount account = accountWithConnectionStatus(PSD2_DISCONNECTED);
+    when(s.getAccount()).thenReturn(account);
     return s;
+  }
+
+  /** A financial account whose PSD2 connection status is exactly {@code status}. */
+  private static FIN_FinancialAccount accountWithConnectionStatus(String status) {
+    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
+    when(account.getPSD2ConnectionStatus()).thenReturn(status);
+    return account;
   }
 
   private static JSONObject idBody(String id) throws Exception {
@@ -1420,6 +1723,75 @@ public class BankStatementsHandlerTest {
       assertEquals(400, r.getHttpStatus());
       assertTrue(r.getBody().getJSONObject("error").getString("message").contains("matched"));
       verify(dal, never()).remove(any());
+    }
+  }
+
+  /**
+   * ETP-5111 — a statement whose financial account is bank-connected through PSD2 / Salt Edge is
+   * refused with a 409, even when it is a perfectly ordinary DRAFT with no matched lines (the
+   * `hasMatchedLines` probe is deliberately stubbed false, so the ONLY thing that can reject this
+   * delete is the connection status). Those statements are re-fetched from the bank, so removing
+   * one locally desynchronises the account.
+   *
+   * <p>This is the server-side half of the unified delete rule: the Statements tab no longer
+   * disables its bulk trash for a connected account, so this guard is what actually enforces the
+   * refusal — for the UI, the REST API and MCP alike. It also covers the accepted consequence that
+   * an OLD manual statement on an account since connected is no longer deletable either.
+   */
+  @Test
+  public void handleDeleteRejectsStatementOfBankConnectedAccount() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement draft = draftStatement("st-1");
+    // Built before when(...) opens — see draftStatement() for why inlining this breaks.
+    FIN_FinancialAccount connectedAccount = accountWithConnectionStatus(PSD2_CONNECTED);
+    when(draft.getAccount()).thenReturn(connectedAccount);
+    doReturn(false).when(handler).hasMatchedLines(draft);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
+
+      NeoResponse r = handler.handle(postCtx(ctx, "delete"));
+
+      assertEquals(409, r.getHttpStatus());
+      assertEquals(MSG_STATEMENT_BANK_CONNECTED,
+          r.getBody().getJSONObject("error").getString("message"));
+      verify(dal, never()).remove(any());
+      verify(dal, never()).flush();
+    }
+  }
+
+  /**
+   * The other side of that guard, and the reason it compares against one exact code rather than
+   * "has any connection status": a disconnected account carries a non-null status too
+   * ({@link #PSD2_DISCONNECTED} is the column's default), and its statements must stay deletable.
+   * A null-check instead of a value-check would pass the test above and fail this one.
+   */
+  @Test
+  public void handleDeleteAllowsStatementOfDisconnectedAccount() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getRequestBody()).thenReturn(idBody("st-1"));
+    FIN_BankStatement draft = draftStatement("st-1");
+    doReturn(false).when(handler).hasMatchedLines(draft);
+    @SuppressWarnings("unchecked")
+    OBCriteria<FIN_BankStatementLine> crit = mock(OBCriteria.class);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(FIN_BankStatement.class), eq("st-1"))).thenReturn(draft);
+      when(dal.createCriteria(FIN_BankStatementLine.class)).thenReturn(crit);
+      when(crit.add(any())).thenReturn(crit);
+      when(crit.list()).thenReturn(Collections.emptyList());
+
+      NeoResponse r = handler.handle(postCtx(ctx, "delete"));
+
+      assertEquals(200, r.getHttpStatus());
+      verify(dal).remove(draft);
     }
   }
 

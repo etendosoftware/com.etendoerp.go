@@ -24,6 +24,7 @@ import javax.servlet.http.HttpServletResponse;
 import com.etendoerp.go.common.GoRuntimeProperties;
 import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
+import com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistory;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
 import com.etendoerp.go.schemaforge.webhooks.SFPromoteUserRole;
 import com.etendoerp.go.schemaforge.webhooks.SFResendInvitation;
@@ -110,6 +111,14 @@ class NeoPseudoSpecDispatcher {
     }
     if ("rolesoverview".equals(pathInfo.specName)) {
       return dispatchGoWebhook("Rolesoverview", method, request, response, new SFRolesOverview());
+    }
+    // ETP-5069: one document's readable email send history, feeding the preview panel's Emails
+    // card. Unlike its neighbours above it needs no role gate and no admin mode — DAL's default
+    // readable-client/org filtering over the client-level ETGO_Email_Send_Log IS the access
+    // rule. See SFDocumentEmailHistory's class javadoc.
+    if ("documentemailhistory".equals(pathInfo.specName)) {
+      return dispatchGoWebhook("Documentemailhistory", method, request, response,
+          new SFDocumentEmailHistory());
     }
     // ETP-4852: compose a user's access from 1+ system-level template roles. See
     // SFAssignUserRoles's class javadoc for the full mechanism and response shape.
