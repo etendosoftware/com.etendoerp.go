@@ -61,6 +61,8 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  *   <li>docTypeToIsReceipt: payments (any case) → 'N'; everything else → 'Y'.</li>
  *   <li>readOperationIds: missing array → empty; blanks/nulls skipped.</li>
  *   <li>belongsToAccount: matching id only; null statement/account → false.</li>
+ *   <li>isOnDraftStatement: processed → false; draft/null flag/null statement/null line → true
+ *       (fails closed, ETP-5121).</li>
  *   <li>signedAmount: deposit - payment, each null-safe.</li>
  * </ul>
  */
@@ -260,6 +262,60 @@ public class ReconciliationSupportTest {
     when(bs.getAccount()).thenReturn(null);
     when(line.getBankStatement()).thenReturn(bs);
     assertFalse(ReconciliationSupport.belongsToAccount(line, ACC_ID));
+  }
+
+  // ── isOnDraftStatement (ETP-5121) ────────────────────────────────────────────
+  //
+  // The shared predicate behind all three write guards AND the loadPendingLines gate. It FAILS
+  // CLOSED — every degenerate input answers "draft" — because each caller uses it to REFUSE a
+  // write: a guard that throws, or that lets a line through because a link is missing, is worse
+  // than one that over-refuses. A persisted row never reaches those branches
+  // (FIN_BankStatement.Processed is NOT NULL, default 'N'), but an unstubbed mock does, which is
+  // exactly why the fixtures in ReconciliationHandlerTest and ReconciliationDifferenceSupportTest
+  // now stub isProcessed() explicitly.
+
+  /** A line hanging off a statement whose {@code processed} flag is {@code flag}. */
+  private FIN_BankStatementLine lineOnStatement(Boolean flag) {
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    FIN_BankStatement bs = mock(FIN_BankStatement.class);
+    when(bs.isProcessed()).thenReturn(flag);
+    when(line.getBankStatement()).thenReturn(bs);
+    return line;
+  }
+
+  /** The ordinary case: a processed statement's lines are reconcilable, so this is not a draft. */
+  @Test
+  public void testIsOnDraftStatementProcessedReturnsFalse() {
+    assertFalse(ReconciliationSupport.isOnDraftStatement(lineOnStatement(Boolean.TRUE)));
+  }
+
+  /** The regression's case: a statement returned to Borrador by "Reactivar". */
+  @Test
+  public void testIsOnDraftStatementUnprocessedReturnsTrue() {
+    assertTrue(ReconciliationSupport.isOnDraftStatement(lineOnStatement(Boolean.FALSE)));
+  }
+
+  /**
+   * A null flag must not NPE on auto-unboxing: the comparison is
+   * {@code !Boolean.TRUE.equals(...)}, so an unknown status counts as draft.
+   */
+  @Test
+  public void testIsOnDraftStatementNullFlagReturnsTrue() {
+    assertTrue(ReconciliationSupport.isOnDraftStatement(lineOnStatement(null)));
+  }
+
+  /** No statement means nothing vouches for the line, so it must not be reconciled. */
+  @Test
+  public void testIsOnDraftStatementNullStatementReturnsTrue() {
+    FIN_BankStatementLine line = mock(FIN_BankStatementLine.class);
+    when(line.getBankStatement()).thenReturn(null);
+    assertTrue(ReconciliationSupport.isOnDraftStatement(line));
+  }
+
+  /** A null line is refused rather than dereferenced — the guard must never be what throws. */
+  @Test
+  public void testIsOnDraftStatementNullLineReturnsTrue() {
+    assertTrue(ReconciliationSupport.isOnDraftStatement(null));
   }
 
   // ── signedAmount ─────────────────────────────────────────────────────────────

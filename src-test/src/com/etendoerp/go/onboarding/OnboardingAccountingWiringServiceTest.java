@@ -267,10 +267,10 @@ public class OnboardingAccountingWiringServiceTest {
   public void testProvisionEntityPostingAccountsRunsEightInsertsWithClientAndSchemaId() {
     // Use a double that records inserts but keeps the REAL provisionEntityPostingAccounts body,
     // so the eight runEntityAcctInsert calls (and their ordering of clientId/schemaId) are
-    // exercised. ensureAcreedorPrepaymentAccount()/overrideAcreedorGroupAccounts() are stubbed by
-    // InsertRecordingService: they bypass the runEntityAcctInsert seam and hit
-    // OBDal.getInstance().getSession() directly, so leaving them real would reach an uninitialized
-    // Hibernate session in this pure-unit test.
+    // exercised. ensureAcreedorPrepaymentAccount()/overrideAcreedorGroupAccounts()/
+    // backfillInvoicePriceVarianceDefault() are stubbed by InsertRecordingService: they bypass the
+    // runEntityAcctInsert seam and hit OBDal.getInstance().getSession() directly, so leaving them
+    // real would reach an uninitialized Hibernate session in this pure-unit test.
     //
     // ETP-4565: count went from six to eight when the financial-account and warehouse posting-
     // account backfills were added (see the dedicated test below for their SQL content).
@@ -292,6 +292,8 @@ public class OnboardingAccountingWiringServiceTest {
         service.ensureAcreedorPrepaymentAccountCount);
     assertEquals("Acreedor group posting-account override must run once", 1,
         service.overrideAcreedorGroupAccountsCount);
+    assertEquals("Invoice Price Variance default backfill must run once", 1,
+        service.backfillInvoicePriceVarianceDefaultCount);
   }
 
   /**
@@ -776,6 +778,68 @@ public class OnboardingAccountingWiringServiceTest {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // backfillInvoicePriceVarianceDefault() — native query parameter binding (real implementation)
+  // ETP-5075 gap A8
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBackfillInvoicePriceVarianceDefaultBindsClientAndSchemaIdWhenRowsAffected() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    NativeQuery query = mock(NativeQuery.class);
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    when(session.createNativeQuery(sqlCaptor.capture())).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.executeUpdate()).thenReturn(1);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.backfillInvoicePriceVarianceDefault("C1", "S1");
+    }
+
+    String sql = sqlCaptor.getValue();
+    assertTrue("backfill SQL must target c_acctschema_default", sql.contains("c_acctschema_default"));
+    assertTrue("backfill SQL must copy p_expense_acct into p_invoicepricevariance_acct",
+        sql.contains("p_invoicepricevariance_acct") && sql.contains("p_expense_acct"));
+    verify(query).setParameter("clientId", "C1");
+    verify(query).setParameter("schemaId", "S1");
+    verify(query).executeUpdate();
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBackfillInvoicePriceVarianceDefaultDoesNotFailWhenZeroRowsAffected() {
+    // Covers the "nothing to backfill" outcome (already-configured schema, or no matching row) —
+    // must still bind both parameters and simply skip the debug log, never throw.
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    NativeQuery query = mock(NativeQuery.class);
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    when(session.createNativeQuery(sqlCaptor.capture())).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.executeUpdate()).thenReturn(0);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      // Must not throw when 0 rows are affected.
+      service.backfillInvoicePriceVarianceDefault("C1", "S1");
+    }
+
+    assertTrue("backfill SQL must still target c_acctschema_default on the 0-row outcome",
+        sqlCaptor.getValue().contains("c_acctschema_default"));
+    verify(query).setParameter("clientId", "C1");
+    verify(query).setParameter("schemaId", "S1");
+    verify(query).executeUpdate();
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // ensureAcreedorPrepaymentAccount() — SQL-dispatch sequencing (real implementation)
   // ---------------------------------------------------------------------------------------------
 
@@ -1207,6 +1271,7 @@ public class OnboardingAccountingWiringServiceTest {
     final List<AcctInsert> acctInserts = new ArrayList<>();
     int ensureAcreedorPrepaymentAccountCount;
     int overrideAcreedorGroupAccountsCount;
+    int backfillInvoicePriceVarianceDefaultCount;
 
     @Override
     protected void runEntityAcctInsert(String sql, String clientId, String schemaId) {
@@ -1221,6 +1286,11 @@ public class OnboardingAccountingWiringServiceTest {
     @Override
     protected void overrideAcreedorGroupAccounts(String clientId, String schemaId) {
       overrideAcreedorGroupAccountsCount++;
+    }
+
+    @Override
+    protected void backfillInvoicePriceVarianceDefault(String clientId, String schemaId) {
+      backfillInvoicePriceVarianceDefaultCount++;
     }
   }
 }

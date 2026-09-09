@@ -86,7 +86,7 @@ public class OnboardingBaselineService {
    * Use the exact UTC timestamp prefix of the last incorporated .sql file, e.g.:
    * {@code "20260617T120000Z"} matches {@code 20260617T120000Z__R7-tax-accounts.sql}.</p>
    *
-   * Current watermark: R31 glitem-subaccount-backfill (2026-09-01).
+   * Current watermark: R33 force-test-mode-selected-backfill (2026-09-02).
    *
    * <p><b>Note (2026-08-26, ETP-4999):</b> gap M1 — the self-registration provisioning chain
    * ({@code InitialClientSetup} then, separately and later, {@code
@@ -193,6 +193,17 @@ public class OnboardingBaselineService {
    * {@code 20260828T140000Z__R29-acctschema-allownegative-revert.sql}. Bumped to R29's own
    * timestamp, {@code 2026-08-28T14:00:00Z}.</p>
    *
+   * <p><b>2026-09-01 (ETP-5117, R31):</b> gap N1 — a Demo/free tenant had no way to force
+   * SII/TicketBAI/VeriFactu into test/sandbox mode without a manual step in Classic. Closed by
+   * {@link OnboardingForceTestModeService#forceTestModeForFreeTenant}, wired as the new step right
+   * after {@code wireAdminIdentity} and before this baseline stamp — it writes a brand-new,
+   * per-Client {@code ETSG_ForceTestMode='Y'} preference row for the tenant when (and only when)
+   * {@link com.etendoerp.go.payment.TenantPlanService#resolvePlan} reads it back as {@code free};
+   * a paid/productive onboarding is left untouched. It never edits the System-level default row
+   * ({@code AD_Client_ID='0'}) and never overwrites a tenant's own pre-existing row. Corrective
+   * twin: {@code 20260901T120000Z__R31-force-test-mode-demo-tenants.sql}. Bumped to R31's own
+   * timestamp, {@code 2026-09-01T12:00:00Z}.</p>
+   *
    * <p><b>2026-09-01 (ETP-5101 S2.2, gap N1):</b> the preventive front for N1 shipped EARLIER, in
    * a separate ticket (ETP-5020, merged 2026-08-30) — {@code
    * GlItemProvisioningSupport#ensureGlItemForSubaccount}, called from both {@code
@@ -250,8 +261,17 @@ public class OnboardingBaselineService {
    * onboarding sampledata"), and R29-transfer states it outright: "new tenants are born correct via
    * the sampledata above". The "CUT bump without its .sql" hazard this constant's contract forbids
    * is about skipping fixes that WOULD still match — not these.</p>
+   *
+   * <p><b>2026-09-02 (ETP-5117 follow-up, R33):</b> gap N1 correction — R31's preference INSERT
+   * never set {@code Selected}, so every row it created landed at the schema default {@code 'N'},
+   * inconsistent with the shape of a row an operator creates by hand in Classic (confirmed on the
+   * shared dev DB: several hand-made {@code ETSG_ForceTestMode} rows carry {@code Selected='Y'}).
+   * {@link OnboardingForceTestModeService#forceTestModeForFreeTenant} now calls {@code
+   * Preference#setSelected(true)} on the row it builds. Corrective twin: {@code
+   * 20260902T120000Z__R33-force-test-mode-selected-backfill.sql}. Bumped to R33's own timestamp,
+   * {@code 2026-09-02T12:00:00Z}.</p>
    */
-  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-09-01T14:00:00Z");
+  private static final Instant ONBOARDING_PROVISIONED_THROUGH = Instant.parse("2026-09-02T12:00:00Z");
 
   private static final String SQL_INSERT_BASELINE = ""
       + "INSERT INTO etgo_data_fix_history ("

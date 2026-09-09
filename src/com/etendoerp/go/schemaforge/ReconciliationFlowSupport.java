@@ -344,6 +344,17 @@ final class ReconciliationFlowSupport {
       return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
           "Statement line is already reconciled: " + statementLineId);
     }
+    // ETP-5121: same rule the manual path applies. Reached only by a client applying a STALE
+    // preview - the statement was reactivated between autoMatch and applySuggestions - or by a
+    // direct API call, since loadPendingLines no longer proposes a draft statement's lines at all.
+    // It MUST stay above createTransactionForRule below: that call persists a transaction, and a
+    // NeoResponse.error returned afterwards still commits it, leaving an orphan movement per
+    // rejected group. prepareAllGroups stamps statementLineId onto the failure, so the message
+    // does not repeat it.
+    if (ReconciliationSupport.isOnDraftStatement(line)) {
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT,
+          ReconciliationHandler.MSG_LINE_ON_DRAFT_STATEMENT);
+    }
 
     List<String> operationIds = readOperationIds(groupEntry);
 
