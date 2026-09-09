@@ -283,7 +283,10 @@ class FiscalDeclCrudHandler {
    *
    * @return the next free {@code DECL_SEQ} value, starting at {@code 0}.
    */
-  private long resolveNextDeclSeq(String clientId, String orgId, String model, long year,
+  // Package-private (not private) so FiscalDeclCrudHandlerTest can exercise it directly, matching
+  // the same test-visibility convention already used for splitAeatError/declToJson/replaceIncidents
+  // in this class rather than introducing a new one.
+  long resolveNextDeclSeq(String clientId, String orgId, String model, long year,
       String period) {
     OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY_FISCAL_DECL,
         "client.id = :clientId and organization.id = :orgId and " + PROPERTY_FISCAL_MODEL
