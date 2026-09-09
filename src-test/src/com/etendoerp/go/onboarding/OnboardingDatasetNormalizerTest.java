@@ -508,6 +508,27 @@ public class OnboardingDatasetNormalizerTest {
   }
 
   /**
+   * ETP-5222 (Item 4, gap A8b, 2026-09-09): verifies that a freshly-provisioned tenant is born
+   * with {@code C_ACCTSCHEMA_DEFAULT.P_InvoicePriceVariance_Acct} already pointing at GOClient's
+   * own dimensionless combination for account 99904000 ("Diferencias entre el coste del producto
+   * y el precio de la fra[ctura]"), instead of NULL — the gap this ticket's Item 4 closes at the
+   * dataset-import baseline (Layer 0), alongside the R11-style accounts asserted above.
+   *
+   * <p>Note this is a dataset-baseline assertion only: it does not by itself prove the runtime
+   * {@code OnboardingAccountingWiringService#backfillInvoicePriceVarianceDefault} patch (Item 1)
+   * is unnecessary — that patch remains the self-healing backstop for any provisioning path that
+   * does not read this file, and is expected to no-op (its {@code IS NULL}/{@code = P_Expense_Acct}
+   * guard already fails to match) once this dataset baseline is in place.</p>
+   */
+  @Test
+  public void testNormalizerIncludesAcctSchemaDefaultInvoicePriceVarianceAccount() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue("P_InvoicePriceVariance_Acct (99904000) missing — expected GOClient's own "
+        + "99904000 combination id", xml.contains("29616DEC549948E7A65ABC28BCC18742"));
+  }
+
+  /**
    * ETP-4452 (R12, 2026-07-08): the product owner reconfirmed — reversing R11's own confirmation —
    * that {@code WriteOff_Acct} must resolve to account 65000000 ("Pérdidas de créditos comerciales
    * incobrables"), not 69400000. Verifies a freshly-provisioned tenant is born with
