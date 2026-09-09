@@ -840,12 +840,12 @@ public class OnboardingAccountingWiringServiceTest {
     // International Group"). This asserts, at the SQL-text level, that BOTH halves of the statement
     // are scoped to the caller's own schemaId — not just the client — so a resolved combination for
     // schema A can never be written onto schema B's row:
-    //   1) the natural-combination SOURCE (the "resolved" derived table) only looks at the
-    //      c_acctschema_default row(s) matching :schemaId, via "d2.ad_client_id = :clientId AND
-    //      d2.c_acctschema_id = :schemaId";
-    //   2) the UPDATE TARGET is correlated back by primary key AND re-asserts the same schema scope,
-    //      via "d.c_acctschema_default_id = resolved.c_acctschema_default_id" together with
-    //      "d.ad_client_id = :clientId AND d.c_acctschema_id = :schemaId".
+    //   1) the natural-combination SOURCE (the "resolved" derived table, aliased d2) filters its
+    //      c_acctschema_default rows by client id together with the caller's schema id — it never
+    //      considers a c_acctschema_default row belonging to a different accounting schema;
+    //   2) the UPDATE TARGET (aliased d) is correlated back to that resolved row by its primary key,
+    //      AND independently re-asserts the same client id + schema id filter on its own row — so
+    //      the correlation alone (by primary key) is not trusted to carry the scoping.
     // Without both halves, a client with 2+ schemas could have one schema's resolved 99904000
     // combination silently written onto a DIFFERENT schema's row.
     OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
