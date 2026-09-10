@@ -37,12 +37,16 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.DocumentType;
 
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
+import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 
 /**
  * NeoHandler for the Purchase Invoice header entity.
  *
  * <p>Extends {@link AbstractInvoiceHeaderHandler} to inherit shared document-type-lock
  * enforcement, origin-invoice persistence, and GET enrichment logic.
+ *
+ * <p>ETP-5238: the {@code paymentMethod} SELECTOR is served by
+ * {@link PaymentMethodSelectorSupport}, independent of Financial Account linkage.
  *
  * <p>Dispatches custom ACTION requests to the appropriate handler:
  * <ul>
@@ -99,6 +103,11 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoResponse paymentMethodSelector = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(context,
+        PaymentMethodSelectorSupport.DirectionFallback.WINDOW);
+    if (paymentMethodSelector != null) {
+      return paymentMethodSelector;
+    }
     NeoHandlerUtils.mirrorAccountingDate(context, "invoiceDate", "accountingDate");
     captureOriginInvoice(context);
     NeoResponse siiAuthError = captureAndValidateSiiAuthorization(context);
