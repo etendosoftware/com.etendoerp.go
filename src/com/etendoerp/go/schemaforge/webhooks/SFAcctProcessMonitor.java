@@ -471,14 +471,42 @@ public class SFAcctProcessMonitor extends BaseWebhookService {
    * trigger rather than treating the triggering response as the final word; the frontend hook does
    * exactly that, on a bounded deadline, instead of keying solely off {@code running}.</p>
    *
-   * <p>Two later outcomes are both normal and both eventually visible in the history the poll
-   * fetches: an ordinary run, or — because {@code AD_Process.preventconcurrent} is {@code 'Y'} for
-   * this process — a run vetoed by {@code ProcessMonitor.stopConcurrency} because the recurring
-   * instance-wide job started in between. A veto is not silent: it writes its own
-   * {@code AD_PROCESS_RUN} row, tagged with this caller's client, with status {@code ERR} and a
-   * zero duration. Its explanation ("Concurrent attempt to execute") goes into the {@code LOG}
-   * column, which this endpoint deliberately never exposes — so such a row surfaces as a plain
-   * failed run. See the class javadoc on what is not exposed and why.</p>
+   * <h3>Concurrency: the recurring run can NOT veto ours (established ETP-5269, twice)</h3>
+   *
+   * <p>{@code AD_Process.preventconcurrent} is {@code 'Y'} for this process and the flag does
+   * reach our trigger ({@code TriggerGenerator} copies it into the job data map), so it is natural
+   * to assume a manual run can be vetoed when the recurring job is mid-flight. <b>It cannot.</b>
+   * {@code ProcessMonitor.vetoJobExecution} only treats another executing job as concurrent when
+   * it matches on BOTH client and organization:</p>
+   *
+   * <pre>
+   *   boolean isSameClient = isSameParam(jobAlreadyScheduled, newJob, "Client");
+   *   if (!isSameClient || !isSameParam(jobAlreadyScheduled, newJob, "Organization")) {
+   *     continue;                       // not concurrent — no veto
+   *   }
+   * </pre>
+   *
+   * <p>and {@code isSameParam} compares {@code ProcessBundle.getContext().getClient()}. Our
+   * one-shot runs as the CALLER'S client; the recurring run is System ({@code '0'}). Different
+   * client, so the two are mutually invisible to the concurrency check. Scoping the bundle to the
+   * caller — done for tenant isolation — removed this scenario as a side effect.</p>
+   *
+   * <p>The only reachable veto is another run of this process on the SAME client and SAME
+   * organization: a second manual run squeezing through the TOCTOU gap in the guards above, or a
+   * tenant that also holds its own recurring request. <b>In that case vetoing is the correct
+   * outcome and must not be worked around</b> — the in-flight run is already posting exactly the
+   * documents the second one would, so retrying would duplicate work, and an automatic retry was
+   * evaluated and rejected on those grounds.</p>
+   *
+   * <p>If a veto does occur it is not silent: {@code ProcessMonitor.stopConcurrency} writes its
+   * own {@code AD_PROCESS_RUN} row, tagged with this caller's client, status {@code ERR}, duration
+   * {@code "00:00:00.000"}. Its explanation ("Concurrent attempt to execute") goes to the
+   * {@code LOG} column, which this endpoint deliberately never exposes, so it surfaces as a plain
+   * failed run. Note that it is NOT reliably distinguishable from a genuine failure without that
+   * log: {@code getDuration(jec.getJobRunTime())} renders the identical duration string for any
+   * real failure that dies inside a millisecond, and neither path ever writes {@code RESULT} or
+   * {@code REPORT} (they are not even parameters of {@code ProcessRunData.insert}). Do not build
+   * behaviour that branches on "zero-duration ERR means it was skipped".</p>
    */
   private JSONObject triggerResult(boolean started, String reason) throws JSONException {
     JSONObject result = new JSONObject();
@@ -504,6 +532,34 @@ public class SFAcctProcessMonitor extends BaseWebhookService {
   /**
    * The active, still-scheduled recurring request for this process. Read only — this row is the
    * automatic cadence and is never modified by this endpoint.
+   *
+   * <h3>Which row wins when there is more than one</h3>
+   *
+   * <p>More than one is possible: the shipped configuration is a single System row
+   * ({@code AD_Client_ID = '0'}), but a tenant may also hold its OWN recurring request for this
+   * process — the reference instance still carries a completed one (F&amp;B,
+   * {@code EE664C05…}), which is how this case came to light. This query previously took
+   * {@code maxResults(1)} with NO ordering, so which row won was whatever the database happened to
+   * return.</p>
+   *
+   * <p>Ordered by <b>soonest next fire time</b>, tie-broken by id for total determinism.</p>
+   *
+   * <p><b>Why soonest, and NOT "prefer the caller's own client".</b> The single thing this row
+   * feeds the UI is "Next automatic run" — the answer to <i>when will my accounting next be posted
+   * without me doing anything</i>. Both candidates post the caller's documents: the System row
+   * sweeps every tenant ({@code AcctServerProcess.doExecute} iterates all clients when its context
+   * client is {@code '0'}), and a tenant row posts that tenant. So the truthful answer is
+   * whichever fires FIRST, not whichever is organizationally closer. Preferring the caller's own
+   * client would actively mislead in the likely configuration: a tenant row scheduled nightly
+   * alongside the System row's five-minute sweep would make the page announce tomorrow 02:00 while
+   * the documents were in fact going to be posted within minutes. Sorting nulls last falls out of
+   * SQL {@code ASC} and is what we want — a row whose next fire time is unknown should never
+   * outrank one with a concrete imminent time.</p>
+   *
+   * <p>The row's {@code securityBasedOnRole} is also copied onto the manual bundle. That is a
+   * weaker use of an arbitrary-ish pick, but it is bounded: the flag is {@code true} on every
+   * recurring request for this process, and the manual run's ACTUAL authority comes from the
+   * caller's own session, not from this row.</p>
    */
   private ProcessRequest findRecurringRequest(Process process) {
     OBCriteria<ProcessRequest> criteria = OBDal.getInstance().createCriteria(ProcessRequest.class);
@@ -514,6 +570,8 @@ public class SFAcctProcessMonitor extends BaseWebhookService {
     // form's (DIRECT). What is wanted is the row that carries the automatic cadence.
     criteria.add(Restrictions.not(Restrictions.in(ProcessRequest.PROPERTY_CHANNEL,
         Arrays.asList(CHANNEL_MANUAL, CHANNEL_INTERACTIVE))));
+    criteria.addOrder(Order.asc(ProcessRequest.PROPERTY_NEXTEXECUTION));
+    criteria.addOrder(Order.asc(ProcessRequest.PROPERTY_ID));
     criteria.setFilterOnReadableClients(false);
     criteria.setFilterOnReadableOrganization(false);
     criteria.setMaxResults(1);
