@@ -64,6 +64,8 @@ import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.payment.HostedCheckoutService;
 import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.CheckoutPaymentRegistry;
+import com.etendoerp.go.payment.CheckoutRequestStore;
+import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.payment.CheckoutWebhookVerifier;
 import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
@@ -254,6 +256,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
   TenantPlanService tenantPlanService = new TenantPlanService();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
+  CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
   CompanyInvitationService companyInvitationService;
   private final TransactionalAuthEmailSender authEmailSender;
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
@@ -396,7 +399,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       final String origin = StringUtils.isBlank(requestOrigin)
           ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
       try {
-        JSONObject result = hostedCheckoutService.createSession(account.getEmail(), clientName, origin);
+        JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
+            clientName, origin);
         writeResponse(response, HttpServletResponse.SC_CREATED, result);
       } catch (IllegalStateException e) {
         writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, "CHECKOUT_NOT_CONFIGURED",
@@ -415,12 +419,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String path = request.getPathInfo();
     String requestId = path != null && path.startsWith(prefix) ? path.substring(prefix.length()) : "";
     runWithAuthenticatedAccount(request, response, "checkout-status", account -> {
-      CheckoutPaymentRegistry.Payment payment = CheckoutPaymentRegistry.find(requestId,
-          account.getEmail());
+      CheckoutRequest checkoutRequest = checkoutRequestStore.find(requestId, account.getEmail());
+      // Answers "pending" for an unknown request id, for another account's request id, and for a
+      // genuinely unpaid one alike. That is deliberate: the endpoint must never confirm that a
+      // request id exists, and the account predicate inside find() is what enforces it.
+      boolean paid = checkoutRequest != null
+          && checkoutRequestStore.isPaidFor(requestId, account.getEmail(), null);
       JSONObject result = new JSONObject();
       result.put("requestId", requestId);
-      result.put(FIELD_STATUS, payment == null ? "pending" : "paid");
-      if (payment != null) result.put(FIELD_CLIENT_NAME, payment.clientName);
+      result.put(FIELD_STATUS, paid ? "paid" : "pending");
+      if (paid) result.put(FIELD_CLIENT_NAME, checkoutRequest.getClientName());
       writeResponse(response, HttpServletResponse.SC_OK, result);
     });
   }
@@ -449,9 +457,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         JSONObject metadata = object.optJSONObject("metadata");
         String requestId = metadata == null ? "" : metadata.optString("request_id", "");
         String email = metadata == null ? "" : metadata.optString("account_email", "");
-        String clientName = metadata == null ? "" : metadata.optString("client_name", "");
         if (!StringUtils.isBlank(requestId) && !StringUtils.isBlank(email)) {
-          CheckoutPaymentRegistry.recordPaid(requestId, email, clientName);
+          // The customer and subscription ids are read here and nowhere else: this is the only
+          // event that carries them alongside the correlation id, and every later subscription or
+          // invoice event arrives keyed by the subscription rather than by the request.
+          checkoutRequestStore.recordPaid(requestId, object.optString("customer", ""),
+              object.optString("subscription", ""));
         }
       }
       writeResponse(response, HttpServletResponse.SC_OK, new JSONObject().put("received", true));
@@ -1853,6 +1864,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     boolean paidUpgrade = paywallOutcome == PaywallOutcome.PAID;
 
+    // Claimed before the stream opens, for the same reason the paywall is: a refusal must answer
+    // with plain JSON and leave nothing half-built. The claim is a conditional update, so of two
+    // concurrent calls for one payment exactly one proceeds — that is the reload-during-
+    // provisioning case, where the ?checkout=success URL stays live for the whole slow run.
+    if (paidUpgrade
+        && !checkoutRequestStore.claimForProvisioning(onboardingRequest.paymentToken,
+            accountEmail)) {
+      writeError(response, HttpServletResponse.SC_CONFLICT, "PROVISIONING_ALREADY_IN_PROGRESS",
+          "This environment is already being created",
+          "This environment is already being created. Please wait for it to finish.");
+      return;
+    }
+
+    // Tracked across the try/catch/finally below. Provisioning has many graceful exits that
+    // `return` after writing a result line rather than throwing, so the catch block alone would
+    // miss most real failures — the dataset step is the common one.
+    boolean provisioningCompleted = false;
+    String failureReason = null;
+
     // Set up NDJSON streaming
     response.setStatus(HttpServletResponse.SC_OK);
     response.setContentType("application/x-ndjson");
@@ -1915,6 +1945,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
 
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
+      // Only after the tenant itself commits. Best-effort in the same spirit as markProductive
+      // above: a tenant may commit with its checkout row unclosed rather than have provisioning
+      // rolled back over bookkeeping, and DERIVED_STATUS surfaces the gap as STALLED either way.
+      if (paidUpgrade) {
+        try {
+          checkoutRequestStore.recordProvisioned(onboardingRequest.paymentToken, clientId);
+        } catch (RuntimeException e) {
+          log.error("Environment '{}' (client {}) was provisioned but its checkout request could "
+              + "not be closed", onboardingRequest.clientName, clientId, e);
+        }
+      }
       // Activate the bank statement-sync schedule now that its row is committed and therefore
       // visible to the scheduler's own DB connection. Best-effort: internally swallows failures
       // and the SCH row is still picked up on the next scheduler initialization.
@@ -1928,6 +1969,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
       sendProgress(writer, "finalize", "done", "Environment ready");
       sendFinalResult(writer, true, "Environment created successfully");
+      provisioningCompleted = true;
 
     } catch (Exception e) {
       log.error("Onboarding failed", e);
@@ -1935,7 +1977,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sendProgress(writer, PROGRESS_ERROR, PROGRESS_ERROR,
           "Onboarding failed: " + e.getMessage());
       sendFinalResult(writer, false, "Onboarding failed: " + e.getMessage());
+      failureReason = e.getMessage();
     } finally {
+      // Annotation only, and deliberately never a status change: the row stays where provisioning
+      // left it so DERIVED_STATUS reports STALLED, rather than being marked terminal by a path
+      // that may itself be failing. recordFailureReason swallows its own errors for the same
+      // reason — a failed annotation must not turn one problem into two.
+      if (paidUpgrade && !provisioningCompleted) {
+        checkoutRequestStore.recordFailureReason(onboardingRequest.paymentToken,
+            failureReason != null ? failureReason : "Provisioning did not complete");
+      }
       // Stop the keepalive before the final flush so no heartbeat races the result line.
       heartbeat.shutdownNow();
       OBContext.restorePreviousMode();
