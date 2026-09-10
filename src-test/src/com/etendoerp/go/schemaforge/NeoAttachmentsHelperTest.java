@@ -445,6 +445,12 @@ public class NeoAttachmentsHelperTest {
     when(request.getContentType()).thenReturn("multipart/form-data");
     when(request.getPart("file")).thenReturn(part);
     when(request.getParameter("tabId")).thenReturn(null);
+    // ETP-5038 moved the size/type policy AHEAD of tab resolution, so a bare Part mock (no
+    // submitted name, no headers) is now rejected earlier with "File type not allowed" and the
+    // tab path below is never reached. Still a 400, which is why only the message assertion
+    // caught it. Give the part an allowed name so the policy passes and this test keeps
+    // exercising what it is about.
+    when(part.getSubmittedFileName()).thenReturn("order-1.pdf");
     stubTableLookup(dal, "TABLE1");
     when(dal.createCriteria(Tab.class)).thenReturn(tabCriteria);
     when(tabCriteria.list()).thenReturn(Collections.emptyList());
@@ -1073,6 +1079,12 @@ public class NeoAttachmentsHelperTest {
     when(request.getContentType()).thenReturn("multipart/form-data");
     when(request.getPart("file")).thenReturn(part);
     when(request.getParameter("tabId")).thenReturn(null);
+    // ETP-5038 moved the size/type policy AHEAD of tab resolution, so a bare Part mock (no
+    // submitted name, no headers) is now rejected earlier with "File type not allowed" and the
+    // tab path below is never reached. Still a 400, which is why only the message assertion
+    // caught it. Give the part an allowed name so the policy passes and this test keeps
+    // exercising what it is about.
+    when(part.getSubmittedFileName()).thenReturn("order-1.pdf");
     stubTableLookup(dal, "TABLE1");
     when(dal.createCriteria(Tab.class)).thenReturn(tabCriteria);
     when(tabCriteria.list()).thenReturn(Collections.emptyList());
