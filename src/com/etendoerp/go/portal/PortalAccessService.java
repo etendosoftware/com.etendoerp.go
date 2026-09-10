@@ -113,12 +113,12 @@ public class PortalAccessService {
     }
     try {
       PortalAccess access = PortalAccessDal.findActiveByTokenHash(tokenHash);
-      if (access == null || access.getClient() == null || access.getBusinessPartner() == null) {
+      if (access == null || access.getClient() == null || access.getBpartner() == null) {
         return Optional.empty();
       }
       PortalAccessDal.touchLastUsed(access, new Date());
       return Optional.of(new PortalSession(access.getId(), access.getClient().getId(),
-          access.getBusinessPartner().getId(), access.getBusinessPartner().getName(),
+          access.getBpartner().getId(), access.getBpartner().getName(),
           access.getClient().getName()));
     } catch (RuntimeException e) {
       // Never says why. A validation that fails for an infrastructure reason must look exactly like

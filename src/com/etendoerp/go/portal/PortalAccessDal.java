@@ -121,7 +121,10 @@ final class PortalAccessDal {
     access.setId(id);
     access.setClient(client);
     access.setOrganization(organization);
-    access.setBusinessPartner(businessPartner);
+    // setBpartner, not setBusinessPartner: generation derives the property name from the column
+    // C_BPARTNER_ID, so PortalAccess exposes getBpartner/setBpartner. Sibling Openbravo entities
+    // (Invoice, Shipment, ...) do use businessPartner — the name follows the column, not the type.
+    access.setBpartner(businessPartner);
     access.setTokenHash(tokenHash);
     OBDal.getInstance().save(access);
     // Flushed, not committed: the row and the email that carries its link then succeed or fail
