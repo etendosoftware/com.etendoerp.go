@@ -69,16 +69,15 @@ public final class SalesInvoiceSendEmailContract extends DefaultDocumentSendEmai
   }
 
   /**
-   * Appends the Business Partner's portal link, when the feature is enabled for this environment
-   * <em>and</em> this sender.
+   * Appends the Business Partner's portal link, when this sender is configured to send portal
+   * links.
    *
-   * <p><b>Both gates are evaluated inside {@code PortalAccessService#findOrCreateLink}, flag
-   * first</b> (plan §2.5): the flag is an in-memory read and the preference is a query, so a
-   * flag-off environment does no extra work on the invoice-send path. Either gate closed means the
-   * service answers empty <em>before writing anything</em> — no {@code etgo_portal_access} row is
-   * minted, and this email is byte-identical to the one this contract produced before ETP-5267.
-   * That is the assertion the plan's tests make on the row count rather than on the email body,
-   * because minting on a gated-off send is how the feature would leak early.
+   * <p><b>The gate is evaluated inside {@code PortalAccessService#findOrCreateLink}</b> (plan
+   * §2.5), and a closed gate means the service answers empty <em>before writing anything</em> — no
+   * {@code etgo_portal_access} row is minted, and this email is byte-identical to the one this
+   * contract produced before ETP-5267. That is the assertion the plan's tests make on the row count
+   * rather than on the email body, because minting on a gated-off send is how the feature would
+   * leak early.
    *
    * <p>Resolved from the invoice's own {@code (client, organization, business partner)} — not from
    * anything in the command — so the link can only ever belong to the Business Partner the invoice

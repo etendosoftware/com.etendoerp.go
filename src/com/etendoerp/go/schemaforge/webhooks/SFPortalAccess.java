@@ -35,8 +35,8 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * Business Partner currently has a live portal link, and revoke it.
  *
  * <p><b>Revocation is the MVP's only kill switch for a leaked link</b> (plan §1), which is why it
- * ships in the MVP and why it is not behind either gate of plan §2.5: a tenant must be able to kill
- * a link that is already out, whatever the flag says. The flag decides whether NEW links go out, not
+ * ships in the MVP and why it is not behind the gate of plan §2.5: a tenant must be able to kill a
+ * link that is already out, whatever that gate says. The gate decides whether NEW links go out, not
  * whether existing ones can be stopped.
  *
  * <p><b>Reached through the NEO pseudo-spec bridge</b> ({@code docs/neo-headless.md} §4.10–4.11),

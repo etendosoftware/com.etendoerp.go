@@ -62,7 +62,7 @@ import com.etendoerp.go.common.ConfigPropertyReader;
  * than falling back to something guessable, mirroring
  * {@code DocumentDownloadTokenService#createDownloadLink}, which already refuses to build a
  * document download link without its own configured secret. The portal link is then simply absent
- * from the email — the same observable outcome as either gate of plan §2.5 being closed.
+ * from the email — the same observable outcome as the gate of plan §2.5 being closed.
  *
  * <p>Should the plan's literal wording ever be preferred over its reuse rule, this class is the only
  * place that decides: replace {@link #deriveToken} with a {@code SecureRandom} draw and the token

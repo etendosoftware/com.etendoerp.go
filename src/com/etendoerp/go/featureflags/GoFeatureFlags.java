@@ -68,29 +68,6 @@ public final class GoFeatureFlags {
   // control planes is what let a charged account receive a demo environment.
 
   /**
-   * ETP-5267 — whether a {@code sales-invoice-send} email carries a link to the Business Partner
-   * self-service portal.
-   *
-   * <p><b>Backend-only, deliberately.</b> No key is declared in the web client's
-   * {@code flag-keys.js} and nothing in the browser reads this: the decision point is entirely
-   * server-side, since the link is injected while building the email in Java. Giving the browser a
-   * key to read would create a second evaluator with nothing to evaluate — and, per the lesson
-   * above, a flag whose two ends resolve from different control planes has no single truth. This is
-   * the first backend flag declared since {@code tenant-upgrade} retired.
-   *
-   * <p><b>It gates the link, not the portal.</b> The {@code /portal/:token} route, the three
-   * {@code /sws/portal/*} endpoints, the {@code etgo_portal_access} table and the revoke action all
-   * ship unconditionally — the same pattern {@code docs/feature-flags.md} already documents as
-   * correct for {@code /upgrade}, where the route is registered unconditionally and only the menu
-   * entry is gated, "because hiding the route would imply the flag was protecting something, which
-   * it is not". What protects the endpoints is the token.
-   *
-   * <p>Never the only gate: a second, permanent per-sender {@code AD_Preference} must also be set.
-   * See {@code PortalLinkPolicy}, which owns both and the order they are evaluated in.
-   */
-  public static final String FLAG_BP_PORTAL_LINK = "bp-portal-link";
-
-  /**
    * OpenFeature domain the provider is bound to. Using a domain instead of the global default
    * provider keeps this module from clobbering a provider installed by another module.
    */

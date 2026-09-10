@@ -34,8 +34,8 @@ import com.etendoerp.go.schemaforge.data.PortalAccess;
  * Owns the lifecycle of a Business Partner's portal access: minting the link that goes into an
  * invoice email, validating the token that comes back, and revoking it.
  *
- * <p><b>Both gates of {@link PortalLinkPolicy} are checked inside {@link #findOrCreateLink}, before
- * anything is written.</b> Deliberately here rather than at the call site: minting a row while a
+ * <p><b>{@link PortalLinkPolicy}'s gate is checked inside {@link #findOrCreateLink}, before
+ * anything is written.</b> Deliberately here rather than at the call site: minting a row while the
  * gate is closed is the failure mode that leaks the feature early — a live token exists for a
  * Business Partner nobody meant to give one — and it is what the plan's tests assert on (the row
  * count, not the email body). Putting the check in the only method that inserts makes it
@@ -61,7 +61,7 @@ public class PortalAccessService {
    * @param client the tenant that owns the invoice being sent
    * @param organization the organization the access row is visible at
    * @param businessPartner the Business Partner the invoice is addressed to
-   * @return the absolute portal link, or empty when either gate is closed, the token secret or app
+   * @return the absolute portal link, or empty when the gate is closed, the token secret or app
    *     base URL is unconfigured, or an argument is missing
    */
   public Optional<String> findOrCreateLink(Client client, Organization organization,
@@ -69,7 +69,7 @@ public class PortalAccessService {
     if (client == null || organization == null || businessPartner == null) {
       return Optional.empty();
     }
-    // Gate order is PortalLinkPolicy's contract: flag (in-memory) before preference (a query).
+    // The sender's preference is the only gate, and PortalLinkPolicy owns reading it.
     if (!PortalLinkPolicy.isLinkEnabled()) {
       return Optional.empty();
     }
