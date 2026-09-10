@@ -20,8 +20,11 @@ package com.etendoerp.go.schemaforge;
 import javax.inject.Named;
 
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.module.sii.process.CorrectDuplicateInvoiceError;
 
 /**
  * NeoHandler delegate for the legacy SII button on Sales Invoice.
@@ -31,6 +34,17 @@ import org.openbravo.dal.service.OBDal;
  * handler {@code org.openbravo.module.sii.process.MultiEnvioFactura}. NEO cannot
  * execute that client-side hook directly, so this handler invokes the underlying
  * server-side action handler with the same payload shape used by the classic UI.
+ *
+ * <p>ETP-5272: {@code MultiEnvioFactura} always sends communication type {@code A0}
+ * ("alta" / new registration) and skips any invoice already marked as sent to SII
+ * ({@code SIIUtils.isSentToSII}). That is wrong for an invoice pending a registry-error
+ * correction ({@link Invoice#isAeatsiiErrorRegistral()} {@code = true}): AEAT expects the
+ * correction envelope, communication type {@code A1}, and the invoice must actually be
+ * resent even though {@code aeatsiiIssent} is already {@code true} (the classic backend
+ * never resets that flag after the correction cycle). The classic module's own resend path
+ * for exactly this case is {@code org.openbravo.module.sii.process.CorrectDuplicateInvoiceError}
+ * — it branches to {@code A1} internally when the invoice's error-registral flag is set — so
+ * this handler routes there instead, reusing that process as-is.
  */
 @Named("sii-send")
 public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
@@ -40,19 +54,96 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
   static final String ACTION_NAME_QUALIFIER = "aeatsiiSend";
   private static final String PROCESS_ID = "2ECF46DAAEEB486EAF79D3594D50DE5F";
   private static final String PROCESS_CLASS = "org.openbravo.module.sii.process.MultiEnvioFactura";
+  private static final String STATUS = "status";
+  private static final String MESSAGE = "message";
+  private static final String ERROR = "error";
+  private static final String SUCCESS = "success";
+  private static final String RESPONSE_ACTIONS = "responseActions";
+  private static final String SHOW_MSG_IN_VIEW = "showMsgInView";
 
   @Override
   protected NeoResponse executeAction(String recordId) throws Exception {
+    Invoice invoice = OBDal.getInstance().get(Invoice.class, recordId);
+
+    if (invoice != null && Boolean.TRUE.equals(invoice.isAeatsiiErrorRegistral())) {
+      return executeRegistralCorrection(recordId);
+    }
+
     JSONObject params = new JSONObject();
     params.put("recordId", recordId);
     params.put("inpRecordId", recordId);
-    params.put("orgid", resolveOrganizationId(recordId));
+    params.put("orgid", resolveOrganizationId(invoice));
     JSONArray ids = new JSONArray();
     ids.put(recordId);
     params.put("ids", ids);
 
     NeoResponse response = NeoProcessService.executeObuiappClass(PROCESS_CLASS, PROCESS_ID, params);
     return normalizeErrorShape(response);
+  }
+
+  /**
+   * Routes a registry-error correction resend to {@code CorrectDuplicateInvoiceError},
+   * the classic module's own resend path for this case (see class-level javadoc).
+   *
+   * <p>{@code CorrectDuplicateInvoiceError} is a plain class (not a {@code BaseActionHandler}),
+   * so it is called directly rather than through {@link NeoProcessService}'s OBUIAPP bridge —
+   * that bridge requires a {@code BaseActionHandler} instance and would reject this class.
+   */
+  private static NeoResponse executeRegistralCorrection(String recordId) {
+    JSONObject handlerResult;
+    try {
+      handlerResult = new CorrectDuplicateInvoiceError().doExecute(recordId);
+    } catch (Exception e) {
+      return NeoResponse.ensureTopLevelMessage(
+          NeoResponse.error(500, "SII registry-error correction failed: " + e.getMessage()));
+    }
+    return normalizeErrorShape(translateCorrectDuplicateResult(handlerResult));
+  }
+
+  /**
+   * Translates {@code CorrectDuplicateInvoiceError#doExecute}'s result shape
+   * ({@code responseActions[0].showMsgInView.{msgType,msgTitle,msgText}}) into a
+   * {@link NeoResponse}. This shape is specific to this classic process (note: it uses
+   * {@code showMsgInView}, not the {@code showMsgInProcessView} key
+   * {@link NeoProcessService}'s generic OBUIAPP translator already recognizes), hence a
+   * dedicated translator here rather than reusing that generic one.
+   *
+   * <p>Package-private and static so it can be unit tested directly against a synthetic
+   * result, without needing a live AEAT connection or DB access.
+   */
+  static NeoResponse translateCorrectDuplicateResult(JSONObject handlerResult) {
+    try {
+      JSONObject msg = extractShowMsgInView(handlerResult);
+      JSONObject body = new JSONObject();
+
+      if (msg == null) {
+        body.put(STATUS, SUCCESS);
+        return NeoResponse.ok(body);
+      }
+
+      String msgType = msg.optString("msgType", SUCCESS);
+      body.put(STATUS, msgType);
+      body.put(MESSAGE, msg.optString("msgText", ""));
+
+      if (ERROR.equalsIgnoreCase(msgType)) {
+        return new NeoResponse(400, body);
+      }
+      return NeoResponse.ok(body);
+    } catch (JSONException e) {
+      return NeoResponse.error(500, "Error parsing SII correction response: " + e.getMessage());
+    }
+  }
+
+  private static JSONObject extractShowMsgInView(JSONObject handlerResult) throws JSONException {
+    if (handlerResult == null) {
+      return null;
+    }
+    JSONArray actions = handlerResult.optJSONArray(RESPONSE_ACTIONS);
+    if (actions == null || actions.length() == 0) {
+      return null;
+    }
+    JSONObject first = actions.optJSONObject(0);
+    return first == null ? null : first.optJSONObject(SHOW_MSG_IN_VIEW);
   }
 
   /**
@@ -101,9 +192,7 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
     return "SII send failed: " + e.getMessage();
   }
 
-  private String resolveOrganizationId(String invoiceId) {
-    org.openbravo.model.common.invoice.Invoice invoice =
-        OBDal.getInstance().get(org.openbravo.model.common.invoice.Invoice.class, invoiceId);
+  private static String resolveOrganizationId(Invoice invoice) {
     if (invoice == null || invoice.getOrganization() == null) {
       return null;
     }
