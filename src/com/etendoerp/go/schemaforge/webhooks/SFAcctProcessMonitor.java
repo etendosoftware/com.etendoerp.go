@@ -173,8 +173,18 @@ public class SFAcctProcessMonitor extends BaseWebhookService {
         .equalsIgnoreCase(StringUtils.trimToEmpty(parameter.get(PARAM_ACTION)));
 
     // Admin mode: the accounting process's recurring request is a System (AD_Client_ID = '0') row,
-    // which a tenant admin's own context cannot read. Every criteria below additionally disables
-    // readable-client/org filtering, matching every sibling webhook in this package.
+    // which a tenant admin's own context cannot read. Every criteria below ALSO disables
+    // readable-client/org filtering explicitly, so the scope never depends on ambient context.
+    //
+    // The boolean is `doOrgClientAccessCheck`, NOT "bypass everything": `true` KEEPS the
+    // cross-client write check and is therefore the STRICTER variant. The 10 sibling webhooks in
+    // this package all call the no-arg setAdminMode(), which is the laxer one. `true` is
+    // deliberate here — this class performs no OBDal writes at all (its only mutation goes through
+    // raw XSQL in ProcessRequestData.insert, which never reaches SecurityChecker), so the strict
+    // check costs nothing and keeps the class honest if a DAL write is ever added. If you DO add
+    // one, expect an OBSecurityException and decide consciously rather than switching this to the
+    // no-arg form to make it go away. The same trap is documented in
+    // UserRoleCompositionServiceIntegrationTest (see its notes on setAdminMode's argument).
     OBContext.setAdminMode(true);
     try {
       Process process = resolveAcctProcess();
@@ -186,12 +196,17 @@ public class SFAcctProcessMonitor extends BaseWebhookService {
 
       int limit = historyLimit(parameter);
       ProcessRequest recurring = findRecurringRequest(process);
+
+      // Trigger FIRST, then read. Reading first and patching only `history` afterwards produced a
+      // response whose fields disagreed with each other: `running` was captured before the run was
+      // scheduled — and since the trigger refuses outright when a run is already in progress, it
+      // was necessarily false in EVERY successful trigger response — while `lastRun` came from the
+      // stale read and `history` from the fresh one. The frontend keys its poll off `running`, so
+      // it never started polling and the page sat there claiming a run had begun.
+      JSONObject triggered = trigger ? triggerManualRun(process, recurring) : null;
       JSONObject result = buildStatus(process, recurring, limit);
-      if (trigger) {
-        result.put(FIELD_TRIGGERED, triggerManualRun(process, recurring));
-        // Re-read the history so the freshly created run is already visible in the response that
-        // the "Run now" click renders, rather than only after the next poll.
-        result.put(FIELD_HISTORY, buildHistory(process, limit));
+      if (triggered != null) {
+        result.put(FIELD_TRIGGERED, triggered);
       }
       responseVars.put(RESPONSE_VAR_RESULT, result.toString());
     } catch (JSONException e) {
@@ -446,6 +461,25 @@ public class SFAcctProcessMonitor extends BaseWebhookService {
     return !criteria.list().isEmpty();
   }
 
+  /**
+   * {@code started: true} means the job was HANDED TO QUARTZ, not that it has run or even that its
+   * {@code AD_PROCESS_RUN} row exists yet.
+   *
+   * <p>{@code ProcessMonitor.jobToBeExecuted} writes that row on the scheduler's own thread, so a
+   * read taken in the same request — however late — can legitimately still see neither a
+   * {@code PRC} run nor a new history entry. Callers must therefore POLL after a successful
+   * trigger rather than treating the triggering response as the final word; the frontend hook does
+   * exactly that, on a bounded deadline, instead of keying solely off {@code running}.</p>
+   *
+   * <p>Two later outcomes are both normal and both eventually visible in the history the poll
+   * fetches: an ordinary run, or — because {@code AD_Process.preventconcurrent} is {@code 'Y'} for
+   * this process — a run vetoed by {@code ProcessMonitor.stopConcurrency} because the recurring
+   * instance-wide job started in between. A veto is not silent: it writes its own
+   * {@code AD_PROCESS_RUN} row, tagged with this caller's client, with status {@code ERR} and a
+   * zero duration. Its explanation ("Concurrent attempt to execute") goes into the {@code LOG}
+   * column, which this endpoint deliberately never exposes — so such a row surfaces as a plain
+   * failed run. See the class javadoc on what is not exposed and why.</p>
+   */
   private JSONObject triggerResult(boolean started, String reason) throws JSONException {
     JSONObject result = new JSONObject();
     result.put("started", started);
