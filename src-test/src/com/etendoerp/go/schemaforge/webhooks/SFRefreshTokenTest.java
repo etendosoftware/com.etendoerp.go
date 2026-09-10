@@ -593,6 +593,146 @@ class SFRefreshTokenTest {
     assertFalse(responseVars.containsKey("error"));
   }
 
+  // ── ETP-5195 follow-up — {"unchanged": true} short-circuit ──────────────
+
+  /**
+   * When the caller's OWN token (as reflected in {@code OBContext.getRole()}) already embeds the
+   * SAME role the DB just resolved via {@code user.getDefaultRole()}, {@code get()} must skip
+   * minting entirely: no {@code generateToken} call, no {@code token}/{@code session} keys, just
+   * {@code {"unchanged": true}}.
+   */
+  @Test
+  void sameRoleAsCallerSkipsMintingAndReturnsUnchanged() {
+    User callerUser = givenAuthenticatedUser("user-1");
+    when(callerUser.isActive()).thenReturn(true);
+    Role currentRole = mock(Role.class);
+    when(currentRole.getId()).thenReturn("role-1");
+    when(currentRole.isActive()).thenReturn(true);
+    stubSameClientRole(currentRole);
+    when(callerUser.getDefaultRole()).thenReturn(currentRole);
+
+    // The caller's OWN token (as reflected in OBContext, populated by NeoAuthenticator before
+    // this webhook is reached) already carries this SAME role.
+    when(mockContext.getRole()).thenReturn(currentRole);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(User.class, "user-1")).thenReturn(callerUser);
+    stubUserRolesCriteria(obDal, 1);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      webhook.get(parameters, responseVars);
+
+      swsMock.verifyNoInteractions();
+    }
+
+    assertFalse(responseVars.containsKey("error"));
+    JSONObject result = resultOf(responseVars);
+    assertTrue(result.optBoolean("unchanged", false));
+    assertFalse(result.has("token"));
+    assertFalse(result.has("session"));
+  }
+
+  /**
+   * Regression guard for {@code isSameRoleAsCaller}'s condition: when the caller's own token
+   * embeds a DIFFERENT role than the DB just resolved, this must behave exactly like the
+   * pre-existing happy path — a token IS minted and session metadata IS built — proving the new
+   * short-circuit does not accidentally fire on a genuine role change.
+   */
+  @Test
+  void differentRoleThanCallerStillMintsTokenAsBefore() throws JSONException {
+    User callerUser = givenAuthenticatedUser("user-1");
+    when(callerUser.isActive()).thenReturn(true);
+    Role currentRole = mock(Role.class);
+    when(currentRole.getId()).thenReturn("role-1");
+    when(currentRole.isActive()).thenReturn(true);
+    stubSameClientRole(currentRole);
+    when(callerUser.getDefaultRole()).thenReturn(currentRole);
+
+    // The caller's OWN token embeds a DIFFERENT role than the just-resolved one.
+    Role callerCurrentTokenRole = mock(Role.class);
+    when(callerCurrentTokenRole.getId()).thenReturn("role-OLD");
+    when(mockContext.getRole()).thenReturn(callerCurrentTokenRole);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(User.class, "user-1")).thenReturn(callerUser);
+    stubUserRolesCriteria(obDal, 1);
+
+    DecodedJWT decoded = mockDecodedJwt("user-1", "client-1", "role-1", "org-1");
+    RoleListData roleListData = roleListDataWith("role-1", "Role One");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class);
+         MockedStatic<EtendoGoJwtSupport> jwtSupportMock = mockStatic(EtendoGoJwtSupport.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      swsMock.when(() -> SecureWebServicesUtils.generateToken(callerUser, currentRole))
+          .thenReturn("fresh-jwt-token");
+      swsMock.when(() -> SecureWebServicesUtils.decodeToken("fresh-jwt-token")).thenReturn(decoded);
+      jwtSupportMock.when(() -> EtendoGoJwtSupport.loadRoleListData("user-1"))
+          .thenReturn(roleListData);
+
+      webhook.get(parameters, responseVars);
+
+      swsMock.verify(() -> SecureWebServicesUtils.generateToken(callerUser, currentRole), times(1));
+    }
+
+    assertFalse(responseVars.containsKey("error"));
+    JSONObject result = resultOf(responseVars);
+    assertEquals("fresh-jwt-token", result.getString("token"));
+    assertTrue(result.has("session"));
+    assertFalse(result.optBoolean("unchanged", false));
+  }
+
+  /**
+   * Fail-closed proof for {@code isSameRoleAsCaller}: when {@code mockContext.getRole()} is left
+   * unstubbed (defaults to {@code null} -- e.g. because {@code NeoAuthenticator} couldn't resolve
+   * a role from a token that legitimately had none), a null caller role must never be treated as
+   * "same" as the just-resolved, genuinely non-null {@code currentRole} -- minting must still
+   * happen exactly as before. Every OTHER existing test already covers this implicitly (none of
+   * them stub {@code getRole()}); this makes it an explicit, named assertion instead.
+   */
+  @Test
+  void nullCallerRoleNeverTreatedAsSameAsResolvedRole() throws JSONException {
+    User callerUser = givenAuthenticatedUser("user-1");
+    when(callerUser.isActive()).thenReturn(true);
+    Role currentRole = mock(Role.class);
+    when(currentRole.getId()).thenReturn("role-1");
+    when(currentRole.isActive()).thenReturn(true);
+    stubSameClientRole(currentRole);
+    when(callerUser.getDefaultRole()).thenReturn(currentRole);
+
+    // mockContext.getRole() deliberately left unstubbed -> returns null.
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(User.class, "user-1")).thenReturn(callerUser);
+    stubUserRolesCriteria(obDal, 1);
+
+    DecodedJWT decoded = mockDecodedJwt("user-1", "client-1", "role-1", "org-1");
+    RoleListData roleListData = roleListDataWith("role-1", "Role One");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class);
+         MockedStatic<EtendoGoJwtSupport> jwtSupportMock = mockStatic(EtendoGoJwtSupport.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      swsMock.when(() -> SecureWebServicesUtils.generateToken(callerUser, currentRole))
+          .thenReturn("fresh-jwt-token");
+      swsMock.when(() -> SecureWebServicesUtils.decodeToken("fresh-jwt-token")).thenReturn(decoded);
+      jwtSupportMock.when(() -> EtendoGoJwtSupport.loadRoleListData("user-1"))
+          .thenReturn(roleListData);
+
+      webhook.get(parameters, responseVars);
+
+      swsMock.verify(() -> SecureWebServicesUtils.generateToken(callerUser, currentRole), times(1));
+    }
+
+    assertFalse(responseVars.containsKey("error"));
+    JSONObject result = resultOf(responseVars);
+    assertEquals("fresh-jwt-token", result.getString("token"));
+    assertTrue(result.has("session"));
+  }
+
   // ── generateToken failure ───────────────────────────────────────────────
 
   @Test

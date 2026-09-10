@@ -95,6 +95,16 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * genuinely unexpected state, so — like before — it is deliberately NOT modeled as a
  * {@code success:false} domain rejection the way {@code SFPromoteUserRole}'s target-user
  * validation is: it surfaces as the bridge's normal {@code error}/{@code 500} path.</p>
+ *
+ * <p><b>ETP-5195 follow-up — {@code {"unchanged": true}}.</b> When {@link
+ * #isSameRoleAsCaller(Role)} finds the caller's OWN current token already embeds the
+ * just-resolved role, nothing is minted at all: no {@code token}, no {@code session}, just
+ * {@code {"unchanged": true}}. A refresh triggered by a tab-focus/visibility-regain or the
+ * background poll (see {@code AuthContext.jsx} in {@code schema_forge_core}) fires far more
+ * often than any actual role change, and unconditionally reissuing an equivalent token (new
+ * {@code iat}/{@code exp}, nothing else different) forced the frontend to actively detect and
+ * ignore that no-op rotation. The frontend's {@code reconcileSessionRefresh} routes this shape
+ * through the exact same no-op path as a legacy (token-only, unchanged-identity) response.</p>
  */
 public class SFRefreshToken extends BaseWebhookService {
 
@@ -115,6 +125,7 @@ public class SFRefreshToken extends BaseWebhookService {
   private static final String CLAIM_CLIENT = "client";
   private static final String CLAIM_ROLE = "role";
   private static final String CLAIM_ORGANIZATION = "organization";
+  private static final String FIELD_UNCHANGED = "unchanged";
 
   @Override
   public void get(Map<String, String> parameter, Map<String, String> responseVars) {
@@ -158,6 +169,20 @@ public class SFRefreshToken extends BaseWebhookService {
                 .toString());
         return;
       }
+      // ETP-5195 follow-up -- a tab-focus/visibility-regain/poll-triggered silent refresh fires
+      // on every reactivation regardless of whether the role actually changed, and minting a
+      // token unconditionally here reissues a fresh iat/exp every single time, which the
+      // frontend then has to actively no-op around (see schema_forge_core's AuthContext.jsx).
+      // When the caller's OWN token (the one that authenticated this very request, still
+      // reflected in OBContext) already embeds the SAME role the DB just resolved, nothing
+      // about the session actually changed -- skip minting entirely and say so explicitly,
+      // rather than reissuing a byte-for-byte-equivalent-but-differently-timed token. A caller
+      // whose token is nearing its own expiry simply rides out that instance's configured
+      // SMFSWS_Config token lifetime, same as any session that never triggers a role change.
+      if (currentRole != null && isSameRoleAsCaller(currentRole)) {
+        responseVars.put(RESPONSE_VAR_RESULT, unchanged().toString());
+        return;
+      }
       String newToken = SecureWebServicesUtils.generateToken(user, currentRole);
       if (currentRole != null) {
         // ETP-5195 -- session metadata extension: only meaningful once a role was actually
@@ -184,6 +209,22 @@ public class SFRefreshToken extends BaseWebhookService {
   private String resolveCallerUserId() {
     OBContext context = OBContext.getOBContext();
     return context != null && context.getUser() != null ? context.getUser().getId() : null;
+  }
+
+  /**
+   * ETP-5195 follow-up — {@code true} when the ROLE embedded in the caller's own current token
+   * (as reflected in {@link OBContext}, populated by {@code NeoAuthenticator#authenticateJwt}
+   * before this webhook is ever reached) already matches the just-resolved {@code
+   * Default_Ad_Role_ID}. Only the role identity is compared — not organization/warehouse — since
+   * {@code Default_Ad_Role_ID} is the single value a promote/demote (the reason this endpoint
+   * exists) ever changes; a same-role token is therefore not stale in any way this refresh cares
+   * about, and minting an equivalent replacement would only reissue a new {@code iat}/{@code
+   * exp} with no other observable difference.
+   */
+  private boolean isSameRoleAsCaller(Role currentRole) {
+    OBContext callerContext = OBContext.getOBContext();
+    Role callerRole = callerContext != null ? callerContext.getRole() : null;
+    return callerRole != null && Objects.equals(callerRole.getId(), currentRole.getId());
   }
 
   /**
@@ -224,6 +265,23 @@ public class SFRefreshToken extends BaseWebhookService {
       return criteria.count() > 0;
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * ETP-5195 follow-up — carries NO {@code token}/{@code session} at all: the caller's role is
+   * unchanged (see {@link #isSameRoleAsCaller(Role)}), so nothing was minted. The frontend's
+   * {@code reconcileSessionRefresh} routes this through the same no-op path as a legacy
+   * (token-only, unchanged-identity) response — see {@code docs/auth-session-refresh.md} in
+   * {@code schema_forge_core}.
+   */
+  private JSONObject unchanged() {
+    try {
+      JSONObject body = new JSONObject();
+      body.put(FIELD_UNCHANGED, true);
+      return body;
+    } catch (JSONException e) {
+      throw new IllegalStateException("Unable to build unchanged result", e);
     }
   }
 
