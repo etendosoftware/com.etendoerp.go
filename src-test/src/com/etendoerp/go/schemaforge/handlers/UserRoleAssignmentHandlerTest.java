@@ -104,6 +104,17 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  * must run, and must complete, BEFORE {@link CompanyInvitationService#createInvitationForNewlyCreatedUser}
  * is ever called — see the {@code afterHandleAssignsPersonalRoleBeforeInvitationOnCreate} test and
  * its siblings below the existing invitation tests.
+ *
+ * <p>Duplicate-email guard on create (ETP-5264): covers {@link
+ * UserRoleAssignmentHandler#rejectDuplicateEmail} short-circuiting {@link
+ * UserRoleAssignmentHandler#handleCreate} with a 400 BEFORE the {@code username} is derived when
+ * an {@code AD_User} with the same {@code email} already exists for the current client (see
+ * {@code handleRejectsDuplicateEmailOnCreateBeforeUsernameIsDerived} and its case-insensitivity
+ * sibling below {@code handleRejectsPostWithBlankEmail}), that a non-duplicate email falls
+ * through to the pre-existing username-derivation flow unchanged ({@code
+ * handleAllowsCreateWhenNoDuplicateEmailExistsForClient}), and that the guard is a no-op when no
+ * client is resolved (already covered by {@code handleForcesUsernameToMirrorEmailOnPost}, which
+ * mocks no {@code OBContext} at all).
  */
 public class UserRoleAssignmentHandlerTest {
 
@@ -167,6 +178,9 @@ public class UserRoleAssignmentHandlerTest {
 
   @Test
   public void handleForcesUsernameToMirrorEmailOnPost() throws Exception {
+    // No OBContext is mocked here, so OBContext.getOBContext() resolves no client — this also
+    // covers rejectDuplicateEmail's client==null no-op path (ETP-5264): the guard must not block
+    // (or otherwise touch OBDal for) a create when no client is resolved.
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
     JSONObject requestBody = new JSONObject();
     requestBody.put("email", "  New.User@Example.com  ");
@@ -198,10 +212,21 @@ public class UserRoleAssignmentHandlerTest {
     when(client.getName()).thenReturn("Second Client");
 
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
-        MockedStatic<EtendoGoJwtSupport> usernameMock = mockStatic(EtendoGoJwtSupport.class)) {
+        MockedStatic<EtendoGoJwtSupport> usernameMock = mockStatic(EtendoGoJwtSupport.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
       usernameMock.when(() -> EtendoGoJwtSupport.buildClientUsername(
           "user@example.com", "Second Client")).thenReturn("user@example.com+secondclient");
+
+      // ETP-5264: a non-null client now also routes handleCreate through rejectDuplicateEmail
+      // before the username is derived — mock an empty match so the new query resolves cleanly
+      // (no pre-existing duplicate) and the pre-existing assertions below stay unaffected.
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<User> criteria = mock(OBCriteria.class);
+      when(obDal.createCriteria(User.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.emptyList());
 
       assertNull(handler.handle(ctx));
       assertEquals("user@example.com+secondclient", requestBody.getString("username"));
@@ -221,6 +246,120 @@ public class UserRoleAssignmentHandlerTest {
 
     NeoResponse response = handler.handle(ctx);
     assertEquals(400, response.getHttpStatus());
+  }
+
+  // ─── handle(): duplicate-email guard on create (ETP-5264) ───────────────────
+
+  @Test
+  public void handleRejectsDuplicateEmailOnCreateBeforeUsernameIsDerived() throws Exception {
+    // A duplicate email within the same client must be rejected with a clear 400 BEFORE the
+    // username is derived — otherwise the derived username would also collide and the DB's raw
+    // unique-constraint violation (naming a field this create form never shows) would leak
+    // through instead. See rejectDuplicateEmail's javadoc.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", "duplicate@example.com");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(requestBody)
+        .build();
+
+    OBContext obContext = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<User> criteria = mock(OBCriteria.class);
+      when(obDal.createCriteria(User.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.singletonList(mock(User.class)));
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("A user with this email address already exists", ownerGuardMessage(response));
+      assertFalse(requestBody.has("username"));
+    }
+  }
+
+  @Test
+  public void handleAllowsCreateWhenNoDuplicateEmailExistsForClient() throws Exception {
+    // Counterpart to the above: an empty match list must NOT short-circuit the create — it falls
+    // through to the pre-existing username-derivation flow, unchanged from before ETP-5264.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", "unique@example.com");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(requestBody)
+        .build();
+
+    OBContext obContext = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+    when(client.getName()).thenReturn(null);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<User> criteria = mock(OBCriteria.class);
+      when(obDal.createCriteria(User.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.emptyList());
+
+      assertNull(handler.handle(ctx));
+      assertEquals("unique@example.com", requestBody.getString("username"));
+    }
+  }
+
+  @Test
+  public void handleRejectsDuplicateEmailOnCreateRegardlessOfInputCasing() throws Exception {
+    // rejectDuplicateEmail always receives the ALREADY-lowercased email (handleCreate normalizes
+    // before calling it) and queries with Restrictions.ilike(..., MatchMode.EXACT), so a
+    // case-only difference against a stored email must still be caught. Restrictions.ilike
+    // returns a Criterion with no introspectable equality/case semantics to assert against, so —
+    // following this file's existing mocking idioms (no static-mocking of Hibernate's
+    // Restrictions) — this is asserted behaviorally: a mixed-case input email still hits the
+    // duplicate short-circuit when the criteria mock reports a match, mirroring the plain
+    // lower-case case above.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", "Duplicate.User@EXAMPLE.com");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(requestBody)
+        .build();
+
+    OBContext obContext = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<User> criteria = mock(OBCriteria.class);
+      when(obDal.createCriteria(User.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.singletonList(mock(User.class)));
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(400, response.getHttpStatus());
+    }
   }
 
   @Test
