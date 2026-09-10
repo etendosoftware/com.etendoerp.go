@@ -282,7 +282,7 @@ public class SFRefreshToken extends BaseWebhookService {
     session.put(FIELD_CLIENT_ID, clientId);
     session.put(FIELD_SELECTED_ROLE_ID, selectedRoleId);
     session.put(FIELD_SELECTED_ORG_ID, selectedOrgId);
-    session.put(FIELD_ROLE_LIST, roleListData.roleArray);
+    session.put(FIELD_ROLE_LIST, roleListData.getRoleArray());
     return session;
   }
 }

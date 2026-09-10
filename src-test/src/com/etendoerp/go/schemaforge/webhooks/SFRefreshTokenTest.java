@@ -174,15 +174,13 @@ class SFRefreshTokenTest {
    */
   private static RoleListData roleListDataWith(String roleId, String roleName)
       throws JSONException {
-    RoleListData data = new RoleListData();
-    data.firstRoleId = roleId;
-    data.roleArray = new JSONArray();
+    JSONArray roleArray = new JSONArray();
     JSONObject roleEntry = new JSONObject();
     roleEntry.put("id", roleId);
     roleEntry.put("name", roleName);
     roleEntry.put("orgList", new JSONArray());
-    data.roleArray.put(roleEntry);
-    return data;
+    roleArray.put(roleEntry);
+    return new RoleListData(roleId, roleArray);
   }
 
   // ── caller resolution failures ──────────────────────────────────────────
@@ -340,7 +338,7 @@ class SFRefreshTokenTest {
     assertEquals("client-9", session.getString("clientId"));
     assertEquals("role-9", session.getString("selectedRoleId"));
     assertEquals("org-9", session.getString("selectedOrgId"));
-    assertEquals(roleListData.roleArray.toString(), session.getJSONArray("roleList").toString());
+    assertEquals(roleListData.getRoleArray().toString(), session.getJSONArray("roleList").toString());
   }
 
   /**

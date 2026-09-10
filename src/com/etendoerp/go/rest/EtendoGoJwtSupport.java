@@ -72,6 +72,15 @@ public final class EtendoGoJwtSupport {
         || (username != null && username.startsWith(accountEmail + "+"));
   }
 
+  /**
+   * Loads the given user's assignable roles (each with its available organizations) as a
+   * {@link RoleListData}, resolving the same {@code AD_Role}/{@code AD_Role_OrgAccess} rows
+   * {@code EtendoGoJwtServlet}'s login flow already builds for the {@code roleList} it returns.
+   *
+   * @param userId the {@code AD_User_ID} whose roles are being resolved
+   * @return the resolved role list, never {@code null}
+   * @throws JSONException if the underlying role/organization JSON cannot be built
+   */
   public static RoleListData loadRoleListData(String userId) throws JSONException {
     try {
       return buildRoleListData(loadRoleRows(userId));
@@ -92,9 +101,7 @@ public final class EtendoGoJwtSupport {
   }
 
   private static RoleListData buildRoleListData(List<Object[]> rows) throws JSONException {
-    RoleListData data = new RoleListData();
-    data.roleArray = new JSONArray();
-
+    String firstRoleId = null;
     Map<String, JSONObject> rolesById = new LinkedHashMap<>();
     for (Object[] row : rows) {
       String roleId = stringValue(row[0]);
@@ -102,8 +109,8 @@ public final class EtendoGoJwtSupport {
       if (roleObj == null) {
         roleObj = buildRoleJson(roleId, stringValue(row[1]));
         rolesById.put(roleId, roleObj);
-        if (data.firstRoleId == null) {
-          data.firstRoleId = roleId;
+        if (firstRoleId == null) {
+          firstRoleId = roleId;
         }
       }
 
@@ -113,10 +120,11 @@ public final class EtendoGoJwtSupport {
       }
     }
 
+    JSONArray roleArray = new JSONArray();
     for (JSONObject roleObj : rolesById.values()) {
-      data.roleArray.put(roleObj);
+      roleArray.put(roleObj);
     }
-    return data;
+    return new RoleListData(firstRoleId, roleArray);
   }
 
   private static String stringValue(Object value) {
@@ -259,8 +267,33 @@ public final class EtendoGoJwtSupport {
     return query.uniqueResult();
   }
 
+  /**
+   * The resolved set of roles (and their available organizations) a user is currently
+   * assignable to, plus a convenience pointer to the first one — the same shape both the
+   * login flow ({@code EtendoGoJwtServlet}) and the silent-refresh webhook
+   * ({@code SFRefreshToken}) need for their own {@code roleList} responses.
+   */
   public static final class RoleListData {
-    public String firstRoleId;
-    public JSONArray roleArray;
+    private final String firstRoleId;
+    private final JSONArray roleArray;
+
+    /**
+     * @param firstRoleId the first resolved role's {@code AD_Role_ID}, or {@code null}
+     * @param roleArray the full resolved role list
+     */
+    public RoleListData(String firstRoleId, JSONArray roleArray) {
+      this.firstRoleId = firstRoleId;
+      this.roleArray = roleArray;
+    }
+
+    /** @return the first resolved role's {@code AD_Role_ID}, or {@code null} if none resolved */
+    public String getFirstRoleId() {
+      return firstRoleId;
+    }
+
+    /** @return the full resolved role list, each entry carrying its available organizations */
+    public JSONArray getRoleArray() {
+      return roleArray;
+    }
   }
 }
