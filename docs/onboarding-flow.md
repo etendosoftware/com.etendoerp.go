@@ -30,9 +30,10 @@ removed, or reordered.
  6. fiscal              — seed SII descriptions (AEATSII_DESCRIPTION)
  7. orgInfo             — wire org fiscal/address info from the signup form
  8. bankConnectionSync  — schedule the PSD2 daily bank-statement sync (non-fatal; wired live 2026-06-28)
- 9. bpGroupAcctPatch    — patch C_BP_Group_Acct columns the core trigger never populates (ETP-4720)
-10. acctdimVisibility   — force flat accounting-dimension visibility (gap K1, ETP-4854)
-11. baseline            — stamp the tenant's data-fix baseline (registerBaseline; always LAST)
+ 9. costingSchedule     — schedule the 5-minute Costing Background process (non-fatal, ETP-5190)
+10. bpGroupAcctPatch    — patch C_BP_Group_Acct columns the core trigger never populates (ETP-4720)
+11. acctdimVisibility   — force flat accounting-dimension visibility (gap K1, ETP-4854)
+12. baseline            — stamp the tenant's data-fix baseline (registerBaseline; always LAST)
 ```
 
 The `orgReady` and `fiscal` steps were added to fix the "environment not ready
@@ -186,8 +187,45 @@ auto-import statements. Has a post-commit companion,
 `activateSchedule(clientId)`, called right after `commitDalChanges` (not
 inside this chain) because the Quartz scheduler needs a committed row.
 
+### `OnboardingCostingScheduleService`
+Step 9 (ETP-5190). Same shape as step 8 and equally **non-fatal**: one
+`AD_Process_Request` per client running core's `CostingBackground` process every
+5 minutes, plus the post-commit `activateSchedule(clientId)` companion.
+
+Why it is needed: onboarding already imports a **validated** costing rule
+(`M_COSTING_RULE` is on `OnboardingDatasetDefinition`'s allowlist and the
+GOClient row ships `ISVALIDATED='Y'`), but nothing ever ran the process that
+consumes it, so no tenant calculated costs. Measured before the fix: 83
+validated costing rules across 74 clients, and **two** `CostingBackground`
+requests in the whole instance — both hand-made (core's F&B demo client, and
+GOClient). Over the same period the step-8 PSD2 schedule stood at 74/74.
+
+Three things worth knowing before touching it:
+
+- **It cannot be sampledata.** `referencedata/sampledata/GOClient/
+  AD_PROCESS_REQUEST.xml` *does* carry a `CostingBackground` row, which makes it
+  look as though tenants are covered — they are not. `AD_PROCESS_REQUEST` is on
+  the dataset's **EXCLUDED** list and is never imported, correctly: every dumped
+  row hardcodes GOClient's own user/role/client/org/warehouse inside its
+  `OB_CONTEXT` JSON. A Process Request is instance data, not model data.
+- **It must be per client.** Unlike `StoredColumnQueueScheduleStartup`, which
+  covers every tenant with one System (`client '0'`) request, `CostingBackground`
+  resolves what to cost with `ad_isorgincluded(o.id, :orgId, :clientId)` bound to
+  the request's own client and organization. A System request would match only
+  org `'0'` and silently cost nothing.
+- **The trigger fields are `timing='S'` + `frequency='2'` + `MINUTELY_INTERVAL=5`.**
+  `S2` is the key core's `TriggerProvider` maps to `repeatMinutelyForever`; it
+  reads the *minutely* interval, not the secondly one. Core's F&B demo client has
+  shipped exactly this shape since 2013.
+
+**Preventive only — the corrective half was declined.** Tenants onboarded
+before this step have no costing schedule and calculate no costs until someone
+adds the Process Request by hand in Classic. That was an explicit call on
+ETP-5190 (new tenants are enough), not a pending task: there is deliberately no
+`cli/src/data-fixes/` twin, unlike steps 10 and 11.
+
 ### `OnboardingAcctdimCentrallyMaintainedService`
-Step 10 (`forceFlatAccountingDimensionVisibility`, ETP-4854, gap K1). Backfills
+Step 11 (`forceFlatAccountingDimensionVisibility`, ETP-4854, gap K1). Backfills
 `C_AcctSchema_Element.isactive` per elementtype from the client's current
 effective `AD_Client.<Dim>_Acctdim_*` config, then flips
 `AD_Client.Acctdim_Centrally_Maintained` to `'N'` so the "Dimensiones
@@ -216,7 +254,7 @@ backfill is what makes that flat switch a reliable source for a tenant from birt
 `AccountingDimensionsSupport`'s own class javadoc for the full history.
 
 ### `OnboardingBaselineService`
-Step 11, always last. Stamps the data-fix baseline row (`applied_utc =
+Step 12, always last. Stamps the data-fix baseline row (`applied_utc =
 ONBOARDING_PROVISIONED_THROUGH`, a hardcoded cutoff — NOT `now()`) so the
 corrective data-fix runner knows which fixes a freshly-onboarded tenant
 already has natively and skips them. Single source of truth for the

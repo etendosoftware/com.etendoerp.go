@@ -78,6 +78,7 @@ import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingBankConnectionSyncService;
+import com.etendoerp.go.onboarding.OnboardingCostingScheduleService;
 import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
@@ -191,6 +192,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_ORG_INFO = "orgInfo";
   private static final String PROGRESS_BASELINE = "baseline";
   private static final String PROGRESS_BANK_CONNECTION_SYNC = "bankConnectionSync";
+  private static final String PROGRESS_COSTING_SCHEDULE = "costingSchedule";
   private static final String PROGRESS_BP_GROUP_ACCT_PATCH = "bpGroupAcctPatch";
   private static final String PROGRESS_ACCTDIM_VISIBILITY = "acctdimVisibility";
   private static final String PROGRESS_ADMIN_IDENTITY = "adminIdentity";
@@ -275,6 +277,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingForceTestModeService();
   OnboardingBankConnectionSyncService onboardingBankConnectionSyncService =
       new OnboardingBankConnectionSyncService();
+  OnboardingCostingScheduleService onboardingCostingScheduleService =
+      new OnboardingCostingScheduleService();
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
   TenantPlanService tenantPlanService = new TenantPlanService();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
@@ -2129,6 +2133,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // visible to the scheduler's own DB connection. Best-effort: internally swallows failures
       // and the SCH row is still picked up on the next scheduler initialization.
       onboardingBankConnectionSyncService.activateSchedule(clientId);
+      // Same contract for the costing schedule: created inside the transaction above, so it
+      // only becomes visible to the scheduler's own connection now.
+      onboardingCostingScheduleService.activateSchedule(clientId);
       Account account = findAccountForCommittedOnboarding(token, accountEmail);
       clearOnboardingDraftBestEffort(account);
       String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
@@ -2713,6 +2720,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!scheduleBankConnectionSync(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
+    if (!scheduleCostingBackground(writer, clientId, orgId, adminUserId, adminRoleId)) {
+      return false;
+    }
     // ETP-4720: patch the 5 C_BP_Group_Acct columns neither the core c_bp_group_trg() trigger nor
     // OnboardingAccountingWiringService's own BP_GROUP_ACCT_SQL populate. Runs LAST among the
     // provisioning steps (right before the data-fix baseline) since it only needs C_BP_Group and
@@ -3020,6 +3030,29 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (Exception e) {
       log.warn("Could not schedule bank statement sync for client {}: {}", clientId, e.getMessage());
       sendProgress(writer, PROGRESS_BANK_CONNECTION_SYNC, "done", "Automatic bank statement sync skipped");
+    }
+    return true;
+  }
+
+  /**
+   * Creates the per-client 5-minute costing schedule, backed by core's "Costing Background process"
+   * (idempotent). Onboarding already imports a VALIDATED costing rule, so without this schedule the
+   * rule sits there and no cost is ever calculated. Non-fatal, exactly like the bank-sync step above:
+   * a missing costing schedule is worth a log line, never a failed environment creation. The Quartz
+   * job is activated after the commit (see {@code handleOnboarding}); even if that activation does
+   * not run, the {@code SCH} row is picked up on the next scheduler initialization.
+   */
+  boolean scheduleCostingBackground(PrintWriter writer, String clientId, String orgId,
+      String adminUserId, String adminRoleId) {
+    sendProgress(writer, PROGRESS_COSTING_SCHEDULE, PROGRESS_IN_PROGRESS,
+        "Scheduling automatic cost calculation...");
+    try {
+      onboardingCostingScheduleService.scheduleCostingBackground(clientId, orgId, adminUserId,
+          adminRoleId);
+      sendProgress(writer, PROGRESS_COSTING_SCHEDULE, "done", "Automatic cost calculation scheduled");
+    } catch (Exception e) {
+      log.warn("Could not schedule cost calculation for client {}: {}", clientId, e.getMessage());
+      sendProgress(writer, PROGRESS_COSTING_SCHEDULE, "done", "Automatic cost calculation skipped");
     }
     return true;
   }
