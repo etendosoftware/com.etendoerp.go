@@ -27,6 +27,7 @@ import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
 import com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistory;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
 import com.etendoerp.go.schemaforge.webhooks.SFPromoteUserRole;
+import com.etendoerp.go.schemaforge.webhooks.SFRefreshToken;
 import com.etendoerp.go.schemaforge.webhooks.SFResendInvitation;
 import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
 import com.etendoerp.go.schemaforge.webhooks.SFSystemRoleTemplates;
@@ -146,6 +147,13 @@ class NeoPseudoSpecDispatcher {
     if ("promoteuserrole".equals(pathInfo.specName)) {
       return dispatchGoWebhook("Promoteuserrole", method, request, response,
           new SFPromoteUserRole());
+    }
+    // ETP-5195: reissues the CALLER'S OWN NEO bearer JWT with their CURRENT
+    // Default_Ad_Role_ID, closing the "stale role claim" gap a promote/demote (§8i) leaves
+    // behind until the caller's next login. See SFRefreshToken's class javadoc for the full
+    // mechanism and response shape.
+    if ("refreshtoken".equals(pathInfo.specName)) {
+      return dispatchGoWebhook("Refreshtoken", method, request, response, new SFRefreshToken());
     }
     // ETP-4830 (item #4) — dev/QA-only endpoint to force-accept an invitation or force an
     // ETGO_INVITATION.STATUS value, so the invite-email flow and the frontend's status pill can

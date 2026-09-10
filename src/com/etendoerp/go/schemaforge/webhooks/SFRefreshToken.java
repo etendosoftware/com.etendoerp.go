@@ -1,0 +1,139 @@
+/*
+ * *************************************************************************
+ * The contents of this file are subject to the Etendo License
+ * (the "License"), you may not use this file except in compliance with
+ * the License.
+ * You may obtain a copy of the License at
+ * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
+ * Software distributed under the License is distributed on an
+ * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
+ * implied. See the License for the specific language governing rights
+ * and limitations under the License.
+ * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All Rights Reserved.
+ * Contributor(s): Futit Services S.L.
+ * *************************************************************************
+ */
+package com.etendoerp.go.schemaforge.webhooks;
+
+import java.util.Map;
+
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.User;
+
+import com.etendoerp.webhookevents.services.BaseWebhookService;
+import com.smf.securewebservices.utils.SecureWebServicesUtils;
+
+/**
+ * ETP-5195 — webhook that reissues the CALLER'S OWN NEO bearer JWT with their CURRENT
+ * {@code AD_User.Default_Ad_Role_ID}, closing the "stale role claim" gap in {@code
+ * com.etendoerp.go.schemaforge.NeoAuthenticator#authenticateJwt}: every NEO request rebuilds
+ * {@link OBContext} straight from the incoming token's {@code role} claim, which is whatever
+ * role the token was minted with at login and is never re-derived from the DB on later
+ * requests. A promote/demote ({@code UserRoleCompositionService#promoteToAdmin}/{@code
+ * #demoteFromAdmin}, see {@code docs/neo-headless.md} §8i) swaps {@code
+ * AD_User.Default_Ad_Role_ID}, but a caller's already-issued token keeps authenticating as the
+ * pre-promotion/demotion role until a new token is minted — today only at login. This endpoint
+ * lets the frontend request a fresh token right after such an action, without forcing a full
+ * re-login.
+ *
+ * <p><b>Endpoint:</b> {@code GET /sws/neo/refreshtoken} (no parameters) — reached ONLY through
+ * the NEO pseudo-spec bridge (see {@code docs/neo-headless.md} §4.10/§4.11); no legacy
+ * {@code /webhooks/*} path, same as every sibling authored after that pattern existed.</p>
+ *
+ * <p><b>Security — this can only ever reissue the CALLER'S OWN token, never anyone else's.</b>
+ * The caller is authenticated by {@code NeoAuthenticator#authenticateJwt} — the exact same
+ * signature/expiry validation every other NEO request goes through — BEFORE this webhook is
+ * ever reached: {@code NeoServlet#processRequest} runs {@code
+ * authenticator.authenticateRequest(...)} first and unconditionally, and a failed validation
+ * there writes the {@code 401} itself and returns before the pseudo-spec dispatcher (hence this
+ * class) is ever consulted. {@code userId} is read ONLY from {@link OBContext#getOBContext()}'s
+ * user — populated by {@code authenticateJwt} from the validated token's own {@code user}
+ * claim — and NEVER from a request parameter or body. There is deliberately no parameter that
+ * could let a caller name a different target user; doing so would be a privilege-escalation
+ * hole.</p>
+ *
+ * <p>The {@code role} claim of the incoming token is deliberately NOT reused: the role to embed
+ * in the new token is re-resolved fresh from {@link User#getDefaultRole()} for that same user
+ * (a plain {@link OBDal} lookup by id, not anything cached from the request), so a stale
+ * token's advisory role claim never leaks into the reissued one. The new token itself is minted
+ * via {@link SecureWebServicesUtils#generateToken(User, Role)} — the exact 2-argument overload
+ * {@code EtendoGoJwtServlet#writeEnvironmentLoginResponse} already uses to mint the very first
+ * token at login — which additionally re-resolves a matching organization/warehouse for that
+ * role the same way login does (see that method's own javadoc for why {@code org}/{@code
+ * warehouse} are left {@code null} here).</p>
+ *
+ * <p><b>Response shape</b> — only the token, not a full login payload: {@code
+ * {"token": "<jwt>"}} on success. Unlike login's {@code writeEnvironmentLoginResponse} this
+ * intentionally omits {@code roleList} (a cross-environment listing meaningful only at initial
+ * login) and any org/warehouse ids, since the frontend already holds those from its current
+ * session and this endpoint's only job is to swap the role embedded in the token. A user with
+ * literally no assignable role at all — not the ordinary case; the promote/demote invariant this
+ * endpoint exists for always leaves one — is a genuinely unexpected state, so it is deliberately
+ * NOT modeled as a {@code success:false} domain rejection the way {@code SFPromoteUserRole}'s
+ * target-user validation is: it surfaces as the bridge's normal {@code error}/{@code 500}
+ * path.</p>
+ */
+public class SFRefreshToken extends BaseWebhookService {
+
+  private static final Logger log = LogManager.getLogger(SFRefreshToken.class);
+
+  private static final String RESPONSE_VAR_RESULT = "result";
+  private static final String RESPONSE_VAR_ERROR = "error";
+  private static final String FIELD_TOKEN = "token";
+
+  @Override
+  public void get(Map<String, String> parameter, Map<String, String> responseVars) {
+    String callerUserId = resolveCallerUserId();
+    if (callerUserId == null) {
+      responseVars.put(RESPONSE_VAR_RESULT,
+          WebhookFailureResponses.failure("Unable to resolve the authenticated user").toString());
+      return;
+    }
+
+    try {
+      // Re-read the user fresh from the DB so Default_Ad_Role_ID reflects any promote/demote
+      // that happened after the caller's current token was minted. Never reuse the role claim
+      // decoded from the incoming token itself -- that is precisely the stale value this
+      // endpoint exists to bypass.
+      User user = OBDal.getInstance().get(User.class, callerUserId);
+      if (user == null) {
+        responseVars.put(RESPONSE_VAR_RESULT,
+            WebhookFailureResponses.failure("User not found").toString());
+        return;
+      }
+      Role currentRole = user.getDefaultRole();
+      String newToken = SecureWebServicesUtils.generateToken(user, currentRole);
+      responseVars.put(RESPONSE_VAR_RESULT, success(newToken).toString());
+    } catch (Exception e) {
+      log.error("Unexpected error in SFRefreshToken for user {}", callerUserId, e);
+      responseVars.put(RESPONSE_VAR_ERROR, e.getMessage());
+    }
+  }
+
+  /**
+   * Reads the caller's user id ONLY from the current {@link OBContext} -- which {@code
+   * NeoAuthenticator#authenticateJwt} populated from the already-validated token's own {@code
+   * user} claim before this webhook was ever reached. Never accepts it as a parameter.
+   */
+  private String resolveCallerUserId() {
+    OBContext context = OBContext.getOBContext();
+    return context != null && context.getUser() != null ? context.getUser().getId() : null;
+  }
+
+  private JSONObject success(String token) {
+    try {
+      JSONObject body = new JSONObject();
+      body.put(FIELD_TOKEN, token);
+      return body;
+    } catch (JSONException e) {
+      throw new IllegalStateException("Unable to build success result", e);
+    }
+  }
+}
