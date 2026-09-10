@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge.webhooks;
 
 import java.util.Map;
+import java.util.Objects;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -186,16 +187,31 @@ public class SFRefreshToken extends BaseWebhookService {
   }
 
   /**
-   * ETP-5195, R5 — verifies {@code role} is active and that {@code user} holds a genuine, ACTIVE
-   * {@code AD_User_Roles} assignment to it, rather than trusting that {@code
-   * Default_Ad_Role_ID} always points at a role the user is really, currently eligible for.
-   * Reuses the same {@link UserRoles} query convention {@link
+   * ETP-5195, R5 — verifies {@code role} is active, belongs to the SAME client the caller is
+   * authenticated as, and that {@code user} holds a genuine, ACTIVE {@code AD_User_Roles}
+   * assignment to it, rather than trusting that {@code Default_Ad_Role_ID} always points at a
+   * role the user is really, currently eligible for. The cross-client check guards against the
+   * same kind of data inconsistency: under normal flow {@code Default_Ad_Role_ID} should always
+   * resolve to a role in the caller's own client, but this endpoint must not TRUST that
+   * blindly — a role from a DIFFERENT client would otherwise mint a token embedding that role
+   * (and its org/warehouse) from a different tenant than the caller's own validated session, a
+   * cross-tenant leak. Reuses the same {@link UserRoles} query convention {@link
    * SFRolesOverview#resolveActiveUserIds} already established for this kind of cross-cutting
    * lookup. Entered under admin mode: the caller's own {@link OBContext} is scoped to the role
    * embedded in their (possibly stale) current token, which is exactly the value this check
    * cannot trust — the lookup itself must not depend on it.
    */
   private boolean isEligibleForRole(User user, Role role) {
+    OBContext callerContext = OBContext.getOBContext();
+    if (callerContext == null || callerContext.getCurrentClient() == null) {
+      // Fail closed rather than NPE-ing into the generic bridge error: same deny outcome, but
+      // surfaces as the specific ineligibility failure below instead of a bare exception.
+      return false;
+    }
+    String callerClientId = callerContext.getCurrentClient().getId();
+    if (!Objects.equals(callerClientId, role.getClient().getId())) {
+      return false;
+    }
     if (!Boolean.TRUE.equals(role.isActive())) {
       return false;
     }

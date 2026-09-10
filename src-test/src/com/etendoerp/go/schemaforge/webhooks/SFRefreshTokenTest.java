@@ -45,6 +45,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
+import org.openbravo.model.ad.system.Client;
 
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
@@ -69,6 +70,16 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
 @MockitoSettings(strictness = Strictness.LENIENT)
 class SFRefreshTokenTest {
 
+  /**
+   * ETP-5195, R5 cross-client check — the client id {@code mockContext.getCurrentClient()} is
+   * stubbed to in {@code setUp()}. Every test that exercises {@code isEligibleForRole}'s
+   * non-null-role branch and expects the pre-existing (same-client) eligibility behavior must
+   * stub its {@link Role} mock's {@code getClient()} to a {@link Client} with this SAME id via
+   * {@link #stubSameClientRole(Role)} -- otherwise {@code role.getClient()} defaults to {@code
+   * null} and the cross-client check NPEs before any of the older checks ever run.
+   */
+  private static final String CALLER_CLIENT_ID = "client-1";
+
   private MockedStatic<OBContext> obContextMock;
   private OBContext mockContext;
   private SFRefreshToken webhook;
@@ -80,6 +91,9 @@ class SFRefreshTokenTest {
     obContextMock = mockStatic(OBContext.class);
     mockContext = mock(OBContext.class);
     obContextMock.when(OBContext::getOBContext).thenReturn(mockContext);
+    Client callerClient = mock(Client.class);
+    when(callerClient.getId()).thenReturn(CALLER_CLIENT_ID);
+    when(mockContext.getCurrentClient()).thenReturn(callerClient);
 
     webhook = new SFRefreshToken();
     parameters = new HashMap<>();
@@ -111,6 +125,18 @@ class SFRefreshTokenTest {
     when(criteria.add(any())).thenReturn(criteria);
     when(criteria.count()).thenReturn(count);
     return criteria;
+  }
+
+  /**
+   * ETP-5195, R5 cross-client check — stubs {@code role.getClient()} to a {@link Client} whose id
+   * matches {@link #CALLER_CLIENT_ID} (the id {@code mockContext.getCurrentClient()} resolves to
+   * via {@code setUp()}), so {@code isEligibleForRole}'s new cross-client guard lets the
+   * pre-existing (same-client) eligibility checks run exactly as before.
+   */
+  private static void stubSameClientRole(Role role) {
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CALLER_CLIENT_ID);
+    when(role.getClient()).thenReturn(client);
   }
 
   /**
@@ -227,6 +253,7 @@ class SFRefreshTokenTest {
     when(callerUser.isActive()).thenReturn(true);
     Role currentRole = mock(Role.class);
     when(currentRole.isActive()).thenReturn(true);
+    stubSameClientRole(currentRole);
     when(callerUser.getDefaultRole()).thenReturn(currentRole);
 
     // Decoy: if this webhook ever started reading identity from the parameter map, it would
@@ -281,6 +308,7 @@ class SFRefreshTokenTest {
     when(callerUser.isActive()).thenReturn(true);
     Role currentRole = mock(Role.class);
     when(currentRole.isActive()).thenReturn(true);
+    stubSameClientRole(currentRole);
     when(callerUser.getDefaultRole()).thenReturn(currentRole);
 
     OBDal obDal = mock(OBDal.class);
@@ -360,6 +388,7 @@ class SFRefreshTokenTest {
     when(callerUser.isActive()).thenReturn(true);
     Role currentRole = mock(Role.class);
     when(currentRole.isActive()).thenReturn(true);
+    stubSameClientRole(currentRole);
     when(callerUser.getDefaultRole()).thenReturn(currentRole);
 
     OBDal obDal = mock(OBDal.class);
@@ -473,6 +502,7 @@ class SFRefreshTokenTest {
     when(callerUser.isActive()).thenReturn(true);
     Role currentRole = mock(Role.class);
     when(currentRole.isActive()).thenReturn(true);
+    stubSameClientRole(currentRole);
     when(callerUser.getDefaultRole()).thenReturn(currentRole);
 
     OBDal obDal = mock(OBDal.class);
@@ -501,6 +531,7 @@ class SFRefreshTokenTest {
     when(callerUser.isActive()).thenReturn(true);
     Role currentRole = mock(Role.class);
     when(currentRole.isActive()).thenReturn(false);
+    stubSameClientRole(currentRole);
     when(callerUser.getDefaultRole()).thenReturn(currentRole);
 
     OBDal obDal = mock(OBDal.class);
@@ -523,6 +554,47 @@ class SFRefreshTokenTest {
     assertFalse(responseVars.containsKey("error"));
   }
 
+  /**
+   * ETP-5195, R5 cross-client check — a {@code Role} whose {@code getClient()} resolves to a
+   * DIFFERENT client than {@code OBContext.getOBContext().getCurrentClient()} must be rejected as
+   * ineligible even though it is otherwise perfectly active, with the exact same failure message
+   * as every other ineligibility branch. Structurally mirrors {@code
+   * inactiveRoleIsRejectedAsIneligibleWithoutQueryingUserRoles} above: the cross-client guard
+   * must short-circuit BEFORE the {@code AD_User_Roles} {@code OBCriteria} query is ever reached,
+   * proving this is a genuine pre-check and not something layered on top of the DB lookup.
+   */
+  @Test
+  void crossClientRoleIsRejectedAsIneligibleWithoutQueryingUserRoles() {
+    User callerUser = givenAuthenticatedUser("user-1");
+    when(callerUser.isActive()).thenReturn(true);
+    Role currentRole = mock(Role.class);
+    when(currentRole.isActive()).thenReturn(true);
+    Client foreignClient = mock(Client.class);
+    when(foreignClient.getId()).thenReturn("client-999");
+    when(currentRole.getClient()).thenReturn(foreignClient);
+    when(callerUser.getDefaultRole()).thenReturn(currentRole);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(User.class, "user-1")).thenReturn(callerUser);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      webhook.get(parameters, responseVars);
+
+      swsMock.verifyNoInteractions();
+      // isEligibleForRole's cross-client guard short-circuits before ever querying UserRoles --
+      // same structural proof as the sibling inactive-role test above.
+      verify(obDal, never()).createCriteria(UserRoles.class);
+    }
+
+    JSONObject result = resultOf(responseVars);
+    assertFalse(result.optBoolean("success", true));
+    assertEquals("User is not eligible for the assigned role", result.optString("message"));
+    assertFalse(responseVars.containsKey("error"));
+  }
+
   // ── generateToken failure ───────────────────────────────────────────────
 
   @Test
@@ -531,6 +603,7 @@ class SFRefreshTokenTest {
     when(callerUser.isActive()).thenReturn(true);
     Role currentRole = mock(Role.class);
     when(currentRole.isActive()).thenReturn(true);
+    stubSameClientRole(currentRole);
     when(callerUser.getDefaultRole()).thenReturn(currentRole);
 
     OBDal obDal = mock(OBDal.class);
