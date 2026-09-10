@@ -19,13 +19,18 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -57,6 +62,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.model.pricing.pricelist.PriceListVersion;
+import org.openbravo.model.pricing.pricelist.ProductPrice;
 
 /**
  * Unit tests for {@link ProductPriceHandler}.
@@ -653,6 +659,9 @@ class ProductPriceHandlerTest {
     when(criteria.addOrder(any(Order.class))).thenReturn(criteria);
     when(criteria.setMaxResults(1)).thenReturn(criteria);
     when(criteria.list()).thenReturn(Collections.singletonList(mockPlv));
+    // ETP-5245: the POST path now also looks for an existing row on the resolved tariff; without
+    // this stub the test would silently traverse the upsert's error branch instead of the insert.
+    givenTheProductHasNoPriceOnThatTariff();
 
     NeoContext ctx = NeoContext.builder()
         .httpMethod("POST")
@@ -661,7 +670,7 @@ class ProductPriceHandlerTest {
         .obContext(obContext)
         .build();
 
-    handler.handle(ctx);
+    assertNull(handler.handle(ctx));
     assertEquals("resolved-plv-id", body.getString("priceListVersion"));
   }
 
@@ -673,6 +682,7 @@ class ProductPriceHandlerTest {
     JSONObject body = new JSONObject();
     body.put("product", "already-set");
     body.put("priceListVersion", "existing-plv-id");
+    givenTheProductHasNoPriceOnThatTariff();
 
     NeoContext ctx = NeoContext.builder()
         .httpMethod("POST")
@@ -681,7 +691,7 @@ class ProductPriceHandlerTest {
         .obContext(obContext)
         .build();
 
-    handler.handle(ctx);
+    assertNull(handler.handle(ctx));
     assertEquals("existing-plv-id", body.getString("priceListVersion"));
   }
 
@@ -719,6 +729,7 @@ class ProductPriceHandlerTest {
     when(sharedCriteria.addOrder(any(Order.class))).thenReturn(sharedCriteria);
     when(sharedCriteria.setMaxResults(1)).thenReturn(sharedCriteria);
     when(sharedCriteria.list()).thenReturn(Collections.singletonList(mockPlv));
+    givenTheProductHasNoPriceOnThatTariff();
 
     NeoContext ctx = NeoContext.builder()
         .httpMethod("POST")
@@ -727,7 +738,7 @@ class ProductPriceHandlerTest {
         .obContext(obContext)
         .build();
 
-    handler.handle(ctx);
+    assertNull(handler.handle(ctx));
     assertEquals("shared-plv-id", body.getString("priceListVersion"));
   }
 
@@ -754,6 +765,7 @@ class ProductPriceHandlerTest {
     when(criteria.addOrder(any(Order.class))).thenReturn(criteria);
     when(criteria.setMaxResults(1)).thenReturn(criteria);
     when(criteria.list()).thenReturn(Collections.singletonList(mockPlv));
+    givenTheProductHasNoPriceOnThatTariff();
 
     NeoContext ctx = NeoContext.builder()
         .httpMethod("POST")
@@ -762,7 +774,7 @@ class ProductPriceHandlerTest {
         .obContext(obContext)
         .build();
 
-    handler.handle(ctx);
+    assertNull(handler.handle(ctx));
     assertEquals("zero-org-plv-id", body.getString("priceListVersion"));
   }
 
@@ -1060,5 +1072,386 @@ class ProductPriceHandlerTest {
     assertTrue(enriched.getBoolean("priceListVersion$salesPriceList"));
     assertEquals("pl-id-1", enriched.getString("priceList"));
     assertEquals("Test Sales PL", enriched.getString("priceList$_identifier"));
+  }
+
+  // ── ETP-5245: POST on an already-priced tariff updates instead of duplicating ─────────────
+  //
+  // M_ProductPrice is unique on (M_PriceList_Version_ID, M_Product_ID). Since ProductDefaultsHandler
+  // seeds a zero-priced row on each default tariff at product creation, the products import's own
+  // price POST — same /batch call, same tariff — would otherwise hit that constraint. Returning a
+  // non-null response from handle() short-circuits the default CRUD, so the INSERT never runs.
+
+  private static final String UPSERT_PRODUCT_ID = "product-upsert";
+  private static final String UPSERT_VERSION_ID = "plv-upsert";
+  private static final String UPSERT_PRICE_ID = "pp-upsert";
+
+  /** Makes ProductHandlerUtils.findExistingPrice see one existing active row for the pair. */
+  @SuppressWarnings("unchecked")
+  private ProductPrice givenTheProductIsAlreadyPricedOnThatTariff() {
+    ProductPrice existing = mock(ProductPrice.class);
+    when(existing.getId()).thenReturn(UPSERT_PRICE_ID);
+    OBCriteria<ProductPrice> criteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(ProductPrice.class)).thenReturn(criteria);
+    when(criteria.add(any(Criterion.class))).thenReturn(criteria);
+    when(criteria.setMaxResults(anyInt())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.singletonList(existing));
+    return existing;
+  }
+
+  /** Makes ProductHandlerUtils.findExistingPrice see no row for the pair. */
+  @SuppressWarnings("unchecked")
+  private void givenTheProductHasNoPriceOnThatTariff() {
+    OBCriteria<ProductPrice> criteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(ProductPrice.class)).thenReturn(criteria);
+    when(criteria.add(any(Criterion.class))).thenReturn(criteria);
+    when(criteria.setMaxResults(anyInt())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+  }
+
+  /** Stubs the read-back query so the updated row can be returned in the GET row shape. */
+  @SuppressWarnings("unchecked")
+  private void stubReadBackOf(String priceId) {
+    when(session.createNativeQuery(anyString())).thenReturn(nativeQuery);
+    when(nativeQuery.setParameter(eq("productId"), anyString())).thenReturn(nativeQuery);
+    Object[] row = new Object[]{
+        priceId, UPSERT_PRODUCT_ID, UPSERT_VERSION_ID, "Default Sales",
+        new BigDecimal("199.99"), new BigDecimal("199.99"), new BigDecimal("199.99"),
+        "S", "Y", "Default Sales PL", UPSERT_PRODUCT_ID + " - Default Sales", "\u20ac", "EUR",
+        "Y", java.sql.Date.valueOf("2026-01-01"), "2026-08-15 10:30:00.123456"
+    };
+    Object[] otherRow = new Object[]{
+        "pp-someone-else", UPSERT_PRODUCT_ID, "plv-other", "Other",
+        BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
+        "S", "N", "Other PL", "ident", null, "EUR",
+        "N", null, "2026-08-15 10:30:00.123456"
+    };
+    when(nativeQuery.list()).thenReturn(Arrays.asList(otherRow, row));
+  }
+
+  private NeoContext upsertCtx(JSONObject body) {
+    return NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD)
+        .requestBody(body)
+        .obContext(obContext)
+        .build();
+  }
+
+  private static JSONObject upsertBody() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("product", UPSERT_PRODUCT_ID);
+    body.put("priceListVersion", UPSERT_VERSION_ID);
+    return body;
+  }
+
+  /**
+   * Verifies that posting a price for a tariff the product already sits on updates that row and
+   * returns it, short-circuiting the insert that would violate the unique constraint.
+   */
+  @Test
+  void testHandlePostUpdatesTheExistingRowInsteadOfInsertingADuplicate() throws Exception {
+    ProductPrice existing = givenTheProductIsAlreadyPricedOnThatTariff();
+    stubReadBackOf(UPSERT_PRICE_ID);
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", "199.99");
+    body.put("listPrice", "199.99");
+    body.put("priceLimit", "199.99");
+
+    NeoResponse response = handler.handle(upsertCtx(body));
+
+    // Non-null == the default CRUD never runs == no INSERT == no constraint violation.
+    assertNotNull(response);
+    assertEquals(200, response.getHttpStatus());
+    verify(existing).setStandardPrice(new BigDecimal("199.99"));
+    verify(existing).setListPrice(new BigDecimal("199.99"));
+    verify(existing).setPriceLimit(new BigDecimal("199.99"));
+    verify(obDal).save(existing);
+    verify(obDal).flush();
+
+    // The response carries only the updated row, in the same shape a GET would return.
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+    assertEquals(1, data.length());
+    assertEquals(UPSERT_PRICE_ID, data.getJSONObject(0).getString("id"));
+    assertEquals(UPSERT_VERSION_ID, data.getJSONObject(0).getString("priceListVersion"));
+  }
+
+  /**
+   * ETP-5245: the row found may have been deactivated by hand. It is invisible in the UI but
+   * still occupies the unique (version, product) pair, so the upsert has to reactivate it —
+   * otherwise the price the user just posted is written to a row nobody can see, and the tariff
+   * still looks unpriced.
+   */
+  @Test
+  void testHandlePostReactivatesADeactivatedRowItUpserts() throws Exception {
+    ProductPrice existing = givenTheProductIsAlreadyPricedOnThatTariff();
+    when(existing.isActive()).thenReturn(Boolean.FALSE);
+    stubReadBackOf(UPSERT_PRICE_ID);
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", "42.00");
+
+    NeoResponse response = handler.handle(upsertCtx(body));
+
+    assertNotNull(response);
+    assertEquals(200, response.getHttpStatus());
+    verify(existing).setActive(true);
+    verify(existing).setStandardPrice(new BigDecimal("42.00"));
+    verify(obDal).save(existing);
+  }
+
+  /**
+   * The reactivation is unconditional, so an already-active row takes the same path — asserted
+   * separately so a future "only when inactive" optimisation cannot silently split the two.
+   */
+  @Test
+  void testHandlePostKeepsAnAlreadyActiveRowActive() throws Exception {
+    ProductPrice existing = givenTheProductIsAlreadyPricedOnThatTariff();
+    when(existing.isActive()).thenReturn(Boolean.TRUE);
+    stubReadBackOf(UPSERT_PRICE_ID);
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", "42.00");
+
+    assertNotNull(handler.handle(upsertCtx(body)));
+    verify(existing).setActive(true);
+    verify(existing, never()).setActive(false);
+  }
+
+  /**
+   * Verifies the other half of the upsert: with no existing row, handle() returns null so the
+   * generic CRUD performs the normal insert.
+   */
+  @Test
+  void testHandlePostLetsTheNormalInsertProceedWhenTheTariffIsUnpriced() throws Exception {
+    givenTheProductHasNoPriceOnThatTariff();
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", "10");
+
+    assertNull(handler.handle(upsertCtx(body)));
+    verify(obDal, never()).save(any());
+    verify(obDal, never()).flush();
+  }
+
+  /**
+   * Verifies that the upsert lookup is skipped entirely when the pair is incomplete — there is
+   * nothing to collide with, so the insert must proceed.
+   */
+  @Test
+  void testHandlePostSkipsTheUpsertLookupWhenNoPriceListVersionCouldBeResolved() throws Exception {
+    mockEmptyCriteria();
+
+    JSONObject body = new JSONObject();
+    body.put("product", UPSERT_PRODUCT_ID);
+    body.put("standardPrice", "10");
+
+    assertNull(handler.handle(upsertCtx(body)));
+    verify(obDal, never()).createCriteria(ProductPrice.class);
+  }
+
+  /**
+   * applyPrice: a field the caller did not send keeps its stored value. Note priceLimit IS still
+   * written here — handlePost derives it from the standard price before the upsert runs.
+   */
+  @Test
+  void testHandlePostLeavesUnsentPriceFieldsUntouched() throws Exception {
+    ProductPrice existing = givenTheProductIsAlreadyPricedOnThatTariff();
+    stubReadBackOf(UPSERT_PRICE_ID);
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", "42.00");
+
+    assertNotNull(handler.handle(upsertCtx(body)));
+
+    verify(existing).setStandardPrice(new BigDecimal("42.00"));
+    verify(existing).setPriceLimit(new BigDecimal("42.00"));
+    verify(existing, never()).setListPrice(any());
+  }
+
+  /**
+   * applyPrice: an explicit JSON null is ignored rather than wiping the stored amount.
+   */
+  @Test
+  void testHandlePostIgnoresNullPriceFields() throws Exception {
+    ProductPrice existing = givenTheProductIsAlreadyPricedOnThatTariff();
+    stubReadBackOf(UPSERT_PRICE_ID);
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", JSONObject.NULL);
+    body.put("listPrice", JSONObject.NULL);
+    body.put("priceLimit", JSONObject.NULL);
+
+    assertNotNull(handler.handle(upsertCtx(body)));
+
+    verify(existing, never()).setStandardPrice(any());
+    verify(existing, never()).setListPrice(any());
+    verify(existing, never()).setPriceLimit(any());
+  }
+
+  /**
+   * applyPrice: a blank cell is ignored rather than parsed as zero.
+   */
+  @Test
+  void testHandlePostIgnoresBlankPriceFields() throws Exception {
+    ProductPrice existing = givenTheProductIsAlreadyPricedOnThatTariff();
+    stubReadBackOf(UPSERT_PRICE_ID);
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", "   ");
+    body.put("listPrice", "");
+    body.put("priceLimit", "  ");
+
+    assertNotNull(handler.handle(upsertCtx(body)));
+
+    verify(existing, never()).setStandardPrice(any());
+    verify(existing, never()).setListPrice(any());
+    verify(existing, never()).setPriceLimit(any());
+  }
+
+  /**
+   * applyPrice: an unparseable amount is logged and skipped — it must not blow up the request nor
+   * overwrite the stored price with garbage.
+   */
+  @Test
+  void testHandlePostIgnoresUnparseablePriceFields() throws Exception {
+    ProductPrice existing = givenTheProductIsAlreadyPricedOnThatTariff();
+    stubReadBackOf(UPSERT_PRICE_ID);
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", "not-a-number");
+    body.put("listPrice", "12,50");
+
+    NeoResponse response = handler.handle(upsertCtx(body));
+
+    assertNotNull(response);
+    assertEquals(200, response.getHttpStatus());
+    verify(existing, never()).setStandardPrice(any());
+    verify(existing, never()).setListPrice(any());
+  }
+
+  /**
+   * applyPrice: surrounding whitespace is trimmed, and zero is a real value (not "blank").
+   */
+  @Test
+  void testHandlePostAcceptsPaddedAmountsAndZero() throws Exception {
+    ProductPrice existing = givenTheProductIsAlreadyPricedOnThatTariff();
+    stubReadBackOf(UPSERT_PRICE_ID);
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", " 12.50 ");
+    body.put("listPrice", "0");
+    body.put("priceLimit", "0");
+
+    assertNotNull(handler.handle(upsertCtx(body)));
+
+    verify(existing).setStandardPrice(new BigDecimal("12.50"));
+    verify(existing).setListPrice(new BigDecimal("0"));
+    verify(existing).setPriceLimit(new BigDecimal("0"));
+  }
+
+  /**
+   * Verifies a failing update surfaces as a 500 instead of falling through to the insert the
+   * unique constraint would reject anyway.
+   */
+  @Test
+  void testHandlePostReturns500WhenTheUpdateFails() throws Exception {
+    ProductPrice existing = givenTheProductIsAlreadyPricedOnThatTariff();
+    doThrow(new IllegalStateException("db down")).when(obDal).save(existing);
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", "10");
+
+    NeoResponse response = handler.handle(upsertCtx(body));
+
+    assertNotNull(response);
+    assertEquals(500, response.getHttpStatus());
+  }
+
+  // ── ETP-5245: the selector exposes the tenant's default-tariff flag ───────────────────────
+
+  /**
+   * Verifies the price list version selector now carries the M_PriceList.IsDefault flag, which the
+   * products import reads to agree with PriceListVersionResolver about which tariff is "the" one.
+   */
+  @Test
+  void testAfterHandleExposesTheDefaultFlagOnSelectorItems() throws Exception {
+    JSONArray items = new JSONArray();
+    JSONObject defaultItem = new JSONObject();
+    defaultItem.put("id", "plv-default");
+    items.put(defaultItem);
+    JSONObject otherItem = new JSONObject();
+    otherItem.put("id", "plv-other");
+    items.put(otherItem);
+
+    JSONObject body = new JSONObject();
+    body.put("items", items);
+
+    PriceListVersion defaultPlv = mock(PriceListVersion.class);
+    PriceList defaultPl = mock(PriceList.class);
+    when(defaultPlv.getPriceList()).thenReturn(defaultPl);
+    when(defaultPl.isSalesPriceList()).thenReturn(Boolean.TRUE);
+    when(defaultPl.isDefault()).thenReturn(Boolean.TRUE);
+    when(defaultPl.getId()).thenReturn("pl-default");
+    when(defaultPl.getIdentifier()).thenReturn("Default Sales PL");
+    when(obDal.get(PriceListVersion.class, "plv-default")).thenReturn(defaultPlv);
+
+    PriceListVersion otherPlv = mock(PriceListVersion.class);
+    PriceList otherPl = mock(PriceList.class);
+    when(otherPlv.getPriceList()).thenReturn(otherPl);
+    when(otherPl.isSalesPriceList()).thenReturn(Boolean.TRUE);
+    when(otherPl.isDefault()).thenReturn(Boolean.FALSE);
+    when(otherPl.getId()).thenReturn("pl-other");
+    when(otherPl.getIdentifier()).thenReturn("Other Sales PL");
+    when(obDal.get(PriceListVersion.class, "plv-other")).thenReturn(otherPlv);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.SELECTOR)
+        .fieldName("priceListVersion")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    assertEquals(200, handler.afterHandle(ctx).getHttpStatus());
+
+    assertTrue(items.getJSONObject(0).getBoolean("default"));
+    assertTrue(items.getJSONObject(0).getBoolean("priceListVersion$default"));
+    assertFalse(items.getJSONObject(1).getBoolean("default"));
+    assertFalse(items.getJSONObject(1).getBoolean("priceListVersion$default"));
+  }
+
+  /**
+   * Verifies an unset IsDefault (null on the model) reads as false rather than throwing.
+   */
+  @Test
+  void testAfterHandleTreatsAnUnsetDefaultFlagAsFalse() throws Exception {
+    JSONArray items = new JSONArray();
+    JSONObject item = new JSONObject();
+    item.put("id", "plv-unset");
+    items.put(item);
+
+    JSONObject body = new JSONObject();
+    body.put("items", items);
+
+    PriceListVersion plv = mock(PriceListVersion.class);
+    PriceList pl = mock(PriceList.class);
+    when(plv.getPriceList()).thenReturn(pl);
+    when(pl.isSalesPriceList()).thenReturn(Boolean.TRUE);
+    when(pl.isDefault()).thenReturn(null);
+    when(pl.getId()).thenReturn("pl-unset");
+    when(pl.getIdentifier()).thenReturn("Unset PL");
+    when(obDal.get(PriceListVersion.class, "plv-unset")).thenReturn(plv);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.SELECTOR)
+        .fieldName("priceListVersion")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    handler.afterHandle(ctx);
+
+    assertFalse(items.getJSONObject(0).getBoolean("default"));
+    assertFalse(items.getJSONObject(0).getBoolean("priceListVersion$default"));
   }
 }

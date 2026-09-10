@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
 import java.util.Set;
 
 import javax.inject.Named;
@@ -28,12 +29,17 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.common.uom.UOM;
 import org.openbravo.model.financialmgmt.tax.TaxCategory;
+import org.openbravo.model.materialmgmt.cost.Costing;
+import org.openbravo.model.pricing.pricelist.PriceListVersion;
+import org.openbravo.model.pricing.pricelist.ProductPrice;
 
 /**
  * NeoHandler for the {@code product} header entity (ETP-4670).
@@ -93,6 +99,8 @@ public class ProductDefaultsHandler implements NeoHandler {
   private static final String FIELD_TOTAL_ROWS = "totalRows";
   private static final String FIELD_END_ROW = "endRow";
   private static final String SYSTEM_CLIENT_ID = "0";
+  /** Display-only flag consumed by the Product window's cost banner and save gate. */
+  private static final String FIELD_HAS_COST = "etgoHasCost";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -157,9 +165,195 @@ public class ProductDefaultsHandler implements NeoHandler {
       return injectDefaults(context);
     }
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())) {
-      return hideSystemCategoryProducts(context);
+      if (METHOD_POST.equals(context.getHttpMethod())) {
+        seedDefaultPrices(context);
+      }
+      return annotateCostPresence(context, hideSystemCategoryProducts(context));
     }
     return null;
+  }
+
+  /**
+   * ETP-5245: tells the UI whether this product already has a cost defined, as
+   * {@code etgoHasCost} on the record.
+   *
+   * <p>A stockable product with no cost line is a blocking condition: the Product window shows a
+   * warning banner and refuses to save until one exists. Both the banner and the save gate need
+   * the same answer, and neither should have to fetch the Costing tab to get it — so the backend
+   * states it once, on the record, the way {@code pisLocked} does for payments. Like that flag it
+   * is emitted, never declared in {@code decisions.json}; it is display-only and is not part of
+   * any save payload.
+   *
+   * <p>Annotates every single-record response — read, create and update alike. A list GET is
+   * skipped: it would cost one count per row and no list view needs it.
+   *
+   * @param context the CRUD GET context
+   * @param filtered the response {@link #hideSystemCategoryProducts} produced, or {@code null}
+   *     when it left the previous result untouched
+   * @return the response to return from {@code afterHandle}
+   */
+  private NeoResponse annotateCostPresence(NeoContext context, NeoResponse filtered) {
+    // Every single-record response, not just a read: the create and update responses carry the
+    // record the form keeps showing, so skipping them left a freshly created product with the
+    // flag absent — and an absent flag means "has a cost", so the banner stayed hidden until the
+    // user reloaded the page. Only a GET list is excluded, where this would be one count per row.
+    if (METHOD_GET.equals(context.getHttpMethod()) && StringUtils.isBlank(context.getRecordId())) {
+      return filtered;
+    }
+    NeoResponse target = filtered != null ? filtered : context.getPreviousResult();
+    if (target == null || target.getBody() == null) {
+      return filtered;
+    }
+    try {
+      JSONObject response = target.getBody().optJSONObject("response");
+      JSONArray data = response != null ? response.optJSONArray("data") : null;
+      if (data == null) {
+        return filtered;
+      }
+      OBContext.setAdminMode();
+      try {
+        for (int i = 0; i < data.length(); i++) {
+          JSONObject record = data.optJSONObject(i);
+          if (record != null) {
+            record.put(FIELD_HAS_COST, hasCostDefined(record.optString("id", null)));
+          }
+        }
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+      return target;
+    } catch (Exception e) {
+      log.error("product afterHandle: could not annotate cost presence", e);
+      return filtered;
+    }
+  }
+
+  /**
+   * Whether the product has at least one active {@code M_Costing} row.
+   *
+   * <p>Counts every row, engine-generated ones included: the question the banner asks is "does
+   * this product have a cost at all", not "did a human type one".
+   *
+   * @param productId the product to check
+   * @return {@code true} when at least one active cost row exists
+   */
+  private boolean hasCostDefined(String productId) {
+    if (StringUtils.isBlank(productId)) {
+      return false;
+    }
+    OBCriteria<Costing> crit = OBDal.getInstance().createCriteria(Costing.class);
+    crit.setFilterOnReadableOrganization(false);
+    crit.add(Restrictions.eq(Costing.PROPERTY_PRODUCT + ".id", productId));
+    crit.add(Restrictions.eq(Costing.PROPERTY_ACTIVE, true));
+    crit.setMaxResults(1);
+    return !crit.list().isEmpty();
+  }
+
+  /**
+   * ETP-5245: gives a brand-new product a zero-priced row on each of the tenant's default
+   * tariffs, so it is never invisible to sales and purchase for lack of a price.
+   *
+   * <p>Runs as a post-hook because it needs the id the CRUD layer just assigned, read from
+   * {@code previousResult} the same way {@code PriceListHeaderHandler#afterHandle} reads it.
+   * {@code NeoServletSupport#handleWithHooks} skips {@code afterHandle} entirely when the create
+   * failed, so a rejected product never leaves orphan prices behind.
+   *
+   * <p>Deliberately best-effort: a tenant with no default tariff configured, or a price that
+   * cannot be written, must not turn a successful product creation into an error. The failure is
+   * logged and the product stands.
+   *
+   * <p>Idempotent by construction — it skips any tariff the product is already priced on. That
+   * matters beyond retries: the products import posts its own price for the same tariff in the
+   * same {@code /batch} call, and {@code ProductPriceHandler} turns that second write into an
+   * update of the row seeded here rather than a duplicate.
+   *
+   * @param context the CRUD POST context whose previous result carries the created product
+   */
+  private void seedDefaultPrices(NeoContext context) {
+    String productId = extractCreatedRecordId(context);
+    if (StringUtils.isBlank(productId)) {
+      return;
+    }
+    try {
+      OBContext.setAdminMode();
+      try {
+        Product product = OBDal.getInstance().get(Product.class, productId);
+        if (product == null) {
+          return;
+        }
+        for (boolean salesPriceList : new boolean[] { true, false }) {
+          seedPriceOnDefaultTariff(context, product, salesPriceList);
+        }
+        OBDal.getInstance().flush();
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("product afterHandle: could not seed default prices for product {}",
+          productId, e);
+    }
+  }
+
+  /**
+   * Creates the zero-priced row for one direction, unless the product already has one there.
+   *
+   * @param context the CRUD context, used for its client/organisation scope
+   * @param product the product just created
+   * @param salesPriceList {@code true} for the sales tariff, {@code false} for the purchase one
+   */
+  private void seedPriceOnDefaultTariff(NeoContext context, Product product,
+      boolean salesPriceList) {
+    String versionId = PriceListVersionResolver.resolveDefaultVersionId(context.getObContext(),
+        salesPriceList);
+    if (StringUtils.isBlank(versionId)) {
+      log.debug("No default {} price list configured; product {} gets no seeded price",
+          salesPriceList ? "sales" : "purchase", product.getId());
+      return;
+    }
+    if (ProductHandlerUtils.findExistingPrice(product.getId(), versionId) != null) {
+      return;
+    }
+    PriceListVersion version = OBDal.getInstance().get(PriceListVersion.class, versionId);
+    if (version == null) {
+      return;
+    }
+    ProductPrice price = OBProvider.getInstance().get(ProductPrice.class);
+    price.setNewOBObject(true);
+    price.setClient(product.getClient());
+    // The product's organisation, not the tariff's. A default tariff often lives in the shared
+    // organisation '0'; putting the price row there while it points at a product in a child
+    // organisation is the direction Etendo's organisation tree forbids. Owned by the child, it
+    // can reference an ancestor's price list version safely.
+    price.setOrganization(product.getOrganization());
+    price.setProduct(product);
+    price.setPriceListVersion(version);
+    price.setStandardPrice(BigDecimal.ZERO);
+    price.setListPrice(BigDecimal.ZERO);
+    price.setPriceLimit(BigDecimal.ZERO);
+    OBDal.getInstance().save(price);
+  }
+
+  /**
+   * Reads the id of the record the default CRUD layer just created.
+   *
+   * @param context the context whose previous result holds the create response
+   * @return the new record id, or {@code null} when the response does not carry one
+   */
+  private String extractCreatedRecordId(NeoContext context) {
+    NeoResponse previous = context.getPreviousResult();
+    if (previous == null || previous.getBody() == null) {
+      return null;
+    }
+    JSONObject response = previous.getBody().optJSONObject("response");
+    if (response == null) {
+      return null;
+    }
+    JSONArray data = response.optJSONArray("data");
+    if (data == null || data.length() == 0) {
+      return null;
+    }
+    JSONObject record = data.optJSONObject(0);
+    return record != null ? StringUtils.trimToNull(record.optString("id", null)) : null;
   }
 
   private NeoResponse injectDefaults(NeoContext context) {
