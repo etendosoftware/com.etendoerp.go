@@ -72,7 +72,7 @@ public final class EtendoGoJwtSupport {
         || (username != null && username.startsWith(accountEmail + "+"));
   }
 
-  static RoleListData loadRoleListData(String userId) throws JSONException {
+  public static RoleListData loadRoleListData(String userId) throws JSONException {
     try {
       return buildRoleListData(loadRoleRows(userId));
     } catch (OBException e) {
@@ -259,8 +259,8 @@ public final class EtendoGoJwtSupport {
     return query.uniqueResult();
   }
 
-  static final class RoleListData {
-    String firstRoleId;
-    JSONArray roleArray;
+  public static final class RoleListData {
+    public String firstRoleId;
+    public JSONArray roleArray;
   }
 }

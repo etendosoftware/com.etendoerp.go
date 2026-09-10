@@ -30,6 +30,9 @@ import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
 
+import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.rest.EtendoGoJwtSupport;
+import com.etendoerp.go.rest.EtendoGoJwtSupport.RoleListData;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -72,16 +75,25 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * role the same way login does (see that method's own javadoc for why {@code org}/{@code
  * warehouse} are left {@code null} here).</p>
  *
- * <p><b>Response shape</b> — only the token, not a full login payload: {@code
- * {"token": "<jwt>"}} on success. Unlike login's {@code writeEnvironmentLoginResponse} this
- * intentionally omits {@code roleList} (a cross-environment listing meaningful only at initial
- * login) and any org/warehouse ids, since the frontend already holds those from its current
- * session and this endpoint's only job is to swap the role embedded in the token. A user with
- * literally no assignable role at all — not the ordinary case; the promote/demote invariant this
- * endpoint exists for always leaves one — is a genuinely unexpected state, so it is deliberately
- * NOT modeled as a {@code success:false} domain rejection the way {@code SFPromoteUserRole}'s
- * target-user validation is: it surfaces as the bridge's normal {@code error}/{@code 500}
- * path.</p>
+ * <p><b>Response shape.</b> When a role is genuinely resolved for the caller (the ordinary
+ * case), the response is {@code {"token": "<jwt>", "session": {...}}} — the {@code session}
+ * object (version 1) carries {@code userId}, {@code clientId}, {@code selectedRoleId},
+ * {@code selectedOrgId} (all read back from the {@code user}/{@code client}/{@code role}/
+ * {@code organization} claims of the token just minted, via {@link
+ * SecureWebServicesUtils#decodeToken(String)} — never re-derived independently, so the response
+ * can never disagree with what the JWT actually contains) and {@code roleList} (the same shape
+ * {@link EtendoGoJwtSupport#loadRoleListData(String)} already builds for login). This activates
+ * the richer validation the frontend's {@code reconcileSessionRefresh} already implements (see
+ * {@code docs/auth-session-refresh.md} in {@code schema_forge_core}) instead of its "legacy"
+ * token-swap-only fallback.
+ *
+ * <p>The {@code currentRole == null} case — a user resolving to literally no assignable role at
+ * all; not the ordinary case, the promote/demote invariant this endpoint exists for always
+ * leaves one — is UNCHANGED: the response stays the bare {@code {"token": "<jwt>"}}, no
+ * {@code session} key, so the frontend's legacy fallback still applies there. This is a
+ * genuinely unexpected state, so — like before — it is deliberately NOT modeled as a
+ * {@code success:false} domain rejection the way {@code SFPromoteUserRole}'s target-user
+ * validation is: it surfaces as the bridge's normal {@code error}/{@code 500} path.</p>
  */
 public class SFRefreshToken extends BaseWebhookService {
 
@@ -90,6 +102,18 @@ public class SFRefreshToken extends BaseWebhookService {
   private static final String RESPONSE_VAR_RESULT = "result";
   private static final String RESPONSE_VAR_ERROR = "error";
   private static final String FIELD_TOKEN = "token";
+  private static final String FIELD_SESSION = "session";
+  private static final String FIELD_SESSION_VERSION = "version";
+  private static final String FIELD_USER_ID = "userId";
+  private static final String FIELD_CLIENT_ID = "clientId";
+  private static final String FIELD_SELECTED_ROLE_ID = "selectedRoleId";
+  private static final String FIELD_SELECTED_ORG_ID = "selectedOrgId";
+  private static final String FIELD_ROLE_LIST = "roleList";
+  private static final int SESSION_CONTRACT_VERSION = 1;
+  private static final String CLAIM_USER = "user";
+  private static final String CLAIM_CLIENT = "client";
+  private static final String CLAIM_ROLE = "role";
+  private static final String CLAIM_ORGANIZATION = "organization";
 
   @Override
   public void get(Map<String, String> parameter, Map<String, String> responseVars) {
@@ -134,7 +158,17 @@ public class SFRefreshToken extends BaseWebhookService {
         return;
       }
       String newToken = SecureWebServicesUtils.generateToken(user, currentRole);
-      responseVars.put(RESPONSE_VAR_RESULT, success(newToken).toString());
+      if (currentRole != null) {
+        // ETP-5195 -- session metadata extension: only meaningful once a role was actually
+        // (re)resolved. Decoding the token we just minted -- rather than re-deriving
+        // client/org/role from scratch -- guarantees the response always agrees with what is
+        // really embedded in it.
+        JSONObject session = buildSessionMetadata(newToken, callerUserId);
+        responseVars.put(RESPONSE_VAR_RESULT, successWithSession(newToken, session).toString());
+      } else {
+        // Legacy/no-metadata case: intentionally unchanged, see class javadoc.
+        responseVars.put(RESPONSE_VAR_RESULT, success(newToken).toString());
+      }
     } catch (Exception e) {
       log.error("Unexpected error in SFRefreshToken for user {}", callerUserId, e);
       responseVars.put(RESPONSE_VAR_ERROR, e.getMessage());
@@ -185,5 +219,54 @@ public class SFRefreshToken extends BaseWebhookService {
     } catch (JSONException e) {
       throw new IllegalStateException("Unable to build success result", e);
     }
+  }
+
+  /**
+   * ETP-5195 -- session metadata extension. Sibling of {@link #success(String)} for the
+   * eligible-role case: same top-level {@code token} field, plus a {@code session} object
+   * carrying the identity/role-list metadata the frontend's {@code reconcileSessionRefresh}
+   * already knows how to validate (see {@code docs/auth-session-refresh.md} in
+   * {@code schema_forge_core}).
+   */
+  private JSONObject successWithSession(String token, JSONObject session) {
+    try {
+      JSONObject body = success(token);
+      body.put(FIELD_SESSION, session);
+      return body;
+    } catch (JSONException e) {
+      throw new IllegalStateException("Unable to build success result", e);
+    }
+  }
+
+  /**
+   * Builds the {@code session} metadata object by decoding the token just minted -- rather than
+   * re-deriving client/role/organization independently -- so the response can never disagree
+   * with what is actually embedded in the returned JWT. {@code roleList} is resolved via {@link
+   * EtendoGoJwtSupport#loadRoleListData(String)}, the same helper/query {@code
+   * EtendoGoJwtServlet} already uses to build the equivalent list at login.
+   *
+   * @param newToken the JWT just minted by {@link SecureWebServicesUtils#generateToken(User,
+   *     Role)} for the current caller/role
+   * @param callerUserId the caller's own id, already resolved via {@link
+   *     #resolveCallerUserId()} -- passed in rather than re-read from the decoded token, though
+   *     both are expected to always agree
+   */
+  private JSONObject buildSessionMetadata(String newToken, String callerUserId) throws Exception {
+    DecodedJWT decoded = SecureWebServicesUtils.decodeToken(newToken);
+    String userId = decoded.getClaim(CLAIM_USER).asString();
+    String clientId = decoded.getClaim(CLAIM_CLIENT).asString();
+    String selectedRoleId = decoded.getClaim(CLAIM_ROLE).asString();
+    String selectedOrgId = decoded.getClaim(CLAIM_ORGANIZATION).asString();
+
+    RoleListData roleListData = EtendoGoJwtSupport.loadRoleListData(callerUserId);
+
+    JSONObject session = new JSONObject();
+    session.put(FIELD_SESSION_VERSION, SESSION_CONTRACT_VERSION);
+    session.put(FIELD_USER_ID, userId);
+    session.put(FIELD_CLIENT_ID, clientId);
+    session.put(FIELD_SELECTED_ROLE_ID, selectedRoleId);
+    session.put(FIELD_SELECTED_ORG_ID, selectedOrgId);
+    session.put(FIELD_ROLE_LIST, roleListData.roleArray);
+    return session;
   }
 }

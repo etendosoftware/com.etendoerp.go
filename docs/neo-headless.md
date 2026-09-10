@@ -3625,20 +3625,41 @@ production call site for that overload). Passing `org`/`warehouse` as `null` let
 re-resolve a matching organization/warehouse for the new role itself, the same way login does,
 instead of carrying over whatever the stale token's `organization`/`warehouse` claims said.
 
-**Response.**
+**Response — session metadata extension (ETP-5195, backend half).** When `currentRole` is
+genuinely resolved for the caller (the ordinary case, having just passed the R5 eligibility
+check above), the response carries a `session` object alongside the token:
 
 ```json
-{"token": "<new signed JWT>"}
+{
+  "token": "<new signed JWT>",
+  "session": {
+    "version": 1,
+    "userId": "...",
+    "clientId": "...",
+    "selectedRoleId": "...",
+    "selectedOrgId": "...",
+    "roleList": [{ "id": "...", "name": "...", "orgList": [{ "id": "...", "name": "..." }] }]
+  }
+}
 ```
 
-wrapped in the bridge's usual envelope, i.e. `{"result": "{\"token\": \"...\"}"}`. Deliberately
-NOT the full login payload: no `roleList` (meaningful only at initial cross-environment login, see
-§ above) and no separate org/warehouse ids — the frontend already holds those from its current
-session, and swapping the token's embedded role is this endpoint's only job. A user resolving to
-literally no assignable role at all — not the ordinary case; the promote/demote invariant this
-endpoint exists for always leaves one — is a genuinely unexpected state rather than an expected
-domain rejection, so unlike `SFPromoteUserRole`'s target-user validation it is NOT modeled as a
-`success:false` `200`; it surfaces as the bridge's normal `error`/`500` path.
+wrapped in the bridge's usual envelope, i.e. `{"result": "{\"token\": \"...\", \"session\": {...}}"}`.
+`userId`/`clientId`/`selectedRoleId`/`selectedOrgId` are read back from the `user`/`client`/
+`role`/`organization` claims of the token *just minted*, via
+`SecureWebServicesUtils.decodeToken(String)` — never re-derived independently, so the response
+can never disagree with what the JWT actually contains. `roleList` reuses
+`EtendoGoJwtSupport.loadRoleListData(String)` (widened to `public` for this call site), the same
+helper/query already used to build the equivalent list at login. This activates the richer
+validation `schema_forge_core`'s `reconcileSessionRefresh` already implements client-side (see
+`docs/auth-session-refresh.md` in that repo) instead of its "legacy" token-swap-only fallback.
+
+The `currentRole == null` case is UNCHANGED: the response stays the bare
+`{"token": "<new signed JWT>"}`, no `session` key, so the frontend's legacy fallback still
+applies. A user resolving to literally no assignable role at all — not the ordinary case; the
+promote/demote invariant this endpoint exists for always leaves one — is a genuinely unexpected
+state rather than an expected domain rejection, so unlike `SFPromoteUserRole`'s target-user
+validation it is NOT modeled as a `success:false` `200`; it surfaces as the bridge's normal
+`error`/`500` path.
 
 **Frontend usage.** Call this endpoint right after a promote/demote action (or any other flow
 that may have changed the caller's own `Default_Ad_Role_ID`) and swap the stored bearer token for

@@ -18,6 +18,7 @@ package com.etendoerp.go.schemaforge.webhooks;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -29,6 +30,7 @@ import static org.mockito.Mockito.when;
 import java.util.HashMap;
 import java.util.Map;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
@@ -44,6 +46,10 @@ import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
 
+import com.auth0.jwt.interfaces.Claim;
+import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.rest.EtendoGoJwtSupport;
+import com.etendoerp.go.rest.EtendoGoJwtSupport.RoleListData;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -105,6 +111,52 @@ class SFRefreshTokenTest {
     when(criteria.add(any())).thenReturn(criteria);
     when(criteria.count()).thenReturn(count);
     return criteria;
+  }
+
+  /**
+   * ETP-5195 — session metadata extension: mocks the {@code user}/{@code client}/{@code role}/
+   * {@code organization} claims {@link SFRefreshToken#buildSessionMetadata} reads off the
+   * decoded token, mirroring {@code AppsServletTest#mockDecodedJwt}'s convention for the same
+   * {@link DecodedJWT}/{@link Claim} shape.
+   */
+  private static DecodedJWT mockDecodedJwt(String userId, String clientId, String roleId,
+      String orgId) {
+    DecodedJWT decoded = mock(DecodedJWT.class);
+    // Claim mocks are built into locals FIRST, then wired one at a time -- nesting mock()/when()
+    // calls directly inside this when()'s argument list corrupts Mockito's ongoing-stubbing
+    // state and throws UnfinishedStubbingException.
+    Claim userClaim = claim(userId);
+    Claim clientClaim = claim(clientId);
+    Claim roleClaim = claim(roleId);
+    Claim organizationClaim = claim(orgId);
+    when(decoded.getClaim("user")).thenReturn(userClaim);
+    when(decoded.getClaim("client")).thenReturn(clientClaim);
+    when(decoded.getClaim("role")).thenReturn(roleClaim);
+    when(decoded.getClaim("organization")).thenReturn(organizationClaim);
+    return decoded;
+  }
+
+  private static Claim claim(String value) {
+    Claim claim = mock(Claim.class);
+    when(claim.asString()).thenReturn(value);
+    return claim;
+  }
+
+  /**
+   * ETP-5195 — builds a {@link RoleListData} carrying a single role entry, standing in for
+   * {@link EtendoGoJwtSupport#loadRoleListData(String)}'s real DB-backed result.
+   */
+  private static RoleListData roleListDataWith(String roleId, String roleName)
+      throws JSONException {
+    RoleListData data = new RoleListData();
+    data.firstRoleId = roleId;
+    data.roleArray = new JSONArray();
+    JSONObject roleEntry = new JSONObject();
+    roleEntry.put("id", roleId);
+    roleEntry.put("name", roleName);
+    roleEntry.put("orgList", new JSONArray());
+    data.roleArray.put(roleEntry);
+    return data;
   }
 
   // ── caller resolution failures ──────────────────────────────────────────
@@ -186,11 +238,21 @@ class SFRefreshTokenTest {
     when(obDal.get(User.class, "user-1")).thenReturn(callerUser);
     stubUserRolesCriteria(obDal, 1);
 
+    // ETP-5195 -- the eligible-role branch now decodes the freshly-minted token and loads the
+    // role list to build the `session` metadata object; both must be stubbed or
+    // buildSessionMetadata throws and the whole call falls into the bridge error path instead.
+    DecodedJWT decoded = mockDecodedJwt("user-1", "client-1", "role-1", "org-1");
+    RoleListData roleListData = roleListDataWith("role-1", "Role One");
+
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
-         MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {
+         MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class);
+         MockedStatic<EtendoGoJwtSupport> jwtSupportMock = mockStatic(EtendoGoJwtSupport.class)) {
       obDalMock.when(OBDal::getInstance).thenReturn(obDal);
       swsMock.when(() -> SecureWebServicesUtils.generateToken(callerUser, currentRole))
           .thenReturn("fresh-jwt-token");
+      swsMock.when(() -> SecureWebServicesUtils.decodeToken("fresh-jwt-token")).thenReturn(decoded);
+      jwtSupportMock.when(() -> EtendoGoJwtSupport.loadRoleListData("user-1"))
+          .thenReturn(roleListData);
 
       webhook.get(parameters, responseVars);
 
@@ -202,6 +264,121 @@ class SFRefreshTokenTest {
     assertFalse(responseVars.containsKey("error"));
     JSONObject result = resultOf(responseVars);
     assertEquals("fresh-jwt-token", result.getString("token"));
+    assertTrue(result.has("session"));
+  }
+
+  // ── session metadata (ETP-5195) ──────────────────────────────────────────
+
+  /**
+   * Pins down the actual field-by-field wiring of {@code buildSessionMetadata}: every value in
+   * {@code session} must come from the DECODED token (never re-derived independently), and
+   * {@code roleList} must be exactly what {@link EtendoGoJwtSupport#loadRoleListData(String)}
+   * returned.
+   */
+  @Test
+  void eligibleRoleResponseIncludesSessionMetadataDecodedFromTheNewToken() throws JSONException {
+    User callerUser = givenAuthenticatedUser("user-1");
+    when(callerUser.isActive()).thenReturn(true);
+    Role currentRole = mock(Role.class);
+    when(currentRole.isActive()).thenReturn(true);
+    when(callerUser.getDefaultRole()).thenReturn(currentRole);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(User.class, "user-1")).thenReturn(callerUser);
+    stubUserRolesCriteria(obDal, 1);
+
+    DecodedJWT decoded = mockDecodedJwt("user-1", "client-9", "role-9", "org-9");
+    RoleListData roleListData = roleListDataWith("role-9", "Finance Manager");
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class);
+         MockedStatic<EtendoGoJwtSupport> jwtSupportMock = mockStatic(EtendoGoJwtSupport.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      swsMock.when(() -> SecureWebServicesUtils.generateToken(callerUser, currentRole))
+          .thenReturn("fresh-jwt-token");
+      swsMock.when(() -> SecureWebServicesUtils.decodeToken("fresh-jwt-token")).thenReturn(decoded);
+      jwtSupportMock.when(() -> EtendoGoJwtSupport.loadRoleListData("user-1"))
+          .thenReturn(roleListData);
+
+      webhook.get(parameters, responseVars);
+    }
+
+    assertFalse(responseVars.containsKey("error"));
+    JSONObject result = resultOf(responseVars);
+    assertEquals("fresh-jwt-token", result.getString("token"));
+    JSONObject session = result.getJSONObject("session");
+    assertEquals(1, session.getInt("version"));
+    assertEquals("user-1", session.getString("userId"));
+    assertEquals("client-9", session.getString("clientId"));
+    assertEquals("role-9", session.getString("selectedRoleId"));
+    assertEquals("org-9", session.getString("selectedOrgId"));
+    assertEquals(roleListData.roleArray.toString(), session.getJSONArray("roleList").toString());
+  }
+
+  /**
+   * Structural proof that the null-role case (see class javadoc) is genuinely untouched by the
+   * ETP-5195 session-metadata extension: no {@code session} key in the response, AND neither
+   * {@code decodeToken} nor {@code loadRoleListData} is ever invoked for this branch.
+   */
+  @Test
+  void nullRoleResponseHasNoSessionKeyAndNeverDecodesOrLoadsRoleList() throws JSONException {
+    User callerUser = givenAuthenticatedUser("user-1");
+    when(callerUser.isActive()).thenReturn(true);
+    when(callerUser.getDefaultRole()).thenReturn(null);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(User.class, "user-1")).thenReturn(callerUser);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class);
+         MockedStatic<EtendoGoJwtSupport> jwtSupportMock = mockStatic(EtendoGoJwtSupport.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      swsMock.when(() -> SecureWebServicesUtils.generateToken(callerUser, null))
+          .thenReturn("token-with-no-role-claim");
+
+      webhook.get(parameters, responseVars);
+
+      swsMock.verify(() -> SecureWebServicesUtils.decodeToken(any()), never());
+      jwtSupportMock.verify(() -> EtendoGoJwtSupport.loadRoleListData(any()), never());
+    }
+
+    assertFalse(responseVars.containsKey("error"));
+    JSONObject result = resultOf(responseVars);
+    assertEquals("token-with-no-role-claim", result.getString("token"));
+    assertFalse(result.has("session"));
+  }
+
+  /**
+   * A failure inside {@code buildSessionMetadata} (decoding the just-minted token) must be
+   * caught by {@code get()}'s own surrounding try/catch and surface as the same bridge
+   * {@code error} path as any other failure in this method -- mirroring {@code
+   * generateTokenFailureSurfacesAsBridgeError}'s shape for a different failure point.
+   */
+  @Test
+  void sessionMetadataDecodeFailureSurfacesAsBridgeError() {
+    User callerUser = givenAuthenticatedUser("user-1");
+    when(callerUser.isActive()).thenReturn(true);
+    Role currentRole = mock(Role.class);
+    when(currentRole.isActive()).thenReturn(true);
+    when(callerUser.getDefaultRole()).thenReturn(currentRole);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(User.class, "user-1")).thenReturn(callerUser);
+    stubUserRolesCriteria(obDal, 1);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      swsMock.when(() -> SecureWebServicesUtils.generateToken(callerUser, currentRole))
+          .thenReturn("fresh-jwt-token");
+      swsMock.when(() -> SecureWebServicesUtils.decodeToken("fresh-jwt-token"))
+          .thenThrow(new RuntimeException("token decoding blew up"));
+
+      webhook.get(parameters, responseVars);
+    }
+
+    assertEquals("token decoding blew up", responseVars.get("error"));
+    assertFalse(responseVars.containsKey("result"));
   }
 
   // ── QA (ETP-5195) — user with no assignable role at all ─────────────────
