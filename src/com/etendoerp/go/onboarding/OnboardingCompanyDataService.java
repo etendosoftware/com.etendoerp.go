@@ -63,6 +63,16 @@ public class OnboardingCompanyDataService {
   }
 
   /**
+   * Reads back the company details the tenant entered when it created its account, for the
+   * read-only summary the First Steps checklist shows above its "Configure" button (ETP-5190).
+   *
+   * <p>Runs in admin mode: the caller is the tenant's own admin, but the organisation and its
+   * {@code OrganizationInformation} row are read by id rather than through the session's
+   * accessible-org filter, so a client-admin sitting on organisation {@code '0'} still resolves
+   * its own legal entity.
+   *
+   * @param clientId the tenant whose company details to read
+   * @param orgId    the organisation to read them from
    * @return the tenant's company details, or {@code null} when the tenant has no organisation of
    *     its own yet (a tenant mid-provisioning, which the panel renders as "nothing to show").
    */

@@ -36,6 +36,9 @@ import org.junit.jupiter.params.provider.ValueSource;
  * must agree on every value; a shared case list is what turns a divergence into a failing test
  * instead of a user being refused by one side and accepted by the other.
  */
+// Test methods live in the @Nested inner classes below; S2187 only inspects
+// the outer class for @Test methods, hence the suppression.
+@SuppressWarnings("java:S2187")
 class SpanishTaxIdValidatorTest {
 
   /*

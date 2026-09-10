@@ -138,7 +138,15 @@ public final class SpanishTaxIdValidator {
     return Result.BAD_FORMAT;
   }
 
-  /** True when {@link #validate} accepts the value. */
+  /**
+   * Convenience predicate over {@link #validate}, for the callers that only need to admit or
+   * refuse a value and have no use for the reason. Anything that reports the reason back to a
+   * user must call {@link #validate} instead — collapsing BAD_FORMAT and BAD_CHECK_DIGIT into
+   * one boolean is what produces a message that cannot say what to correct.
+   *
+   * @param rawTaxId the raw value as typed or pasted, may be {@code null} or blank
+   * @return {@code true} only when {@link #validate} returns {@link Result#VALID}
+   */
   public static boolean isValid(String rawTaxId) {
     return validate(rawTaxId) == Result.VALID;
   }

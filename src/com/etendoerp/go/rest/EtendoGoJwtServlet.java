@@ -59,6 +59,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.EtendoGoCorsServlet;
+import com.etendoerp.go.common.JwtAuthUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.payment.TenantPaywallService;
@@ -1766,7 +1767,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
               .put("name", nullSafe(data.getName()))
               .put("tradeName", nullSafe(data.getTradeName()))
               .put("taxId", nullSafe(data.getTaxId()))
-              .put("address", nullSafe(data.getAddress())));
+              .put(FIELD_ADDRESS, nullSafe(data.getAddress())));
       writeSuccessStatus(response, result);
     });
   }
@@ -1808,8 +1809,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       DecodedJWT jwt = SecureWebServicesUtils.decodeToken(extractBearerToken(request));
       if (jwt != null) {
-        clientId = jwt.getClaim("client").asString();
-        orgId = jwt.getClaim("organization").asString();
+        clientId = jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString();
+        orgId = jwt.getClaim(JwtAuthUtils.CLAIM_ORG).asString();
       }
     } catch (Exception e) {
       log.debug("Bearer token carries no NEO session claims", e);
