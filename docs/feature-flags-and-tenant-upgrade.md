@@ -60,21 +60,23 @@ A flag `my-flag` is read from `etendo.go.flags.my-flag`, resolved in priority or
 property, `Openbravo.properties`, environment variable `ETGO_FLAG_MY_FLAG` (uppercased, every
 non-alphanumeric character replaced by `_`). See `com.etendoerp.go.common.GoRuntimeProperties`.
 
-A flag may additionally name the accounts it is on for, as a comma-separated allowlist of
-`ETGO_ACCOUNT` emails read from `etendo.go.flags.my-flag.emails` (env var
-`ETGO_FLAG_MY_FLAG_EMAILS`) through the same precedence. See **Per-account targeting** below.
+These local properties are a **plain boolean per environment**. Per-account targeting is a ConfigCat
+concern only — see **Per-account targeting** below for why there is deliberately no local equivalent.
 
 Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 
 | Flag | Property | Environment variable | Default |
 |------|----------|---------------------|---------|
-| `bp-portal-link` | `etendo.go.flags.bp-portal-link`<br>`etendo.go.flags.bp-portal-link.emails` | `ETGO_FLAG_BP_PORTAL_LINK`<br>`ETGO_FLAG_BP_PORTAL_LINK_EMAILS` | absent ⇒ **`false`** |
+| `bp-portal-link` | `etendo.go.flags.bp-portal-link` | `ETGO_FLAG_BP_PORTAL_LINK` | absent ⇒ **`false`** |
 | *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
 
 `bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
 Business Partner self-service portal. It is **targeted per sending account** and false for everyone
-until an account is listed in `.emails`, so day-to-day enablement is the allowlist rather than the
-bare boolean. It is **backend-only** — no key in the web client's `flag-keys.js`, nothing in the
+until a ConfigCat targeting rule names that account's email, so day-to-day enablement happens in the
+ConfigCat dashboard and takes effect without a restart. Where no SDK key is configured the flag
+degrades to the local per-environment boolean above, which has no per-account notion — so a shared
+environment needs ConfigCat set up before the link is switched on for anyone. It is
+**backend-only** — no key in the web client's `flag-keys.js`, nothing in the
 browser reads it, and none must be added. It gates the link only: the portal route, the three
 `/sws/portal/*` endpoints, the `etgo_portal_access` table and the revoke action all ship
 unconditionally, and revocation in particular must work whatever the flag says, since it is the only
@@ -90,42 +92,38 @@ indistinguishable from a disabled feature — which is how a charged account got
 Accepted affirmatives: `true`, `Y`, `yes`, `1`. Accepted negatives: `false`, `N`, `no`, `0`
 (case-insensitive).
 
-### Per-account targeting (ETP-5267)
+### Per-account targeting (ETP-5267) — ConfigCat only, deliberately
 
-Until ETP-5267 the evaluation context was accepted for API compatibility and passed through, but did
-**not** affect the result — this document and `PropertiesFeatureProvider`'s own javadoc both said so.
-That is no longer true, and both were corrected with the change.
+This module publishes the account identity into every evaluation, so a hosted provider can target on
+it: `FeatureFlagContext.forAccount(...)` sets the `ETGO_ACCOUNT` email as the OpenFeature
+**targeting key** *and* as the `Email` attribute. Both, because ConfigCat's `ContextTransformer` maps
+the targeting key to its user *identifier* and only an attribute named exactly `Email` to the
+*email* — so a dashboard rule written against Email (the obvious one to write) matches, and so does
+one written against Identifier. Publishing only the targeting key is the trap: the obvious rule would
+match nobody, and a flag that silently resolves false is indistinguishable from one deliberately off.
 
-```
-etendo.go.flags.my-flag         = false                             # default for everyone
-etendo.go.flags.my-flag.emails  = someone@example.com, other@example.com
-```
+**There is no local per-account mechanism, and that is a decision rather than a gap.** An earlier
+iteration of ETP-5267 added an `etendo.go.flags.<key>.emails` allowlist to
+`PropertiesFeatureProvider` and it was removed the same day, for two reasons:
 
-`PropertiesFeatureProvider` matches the allowlist against the evaluation context's **targeting key**
-— the `ETGO_ACCOUNT` email that `FeatureFlagContext.forAccount(...)` carries — trimmed and
-case-insensitively, because these addresses are typed by hand on one side and read out of the
-database on the other. Semantics:
+- **It would silently do nothing wherever ConfigCat is configured.** Only one provider is ever
+  installed, so with an SDK key set the property is inert — a configuration knob that appears to
+  control something and does not. That is the same family of failure as ETP-4966.
+- **Two ways to express one decision is two things to keep in sync**, in code shared by every flag in
+  the module.
 
-| Situation | Result |
-|---|---|
-| Targeting key listed in `.emails` | **`true`** (reason `TARGETING_MATCH`) |
-| Not listed, or no targeting key, or no `.emails` set | the flag's own boolean value |
-| Nothing configured at all | **`false`** |
+Consequences to hold onto:
 
-Three properties of this worth being explicit about:
-
-- **The allowlist and the boolean are an OR, never an AND.** Naming an account is sufficient on its
-  own, so a targeted rollout needs one property set rather than two. Conversely, setting the bare
-  boolean to `true` still enables the flag for *everyone* — that is the pre-existing
-  environment-wide switch, unchanged.
-- **No wildcard, and an empty allowlist never means "everyone".** A blank entry (a trailing comma,
-  `a,,b`) cannot match, because the targeting key is non-blank by the time it is compared.
-- **A flag with no `.emails` property behaves exactly as it did before.** That is the
-  backward-compatibility guarantee, and it is what leaves every other flag unaffected.
-
-What this does *not* provide is percentage rollout or rule-based segments — "these named accounts",
-not "20% of users". Those still arrive with the hosted provider. Changing a flag or its allowlist is
-still a configuration change, so both take effect on restart rather than instantly.
+- **A dev box needs no targeting.** It has one user, so the plain boolean is enough there.
+- **A shared environment must have ConfigCat configured before the flag is switched on**, because
+  the local arm can only answer "everyone" or "nobody".
+- **Evaluation is in-memory and costs no network call.** ConfigCat's `autoPoll` fetches in the
+  background (60 s here, `CONFIGCAT_POLL_SECONDS`) and evaluates against the in-memory snapshot, so
+  a flag check inside request handling is a map lookup.
+- **A flag that does not exist in ConfigCat resolves to its code default, `false`** — asking for an
+  undefined key is never an error.
+- **Creating a flag or changing a targeting rule is visible within one poll interval, with no
+  restart.** That, not the local properties, is the day-to-day path.
 
 ### Targeting key — still OPEN for any future flag, no longer blocking this capability
 

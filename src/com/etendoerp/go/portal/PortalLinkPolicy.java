@@ -41,11 +41,15 @@ import com.etendoerp.go.schemaforge.data.Account;
  * carries the link. See plan §2.5.
  *
  * <p><b>One gate: the {@link GoFeatureFlags#FLAG_BP_PORTAL_LINK} flag, evaluated for the account
- * sending the invoice.</b> Enabling one person is one line of configuration
- * ({@code etendo.go.flags.bp-portal-link.emails}); with nothing configured the answer is
- * {@code false} for everyone. There is no second condition to satisfy, and deliberately so — the
- * feature was briefly built with an environment flag AND a per-sender {@code AD_Preference}, which
- * meant nothing worked until two unrelated things were configured.
+ * sending the invoice.</b> Enabling one person is a ConfigCat targeting rule on that account's
+ * email; with nothing configured the answer is {@code false} for everyone. There is no second
+ * condition to satisfy, and deliberately so — the feature was briefly built with an environment
+ * flag AND a per-sender {@code AD_Preference}, which meant nothing worked until two unrelated
+ * things were configured.
+ *
+ * <p>With no ConfigCat SDK key the flag degrades to a plain per-environment boolean, so a shared
+ * environment needs ConfigCat configured before the link is switched on for anyone. A dev box has
+ * one user, so the boolean is enough there.
  *
  * <p><b>The identity is the {@code ETGO_ACCOUNT} email, not {@code AD_User.email}.</b> That is not
  * interchangeable: onboarding never writes {@code AD_User.email} — {@code InitialSetupUtility}
