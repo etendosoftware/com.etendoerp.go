@@ -3625,6 +3625,23 @@ production call site for that overload). Passing `org`/`warehouse` as `null` let
 re-resolve a matching organization/warehouse for the new role itself, the same way login does,
 instead of carrying over whatever the stale token's `organization`/`warehouse` claims said.
 
+**R5 eligibility check.** Before that, `get()` rejects an inactive caller outright —
+`!Boolean.TRUE.equals(user.isActive())` fails with "User is not active" before any role
+resolution is attempted. Then, when `currentRole` is non-null, `isEligibleForRole(user,
+currentRole)` gates minting rather than trusting `Default_Ad_Role_ID` blindly:
+- the role must belong to the SAME client as the caller's own currently-authenticated session
+  (a cross-client guard — a role from a different client would otherwise mint a token embedding
+  that role, and its org/warehouse, from a different tenant than the caller's own validated
+  session);
+- the role must itself be `Active`;
+- and the user must hold a genuine, ACTIVE `AD_User_Roles` assignment to that role, rather than
+  assuming `Default_Ad_Role_ID` and `AD_User_Roles` always agree.
+
+Any of these failing returns `success:false` with "User is not eligible for the assigned role"
+instead of minting a token — role resolution here is NOT unconditional. A `currentRole == null`
+(no assignable role) is unaffected by this check and still flows straight through, per the
+existing "no assignable role" case below.
+
 **Response — session metadata extension (ETP-5195, backend half).** When `currentRole` is
 genuinely resolved for the caller (the ordinary case, having just passed the R5 eligibility
 check above), the response carries a `session` object alongside the token:

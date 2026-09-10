@@ -1044,6 +1044,43 @@ public class UserRoleAssignmentHandlerTest {
   }
 
   @Test
+  public void handleRejectsSelfDeleteViaQueryParamIdFallback() throws Exception {
+    // ETP-5195, R3: a path-less DELETE (.../user?id=<protected-id>) must fall back to the query
+    // "id" param the same way NeoCrudHandler#buildDalParams resolves the effective target, so
+    // this guard cannot be bypassed by simply omitting the path id. No recordId is set on the
+    // context here — only queryParams — proving the fallback itself reaches and triggers the
+    // same self-delete guard as the path-id case above, not just a null short-circuit.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    User actingUser = mock(User.class);
+    when(actingUser.getId()).thenReturn(USER_ID);
+    OBContext requestObContext = mock(OBContext.class);
+    when(requestObContext.getUser()).thenReturn(actingUser);
+
+    Map<String, String> queryParams = new HashMap<>();
+    // "id" mirrors the handler's private FIELD_ID constant (not accessible from this test).
+    queryParams.put("id", USER_ID);
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("DELETE")
+        .queryParams(queryParams)
+        .obContext(requestObContext)
+        .build();
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("You cannot delete your own user account",
+          response.getBody().getJSONObject("error").getString("message"));
+      obCtxMock.verify(() -> OBContext.setAdminMode(true), never());
+      ownerMock.verify(() -> OwnerSupport.isOwner(any()), never());
+      obDalMock.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
   public void handleRejectsOwnerDelete() throws Exception {
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
     String ownerId = "owner-delete-001";
