@@ -140,8 +140,9 @@ public class ProductDefaultsHandler implements NeoHandler {
    * scope for this ticket's reported cases (all of which change {@code productType} in the same
    * request).
    */
-  private static void enforceNonStockableProductTypes(JSONObject body) throws JSONException {
-    if (!NON_STOCKABLE_PRODUCT_TYPES.contains(body.optString(FIELD_PRODUCT_TYPE, null))) {
+  static void enforceNonStockableProductTypes(JSONObject body) throws JSONException {
+    String productType = body.optString(FIELD_PRODUCT_TYPE, null);
+    if (productType == null || !NON_STOCKABLE_PRODUCT_TYPES.contains(productType)) {
       return;
     }
     body.put(FIELD_STOCKED, false);

@@ -412,4 +412,18 @@ public class ProductDefaultsHandlerTest {
     assertEquals(false, body.has("stocked"));
     assertEquals(false, body.has("returnable"));
   }
+
+  @Test
+  public void testEnforceNonStockableProductTypesDoesNotThrowWhenProductTypeAbsent()
+      throws Exception {
+    // Regression guard: Set.of(...).contains(null) throws NPE. A request that never mentions
+    // productType at all (the common case: editing weight, price, etc. on an already-existing
+    // product) must be a silent no-op, not a caught-and-logged exception on every such request.
+    JSONObject body = new JSONObject().put("weight", 5);
+
+    ProductDefaultsHandler.enforceNonStockableProductTypes(body);
+
+    assertEquals(false, body.has("stocked"));
+    assertEquals(false, body.has("returnable"));
+  }
 }
