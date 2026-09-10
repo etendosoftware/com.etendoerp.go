@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge.webhooks;
 
 import java.text.SimpleDateFormat;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
@@ -41,7 +42,6 @@ import org.openbravo.model.ad.ui.ProcessRequest;
 import org.openbravo.model.ad.ui.ProcessRun;
 import org.openbravo.scheduling.OBScheduler;
 import org.openbravo.scheduling.ProcessBundle;
-import org.openbravo.scheduling.ProcessContext;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
@@ -85,23 +85,23 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  *       having corrupted the recurring row's stored schedule.</li>
  * </ul>
  *
- * <p>The one-shot row is also restart-safe. It carries {@code Channel.DIRECT} ("Direct"), and
- * {@code OBScheduler.initialize()} explicitly marks any still-{@code SCH} "Direct" request as
- * {@code SYR} (System Restart) and skips rescheduling it. A one-shot can therefore never silently
- * become a second recurring job, however Tomcat stops.</p>
+ * <p>The one-shot row carries no frequency, so it can never become a second recurring job. It is
+ * created with {@code Channel.BACKGROUND} and scoped to the CALLING client — both decisions, and
+ * the restart behaviour that follows from the first, are explained on
+ * {@link #triggerManualRun(Process, ProcessRequest)}.</p>
  *
- * <p>The manual run reuses the recurring request's own stored {@code ob_context} as the run
- * identity, so it executes as exactly the same user/client/org the automatic run does. This is
- * deliberate: the point of the feature is "do the scheduled run now", not "do a different run".
- * It also means the endpoint refuses to trigger when no recurring request exists — there is then no
- * established identity to borrow, and inventing one is not this endpoint's call to make.</p>
- *
- * <h2>Access</h2>
+ * <h2>Access and tenant scope</h2>
  *
  * <p>Both actions are gated on {@link NeoAccessHelper#isAdminOrClientAdmin(Role)}, enforced
  * server-side. Any other caller (including one with no role) gets the {@code notAuthorized} payload
  * — the frontend flag is visual gating only and is never trusted here. Denial mirrors the
  * "answer, don't 403" convention the rest of this webhook family uses.</p>
+ *
+ * <p><b>A manual run posts only the caller's OWN client's documents.</b> That is the whole point of
+ * the scoping described on {@code triggerManualRun}: the automatic cadence runs as System and
+ * therefore posts every tenant, which is right for an unattended instance-wide job and wrong for a
+ * button any client-admin can press. Reading is scoped the same way — {@link #visibleClientIds()}
+ * — so one tenant's admin never sees another tenant's manual runs.</p>
  *
  * <h2>What is deliberately NOT exposed</h2>
  *
@@ -146,8 +146,14 @@ public class SFAcctProcessMonitor extends BaseWebhookService {
   private static final String REASON_NOT_AUTHORIZED = "notAuthorized";
   private static final String REASON_NOT_INSTALLED = "notInstalled";
 
-  /** {@code AD_PROCESS_REQUEST.CHANNEL} written by a manual one-shot; see class javadoc. */
-  private static final String CHANNEL_DIRECT = ProcessBundle.Channel.DIRECT.toString();
+  /** {@code AD_PROCESS_REQUEST.CHANNEL} written by a manual one-shot from this page. */
+  private static final String CHANNEL_MANUAL = ProcessBundle.Channel.BACKGROUND.toString();
+  /** The interactive "Posting by DB tables" form's channel — never created by this endpoint. */
+  private static final String CHANNEL_INTERACTIVE = ProcessBundle.Channel.DIRECT.toString();
+
+  private static final String SYSTEM_CLIENT = "0";
+  /** Organization {@code '0'} inside one client means "every organization of that client". */
+  private static final String ORG_ALL_WITHIN_CLIENT = "0";
 
   private static final String STATUS_SCHEDULED = org.openbravo.scheduling.Process.SCHEDULED;
   private static final String STATUS_PROCESSING = org.openbravo.scheduling.Process.PROCESSING;
@@ -224,6 +230,9 @@ public class SFAcctProcessMonitor extends BaseWebhookService {
    * {@link ProcessRequest} for this process — not just the recurring request's own runs. A manual
    * run lives on its own one-shot request (see class javadoc), so filtering by the recurring
    * request id would hide from this page exactly the runs it just started.
+   *
+   * <p>Scoped to the caller's own client PLUS System ({@code '0'}) — see
+   * {@link #visibleClientIds()}.</p>
    */
   private JSONArray buildHistory(Process process, int limit) throws JSONException {
     JSONArray history = new JSONArray();
@@ -231,6 +240,24 @@ public class SFAcctProcessMonitor extends BaseWebhookService {
       history.put(toRunJson(run));
     }
     return history;
+  }
+
+  /**
+   * The clients whose runs this caller may see: their own, plus System.
+   *
+   * <p>Both {@code AD_PROCESS_REQUEST} and {@code AD_PROCESS_RUN} are tagged with the scheduling
+   * context's client ({@code ProcessRequestData.insert} and {@code ProcessMonitor.jobToBeExecuted}
+   * both pass {@code ctx.getClient()}), and the live instance confirms real per-tenant values, so
+   * filtering by client is possible rather than theoretical.</p>
+   *
+   * <p>System is included deliberately, and it is not a leak: the System-context automatic run is
+   * the shared cadence that posts <em>every</em> client's documents, including this caller's. Its
+   * rows are the history of work done on the caller's own data, and excluding them would leave the
+   * page looking as though the process had never run. What the filter does exclude is another
+   * tenant's MANUAL runs, which say nothing about this caller's accounting.</p>
+   */
+  private List<String> visibleClientIds() {
+    return Arrays.asList(OBContext.getOBContext().getCurrentClient().getId(), SYSTEM_CLIENT);
   }
 
   private JSONObject toRunJson(ProcessRun run) throws JSONException {
@@ -244,7 +271,7 @@ public class SFAcctProcessMonitor extends BaseWebhookService {
     // Lets the UI label a row Manual vs Automatic. Derived from the owning request's channel, so it
     // needs no extra column and stays correct for runs created before this feature existed.
     ProcessRequest request = run.getProcessRequest();
-    json.put("manual", request != null && CHANNEL_DIRECT.equals(request.getChannel()));
+    json.put("manual", request != null && CHANNEL_MANUAL.equals(request.getChannel()));
     // NOTE: run.getLog() and run.getReport() are intentionally absent. See class javadoc.
     return json;
   }
@@ -254,6 +281,10 @@ public class SFAcctProcessMonitor extends BaseWebhookService {
     criteria.createAlias(ProcessRun.PROPERTY_PROCESSREQUEST, "request");
     criteria.add(Restrictions.eq("request." + ProcessRequest.PROPERTY_PROCESS + ".id",
         process.getId()));
+    // Client filtering is explicit, not DAL's: admin mode is on (needed to read the System
+    // recurring request at all), which disables the readable-clients filter this would otherwise
+    // rely on. Stating the restriction here means the scope does not depend on ambient context.
+    criteria.add(Restrictions.in(ProcessRun.PROPERTY_CLIENT + ".id", visibleClientIds()));
     criteria.addOrder(Order.desc(ProcessRun.PROPERTY_STARTTIME));
     criteria.setFilterOnReadableClients(false);
     criteria.setFilterOnReadableOrganization(false);
@@ -280,6 +311,10 @@ public class SFAcctProcessMonitor extends BaseWebhookService {
     criteria.add(Restrictions.eq(ProcessRun.PROPERTY_STATUS, STATUS_PROCESSING));
     criteria.add(Restrictions.gt(ProcessRun.PROPERTY_STARTTIME,
         new Date(System.currentTimeMillis() - STALE_RUN_MS)));
+    // Same scope as the history. Including System is the conservative half: while the instance-wide
+    // automatic run is mid-flight it is posting THIS client's documents too, so starting a manual
+    // run on top of it would have two jobs contending for the same unposted rows.
+    criteria.add(Restrictions.in(ProcessRun.PROPERTY_CLIENT + ".id", visibleClientIds()));
     criteria.setFilterOnReadableClients(false);
     criteria.setFilterOnReadableOrganization(false);
     criteria.setMaxResults(1);
@@ -291,9 +326,51 @@ public class SFAcctProcessMonitor extends BaseWebhookService {
   // ---------------------------------------------------------------------------------------------
 
   /**
-   * Inserts and schedules a one-shot sibling request. Returns the outcome as a small object rather
-   * than throwing, so a refusal ("already running", "scheduler in standby") renders as an ordinary
-   * message next to a still-usable status card instead of collapsing the whole page into an error.
+   * Inserts and schedules a one-shot sibling request, scoped to the CALLING client. Returns the
+   * outcome as a small object rather than throwing, so a refusal ("already running", "scheduler in
+   * standby") renders as an ordinary message next to a still-usable status card instead of
+   * collapsing the whole page into an error.
+   *
+   * <h3>Why the caller's own client, and not the recurring request's context (ETP-5269 scope
+   * change)</h3>
+   *
+   * <p>{@code AcctServerProcess.doExecute} branches on the bundle context's client:</p>
+   * <pre>
+   *   if (vars.getClient().equals("0")) {  // every non-System client, one after another
+   *     for (Client c : allClientsExceptSystem) processClient(...);
+   *   } else {
+   *     processClient(vars, bundle);       // this client alone
+   *   }
+   * </pre>
+   *
+   * <p>The recurring request is a System row ({@code AD_Client_ID = '0'}), so it takes the first
+   * branch — which is correct for an unattended instance-wide cadence, but wrong for a button: it
+   * would let a client-admin of one tenant post accounting for every other tenant. Passing the
+   * caller's own client id takes the second branch, so a manual run processes only the caller's
+   * documents. Organization is {@code '0'} deliberately: within one client that means "every
+   * organization", which is the client-wide equivalent of what the automatic run does for that
+   * client ({@code processClient} then calls {@code selectAcctTable(connection, client)}).</p>
+   *
+   * <h3>Why Channel.BACKGROUND and not DIRECT</h3>
+   *
+   * <p>{@code AcctServerProcess} reads the channel: {@code isDirect = bundle.getChannel() ==
+   * Channel.DIRECT}, and when direct it loads its table/org/date parameters from
+   * {@code AD_PINSTANCE_PARA} using the bundle's pinstance id. A one-shot scheduled request has NO
+   * pinstance, and those generated finders return {@code ""} rather than null when nothing matches
+   * — so {@code strOrg} would be silently overwritten from {@code "0"} to {@code ""} and
+   * {@code AcctServer.get(table, client, "", conn)} would be asked for an empty organization. The
+   * run would report success and post nothing. {@code BACKGROUND} keeps {@code isDirect} false, so
+   * the process takes exactly the same path the automatic run takes, and it stays a distinct
+   * channel string from both {@code "Direct"} (the interactive "Posting by DB tables" form) and
+   * {@code "Process Scheduler"} (the recurring row) — which is what lets the queries below tell the
+   * three kinds of row apart without a new column.</p>
+   *
+   * <p>The trade-off accepted in exchange: {@code OBScheduler.initialize()} skips rescheduling a
+   * leftover {@code SCH} row only when its channel is {@code "Direct"} or its timing is IMMEDIATE.
+   * A {@code BACKGROUND} one-shot that was interrupted between INSERT and firing is therefore
+   * re-fired once on the next startup. One extra posting run is harmless — {@code AcctServer} only
+   * posts documents that are still unposted — and it is far better than a run that silently posts
+   * nothing. It still cannot become recurring: the row carries no frequency.</p>
    */
   private JSONObject triggerManualRun(Process process, ProcessRequest recurring)
       throws JSONException {
@@ -312,20 +389,30 @@ public class SFAcctProcessMonitor extends BaseWebhookService {
         return triggerResult(false, "schedulerUnavailable");
       }
 
-      ProcessContext context = ProcessContext.newInstance(recurring.getOpenbravoContext());
-      VariablesSecureApp vars = context.toVars();
+      OBContext caller = OBContext.getOBContext();
+      String clientId = caller.getCurrentClient().getId();
+      if (SYSTEM_CLIENT.equals(clientId)) {
+        // A System-context caller has no own tenant to scope to, and falling back to the
+        // instance-wide run is exactly what this change exists to prevent. The automatic cadence
+        // already covers System; there is nothing for the button to do that would be safe.
+        return triggerResult(false, "systemClientNotScopable");
+      }
+
+      VariablesSecureApp vars = new VariablesSecureApp(caller.getUser().getId(), clientId,
+          ORG_ALL_WITHIN_CLIENT, caller.getRole().getId(), caller.getLanguage().getLanguage());
       ConnectionProvider connection = scheduler.getConnection();
 
       ProcessBundle bundle = new ProcessBundle(process.getId(), vars,
-          ProcessBundle.Channel.DIRECT, context.getClient(), context.getOrganization(),
+          ProcessBundle.Channel.BACKGROUND, clientId, ORG_ALL_WITHIN_CLIENT,
           Boolean.TRUE.equals(recurring.isSecurityBasedOnRole())).init(connection);
 
-      // The no-requestId overload: mints a fresh id, INSERTs its own AD_PROCESS_REQUEST and
+      // The no-requestId overload: mints a fresh id, INSERTs its own AD_PROCESS_REQUEST (tagged
+      // with this client, which is what makes the run auditable and filterable per tenant) and
       // schedules it with an IMMEDIATE trigger. It never touches `recurring`.
       scheduler.schedule(bundle);
 
-      log.info("SFAcctProcessMonitor: manual run of {} scheduled by user {}", process.getName(),
-          vars.getUser());
+      log.info("SFAcctProcessMonitor: manual run of {} scheduled by user {} for client {}",
+          process.getName(), vars.getUser(), clientId);
       return triggerResult(true, "started");
     } catch (Exception e) {
       log.error("SFAcctProcessMonitor: could not schedule a manual run of {}", process.getName(), e);
@@ -345,8 +432,12 @@ public class SFAcctProcessMonitor extends BaseWebhookService {
   private boolean hasPendingManualRequest(Process process) {
     OBCriteria<ProcessRequest> criteria = OBDal.getInstance().createCriteria(ProcessRequest.class);
     criteria.add(Restrictions.eq(ProcessRequest.PROPERTY_PROCESS + ".id", process.getId()));
-    criteria.add(Restrictions.eq(ProcessRequest.PROPERTY_CHANNEL, CHANNEL_DIRECT));
+    criteria.add(Restrictions.eq(ProcessRequest.PROPERTY_CHANNEL, CHANNEL_MANUAL));
     criteria.add(Restrictions.eq(ProcessRequest.PROPERTY_STATUS, STATUS_SCHEDULED));
+    // Only this client's own pending one-shot blocks it. Another tenant's queued manual run is
+    // none of this caller's business and must not disable their button.
+    criteria.add(Restrictions.eq(ProcessRequest.PROPERTY_CLIENT + ".id",
+        OBContext.getOBContext().getCurrentClient().getId()));
     criteria.add(Restrictions.gt(ProcessRequest.PROPERTY_CREATIONDATE,
         new Date(System.currentTimeMillis() - STALE_RUN_MS)));
     criteria.setFilterOnReadableClients(false);
@@ -385,7 +476,10 @@ public class SFAcctProcessMonitor extends BaseWebhookService {
     criteria.add(Restrictions.eq(ProcessRequest.PROPERTY_PROCESS + ".id", process.getId()));
     criteria.add(Restrictions.eq(ProcessRequest.PROPERTY_STATUS, STATUS_SCHEDULED));
     criteria.add(Restrictions.eq(ProcessRequest.PROPERTY_ACTIVE, true));
-    criteria.add(Restrictions.ne(ProcessRequest.PROPERTY_CHANNEL, CHANNEL_DIRECT));
+    // Exclude both one-shot kinds — this page's own manual runs (BACKGROUND) and the interactive
+    // form's (DIRECT). What is wanted is the row that carries the automatic cadence.
+    criteria.add(Restrictions.not(Restrictions.in(ProcessRequest.PROPERTY_CHANNEL,
+        Arrays.asList(CHANNEL_MANUAL, CHANNEL_INTERACTIVE))));
     criteria.setFilterOnReadableClients(false);
     criteria.setFilterOnReadableOrganization(false);
     criteria.setMaxResults(1);
