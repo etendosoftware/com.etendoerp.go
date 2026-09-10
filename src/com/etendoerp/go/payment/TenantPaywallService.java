@@ -33,7 +33,7 @@ import org.apache.commons.lang3.StringUtils;
  *   <li>The request targets an environment the account already owns → allowed. That is a resume of a
  *       partially provisioned environment, not a new one, so it must not be charged again.</li>
  *   <li>Otherwise the account is asking for an additional environment → only a payment Stripe's
- *       webhook actually confirmed (see {@link CheckoutPaymentRegistry}) is accepted. There is no
+ *       webhook actually confirmed (see {@link CheckoutRequestStore}) is accepted. There is no
  *       other way to pass this check: a well-shaped but unconfirmed {@code paymentToken} is
  *       declined, not approved.</li>
  * </ol>
@@ -48,6 +48,25 @@ import org.apache.commons.lang3.StringUtils;
  * with itself.
  */
 public class TenantPaywallService {
+
+  /**
+   * Where a confirmed payment is looked up. Extracted as a seam so the decision rules stay
+   * assertable without a database: the rules are the part that has regressed before (ETP-4966),
+   * and they deserve tests that run in milliseconds rather than against a live DAL.
+   */
+  @FunctionalInterface
+  public interface PaymentConfirmation {
+    /**
+     * @param requestId the checkout request id offered as a payment token
+     * @param accountEmail authenticated account email
+     * @param clientName requested environment name, when available
+     * @return true when a confirmed payment correlates to all three
+     */
+    boolean isPaidFor(String requestId, String accountEmail, String clientName);
+  }
+
+  PaymentConfirmation paymentConfirmation = new CheckoutRequestStore()::isPaidFor;
+
 
   /** Outcome of the paywall check for one onboarding request. */
   public enum Decision {
@@ -116,14 +135,14 @@ public class TenantPaywallService {
    * @param convertingToProductive whether the request converts an existing environment
    *     ({@code upgradeAction=convert-demo}) rather than creating one
    * @param paymentToken the server-generated Stripe checkout request id to correlate against
-   *     {@link CheckoutPaymentRegistry}
+   *     {@link CheckoutRequestStore}
    * @param accountEmail authenticated account email used for payment correlation
    * @param clientName requested environment name used for payment correlation
    * @return the evaluation outcome
    */
   public Outcome evaluate(boolean accountOwnsEnvironment, boolean resumingOwnedEnvironment,
       boolean convertingToProductive, String paymentToken, String accountEmail, String clientName) {
-    boolean confirmedPayment = CheckoutPaymentRegistry.isPaidFor(paymentToken, accountEmail,
+    boolean confirmedPayment = paymentConfirmation.isPaidFor(paymentToken, accountEmail,
         clientName);
     Decision decision = decide(accountOwnsEnvironment, resumingOwnedEnvironment,
         convertingToProductive, paymentToken, confirmedPayment);

@@ -17,16 +17,16 @@
 
 package com.etendoerp.go.payment;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import java.util.concurrent.atomic.AtomicInteger;
 
-import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.NullSource;
-import org.junit.jupiter.params.provider.ValueSource;
+import java.util.HashMap;
+import java.util.Map;
+
+import org.junit.Test;
 
 import com.etendoerp.go.payment.TenantPaywallService.Decision;
 import com.etendoerp.go.payment.TenantPaywallService.Outcome;
@@ -46,16 +46,16 @@ import com.etendoerp.go.payment.TenantPaywallService.Outcome;
  * the paywall short-circuited to {@code ALLOWED} without ever reading the payment token, so a
  * charged account got a free environment and nothing anywhere reported it. The plan must therefore
  * be derived from the one fact that means money changed hands: a
- * {@link CheckoutPaymentRegistry}-confirmed payment, correlated to this account and this
+ * {@link CheckoutRequestStore}-confirmed payment, correlated to this account and this
  * environment name by the Stripe webhook.
  *
  * <p>There is no flag parameter. The paid-environment capability is permanent and cannot be
  * switched off, which is what removes the class of bug where the two ends of the system disagree
  * about whether the feature is on.
  */
-class TenantPaywallServiceTest {
+public class TenantPaywallServiceTest {
 
-  /** Distinct per call so tests never collide in the process-wide payment registry. */
+  /** Distinct per call so tests never collide in the shared CONFIRMED map below. */
   private static final AtomicInteger REQUEST_SEQUENCE = new AtomicInteger();
 
   private static final String BUYER = "buyer@example.test";
@@ -64,17 +64,33 @@ class TenantPaywallServiceTest {
   private static final String OTHER_ENVIRONMENT = "Acme Something Else";
 
   // Same shape the retired MockPaymentService used to accept. Kept as a constant specifically to
-  // prove it is no longer special-cased: with no matching CheckoutPaymentRegistry entry, a
+  // prove it is no longer special-cased: with no matching CheckoutRequestStore row, a
   // mock-shaped token must be declined exactly like any other unverified string.
   private static final String MOCK_SHAPED_TOKEN = "mock-paid-abc123";
 
+  /** Stands in for the durable store: request id -> the account and environment it was paid for. */
+  private static final Map<String, String[]> CONFIRMED = new HashMap<>();
+
   private final TenantPaywallService service = new TenantPaywallService();
+
+  {
+    // Mirrors CheckoutRequestStore.isPaidFor, including its blank-clientName rule: a caller that
+    // does not know the environment name gets the account check only.
+    service.paymentConfirmation = (requestId, accountEmail, clientName) -> {
+      String[] recorded = requestId == null ? null : CONFIRMED.get(requestId);
+      if (recorded == null || !recorded[0].equalsIgnoreCase(accountEmail)) {
+        return false;
+      }
+      return clientName == null || clientName.trim().isEmpty()
+          || recorded[1].equalsIgnoreCase(clientName);
+    };
+  }
 
   /** Records a webhook-confirmed payment and returns the token that correlates to it. */
   private static String confirmedPaymentFor(String accountEmail, String clientName) {
     String requestId = "req-" + REQUEST_SEQUENCE.incrementAndGet() + "-"
         + System.identityHashCode(new Object());
-    CheckoutPaymentRegistry.recordPaid(requestId, accountEmail, clientName);
+    CONFIRMED.put(requestId, new String[] { accountEmail, clientName });
     return requestId;
   }
 
@@ -86,16 +102,16 @@ class TenantPaywallServiceTest {
   // --- The reported bug: a confirmed payment is what makes an environment productive ---
 
   @Test
-  void confirmedPaymentForAnAdditionalEnvironmentIsAllowedAndProductive() {
+  public void confirmedPaymentForAnAdditionalEnvironmentIsAllowedAndProductive() {
     Outcome outcome = evaluateAdditionalEnvironment(confirmedPaymentFor(BUYER, ENVIRONMENT));
 
     assertEquals(Decision.ALLOWED, outcome.getDecision());
-    assertTrue(outcome.isProductive(),
-        "a payment the Stripe webhook confirmed must produce a productive environment");
+    assertTrue("a payment the Stripe webhook confirmed must produce a productive environment",
+        outcome.isProductive());
   }
 
   @Test
-  void confirmedPaymentIsProductiveEvenForAnAccountThatOwnsNoEnvironmentYet() {
+  public void confirmedPaymentIsProductiveEvenForAnAccountThatOwnsNoEnvironmentYet() {
     // A first environment is free, so this request was never going to be blocked. It is still a
     // completed purchase: the account paid and must get what it paid for. Deriving the plan from
     // ownership instead of from the payment is exactly what shipped a charged account a demo.
@@ -103,15 +119,14 @@ class TenantPaywallServiceTest {
         confirmedPaymentFor(BUYER, ENVIRONMENT), BUYER, ENVIRONMENT);
 
     assertEquals(Decision.ALLOWED, outcome.getDecision());
-    assertTrue(outcome.isProductive(),
-        "a confirmed payment must be honoured even when the paywall would have allowed the "
-            + "request for free");
+    assertTrue("a confirmed payment must be honoured even when the paywall would have allowed "
+        + "the request for free", outcome.isProductive());
   }
 
   // --- Converting the environment the user is currently in ---
 
   @Test
-  void convertingTheCurrentEnvironmentWithAConfirmedPaymentIsAllowedAndProductive() {
+  public void convertingTheCurrentEnvironmentWithAConfirmedPaymentIsAllowedAndProductive() {
     // The web client preselects this: upgradeAction=convert-demo against the environment the
     // session is already inside, so the requested name resolves to an environment the account
     // owns. That makes it a resume as far as client lookup is concerned, and a paid state
@@ -120,12 +135,12 @@ class TenantPaywallServiceTest {
         confirmedPaymentFor(BUYER, ENVIRONMENT), BUYER, ENVIRONMENT);
 
     assertEquals(Decision.ALLOWED, outcome.getDecision());
-    assertTrue(outcome.isProductive(),
-        "converting the current environment is the paid transition this feature exists for");
+    assertTrue("converting the current environment is the paid transition this feature exists "
+        + "for", outcome.isProductive());
   }
 
   @Test
-  void convertingTheCurrentEnvironmentWithoutAPaymentIsRefused() {
+  public void convertingTheCurrentEnvironmentWithoutAPaymentIsRefused() {
     // Conversion must not be reachable as a free retry of interrupted onboarding: without a
     // payment there is nothing to convert, so the request is refused rather than silently
     // re-provisioning the same environment on the free plan.
@@ -136,7 +151,7 @@ class TenantPaywallServiceTest {
   }
 
   @Test
-  void convertingWithATokenNobodyConfirmedIsDeclined() {
+  public void convertingWithATokenNobodyConfirmedIsDeclined() {
     Outcome outcome = service.evaluate(true, true, true, MOCK_SHAPED_TOKEN, BUYER, ENVIRONMENT);
 
     assertEquals(Decision.PAYMENT_DECLINED, outcome.getDecision());
@@ -146,7 +161,7 @@ class TenantPaywallServiceTest {
   // --- Resuming an interrupted provisioning is not a purchase ---
 
   @Test
-  void resumingAnOwnedEnvironmentIsAllowedFreeOfChargeAndStaysOnItsCurrentPlan() {
+  public void resumingAnOwnedEnvironmentIsAllowedFreeOfChargeAndStaysOnItsCurrentPlan() {
     // A partially provisioned environment is re-entered so the idempotent chain can reconcile
     // what is missing. No payment, and no plan change: it must not be charged, and it must not be
     // promoted either.
@@ -157,7 +172,7 @@ class TenantPaywallServiceTest {
   }
 
   @Test
-  void resumingIsNotBlockedByAnUnusableToken() {
+  public void resumingIsNotBlockedByAnUnusableToken() {
     Outcome outcome = service.evaluate(true, true, false, MOCK_SHAPED_TOKEN, BUYER, ENVIRONMENT);
 
     assertEquals(Decision.ALLOWED, outcome.getDecision());
@@ -167,7 +182,7 @@ class TenantPaywallServiceTest {
   // --- A first environment is free ---
 
   @Test
-  void firstEnvironmentNeedsNoPaymentAndIsNotProductive() {
+  public void firstEnvironmentNeedsNoPaymentAndIsNotProductive() {
     Outcome outcome = service.evaluate(false, false, false, null, BUYER, ENVIRONMENT);
 
     assertEquals(Decision.ALLOWED, outcome.getDecision());
@@ -176,18 +191,26 @@ class TenantPaywallServiceTest {
 
   // --- An additional environment is gated on a confirmed payment ---
 
-  @ParameterizedTest
-  @NullSource
-  @ValueSource(strings = { "", "   " })
-  void additionalEnvironmentWithoutATokenRequiresPayment(String paymentToken) {
-    Outcome outcome = evaluateAdditionalEnvironment(paymentToken);
+  @Test
+  public void additionalEnvironmentWithoutATokenRequiresPayment() {
+    // Absent, empty and whitespace-only must all land on PAYMENT_REQUIRED rather than
+    // PAYMENT_DECLINED: none of them is a token someone tried and failed to pay with.
+    for (String paymentToken : new String[] { null, "", "   " }) {
+      Outcome outcome = evaluateAdditionalEnvironment(paymentToken);
 
-    assertEquals(Decision.PAYMENT_REQUIRED, outcome.getDecision());
-    assertFalse(outcome.isProductive());
+      assertEquals("expected PAYMENT_REQUIRED for " + describe(paymentToken),
+          Decision.PAYMENT_REQUIRED, outcome.getDecision());
+      assertFalse(outcome.isProductive());
+    }
+  }
+
+  /** Names a token in an assertion message, so a failure on "" or "   " is still readable. */
+  private static String describe(String paymentToken) {
+    return paymentToken == null ? "a null token" : "the token '" + paymentToken + "'";
   }
 
   @Test
-  void additionalEnvironmentWithAnUnconfirmedTokenIsDeclined() {
+  public void additionalEnvironmentWithAnUnconfirmedTokenIsDeclined() {
     Outcome outcome = evaluateAdditionalEnvironment("req-never-paid");
 
     assertEquals(Decision.PAYMENT_DECLINED, outcome.getDecision());
@@ -195,7 +218,7 @@ class TenantPaywallServiceTest {
   }
 
   @Test
-  void additionalEnvironmentWithAMockShapedButUnconfirmedTokenIsDeclined() {
+  public void additionalEnvironmentWithAMockShapedButUnconfirmedTokenIsDeclined() {
     // Regression test: a hand-crafted token that merely LOOKS like the retired mock-payment
     // format must not bypass the paywall, and must never mark an environment productive.
     Outcome outcome = evaluateAdditionalEnvironment(MOCK_SHAPED_TOKEN);
@@ -207,49 +230,50 @@ class TenantPaywallServiceTest {
   // --- A payment belongs to one account and one environment name ---
 
   @Test
-  void aPaymentConfirmedForAnotherAccountIsNeitherAllowedNorProductive() {
+  public void aPaymentConfirmedForAnotherAccountIsNeitherAllowedNorProductive() {
     String foreignPayment = confirmedPaymentFor(OTHER_ACCOUNT, ENVIRONMENT);
 
     Outcome outcome = evaluateAdditionalEnvironment(foreignPayment);
 
     assertEquals(Decision.PAYMENT_DECLINED, outcome.getDecision());
-    assertFalse(outcome.isProductive(),
-        "one account's payment must never promote another account's environment");
+    assertFalse("one account's payment must never promote another account's environment",
+        outcome.isProductive());
   }
 
   @Test
-  void aPaymentConfirmedForAnotherEnvironmentNameIsNeitherAllowedNorProductive() {
+  public void aPaymentConfirmedForAnotherEnvironmentNameIsNeitherAllowedNorProductive() {
     String otherEnvironmentPayment = confirmedPaymentFor(BUYER, OTHER_ENVIRONMENT);
 
     Outcome outcome = evaluateAdditionalEnvironment(otherEnvironmentPayment);
 
     assertEquals(Decision.PAYMENT_DECLINED, outcome.getDecision());
-    assertFalse(outcome.isProductive(),
-        "a payment raised for one environment name must not promote a different one");
+    assertFalse("a payment raised for one environment name must not promote a different one",
+        outcome.isProductive());
   }
 
   // --- Invariants ---
 
   @Test
-  void aBlockedRequestIsNeverProductive() {
+  public void aBlockedRequestIsNeverProductive() {
     // Nothing was provisioned, so there is nothing to promote. Stated as its own spec because a
     // productive marker on a refused request would silently grant the paid plan for free.
     for (String token : new String[] { null, "", "req-never-paid", MOCK_SHAPED_TOKEN }) {
       Outcome outcome = evaluateAdditionalEnvironment(token);
-      assertTrue(outcome.getDecision().isBlocked(), "expected a blocked decision for " + token);
-      assertFalse(outcome.isProductive(), "a blocked request must never be productive: " + token);
+      assertTrue("expected a blocked decision for " + token, outcome.getDecision().isBlocked());
+      assertFalse("a blocked request must never be productive: " + token,
+          outcome.isProductive());
     }
   }
 
   @Test
-  void onlyAllowedIsUnblocked() {
+  public void onlyAllowedIsUnblocked() {
     assertFalse(Decision.ALLOWED.isBlocked());
     assertTrue(Decision.PAYMENT_REQUIRED.isBlocked());
     assertTrue(Decision.PAYMENT_DECLINED.isBlocked());
   }
 
   @Test
-  void theSameRequestEvaluatesTheSameWayEveryTime() {
+  public void theSameRequestEvaluatesTheSameWayEveryTime() {
     // The capability has no off switch, so two identical evaluations cannot disagree. This is the
     // unit-level statement of "it can no longer be turned off": there is no ambient configuration
     // left for the outcome to depend on.
