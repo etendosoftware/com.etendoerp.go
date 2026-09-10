@@ -39,10 +39,13 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.utility.Image;
+import org.openbravo.model.ad.system.ClientInformation;
 import org.openbravo.model.ad.utility.Attachment;
 import org.openbravo.model.common.invoice.Invoice;
 
 import com.etendoerp.go.schemaforge.NeoAttachmentsHelper;
+import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.etendoerp.go.schemaforge.NeoResponse;
 
 /**
@@ -105,6 +108,27 @@ public class PortalServlet extends HttpBaseServlet {
   private static final String PATH_ME = "/me";
   private static final String PATH_INVOICES = "/invoices";
   private static final String PDF_SUFFIX = "/pdf";
+
+  /** Tenant logo, so the page can show whose portal this is. Takes no parameters. */
+  private static final String PATH_LOGO = "/logo";
+
+  /** Query parameters for paging {@code GET /invoices}. */
+  private static final String PARAM_LIMIT = "limit";
+  private static final String PARAM_OFFSET = "offset";
+
+  /** Page size when the caller asks for none. */
+  private static final int DEFAULT_LIMIT = 50;
+
+  /**
+   * Hard ceiling on page size.
+   *
+   * <p>It exists so the page size is <b>ours</b>, not the caller's: without it
+   * {@code ?limit=1000000} makes an unauthenticated request serialize a Business Partner's entire
+   * history, which is a denial-of-service knob handed to whoever holds a link. A caller asking for
+   * more is clamped rather than rejected — the request is still answerable, just not on the
+   * caller's terms.
+   */
+  private static final int MAX_LIMIT = 200;
   /** {@code AD_Table.name} holding sales-invoice attachments, as {@code NeoDocumentDownloadService} maps it. */
   private static final String TABLE_C_INVOICE = "C_Invoice";
   private static final String DATE_FORMAT = "yyyy-MM-dd";
@@ -152,6 +176,8 @@ public class PortalServlet extends HttpBaseServlet {
         handleInvoices(request, response);
       } else if (path.startsWith(PATH_INVOICES + "/") && path.endsWith(PDF_SUFFIX)) {
         handleInvoicePdf(request, response, invoiceIdFromPdfPath(path));
+      } else if (path.equals(PATH_LOGO)) {
+        handleLogo(request, response);
       } else {
         sendError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND);
       }
@@ -191,7 +217,61 @@ public class PortalServlet extends HttpBaseServlet {
     JSONObject body = new JSONObject();
     body.put("businessPartnerName", StringUtils.defaultString(validated.getBusinessPartnerName()));
     body.put("tenantName", StringUtils.defaultString(validated.getTenantName()));
+    // Whether there is a logo to fetch, so the page never requests one that does not exist and
+    // never has to hide a broken image. The bytes come from GET /logo, not inlined here: a base64
+    // logo would bloat every /me response, and /me is the request that decides whether the page
+    // renders at all.
+    body.put("hasLogo", resolveTenantLogo(validated.getClientId()) != null);
     sendJson(response, HttpServletResponse.SC_OK, body);
+  }
+
+  /**
+   * Streams the tenant's own logo, so the customer can see whose portal this is.
+   *
+   * <p>The image served is {@code AD_ClientInfo.your_company_document_image} — the one the
+   * tenant already uploaded for its printed documents. That is deliberate reuse: a customer looking
+   * at this page has an invoice from the same company in hand, and the logo on both should match. It
+   * also means a tenant configures branding once, in the place it already configures it.
+   *
+   * <p><b>Scoped by the token like everything else.</b> The client comes from the validated row, so
+   * a token cannot fetch another tenant's logo, and no image id is accepted from the caller — this
+   * endpoint takes no parameters at all.
+   *
+   * <p>A tenant with no logo answers {@code 404}, which {@code /me}'s {@code hasLogo} lets the page
+   * avoid asking for in the first place.
+   */
+  private void handleLogo(HttpServletRequest request, HttpServletResponse response)
+      throws IOException, JSONException {
+    Optional<PortalSession> session = accessService.validate(resolveToken(request));
+    if (!session.isPresent()) {
+      rejectInvalidLink(response);
+      return;
+    }
+    Image logo = resolveTenantLogo(session.get().getClientId());
+    byte[] bytes = logo == null ? null : logo.getBindaryData();
+    if (bytes == null || bytes.length == 0) {
+      sendError(response, HttpServletResponse.SC_NOT_FOUND, NOT_FOUND);
+      return;
+    }
+    // Sniffed from the bytes when the row carries no mime type, rather than trusting a stored
+    // string: the browser renders what the header claims, so the header should describe the bytes.
+    String mimeType = StringUtils.defaultIfBlank(logo.getMimetype(),
+        NeoImageHelper.sniffMimeType(bytes));
+    response.setStatus(HttpServletResponse.SC_OK);
+    response.setContentType(StringUtils.defaultIfBlank(mimeType, NeoImageHelper.MIME_PNG));
+    response.setContentLength(bytes.length);
+    response.getOutputStream().write(bytes);
+  }
+
+  /**
+   * Resolves the tenant's document logo, or {@code null} when it has none.
+   *
+   * <p>Read under the admin mode {@code doGet} already established: a portal request has no Etendo
+   * session, so DAL's own client filtering would match nothing.
+   */
+  private static Image resolveTenantLogo(String clientId) {
+    ClientInformation info = OBDal.getInstance().get(ClientInformation.class, clientId);
+    return info == null ? null : info.getYourCompanyDocumentImage();
   }
 
   /** Lists the Business Partner's completed sales invoices and their outstanding balance. */
@@ -202,8 +282,14 @@ public class PortalServlet extends HttpBaseServlet {
       rejectInvalidLink(response);
       return;
     }
-    List<Invoice> invoices = PortalInvoiceQuery.list(session.get());
-    JSONArray rows = new JSONArray();
+    PortalSession validated = session.get();
+    int limit = clampLimit(request.getParameter(PARAM_LIMIT));
+    int offset = parseOffset(request.getParameter(PARAM_OFFSET));
+
+    // The whole set is read for the aggregates below, then only one page is serialized. The totals
+    // MUST span every invoice, not the page: a balance that shrank as the customer clicked "next"
+    // would be a wrong number presented confidently, which is worse than showing none.
+    List<Invoice> all = PortalInvoiceQuery.listAll(validated);
     // Accumulated per currency, never summed across them: a tenant that invoices the same Business
     // Partner in EUR and USD has two balances, and adding them would produce a number that means
     // nothing. The contract's top-level `currency` + `outstandingAmount` are the single-currency
@@ -211,17 +297,30 @@ public class PortalServlet extends HttpBaseServlet {
     // full breakdown for the mixed case. Insertion-ordered, so the first currency encountered
     // (newest invoice first) is the one promoted to the top level.
     Map<String, BigDecimal> outstandingByCurrency = new LinkedHashMap<>();
-    for (Invoice invoice : invoices) {
-      rows.put(toInvoiceJson(invoice));
+    for (Invoice invoice : all) {
       outstandingByCurrency.merge(currencyOf(invoice), amount(invoice.getOutstandingAmount()),
           BigDecimal::add);
     }
+
+    JSONArray rows = new JSONArray();
+    int from = Math.min(offset, all.size());
+    int to = Math.min(from + limit, all.size());
+    for (Invoice invoice : all.subList(from, to)) {
+      rows.put(toInvoiceJson(invoice));
+    }
+
     JSONObject body = new JSONObject();
     body.put("invoices", rows);
-    // No `status` and no invoice count, both by contract: the browser derives status by comparing
-    // outstandingAmount against grandTotalAmount, and the count from invoices.length. That makes
-    // PortalInvoiceQuery's docstatus = 'CO' filter load-bearing — the browser makes no scoping or
-    // eligibility decision at all.
+    // Paging metadata. `totalCount` is what makes the page interpretable — without it the browser
+    // cannot tell a short last page from the end of the list, and `invoices.length` stops being the
+    // count it used to be. Kept additive: a caller that ignores these three keys still renders the
+    // first page correctly.
+    body.put("totalCount", all.size());
+    body.put("offset", from);
+    body.put("limit", limit);
+    // No `status`, by contract: the browser derives it by comparing outstandingAmount against
+    // grandTotalAmount. That makes PortalInvoiceQuery's docstatus = 'CO' filter load-bearing — the
+    // browser makes no scoping or eligibility decision at all.
     body.put("currency", primaryCurrency(outstandingByCurrency));
     body.put("outstandingAmount", primaryOutstanding(outstandingByCurrency));
     // Additive, and deliberately outside the agreed contract: extra keys are inert in the frontend,
@@ -402,6 +501,36 @@ public class PortalServlet extends HttpBaseServlet {
       throw new IllegalStateException("Could not build the portal error body", e);
     }
     sendJson(response, status, body);
+  }
+
+  /**
+   * Resolves the requested page size into {@code [1, MAX_LIMIT]}.
+   *
+   * <p>Anything unusable — absent, blank, non-numeric, zero or negative — becomes
+   * {@value #DEFAULT_LIMIT} rather than an error. A malformed paging parameter is not worth failing
+   * a customer's page over, and there is no security decision here to get wrong: the scope is fixed
+   * by the token, so this only decides how much of an already-authorised list is serialized.
+   */
+  private static int clampLimit(String raw) {
+    int requested = parsePositiveInt(raw, DEFAULT_LIMIT);
+    return Math.min(Math.max(requested, 1), MAX_LIMIT);
+  }
+
+  /** Resolves the requested offset, treating anything unusable as the first page. */
+  private static int parseOffset(String raw) {
+    return Math.max(parsePositiveInt(raw, 0), 0);
+  }
+
+  private static int parsePositiveInt(String raw, int fallback) {
+    String normalized = StringUtils.trimToNull(raw);
+    if (normalized == null) {
+      return fallback;
+    }
+    try {
+      return Integer.parseInt(normalized);
+    } catch (NumberFormatException e) {
+      return fallback;
+    }
   }
 
   private static void sendJson(HttpServletResponse response, int status, JSONObject body)

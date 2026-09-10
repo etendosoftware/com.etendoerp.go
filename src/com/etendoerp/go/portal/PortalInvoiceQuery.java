@@ -60,12 +60,45 @@ final class PortalInvoiceQuery {
   }
 
   /**
-   * Lists the Business Partner's completed sales invoices, newest first.
+   * Lists one page of the Business Partner's completed sales invoices, newest first.
+   *
+   * <p><b>The order is deterministic, which is what makes paging safe.</b> {@code invoiceDate desc}
+   * alone is not: invoices share a date routinely, and two rows with equal sort keys may come back
+   * in either order between calls, so a row could be skipped on one page and repeated on the next.
+   * {@code documentNo desc} is the tie-breaker that removes that.
+   *
+   * <p>Paging is by offset rather than a keyset cursor, deliberately. The known trade is that a new
+   * invoice arriving mid-browse shifts every later row by one, so a customer paging at that instant
+   * could see one row twice. For an append-newest-first list read by one person that is
+   * inconsequential, and a keyset cursor over the composite {@code (invoiceDate, documentNo)} key
+   * costs materially more in HQL. Revisit if paging ever backs an export or a reconciliation.
    *
    * @param session the validated token scope
-   * @return the invoices, never {@code null}
+   * @param offset how many rows to skip; negative is treated as 0
+   * @param limit maximum rows to return; the caller clamps this
+   * @return the page, never {@code null}
    */
-  static List<Invoice> list(PortalSession session) {
+  static List<Invoice> list(PortalSession session, int offset, int limit) {
+    OBQuery<Invoice> query = OBDal.getInstance().createQuery(Invoice.class,
+        "as i where" + SCOPE_CLAUSE + " order by i.invoiceDate desc, i.documentNo desc");
+    applyScope(query, session);
+    query.setFirstResult(Math.max(offset, 0));
+    query.setMaxResult(limit);
+    return query.list();
+  }
+
+  /**
+   * Lists every completed sales invoice in scope, newest first.
+   *
+   * <p>Used for the whole-set aggregates the response carries alongside the page
+   * ({@code outstandingAmount}, {@code balances}). Those are totals over <em>all</em> invoices,
+   * never over the page — a balance that changed as the customer paged would be worse than showing
+   * no balance at all.
+   *
+   * @param session the validated token scope
+   * @return every invoice in scope, never {@code null}
+   */
+  static List<Invoice> listAll(PortalSession session) {
     OBQuery<Invoice> query = OBDal.getInstance().createQuery(Invoice.class,
         "as i where" + SCOPE_CLAUSE + " order by i.invoiceDate desc, i.documentNo desc");
     applyScope(query, session);
