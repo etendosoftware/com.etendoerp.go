@@ -18,6 +18,7 @@ package com.etendoerp.go.schemaforge.webhooks;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -37,9 +38,11 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.access.UserRoles;
 
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -87,6 +90,21 @@ class SFRefreshTokenTest {
     when(user.getId()).thenReturn(userId);
     when(mockContext.getUser()).thenReturn(user);
     return user;
+  }
+
+  /**
+   * ETP-5195, R5 — stubs {@code obDal.createCriteria(UserRoles.class)} (fluent {@code add()},
+   * {@code count()}) so {@code isEligibleForRole}'s {@code AD_User_Roles} lookup returns the
+   * given row count. Mirrors the {@code OBCriteria} mocking convention already established in
+   * {@code UserRoleAssignmentHandlerTest} for the same entity.
+   */
+  @SuppressWarnings("unchecked")
+  private OBCriteria<UserRoles> stubUserRolesCriteria(OBDal obDal, int count) {
+    OBCriteria<UserRoles> criteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(UserRoles.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.count()).thenReturn(count);
+    return criteria;
   }
 
   // ── caller resolution failures ──────────────────────────────────────────
@@ -154,7 +172,9 @@ class SFRefreshTokenTest {
   void happyPathReissuesTokenForCallersOwnUserAndIgnoresAnyUserIdInParameters()
       throws JSONException {
     User callerUser = givenAuthenticatedUser("user-1");
+    when(callerUser.isActive()).thenReturn(true);
     Role currentRole = mock(Role.class);
+    when(currentRole.isActive()).thenReturn(true);
     when(callerUser.getDefaultRole()).thenReturn(currentRole);
 
     // Decoy: if this webhook ever started reading identity from the parameter map, it would
@@ -164,6 +184,7 @@ class SFRefreshTokenTest {
 
     OBDal obDal = mock(OBDal.class);
     when(obDal.get(User.class, "user-1")).thenReturn(callerUser);
+    stubUserRolesCriteria(obDal, 1);
 
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
          MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {
@@ -196,6 +217,7 @@ class SFRefreshTokenTest {
   @Test
   void nullDefaultRoleIsPassedThroughToGenerateTokenUnmodified() throws JSONException {
     User callerUser = givenAuthenticatedUser("user-1");
+    when(callerUser.isActive()).thenReturn(true);
     when(callerUser.getDefaultRole()).thenReturn(null);
 
     OBDal obDal = mock(OBDal.class);
@@ -221,6 +243,7 @@ class SFRefreshTokenTest {
   @Test
   void nullDefaultRoleSurfacesAsBridgeErrorWhenGenerateTokenRejectsIt() {
     User callerUser = givenAuthenticatedUser("user-1");
+    when(callerUser.isActive()).thenReturn(true);
     when(callerUser.getDefaultRole()).thenReturn(null);
 
     OBDal obDal = mock(OBDal.class);
@@ -242,16 +265,100 @@ class SFRefreshTokenTest {
     assertFalse(responseVars.containsKey("result"));
   }
 
+  // ── R5 (ETP-5195) — role/user eligibility checks ─────────────────────────
+
+  @Test
+  void inactiveUserIsRejectedBeforeGeneratingAToken() {
+    User callerUser = givenAuthenticatedUser("user-1");
+    when(callerUser.isActive()).thenReturn(false);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(User.class, "user-1")).thenReturn(callerUser);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      webhook.get(parameters, responseVars);
+
+      swsMock.verifyNoInteractions();
+    }
+
+    JSONObject result = resultOf(responseVars);
+    assertFalse(result.optBoolean("success", true));
+    assertEquals("User is not active", result.optString("message"));
+    assertFalse(responseVars.containsKey("error"));
+  }
+
+  @Test
+  void activeRoleWithNoActiveUserRolesRowIsRejectedAsIneligible() {
+    User callerUser = givenAuthenticatedUser("user-1");
+    when(callerUser.isActive()).thenReturn(true);
+    Role currentRole = mock(Role.class);
+    when(currentRole.isActive()).thenReturn(true);
+    when(callerUser.getDefaultRole()).thenReturn(currentRole);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(User.class, "user-1")).thenReturn(callerUser);
+    // No active AD_User_Roles assignment for this user/role pair.
+    stubUserRolesCriteria(obDal, 0);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      webhook.get(parameters, responseVars);
+
+      swsMock.verifyNoInteractions();
+    }
+
+    JSONObject result = resultOf(responseVars);
+    assertFalse(result.optBoolean("success", true));
+    assertEquals("User is not eligible for the assigned role", result.optString("message"));
+    assertFalse(responseVars.containsKey("error"));
+  }
+
+  @Test
+  void inactiveRoleIsRejectedAsIneligibleWithoutQueryingUserRoles() {
+    User callerUser = givenAuthenticatedUser("user-1");
+    when(callerUser.isActive()).thenReturn(true);
+    Role currentRole = mock(Role.class);
+    when(currentRole.isActive()).thenReturn(false);
+    when(callerUser.getDefaultRole()).thenReturn(currentRole);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(User.class, "user-1")).thenReturn(callerUser);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      webhook.get(parameters, responseVars);
+
+      swsMock.verifyNoInteractions();
+      // isEligibleForRole short-circuits on role.isActive() before ever querying UserRoles.
+      verify(obDal, never()).createCriteria(UserRoles.class);
+    }
+
+    JSONObject result = resultOf(responseVars);
+    assertFalse(result.optBoolean("success", true));
+    assertEquals("User is not eligible for the assigned role", result.optString("message"));
+    assertFalse(responseVars.containsKey("error"));
+  }
+
   // ── generateToken failure ───────────────────────────────────────────────
 
   @Test
   void generateTokenFailureSurfacesAsBridgeError() {
     User callerUser = givenAuthenticatedUser("user-1");
+    when(callerUser.isActive()).thenReturn(true);
     Role currentRole = mock(Role.class);
+    when(currentRole.isActive()).thenReturn(true);
     when(callerUser.getDefaultRole()).thenReturn(currentRole);
 
     OBDal obDal = mock(OBDal.class);
     when(obDal.get(User.class, "user-1")).thenReturn(callerUser);
+    stubUserRolesCriteria(obDal, 1);
 
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
          MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {

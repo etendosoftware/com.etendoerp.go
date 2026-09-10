@@ -22,10 +22,13 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.access.UserRoles;
 
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -108,7 +111,28 @@ public class SFRefreshToken extends BaseWebhookService {
             WebhookFailureResponses.failure("User not found").toString());
         return;
       }
+      // ETP-5195, R5: this endpoint mints a live bearer token, so it must not do so for an
+      // inactive account -- an admin deactivating a user mid-session must not leave this refresh
+      // path as a way to keep minting valid tokens for them.
+      if (!Boolean.TRUE.equals(user.isActive())) {
+        responseVars.put(RESPONSE_VAR_RESULT,
+            WebhookFailureResponses.failure("User is not active").toString());
+        return;
+      }
       Role currentRole = user.getDefaultRole();
+      // A null currentRole is the existing, documented "no assignable role" case (see this
+      // class's javadoc) -- left unchanged, it still flows straight through to generateToken
+      // below. It is only when a role IS resolved that ETP-5195, R5 requires verifying the user
+      // is genuinely, ACTIVELY eligible for it: under normal flow Default_Ad_Role_ID and
+      // AD_User_Roles should always agree, but this endpoint must not TRUST that invariant
+      // blindly, since a data inconsistency would otherwise let it mint a token for a role the
+      // user isn't actually assigned to.
+      if (currentRole != null && !isEligibleForRole(user, currentRole)) {
+        responseVars.put(RESPONSE_VAR_RESULT,
+            WebhookFailureResponses.failure("User is not eligible for the assigned role")
+                .toString());
+        return;
+      }
       String newToken = SecureWebServicesUtils.generateToken(user, currentRole);
       responseVars.put(RESPONSE_VAR_RESULT, success(newToken).toString());
     } catch (Exception e) {
@@ -125,6 +149,32 @@ public class SFRefreshToken extends BaseWebhookService {
   private String resolveCallerUserId() {
     OBContext context = OBContext.getOBContext();
     return context != null && context.getUser() != null ? context.getUser().getId() : null;
+  }
+
+  /**
+   * ETP-5195, R5 — verifies {@code role} is active and that {@code user} holds a genuine, ACTIVE
+   * {@code AD_User_Roles} assignment to it, rather than trusting that {@code
+   * Default_Ad_Role_ID} always points at a role the user is really, currently eligible for.
+   * Reuses the same {@link UserRoles} query convention {@link
+   * SFRolesOverview#resolveActiveUserIds} already established for this kind of cross-cutting
+   * lookup. Entered under admin mode: the caller's own {@link OBContext} is scoped to the role
+   * embedded in their (possibly stale) current token, which is exactly the value this check
+   * cannot trust — the lookup itself must not depend on it.
+   */
+  private boolean isEligibleForRole(User user, Role role) {
+    if (!Boolean.TRUE.equals(role.isActive())) {
+      return false;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      OBCriteria<UserRoles> criteria = OBDal.getInstance().createCriteria(UserRoles.class);
+      criteria.add(Restrictions.eq(UserRoles.PROPERTY_ROLE + ".id", role.getId()));
+      criteria.add(Restrictions.eq(UserRoles.PROPERTY_USERCONTACT + ".id", user.getId()));
+      criteria.add(Restrictions.eq(UserRoles.PROPERTY_ACTIVE, true));
+      return criteria.count() > 0;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   private JSONObject success(String token) {
