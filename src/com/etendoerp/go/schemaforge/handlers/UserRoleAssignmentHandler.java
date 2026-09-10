@@ -173,6 +173,18 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  *   "the owner can't deactivate themselves" generically — no separate case needed here). A
  *   target that is not flagged as owner (every pre-existing user until a separate,
  *   human-reviewed backfill data-fix runs) never triggers this guard at all.</li>
+ *
+ *   <li><b>Delete-path guards on {@code DELETE} (ETP-5195 Bug 3):</b> {@link
+ *   #handle(NeoContext)} previously had no {@code DELETE} case at all, so a delete request fell
+ *   straight through to the default CRUD delete with none of this window's other guards applied
+ *   — an administrator could delete their own {@code AD_User} record outright. {@link
+ *   #rejectDangerousDelete} now rejects three cases before the default CRUD delete ever runs:
+ *   a self-delete (same {@code actingUserId.equals(userId)} pattern as the deactivation guard
+ *   above), a delete of the record flagged as the client's owner via {@link OwnerSupport#isOwner}
+ *   (unconditional — unlike the update guard's owner protection, the owner is NOT exempt from
+ *   deleting their own record here), and a delete of the last remaining active client-admin
+ *   (reusing {@link #isLastActiveClientAdmin} as-is). Same fail-CLOSED contract as the other
+ *   guards in this class.</li>
  * </ol>
  *
  * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
@@ -187,6 +199,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   private static final String METHOD_POST = "POST";
   private static final String METHOD_PUT = "PUT";
   private static final String METHOD_PATCH = "PATCH";
+  private static final String METHOD_DELETE = "DELETE";
 
   /** {@code AD_User_ID} of the System-client "Admin" and "System" bootstrap accounts. */
   private static final Set<String> HIDDEN_BOOTSTRAP_USER_IDS = Set.of("0", "100");
@@ -207,9 +220,10 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * Pre-hook dispatch: on a {@code user} {@code POST} (create), derives a unique {@code
    * username}; on a {@code user} {@code PUT}/{@code PATCH} (update), guards against the
    * email-immutability and self/last-admin-lockout writes described in the class javadoc's
-   * ETP-4830 write-path-guards concern; on a {@code user} list {@code GET}, excludes
-   * contact-only rows (see {@link #excludeContactOnlyUsers}, ETP-5019). No-op for every other
-   * method/endpoint.
+   * ETP-4830 write-path-guards concern; on a {@code user} {@code DELETE}, guards against the
+   * self/last-admin/owner deletes described in the class javadoc's ETP-5195 delete-guards
+   * concern; on a {@code user} list {@code GET}, excludes contact-only rows (see {@link
+   * #excludeContactOnlyUsers}, ETP-5019). No-op for every other method/endpoint.
    */
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -222,6 +236,9 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     }
     if (METHOD_PUT.equalsIgnoreCase(method) || METHOD_PATCH.equalsIgnoreCase(method)) {
       return validateUpdate(context);
+    }
+    if (METHOD_DELETE.equalsIgnoreCase(method)) {
+      return rejectDangerousDelete(context);
     }
     if (METHOD_GET.equalsIgnoreCase(method) && context.getRecordId() == null) {
       excludeContactOnlyUsers(context);
@@ -439,6 +456,64 @@ public class UserRoleAssignmentHandler implements NeoHandler {
           userId, e.getMessage(), e);
       // Fail CLOSED: an error here must not silently let a lockout-risking deactivation through.
       return NeoResponse.error(500, "Error validating deactivation: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Pre-hook guard for a {@code user} {@code DELETE}: rejects a self-delete, a delete of the
+   * client's owner record (by anyone, including the owner themself), and a delete of the last
+   * remaining active client-admin. Runs BEFORE the default CRUD delete (this is a {@code
+   * handle()} pre-hook), so a rejection here never lets the record reach the DB delete at all.
+   *
+   * <p><b>ETP-5195 Bug 3.</b> {@link #handle(NeoContext)} previously had no {@code DELETE} case
+   * whatsoever, so a delete request fell straight through to the default CRUD delete with NONE
+   * of this window's existing write-path guards applied — an administrator could delete their
+   * own {@code AD_User} record outright. This mirrors the {@code
+   * actingUserId.equals(userId)} self-check from {@link #rejectDangerousDeactivation}, the
+   * {@link OwnerSupport#isOwner} check from {@link #rejectNonOwnerEditingOwner} (widened here:
+   * unlike the update guard, which lets the owner edit their OWN record, a delete of the owner's
+   * record is blocked unconditionally — the owner is not exempt from deleting themself), and
+   * reuses {@link #isLastActiveClientAdmin} as-is. Same fail-CLOSED reasoning as the other guards
+   * in this class: an unexpected error surfaces a 500 rather than silently letting the delete
+   * proceed.
+   *
+   * @return a 400/500 error response to short-circuit the request, or {@code null} to let the
+   *     default CRUD delete proceed
+   */
+  private NeoResponse rejectDangerousDelete(NeoContext context) {
+    String userId = context.getRecordId();
+    if (userId == null) {
+      return null;
+    }
+    OBContext obContext = context.getObContext();
+    String actingUserId = obContext != null && obContext.getUser() != null
+        ? obContext.getUser().getId() : null;
+    if (actingUserId != null && actingUserId.equals(userId)) {
+      return NeoResponse.error(400, "You cannot delete your own user account");
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        if (OwnerSupport.isOwner(userId)) {
+          return NeoResponse.error(400, "This user is the tenant owner and cannot be deleted");
+        }
+        User targetUser = OBDal.getInstance().get(User.class, userId);
+        if (targetUser == null) {
+          return null;
+        }
+        if (isLastActiveClientAdmin(targetUser)) {
+          return NeoResponse.error(400,
+              "Cannot delete the last active administrator for this client");
+        }
+        return null;
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("UserRoleAssignmentHandler.rejectDangerousDelete error for user {}: {}", userId,
+          e.getMessage(), e);
+      // Fail CLOSED: an error here must not silently let a dangerous delete through unverified.
+      return NeoResponse.error(500, "Error validating delete: " + e.getMessage());
     }
   }
 
