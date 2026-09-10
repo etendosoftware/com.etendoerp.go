@@ -278,6 +278,8 @@ public final class EtendoGoJwtSupport {
     private final JSONArray roleArray;
 
     /**
+     * Builds an immutable {@link RoleListData} snapshot.
+     *
      * @param firstRoleId the first resolved role's {@code AD_Role_ID}, or {@code null}
      * @param roleArray the full resolved role list
      */
