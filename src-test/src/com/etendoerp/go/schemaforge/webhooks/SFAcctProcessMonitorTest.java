@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
@@ -123,6 +124,19 @@ class SFAcctProcessMonitorTest extends BaseWebhookTest {
   private final List<List<String>> runCriteria = new ArrayList<>();
   private final List<List<String>> requestCriteria = new ArrayList<>();
 
+  /**
+   * Every query and every scheduler call, in the order they actually happened. Some invariants of
+   * this endpoint are about ORDER rather than about any single value — above all "the history is
+   * read AFTER the run is scheduled", which is the whole of the W1 fix and which no count of
+   * queries can express. Appended at {@code list()} time (i.e. the query really ran) and from the
+   * {@code schedule(...)} stub.
+   */
+  private final List<String> callLog = new ArrayList<>();
+
+  private static final String EVENT_SCHEDULE = "schedule";
+  private static final String EVENT_HISTORY_READ = "query:runHistory";
+  private static final String EVENT_IN_PROGRESS_PROBE = "query:runInProgress";
+
   /** Rows each of the four queries answers with. Reassigned per test. */
   private List<Process> processRows = new ArrayList<>();
   private List<ProcessRun> historyRows = new ArrayList<>();
@@ -161,6 +175,12 @@ class SFAcctProcessMonitorTest extends BaseWebhookTest {
     // case explicitly so only the test that cares about standby sees it.
     when(scheduler.isSchedulingAllowed()).thenReturn(true);
     when(scheduler.getConnection()).thenReturn(mock(ConnectionProvider.class));
+    // Logged so the ordering assertions can place it against the queries. A test that needs
+    // `schedule` to fail re-stubs it with doThrow, which replaces this.
+    doAnswer(invocation -> {
+      callLog.add(EVENT_SCHEDULE);
+      return null;
+    }).when(scheduler).schedule(any(ProcessBundle.class));
     obSchedulerMock = mockStatic(OBScheduler.class);
     obSchedulerMock.when(OBScheduler::getInstance).thenReturn(scheduler);
 
@@ -219,8 +239,17 @@ class SFAcctProcessMonitorTest extends BaseWebhookTest {
         criterions.add(String.valueOf(criterion));
         return criteria;
       });
+      // Orders land in the same recording, prefixed. `setMaxResults(1)` only picks a stable row if
+      // the query is ordered, so the ordering is part of what a criteria assertion has to see.
+      when(criteria.addOrder(any())).thenAnswer(ordered -> {
+        criterions.add("order:" + ordered.getArgument(0, Object.class));
+        return criteria;
+      });
       when(criteria.setMaxResults(anyInt())).thenReturn(criteria);
-      when(criteria.list()).thenAnswer(listed -> resolver.apply(criterions));
+      when(criteria.list()).thenAnswer(listed -> {
+        logQuery(entityClass, criterions);
+        return resolver.apply(criterions);
+      });
       return criteria;
     });
   }
@@ -233,6 +262,19 @@ class SFAcctProcessMonitorTest extends BaseWebhookTest {
       return requestCriteria;
     }
     return new ArrayList<>();
+  }
+
+  /**
+   * Records a query on {@link #callLog} at the moment it is executed. Only the two {@link
+   * ProcessRun} queries are distinguished, since they are the ones whose ordering relative to the
+   * schedule call is an invariant; anything else is logged by entity name.
+   */
+  private void logQuery(Class<?> entityClass, List<String> criterions) {
+    if (entityClass != ProcessRun.class) {
+      callLog.add("query:" + entityClass.getSimpleName());
+      return;
+    }
+    callLog.add(criterions.contains("status=PRC") ? EVENT_IN_PROGRESS_PROBE : EVENT_HISTORY_READ);
   }
 
   /** The criterions of the history query (the ProcessRun criteria that is NOT the PRC probe). */
@@ -497,6 +539,36 @@ class SFAcctProcessMonitorTest extends BaseWebhookTest {
         "Expected both one-shot channels excluded, got: " + criterions);
   }
 
+  @Test
+  @DisplayName("The recurring lookup is ordered, so setMaxResults(1) picks the same row every time")
+  void recurringLookupIsDeterministic() throws Exception {
+    // An unordered `setMaxResults(1)` returns whichever row the database felt like, so on an
+    // instance with more than one scheduled request the page's next-run time — and the
+    // `isSecurityBasedOnRole` the one-shot bundle inherits — could differ between two identical
+    // requests. The id tie-breaker matters as much as the primary key: two requests can share a
+    // next-execution instant, which would leave the choice non-deterministic again.
+    givenClientAdminCaller();
+
+    invoke();
+
+    List<String> criterions = requestCriteria.get(0);
+    assertTrue(criterions.contains("order:nextExecution asc"),
+        "Expected the soonest request to win, got: " + criterions);
+    assertTrue(criterions.contains("order:id asc"),
+        "Expected an id tie-breaker for equal next-execution instants, got: " + criterions);
+  }
+
+  @Test
+  @DisplayName("History is ordered recent-first")
+  void historyIsOrderedRecentFirst() throws Exception {
+    givenClientAdminCaller();
+
+    invoke();
+
+    assertTrue(historyQueryCriterions().contains("order:startTime desc"),
+        "Got: " + historyQueryCriterions());
+  }
+
   // ── history contents and scope ────────────────────────────────────────────
 
   @Test
@@ -660,9 +732,31 @@ class SFAcctProcessMonitorTest extends BaseWebhookTest {
     assertFalse(responseVars.containsKey("error"));
   }
 
+  /**
+   * The W1 invariant, stated as an ORDER rather than as a count.
+   *
+   * <p>A trigger response must describe the world AFTER the run was scheduled. The endpoint reads
+   * the status exactly ONCE, and that read comes after {@code OBScheduler.schedule(...)} — so
+   * {@code history}, {@code lastRun} and {@code running} all describe the same instant, and that
+   * instant is a post-trigger one.</p>
+   *
+   * <p>This assertion used to expect TWO history reads, which encoded the original
+   * read-then-trigger-then-re-read shape: the status was captured BEFORE the run was scheduled and
+   * only {@code history} was patched afterwards. That left {@code running} necessarily false in
+   * every successful trigger response — the trigger refuses outright when a run is already in
+   * progress — while {@code lastRun} came from the stale read and {@code history} from the fresh
+   * one, three fields disagreeing with each other. The frontend keys its poll off {@code running},
+   * so the poll never started and the page claimed a run had begun while nothing arrived. Commit
+   * {@code c0e27031} collapsed that into one post-trigger read; this test was not updated with it,
+   * and only a real Gradle run caught it.</p>
+   *
+   * <p>Asserting the ORDER, not just the count, is deliberate: a bare "exactly one history read"
+   * would still pass if someone moved the read back in front of the trigger and dropped the
+   * re-read, which is precisely the defect.</p>
+   */
   @Test
-  @DisplayName("A successful trigger re-reads the history in the same response")
-  void triggerRefreshesTheHistoryInTheSameResponse() throws Exception {
+  @DisplayName("A successful trigger reads the history AFTER scheduling, exactly once")
+  void triggerReadsTheHistoryAfterScheduling() throws Exception {
     givenClientAdminCaller();
     historyRows.add(run("run-1", "SUC", "Process Scheduler"));
 
@@ -670,8 +764,44 @@ class SFAcctProcessMonitorTest extends BaseWebhookTest {
 
     assertTrue(result.getJSONObject("triggered").getBoolean("started"));
     assertEquals(1, result.getJSONArray("history").length());
-    // Two history queries: the one inside buildStatus, and the re-read after the run was scheduled.
-    assertEquals(2, runCriteria.stream().filter(c -> !c.contains("status=PRC")).count());
+
+    int scheduledAt = callLog.indexOf(EVENT_SCHEDULE);
+    int historyReadAt = callLog.indexOf(EVENT_HISTORY_READ);
+    assertTrue(scheduledAt >= 0, "The run was never scheduled. Call log: " + callLog);
+    assertTrue(historyReadAt > scheduledAt,
+        "The history must be read AFTER the run is scheduled, not before. Call log: " + callLog);
+    // Exactly one read, so no stale pre-trigger snapshot survives anywhere in the response.
+    assertEquals(1, callLog.stream().filter(EVENT_HISTORY_READ::equals).count(),
+        "Call log: " + callLog);
+  }
+
+  @Test
+  @DisplayName("The in-progress flag is also captured after scheduling, so it agrees with history")
+  void triggerCapturesRunningAfterScheduling() throws Exception {
+    givenClientAdminCaller();
+
+    invokeTrigger();
+
+    // `running` comes from the LAST in-progress probe, the one inside buildStatus. The earlier
+    // probe is the trigger's own already-running guard, which runs before the schedule by
+    // necessity. What must not happen is the reported `running` being taken from that earlier one.
+    int scheduledAt = callLog.indexOf(EVENT_SCHEDULE);
+    int lastProbeAt = callLog.lastIndexOf(EVENT_IN_PROGRESS_PROBE);
+    assertTrue(lastProbeAt > scheduledAt,
+        "The reported running flag must be probed after scheduling. Call log: " + callLog);
+  }
+
+  @Test
+  @DisplayName("A plain read schedules nothing and still reads the history exactly once")
+  void readOnlyRequestReadsTheHistoryOnce() throws Exception {
+    givenClientAdminCaller();
+    historyRows.add(run("run-1", "SUC", "Process Scheduler"));
+
+    invoke();
+
+    assertFalse(callLog.contains(EVENT_SCHEDULE), "Call log: " + callLog);
+    assertEquals(1, callLog.stream().filter(EVENT_HISTORY_READ::equals).count(),
+        "Call log: " + callLog);
   }
 
   // ── history limit ─────────────────────────────────────────────────────────
