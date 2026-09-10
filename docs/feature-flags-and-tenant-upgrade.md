@@ -60,6 +60,10 @@ A flag `my-flag` is read from `etendo.go.flags.my-flag`, resolved in priority or
 property, `Openbravo.properties`, environment variable `ETGO_FLAG_MY_FLAG` (uppercased, every
 non-alphanumeric character replaced by `_`). See `com.etendoerp.go.common.GoRuntimeProperties`.
 
+A flag may additionally name the accounts it is on for, as a comma-separated allowlist of
+`ETGO_ACCOUNT` emails read from `etendo.go.flags.my-flag.emails` (env var
+`ETGO_FLAG_MY_FLAG_EMAILS`) through the same precedence. See **Per-account targeting** below.
+
 No backend flag is declared today: `tenant-upgrade` was the only one and it retired with ETP-4966.
 The stack stays as the entry point for the next one — declare its key as a constant on
 `GoFeatureFlags` and add its row here.
@@ -76,9 +80,42 @@ indistinguishable from a disabled feature — which is how a charged account got
 Accepted affirmatives: `true`, `Y`, `yes`, `1`. Accepted negatives: `false`, `N`, `no`, `0`
 (case-insensitive).
 
-Because flags come from configuration, this provider serves **environment-level rollout, not
-per-user targeting**. The evaluation context is accepted for API compatibility and passed through,
-but does not affect the result. Per-user bucketing arrives with the hosted provider.
+### Per-account targeting (ETP-5267)
+
+Until ETP-5267 the evaluation context was accepted for API compatibility and passed through, but did
+**not** affect the result — this document and `PropertiesFeatureProvider`'s own javadoc both said so.
+That is no longer true, and both were corrected with the change.
+
+```
+etendo.go.flags.my-flag         = false                             # default for everyone
+etendo.go.flags.my-flag.emails  = someone@example.com, other@example.com
+```
+
+`PropertiesFeatureProvider` matches the allowlist against the evaluation context's **targeting key**
+— the `ETGO_ACCOUNT` email that `FeatureFlagContext.forAccount(...)` carries — trimmed and
+case-insensitively, because these addresses are typed by hand on one side and read out of the
+database on the other. Semantics:
+
+| Situation | Result |
+|---|---|
+| Targeting key listed in `.emails` | **`true`** (reason `TARGETING_MATCH`) |
+| Not listed, or no targeting key, or no `.emails` set | the flag's own boolean value |
+| Nothing configured at all | **`false`** |
+
+Three properties of this worth being explicit about:
+
+- **The allowlist and the boolean are an OR, never an AND.** Naming an account is sufficient on its
+  own, so a targeted rollout needs one property set rather than two. Conversely, setting the bare
+  boolean to `true` still enables the flag for *everyone* — that is the pre-existing
+  environment-wide switch, unchanged.
+- **No wildcard, and an empty allowlist never means "everyone".** A blank entry (a trailing comma,
+  `a,,b`) cannot match, because the targeting key is non-blank by the time it is compared.
+- **A flag with no `.emails` property behaves exactly as it did before.** That is the
+  backward-compatibility guarantee, and it is what leaves every other flag unaffected.
+
+What this does *not* provide is percentage rollout or rule-based segments — "these named accounts",
+not "20% of users". Those still arrive with the hosted provider. Changing a flag or its allowlist is
+still a configuration change, so both take effect on restart rather than instantly.
 
 ### Targeting key — still OPEN for any future flag, no longer blocking this capability
 
@@ -120,9 +157,16 @@ package, so it needs no core change and no version bump — which is what unbloc
 `/environments` route stalled on the core helper dropping top-level fields.
 
 **This is not closed until the web client consumes them.** The backend now exposes the identity; the
-frontend half is the remaining scope. Until it lands, the two ends still bucket differently and no
-targeting-aware provider should be installed. Full client-side reasoning is in `docs/feature-flags.md`
-in the functional repo.
+frontend half is the remaining scope. Until it lands, the two ends still bucket differently, so **no
+flag with a frontend end may be made targeting-aware**. Full client-side reasoning is in
+`docs/feature-flags.md` in the functional repo.
+
+**What ETP-5267 changed, and why it is not a violation of the above.** A targeting-aware provider
+*is* now installed (see **Per-account targeting**), which the previous wording ruled out
+categorically. The narrower rule is the correct one: this divergence is between *two* evaluators, so
+it can only bite a flag the browser also reads. A backend-only flag that targets the **account
+email** — the key this section says the backend targets on — has no second end to disagree with. A
+flag read on both ends still needs the frontend half of ETP-4693 first.
 
 ### Failure behaviour — never block, never fail, default false
 
