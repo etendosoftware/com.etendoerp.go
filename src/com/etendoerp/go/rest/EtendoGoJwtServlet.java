@@ -1689,8 +1689,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         }
       }
       // updateFirstSteps flushes and commits internally
-      // (EtendoGoJwtDalHelper.flushAndCommitDalChanges) — no extra commit here.
-      EtendoGoJwtDalHelper.updateFirstSteps(account, storedFirstSteps);
+      // (FirstStepsDalHelper.flushAndCommit) — no extra commit here.
+      FirstStepsDalHelper.updateFirstSteps(account, storedFirstSteps);
       writeSuccessStatus(response, new JSONObject());
     });
   }
@@ -1732,7 +1732,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * warning and reported as {@code null} instead of failing the request.
    */
   private Object parseStoredFirstSteps(Account account) {
-    String storedFirstSteps = EtendoGoJwtDalHelper.getFirstSteps(account);
+    String storedFirstSteps = FirstStepsDalHelper.getFirstSteps(account);
     if (StringUtils.isBlank(storedFirstSteps)) {
       return JSONObject.NULL;
     }

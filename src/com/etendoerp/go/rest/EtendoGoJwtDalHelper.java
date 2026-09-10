@@ -433,28 +433,6 @@ final class EtendoGoJwtDalHelper {
   }
 
   /**
-   * Returns the stored First Steps checklist JSON for the given account, or {@code null} when the
-   * account is unknown or nothing has been persisted yet.
-   */
-  static String getFirstSteps(Account account) {
-    return account == null ? null : account.getFirstSteps();
-  }
-
-  /**
-   * Persists the First Steps checklist JSON for the given account, or clears it when
-   * {@code firstStepsJson} is {@code null}. Flushes and commits internally, so callers must not
-   * add a second commit.
-   */
-  static void updateFirstSteps(Account account, String firstStepsJson) {
-    if (account == null) {
-      return;
-    }
-    account.setFirstSteps(firstStepsJson);
-    OBDal.getInstance().save(account);
-    flushAndCommitDalChanges();
-  }
-
-  /**
    * Returns {@code true} when the given client is owned by the account identified by
    * {@code accountEmail}, i.e. it has an active user whose username is the account email or an
    * {@code email+suffix} variant of it — the same ownership criterion used by
