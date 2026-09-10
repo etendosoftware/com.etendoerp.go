@@ -31,11 +31,11 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.service.json.JsonUtils;
 import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.model.pricing.pricelist.PriceListVersion;
 import org.openbravo.model.pricing.pricelist.ProductPrice;
 
-import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
 
 /**
@@ -243,12 +243,16 @@ public class ProductPriceHandler implements NeoHandler {
     // ETP-5203: row[15] (updated) is mandatory for every PUT/PATCH by
     // NeoCrudHandler#validateUpdateRequest (ETP-5073) — omitting it left the
     // Product window's Price tab with no way to echo the value back, so every
-    // edit 400'd with missing_updated. Canonicalized through NeoDateFormat since a
-    // native-SQL Timestamp prints in the raw Postgres shape, mirroring
-    // ChartOfAccountsHandler#toAccountJson.
-    String rawUpdated = row[15] != null ? String.valueOf(row[15]) : null;
-    String canonicalUpdated = rawUpdated != null ? NeoDateFormat.toCanonical(rawUpdated, true) : null;
-    String updatedValue = canonicalUpdated != null ? canonicalUpdated : rawUpdated;
+    // edit 400'd with missing_updated.
+    //
+    // ETP-5245: formatted with core's OWN writer, because core's reader is what has to accept it
+    // back. JsonUtils.createDateTimeFormat() is `yyyy-MM-dd'T'HH:mm:ssZZZZZ` and the offset is
+    // MANDATORY: a string without one is read as UTC, so on a UTC-3 server every echoed value
+    // looked three hours old and the concurrency check refused the edit as `stale_record` —
+    // every single time, since the row was never actually touched by anyone else.
+    // NeoDateFormat.toCanonical is the wrong tool here: it deliberately DROPS the offset. Same
+    // bug, same fix as FinancialAccountsPageHandler (see its note on `row.updated`).
+    String updatedValue = formatUpdatedForEcho(row[15]);
     item.put(FIELD_UPDATED, updatedValue != null ? updatedValue : JSONObject.NULL);
     return item;
   }
@@ -410,4 +414,48 @@ public class ProductPriceHandler implements NeoHandler {
     return PriceListVersionResolver.resolveDefaultVersionId(obContext, true);
   }
 
+  /**
+   * Formats the row's {@code updated} stamp the way core's reader expects it back.
+   *
+   * <p>A native query hands this column over as a {@link java.sql.Timestamp}, but the value is
+   * accepted as a raw Postgres string too, so both are handled: whichever arrives, the output is
+   * always core's own {@code yyyy-MM-dd'T'HH:mm:ssZZZZZ} WITH the offset. Returning it without
+   * one is what caused every edit to be refused as {@code stale_record} on a server west of UTC.
+   *
+   * @param raw the value in the {@code updated} column of the query result
+   * @return the formatted stamp, or {@code null} when there is nothing to echo
+   */
+  private static String formatUpdatedForEcho(Object raw) {
+    if (raw == null) {
+      return null;
+    }
+    if (raw instanceof java.util.Date) {
+      return toXsdStamp((java.util.Date) raw);
+    }
+    String text = String.valueOf(raw);
+    try {
+      return toXsdStamp(java.sql.Timestamp.valueOf(text));
+    } catch (IllegalArgumentException e) {
+      // Not the Postgres shape; hand it back untouched rather than inventing an offset.
+      log.debug("Could not parse product price 'updated' value '{}'", text);
+      return text;
+    }
+  }
+
+  /**
+   * Writes an instant in the exact shape core itself emits: {@code 2026-08-15T10:30:00-03:00}.
+   *
+   * <p>The colon matters. {@code JsonUtils.createDateTimeFormat()} produces an RFC-822 offset with
+   * no colon, and {@code convertFromXSDToJavaFormat} — the repair step every reader runs first —
+   * only recognises the colon form; given anything else it appends {@code "+0000"}, so a bare
+   * {@code -0300} becomes {@code -0300+0000}. That still parses today, but only because
+   * {@code SimpleDateFormat} ignores trailing characters. Emitting the colon form removes the
+   * accident: the reader strips the colon back out and parses exactly what was written.
+   *
+   * @param instant the value to write
+   * @return the stamp in core's XSD shape
+   */
+  private static String toXsdStamp(java.util.Date instant) {
+    return JsonUtils.convertToCorrectXSDFormat(JsonUtils.createDateTimeFormat().format(instant));
+  }
 }
