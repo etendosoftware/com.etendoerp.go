@@ -235,12 +235,20 @@ public class ProductPriceHandler implements NeoHandler {
     // ETP-5203: row[15] (updated) is mandatory for every PUT/PATCH by
     // NeoCrudHandler#validateUpdateRequest (ETP-5073) — omitting it left the
     // Product window's Price tab with no way to echo the value back, so every
-    // edit 400'd with missing_updated. Canonicalized through NeoDateFormat since a
-    // native-SQL Timestamp prints in the raw Postgres shape, mirroring
-    // ChartOfAccountsHandler#toAccountJson.
-    String rawUpdated = row[15] != null ? String.valueOf(row[15]) : null;
-    String canonicalUpdated = rawUpdated != null ? NeoDateFormat.toCanonical(rawUpdated, true) : null;
-    String updatedValue = canonicalUpdated != null ? canonicalUpdated : rawUpdated;
+    // edit 400'd with missing_updated.
+    //
+    // ETP-5255: emitted through NeoDateFormat.toAuditToken, NOT toCanonical. This is a
+    // concurrency token, so it is read back by JsonUtils.createDateTimeFormat(), whose offset
+    // is MANDATORY — an offsetless value is re-read as UTC, and the check then refused every
+    // edit on this tab as stale by exactly the server's UTC offset. toCanonical is the wrong
+    // tool here because it deliberately DROPS the offset; see toAuditToken's javadoc. row[15] is
+    // the raw `updated` column, so a native-SQL Timestamp reaches the formatter directly.
+    Object rawUpdated = row[15];
+    String auditToken = NeoDateFormat.toAuditToken(rawUpdated);
+    // A token we could not render does not mean "no value": per NeoDateFormat's contract the
+    // original must go through verbatim, since a null `updated` trips the mandatory-token guard.
+    String updatedValue = auditToken != null
+        ? auditToken : (rawUpdated != null ? String.valueOf(rawUpdated) : null);
     item.put(FIELD_UPDATED, updatedValue != null ? updatedValue : JSONObject.NULL);
     return item;
   }

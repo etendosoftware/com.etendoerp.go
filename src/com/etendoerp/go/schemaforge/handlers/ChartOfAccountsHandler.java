@@ -539,10 +539,17 @@ public class ChartOfAccountsHandler implements NeoHandler {
    * client with no way to echo the value back, so every edit or deactivate through this
    * bypass-the-generic-service list/detail path 400'd with {@code missing_updated}, no matter
    * how freshly the record had just been re-read. Formatted through
-   * {@link NeoDateFormat#toCanonical} rather than {@code row[7].toString()} verbatim, since a
+   * {@link NeoDateFormat#toAuditToken} rather than {@code row[7].toString()} verbatim, since a
    * native-SQL {@code Timestamp} prints in the raw Postgres shape
-   * ({@code yyyy-MM-dd HH:mm:ss.ffffff}) that class exists to convert into the ISO wire format
+   * ({@code yyyy-MM-dd HH:mm:ss.ffffff}), which is not what
    * {@code NeoRecordVersion}/{@code JsonUtils} parse back on the way in.
+   *
+   * <p>ETP-5255: {@code toAuditToken}, NOT {@link NeoDateFormat#toCanonical}. A concurrency token
+   * is read back by {@code JsonUtils.createDateTimeFormat()}, whose offset is MANDATORY: an
+   * offsetless value is silently re-read as UTC, and the check then refused every edit here as
+   * stale by exactly the server's UTC offset — a conflict on a record nobody else had touched.
+   * {@code toCanonical} is the obvious-looking tool and the wrong one, because it deliberately
+   * DROPS the offset. See {@code toAuditToken}'s javadoc for the full reasoning.
    */
   private static JSONObject toAccountJson(Object[] row) throws Exception {
     JSONObject entry = new JSONObject();
@@ -555,13 +562,14 @@ public class ChartOfAccountsHandler implements NeoHandler {
     entry.put(FIELD_ACTIVE, "Y".equals(String.valueOf(row[6])));
     entry.put("protectedParentLikeSubaccount",
         ChartOfAccountsSaveValidationSupport.isProtectedParentLikeSubaccount(String.valueOf(row[1])) ? "Y" : "N");
-    // NeoDateFormat.toCanonical returning null does not mean "no value" — its own contract
-    // (see the class javadoc) requires the caller pass the ORIGINAL value through verbatim
+    // NeoDateFormat.toAuditToken returning null does not mean "no value" — that class's contract
+    // (see its class javadoc) requires the caller pass the ORIGINAL value through verbatim
     // rather than blank it, since a client that later PATCHes this record back needs SOME
     // `updated` token, not a null one that would trip the mandatory-`updated` concurrency guard.
-    String rawUpdated = row[7] != null ? String.valueOf(row[7]) : null;
-    String canonicalUpdated = rawUpdated != null ? NeoDateFormat.toCanonical(rawUpdated, true) : null;
-    String updatedValue = canonicalUpdated != null ? canonicalUpdated : rawUpdated;
+    Object rawUpdated = row[7];
+    String auditToken = NeoDateFormat.toAuditToken(rawUpdated);
+    String updatedValue = auditToken != null
+        ? auditToken : (rawUpdated != null ? String.valueOf(rawUpdated) : null);
     entry.put(FIELD_UPDATED, updatedValue != null ? updatedValue : JSONObject.NULL);
     return entry;
   }
