@@ -1297,18 +1297,22 @@ public class ChartOfAccountsHandlerTest {
     return (JSONObject) method.invoke(null, (Object) row);
   }
 
+  /**
+   * ETP-5101: {@code row[7]} (the raw Postgres timestamp) must be reformatted into the wire shape
+   * {@code NeoRecordVersion} and {@code JsonUtils} parse back, not passed through verbatim —
+   * passing it through is what let {@code missing_updated} PATCH/PUT requests through.
+   *
+   * <p>ETP-5255: that shape is {@link NeoDateFormat#toAuditToken}, <b>not</b>
+   * {@code toCanonical}. The token is a concurrency value, read back by
+   * {@code JsonUtils.createDateTimeFormat}, whose offset is mandatory. {@code toCanonical} drops
+   * the offset by design, so every edit came back stale by exactly the server's UTC offset. See
+   * {@link NeoDateFormat#toAuditToken}'s own javadoc.
+   */
   @Test
   public void toAccountJsonHandlesPlainStringYValues() throws Exception {
     JSONObject entry = invokeToAccountJson(rowWith("Y", "Y"));
     assertTrue("summaryLevel must be true for a plain String \"Y\"", entry.getBoolean("summaryLevel"));
     assertTrue("active must be true for a plain String \"Y\"", entry.getBoolean("active"));
-    // ETP-5101: row[7] (raw Postgres timestamp) must be reformatted into the wire shape
-    // NeoRecordVersion/JsonUtils parse back, not passed through verbatim — passing it through is
-    // what let missing_updated PATCH/PUT requests through.
-    // ETP-5255: that shape is NeoDateFormat.toAuditToken, NOT toCanonical. The token is a
-    // concurrency value read back by JsonUtils.createDateTimeFormat(), whose offset is mandatory;
-    // toCanonical drops the offset by design, so every edit came back stale by the server's UTC
-    // offset. See NeoDateFormat.toAuditToken's javadoc.
     assertIsAuditTokenFor(SAMPLE_UPDATED_WALL_CLOCK, entry.getString("updated"));
   }
 
