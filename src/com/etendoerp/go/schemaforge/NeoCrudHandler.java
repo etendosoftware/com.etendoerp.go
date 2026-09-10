@@ -975,7 +975,7 @@ class NeoCrudHandler {
     // ETP-5073 / DOC-04: same capture-before-filter dance, same reason, for `updated`.
     // filterWriteRequest drops it because it is not in `writableFields` (it cannot be: it is not
     // an AD field, so push-to-neo registers no row for it, and NeoFieldFilter deliberately keeps
-    // ALWAYS_READABLE_KEYS out of the writable set so a client can never author its own audit
+    // ALWAYS_READABLE_PROPS out of the writable set so a client can never author its own audit
     // stamp). Dropping it silently disabled core's concurrency check for every entity. Re-injected
     // after filtering so the check evaluates — the value is a token the client echoes back from
     // its read, never data we persist: core reads it, compares it, and overwrites the column with

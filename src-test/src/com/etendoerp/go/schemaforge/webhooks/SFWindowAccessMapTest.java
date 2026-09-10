@@ -211,6 +211,7 @@ class SFWindowAccessMapTest {
     void testSystemAdminRoleGetsFullAccessToEveryWindow() throws Exception {
         givenSystemAdminRole();
         stubSpecRows(Arrays.asList(windowSpec("win-1"), windowSpec("win-2")));
+        stubWindowAccessRows(Collections.emptyList());
 
         webhook.get(parameters, responseVars);
 
@@ -235,6 +236,7 @@ class SFWindowAccessMapTest {
     void testClientAdminRoleGetsFullAccessToEveryWindow() throws Exception {
         givenClientAdminRole("role-client-admin");
         stubSpecRows(Collections.singletonList(windowSpec("win-only")));
+        stubWindowAccessRows(Collections.emptyList());
 
         webhook.get(parameters, responseVars);
 
@@ -253,12 +255,38 @@ class SFWindowAccessMapTest {
     void testAdminBypassDeduplicatesSharedWindows() throws Exception {
         givenSystemAdminRole();
         stubSpecRows(Arrays.asList(windowSpec("win-shared"), windowSpec("win-shared")));
+        stubWindowAccessRows(Collections.emptyList());
 
         webhook.get(parameters, responseVars);
 
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
         assertEquals(1, result.getJSONObject("windowAccess").length());
+    }
+
+    /**
+     * ETP-5240 regression: "permission-anchor" windows (e.g. Financial Reports, Smart Scan,
+     * Inventory Stock Report) are granted directly via an active {@code AD_Window_Access} row to
+     * some non-admin role but have NO backing {@code ETGO_SF_SPEC} — before this fix the admin
+     * bypass only enumerated spec-backed windows, so admin/client-admin got "none" for a window a
+     * real role could already open. Now the bypass's map is the union of both sources.
+     */
+    @Test
+    @DisplayName("Admin bypass includes a window with an active grant but no backing ETGO_SF_SPEC (ETP-5240)")
+    void testAdminBypassIncludesWindowWithGrantButNoSpec() throws Exception {
+        givenSystemAdminRole();
+        stubSpecRows(Collections.singletonList(windowSpec("win-spec-backed")));
+        // "win-permission-anchor" has an active grant for some non-admin role, but is deliberately
+        // absent from stubSpecRows above — mirrors a window with no ETGO_SF_SPEC row at all.
+        stubWindowAccessRows(Collections.singletonList(windowAccessRow("win-permission-anchor", true)));
+
+        webhook.get(parameters, responseVars);
+
+        assertNull(responseVars.get(ERROR));
+        JSONObject windowAccess = new JSONObject(responseVars.get(RESULT)).getJSONObject("windowAccess");
+        assertEquals(2, windowAccess.length());
+        assertEquals("full", windowAccess.getString("win-spec-backed"));
+        assertEquals("full", windowAccess.getString("win-permission-anchor"));
     }
 
     // ── restricted role: windowAccess resolution ─────────────────────────

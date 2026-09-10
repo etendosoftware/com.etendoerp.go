@@ -35,6 +35,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -62,7 +65,10 @@ import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
  *   <li>{@code null} account is a no-op (never breaks account creation)</li>
  *   <li>an org with no general ledger is a no-op (soft-degrade, mirrors the handler)</li>
  *   <li>Bank type: the 7 fields it owns get the correct default codes; the always-empty
- *       {@code clearedPaymentAccount}/{@code clearedPaymentAccountOUT} are never set</li>
+ *       {@code clearedPaymentAccount}/{@code clearedPaymentAccountOUT} are explicitly set to
+ *       {@code null}, undoing core's {@code FIN_FINANCIAL_ACCOUNT_TRG} seed (ETP-5207)</li>
+ *   <li>the cleared IN/OUT pair is emptied for every account type, on an existing
+ *       (trigger-created) row as well as a new one, and even when no default code resolves</li>
  *   <li>Cash type: only the 4 shared fields get set, with the Caja-specific deposit/withdrawal
  *       code ({@code 57001000}); the 3 Bank-only fields are never touched</li>
  *   <li>Card type: only the 4 shared fields get set, with the Tarjeta-specific deposit/withdrawal
@@ -189,7 +195,8 @@ class FinancialAccountAccountingDefaultsSupportTest {
   // ── per-type defaults ────────────────────────────────────────────────────────
 
   @Test
-  @DisplayName("Bank: sets all 7 owned fields with the PGC-España default codes; cleared fields untouched")
+  @DisplayName("Bank: sets all 7 owned fields with the PGC-España default codes; cleared fields"
+      + " explicitly emptied (ETP-5207)")
   void bankTypeSetsSevenExpectedDefaults() {
     wireAccountWithLedger(TYPE_BANK);
     FIN_FinancialAccountAccounting row = wireExistingRow();
@@ -213,9 +220,11 @@ class FinancialAccountAccountingDefaultsSupportTest {
     verify(row).setFINOutIntransitAcct(inTransitOut);
     verify(row).setDepositAccount(deposit);
     verify(row).setWithdrawalAccount(withdrawal);
-    // clearedPaymentAccount / clearedPaymentAccountOUT are always empty — never set by this class.
-    verify(row, never()).setClearedPaymentAccount(any());
-    verify(row, never()).setClearedPaymentAccountOUT(any());
+    // clearedPaymentAccount / clearedPaymentAccountOUT are always empty — and ETP-5207 requires
+    // them to be EXPLICITLY cleared, not merely left un-set: core's FIN_FINANCIAL_ACCOUNT_TRG
+    // already seeded both columns on the row findOrCreateRow just found.
+    verify(row).setClearedPaymentAccount(null);
+    verify(row).setClearedPaymentAccountOUT(null);
 
     verify(obDal).save(row);
     verify(obDal).flush();
@@ -244,8 +253,9 @@ class FinancialAccountAccountingDefaultsSupportTest {
     verify(row, never()).setFINBankrevaluationgainAcct(any());
     verify(row, never()).setFINBankrevaluationlossAcct(any());
     verify(row, never()).setFINBankfeeAcct(any());
-    verify(row, never()).setClearedPaymentAccount(any());
-    verify(row, never()).setClearedPaymentAccountOUT(any());
+    // The cleared pair, by contrast, is explicitly emptied for EVERY type (ETP-5207).
+    verify(row).setClearedPaymentAccount(null);
+    verify(row).setClearedPaymentAccountOUT(null);
 
     verify(obDal).save(row);
     verify(obDal).flush();
@@ -273,9 +283,73 @@ class FinancialAccountAccountingDefaultsSupportTest {
     verify(row, never()).setFINBankrevaluationgainAcct(any());
     verify(row, never()).setFINBankrevaluationlossAcct(any());
     verify(row, never()).setFINBankfeeAcct(any());
-    verify(row, never()).setClearedPaymentAccount(any());
-    verify(row, never()).setClearedPaymentAccountOUT(any());
+    // The cleared pair, by contrast, is explicitly emptied for EVERY type (ETP-5207).
+    verify(row).setClearedPaymentAccount(null);
+    verify(row).setClearedPaymentAccountOUT(null);
 
+    verify(obDal).save(row);
+    verify(obDal).flush();
+  }
+
+  // ── ETP-5207: the cleared-payment pair is emptied, not merely left alone ─────
+
+  @ParameterizedTest(name = "type={0}")
+  @NullSource
+  @ValueSource(strings = { TYPE_BANK, TYPE_CASH, TYPE_CARD, "X" })
+  @DisplayName("ETP-5207: the cleared IN/OUT pair is emptied unconditionally for every account"
+      + " type — including a null/unrecognized one — and even when NO default code resolves")
+  void clearedAccountsAreAlwaysEmptiedForEveryType(String type) {
+    wireAccountWithLedger(type);
+    FIN_FinancialAccountAccounting row = wireExistingRow();
+    // Nothing resolves: the clearing must not depend on resolveCombinationByCode succeeding.
+    wireResolveCombinationByCode();
+
+    Assertions.assertDoesNotThrow(
+        () -> FinancialAccountAccountingDefaultsSupport.applyDefaultAccountingConfiguration(account));
+
+    verify(row).setClearedPaymentAccount(null);
+    verify(row).setClearedPaymentAccountOUT(null);
+    verify(obDal).save(row);
+    verify(obDal).flush();
+  }
+
+  @Test
+  @DisplayName("ETP-5207 regression: the row findOrCreateRow FINDS is the one core's"
+      + " FIN_FINANCIAL_ACCOUNT_TRG already seeded with the ledger asset account, so the cleared"
+      + " pair is emptied in the very same pass that applies the 7 resolvable Bank defaults")
+  void triggerSeededExistingRowGetsClearedAccountsEmptied() {
+    wireAccountWithLedger(TYPE_BANK);
+    FIN_FinancialAccountAccounting row = wireExistingRow();
+    // Expresses the real-world starting state: the AFTER-INSERT trigger put 57200000 in both
+    // columns before this class ever ran. (A Mockito mock holds no state, so these stubs are
+    // documentary — what the assertions below actually pin is that the null-setters fire in the
+    // SAME pass as the resolvable defaults, i.e. clearing and defaulting are not exclusive. That
+    // is the combination the pre-ETP-5207 code got wrong: it defaulted and left these seeded.)
+    AccountingCombination triggerSeed = combo("57200000-trigger-seed");
+    when(row.getClearedPaymentAccount()).thenReturn(triggerSeed);
+    when(row.getClearedPaymentAccountOUT()).thenReturn(triggerSeed);
+
+    AccountingCombination gain = combo("gain");
+    AccountingCombination loss = combo("loss");
+    AccountingCombination fee = combo("fee");
+    AccountingCombination inTransitIn = combo("in-transit-in");
+    AccountingCombination inTransitOut = combo("in-transit-out");
+    AccountingCombination deposit = combo("deposit");
+    AccountingCombination withdrawal = combo("withdrawal");
+    wireResolveCombinationByCode(gain, loss, fee, inTransitIn, inTransitOut, deposit, withdrawal);
+
+    FinancialAccountAccountingDefaultsSupport.applyDefaultAccountingConfiguration(account);
+
+    verify(row).setClearedPaymentAccount(null);
+    verify(row).setClearedPaymentAccountOUT(null);
+    // The 7 resolvable defaults are still applied — the reset must not have short-circuited them.
+    verify(row).setFINBankrevaluationgainAcct(gain);
+    verify(row).setFINBankrevaluationlossAcct(loss);
+    verify(row).setFINBankfeeAcct(fee);
+    verify(row).setInTransitPaymentAccountIN(inTransitIn);
+    verify(row).setFINOutIntransitAcct(inTransitOut);
+    verify(row).setDepositAccount(deposit);
+    verify(row).setWithdrawalAccount(withdrawal);
     verify(obDal).save(row);
     verify(obDal).flush();
   }
@@ -371,8 +445,11 @@ class FinancialAccountAccountingDefaultsSupportTest {
     verify(row, never()).setFINOutIntransitAcct(any());
     verify(row, never()).setDepositAccount(any());
     verify(row, never()).setWithdrawalAccount(any());
-    verify(row, never()).setClearedPaymentAccount(any());
-    verify(row, never()).setClearedPaymentAccountOUT(any());
+    // ...but the cleared pair is STILL emptied: it is not resolved from any code, so ETP-5207's
+    // reset is unconditional even on a chart where nothing else matches. This is the load-bearing
+    // assertion — it proves the clearing does not ride on resolveCombinationByCode succeeding.
+    verify(row).setClearedPaymentAccount(null);
+    verify(row).setClearedPaymentAccountOUT(null);
     // A fully-unresolved default set must still be saved (best-effort, matches the handler).
     verify(obDal).save(row);
     verify(obDal).flush();

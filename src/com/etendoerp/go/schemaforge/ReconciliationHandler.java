@@ -1601,7 +1601,11 @@ public class ReconciliationHandler implements NeoHandler {
   }
 
   FIN_Reconciliation addNewDraftReconciliation(FIN_FinancialAccount account) {
-    return APRM_MatchingUtility.addNewDraftReconciliation(account);
+    // ETP-5230: core bumps the "Reconciliation" sequence (org *) through the DAL inside this call,
+    // which an Organization-level role may not write. Core's own flush is inside the call, so the
+    // scope covers it. See StarOrgWriteScope for why an outer setAdminMode(false) does not work.
+    return StarOrgWriteScope.withWritableStarOrg(
+        () -> APRM_MatchingUtility.addNewDraftReconciliation(account));
   }
 
   void matchBankStatementLine(FIN_BankStatementLine line, List<String> operationIds,
