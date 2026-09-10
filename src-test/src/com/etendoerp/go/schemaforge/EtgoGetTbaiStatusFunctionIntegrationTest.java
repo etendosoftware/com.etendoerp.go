@@ -35,6 +35,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.test.base.OBBaseTest;
 
+import com.smf.ticketbai.data.TbaiConfig;
 import com.smf.ticketbai.data.TbaiSyncinvoice;
 
 /**
@@ -71,13 +72,16 @@ import com.smf.ticketbai.data.TbaiSyncinvoice;
  * mirroring {@code TbaiSyncStatusInjectorIntegrationTest}'s convention (the class this migration
  * deleted) and {@code EtgoInvitationUserCascadeDeleteIntegrationTest}'s.</p>
  *
- * <p><strong>NOT RUN.</strong> {@code ETGO_GET_TBAI_STATUS} does not exist in the local database
- * yet — {@code update.database} has not been run for this migration (ETP-5216 plan §8 Step 7 is
- * pending). This test is written correctly against the function's specified contract (§5.8) but
- * has not been executed; do not read a green CI run of this file as proof until that step lands.
- * A run against a database missing the function fails with a Postgres
- * {@code 42883 function etgo_get_tbai_status(...) does not exist} error, not a test assertion
- * failure — that is the expected failure mode before Step 7.</p>
+ * <p><strong>The adoption-date gate is a precondition, not a detail.</strong> The function grew an
+ * ADOPTION-DATE GATE after this class was first written: it answers {@code 'NoAplica'} — before
+ * reading {@code tbai_syncinvoice} at all — when the invoice's organization has no active
+ * {@code tbai_config}, or when the invoice predates that config's {@code tbaisystemdate}. Every
+ * test that asserts an ESTADO therefore has to open that gate first, via
+ * {@link #adoptTicketBaiFor(Invoice)}; without it the function is right and the assertion is
+ * meaningless — which is exactly how this class first ran red, 4 of its 6 tests reading
+ * {@code 'NoAplica'}. A run against a database where {@code update.database} never created the
+ * function fails differently, with a Postgres {@code 42883 ... does not exist} error: that is a
+ * missing migration, not an assertion failure.</p>
  */
 public class EtgoGetTbaiStatusFunctionIntegrationTest extends OBBaseTest {
 
@@ -140,6 +144,64 @@ public class EtgoGetTbaiStatusFunctionIntegrationTest extends OBBaseTest {
     return row;
   }
 
+  /**
+   * Saves an ACTIVE {@code tbai_config} for the invoice's OWN organization, dated one day BEFORE
+   * the invoice. This is the precondition of the ADOPTION-DATE GATE, which the function acquired
+   * after this class was written: with no active config for that organization — or with one dated
+   * after the invoice — it returns {@code 'NoAplica'} without ever reading
+   * {@code tbai_syncinvoice}, so every ESTADO assertion in this class reads {@code 'NoAplica'}
+   * instead of the value it means to pin.
+   *
+   * <p>Derived from the invoice's own date rather than a fixed literal, which makes it independent
+   * of whichever fixture {@link #anyFixtureInvoice()} happens to pick, and safe in an environment
+   * that ALREADY has a config for that organization: the function reads
+   * {@code ORDER BY tbaisystemdate ASC, tbai_config_id ASC LIMIT 1}, i.e. the EARLIEST active
+   * config, so either this row wins (being earlier than the invoice) or a pre-existing one does —
+   * and that one is earlier still, hence also before the invoice. The gate opens either way, and
+   * no unique constraint on {@code ad_org_id} exists to make the extra row a conflict.
+   *
+   * <p>Matched on the invoice's own organization with no org-tree walk, exactly as the function
+   * does (it mirrors Classic's {@code TBAI_ExistConfigAndIsAvailable}).
+   *
+   * <p>Note this write is WATCHED: {@code AD_COMPDEP_WATCHED_COL} covers {@code tbai_config}, so
+   * saving it recomputes {@code EM_ETGO_Tbai_Status} for that organization's invoices inside this
+   * transaction. Like every other write here it is rolled back in {@link #rollbackChanges()}.
+   */
+  private void adoptTicketBaiFor(Invoice invoice) {
+    assertNotNull("The fixture invoice must carry a DateInvoiced for the adoption-date gate to be "
+        + "satisfiable at all — a null invoice date is 'NoAplica' by design",
+        invoice.getInvoiceDate());
+    TbaiConfig config = OBProvider.getInstance().get(TbaiConfig.class);
+    config.setClient(invoice.getClient());
+    config.setOrganization(invoice.getOrganization());
+    Calendar cal = Calendar.getInstance();
+    cal.setTime(invoice.getInvoiceDate());
+    cal.add(Calendar.DAY_OF_MONTH, -1);
+    config.setTbaisystemdate(new Timestamp(cal.getTimeInMillis()));
+    OBDal.getInstance().save(config);
+    OBDal.getInstance().flush();
+  }
+
+  /**
+   * An existing fixture invoice with NO {@code tbai_syncinvoice} rows, resolved with the same
+   * NOT EXISTS the assertion depends on instead of assuming it of an arbitrary invoice.
+   */
+  @SuppressWarnings("rawtypes")
+  private Invoice fixtureInvoiceWithoutSyncRows() {
+    // Scoped to the logged-in test client, like every other fixture here (a raw native query has
+    // none of the client filtering OBCriteria applies for free), and to an invoice that actually
+    // carries a date — one without it is 'NoAplica' by design and could never pass the gate.
+    NativeQuery query = OBDal.getInstance().getSession().createNativeQuery(
+        "SELECT i.c_invoice_id FROM c_invoice i WHERE i.ad_client_id = :clientId"
+            + " AND i.dateinvoiced IS NOT NULL AND NOT EXISTS ("
+            + "SELECT 1 FROM tbai_syncinvoice s WHERE s.c_invoice_id = i.c_invoice_id) LIMIT 1");
+    query.setParameter("clientId", OBContext.getOBContext().getCurrentClient().getId());
+    String invoiceId = (String) query.uniqueResult();
+    assertNotNull("Test fixture must contain at least one invoice with no tbai_syncinvoice rows",
+        invoiceId);
+    return OBDal.getInstance().get(Invoice.class, invoiceId);
+  }
+
   private Date farFutureTimestamp() {
     // Far enough in the future that it beats any pre-existing fixture data's
     // `created` timestamp, so this test does not depend on the chosen fixture
@@ -157,20 +219,44 @@ public class EtgoGetTbaiStatusFunctionIntegrationTest extends OBBaseTest {
     return new Timestamp(cal.getTimeInMillis());
   }
 
-  // ── Edge case 1 — no tbai_syncinvoice row at all ────────────────────────────
-  // `SELECT ... INTO` (not `INTO STRICT`) assigns NULL for zero matching rows
-  // and does not raise NO_DATA_FOUND. Uses a random id belonging to NO real
-  // invoice at all: the function never joins to c_invoice, so an id with zero
-  // matching rows is a stronger proof than hunting for a real, sync-row-free
-  // invoice in shared fixture data.
+  // ── Edge case 1a — the invoice row itself does not exist ────────────────────
+  // The function DOES join to c_invoice now (the adoption-date gate reads
+  // i.ad_org_id / i.dateinvoiced), so a random id no longer reaches the
+  // tbai_syncinvoice lookup at all: it stops at the "invoice row is gone
+  // (deleted between enqueue and recompute)" guard. That guard is worth pinning
+  // on its own, so this case keeps the random id and now says what it proves.
   @Test
-  public void testReturnsPendienteWhenNoSyncRowExists() throws Exception {
+  public void testReturnsPendienteWhenTheInvoiceDoesNotExist() throws Exception {
     setTestUserContext();
     OBContext.setAdminMode(true);
     try {
       Session session = OBDal.getInstance().getSession();
       String randomId = UUID.randomUUID().toString().replace("-", "").toUpperCase();
       String result = callFunction(session, randomId);
+      assertEquals(
+          "An id matching no invoice at all must resolve to 'Pendiente', never to an error",
+          "Pendiente", result);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  // ── Edge case 1b — a REAL invoice carrying zero tbai_syncinvoice rows ───────
+  // What edge case 1 was written to prove and, once the gate landed, could no
+  // longer reach: `SELECT ... INTO` (not `INTO STRICT`) assigns NULL for zero
+  // matching rows and does not raise NO_DATA_FOUND. It needs a real invoice
+  // that is past the gate, otherwise an earlier guard satisfies the assertion
+  // and it would keep passing even if the sync-row lookup were deleted outright.
+  @Test
+  public void testReturnsPendienteWhenNoSyncRowExists() throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Invoice invoice = fixtureInvoiceWithoutSyncRows();
+      adoptTicketBaiFor(invoice);
+
+      Session session = OBDal.getInstance().getSession();
+      String result = callFunction(session, invoice.getId());
       assertEquals(
           "Zero matching tbai_syncinvoice rows must resolve to 'Pendiente', not NO_DATA_FOUND",
           "Pendiente", result);
@@ -207,6 +293,7 @@ public class EtgoGetTbaiStatusFunctionIntegrationTest extends OBBaseTest {
     OBContext.setAdminMode(true);
     try {
       Invoice invoice = anyFixtureInvoice();
+      adoptTicketBaiFor(invoice);
       TbaiSyncinvoice row = newSyncRow(invoice, null, farFutureTimestamp());
       OBDal.getInstance().save(row);
       OBDal.getInstance().flush();
@@ -229,6 +316,7 @@ public class EtgoGetTbaiStatusFunctionIntegrationTest extends OBBaseTest {
     OBContext.setAdminMode(true);
     try {
       Invoice invoice = anyFixtureInvoice();
+      adoptTicketBaiFor(invoice);
       TbaiSyncinvoice row = newSyncRow(invoice, "", farFutureTimestamp());
       OBDal.getInstance().save(row);
       OBDal.getInstance().flush();
@@ -253,6 +341,7 @@ public class EtgoGetTbaiStatusFunctionIntegrationTest extends OBBaseTest {
     OBContext.setAdminMode(true);
     try {
       Invoice invoice = anyFixtureInvoice();
+      adoptTicketBaiFor(invoice);
       // Must fit TBAI_SyncInvoice.estado, which is VARCHAR(10): a longer literal never even
       // reaches the function under test — OBInterceptor rejects the fixture save itself with
       // "Value too long", so the test fails on its own setup rather than on the behaviour it
@@ -284,6 +373,7 @@ public class EtgoGetTbaiStatusFunctionIntegrationTest extends OBBaseTest {
     OBContext.setAdminMode(true);
     try {
       Invoice invoice = anyFixtureInvoice();
+      adoptTicketBaiFor(invoice);
 
       // An older row: must lose to both tied rows below purely on `created
       // DESC`, proving that ordering is honored before the tiebreak is ever
