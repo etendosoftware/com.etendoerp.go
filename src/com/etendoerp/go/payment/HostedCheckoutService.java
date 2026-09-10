@@ -16,8 +16,11 @@ import org.codehaus.jettison.json.JSONObject;
 
 /** Small provider adapter for Stripe Checkout Sessions. Pricing is always selected server-side. */
 public class HostedCheckoutService {
+  CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
+
   /**
    * Creates a provider-hosted Checkout Session bound to the authenticated account.
+   * @param accountId authenticated account id, correlated on the durable request row
    * @param accountEmail authenticated account email
    * @param clientName requested client name
    * @param origin public application origin for return URLs
@@ -25,10 +28,16 @@ public class HostedCheckoutService {
    * @throws IOException when the provider cannot be reached or rejects the request
    * @throws JSONException when the provider response is not valid JSON
    */
-  public JSONObject createSession(String accountEmail, String clientName, String origin)
-      throws IOException, JSONException {
+  public JSONObject createSession(String accountId, String accountEmail, String clientName,
+      String origin) throws IOException, JSONException {
     if (!CheckoutConfiguration.isConfigured()) throw new IllegalStateException("Checkout is not configured");
     String requestId = UUID.randomUUID().toString();
+    // Recorded and committed BEFORE the provider is contacted. A crash during the call below would
+    // otherwise leave a session at Stripe that nothing on this side can name, and therefore that no
+    // reconciliation could ever find. The row is deliberately not rolled back when the call fails:
+    // it is the evidence that someone tried to buy something, and it is always safe to expire
+    // because the checkoutUrl only reaches the browser once this method returns.
+    checkoutRequestStore.recordRequested(requestId, accountId, accountEmail, clientName);
     String form = buildSessionForm(requestId, accountEmail, clientName, origin);
     HttpURLConnection connection = (HttpURLConnection) new URL(CheckoutConfiguration.apiBaseUrl() + "/v1/checkout/sessions").openConnection();
     connection.setRequestMethod("POST");
@@ -39,6 +48,9 @@ public class HostedCheckoutService {
     String response = read(connection);
     if (connection.getResponseCode() / 100 != 2) throw new IOException("Checkout provider rejected session");
     JSONObject provider = new JSONObject(response);
+    // The provider session id is the reconciliation anchor for an abandoned or lost checkout, and
+    // this response is the only place it appears. Recorded before the URL is handed back.
+    checkoutRequestStore.recordSessionCreated(requestId, provider.optString("id", ""));
     JSONObject result = new JSONObject();
     result.put("requestId", requestId);
     result.put("checkoutUrl", provider.optString("url", ""));
