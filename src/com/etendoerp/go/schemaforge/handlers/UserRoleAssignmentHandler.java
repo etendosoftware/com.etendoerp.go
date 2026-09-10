@@ -481,7 +481,18 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    *     default CRUD delete proceed
    */
   private NeoResponse rejectDangerousDelete(NeoContext context) {
+    // ETP-5195, R3: resolve the EFFECTIVE target id the same way NeoCrudHandler#buildDalParams
+    // now does — the path id wins when present, otherwise fall back to the query "id" — so this
+    // guard always evaluates the exact same record the CRUD delete will actually touch. Before
+    // this fix, a request like DELETE /sws/neo/user/user/<ordinary-id>?id=<protected-id> let a
+    // query "id" silently override the path id at the CRUD layer while this guard kept looking
+    // only at the path id, so guard and delete disagreed on the target; a path-less DELETE
+    // .../user?id=<protected-id> bypassed the guard outright, since it bailed out immediately
+    // below with no query fallback at all.
     String userId = context.getRecordId();
+    if (userId == null && context.getQueryParams() != null) {
+      userId = context.getQueryParams().get(FIELD_ID);
+    }
     if (userId == null) {
       return null;
     }
