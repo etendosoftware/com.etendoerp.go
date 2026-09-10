@@ -28,6 +28,7 @@ import static org.mockito.Mockito.when;
 import java.util.HashMap;
 import java.util.Map;
 
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -150,7 +151,8 @@ class SFRefreshTokenTest {
    * consulted to resolve identity.
    */
   @Test
-  void happyPathReissuesTokenForCallersOwnUserAndIgnoresAnyUserIdInParameters() {
+  void happyPathReissuesTokenForCallersOwnUserAndIgnoresAnyUserIdInParameters()
+      throws JSONException {
     User callerUser = givenAuthenticatedUser("user-1");
     Role currentRole = mock(Role.class);
     when(callerUser.getDefaultRole()).thenReturn(currentRole);
@@ -192,7 +194,7 @@ class SFRefreshTokenTest {
   // branches `generateToken` could plausibly take.
 
   @Test
-  void nullDefaultRoleIsPassedThroughToGenerateTokenUnmodified() {
+  void nullDefaultRoleIsPassedThroughToGenerateTokenUnmodified() throws JSONException {
     User callerUser = givenAuthenticatedUser("user-1");
     when(callerUser.getDefaultRole()).thenReturn(null);
 
