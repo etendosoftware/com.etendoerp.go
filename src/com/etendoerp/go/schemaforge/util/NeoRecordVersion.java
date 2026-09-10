@@ -146,7 +146,11 @@ public final class NeoRecordVersion {
    * {@link #routeOf} so both call paths spell it the same way; {@code null} is accepted and
    * degrades to the entity/record pair, keeping the older three-argument form usable.
    *
-   * @param requestPath the endpoint being served, e.g. {@code "PUT /contacts/customer/1000042"}
+   * @param dalEntityName the DAL entity name (e.g. {@code "Order"})
+   * @param recordId      the record being written
+   * @param clientValue   the {@code updated} value the caller echoed back from its read
+   * @param requestPath   the endpoint being served, e.g. {@code "PUT /contacts/customer/1000042"}
+   * @return whether the write must be refused as a concurrent-modification conflict
    */
   public static boolean isStale(String dalEntityName, String recordId, String clientValue,
       String requestPath) {

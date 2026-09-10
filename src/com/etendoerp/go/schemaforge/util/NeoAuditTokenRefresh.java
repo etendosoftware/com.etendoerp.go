@@ -162,8 +162,8 @@ public final class NeoAuditTokenRefresh {
       return;
     }
     try {
-      for (JSONObject record : records(body)) {
-        refreshRecord(dalEntityName, record, context.getRecordId());
+      for (JSONObject written : records(body)) {
+        refreshRecord(dalEntityName, written, context.getRecordId());
       }
     } catch (Exception e) {
       log.warn("Could not refresh the `updated` token of a {} write response: {}. The response is"
@@ -217,9 +217,9 @@ public final class NeoAuditTokenRefresh {
     JSONArray data = envelope == null ? null : envelope.optJSONArray(KEY_DATA);
     if (data != null) {
       for (int i = 0; i < data.length(); i++) {
-        JSONObject record = data.optJSONObject(i);
-        if (record != null) {
-          found.add(record);
+        JSONObject candidate = data.optJSONObject(i);
+        if (candidate != null) {
+          found.add(candidate);
         }
       }
       return found;
@@ -245,13 +245,13 @@ public final class NeoAuditTokenRefresh {
    * with no {@code updated} at all would 400 the next write with {@code missing_updated}, which is
    * worse than the stale token this is trying to fix.
    */
-  private static void refreshRecord(String dalEntityName, JSONObject record, String fallbackId)
+  private static void refreshRecord(String dalEntityName, JSONObject written, String fallbackId)
       throws JSONException {
-    String previous = record.optString(FIELD_UPDATED, null);
+    String previous = written.optString(FIELD_UPDATED, null);
     if (StringUtils.isBlank(previous)) {
       return;
     }
-    String recordId = record.optString(KEY_ID, null);
+    String recordId = written.optString(KEY_ID, null);
     if (StringUtils.isBlank(recordId)) {
       recordId = fallbackId;
     }
@@ -262,7 +262,7 @@ public final class NeoAuditTokenRefresh {
     if (current == null || current.equals(previous)) {
       return;
     }
-    record.put(FIELD_UPDATED, current);
+    written.put(FIELD_UPDATED, current);
     log.debug("Refreshed the `updated` token of {} {} after the post-hook: '{}' -> '{}' (ETP-5262)",
         dalEntityName, recordId, previous, current);
   }

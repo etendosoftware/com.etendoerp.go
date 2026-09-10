@@ -152,9 +152,9 @@ class NeoAuditTokenRefreshTest {
   }
 
   /** Core's {@code {"response":{"data":[record]}}} write envelope. */
-  private static JSONObject envelope(JSONObject record) throws JSONException {
+  private static JSONObject envelope(JSONObject written) throws JSONException {
     return new JSONObject().put("response",
-        new JSONObject().put("data", new JSONArray().put(record)));
+        new JSONObject().put("data", new JSONArray().put(written)));
   }
 
   private static JSONObject recordWithToken(String token) throws JSONException {

@@ -568,8 +568,8 @@ public class ChartOfAccountsHandler implements NeoHandler {
     // `updated` token, not a null one that would trip the mandatory-`updated` concurrency guard.
     Object rawUpdated = row[7];
     String auditToken = NeoDateFormat.toAuditToken(rawUpdated);
-    String updatedValue = auditToken != null
-        ? auditToken : (rawUpdated != null ? String.valueOf(rawUpdated) : null);
+    String rawFallback = rawUpdated != null ? String.valueOf(rawUpdated) : null;
+    String updatedValue = auditToken != null ? auditToken : rawFallback;
     entry.put(FIELD_UPDATED, updatedValue != null ? updatedValue : JSONObject.NULL);
     return entry;
   }

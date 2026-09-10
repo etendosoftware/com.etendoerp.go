@@ -247,8 +247,8 @@ public class ProductPriceHandler implements NeoHandler {
     String auditToken = NeoDateFormat.toAuditToken(rawUpdated);
     // A token we could not render does not mean "no value": per NeoDateFormat's contract the
     // original must go through verbatim, since a null `updated` trips the mandatory-token guard.
-    String updatedValue = auditToken != null
-        ? auditToken : (rawUpdated != null ? String.valueOf(rawUpdated) : null);
+    String rawFallback = rawUpdated != null ? String.valueOf(rawUpdated) : null;
+    String updatedValue = auditToken != null ? auditToken : rawFallback;
     item.put(FIELD_UPDATED, updatedValue != null ? updatedValue : JSONObject.NULL);
     return item;
   }
