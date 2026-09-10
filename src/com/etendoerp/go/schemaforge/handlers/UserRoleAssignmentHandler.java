@@ -30,6 +30,7 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -125,7 +126,14 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  *   pill fix) attached directly onto the {@code POST} create response itself, right after the
  *   invitation is created (see {@link #inviteNewlyCreatedUser}), so the pill renders on the
  *   detail header's FIRST paint instead of only after a subsequent GET (leaving and re-entering
- *   the record).</li>
+ *   the record). <b>Duplicate-email guard (ETP-5264):</b> because the create form never shows
+ *   {@code username}, a client submitting an email that already belongs to one of its users used
+ *   to fail on the DB's {@code username} unique-constraint violation instead — the derived
+ *   username collides too, but the resulting error names the technical {@code username} column,
+ *   which the user never typed and the frontend ({@code backendErrors.js}) has no mapping for, so
+ *   it surfaced raw and misleadingly. {@link #rejectDuplicateEmail} runs BEFORE the {@code
+ *   username} derivation above and returns a clear 400 instead, so the confusing DB message is
+ *   never reached.</li>
  *
  *   <li><b>Write-path guards on {@code PUT}/{@code PATCH} (ETP-4830 QA rejection cycle 1):</b>
  *   {@link #handle(NeoContext)} rejects two dangerous updates with a 400 BEFORE the default CRUD
@@ -268,7 +276,10 @@ public class UserRoleAssignmentHandler implements NeoHandler {
 
   /**
    * Derives a unique {@code username} from {@code email} and the current client, and rejects a
-   * blank/missing email with 400.
+   * blank/missing email with 400. Before that derivation runs, also rejects a duplicate {@code
+   * email} within the same client with a clear 400 (see {@link #rejectDuplicateEmail}, ETP-5264)
+   * — otherwise the derived {@code username} would collide too, and the resulting DB
+   * unique-constraint error would confusingly name a field this create form never shows.
    *
    * <p>No longer validates or reads an admin-typed {@code password} (ETP-4830 removed that
    * temporary bypass — see the class javadoc's concern (3)): invite-email is now the only way
@@ -286,11 +297,15 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     if (email == null) {
       return NeoResponse.error(400, "Field 'email' is required to create a user");
     }
+    String normalizedEmail = email.toLowerCase();
+    OBContext obContext = OBContext.getOBContext();
+    Client client = obContext != null ? obContext.getCurrentClient() : null;
+    NeoResponse duplicateEmailGuard = rejectDuplicateEmail(normalizedEmail, client);
+    if (duplicateEmailGuard != null) {
+      return duplicateEmailGuard;
+    }
     try {
-      String normalizedEmail = email.toLowerCase();
-      OBContext obContext = OBContext.getOBContext();
-      String clientName = obContext != null && obContext.getCurrentClient() != null
-          ? obContext.getCurrentClient().getName() : null;
+      String clientName = client != null ? client.getName() : null;
       requestBody.put(FIELD_USERNAME,
           clientName == null
               ? normalizedEmail
@@ -298,6 +313,32 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     } catch (Exception e) {
       log.warn("UserRoleAssignmentHandler.handle: failed to derive username from email: {}",
           e.getMessage(), e);
+    }
+    return null;
+  }
+
+  /**
+   * Rejects a {@code user} create whose {@code email} (already lowercased by the caller) is
+   * already used by another {@code AD_User} of the same {@code client} — see the class javadoc's
+   * ETP-5264 duplicate-email-guard concern for why this proactive check exists (it stands in for
+   * the DB's own {@code username} unique-constraint, whose violation would otherwise surface a
+   * raw message naming a field this form never shows). Deliberately does NOT filter by {@code
+   * active} — the DB constraint this check stands in for doesn't care about the {@code active}
+   * flag either, so filtering here would create a gap where this pre-check passes but the DB
+   * insert still fails with the confusing raw message. A no-op ({@code null}) when {@code client}
+   * is {@code null} — {@link #handleCreate} still falls through to its own best-effort username
+   * derivation in that case, unchanged from before ETP-5264.
+   */
+  private NeoResponse rejectDuplicateEmail(String normalizedEmail, Client client) {
+    if (client == null) {
+      return null;
+    }
+    OBCriteria<User> criteria = OBDal.getInstance().createCriteria(User.class);
+    criteria.add(Restrictions.eq(User.PROPERTY_CLIENT, client));
+    criteria.add(Restrictions.ilike(User.PROPERTY_EMAIL, normalizedEmail, MatchMode.EXACT));
+    criteria.setMaxResults(1);
+    if (!criteria.list().isEmpty()) {
+      return NeoResponse.error(400, "A user with this email address already exists");
     }
     return null;
   }
