@@ -29,10 +29,9 @@ removed, or reordered.
  5. orgReady            — mark the org as ready (AD_ORG.isready = Y)
  6. fiscal              — seed SII descriptions (AEATSII_DESCRIPTION)
  7. orgInfo             — wire org fiscal/address info from the signup form
- 8. bankConnectionSync  — schedule the PSD2 daily bank-statement sync (non-fatal; wired live 2026-06-28)
- 9. bpGroupAcctPatch    — patch C_BP_Group_Acct columns the core trigger never populates (ETP-4720)
-10. acctdimVisibility   — force flat accounting-dimension visibility (gap K1, ETP-4854)
-11. baseline            — stamp the tenant's data-fix baseline (registerBaseline; always LAST)
+ 8. bpGroupAcctPatch    — patch C_BP_Group_Acct columns the core trigger never populates (ETP-4720)
+ 9. acctdimVisibility   — force flat accounting-dimension visibility (gap K1, ETP-4854)
+10. baseline            — stamp the tenant's data-fix baseline (registerBaseline; always LAST)
 ```
 
 The `orgReady` and `fiscal` steps were added to fix the "environment not ready
@@ -40,7 +39,7 @@ for invoicing" error that occurred when the org-accessibility filter hid all
 org-scoped records because `isready=N`.
 
 **Removed in ETP-5079 — the `customer` step.** Onboarding used to run a
-`customer` step between `orgInfo` and `bankConnectionSync` that created a
+`customer` step between `orgInfo` and `bpGroupAcctPatch` that created a
 synthetic "Default Customer" `C_BPARTNER` (search key
 `ONBOARDING_DEFAULT_CUSTOMER`), its address and a "Default Customer Contact"
 `AD_User`, so a demo Sales Invoice had a counterparty. **A new tenant is now
@@ -59,7 +58,34 @@ are all gone. Two consequences worth knowing:
   — without that change onboarding would finish provisioning and then refuse to
   let the user into the new environment.
 
-Steps 8–10 are corrective/preventive gap-closing steps layered on top of the
+**Removed in ETP-5275 — the `bankConnectionSync` step.** Onboarding used to run
+a `bankConnectionSync` step (wired live 2026-06-28) that created one daily
+`AD_Process_Request` per client for the PSD2 `Get Bank Statements` process
+(`PSD2_GetBankStatements`, `AD_Process` `F8704AB553464EFEABF8A5A82C74A308`),
+firing at a random time in the 03:00–06:00 window, plus a post-commit
+`activateSchedule(clientId)` companion right after `commitDalChanges`. **A new
+tenant is now born with no scheduled process at all.** The service
+(`OnboardingBankConnectionSyncService`), its servlet step, its helper
+`scheduleBankConnectionSync`, its `bankConnectionSync` NDJSON progress events
+and the `PROGRESS_BANK_CONNECTION_SYNC` constant are all gone. Three
+consequences worth knowing:
+* The PSD2 module is untouched. The `AD_Process` stays installed and a user (or
+  an operator) can still schedule it by hand from Classic's "Proceso
+  Programado" window — only the automatic per-tenant provisioning is gone.
+  `PSD2_RefreshPendingPayments` was never part of this step and is unaffected.
+* Existing tenants keep the schedule this step already created for them. The
+  corrective half is a data-fix in the functional repo
+  (`R36-psd2-bank-statement-schedule-removal`), which deletes those rows. It
+  deliberately keys on the `AD_Process` id, never on the process name, so the
+  separate `Get Bank Statements (All Clients)` process is left alone. Note the
+  delete cannot be a plain `DELETE`: core's `AD_PROCESS_REQUEST_TRG` refuses one
+  while the request is still `'SCH'`, so the fix unschedules to `'UNS'` first in
+  the same transaction.
+* `ONBOARDING_PROVISIONED_THROUGH` is deliberately NOT bumped — same reasoning
+  as ETP-5079: moving it forward would silently suppress the still-wanted fixes
+  stamped before it for every new tenant.
+
+Steps 8–9 are corrective/preventive gap-closing steps layered on top of the
 original five (`accounting`, `periodControl`, `orgInfo` predate them too, ETP
 numbers as noted). `baseline` is always the final step — it stamps
 `ONBOARDING_PROVISIONED_THROUGH` (in `OnboardingBaselineService`) so the
@@ -92,7 +118,7 @@ duplicate import. The count is still logged for diagnostics.
 ### `OnboardingAccountingWiringService`
 Step 2 (`wire`) creates the client's accounting schema / `C_AcctSchema_Default`
 wiring; a later entry point on the SAME service, `patchBpGroupAcctMissingColumns`
-(step 9), patches 5 `C_BP_Group_Acct` columns left NULL by both the core
+(step 8), patches 5 `C_BP_Group_Acct` columns left NULL by both the core
 trigger and this service's own initial SQL (ETP-4720). See
 `etendo_schema_forge/docs/etendo-ad/onboarding-and-datafixes-map.md` for the
 full root-cause writeup.
@@ -178,16 +204,8 @@ Step 7. Wires the org's fiscal/address information collected on the signup
 form (country, fiscal ID, address) onto the newly created `AD_Org`/legal
 entity.
 
-### `OnboardingBankConnectionSyncService`
-Step 8. Intentionally **non-fatal** — always returns `true` and swallows
-errors (logs + `done` "skipped"). Schedules one daily `AD_Process_Request` per
-client that runs PSD2 `Get Bank Statements`, so Salt Edge-connected accounts
-auto-import statements. Has a post-commit companion,
-`activateSchedule(clientId)`, called right after `commitDalChanges` (not
-inside this chain) because the Quartz scheduler needs a committed row.
-
 ### `OnboardingAcctdimCentrallyMaintainedService`
-Step 10 (`forceFlatAccountingDimensionVisibility`, ETP-4854, gap K1). Backfills
+Step 9 (`forceFlatAccountingDimensionVisibility`, ETP-4854, gap K1). Backfills
 `C_AcctSchema_Element.isactive` per elementtype from the client's current
 effective `AD_Client.<Dim>_Acctdim_*` config, then flips
 `AD_Client.Acctdim_Centrally_Maintained` to `'N'` so the "Dimensiones
@@ -216,7 +234,7 @@ backfill is what makes that flat switch a reliable source for a tenant from birt
 `AccountingDimensionsSupport`'s own class javadoc for the full history.
 
 ### `OnboardingBaselineService`
-Step 11, always last. Stamps the data-fix baseline row (`applied_utc =
+Step 10, always last. Stamps the data-fix baseline row (`applied_utc =
 ONBOARDING_PROVISIONED_THROUGH`, a hardcoded cutoff — NOT `now()`) so the
 corrective data-fix runner knows which fixes a freshly-onboarded tenant
 already has natively and skips them. Single source of truth for the

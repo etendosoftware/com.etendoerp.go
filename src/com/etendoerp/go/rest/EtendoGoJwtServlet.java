@@ -75,7 +75,6 @@ import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
-import com.etendoerp.go.onboarding.OnboardingBankConnectionSyncService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.AccountIdentity;
@@ -185,7 +184,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_ORG_READY = "orgReady";
   private static final String PROGRESS_ORG_INFO = "orgInfo";
   private static final String PROGRESS_BASELINE = "baseline";
-  private static final String PROGRESS_BANK_CONNECTION_SYNC = "bankConnectionSync";
   private static final String PROGRESS_BP_GROUP_ACCT_PATCH = "bpGroupAcctPatch";
   private static final String PROGRESS_ACCTDIM_VISIBILITY = "acctdimVisibility";
   private static final String PROGRESS_ADMIN_IDENTITY = "adminIdentity";
@@ -249,8 +247,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingBaselineService();
   OnboardingForceTestModeService onboardingForceTestModeService =
       new OnboardingForceTestModeService();
-  OnboardingBankConnectionSyncService onboardingBankConnectionSyncService =
-      new OnboardingBankConnectionSyncService();
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
   TenantPlanService tenantPlanService = new TenantPlanService();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
@@ -1915,10 +1911,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
 
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
-      // Activate the bank statement-sync schedule now that its row is committed and therefore
-      // visible to the scheduler's own DB connection. Best-effort: internally swallows failures
-      // and the SCH row is still picked up on the next scheduler initialization.
-      onboardingBankConnectionSyncService.activateSchedule(clientId);
       Account account = findAccountForCommittedOnboarding(token, accountEmail);
       clearOnboardingDraftBestEffort(account);
       String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
@@ -2460,9 +2452,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!wireOrgInfo(writer, clientId, orgId, adminUserId, adminRoleId, requestData)) {
       return false;
     }
-    if (!scheduleBankConnectionSync(writer, clientId, orgId, adminUserId, adminRoleId)) {
-      return false;
-    }
     // ETP-4720: patch the 5 C_BP_Group_Acct columns neither the core c_bp_group_trg() trigger nor
     // OnboardingAccountingWiringService's own BP_GROUP_ACCT_SQL populate. Runs LAST among the
     // provisioning steps (right before the data-fix baseline) since it only needs C_BP_Group and
@@ -2752,28 +2741,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     sendProgress(writer, PROGRESS_BASELINE, "done", "Data-fix baseline registered");
     return true;
   }
-
-  /**
-   * Creates the per-client daily bank statement-sync schedule, backed by the PSD2 module's
-   * "Get Bank Statements" process (idempotent). Non-fatal: a
-   * failure here must never block onboarding, so it is logged and reported as skipped rather than
-   * aborting. The Quartz job is activated after the commit (see {@code handleOnboarding}); even if
-   * activation does not run, the {@code SCH} row is picked up on the next scheduler initialization.
-   */
-  boolean scheduleBankConnectionSync(PrintWriter writer, String clientId, String orgId,
-      String adminUserId, String adminRoleId) {
-    sendProgress(writer, PROGRESS_BANK_CONNECTION_SYNC, PROGRESS_IN_PROGRESS,
-        "Scheduling automatic bank statement sync...");
-    try {
-      onboardingBankConnectionSyncService.scheduleBankConnectionStatementSync(clientId, orgId, adminUserId, adminRoleId);
-      sendProgress(writer, PROGRESS_BANK_CONNECTION_SYNC, "done", "Automatic bank statement sync scheduled");
-    } catch (Exception e) {
-      log.warn("Could not schedule bank statement sync for client {}: {}", clientId, e.getMessage());
-      sendProgress(writer, PROGRESS_BANK_CONNECTION_SYNC, "done", "Automatic bank statement sync skipped");
-    }
-    return true;
-  }
-
 
 
   /**
