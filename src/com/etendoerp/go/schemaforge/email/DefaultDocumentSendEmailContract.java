@@ -343,8 +343,14 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
       // Reply-To the customer receiving this invoice or order has no way to answer the operator
       // who sent it. Derived from the session, never from the command body.
       String replyTo = EmailSenderIdentity.resolveReplyTo();
+      // Resolved here, at the top of the send, rather than deep inside buildContent: a subclass's
+      // hook may consult feature gates and hit the database (see SalesInvoiceSendEmailContract),
+      // and that belongs where the command is still in scope and the decision is readable.
+      Optional<String> extraParagraphHtml =
+          resolveAdditionalParagraphHtml(command, document.get(), language);
       return EmailContractResolution.ready(new EmailProviderRequest(recipients, CONTENT_TEMPLATE,
-          buildTemplateData(document.get(), downloadLink.get(), language, messageEdits, replyTo),
+          buildTemplateData(document.get(), downloadLink.get(), language, messageEdits, replyTo,
+              extraParagraphHtml),
           replyTo));
     } catch (JSONException e) {
       throw new OBException("Could not build document email payload for " + name, e);
@@ -379,8 +385,33 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
             EmailThrottleRule.global(DEFAULT_MAX_GLOBAL, GLOBAL_WINDOW_SECONDS)));
   }
 
+  /**
+   * Per-contract hook: extra copy appended after the body paragraph, as markup the subclass has
+   * already escaped.
+   *
+   * <p><b>Empty by default, and that default is the guarantee.</b> Every contract that does not
+   * override this produces a byte-identical email to the one it produced before the hook existed —
+   * not because the caller is careful, but because there is nothing to append. The one override
+   * today is {@code SalesInvoiceSendEmailContract}, for the Business Partner portal link
+   * (ETP-5267), and it answers empty unless both of that feature's gates are open.
+   *
+   * <p>Rendered between the body copy and the summary block (see {@link #buildContent}). It is
+   * <em>not</em> a second call to action: {@link EmailContent} carries one button, which belongs to
+   * the document itself and which an operator's edited message must never be able to displace.
+   *
+   * @param command the send command, for a subclass that needs the record id
+   * @param document the resolved document
+   * @param language the recipient language
+   * @return escaped markup to append, or empty to leave the email exactly as it was
+   */
+  protected Optional<String> resolveAdditionalParagraphHtml(EmailContractCommand command,
+      EmailDocumentRecord document, String language) {
+    return Optional.empty();
+  }
+
   private JSONObject buildTemplateData(EmailDocumentRecord document, String downloadLink,
-      String language, Optional<EmailMessageEdits> messageEdits, String replyTo)
+      String language, Optional<EmailMessageEdits> messageEdits, String replyTo,
+      Optional<String> extraParagraphHtml)
       throws JSONException {
     JSONObject data = new JSONObject();
     // Kept beside the rendered content: the gateway logs these for traceability, and they cost
@@ -396,8 +427,8 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     }
     data.put("download_link", downloadLink);
     data.put(FIELD_SUBJECT, resolveSubject(document, language, messageEdits));
-    data.put(FIELD_BODY,
-        EmailLayout.render(buildContent(document, downloadLink, language, messageEdits, replyTo)));
+    data.put(FIELD_BODY, EmailLayout.render(buildContent(document, downloadLink, language,
+        messageEdits, replyTo, extraParagraphHtml)));
     return data;
   }
 
@@ -410,7 +441,8 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
    * reopened).</p>
    */
   private EmailContent buildContent(EmailDocumentRecord document, String downloadLink,
-      String language, Optional<EmailMessageEdits> messageEdits, String replyTo) {
+      String language, Optional<EmailMessageEdits> messageEdits, String replyTo,
+      Optional<String> extraParagraphHtml) {
     EmailContent.Builder content = EmailContent.builder();
     // toHtmlBody() has already escaped the operator's text and turned newlines into <br>.
     String override = messageEdits.map(EmailMessageEdits::toHtmlBody).orElse(null);
@@ -432,6 +464,9 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
           EmailEscape.escapeHtml(documentTypeLabel(language)),
           EmailEscape.escapeHtml(document.getDocumentNumber()))));
     }
+    // After the body, before the summary block: the extra copy is context about the document, so it
+    // reads with the sentence above it rather than after the facts table.
+    extraParagraphHtml.ifPresent(content::paragraphHtml);
     appendDetails(content, document, language);
     content.cta(EmailMessages.get("document.cta", language), downloadLink)
         .linkFallbackText(EmailMessages.get("link.fallback", language));
