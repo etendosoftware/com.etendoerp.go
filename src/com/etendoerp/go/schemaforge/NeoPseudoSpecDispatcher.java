@@ -165,9 +165,8 @@ class NeoPseudoSpecDispatcher {
     }
     // ETP-5267 — the internal-user side of the Business Partner self-service portal: does this
     // Business Partner have a live portal link, and revoke it. Deliberately NOT behind the
-    // per-sender gate that decides whether invoice emails carry links: revocation is the only kill
-    // switch for a link that is already out, and must work whether or not this tenant emits new
-    // ones. See SFPortalAccess's class javadoc.
+    // bp-portal-link flag: revocation is the only kill switch for a link that is already out, and
+    // must work whatever the flag says for this sender. See SFPortalAccess's class javadoc.
     if ("portalaccess".equals(pathInfo.specName)) {
       return dispatchGoWebhook("Portalaccess", method, request, response, new SFPortalAccess());
     }

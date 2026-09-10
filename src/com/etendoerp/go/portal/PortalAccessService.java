@@ -69,7 +69,8 @@ public class PortalAccessService {
     if (client == null || organization == null || businessPartner == null) {
       return Optional.empty();
     }
-    // The sender's preference is the only gate, and PortalLinkPolicy owns reading it.
+    // The bp-portal-link flag, evaluated for the sending account, is the only gate; PortalLinkPolicy
+    // owns resolving that account and asking.
     if (!PortalLinkPolicy.isLinkEnabled()) {
       return Optional.empty();
     }

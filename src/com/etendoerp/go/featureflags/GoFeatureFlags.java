@@ -68,6 +68,41 @@ public final class GoFeatureFlags {
   // control planes is what let a charged account receive a demo environment.
 
   /**
+   * ETP-5267 — whether a {@code sales-invoice-send} email carries a link to the Business Partner
+   * self-service portal.
+   *
+   * <p><b>Targeted per sending account, and false for everyone until one is named.</b> The
+   * decision is "does the account sending this invoice have the portal link switched on", answered
+   * by the allowlist {@link PropertiesFeatureProvider} resolves from
+   * {@code etendo.go.flags.bp-portal-link.emails} against the {@code ETGO_ACCOUNT} email in the
+   * evaluation context. One property enables one person; nothing configured means nobody. See
+   * {@code PortalLinkPolicy}, which resolves the sending account and owns this flag's only call
+   * site.
+   *
+   * <p><b>Backend-only, and it must stay that way.</b> No key is declared in the web client's
+   * {@code flag-keys.js} and nothing in the browser reads this — <b>never add one.</b> The decision
+   * point is entirely server-side, since the link is injected while building the email in Java, so
+   * a browser key would create a second evaluator with nothing to evaluate. That is not a style
+   * preference: per the ETP-4966 lesson above, a flag whose two ends resolve from different control
+   * planes has no single truth, and an unset key on one end is indistinguishable from a disabled
+   * feature. With a single evaluator there is no second end to disagree.
+   *
+   * <p>This also does <em>not</em> reopen the {@code targeting-key-divergence} item on
+   * {@code paid-second-tenant}: that divergence is the frontend sending the ERP username while the
+   * backend targets the account email. This flag targets the account email — the key the backend
+   * targets on — and has no frontend end at all.
+   *
+   * <p><b>It gates the link, not the portal.</b> The {@code /portal/:token} route, the three
+   * {@code /sws/portal/*} endpoints, the {@code etgo_portal_access} table and the revoke action all
+   * ship unconditionally — the same pattern {@code docs/feature-flags.md} already documents as
+   * correct for {@code /upgrade}, where the route is registered unconditionally and only the menu
+   * entry is gated, "because hiding the route would imply the flag was protecting something, which
+   * it is not". What protects the endpoints is the token. Revocation in particular must keep working
+   * whatever this flag says: it is the only kill switch for a link already out.
+   */
+  public static final String FLAG_BP_PORTAL_LINK = "bp-portal-link";
+
+  /**
    * OpenFeature domain the provider is bound to. Using a domain instead of the global default
    * provider keeps this module from clobbering a provider installed by another module.
    */

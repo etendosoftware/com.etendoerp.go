@@ -23,11 +23,13 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.erpCommon.businessUtility.Preferences;
-import org.openbravo.erpCommon.utility.PropertyException;
-import org.openbravo.erpCommon.utility.PropertyNotFoundException;
+import org.openbravo.model.ad.access.User;
 
+import com.etendoerp.go.common.GoAccountResolver;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.featureflags.FeatureFlagContext;
+import com.etendoerp.go.featureflags.GoFeatureFlags;
+import com.etendoerp.go.schemaforge.data.Account;
 
 /**
  * The single gate that decides whether a sales-invoice email carries a portal link, and the builder
@@ -38,27 +40,25 @@ import com.etendoerp.go.common.PublicUrlResolver;
  * protects them is the token (plan §5). The gate decides one thing only: whether an invoice email
  * carries the link. See plan §2.5.
  *
- * <p><b>One gate, and it belongs to the sender.</b> {@value #PREFERENCE_ATTRIBUTE} in
- * {@code AD_Preference} is the whole condition: the capability itself is always on, and the only
- * question asked per send is whether <em>this sender</em> is configured to emit portal links. There
- * is no environment-level condition on top of it, so nothing has to be configured twice.
+ * <p><b>One gate: the {@link GoFeatureFlags#FLAG_BP_PORTAL_LINK} flag, evaluated for the account
+ * sending the invoice.</b> Enabling one person is one line of configuration
+ * ({@code etendo.go.flags.bp-portal-link.emails}); with nothing configured the answer is
+ * {@code false} for everyone. There is no second condition to satisfy, and deliberately so — the
+ * feature was briefly built with an environment flag AND a per-sender {@code AD_Preference}, which
+ * meant nothing worked until two unrelated things were configured.
  *
- * <p><b>It is deliberately not a feature flag.</b> A permanent per-sender capability was never a
- * flag's job, and the flag machinery could not express it anyway:
- * {@code PropertiesFeatureProvider} ignores the evaluation context — it serves environment-level
- * rollout, not per-user targeting — and per-user flag targeting needs the hosted control plane,
- * which is blocked by the still-open {@code targeting-key-divergence} precondition. Per-tenant
- * control comes free from the same mechanism: Openbravo resolves preferences most-specific-first
- * (user → role → org → client → system), so the preference set at <b>client</b> level enables every
- * sender in the tenant and at <b>user</b> level enables one person.
+ * <p><b>The identity is the {@code ETGO_ACCOUNT} email, not {@code AD_User.email}.</b> That is not
+ * interchangeable: onboarding never writes {@code AD_User.email} — {@code InitialSetupUtility}
+ * only writes {@code username} — so targeting on the AD user's email would read {@code null} for
+ * essentially every Etendo Go user and the flag would never match anyone. The account is therefore
+ * resolved from the AD username through {@link GoAccountResolver}, which is also what handles the
+ * {@code <accountEmail>+<clientName>} username a second environment gets. Same resolution
+ * {@code NeoSessionService} uses to put the account identity on a session.
+ *
+ * <p>No account, no email on it, or any failure resolving it ⇒ <b>no link</b>. There is no fallback
+ * to "allow": every unknown answers the same way an unlisted account does.
  */
 public final class PortalLinkPolicy {
-
-  /**
-   * {@code AD_Preference} attribute that opts one sender (or role, org, or whole tenant) into
-   * sending portal links. Any value Openbravo reads back as set enables it; absence disables it.
-   */
-  public static final String PREFERENCE_ATTRIBUTE = "ETGO_BPPortalLinkEnabled";
 
   /** Path the SPA registers for the public portal route. */
   static final String PORTAL_ROUTE = "portal";
@@ -69,47 +69,43 @@ public final class PortalLinkPolicy {
   }
 
   /**
-   * Evaluates the gate.
+   * Evaluates the gate: is the portal link switched on for the account sending this invoice.
    *
-   * @return {@code true} when the current sender is configured to send portal links
+   * @return {@code true} only when the flag positively resolves true for the sending account
    */
   public static boolean isLinkEnabled() {
-    return isEnabledForCurrentSender();
+    return GoFeatureFlags.isEnabled(GoFeatureFlags.FLAG_BP_PORTAL_LINK,
+        FeatureFlagContext.forAccount(currentAccountEmail()));
   }
 
   /**
-   * The per-sender {@code AD_Preference}, read from {@link OBContext} exactly as
-   * {@code NeoFavoritesService} reads the navigator favourites.
+   * Resolves the {@code ETGO_ACCOUNT} email of the user sending the invoice, which is the flag's
+   * targeting key.
    *
-   * <p><b>{@code isListProperty} is {@code false}, and that is load-bearing.</b> It is what makes
-   * Openbravo store and resolve the key in {@code AD_Preference.Attribute}. {@code TenantPlanService}
-   * documents the inverse mistake as a real failure mode: a key written to {@code Property} instead
-   * is never found, and every configured sender would silently read back as not configured.
+   * <p>Runs in admin mode because {@code ETGO_ACCOUNT} is a platform table the invoice sender's own
+   * role has no reason to be able to read, and the account being looked up is the sender's own.
    *
-   * <p><b>Not set ⇒ no link.</b> {@link PropertyNotFoundException} is the normal "not configured"
-   * answer, not an error: the capability is opt-in, so an absent preference is the safe default and
-   * the reason no second gate is needed to keep links from going out unasked.
-   *
-   * @return {@code true} when a preference row resolves for the current user/role/org/client
+   * @return the account email, or {@code null} when no active account resolves — which the caller
+   *     turns into "no link", never into "allow"
    */
-  static boolean isEnabledForCurrentSender() {
-    OBContext ctx = OBContext.getOBContext();
-    if (ctx == null) {
-      return false;
-    }
+  private static String currentAccountEmail() {
     try {
-      String value = Preferences.getPreferenceValue(PREFERENCE_ATTRIBUTE, false,
-          ctx.getCurrentClient(), ctx.getCurrentOrganization(),
-          ctx.getUser(), ctx.getRole(), null);
-      return isAffirmative(value);
-    } catch (PropertyNotFoundException e) {
-      return false;
-    } catch (PropertyException e) {
-      // A malformed or ambiguous preference is not a reason to fail an invoice send; it is a reason
-      // not to add a link to it.
-      log.warn("Could not read {}, treating the portal link as disabled: {}", PREFERENCE_ATTRIBUTE,
-          e.getMessage());
-      return false;
+      OBContext.setAdminMode(true);
+      OBContext ctx = OBContext.getOBContext();
+      User user = ctx == null ? null : ctx.getUser();
+      if (user == null) {
+        return null;
+      }
+      return GoAccountResolver.findAccountByUsername(user.getUsername())
+          .map(Account::getEmail)
+          .orElse(null);
+    } catch (RuntimeException e) {
+      // Resolving the sender must never fail an invoice send; it is only a reason not to add a link.
+      log.warn("Could not resolve the sending account, treating the portal link as disabled: {}",
+          e.getMessage(), e);
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 
@@ -138,20 +134,5 @@ public final class PortalLinkPolicy {
     }
     return Optional.ofNullable(
         PublicUrlResolver.appendPath(baseUrl, PORTAL_ROUTE + "/" + normalizedToken));
-  }
-
-  /**
-   * Reads a preference value as a boolean, accepting every spelling an Etendo operator plausibly
-   * types ({@code true}, {@code Y}, {@code yes}, {@code 1}, in any case), so enabling a sender never
-   * fails on the wording. A row that exists with an empty value counts as enabled: the operator
-   * created it on purpose.
-   */
-  private static boolean isAffirmative(String value) {
-    String normalized = StringUtils.trimToNull(value);
-    if (normalized == null) {
-      return true;
-    }
-    return "true".equalsIgnoreCase(normalized) || "y".equalsIgnoreCase(normalized)
-        || "yes".equalsIgnoreCase(normalized) || "1".equals(normalized);
   }
 }

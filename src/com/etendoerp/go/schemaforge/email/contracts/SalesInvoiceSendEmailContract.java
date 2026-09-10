@@ -69,8 +69,8 @@ public final class SalesInvoiceSendEmailContract extends DefaultDocumentSendEmai
   }
 
   /**
-   * Appends the Business Partner's portal link, when this sender is configured to send portal
-   * links.
+   * Appends the Business Partner's portal link, when the {@code bp-portal-link} flag is on for the
+   * account sending this invoice.
    *
    * <p><b>The gate is evaluated inside {@code PortalAccessService#findOrCreateLink}</b> (plan
    * §2.5), and a closed gate means the service answers empty <em>before writing anything</em> — no

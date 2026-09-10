@@ -64,13 +64,23 @@ A flag may additionally name the accounts it is on for, as a comma-separated all
 `ETGO_ACCOUNT` emails read from `etendo.go.flags.my-flag.emails` (env var
 `ETGO_FLAG_MY_FLAG_EMAILS`) through the same precedence. See **Per-account targeting** below.
 
-No backend flag is declared today: `tenant-upgrade` was the only one and it retired with ETP-4966.
-The stack stays as the entry point for the next one — declare its key as a constant on
-`GoFeatureFlags` and add its row here.
+Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 
 | Flag | Property | Environment variable | Default |
 |------|----------|---------------------|---------|
-| *(none)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
+| `bp-portal-link` | `etendo.go.flags.bp-portal-link`<br>`etendo.go.flags.bp-portal-link.emails` | `ETGO_FLAG_BP_PORTAL_LINK`<br>`ETGO_FLAG_BP_PORTAL_LINK_EMAILS` | absent ⇒ **`false`** |
+| *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
+
+`bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
+Business Partner self-service portal. It is **targeted per sending account** and false for everyone
+until an account is listed in `.emails`, so day-to-day enablement is the allowlist rather than the
+bare boolean. It is **backend-only** — no key in the web client's `flag-keys.js`, nothing in the
+browser reads it, and none must be added. It gates the link only: the portal route, the three
+`/sws/portal/*` endpoints, the `etgo_portal_access` table and the revoke action all ship
+unconditionally, and revocation in particular must work whatever the flag says, since it is the only
+kill switch for a link already out.
+
+`tenant-upgrade` was the only earlier backend flag and it retired with ETP-4966.
 
 **Lesson from the retired flag, worth honouring for the next one:** a flag whose two ends read from
 different control planes has no single truth. Either both ends resolve the same key from the same
