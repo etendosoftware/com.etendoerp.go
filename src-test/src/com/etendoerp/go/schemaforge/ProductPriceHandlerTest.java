@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -29,11 +30,15 @@ import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -57,6 +62,9 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.model.pricing.pricelist.PriceListVersion;
+import org.openbravo.service.json.JsonUtils;
+
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
 /**
  * Unit tests for {@link ProductPriceHandler}.
@@ -70,6 +78,27 @@ import org.openbravo.model.pricing.pricelist.PriceListVersion;
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class ProductPriceHandlerTest {
+
+  /**
+   * The server-local wall clock the {@code row[15]} fixture ({@code "2026-08-15 10:30:00.123456"},
+   * the raw Postgres shape) denotes, with NO zone offset.
+   *
+   * <p>Deliberately <b>not</b> the expected value: it is what {@code NeoDateFormat.toCanonical}
+   * emitted before ETP-5255, kept so the assertions can state that the token preserves this wall
+   * clock and is nevertheless never equal to it.
+   */
+  private static final String SAMPLE_UPDATED_WALL_CLOCK = "2026-08-15T10:30:00";
+
+  /**
+   * The shape of an {@code updated} audit token: the canonical ISO datetime plus a
+   * <b>mandatory</b> RFC-822 zone offset — the pattern
+   * {@code JsonUtils.createDateTimeFormat()} ({@code yyyy-MM-dd'T'HH:mm:ssZZZZZ}) emits and
+   * requires back. The offset is asserted as a shape, not a literal, because it is the JVM's
+   * default zone: hardcoding a developer machine's {@code -0300} would only move the failure to
+   * CI.
+   */
+  private static final Pattern AUDIT_TOKEN_SHAPE = Pattern
+      .compile("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}[+-]\\d{4}$");
 
   private ProductPriceHandler handler;
 
@@ -285,7 +314,11 @@ class ProductPriceHandlerTest {
     assertEquals("PricingProductPrice", item.getString("_entityName"));
     // ETP-5203: updated (row[15]) must be present so PUT/PATCH can echo it back
     // for the mandatory optimistic-concurrency check (missing_updated regression).
-    assertEquals("2026-08-15T10:30:00", item.getString("updated"));
+    // ETP-5255: and it must be rendered by NeoDateFormat.toAuditToken, NOT toCanonical — the
+    // token is read back by JsonUtils.createDateTimeFormat(), whose offset is mandatory, so an
+    // offsetless value is silently re-read as UTC and every edit on this tab came back stale by
+    // exactly the server's UTC offset. See NeoDateFormat.toAuditToken's javadoc.
+    assertIsAuditTokenFor(SAMPLE_UPDATED_WALL_CLOCK, item.getString("updated"));
   }
 
   /**
@@ -1060,5 +1093,29 @@ class ProductPriceHandlerTest {
     assertTrue(enriched.getBoolean("priceListVersion$salesPriceList"));
     assertEquals("pl-id-1", enriched.getString("priceList"));
     assertEquals("Test Sales PL", enriched.getString("priceList$_identifier"));
+  }
+
+  /**
+   * Asserts that {@code emitted} is a valid {@code updated} concurrency token for the
+   * server-local wall clock {@code expectedWallClock}, per ETP-5255.
+   *
+   * <p>Three independent properties, each of which the pre-ETP-5255 offsetless output violates:
+   * the token carries a zone offset (an offsetless value is not rejected on the way back in, it
+   * is silently re-read as UTC by {@code JsonUtils.convertFromXSDToJavaFormat}, which appends
+   * {@code "+0000"}); core's own reader parses it back; and it round-trips to the same
+   * <b>instant</b> as the server-local wall clock, so the offset was derived from the value
+   * rather than concatenated onto a re-interpreted one.
+   */
+  private static void assertIsAuditTokenFor(String expectedWallClock, String emitted)
+      throws ParseException {
+    assertTrue(AUDIT_TOKEN_SHAPE.matcher(emitted).matches(),
+        () -> "'" + emitted + "' must carry a zone offset (yyyy-MM-dd'T'HH:mm:ssZ)");
+    assertTrue(emitted.startsWith(expectedWallClock),
+        () -> "'" + emitted + "' must keep the server-local wall clock " + expectedWallClock);
+    assertNotEquals(expectedWallClock, emitted,
+        "the offsetless canonical form is NOT a valid concurrency token (ETP-5255)");
+    Date expectedInstant = new SimpleDateFormat(NeoDateFormat.ISO_DATETIME).parse(expectedWallClock);
+    assertEquals(expectedInstant, JsonUtils.createDateTimeFormat().parse(emitted),
+        "the token must round-trip through core's own reader to the same instant");
   }
 }

@@ -410,6 +410,10 @@ class NeoAuditTokenRefreshTest {
    * that site needs the refresh. If it fails, do not delete the assertion — either route the new
    * site through {@code NeoAuditTokenRefresh}, or add it to {@link #EXEMPT} with the reason it
    * cannot carry a CRUD write.
+   *
+   * <p>The scan reads each file's code only ({@link NeoAuditTokenRefreshTest#codeOf}): a mention
+   * of {@code .afterHandle(} in a comment is prose about another class, not a dispatch site, and
+   * counting it produced a false positive on {@code AbstractInvoiceHeaderHandler} (ETP-5255).
    */
   @Nested
   @DisplayName("afterHandle dispatch-site inventory")
@@ -420,18 +424,19 @@ class NeoAuditTokenRefreshTest {
      * reach a CRUD write — which is the only case {@link NeoAuditTokenRefresh} acts on.
      */
     private static final Set<String> EXEMPT = Set.of(
-        // Sub-endpoint dispatch (selectors, defaults, actions, callouts). Reached only from
-        // NeoSubEndpointDispatcher, so its endpoint type is never CRUD and the refresh would be a
-        // no-op by its own first guard.
-        "com/etendoerp/go/schemaforge/NeoHookDispatcher.java",
         // The MCP DEFAULTS endpoint: a GET that resolves field defaults. Not a write, and there is
         // no record whose token could be corrected.
         "com/etendoerp/go/mcp/McpToolRouter.java");
 
-    /** The two sites that DO carry CRUD writes, and therefore must call the refresh. */
+    /** The sites that DO carry a write whose new token must reach the response. */
     private static final Set<String> MUST_REFRESH = Set.of(
         "com/etendoerp/go/schemaforge/NeoServletSupport.java",
-        "com/etendoerp/go/mcp/McpHookExecutor.java");
+        "com/etendoerp/go/mcp/McpHookExecutor.java",
+        // ETP-5255: no longer exempt. Sub-endpoint handlers (actions, callouts) DO persist changes
+        // in afterHandle(), so NeoHookDispatcher#runPostHook now routes its effective result
+        // through NeoAuditTokenRefresh — without it the response shipped the pre-hook token and
+        // the caller's next write came back as a false 409.
+        "com/etendoerp/go/schemaforge/NeoHookDispatcher.java");
 
     @Test
     @DisplayName("every afterHandle dispatch site either refreshes the token or is a known exemption")
@@ -444,7 +449,13 @@ class NeoAuditTokenRefreshTest {
       List<String> dispatchSites = new ArrayList<>();
       List<String> withoutRefresh = new ArrayList<>();
       for (Path file : javaFilesUnder(sourceRoot)) {
-        String source = read(file);
+        // Comments stripped first: the scan below is a text match, and a file that merely MENTIONS
+        // another class's hook in prose is not a dispatch site. AbstractInvoiceHeaderHandler was
+        // counted as one on the strength of the sentence "is also invoked from
+        // InvoiceLineHandler.afterHandle() (line save)". Exempting that file would have been the
+        // wrong repair twice over — it would file a non-site as an exempt site, and it would then
+        // mask a REAL dispatch site later added to the same file.
+        String source = codeOf(file);
         // The INVOCATION, not the `@Override public NeoResponse afterHandle(...)` declarations the
         // handlers carry: a handler implements the hook, a dispatcher calls it.
         if (!source.contains(".afterHandle(")) {
@@ -474,7 +485,7 @@ class NeoAuditTokenRefreshTest {
 
     private static boolean isSuperDelegationOnly(String relativePath) {
       Path sourceRoot = moduleSourceRoot();
-      String source = read(sourceRoot.resolve(relativePath));
+      String source = codeOf(sourceRoot.resolve(relativePath));
       return !source.replace("super.afterHandle(", "").contains(".afterHandle(");
     }
   }
@@ -516,6 +527,82 @@ class NeoAuditTokenRefreshTest {
     } catch (IOException e) {
       throw new UncheckedIOException(e);
     }
+  }
+
+  /**
+   * The file's CODE, with every comment removed — the only text the inventory scan may look at.
+   *
+   * <p>A single state machine rather than a regex because the two constructs interleave: a
+   * {@code "//"} inside a string literal opens no comment, and a {@code '"'} inside a comment
+   * opens no literal. Comment bodies are replaced by a space so no two identifiers are welded
+   * together, and line breaks inside a block comment are preserved so nothing else that reads this
+   * text can be thrown off by them.
+   *
+   * <p>Character literals are tracked alongside strings for the sole reason that {@code '"'} is a
+   * legal one, and mistaking it for the start of a string would swallow the rest of the file.
+   */
+  private static String codeOf(Path file) {
+    String source = read(file);
+    StringBuilder out = new StringBuilder(source.length());
+    boolean inLineComment = false;
+    boolean inBlockComment = false;
+    boolean inString = false;
+    boolean inChar = false;
+    for (int i = 0; i < source.length(); i++) {
+      char c = source.charAt(i);
+      char next = i + 1 < source.length() ? source.charAt(i + 1) : '\0';
+      if (inLineComment) {
+        if (c == '\n') {
+          inLineComment = false;
+          out.append(c);
+        }
+        continue;
+      }
+      if (inBlockComment) {
+        if (c == '*' && next == '/') {
+          inBlockComment = false;
+          i++;
+          out.append(' ');
+        } else if (c == '\n') {
+          out.append(c);
+        }
+        continue;
+      }
+      if (inString || inChar) {
+        out.append(c);
+        if (c == '\\') {
+          // An escape consumes the next character, so a `\"` never closes the literal.
+          if (i + 1 < source.length()) {
+            out.append(next);
+            i++;
+          }
+        } else if (inString && c == '"') {
+          inString = false;
+        } else if (inChar && c == '\'') {
+          inChar = false;
+        }
+        continue;
+      }
+      if (c == '/' && next == '/') {
+        inLineComment = true;
+        out.append(' ');
+        i++;
+        continue;
+      }
+      if (c == '/' && next == '*') {
+        inBlockComment = true;
+        out.append(' ');
+        i++;
+        continue;
+      }
+      if (c == '"') {
+        inString = true;
+      } else if (c == '\'') {
+        inChar = true;
+      }
+      out.append(c);
+    }
+    return out.toString();
   }
 
   private static String relativeUnixPath(Path root, Path file) {
