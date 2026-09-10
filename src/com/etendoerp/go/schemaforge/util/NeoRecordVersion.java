@@ -133,24 +133,68 @@ public final class NeoRecordVersion {
    * @return whether the write must be refused as a concurrent-modification conflict
    */
   public static boolean isStale(String dalEntityName, String recordId, String clientValue) {
+    return isStale(dalEntityName, recordId, clientValue, null);
+  }
+
+  /**
+   * As {@link #isStale(String, String, String)}, naming the endpoint in every line it logs.
+   *
+   * <p>ETP-5255: the DAL entity name alone does not identify the caller. Several endpoints write
+   * the same entity — a window tab, a custom handler and the MCP write path all reach
+   * {@code BusinessPartner} — so a conflict line without the route says what row moved but not
+   * which surface got it wrong, which is the only part a fix needs. Build the value with
+   * {@link #routeOf} so both call paths spell it the same way; {@code null} is accepted and
+   * degrades to the entity/record pair, keeping the older three-argument form usable.
+   *
+   * @param requestPath the endpoint being served, e.g. {@code "PUT /contacts/customer/1000042"}
+   */
+  public static boolean isStale(String dalEntityName, String recordId, String clientValue,
+      String requestPath) {
     if (StringUtils.isBlank(dalEntityName) || StringUtils.isBlank(recordId)
         || StringUtils.isBlank(clientValue) || "null".equals(clientValue)) {
-      log.warn("Concurrency check did not run (guard: missing argument) — entity '{}', record"
-          + " '{}', client `updated` '{}'. The write proceeds with only core's own check behind"
-          + " it (ETP-5073)", dalEntityName, recordId, clientValue);
+      log.warn("Concurrency check did not run (guard: missing argument) — {}, entity '{}',"
+          + " record '{}', client `updated` '{}'. The write proceeds with only core's own check"
+          + " behind it (ETP-5073)", route(requestPath), dalEntityName, recordId, clientValue);
       return false;
     }
     Date storedUpdated = readStoredUpdated(dalEntityName, recordId);
     if (storedUpdated == null) {
       return false;
     }
-    Date clientUpdated = parseClientValue(clientValue);
+    Date clientUpdated = parseClientValue(clientValue, dalEntityName, recordId, requestPath);
     if (clientUpdated == null) {
       return false;
     }
     boolean stale = !equalToTheSecond(clientUpdated, storedUpdated);
-    logVerdict(stale, dalEntityName, recordId, clientValue, clientUpdated, storedUpdated);
+    logVerdict(stale, dalEntityName, recordId, clientValue, clientUpdated, storedUpdated,
+        requestPath);
     return stale;
+  }
+
+  /**
+   * The endpoint, spelled one way, for {@link #isStale(String, String, String, String)}.
+   *
+   * <p>Shared rather than formatted at each call site so two callers cannot describe the same
+   * request differently — a log query that has to match two shapes matches neither reliably.
+   * The shape mirrors what {@code NeoWriteRefusalLog} already emits, so the refusal line and the
+   * comparison line for one request can be correlated by eye.
+   *
+   * @param httpMethod  the verb, or the MCP path's equivalent
+   * @param specName    the spec (window) being served
+   * @param entityName  the spec entity (tab), not the DAL entity
+   * @param recordId    the record being written
+   * @return e.g. {@code "PUT /contacts/customer/1000042"}
+   */
+  public static String routeOf(String httpMethod, String specName, String entityName,
+      String recordId) {
+    return String.format("%s /%s/%s/%s", httpMethod, specName, entityName, recordId);
+  }
+
+  /**
+   * The route for a log line, or a stand-in when the caller did not supply one.
+   */
+  private static String route(String requestPath) {
+    return StringUtils.isBlank(requestPath) ? "(route not supplied)" : requestPath;
   }
 
   /**
@@ -186,24 +230,128 @@ public final class NeoRecordVersion {
    * terms, and reporting it as a concurrency failure would send the user to reload a record that
    * was never the problem.
    *
-   * <p>ETP-5255 raised the failure to WARN and made it log the repaired string next to the raw
-   * one. This is the guard most likely to be firing unnoticed in production: the repair does not
-   * validate, it only reshapes — {@code convertFromXSDToJavaFormat} strips the colon from a
-   * {@code +02:00} offset and, when there is no offset at all, appends {@code +0000} — so a token
-   * that lost its zone on the way out is not rejected here, it is silently re-read as UTC. Seeing
-   * raw and repaired side by side is what distinguishes "the client sent something unparseable"
-   * from "we turned a local timestamp into a UTC one".
+   * <p>ETP-5255 raised the failure to ERROR and made it log the repaired string next to the raw
+   * one. The repair does not validate, it only reshapes — {@code convertFromXSDToJavaFormat}
+   * strips the colon from a {@code +02:00} offset and, when there is no offset at all, appends
+   * {@code +0000} — so a token that lost its zone on the way out is not rejected here, it is
+   * silently re-read as UTC. Seeing raw and repaired side by side is what distinguishes "the
+   * client sent something unparseable" from "we turned a local timestamp into a UTC one".
+   *
+   * <p>The failure is ERROR rather than WARN on measured evidence, not on principle. The level was
+   * deliberately left at WARN when the verdict logging was raised, on the grounds that no guard
+   * had ever been observed firing and a burst of unexplained ERRORs risks getting the whole signal
+   * muted. Probing core's parser settled it: {@code 2026-08-28T12:30:15Z} — the single most
+   * canonical way to write UTC, and valid XML Schema — landed here, because the repair appended
+   * {@code +0000} to a token that already ended in {@code Z}. So this guard is reachable by a
+   * well-formed emitter, and every hit means a write went through with no concurrency check at
+   * all. That is the invisible failure this ticket exists to surface, and WARN is the level the
+   * team's log tracking does not read. {@link #normalizeZoneDesignator} closes the {@code Z} case
+   * itself; the level stays raised because whatever is left here is a real defect.
    */
-  private static Date parseClientValue(String clientValue) {
-    String repaired = repairQuietly(clientValue);
+  private static Date parseClientValue(String clientValue, String dalEntityName, String recordId,
+      String requestPath) {
+    String repaired = repairedForCompare(clientValue);
+    if (!hasZoneOffset(clientValue)) {
+      log.error("Client `updated` carries no zone offset — {}, entity '{}', record '{}', raw '{}',"
+          + " repaired '{}', server timezone '{}'. This is NOT refused and NOT skipped: core's XSD"
+          + " repair appends '+0000' rather than rejecting it, so the token parses cleanly and is"
+          + " then compared AS UTC — the verdict below is wrong by exactly the server's offset."
+          + " Always a defect on the emitting side, since a client cannot lose an offset that was"
+          + " in the response it read: find whoever built this record's `updated` and route it"
+          + " through NeoDateFormat.toAuditToken (ETP-5255 class A)", route(requestPath),
+          dalEntityName, recordId, clientValue, repaired, TimeZone.getDefault().getID());
+    }
     try {
       return new Timestamp(JsonUtils.createDateTimeFormat().parse(repaired).getTime());
     } catch (ParseException | RuntimeException e) {
-      log.warn("Concurrency check did not run (guard: unparseable client `updated`) — raw '{}',"
-          + " repaired '{}': {}. The write proceeds unchecked", clientValue, repaired,
-          e.getMessage());
+      log.error("Concurrency check DID NOT RUN (guard: unparseable client `updated`) — {}, raw"
+          + " '{}', repaired '{}': {}. The write proceeds unchecked, so a genuine conflict here is"
+          + " applied silently — this is the one guard whose own firing is the defect. A"
+          + " well-formed token cannot reach this line: what core's format accepts is Z, +hh:mm"
+          + " and +hhmm, and Z is normalized before the repair (see normalizeZoneDesignator), so"
+          + " the token is malformed or truncated on the emitting side — an hour-only '+02'"
+          + " offset, or a date with no time component", route(requestPath), clientValue,
+          repaired, e.getMessage());
       return null;
     }
+  }
+
+  /**
+   * Whether the token names its zone, tested on the RAW value — before the XSD repair, which is
+   * what destroys the evidence by appending {@code +0000}.
+   *
+   * <p>Only the part after the {@code T} is examined: the date half carries {@code -} separators
+   * that would otherwise read as a negative offset. Accepts every shape an emitter might plausibly
+   * write — {@code Z}, {@code +02:00}, {@code +0200}, {@code +02} — deliberately wider than what
+   * core's format can actually parse, because the question here is "did the emitter state a zone
+   * at all", not "is the offset well formed". Two of those shapes do NOT survive the repair
+   * ({@code Z} is normalized first; a bare {@code +02} is not, and fails in the guard below), and
+   * that asymmetry is the point: answering {@code true} keeps this detector quiet about a token
+   * that named its zone, and lets the unparseable guard report it as the malformed value it is.
+   *
+   * <p>A value with no {@code T} has no time component, so it has no zone either and cannot be a
+   * concurrency token.
+   */
+  private static boolean hasZoneOffset(String value) {
+    int timeStart = StringUtils.indexOf(value, 'T');
+    if (timeStart < 0) {
+      return false;
+    }
+    String timePart = value.substring(timeStart + 1);
+    return StringUtils.containsAny(timePart, 'Z', 'z', '+', '-');
+  }
+
+  /**
+   * The exact string the concurrency check parses: the zone designator normalised, then core's
+   * XSD-to-Java repair.
+   *
+   * <p>Exists so there is only ONE derivation of it. There used to be two — the parse built its
+   * own and the verdict line rebuilt it with a bare {@code repairQuietly} — and the moment
+   * {@link #normalizeZoneDesignator} was introduced they diverged: a {@code Z} token was compared
+   * as {@code …+0000} but *reported* as {@code …Z+0000}, so the diagnostic named a string that had
+   * never been parsed, in precisely the case the normalisation had just fixed. A log line that
+   * misreports its own input is worse than no log line, because it sends the reader after a
+   * parsing bug that does not exist.
+   *
+   * <p>Pure and cheap, so recomputing it per call site is fine; what matters is that every call
+   * site computes the SAME thing.
+   */
+  private static String repairedForCompare(String clientValue) {
+    return repairQuietly(normalizeZoneDesignator(clientValue));
+  }
+
+  /**
+   * Rewrites a trailing {@code Z}/{@code z} zone designator as {@code +00:00} before the XSD
+   * repair sees it.
+   *
+   * <p>ETP-5255: without this, the most canonical way to say UTC does not survive the repair.
+   * {@code convertFromXSDToJavaFormat} appends {@code +0000} to {@code 2026-08-28T12:30:15Z},
+   * producing {@code 2026-08-28T12:30:15Z+0000}, which the shared datetime format cannot parse —
+   * so the concurrency check did not run at all and the write went through unchecked. A
+   * well-formed, explicitly zoned token was being dropped on the floor, and the only trace was a
+   * WARN nobody reads.
+   *
+   * <p>{@code +00:00} rather than {@code +0000}, deliberately: the repair recognises the
+   * colon-separated form and rewrites it to {@code +0000} cleanly, whereas an RFC822 offset is not
+   * recognised and gets a second {@code +0000} appended. That doubled form does parse, but only
+   * because {@code SimpleDateFormat} discards trailing text once the pattern is satisfied — it
+   * parses {@code +0200XYZZY} just as happily. Feeding the repair the shape it understands keeps
+   * this off that accident.
+   *
+   * <p>Scope is exactly what XML Schema {@code dateTime} permits for a zone, which is {@code Z} or
+   * {@code +hh:mm}. An hour-only {@code +02} is legal ISO 8601 but not legal XSD, so it is left to
+   * fail in the guard above rather than quietly accepted here: widening what counts as a valid
+   * token is a behaviour change that belongs to whoever owns the emitting contract, not to a
+   * concurrency check.
+   */
+  private static String normalizeZoneDesignator(String clientValue) {
+    if (StringUtils.indexOf(clientValue, 'T') < 0) {
+      return clientValue;
+    }
+    if (!StringUtils.endsWithAny(clientValue, "Z", "z")) {
+      return clientValue;
+    }
+    return StringUtils.substring(clientValue, 0, clientValue.length() - 1) + "+00:00";
   }
 
   /**
@@ -222,7 +370,7 @@ public final class NeoRecordVersion {
   }
 
   /**
-   * Records a decided verdict: WARN when stale, DEBUG when not.
+   * Records a decided verdict: ERROR when stale, DEBUG when not.
    *
    * <p>The passing case is logged too, and that is the point rather than noise. A refusal on its
    * own says nothing about whether the comparison is trustworthy; the same session's successful
@@ -231,18 +379,28 @@ public final class NeoRecordVersion {
    *
    * <p>Guarded by {@link Logger#isDebugEnabled()} so the diagnostic string is not built for a
    * verdict nobody is going to read: at INFO this is the hot path of every single update.
+   *
+   * <p>ETP-5255 raised the refusal from WARN to ERROR. A clash CAN be legitimate — somebody
+   * really did save first, and the user recovers by reloading — which is the argument for WARN,
+   * and it loses to one fact: the team reads production through log-analysis tooling that
+   * surfaces ERROR only, so a WARN here is written, retained and never read. At the moment of
+   * logging, a real conflict and a fabricated one are indistinguishable, and the four windows
+   * investigated under this ticket showed the fabricated kind is the common one. A legitimate
+   * conflict logged at ERROR costs a glance; a false one logged at WARN is a user-visible defect
+   * nobody finds. The delta in the line is what tells the two apart afterwards.
    */
   private static void logVerdict(boolean stale, String dalEntityName, String recordId,
-      String clientValue, Date clientUpdated, Date storedUpdated) {
+      String clientValue, Date clientUpdated, Date storedUpdated, String requestPath) {
     if (!stale && !log.isDebugEnabled()) {
       return;
     }
     String comparison =
         describeComparison(dalEntityName, recordId, clientValue, clientUpdated, storedUpdated);
     if (stale) {
-      log.warn("Concurrency check refused the write as stale — {}", comparison);
+      log.error("Concurrency check refused the write as stale on {} — {}", route(requestPath),
+          comparison);
     } else {
-      log.debug("Concurrency check passed — {}", comparison);
+      log.debug("Concurrency check passed on {} — {}", route(requestPath), comparison);
     }
   }
 
@@ -261,7 +419,8 @@ public final class NeoRecordVersion {
     return String.format(
         "entity '%s', record '%s'; client raw '%s', repaired '%s', parsed %s (%d ms);"
             + " stored %s (%d ms); delta %+d ms; server timezone '%s'",
-        dalEntityName, recordId, clientValue, repairQuietly(clientValue), render(clientUpdated),
+        dalEntityName, recordId, clientValue, repairedForCompare(clientValue),
+        render(clientUpdated),
         clientMillis, render(storedUpdated), storedMillis, clientMillis - storedMillis,
         TimeZone.getDefault().getID());
   }

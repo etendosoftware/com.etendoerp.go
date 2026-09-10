@@ -624,7 +624,9 @@ class NeoCrudHandler {
   private NeoResponse detectStaleRecord(NeoContext context, String dalEntityName) {
     JSONObject body = context.getRequestBody();
     String clientValue = body == null ? null : body.optString(FIELD_UPDATED, null);
-    if (!NeoRecordVersion.isStale(dalEntityName, context.getRecordId(), clientValue)) {
+    String route = NeoRecordVersion.routeOf(context.getHttpMethod(), context.getSpecName(),
+        context.getEntityName(), context.getRecordId());
+    if (!NeoRecordVersion.isStale(dalEntityName, context.getRecordId(), clientValue, route)) {
       return null;
     }
     NeoWriteRefusalLog.staleRecord(context, clientValue);
