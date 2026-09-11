@@ -3343,10 +3343,21 @@ public class AbstractInvoiceHeaderHandlerTest {
     assertEquals("2026-07-05", updates.getString("accountingDate"));
   }
 
-  // ── ETP-4531: mirrorAccountingDate (unified date, server-side mirror) ───────
+  // ── ETP-5273: mirrorAccountingDateOnCreate (independent date, POST-only default) ─────
+  //
+  // ETP-4531 originally mirrored accountingDate from invoiceDate on every CRUD write
+  // (POST/PUT/PATCH), unconditionally overwriting whatever was already there — the tests
+  // below used to assert exactly that. ETP-5273 reintroduces accountingDate as an
+  // independent, user-editable field for invoices: it must default from invoiceDate ONLY
+  // when the invoice is first created and the caller did not already supply a value, and
+  // must NEVER be touched again afterwards — a PUT/PATCH must leave whatever value the
+  // record (or the user's own edit) already carries untouched, even if invoiceDate also
+  // changed in the same request. That forward sync on update is instead the job of the
+  // classic Etendo callout executed server-side by NeoCalloutService (see
+  // AbstractInvoiceHeaderHandler#handleInvoiceAfterCallout).
 
   @Test
-  public void mirrorAccountingDate_postCrud_copiesInvoiceDateIntoAccountingDate()
+  public void mirrorAccountingDateOnCreate_postCrudNoExplicitValue_copiesInvoiceDate()
       throws Exception {
     JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
     NeoContext ctx = NeoContext.builder()
@@ -3355,13 +3366,34 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
     assertEquals("2026-07-01", body.getString("accountingDate"));
   }
 
   @Test
-  public void mirrorAccountingDate_putCrud_overwritesStaleAccountingDate() throws Exception {
+  public void mirrorAccountingDateOnCreate_postCrudExplicitValue_doesNotOverwrite()
+      throws Exception {
+    // The user (or an import) explicitly set accountingDate independently of invoiceDate on
+    // create — the default must not clobber it.
+    JSONObject body = new JSONObject()
+        .put("invoiceDate", "2026-07-01").put("accountingDate", "2026-06-15");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(body)
+        .build();
+
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
+
+    assertEquals("2026-06-15", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDateOnCreate_putCrud_doesNotTouchAccountingDate()
+      throws Exception {
+    // ETP-5273: unlike the old unified-date mirror, PUT is a no-op — an update must never
+    // re-derive accountingDate from invoiceDate, even when invoiceDate itself changed.
     JSONObject body = new JSONObject()
         .put("invoiceDate", "2026-07-10").put("accountingDate", "2026-01-01");
     NeoContext ctx = NeoContext.builder()
@@ -3370,13 +3402,13 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
-    assertEquals("2026-07-10", body.getString("accountingDate"));
+    assertEquals("2026-01-01", body.getString("accountingDate"));
   }
 
   @Test
-  public void mirrorAccountingDate_nonCrudEndpoint_doesNotMutateBody() throws Exception {
+  public void mirrorAccountingDateOnCreate_nonCrudEndpoint_doesNotMutateBody() throws Exception {
     JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.ACTION)
@@ -3384,13 +3416,13 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
     assertTrue(!body.has("accountingDate"));
   }
 
   @Test
-  public void mirrorAccountingDate_getMethod_doesNotMutateBody() throws Exception {
+  public void mirrorAccountingDateOnCreate_getMethod_doesNotMutateBody() throws Exception {
     JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
@@ -3398,26 +3430,27 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
     assertTrue(!body.has("accountingDate"));
   }
 
   /**
-   * Regression test for the live-reproduced bug: editing just the date on an EXISTING invoice
-   * and saving through the real React UI sends a {@code PATCH} with a SPARSE body containing
-   * only the changed field ({@code useEntity.js#buildPatchPayload} diffs {@code editing} against
-   * {@code selected} and sends only what changed — never a full record, and never a {@code PUT}).
-   * The original {@code mirrorAccountingDate()} checked only {@code POST}/{@code PUT}, so this
-   * exact request shape silently never mirrored {@code accountingDate} on update — reproduced
-   * against invoice {@code 0BC614E563FC4E7EB63B6FCF9788730B}: DateInvoiced updated to
-   * 2026-07-15 but DateAcct stayed at the stale create-time value of 2026-07-17.
+   * ETP-5273 regression guard for the bug the ORIGINAL unified-date mirror had at ETP-4531:
+   * editing just the date on an EXISTING invoice through the real React UI sends a
+   * {@code PATCH} with a SPARSE body containing only the changed field
+   * ({@code useEntity.js#buildPatchPayload} diffs {@code editing} against {@code selected} and
+   * sends only what changed — never a full record, and never a {@code PUT}). That old mirror
+   * checked only {@code POST}/{@code PUT}, so this exact request shape silently never mirrored
+   * {@code accountingDate} on update. Under the current, independent-field design that same
+   * PATCH must simply leave {@code accountingDate} alone — there is nothing to mirror on
+   * update anymore, so the sparse body must stay exactly as sent.
    */
   @Test
-  public void mirrorAccountingDate_patchCrudSparseBody_copiesInvoiceDateIntoAccountingDate()
+  public void mirrorAccountingDateOnCreate_patchCrudSparseBody_doesNotAddAccountingDate()
       throws Exception {
     // Sparse body: exactly what useEntity.js's buildPatchPayload sends for a date-only edit —
-    // no other header fields, unlike the multi-field bodies the original POST/PUT tests used.
+    // no other header fields.
     JSONObject body = new JSONObject().put("invoiceDate", "2026-07-15");
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
@@ -3425,14 +3458,17 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
-    assertEquals("2026-07-15", body.getString("accountingDate"));
+    assertTrue(!body.has("accountingDate"));
   }
 
   @Test
-  public void mirrorAccountingDate_patchCrud_overwritesStaleAccountingDate() throws Exception {
-    // Mirrors the real DB state before the fix: accountingDate present but stale from create.
+  public void mirrorAccountingDateOnCreate_patchCrud_doesNotTouchExistingAccountingDate()
+      throws Exception {
+    // A PATCH changing invoiceDate on an existing invoice must never re-derive
+    // accountingDate — CP-2: an independently-edited accounting date must survive an
+    // unrelated document-date change untouched by this mirror.
     JSONObject body = new JSONObject()
         .put("invoiceDate", "2026-07-15").put("accountingDate", "2026-07-17");
     NeoContext ctx = NeoContext.builder()
@@ -3441,13 +3477,13 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
-    assertEquals("2026-07-15", body.getString("accountingDate"));
+    assertEquals("2026-07-17", body.getString("accountingDate"));
   }
 
   @Test
-  public void mirrorAccountingDate_patchCrudUnrelatedFieldOnly_doesNotAddAccountingDate()
+  public void mirrorAccountingDateOnCreate_patchCrudUnrelatedFieldOnly_doesNotAddAccountingDate()
       throws Exception {
     // A PATCH that doesn't touch invoiceDate at all (e.g. only businessPartner changed) must
     // stay a no-op — mirroring must not fabricate an accountingDate out of nowhere.
@@ -3458,7 +3494,7 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
     assertTrue(!body.has("accountingDate"));
   }
