@@ -17,11 +17,13 @@
 package com.etendoerp.go.roles;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -1086,6 +1088,38 @@ class UserRoleCompositionServiceTest {
     }
   }
 
+  /**
+   * ETP-5206 — {@code promoteToAdmin} is explicitly OUT of scope for the self-demotion
+   * guard (self-promotion, not self-demotion). Quick regression check, not full new
+   * coverage: a self-promotion attempt still rejects via the SAME pre-existing message it
+   * always did ("owner already has the Admin role") — no NEW self-check message appears,
+   * confirming the method was left untouched.
+   */
+  @Test
+  void promoteToAdminSelfPromotionRemainsUnaffectedByEtp5206() {
+    Role callerRole = mock(Role.class);
+    when(callerRole.isClientAdmin()).thenReturn(true);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("client-1");
+    when(callerRole.getClient()).thenReturn(client);
+
+    User target = mock(User.class);
+    when(target.getId()).thenReturn("owner-1");
+    when(target.getClient()).thenReturn(client);
+
+    when(mockDal.get(User.class, "owner-1")).thenReturn(target);
+
+    try (MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class)) {
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("owner-1")).thenReturn(true);
+
+      OBException ex = assertThrows(OBException.class,
+          () -> service.promoteToAdmin("owner-1", callerRole, "owner-1"));
+
+      assertTrue(ex.getMessage().toLowerCase().contains("already has the admin role"));
+      verify(mockDal, never()).save(any());
+    }
+  }
+
   @Test
   void demoteFromAdminRejectsWhenTargetIsOwner() {
     Role callerRole = mock(Role.class);
@@ -1110,6 +1144,145 @@ class UserRoleCompositionServiceTest {
       assertTrue(ex.getMessage().toLowerCase().contains("owner")
           && ex.getMessage().toLowerCase().contains("demoted"));
       verify(mockDal, never()).save(any());
+    }
+  }
+
+  /**
+   * ETP-5206 — a non-owner Admin may never remove their OWN Admin role, even though
+   * {@code callerIsOwnerOrAdmin} authorizes them (they currently hold the client-admin role).
+   * The guard fires on plain id equality, before the target {@link User} is even looked up.
+   */
+  @Test
+  void demoteFromAdminRejectsSelfDemotionByNonOwnerAdmin() {
+    Role callerRole = mock(Role.class);
+    when(callerRole.isClientAdmin()).thenReturn(true);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("client-1");
+    when(callerRole.getClient()).thenReturn(client);
+
+    User caller = mock(User.class);
+    when(caller.getId()).thenReturn("admin-1");
+    Role callerCurrentRole = mock(Role.class);
+    when(callerCurrentRole.isClientAdmin()).thenReturn(true);
+    when(caller.getDefaultRole()).thenReturn(callerCurrentRole);
+    when(mockDal.get(User.class, "admin-1")).thenReturn(caller);
+
+    try (MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class)) {
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("admin-1")).thenReturn(false);
+
+      OBException ex = assertThrows(OBException.class,
+          () -> service.demoteFromAdmin("admin-1", callerRole, "admin-1"));
+      assertTrue(ex.getMessage().toLowerCase().contains("cannot demote themselves"));
+      verify(mockDal, never()).save(any());
+      // The self-check fires before the target lookup — since caller and target share the
+      // same id here, `get(User.class, "admin-1")` must only have been invoked ONCE, for
+      // resolving the caller's own current role inside `callerIsOwnerOrAdmin`.
+      verify(mockDal, times(1)).get(User.class, "admin-1");
+    }
+  }
+
+  /**
+   * ETP-5206 — the owner demoting THEMSELVES is also rejected, but by the NEW self-check
+   * added right after the authorization check — it sits BEFORE the pre-existing
+   * {@code OwnerSupport.isOwner(targetUserId)} guard in method order, so for this
+   * caller-equals-target-equals-owner case it is the self-demotion message that wins, not
+   * "The owner can never be demoted". Confirmed against the actual method order rather than
+   * assumed — do not "simplify" this assertion without re-checking the source.
+   */
+  @Test
+  void demoteFromAdminRejectsOwnerSelfDemotionViaTheSelfCheckFirst() {
+    Role callerRole = mock(Role.class);
+    when(callerRole.isClientAdmin()).thenReturn(true);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("client-1");
+    when(callerRole.getClient()).thenReturn(client);
+
+    try (MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class)) {
+      // The owner shortcut in callerIsOwnerOrAdmin resolves straight off OwnerSupport, with
+      // no `mockDal.get(User.class, ...)` needed for the caller at all.
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("owner-1")).thenReturn(true);
+
+      OBException ex = assertThrows(OBException.class,
+          () -> service.demoteFromAdmin("owner-1", callerRole, "owner-1"));
+
+      assertTrue(ex.getMessage().toLowerCase().contains("cannot demote themselves"));
+      assertFalse(ex.getMessage().toLowerCase().contains("can never be demoted"));
+      // The self-check throws before the target `User` is ever resolved.
+      verify(mockDal, never()).get(eq(User.class), any());
+      verify(mockDal, never()).save(any());
+    }
+  }
+
+  /**
+   * ETP-5206 regression guard — an Admin demoting a DIFFERENT Admin (neither the caller,
+   * nor the owner) must remain completely unaffected by the new self-demotion guard, since
+   * the ids never match. Same happy-path shape as
+   * {@link #demoteFromAdminRestoresPriorPersonalRoleByName()}, with a non-owner Admin as the
+   * caller instead of the owner.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void demoteFromAdminAllowsNonOwnerAdminToDemoteADifferentAdmin() {
+    Role callerRole = mock(Role.class);
+    when(callerRole.isClientAdmin()).thenReturn(true);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("client-1");
+    when(callerRole.getClient()).thenReturn(client);
+
+    User caller = mock(User.class);
+    when(caller.getId()).thenReturn("admin-a-1");
+    Role callerCurrentRole = mock(Role.class);
+    when(callerCurrentRole.isClientAdmin()).thenReturn(true);
+    when(caller.getDefaultRole()).thenReturn(callerCurrentRole);
+    when(mockDal.get(User.class, "admin-a-1")).thenReturn(caller);
+
+    User target = mock(User.class);
+    when(target.getId()).thenReturn("admin-b-1");
+    when(target.getClient()).thenReturn(client);
+    when(target.getName()).thenReturn("Admin B");
+    Role targetCurrentRole = mock(Role.class);
+    when(targetCurrentRole.isClientAdmin()).thenReturn(true);
+    when(target.getDefaultRole()).thenReturn(targetCurrentRole);
+    when(mockDal.get(User.class, "admin-b-1")).thenReturn(target);
+
+    Role priorPersonalRole = mock(Role.class);
+    when(priorPersonalRole.isActive()).thenReturn(true);
+    when(priorPersonalRole.isTemplate()).thenReturn(false);
+    when(priorPersonalRole.isClientAdmin()).thenReturn(false);
+    when(priorPersonalRole.getClient()).thenReturn(client);
+    when(priorPersonalRole.getId()).thenReturn("role-prior-b");
+
+    OBCriteria<Role> roleCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(Role.class)).thenReturn(roleCriteria);
+    when(roleCriteria.list()).thenReturn(Collections.singletonList(priorPersonalRole));
+    when(roleCriteria.uniqueResult()).thenReturn(priorPersonalRole).thenReturn(null);
+    when(roleCriteria.setMaxResults(1)).thenReturn(roleCriteria);
+    when(roleCriteria.setFilterOnReadableClients(false)).thenReturn(roleCriteria);
+    when(roleCriteria.setFilterOnReadableOrganization(false)).thenReturn(roleCriteria);
+    when(roleCriteria.add(any())).thenReturn(roleCriteria);
+
+    OBCriteria<UserRoles> userRolesCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(UserRoles.class)).thenReturn(userRolesCriteria);
+    when(userRolesCriteria.list()).thenReturn(Collections.emptyList());
+
+    OBCriteria<org.openbravo.model.ad.access.RoleInheritance> inheritanceCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(org.openbravo.model.ad.access.RoleInheritance.class)).thenReturn(inheritanceCriteria);
+    when(inheritanceCriteria.setMaxResults(1)).thenReturn(inheritanceCriteria);
+    when(inheritanceCriteria.list()).thenReturn(Collections.emptyList());
+
+    try (MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<com.etendoerp.go.schemaforge.util.UserRoleSyncSupport> userRoleSyncMock =
+             mockStatic(com.etendoerp.go.schemaforge.util.UserRoleSyncSupport.class)) {
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("admin-a-1")).thenReturn(false);
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("admin-b-1")).thenReturn(false);
+
+      UserRoleCompositionService.AssignmentResult result =
+          service.demoteFromAdmin("admin-a-1", callerRole, "admin-b-1");
+
+      assertEquals("role-prior-b", result.personalRoleId);
+      verify(target).setDefaultRole(priorPersonalRole);
+      verify(target).setSmfswsDefaultWsRole(priorPersonalRole);
     }
   }
 
