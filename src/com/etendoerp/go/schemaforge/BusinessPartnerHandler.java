@@ -30,23 +30,19 @@ import java.sql.SQLException;
 import java.sql.Savepoint;
 
 import javax.inject.Named;
-import javax.servlet.http.HttpServletRequest;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.MatchMode;
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
-import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
+
+import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 
 /**
  * Pre/post-save hook for the businessPartner entity in the contacts spec.
@@ -78,18 +74,22 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
  * </ul>
  *
  * <p>On SELECTOR (ETP-5183, {@code handle()} pre-hook, short-circuits before the generic
- * selector flow): filters the Payment Method selector for {@code paymentMethod}
- * ({@code FIN_Paymentmethod_ID}, pay-in) and {@code pOPaymentMethod}
- * ({@code PO_Paymentmethod_ID}, pay-out) directly against {@code FIN_PaymentMethod}, restricted
- * ONLY by the field's own {@code Payin_Allow}/{@code Payout_Allow} flag — no join to
- * {@code FIN_FinAcc_PaymentMethod}. Classic (and every other window sharing these columns —
- * sales invoice, sales order, payment-in, simple G/L journal, the Classic Business Partner tabs
- * themselves) resolves this selector through an {@code AD_Val_Rule} that also requires the
- * payment method to be linked to at least one active Financial Account; on {@code /contacts}
- * that account-linkage requirement is wrong, since a Business Partner's preferred Payment
- * Method is configured independently of which Financial Account will end up settling it. This
- * branch checks the field name and falls through ({@code null}) for every other selector field
- * this entity exposes, so no other column or window is affected.
+ * selector flow): delegates to {@link PaymentMethodSelectorSupport#handleIfPaymentMethodSelector}
+ * to filter the Payment Method selector for {@code paymentMethod} ({@code FIN_Paymentmethod_ID},
+ * pay-in) and {@code pOPaymentMethod} ({@code PO_Paymentmethod_ID}, pay-out) directly against
+ * {@code FIN_PaymentMethod}, restricted ONLY by the field's own
+ * {@code Payin_Allow}/{@code Payout_Allow} flag — no join to {@code FIN_FinAcc_PaymentMethod}.
+ * Classic (and every other window sharing these columns — sales invoice, sales order,
+ * payment-in, simple G/L journal, the Classic Business Partner tabs themselves) resolves this
+ * selector through an {@code AD_Val_Rule} that also requires the payment method to be linked to
+ * at least one active Financial Account; on {@code /contacts} that account-linkage requirement is
+ * wrong, since a Business Partner's preferred Payment Method is configured independently of which
+ * Financial Account will end up settling it. Since ETP-5238, the same shared class also serves
+ * the sales quotation, sales order, sales invoice, purchase order and purchase invoice header
+ * handlers, resolving the pay-in/pay-out direction from the {@code IsSOTrx} request parameter on
+ * those windows (falling back to field name, exactly as here, when it is absent). This branch
+ * checks the field name and falls through ({@code null}) for every other selector field this
+ * entity exposes, so no other column or window is affected.
  *
  * <p>Registered via {@code JAVA_QUALIFIER = 'businessPartnerHandler'} on the
  * ETGO_SF_ENTITY record for the contacts spec's businessPartner entity.
@@ -119,32 +119,6 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   private static final String FIELD_CURRENCY = "bPCurrencyID";
   private static final String FIELD_CUSTOMER = "customer";
   private static final String FIELD_VENDOR = "vendor";
-
-  // ETP-5183 — Payment Method selector filtering (SELECTOR pre-hook, see PaymentMethodSelector*
-  // constants and handlePaymentMethodSelector() below). Field/column names for both directions:
-  // customer entity uses paymentMethod/FIN_Paymentmethod_ID (pay-in), vendorCreditor entity uses
-  // pOPaymentMethod/PO_Paymentmethod_ID (pay-out).
-  private static final String SELECTOR_FIELD_PAYMENT_METHOD = "paymentMethod";
-  private static final String SELECTOR_COLUMN_PAYMENT_METHOD = "FIN_Paymentmethod_ID";
-  private static final String SELECTOR_FIELD_PO_PAYMENT_METHOD = "pOPaymentMethod";
-  private static final String SELECTOR_COLUMN_PO_PAYMENT_METHOD = "PO_Paymentmethod_ID";
-  private static final String SELECTOR_PARAM_SEARCH = "q";
-  private static final String SELECTOR_PARAM_LIMIT = "limit";
-  private static final String SELECTOR_PARAM_OFFSET = "offset";
-  private static final int SELECTOR_DEFAULT_LIMIT = 20;
-  private static final int SELECTOR_MAX_LIMIT = 100;
-  private static final String SELECTOR_FIELD_ID = "id";
-  private static final String SELECTOR_FIELD_LABEL = "label";
-  private static final String SELECTOR_FIELD_ITEMS = "items";
-  private static final String SELECTOR_FIELD_COLUMNS = "columns";
-  private static final String SELECTOR_FIELD_TOTAL_COUNT = "totalCount";
-  private static final String SELECTOR_FIELD_HAS_MORE = "hasMore";
-
-  /** Pay-in (customer) vs. pay-out (vendor/creditor) direction of a requested selector field. */
-  private enum PaymentMethodDirection {
-    PAY_IN,
-    PAY_OUT
-  }
 
   // ETP-4565 posting-account backfill (see provisionMissingBpAcctRows()): scoped to a single
   // already-persisted business partner (bound by ? = c_bpartner_id) instead of a client-wide
@@ -333,7 +307,8 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       // A SELECTOR request is never a write, so falling through to the isWrite check below
       // (when this isn't a Payment Method field) already returns null for it — no separate
       // early return needed here.
-      NeoResponse selectorResult = handlePaymentMethodSelector(ctx);
+      NeoResponse selectorResult = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(ctx,
+          PaymentMethodSelectorSupport.DirectionFallback.FIELD_NAME);
       if (selectorResult != null) {
         return selectorResult;
       }
@@ -406,132 +381,6 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
     for (String key : PRECREATE_BILLING_FIELDS) {
       body.remove(key);
       body.remove(key + "$_identifier");
-    }
-  }
-
-  /**
-   * ETP-5183 SELECTOR pre-hook: resolves the Payment Method field name to a pay-in/pay-out
-   * direction and, when it is one of ours, queries {@code FIN_PaymentMethod} directly. Returns
-   * {@code null} for any other field/entity so nothing else on {@code businessPartner} is
-   * affected.
-   */
-  private NeoResponse handlePaymentMethodSelector(NeoContext ctx) {
-    PaymentMethodDirection direction = resolvePaymentMethodDirection(ctx.getFieldName());
-    if (direction == null) {
-      return null;
-    }
-    try {
-      return queryPaymentMethods(direction);
-    } catch (Exception e) {
-      log.error("BusinessPartnerHandler: error querying payment method selector ({}): {}",
-          direction, e.getMessage(), e);
-      return NeoResponse.error(500, "Error querying payment methods");
-    }
-  }
-
-  /**
-   * Maps the requested selector field to its pay-in/pay-out direction, matching either the DAL
-   * property name or the raw DB column name (case-insensitive). Returns {@code null} for any
-   * field this branch does not own.
-   */
-  private static PaymentMethodDirection resolvePaymentMethodDirection(String fieldName) {
-    if (StringUtils.isBlank(fieldName)) {
-      return null;
-    }
-    if (SELECTOR_FIELD_PAYMENT_METHOD.equalsIgnoreCase(fieldName)
-        || SELECTOR_COLUMN_PAYMENT_METHOD.equalsIgnoreCase(fieldName)) {
-      return PaymentMethodDirection.PAY_IN;
-    }
-    if (SELECTOR_FIELD_PO_PAYMENT_METHOD.equalsIgnoreCase(fieldName)
-        || SELECTOR_COLUMN_PO_PAYMENT_METHOD.equalsIgnoreCase(fieldName)) {
-      return PaymentMethodDirection.PAY_OUT;
-    }
-    return null;
-  }
-
-  /**
-   * Queries {@code FIN_PaymentMethod} directly — active + the direction's own allow flag only,
-   * no {@code FIN_FinAcc_PaymentMethod} join — and returns the same
-   * {@code {items, columns, totalCount, hasMore}} envelope the generic selector produces.
-   */
-  private static NeoResponse queryPaymentMethods(PaymentMethodDirection direction) throws Exception {
-    HttpServletRequest request = currentSelectorRequest();
-    String search = request != null
-        ? StringUtils.trimToNull(request.getParameter(SELECTOR_PARAM_SEARCH)) : null;
-    int limit = parseSelectorIntParam(request, SELECTOR_PARAM_LIMIT, SELECTOR_DEFAULT_LIMIT, 1,
-        SELECTOR_MAX_LIMIT);
-    int offset = parseSelectorIntParam(request, SELECTOR_PARAM_OFFSET, 0, 0, Integer.MAX_VALUE);
-
-    try {
-      OBContext.setAdminMode();
-
-      int totalCount = buildPaymentMethodCriteria(direction, search).count();
-
-      OBCriteria<FIN_PaymentMethod> dataCriteria = buildPaymentMethodCriteria(direction, search);
-      dataCriteria.addOrderBy(FIN_PaymentMethod.PROPERTY_NAME, true);
-      dataCriteria.setMaxResults(limit);
-      dataCriteria.setFirstResult(offset);
-      List<FIN_PaymentMethod> rows = dataCriteria.list();
-
-      JSONArray items = new JSONArray();
-      for (FIN_PaymentMethod paymentMethod : rows) {
-        JSONObject item = new JSONObject();
-        item.put(SELECTOR_FIELD_ID, paymentMethod.getId());
-        item.put(SELECTOR_FIELD_LABEL, paymentMethod.getName());
-        items.put(item);
-      }
-
-      JSONObject result = new JSONObject();
-      result.put(SELECTOR_FIELD_ITEMS, items);
-      result.put(SELECTOR_FIELD_COLUMNS, new JSONArray());
-      result.put(SELECTOR_FIELD_TOTAL_COUNT, totalCount);
-      result.put(SELECTOR_FIELD_HAS_MORE, offset + limit < totalCount);
-      return NeoResponse.ok(result);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  private static OBCriteria<FIN_PaymentMethod> buildPaymentMethodCriteria(
-      PaymentMethodDirection direction, String search) {
-    OBCriteria<FIN_PaymentMethod> criteria = OBDal.getInstance().createCriteria(FIN_PaymentMethod.class);
-    criteria.add(Restrictions.eq(FIN_PaymentMethod.PROPERTY_ACTIVE, true));
-    String allowProperty = direction == PaymentMethodDirection.PAY_IN
-        ? FIN_PaymentMethod.PROPERTY_PAYINALLOW
-        : FIN_PaymentMethod.PROPERTY_PAYOUTALLOW;
-    criteria.add(Restrictions.eq(allowProperty, true));
-    if (StringUtils.isNotBlank(search)) {
-      criteria.add(Restrictions.ilike(FIN_PaymentMethod.PROPERTY_NAME, search, MatchMode.ANYWHERE));
-    }
-    return criteria;
-  }
-
-  /**
-   * The current request, resolved from Openbravo's request-scoped {@link RequestContext} rather
-   * than threaded through {@link NeoContext} — the SELECTOR sub-endpoint's hook context does not
-   * carry query params (only CRUD does).
-   */
-  private static HttpServletRequest currentSelectorRequest() {
-    return RequestContext.get() != null ? RequestContext.get().getRequest() : null;
-  }
-
-  private static int parseSelectorIntParam(HttpServletRequest request, String name,
-      int defaultValue, int min, int max) {
-    if (request == null) {
-      return defaultValue;
-    }
-    String raw = StringUtils.trimToNull(request.getParameter(name));
-    if (raw == null) {
-      return defaultValue;
-    }
-    try {
-      int value = Integer.parseInt(raw);
-      if (value < min) {
-        return min;
-      }
-      return Math.min(value, max);
-    } catch (NumberFormatException e) {
-      return defaultValue;
     }
   }
 

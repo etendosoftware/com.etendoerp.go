@@ -25,6 +25,7 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -35,22 +36,35 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import javax.servlet.http.HttpServletRequest;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Criterion;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.advpaymentmngt.ProcessInvoiceUtil;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.weld.WeldUtils;
+import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.ad.ui.Process;
+import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.common.enterprise.DocumentType;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 
 /**
  * Unit tests for {@link SalesInvoiceHeaderHandler}.
@@ -1073,5 +1087,133 @@ public class SalesInvoiceHeaderHandlerTest {
       order.verify(processInvoiceUtil).process(
           eq("ar-inv-action-co"), eq("CO"), eq(""), eq(""), eq(""), any(), any());
     }
+  }
+
+  // ── ETP-5238: paymentMethod SELECTOR is independent of Financial Account ────
+
+  /**
+   * A SELECTOR context wired with an AD Tab/Window pair whose {@code isSalesTransaction()} is
+   * {@code true} — the sales-invoice window declares {@link
+   * com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport.DirectionFallback#WINDOW},
+   * so this is what the handler resolves direction from once the {@code IsSOTrx} request param
+   * is absent.
+   */
+  private static NeoContext salesWindowSelectorCtx() {
+    Window window = mock(Window.class);
+    when(window.isSalesTransaction()).thenReturn(true);
+    Tab tab = mock(Tab.class);
+    when(tab.getWindow()).thenReturn(window);
+    return NeoContext.builder()
+        .specName("sales-invoice").entityName("header").httpMethod("GET")
+        .endpointType(NeoEndpointType.SELECTOR).fieldName("paymentMethod")
+        .adTab(tab).build();
+  }
+
+  private void stubPaymentMethodSelectorRequest(MockedStatic<RequestContext> reqCtx,
+      Map<String, String> params) {
+    RequestContext requestContext = mock(RequestContext.class);
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    reqCtx.when(RequestContext::get).thenReturn(requestContext);
+    when(requestContext.getRequest()).thenReturn(request);
+    when(request.getParameter(anyString())).thenReturn(null);
+
+    Map<String, String[]> parameterMap = new HashMap<>();
+    for (Map.Entry<String, String> entry : params.entrySet()) {
+      parameterMap.put(entry.getKey(), new String[] { entry.getValue() });
+    }
+    when(request.getParameterMap()).thenReturn(parameterMap);
+  }
+
+  @SuppressWarnings("unchecked")
+  private ArgumentCaptor<Criterion> stubPaymentMethodCriteria(MockedStatic<OBDal> obDal,
+      List<FIN_PaymentMethod> rows) {
+    OBDal obDalMock = mock(OBDal.class);
+    obDal.when(OBDal::getInstance).thenReturn(obDalMock);
+    OBCriteria<FIN_PaymentMethod> criteria = mock(OBCriteria.class);
+    when(obDalMock.createCriteria(FIN_PaymentMethod.class)).thenReturn(criteria);
+    ArgumentCaptor<Criterion> captor = ArgumentCaptor.forClass(Criterion.class);
+    when(criteria.add(captor.capture())).thenReturn(criteria);
+    when(criteria.addOrderBy(any(), anyBoolean())).thenReturn(criteria);
+    when(criteria.setMaxResults(anyInt())).thenReturn(criteria);
+    when(criteria.setFirstResult(anyInt())).thenReturn(criteria);
+    when(criteria.count()).thenReturn(rows.size());
+    when(criteria.list()).thenReturn(rows);
+    return captor;
+  }
+
+  /** Renders every captured restriction (read only AFTER invoking the method under test). */
+  private List<String> renderedCriteria(ArgumentCaptor<Criterion> captor) {
+    return captor.getAllValues().stream().map(Criterion::toString)
+        .collect(java.util.stream.Collectors.toList());
+  }
+
+  /**
+   * The paymentMethod SELECTOR request must be served by
+   * {@code com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport}, short-circuiting
+   * before {@code postingService}/{@code totalDiscountService} or any ACTION delegate is reached,
+   * and — since this window declares the {@code WINDOW} direction fallback — the criteria built
+   * when {@code IsSOTrx} is absent must be against {@code payinAllow}, never {@code payoutAllow}.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testHandleServesPaymentMethodSelectorIndependentOfFinancialAccount() throws Exception {
+    NeoContext ctx = salesWindowSelectorCtx();
+
+    try (MockedStatic<RequestContext> reqCtx = Mockito.mockStatic(RequestContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxMock = Mockito.mockStatic(OBContext.class)) {
+      stubPaymentMethodSelectorRequest(reqCtx, Collections.emptyMap());
+
+      ArgumentCaptor<Criterion> captor = stubPaymentMethodCriteria(obDal, Collections.emptyList());
+
+      NeoResponse response = new SalesInvoiceHeaderHandler().handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(200, response.getHttpStatus());
+      List<String> rendered = renderedCriteria(captor);
+      assertTrue("expected a payinAllow filter, got: " + rendered,
+          rendered.stream().anyMatch(s -> s.toLowerCase().contains("payinallow")));
+      assertFalse("must not filter on payoutAllow for a sales document, got: " + rendered,
+          rendered.stream().anyMatch(s -> s.toLowerCase().contains("payoutallow")));
+    }
+  }
+
+  /**
+   * Same window, but with the request explicitly sending {@code IsSOTrx=Y} (the normal case in
+   * production) — must resolve identically to the absent-param case above.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testHandleServesPaymentMethodSelectorBuildsPayinCriteriaWhenIsSOTrxIsY() throws Exception {
+    NeoContext ctx = salesWindowSelectorCtx();
+
+    try (MockedStatic<RequestContext> reqCtx = Mockito.mockStatic(RequestContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxMock = Mockito.mockStatic(OBContext.class)) {
+      Map<String, String> params = new HashMap<>();
+      params.put("IsSOTrx", "Y");
+      stubPaymentMethodSelectorRequest(reqCtx, params);
+
+      ArgumentCaptor<Criterion> captor = stubPaymentMethodCriteria(obDal, Collections.emptyList());
+
+      NeoResponse response = new SalesInvoiceHeaderHandler().handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(200, response.getHttpStatus());
+      List<String> rendered = renderedCriteria(captor);
+      assertTrue("expected a payinAllow filter, got: " + rendered,
+          rendered.stream().anyMatch(s -> s.toLowerCase().contains("payinallow")));
+      assertFalse("must not filter on payoutAllow for a sales document, got: " + rendered,
+          rendered.stream().anyMatch(s -> s.toLowerCase().contains("payoutallow")));
+    }
+  }
+
+  /**
+   * Non-selector requests are completely unaffected by the new SELECTOR branch (no-regression).
+   */
+  @Test
+  public void testHandleStillReturnsNullForNonSelectorRequestAfterPaymentMethodWiring() {
+    NeoContext ctx = NeoContext.builder().httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
+    assertNull(new SalesInvoiceHeaderHandler().handle(ctx));
   }
 }
