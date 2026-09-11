@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge.util;
 
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -30,6 +32,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.session.OBPropertiesProvider;
+import org.openbravo.service.json.JsonUtils;
 
 /**
  * Single definition of the date format NEO speaks over JSON (ETP-4793 / IMP-16).
@@ -136,6 +139,87 @@ public final class NeoDateFormat {
    */
   public static String toWireDate(java.util.Date ts) {
     return ts == null ? null : zoned(ts).format(WIRE_DATE);
+  }
+
+  /**
+   * Renders an {@code updated} audit value as the <b>concurrency token</b> a client echoes back
+   * on its next write — {@code yyyy-MM-dd'T'HH:mm:ssZZZZZ}, <b>offset included</b>.
+   *
+   * <p><b>Why this is not {@link #toWireDateTime} or {@link #toCanonical}.</b>
+   * Those two are correct for a BUSINESS datetime and deliberately emit no offset: a civil date
+   * is a wall-clock datum and asserting a zone on it is what ETP-5100 fixed. An audit timestamp
+   * is the opposite kind of value — it is an instant, and it exists to be compared for equality
+   * against the stored row by {@code NeoRecordVersion} and by core's own
+   * {@code JsonToDataConverter}. Both read it through {@code JsonUtils.createDateTimeFormat()},
+   * whose pattern is {@code yyyy-MM-dd'T'HH:mm:ssZZZZZ} and whose offset is <b>mandatory</b>:
+   * {@code JsonUtils.convertFromXSDToJavaFormat} appends {@code "+0000"} to a token that lacks
+   * one ("make them utc, the timezone must be there") rather than rejecting it. So an offsetless
+   * local time is not refused on the way back in, it is silently re-read as UTC, and the
+   * comparison then fails by exactly the server's UTC offset — every write looks stale, on a
+   * record nobody else touched.
+   *
+   * <p>That defect has now been introduced three times, in three handlers, each of which reached
+   * for {@code toCanonical} because it is the obvious-looking tool and the wrong one (it
+   * <b>drops</b> the offset by design). ETP-5073 hit it on Financial Accounts (UTC-3: every write
+   * three hours old), and ETP-5255 found it still live on Product → Price and Chart of Accounts.
+   * Hence one named method, so the next handler that serialises {@code updated} finds the answer
+   * instead of the trap.
+   *
+   * <p>Formatting is done with core's own writer, not a pattern of ours: core's reader is what
+   * has to accept the value back, so the only safe emitter is the one paired with it. That pairing
+   * is why the result goes through {@code convertToCorrectXSDFormat} as well — core states it
+   * itself on {@code createDateTimeFormat}: <i>"Note users of this method will also use the
+   * convertToCorrectXSDFormat method"</i>. The writer emits an RFC-822 offset ({@code -0300}); the
+   * reader's repair only recognises the XSD colon form ({@code -03:00}), which it rewrites back to
+   * RFC-822 cleanly. Emitting the un-colonised form is NOT rejected — it is unrecognised, so the
+   * repair appends a second {@code "+0000"} and the value survives only because
+   * {@code SimpleDateFormat} discards trailing text once its pattern is satisfied (it would parse
+   * {@code +0200XYZZY} just as happily). {@code NeoRecordVersion.normalizeZoneDesignator} already
+   * refuses to rely on that accident for an inbound {@code Z}; this method must not rely on it for
+   * the token it emits. The colon form is also the only one ECMAScript's {@code Date.parse}
+   * guarantees, so the browser stops depending on a lenient engine parser too.
+   *
+   * @param rawUpdated the audit value as the row yielded it — a {@link java.util.Date} (which is
+   *                   what a native-SQL {@code timestamp} column produces, and the preferred
+   *                   input), or its string form in the raw Postgres shape
+   * @return the token, or {@code null} when the input is {@code null} or is not a recognisable
+   *         timestamp — following this class's contract, the caller must then pass its ORIGINAL
+   *         value through verbatim rather than blank it, because a record that comes back with no
+   *         {@code updated} at all trips the mandatory-token guard and 400s with
+   *         {@code missing_updated}
+   */
+  public static String toAuditToken(Object rawUpdated) {
+    if (rawUpdated == null) {
+      return null;
+    }
+    if (rawUpdated instanceof java.util.Date) {
+      return xsdStamp((java.util.Date) rawUpdated);
+    }
+    // A string input has no offset to preserve — a Postgres `timestamp without time zone`, and
+    // Timestamp.toString(), are both server-local wall clock. So it is canonicalised (which
+    // normalises the Postgres shape and keeps the wall-clock reading intact), parsed back in the
+    // server's own zone, and re-emitted WITH that zone's offset. The offset is derived by the
+    // JDK from the parsed instant, never concatenated onto the string: hand-appending it would
+    // get DST wrong twice a year, which is precisely the class of bug this method exists to end.
+    String canonical = toCanonical(String.valueOf(rawUpdated), true);
+    if (canonical == null) {
+      return null;
+    }
+    try {
+      return xsdStamp(new SimpleDateFormat(ISO_DATETIME).parse(canonical));
+    } catch (ParseException e) {
+      log.debug("Could not render '{}' as an audit token: {}", rawUpdated, e.getMessage());
+      return null;
+    }
+  }
+
+  /**
+   * Core's datetime writer and its XSD colon-inserter, applied as the pair core documents them as.
+   * The single place the audit token's wire shape is decided, so the two branches above cannot
+   * drift apart.
+   */
+  private static String xsdStamp(java.util.Date instant) {
+    return JsonUtils.convertToCorrectXSDFormat(JsonUtils.createDateTimeFormat().format(instant));
   }
 
   private static java.time.ZonedDateTime zoned(java.util.Date ts) {
