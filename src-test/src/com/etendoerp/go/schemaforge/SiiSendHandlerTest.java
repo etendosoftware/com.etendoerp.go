@@ -24,20 +24,16 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
-import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
-import org.openbravo.module.sii.process.CorrectDuplicateInvoiceError;
 
 /**
  * Unit tests for {@link SiiSendHandler}.
@@ -146,157 +142,19 @@ public class SiiSendHandlerTest {
     assertNull(SiiSendHandler.normalizeErrorShape(null));
   }
 
-  // ── translateCorrectDuplicateResult() — ETP-5272 ──────────────────────────
-  //
-  // CorrectDuplicateInvoiceError#doExecute returns
-  // {"responseActions":[{"showMsgInView":{"msgType","msgTitle","msgText"}}]} — a shape
-  // specific to this classic process, distinct from the generic OBUIAPP
-  // showMsgInProcessView translated elsewhere. These tests exercise the dedicated
-  // translator directly against synthetic JSON, no DB/AEAT access required.
-
-  /**
-   * Builds a {@code CorrectDuplicateInvoiceError#doExecute}-shaped result with a single
-   * {@code showMsgInView} action.
-   */
-  private static JSONObject correctDuplicateResult(String msgType, String msgTitle, String msgText)
-      throws JSONException {
-    JSONObject showMsgInView = new JSONObject();
-    showMsgInView.put("msgType", msgType);
-    showMsgInView.put("msgTitle", msgTitle);
-    showMsgInView.put("msgText", msgText);
-    JSONObject action = new JSONObject();
-    action.put("showMsgInView", showMsgInView);
-    JSONArray responseActions = new JSONArray();
-    responseActions.put(action);
-    JSONObject handlerResult = new JSONObject();
-    handlerResult.put("responseActions", responseActions);
-    return handlerResult;
-  }
-
-  @Test
-  public void testTranslateCorrectDuplicateResultSuccess() throws JSONException {
-    JSONObject handlerResult = correctDuplicateResult("success", "OK", "Invoice sent correctly");
-
-    NeoResponse result = SiiSendHandler.translateCorrectDuplicateResult(handlerResult);
-
-    assertEquals(200, result.getHttpStatus());
-    assertEquals("success", result.getBody().getString("status"));
-    assertEquals("Invoice sent correctly", result.getBody().getString("message"));
-  }
-
-  @Test
-  public void testTranslateCorrectDuplicateResultError() throws JSONException {
-    JSONObject handlerResult = correctDuplicateResult("error", "Error", "AEAT rejected the correction");
-
-    NeoResponse result = SiiSendHandler.translateCorrectDuplicateResult(handlerResult);
-
-    assertEquals(400, result.getHttpStatus());
-    assertEquals("error", result.getBody().getString("status"));
-    assertEquals("AEAT rejected the correction", result.getBody().getString("message"));
-  }
-
-  @Test
-  public void testTranslateCorrectDuplicateResultErrorIsCaseInsensitive() throws JSONException {
-    JSONObject handlerResult = correctDuplicateResult("Error", "Error", "AEAT rejected the correction");
-
-    NeoResponse result = SiiSendHandler.translateCorrectDuplicateResult(handlerResult);
-
-    assertEquals(400, result.getHttpStatus());
-    assertEquals("Error", result.getBody().getString("status"));
-    assertEquals("AEAT rejected the correction", result.getBody().getString("message"));
-  }
-
-  @Test
-  public void testTranslateCorrectDuplicateResultNullHandlerResultDefaultsToSuccess() {
-    NeoResponse result = SiiSendHandler.translateCorrectDuplicateResult(null);
-
-    assertEquals(200, result.getHttpStatus());
-    assertEquals("success", result.getBody().optString("status", null));
-    assertFalse(result.getBody().has("message"));
-  }
-
-  @Test
-  public void testTranslateCorrectDuplicateResultEmptyResponseActionsDefaultsToSuccess() throws JSONException {
-    JSONObject handlerResult = new JSONObject().put("responseActions", new JSONArray());
-
-    NeoResponse result = SiiSendHandler.translateCorrectDuplicateResult(handlerResult);
-
-    assertEquals(200, result.getHttpStatus());
-    assertEquals("success", result.getBody().getString("status"));
-    assertFalse(result.getBody().has("message"));
-  }
-
-  @Test
-  public void testTranslateCorrectDuplicateResultMissingResponseActionsKeyDefaultsToSuccess()
-      throws JSONException {
-    JSONObject handlerResult = new JSONObject().put("someOtherKey", "value");
-
-    NeoResponse result = SiiSendHandler.translateCorrectDuplicateResult(handlerResult);
-
-    assertEquals(200, result.getHttpStatus());
-    assertEquals("success", result.getBody().getString("status"));
-  }
-
-  @Test
-  public void testTranslateCorrectDuplicateResultMalformedActionDefaultsToSuccess() throws JSONException {
-    // responseActions[0] present, but without a showMsgInView key — extractShowMsgInView
-    // falls through to null, same as the "no rows"/"missing key" defaults above.
-    JSONObject action = new JSONObject().put("someOtherAction", new JSONObject());
-    JSONObject handlerResult = new JSONObject().put("responseActions", new JSONArray().put(action));
-
-    NeoResponse result = SiiSendHandler.translateCorrectDuplicateResult(handlerResult);
-
-    assertEquals(200, result.getHttpStatus());
-    assertEquals("success", result.getBody().getString("status"));
-  }
-
   // ── executeAction() routing — ETP-5272 ─────────────────────────────────────
   //
-  // executeAction must route to CorrectDuplicateInvoiceError (registry-error resend, A1)
-  // ONLY when Invoice#isAeatsiiErrorRegistral() is true AND the invoice's actual AEAT error
-  // code is exactly "3000" (duplicate registration) — CorrectDuplicateInvoiceError hard-gates
-  // on that code itself. Any OTHER registry error (or a null/blank error code) with the
-  // registral flag set must route to MultiInvoiceSIIModification instead (also A1, but a real
-  // resend, via the same NeoProcessService#executeObuiappClass bridge MultiEnvioFactura uses).
-  // With the registral flag unset, the existing MultiEnvioFactura path (A0) is untouched.
-  // CorrectDuplicateInvoiceError is constructed directly (it is not a BaseActionHandler), so its
-  // construction is intercepted with Mockito's inline mock-maker (mockConstruction) rather than
-  // exercising the real SOAP call inside #doExecute — that call needs a live AEAT/DB environment
-  // and is out of scope for a unit test.
+  // executeAction routes to MultiInvoiceSIIModification (registry-error resend, A1)
+  // whenever Invoice#isAeatsiiErrorRegistral() is true — regardless of the invoice's
+  // AEAT error code (the code check was removed: only two branches exist now). With the
+  // registral flag unset (or the invoice not found), the existing MultiEnvioFactura path
+  // (A0) is untouched.
 
   @Test
-  public void testExecuteActionRoutesToRegistralCorrectionWhenErrorCodeIs3000() throws Exception {
+  public void testExecuteActionRoutesToModificationWhenRegistralFlagTrueWithCode3000() throws Exception {
     Invoice invoice = mock(Invoice.class);
     when(invoice.isAeatsiiErrorRegistral()).thenReturn(Boolean.TRUE);
     when(invoice.getAeatsiiErrorCode()).thenReturn("3000");
-
-    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class);
-         MockedConstruction<CorrectDuplicateInvoiceError> correctionMock = Mockito.mockConstruction(
-             CorrectDuplicateInvoiceError.class,
-             (mockInstance, context) -> when(mockInstance.doExecute("inv-registral")).thenReturn(
-                 correctDuplicateResult("success", "OK", "Corrected and resent")))) {
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(Invoice.class, "inv-registral")).thenReturn(invoice);
-
-      NeoResponse result = handler.executeAction("inv-registral");
-
-      assertEquals(200, result.getHttpStatus());
-      assertEquals("success", result.getBody().getString("status"));
-      assertEquals("Corrected and resent", result.getBody().getString("message"));
-
-      assertEquals(1, correctionMock.constructed().size());
-      verify(correctionMock.constructed().get(0)).doExecute("inv-registral");
-      processMock.verifyNoInteractions();
-    }
-  }
-
-  @Test
-  public void testExecuteActionRoutesToModificationWhenErrorCodeIsNot3000() throws Exception {
-    Invoice invoice = mock(Invoice.class);
-    when(invoice.isAeatsiiErrorRegistral()).thenReturn(Boolean.TRUE);
-    when(invoice.getAeatsiiErrorCode()).thenReturn("1130");
     Organization org = mock(Organization.class);
     when(org.getId()).thenReturn("org-1");
     when(invoice.getOrganization()).thenReturn(org);
@@ -304,23 +162,19 @@ public class SiiSendHandlerTest {
     NeoResponse expected = NeoResponse.ok(new JSONObject().put("sent", true));
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class);
-         MockedConstruction<CorrectDuplicateInvoiceError> correctionMock = Mockito.mockConstruction(
-             CorrectDuplicateInvoiceError.class)) {
+         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(Invoice.class, "inv-other-error")).thenReturn(invoice);
+      when(dal.get(Invoice.class, "inv-registral-3000")).thenReturn(invoice);
       processMock.when(() -> NeoProcessService.executeObuiappClass(
               eq("org.openbravo.module.sii.process.MultiInvoiceSIIModification"),
               eq("F5CCFE8DCAC04FBD9B4A217C6383032B"),
               any(JSONObject.class)))
           .thenReturn(expected);
 
-      NeoResponse result = handler.executeAction("inv-other-error");
+      NeoResponse result = handler.executeAction("inv-registral-3000");
 
       assertEquals(expected, result);
-      assertTrue("CorrectDuplicateInvoiceError must not be constructed for a non-3000 error code",
-          correctionMock.constructed().isEmpty());
       processMock.verify(() -> NeoProcessService.executeObuiappClass(
           eq("org.openbravo.module.sii.process.MultiInvoiceSIIModification"),
           eq("F5CCFE8DCAC04FBD9B4A217C6383032B"),
@@ -329,7 +183,8 @@ public class SiiSendHandlerTest {
   }
 
   @Test
-  public void testExecuteActionRoutesToModificationWhenErrorCodeIsNull() throws Exception {
+  public void testExecuteActionRoutesToModificationWhenRegistralFlagTrueWithOtherOrNullCode()
+      throws Exception {
     Invoice invoice = mock(Invoice.class);
     when(invoice.isAeatsiiErrorRegistral()).thenReturn(Boolean.TRUE);
     when(invoice.getAeatsiiErrorCode()).thenReturn(null);
@@ -340,19 +195,16 @@ public class SiiSendHandlerTest {
     NeoResponse expected = NeoResponse.ok(new JSONObject().put("sent", true));
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class);
-         MockedConstruction<CorrectDuplicateInvoiceError> correctionMock = Mockito.mockConstruction(
-             CorrectDuplicateInvoiceError.class)) {
+         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(Invoice.class, "inv-null-error-code")).thenReturn(invoice);
+      when(dal.get(Invoice.class, "inv-registral-null-code")).thenReturn(invoice);
       processMock.when(() -> NeoProcessService.executeObuiappClass(any(), any(), any()))
           .thenReturn(expected);
 
-      NeoResponse result = handler.executeAction("inv-null-error-code");
+      NeoResponse result = handler.executeAction("inv-registral-null-code");
 
       assertEquals(expected, result);
-      assertTrue(correctionMock.constructed().isEmpty());
       processMock.verify(() -> NeoProcessService.executeObuiappClass(
           eq("org.openbravo.module.sii.process.MultiInvoiceSIIModification"),
           eq("F5CCFE8DCAC04FBD9B4A217C6383032B"),
@@ -371,9 +223,7 @@ public class SiiSendHandlerTest {
     NeoResponse expected = NeoResponse.ok(new JSONObject().put("sent", true));
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class);
-         MockedConstruction<CorrectDuplicateInvoiceError> correctionMock = Mockito.mockConstruction(
-             CorrectDuplicateInvoiceError.class)) {
+         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(Invoice.class, "inv-normal")).thenReturn(invoice);
@@ -386,8 +236,6 @@ public class SiiSendHandlerTest {
       NeoResponse result = handler.executeAction("inv-normal");
 
       assertEquals(expected, result);
-      assertTrue("CorrectDuplicateInvoiceError must not be constructed on this path",
-          correctionMock.constructed().isEmpty());
       processMock.verify(() -> NeoProcessService.executeObuiappClass(
           eq("org.openbravo.module.sii.process.MultiEnvioFactura"),
           eq("2ECF46DAAEEB486EAF79D3594D50DE5F"),
@@ -403,9 +251,7 @@ public class SiiSendHandlerTest {
     NeoResponse expected = NeoResponse.ok(new JSONObject().put("sent", true));
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class);
-         MockedConstruction<CorrectDuplicateInvoiceError> correctionMock = Mockito.mockConstruction(
-             CorrectDuplicateInvoiceError.class)) {
+         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(Invoice.class, "inv-null-flag")).thenReturn(invoice);
@@ -415,7 +261,6 @@ public class SiiSendHandlerTest {
       NeoResponse result = handler.executeAction("inv-null-flag");
 
       assertEquals(expected, result);
-      assertTrue(correctionMock.constructed().isEmpty());
     }
   }
 
@@ -424,9 +269,7 @@ public class SiiSendHandlerTest {
     NeoResponse expected = NeoResponse.ok(new JSONObject().put("sent", true));
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class);
-         MockedConstruction<CorrectDuplicateInvoiceError> correctionMock = Mockito.mockConstruction(
-             CorrectDuplicateInvoiceError.class)) {
+         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(Invoice.class, "inv-missing")).thenReturn(null);
@@ -436,31 +279,6 @@ public class SiiSendHandlerTest {
       NeoResponse result = handler.executeAction("inv-missing");
 
       assertEquals(expected, result);
-      assertTrue(correctionMock.constructed().isEmpty());
-    }
-  }
-
-  @Test
-  public void testExecuteActionWrapsRegistralCorrectionExceptionInto500() throws Exception {
-    Invoice invoice = mock(Invoice.class);
-    when(invoice.isAeatsiiErrorRegistral()).thenReturn(Boolean.TRUE);
-    when(invoice.getAeatsiiErrorCode()).thenReturn("3000");
-
-    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedConstruction<CorrectDuplicateInvoiceError> correctionMock = Mockito.mockConstruction(
-             CorrectDuplicateInvoiceError.class,
-             (mockInstance, context) -> when(mockInstance.doExecute("inv-boom")).thenThrow(
-                 new RuntimeException("SOAP timeout")))) {
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(Invoice.class, "inv-boom")).thenReturn(invoice);
-
-      NeoResponse result = handler.executeAction("inv-boom");
-
-      assertEquals(500, result.getHttpStatus());
-      String message = result.getBody().getString("message");
-      assertTrue(message.contains("SII registry-error correction failed"));
-      assertTrue(message.contains("SOAP timeout"));
     }
   }
 }

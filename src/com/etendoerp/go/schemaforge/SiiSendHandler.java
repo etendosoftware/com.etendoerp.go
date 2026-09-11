@@ -24,7 +24,6 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
-import org.openbravo.module.sii.process.CorrectDuplicateInvoiceError;
 
 /**
  * NeoHandler delegate for the legacy SII button on Sales Invoice.
@@ -38,20 +37,12 @@ import org.openbravo.module.sii.process.CorrectDuplicateInvoiceError;
  * <p>ETP-5272: {@code MultiEnvioFactura} always sends communication type {@code A0}
  * ("alta" / new registration). That is wrong for an invoice pending a registry-error
  * correction ({@link Invoice#isAeatsiiErrorRegistral()} {@code = true}) — AEAT expects the
- * correction/modification envelope, communication type {@code A1}. Classic Etendo itself
- * splits that case in two, by the invoice's actual AEAT error code
- * ({@link Invoice#getAeatsiiErrorCode()}):
- * <ul>
- *   <li>error code exactly {@code "3000"} (duplicate registration) — the classic
- *       "Corregir" button, {@code org.openbravo.module.sii.process.CorrectDuplicateInvoiceError}.
- *       It does a {@code ConsultaLR*} read-back against AEAT and syncs local fields; it does
- *       NOT resend. This handler calls it directly (it is a plain class, not a
- *       {@code BaseActionHandler}).</li>
- *   <li>any other registry error (or no error code at all) — the classic "Modificar" button,
- *       {@code org.openbravo.module.sii.process.MultiInvoiceSIIModification}. This is the real
- *       resend: like {@code MultiEnvioFactura}, it extends {@code BaseActionHandler}, so it is
- *       invoked through the same {@link NeoProcessService#executeObuiappClass} bridge.</li>
- * </ul>
+ * correction/modification envelope, communication type {@code A1}. Whenever that flag is
+ * set, this handler routes to the classic "Modificar" action,
+ * {@code org.openbravo.module.sii.process.MultiInvoiceSIIModification}, regardless of the
+ * invoice's AEAT error code. Like {@code MultiEnvioFactura}, it extends
+ * {@code BaseActionHandler}, so it is invoked through the same
+ * {@link NeoProcessService#executeObuiappClass} bridge.
  */
 @Named("sii-send")
 public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
@@ -64,22 +55,12 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
   private static final String MODIFICATION_PROCESS_ID = "F5CCFE8DCAC04FBD9B4A217C6383032B";
   private static final String MODIFICATION_PROCESS_CLASS =
       "org.openbravo.module.sii.process.MultiInvoiceSIIModification";
-  private static final String DUPLICATE_REGISTRATION_ERROR_CODE = "3000";
-  private static final String STATUS = "status";
-  private static final String MESSAGE = "message";
-  private static final String ERROR = "error";
-  private static final String SUCCESS = "success";
-  private static final String RESPONSE_ACTIONS = "responseActions";
-  private static final String SHOW_MSG_IN_VIEW = "showMsgInView";
 
   @Override
   protected NeoResponse executeAction(String recordId) throws Exception {
     Invoice invoice = OBDal.getInstance().get(Invoice.class, recordId);
 
     if (invoice != null && Boolean.TRUE.equals(invoice.isAeatsiiErrorRegistral())) {
-      if (DUPLICATE_REGISTRATION_ERROR_CODE.equals(invoice.getAeatsiiErrorCode())) {
-        return executeRegistralCorrection(recordId);
-      }
       return executeRegistralModification(recordId, invoice);
     }
 
@@ -89,11 +70,11 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
   }
 
   /**
-   * Routes a registry-error resend (any AEAT error code other than the duplicate-registration
-   * {@code "3000"}) to {@code MultiInvoiceSIIModification}, the classic module's "Modificar"
-   * action (communication type {@code A1}). Unlike {@code CorrectDuplicateInvoiceError}, this
-   * is a real {@code BaseActionHandler}, so it is invoked through the same
-   * {@link NeoProcessService#executeObuiappClass} bridge already used for {@code MultiEnvioFactura}.
+   * Routes a registry-error resend to {@code MultiInvoiceSIIModification}, the classic module's
+   * "Modificar" action (communication type {@code A1}), whenever
+   * {@link Invoice#isAeatsiiErrorRegistral()} is {@code true} — regardless of the invoice's
+   * AEAT error code. Like {@code MultiEnvioFactura}, this is a real {@code BaseActionHandler},
+   * so it is invoked through the same {@link NeoProcessService#executeObuiappClass} bridge.
    */
   private static NeoResponse executeRegistralModification(String recordId, Invoice invoice)
       throws Exception {
@@ -118,71 +99,6 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
     ids.put(recordId);
     params.put("ids", ids);
     return params;
-  }
-
-  /**
-   * Routes a registry-error correction resend to {@code CorrectDuplicateInvoiceError},
-   * the classic module's own resend path for this case (see class-level javadoc).
-   *
-   * <p>{@code CorrectDuplicateInvoiceError} is a plain class (not a {@code BaseActionHandler}),
-   * so it is called directly rather than through {@link NeoProcessService}'s OBUIAPP bridge —
-   * that bridge requires a {@code BaseActionHandler} instance and would reject this class.
-   */
-  private static NeoResponse executeRegistralCorrection(String recordId) {
-    JSONObject handlerResult;
-    try {
-      handlerResult = new CorrectDuplicateInvoiceError().doExecute(recordId);
-    } catch (Exception e) {
-      return NeoResponse.ensureTopLevelMessage(
-          NeoResponse.error(500, "SII registry-error correction failed: " + e.getMessage()));
-    }
-    return normalizeErrorShape(translateCorrectDuplicateResult(handlerResult));
-  }
-
-  /**
-   * Translates {@code CorrectDuplicateInvoiceError#doExecute}'s result shape
-   * ({@code responseActions[0].showMsgInView.{msgType,msgTitle,msgText}}) into a
-   * {@link NeoResponse}. This shape is specific to this classic process (note: it uses
-   * {@code showMsgInView}, not the {@code showMsgInProcessView} key
-   * {@link NeoProcessService}'s generic OBUIAPP translator already recognizes), hence a
-   * dedicated translator here rather than reusing that generic one.
-   *
-   * <p>Package-private and static so it can be unit tested directly against a synthetic
-   * result, without needing a live AEAT connection or DB access.
-   */
-  static NeoResponse translateCorrectDuplicateResult(JSONObject handlerResult) {
-    try {
-      JSONObject msg = extractShowMsgInView(handlerResult);
-      JSONObject body = new JSONObject();
-
-      if (msg == null) {
-        body.put(STATUS, SUCCESS);
-        return NeoResponse.ok(body);
-      }
-
-      String msgType = msg.optString("msgType", SUCCESS);
-      body.put(STATUS, msgType);
-      body.put(MESSAGE, msg.optString("msgText", ""));
-
-      if (ERROR.equalsIgnoreCase(msgType)) {
-        return new NeoResponse(400, body);
-      }
-      return NeoResponse.ok(body);
-    } catch (JSONException e) {
-      return NeoResponse.error(500, "Error parsing SII correction response: " + e.getMessage());
-    }
-  }
-
-  private static JSONObject extractShowMsgInView(JSONObject handlerResult) throws JSONException {
-    if (handlerResult == null) {
-      return null;
-    }
-    JSONArray actions = handlerResult.optJSONArray(RESPONSE_ACTIONS);
-    if (actions == null || actions.length() == 0) {
-      return null;
-    }
-    JSONObject first = actions.optJSONObject(0);
-    return first == null ? null : first.optJSONObject(SHOW_MSG_IN_VIEW);
   }
 
   /**
