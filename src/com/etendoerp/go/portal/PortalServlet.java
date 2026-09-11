@@ -129,6 +129,10 @@ public class PortalServlet extends HttpBaseServlet {
    * caller's terms.
    */
   private static final int MAX_LIMIT = 200;
+  /** JSON field names this servlet writes into more than one response shape. */
+  private static final String FIELD_CURRENCY = "currency";
+  private static final String FIELD_OUTSTANDING_AMOUNT = "outstandingAmount";
+
   /** {@code AD_Table.name} holding sales-invoice attachments, as {@code NeoDocumentDownloadService} maps it. */
   private static final String TABLE_C_INVOICE = "C_Invoice";
   private static final String DATE_FORMAT = "yyyy-MM-dd";
@@ -316,13 +320,13 @@ public class PortalServlet extends HttpBaseServlet {
     // count it used to be. Kept additive: a caller that ignores these three keys still renders the
     // first page correctly.
     body.put("totalCount", all.size());
-    body.put("offset", from);
-    body.put("limit", limit);
+    body.put(PARAM_OFFSET, from);
+    body.put(PARAM_LIMIT, limit);
     // No `status`, by contract: the browser derives it by comparing outstandingAmount against
     // grandTotalAmount. That makes PortalInvoiceQuery's docstatus = 'CO' filter load-bearing — the
     // browser makes no scoping or eligibility decision at all.
-    body.put("currency", primaryCurrency(outstandingByCurrency));
-    body.put("outstandingAmount", primaryOutstanding(outstandingByCurrency));
+    body.put(FIELD_CURRENCY, primaryCurrency(outstandingByCurrency));
+    body.put(FIELD_OUTSTANDING_AMOUNT, primaryOutstanding(outstandingByCurrency));
     // Additive, and deliberately outside the agreed contract: extra keys are inert in the frontend,
     // and dropping the breakdown would silently misreport a mixed-currency Business Partner.
     body.put("balances", toBalancesJson(outstandingByCurrency));
@@ -447,9 +451,9 @@ public class PortalServlet extends HttpBaseServlet {
     json.put("documentNo", StringUtils.defaultString(invoice.getDocumentNo()));
     json.put("invoiceDate", formatDate(invoice.getInvoiceDate()));
     json.put("dueDate", formatDate(invoice.getETGODueDate()));
-    json.put("currency", currencyOf(invoice));
+    json.put(FIELD_CURRENCY, currencyOf(invoice));
     json.put("grandTotalAmount", amount(invoice.getGrandTotalAmount()));
-    json.put("outstandingAmount", amount(invoice.getOutstandingAmount()));
+    json.put(FIELD_OUTSTANDING_AMOUNT, amount(invoice.getOutstandingAmount()));
     return json;
   }
 
@@ -458,8 +462,8 @@ public class PortalServlet extends HttpBaseServlet {
     JSONArray balances = new JSONArray();
     for (Map.Entry<String, BigDecimal> entry : outstandingByCurrency.entrySet()) {
       JSONObject balance = new JSONObject();
-      balance.put("currency", entry.getKey());
-      balance.put("outstandingAmount", entry.getValue());
+      balance.put(FIELD_CURRENCY, entry.getKey());
+      balance.put(FIELD_OUTSTANDING_AMOUNT, entry.getValue());
       balances.put(balance);
     }
     return balances;

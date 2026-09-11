@@ -81,7 +81,7 @@ final class PortalRateLimiter {
     }
     long currentWindow = clock.millis() / WINDOW.toMillis();
     Window updated = windows.compute(normalizedKey, (ignored, existing) ->
-        existing == null || existing.window != currentWindow
+        existing == null || existing.windowIndex != currentWindow
             ? new Window(currentWindow, 1)
             : new Window(currentWindow, existing.count + 1));
     return updated.count <= MAX_REQUESTS_PER_WINDOW;
@@ -89,11 +89,11 @@ final class PortalRateLimiter {
 
   /** One caller's counter for one window. Immutable so {@code compute} stays atomic. */
   private static final class Window {
-    private final long window;
+    private final long windowIndex;
     private final int count;
 
-    private Window(long window, int count) {
-      this.window = window;
+    private Window(long windowIndex, int count) {
+      this.windowIndex = windowIndex;
       this.count = count;
     }
   }

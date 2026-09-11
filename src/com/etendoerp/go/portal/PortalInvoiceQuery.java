@@ -48,6 +48,9 @@ final class PortalInvoiceQuery {
   private static final String PARAM_DOCSTATUS = "docStatus";
   private static final String PARAM_INVOICE_ID = "invoiceId";
 
+  /** The alias declaration and {@code where} keyword every portal read opens with. */
+  private static final String ALIAS_WHERE = "as i where";
+
   /** The three-filter scope every portal read shares, as an HQL fragment. */
   private static final String SCOPE_CLAUSE =
       " i.client.id = :" + PARAM_CLIENT_ID
@@ -80,7 +83,7 @@ final class PortalInvoiceQuery {
    */
   static List<Invoice> list(PortalSession session, int offset, int limit) {
     OBQuery<Invoice> query = OBDal.getInstance().createQuery(Invoice.class,
-        "as i where" + SCOPE_CLAUSE + " order by i.invoiceDate desc, i.documentNo desc");
+        ALIAS_WHERE + SCOPE_CLAUSE + " order by i.invoiceDate desc, i.documentNo desc");
     applyScope(query, session);
     query.setFirstResult(Math.max(offset, 0));
     query.setMaxResult(limit);
@@ -100,7 +103,7 @@ final class PortalInvoiceQuery {
    */
   static List<Invoice> listAll(PortalSession session) {
     OBQuery<Invoice> query = OBDal.getInstance().createQuery(Invoice.class,
-        "as i where" + SCOPE_CLAUSE + " order by i.invoiceDate desc, i.documentNo desc");
+        ALIAS_WHERE + SCOPE_CLAUSE + " order by i.invoiceDate desc, i.documentNo desc");
     applyScope(query, session);
     return query.list();
   }
@@ -118,7 +121,7 @@ final class PortalInvoiceQuery {
    */
   static Invoice findInScope(PortalSession session, String invoiceId) {
     OBQuery<Invoice> query = OBDal.getInstance().createQuery(Invoice.class,
-        "as i where" + SCOPE_CLAUSE + " and i.id = :" + PARAM_INVOICE_ID);
+        ALIAS_WHERE + SCOPE_CLAUSE + " and i.id = :" + PARAM_INVOICE_ID);
     applyScope(query, session);
     query.setNamedParameter(PARAM_INVOICE_ID, invoiceId);
     query.setMaxResult(1);
