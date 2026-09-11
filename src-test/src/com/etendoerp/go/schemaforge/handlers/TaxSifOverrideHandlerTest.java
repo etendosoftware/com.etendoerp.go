@@ -33,8 +33,10 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.codehaus.jettison.json.JSONArray;
@@ -137,6 +139,11 @@ class TaxSifOverrideHandlerTest {
         .specName("tax").entityName("tax")
         .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
         .recordId(TAX_ID).requestBody(body).obContext(obContext);
+  }
+
+  private NeoContext.Builder patchContextWithQueryParams(JSONObject body,
+      Map<String, String> queryParams) {
+    return patchContext(body).queryParams(queryParams);
   }
 
   private NativeQuery<?> stubUpsertQuery() {
@@ -355,6 +362,111 @@ class TaxSifOverrideHandlerTest {
     // No row must ever be persisted into etsg_tax_sif_config for an unresolved legal entity.
     verify(mockSession, never()).createNativeQuery(
         argThat(sql -> sql != null && sql.startsWith("INSERT INTO etsg_tax_sif_config")));
+  }
+
+  // ── ETP-5229 — invoice-line org vs session org mismatch ─────────────────────
+
+  /**
+   * ETP-5229 regression: reproduces the live bug Ruben hit. The user's SESSION org
+   * ({@link #CURRENT_ORG_ID}) differs from the INVOICE LINE's own org (sent as
+   * {@code sifContextOrgId}), and each resolves to a DIFFERENT legal entity. Before the fix,
+   * {@code upsertOverride} always resolved the legal entity from the session org — this test
+   * pins that the write now resolves {@code AD_GET_ORG_LE_BU} against the invoice's org
+   * instead, matching what {@code InvoiceLineTaxSifSelectorPolicy#querySifColumns} reads on.
+   */
+  @Test
+  void handlePatchWithSifContextOrgIdResolvesLegalEntityFromInvoiceOrgNotSessionOrg()
+      throws Exception {
+    String invoiceOrgId = "ORG_INVOICE_002";
+    String invoiceLegalEntityOrgId = "ORG_LE_INVOICE_002";
+
+    // Session org (CURRENT_ORG_ID) resolves to LEGAL_ENTITY_ORG_ID (stubbed in setUp).
+    // The invoice's own org resolves to a DIFFERENT legal entity — the LE lookup answers
+    // depending on which org id it was just bound with, mirroring what AD_GET_ORG_LE_BU would
+    // really do for two orgs under different legal entities.
+    java.util.concurrent.atomic.AtomicReference<String> boundOrgId =
+        new java.util.concurrent.atomic.AtomicReference<>();
+    // Deliberately an EXACT match on the standalone LE-lookup SQL (not a `.contains(...)`
+    // substring match) — the effective-values SELECT also embeds "ad_get_org_le_bu" inside its
+    // JOIN clause, and a substring predicate registered here (after setUp()'s own broader
+    // `.contains(...)` stub) would win as the LAST matching stub and hijack that unrelated
+    // query too, corrupting the read-back assertions in the other tests below.
+    NativeQuery<Object> leQuery = mock(NativeQuery.class);
+    lenient().when(mockSession.createNativeQuery(
+        argThat(sql -> "SELECT ad_get_org_le_bu(:orgId, 'LE')".equals(sql))))
+        .thenReturn((NativeQuery) leQuery);
+    lenient().when(leQuery.setParameter(eq(PARAM_ORG_ID_TEST), any())).thenAnswer(invocation -> {
+      boundOrgId.set(invocation.getArgument(1));
+      return leQuery;
+    });
+    lenient().when(leQuery.uniqueResult()).thenAnswer(invocation ->
+        invoiceOrgId.equals(boundOrgId.get()) ? invoiceLegalEntityOrgId : LEGAL_ENTITY_ORG_ID);
+
+    NativeQuery<?> upsertQuery = stubUpsertQuery();
+    Map<String, String> queryParams = new HashMap<>();
+    queryParams.put("sifContextOrgId", invoiceOrgId);
+    JSONObject body = new JSONObject().put("tbaiClaveregimeniva", "01");
+
+    handler.handle(patchContextWithQueryParams(body, queryParams).build());
+
+    // The LE lookup itself must have been invoked with the INVOICE's org, not the session org.
+    verify(leQuery).setParameter(PARAM_ORG_ID_TEST, invoiceOrgId);
+    verify(leQuery, never()).setParameter(PARAM_ORG_ID_TEST, CURRENT_ORG_ID);
+    // The upsert must key the row on the invoice's legal entity, not the session's.
+    verify((NativeQuery) upsertQuery).setParameter(PARAM_ORG_ID_TEST, invoiceLegalEntityOrgId);
+  }
+
+  private static final String PARAM_ORG_ID_TEST = "orgId";
+
+  /**
+   * When {@code sifContextOrgId} is ABSENT (the standalone Tax admin window's own PATCH flow,
+   * which has no invoice in scope), behavior must be byte-for-byte identical to pre-ETP-5229:
+   * the legal entity is resolved from the session org.
+   */
+  @Test
+  void handlePatchWithoutSifContextOrgIdFallsBackToSessionOrg() throws Exception {
+    NativeQuery<?> upsertQuery = stubUpsertQuery();
+    JSONObject body = new JSONObject().put("etvfacVatRegime", "09");
+
+    handler.handle(patchContext(body).build());
+
+    verify((NativeQuery) upsertQuery).setParameter(PARAM_ORG_ID_TEST, LEGAL_ENTITY_ORG_ID);
+  }
+
+  /**
+   * ETP-5229: the read-back response returned right after the write (when the PATCH body was
+   * entirely SIF fields) must query the effective value using the SAME organization the write
+   * just used — the invoice's org, not the session's — so a caller relying on THIS response
+   * (rather than a follow-up GET) also sees the correct effective value immediately.
+   */
+  @Test
+  void handlePatchWithSifContextOrgIdUsesSameOrgForImmediateReadBack() throws Exception {
+    stubUpsertQuery();
+    NativeQuery<Object> effectiveQuery =
+        stubEffectiveValuesQuery(row(TAX_ID, null, null, null, null, null, "01", null, null));
+    Map<String, String> queryParams = new HashMap<>();
+    queryParams.put("sifContextOrgId", "ORG_INVOICE_002");
+    JSONObject body = new JSONObject().put("tbaiClaveregimeniva", "01");
+
+    handler.handle(patchContextWithQueryParams(body, queryParams).build());
+
+    verify(effectiveQuery).setParameter(PARAM_ORG_ID_TEST, "ORG_INVOICE_002");
+  }
+
+  /**
+   * A blank {@code sifContextOrgId} (empty string) must be treated as absent, not as a literal
+   * organization id — falls back to the session org exactly like the param being missing.
+   */
+  @Test
+  void handlePatchWithBlankSifContextOrgIdFallsBackToSessionOrg() throws Exception {
+    NativeQuery<?> upsertQuery = stubUpsertQuery();
+    Map<String, String> queryParams = new HashMap<>();
+    queryParams.put("sifContextOrgId", "   ");
+    JSONObject body = new JSONObject().put("etvfacVatRegime", "09");
+
+    handler.handle(patchContextWithQueryParams(body, queryParams).build());
+
+    verify((NativeQuery) upsertQuery).setParameter(PARAM_ORG_ID_TEST, LEGAL_ENTITY_ORG_ID);
   }
 
   // ── afterHandle() — GET single record ───────────────────────────────────────

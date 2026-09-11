@@ -92,9 +92,36 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
  * ({@code em_obspti_isequivalentcharge='N'}). This policy projects {@code issummary}/
  * {@code parent_tax_id}/{@code em_obspti_isequivalentcharge} (as {@code isSummary}/
  * {@code parentTaxId}/{@code isEquivalentCharge}) unconditionally alongside the SIF value
- * columns above, so the frontend can link a summary tax to its already-fetched child within the
- * SAME catalog response and check the CHILD's completeness, without a second request — see
- * {@code resolveEffectiveTaxRow()} in {@code useTaxSifLineRowActions.jsx}.
+ * columns above, so the frontend can link a summary tax to its child and check the CHILD's
+ * completeness — see {@code resolveEffectiveTaxRow()} in {@code useTaxSifLineRowActions.jsx}.
+ *
+ * <p><b>ETP-5229 correction — the child is NEVER in the same catalog response:</b> the
+ * PREVIOUS revision of this doc claimed the child's row "is already present in the same
+ * client-side map" because the frontend pages through the WHOLE selector response. That
+ * assumption was wrong and was the actual (second, independent) root cause of the
+ * SIF-completeness badge never clearing for ANY compound tax. {@code AD_Ref_Table} row for
+ * reference {@code 158} (the {@code C_Tax_ID} column's picker reference, {@code AD_Column_ID}
+ * {@code 3848}) carries {@code SQLWhereClause = "C_Tax.Parent_Tax_ID IS NULL"} — translated to
+ * HQL by {@code SqlToHqlTranslator} and applied by {@code SelectorQueryExecutor} to EVERY call
+ * of this selector, including the frontend's own background catalog fetch (same endpoint, same
+ * meta, same filter — there is no separate "unfiltered" mode). That filter is intentional and
+ * load-bearing: a user must never be offered a bare rate-component ("...(+21%)") as a line's
+ * tax, only the summary tax. But it also means a compound tax's children are permanently
+ * INVISIBLE to the selector's base query — {@code enrich()} above only decorates items the base
+ * query already returned, so a summary tax's children were never enriched, never present in
+ * {@code taxById}, and {@code resolveEffectiveTaxRow()} always fell back to the summary tax
+ * itself (which carries no SIF value columns) — reporting "missing" unconditionally for every
+ * compound tax regardless of actual configuration.
+ *
+ * <p><b>Fix:</b> when the request carries {@link #INCLUDE_CHILDREN_PARAM} (set ONLY by
+ * {@code useTaxSifLineRowActions.jsx}'s background catalog fetch — the user-facing
+ * {@code InlineSearchCombo} picker never sends it, so the picker's own live search is
+ * completely unaffected), {@code enrich()} additionally queries {@code c_tax} directly via JDBC
+ * (bypassing the {@code AD_Ref_Table} filter entirely, the same way {@code querySifColumns}
+ * already does for the summary rows) for every child of a summary tax present in the page, and
+ * APPENDS those child rows as extra {@code items} on the SAME response — fully enriched with the
+ * same structural + SIF value columns. This is strictly additive: nothing is removed or hidden
+ * from the picker, and the flag defaults to off.
  */
 public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichmentPolicy {
 
@@ -172,6 +199,14 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
   // etsg_tax_sif_config override row for the correct legal entity.
   private static final String AD_ORG_ID_PARAM = "AD_Org_ID";
 
+  // Raw query-string param — flows straight through NeoSelectorEndpoint's generic
+  // "everything except q/limit/offset" contextParams collection (no NeoSelectorService
+  // change needed). Sent ONLY by useTaxSifLineRowActions.jsx's background catalog fetch
+  // (see the ETP-5229 class doc above) — the user-facing InlineSearchCombo picker never
+  // sends it, so the picker's own live search-as-you-type is completely unaffected by the
+  // extra child rows this flag causes enrich() to append.
+  private static final String INCLUDE_CHILDREN_PARAM = "includeTaxChildren";
+
   public InvoiceLineTaxSifSelectorPolicy() {
     // Stateless policy; public constructor supports registry composition without CDI.
   }
@@ -213,6 +248,10 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
           : null;
       Map<String, Map<String, Object>> sifByTaxId = querySifColumns(taxIds, organizationId);
       applyEnrichment(items, sifByTaxId);
+
+      if (isIncludeChildrenRequested(contextParams)) {
+        appendSummaryTaxChildren(items, sifByTaxId, taxIds, organizationId);
+      }
     } catch (Exception e) {
       log.warn("[InvoiceLineTaxSifSelectorPolicy] Failed to enrich tax selector: {}",
           e.getMessage(), e);
@@ -243,6 +282,92 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
       }
     }
     return ids;
+  }
+
+  private static boolean isIncludeChildrenRequested(Map<String, String> contextParams) {
+    if (contextParams == null) {
+      return false;
+    }
+    String raw = StringUtils.trimToNull(contextParams.get(INCLUDE_CHILDREN_PARAM));
+    return "true".equalsIgnoreCase(raw) || "1".equals(raw);
+  }
+
+  /**
+   * ETP-5229 — appends the rate-component children of every summary tax present in {@code
+   * items} as EXTRA items on the same response, fully enriched with the same structural + SIF
+   * value columns {@link #applyEnrichment} already projects. See the class doc for why this is
+   * necessary (the base selector query permanently excludes {@code parent_tax_id IS NOT NULL}
+   * rows) and why it is additive-only and flag-gated (never affects the user-facing picker).
+   *
+   * @param items the response's mutable {@code items} array — new child items are appended here
+   * @param sifByTaxId the enrichment map already computed for the page's own ids, used to find
+   *     which of them are summary taxes ({@code isSummary == "Y"})
+   * @param existingIds ids already present in {@code items}, so a child that (unexpectedly)
+   *     already made it into the page is never duplicated
+   * @param organizationId same per-org override context {@link #querySifColumns} uses
+   */
+  private static void appendSummaryTaxChildren(JSONArray items,
+      Map<String, Map<String, Object>> sifByTaxId, List<String> existingIds, String organizationId)
+      throws SQLException, JSONException {
+    List<String> summaryTaxIds = new ArrayList<>();
+    for (Map.Entry<String, Map<String, Object>> entry : sifByTaxId.entrySet()) {
+      if ("Y".equals(entry.getValue().get("isSummary"))) {
+        summaryTaxIds.add(entry.getKey());
+      }
+    }
+    if (summaryTaxIds.isEmpty()) {
+      return;
+    }
+    List<String> childIds = queryChildTaxIds(summaryTaxIds);
+    childIds.removeAll(existingIds);
+    if (childIds.isEmpty()) {
+      return;
+    }
+    Map<String, Map<String, Object>> childSif = querySifColumns(childIds, organizationId);
+    for (String childId : childIds) {
+      Map<String, Object> sif = childSif.get(childId);
+      if (sif == null) {
+        continue;
+      }
+      JSONObject childItem = new JSONObject();
+      childItem.put("id", childId);
+      for (Map.Entry<String, Object> entry : sif.entrySet()) {
+        childItem.put(entry.getKey(), entry.getValue());
+      }
+      items.put(childItem);
+    }
+  }
+
+  /**
+   * Direct JDBC lookup of {@code c_tax} rows whose {@code parent_tax_id} is one of {@code
+   * parentIds} — deliberately bypassing the {@code AD_Ref_Table} selector filter
+   * ({@code Parent_Tax_ID IS NULL}) the SAME way {@link #querySifColumns} already bypasses it
+   * for the summary rows, since that filter's entire purpose is to keep children out of the
+   * user-facing picker, not out of this server-side lookup.
+   */
+  @SuppressWarnings("java:S2077")
+  private static List<String> queryChildTaxIds(List<String> parentIds) throws SQLException {
+    StringBuilder placeholders = new StringBuilder();
+    for (int i = 0; i < parentIds.size(); i++) {
+      if (i > 0) {
+        placeholders.append(", ");
+      }
+      placeholders.append('?');
+    }
+    String sql = "SELECT c_tax_id FROM c_tax WHERE parent_tax_id IN (" + placeholders + ")";
+    List<String> childIds = new ArrayList<>();
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      for (int i = 0; i < parentIds.size(); i++) {
+        ps.setString(i + 1, parentIds.get(i));
+      }
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          childIds.add(rs.getString("c_tax_id"));
+        }
+      }
+    }
+    return childIds;
   }
 
   /**
