@@ -22,6 +22,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -32,15 +33,20 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
+import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Criterion;
 import org.junit.Rule;
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
@@ -51,13 +57,18 @@ import org.mockito.junit.MockitoRule;
 import org.openbravo.advpaymentmngt.ProcessInvoiceUtil;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.weld.WeldUtils;
+import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.ui.Process;
+import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
+import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 
 /**
  * Unit tests for {@link PurchaseInvoiceHeaderHandler}.
@@ -73,6 +84,12 @@ import org.openbravo.model.common.invoice.Invoice;
  *       (recordId is null).</li>
  *   <li>{@code afterHandle()} total-discount adjustment for draft invoices (grandTotalAmount /
  *       outstandingAmount), inherited from {@link AbstractInvoiceHeaderHandler}.</li>
+ *   <li>{@code afterHandle()} leaves the {@code eTGOTbaiStatus} column untouched and injects no
+ *       synthetic {@code tbaiSyncEstado} (ETP-5216: the TicketBAI/Batuz status is now the stored
+ *       computed column {@code EM_ETGO_Tbai_Status} on {@code C_Invoice}).</li>
+ *   <li>{@code afterHandle()} {@link SifSubRecordAttachments} wiring — detail-only, absent from
+ *       list and write responses (ETP-5087: without it the SIF tab of a purchase invoice sent to
+ *       Batuz had no sub-record id and showed neither request nor response XML).</li>
  *   <li>DB error resilience in enrichLinkedReceipts.</li>
  * </ul>
  */
@@ -282,6 +299,190 @@ public class PurchaseInvoiceHeaderHandlerTest {
       JSONArray receipts = enrichedRec.getJSONArray("linkedReceipts");
       assertEquals(1, receipts.length());
       assertEquals("receipt-001", receipts.getJSONObject(0).getString("id"));
+    }
+  }
+
+  // ── afterHandle — TicketBAI status is a real column, never injected (ETP-5216) ──
+
+  /**
+   * ETP-5216: the TicketBAI/Batuz status is no longer synthesized server-side. It is the stored
+   * computed AD column {@code EM_ETGO_Tbai_Status} on {@code C_Invoice}, so it reaches the
+   * frontend as the ordinary contract field {@code eTGOTbaiStatus} — filterable and sortable,
+   * which an injected field never was.
+   *
+   * <p>This test replaces the ETP-5087 injector tests rather than deleting them: it pins the
+   * property those tests were really protecting (the fiscal status survives {@code afterHandle}
+   * intact) while forbidding the mechanism that made ETP-4391 invisible. If anyone re-introduces
+   * a per-row injection, the {@code tbaiSyncEstado} assertion fails here.
+   */
+  @Test
+  public void afterHandle_listMode_passesThroughTbaiStatusColumnAndInjectsNothing() throws Exception {
+    JSONArray data = new JSONArray()
+        .put(new JSONObject().put("id", "pinv-1").put("documentNo", "PI-001")
+            .put("eTGOTbaiStatus", "Rechazado"))
+        .put(new JSONObject().put("id", "pinv-2").put("documentNo", "PI-002")
+            .put("eTGOTbaiStatus", "Recibido"));
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = getCtx();
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    NeoResponse result = handler.afterHandle(ctx);
+
+    assertNotNull(result);
+    JSONArray resultData = result.getBody().getJSONObject("response").getJSONArray("data");
+    assertEquals("Rechazado", resultData.getJSONObject(0).getString("eTGOTbaiStatus"));
+    assertEquals("Recibido", resultData.getJSONObject(1).getString("eTGOTbaiStatus"));
+    assertFalse("afterHandle must not re-introduce a synthetic tbaiSyncEstado field",
+        resultData.getJSONObject(0).has("tbaiSyncEstado"));
+    assertFalse("afterHandle must not re-introduce a synthetic tbaiSyncEstado field",
+        resultData.getJSONObject(1).has("tbaiSyncEstado"));
+  }
+
+  /**
+   * ETP-5216: an invoice with no resolved submission carries {@code 'Pendiente'} straight from the
+   * database — {@code ETGO_GET_TBAI_STATUS} returns that literal for "no sync row / no estado", so
+   * the field is always present and the handler has nothing to default. The old code left the key
+   * absent and let the frontend {@code ??} invent the value, which is what let a dead injector
+   * render as plausible data for months (ETP-4391).
+   */
+  @Test
+  public void afterHandle_singleRecord_leavesTbaiStatusColumnUntouched() throws Exception {
+    JSONArray data = new JSONArray()
+        .put(new JSONObject().put("id", "pinv-detail").put("eTGOTbaiStatus", "Pendiente"));
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .recordId("pinv-detail")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal roInst = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(roInst);
+      dalMock.when(OBDal::getInstance).thenReturn(roInst);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(roInst.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(any())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject rec = result.getBody()
+          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("Pendiente", rec.getString("eTGOTbaiStatus"));
+      assertFalse("detail view must not re-introduce a synthetic tbaiSyncEstado field",
+          rec.has("tbaiSyncEstado"));
+    }
+  }
+
+  // ── afterHandle — SifSubRecordAttachments wiring (ETP-5087) ──────────────
+
+  /**
+   * ETP-5087: the SIF tab of a PURCHASE invoice sent to Batuz showed neither the request nor the
+   * response XML. Same root cause as the {@code tbaiSyncEstado} gap above — the call lived only in
+   * {@code SalesInvoiceHeaderHandler#afterHandle}, so AP detail responses never carried
+   * {@code tbaiSyncInvoiceId} (nor {@code aeatsiiFacturaId} / {@code invoiceVerifactuId}) and the
+   * frontend had no sub-record id to point the attachments endpoint at.
+   *
+   * <p>The static {@code enrich} is stubbed to write fixture ids into the record it receives, so
+   * the assertions prove both that it is invoked with the detail record and the C_Invoice id, and
+   * that whatever it writes survives into the response body.
+   */
+  @Test
+  public void afterHandle_singleRecord_injectsSifSubRecordAttachmentIds() throws Exception {
+    JSONObject rec = new JSONObject().put("id", "pinv-detail");
+    JSONArray data = new JSONArray().put(rec);
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .recordId("pinv-detail")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<SifSubRecordAttachments> sifMock =
+             Mockito.mockStatic(SifSubRecordAttachments.class)) {
+      OBDal roInst = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(roInst);
+      dalMock.when(OBDal::getInstance).thenReturn(roInst);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(roInst.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(any())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      sifMock.when(() -> SifSubRecordAttachments.enrich(any(), anyString())).thenAnswer(inv -> {
+        JSONObject target = inv.getArgument(0);
+        target.put("tbaiSyncInvoiceId", "tbai-sync-001");
+        target.put("aeatsiiFacturaId", "sii-fact-001");
+        target.put("invoiceVerifactuId", "vfac-001");
+        return null;
+      });
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      sifMock.verify(() -> SifSubRecordAttachments.enrich(rec, "pinv-detail"));
+      JSONObject enriched = result.getBody()
+          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("tbai-sync-001", enriched.getString("tbaiSyncInvoiceId"));
+      assertEquals("sii-fact-001", enriched.getString("aeatsiiFacturaId"));
+      assertEquals("vfac-001", enriched.getString("invoiceVerifactuId"));
+    }
+  }
+
+  /**
+   * ETP-5087 / ETP-4888: the sub-record ids are a detail-only enrichment — a list GET must never
+   * carry them, and must never pay for the three extra queries per row. Mirrors
+   * {@code SalesInvoiceHeaderHandlerTest#testSifSubRecordAttachmentsNotCalledForListView}.
+   */
+  @Test
+  public void afterHandle_listMode_doesNotInjectSifSubRecordAttachmentIds() throws Exception {
+    JSONArray data = new JSONArray()
+        .put(new JSONObject().put("id", "pinv-1"))
+        .put(new JSONObject().put("id", "pinv-2"));
+    JSONObject body = new JSONObject().put("response", new JSONObject().put("data", data));
+    NeoContext ctx = getCtx(); // recordId = null — list view
+    ctx.setPreviousResult(NeoResponse.ok(body));
+
+    try (MockedStatic<SifSubRecordAttachments> sifMock =
+             Mockito.mockStatic(SifSubRecordAttachments.class)) {
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      sifMock.verifyNoInteractions();
+      JSONArray resultData = result.getBody().getJSONObject("response").getJSONArray("data");
+      for (int i = 0; i < resultData.length(); i++) {
+        JSONObject resultRec = resultData.getJSONObject(i);
+        assertFalse(resultRec.has("aeatsiiFacturaId"));
+        assertFalse(resultRec.has("tbaiSyncInvoiceId"));
+        assertFalse(resultRec.has("invoiceVerifactuId"));
+      }
+    }
+  }
+
+  /**
+   * ETP-5087: like the {@code tbaiSyncEstado} injection, the sub-record lookup is GET-only — a
+   * save must never pay for three fiscal-table round-trips. Pins the interaction so a refactor
+   * that hoists the enrichment above the {@code extractGetDataArray() == null} guard fails here.
+   */
+  @Test
+  public void afterHandle_writeMethods_neverInjectSifSubRecordAttachmentIds() {
+    try (MockedStatic<SifSubRecordAttachments> sifMock =
+             Mockito.mockStatic(SifSubRecordAttachments.class)) {
+      for (String writeMethod : new String[] { "POST", "PUT", "PATCH" }) {
+        NeoContext ctx = NeoContext.builder().httpMethod(writeMethod).build();
+        assertNull(handler.afterHandle(ctx));
+      }
+      sifMock.verifyNoInteractions();
     }
   }
 
@@ -967,5 +1168,133 @@ public class PurchaseInvoiceHeaderHandlerTest {
       assertNotNull("apInvoiceSubtype key must exist", resultRec.opt("apInvoiceSubtype"));
       assertEquals("FAC", resultRec.getString("apInvoiceSubtype"));
     }
+  }
+
+  // ── ETP-5238: paymentMethod SELECTOR is independent of Financial Account ────
+
+  /**
+   * A SELECTOR context wired with an AD Tab/Window pair whose {@code isSalesTransaction()} is
+   * {@code false} — the purchase-invoice window declares {@link
+   * com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport.DirectionFallback#WINDOW},
+   * so this is what the handler resolves direction from once the {@code IsSOTrx} request param
+   * is absent.
+   */
+  private static NeoContext purchaseWindowSelectorCtx() {
+    Window window = mock(Window.class);
+    when(window.isSalesTransaction()).thenReturn(false);
+    Tab tab = mock(Tab.class);
+    when(tab.getWindow()).thenReturn(window);
+    return NeoContext.builder()
+        .specName("purchase-invoice").entityName("header").httpMethod("GET")
+        .endpointType(NeoEndpointType.SELECTOR).fieldName("paymentMethod")
+        .adTab(tab).build();
+  }
+
+  private void stubPaymentMethodSelectorRequest(MockedStatic<RequestContext> reqCtx,
+      Map<String, String> params) {
+    RequestContext requestContext = mock(RequestContext.class);
+    HttpServletRequest request = mock(HttpServletRequest.class);
+    reqCtx.when(RequestContext::get).thenReturn(requestContext);
+    when(requestContext.getRequest()).thenReturn(request);
+    when(request.getParameter(anyString())).thenReturn(null);
+
+    Map<String, String[]> parameterMap = new HashMap<>();
+    for (Map.Entry<String, String> entry : params.entrySet()) {
+      parameterMap.put(entry.getKey(), new String[] { entry.getValue() });
+    }
+    when(request.getParameterMap()).thenReturn(parameterMap);
+  }
+
+  @SuppressWarnings("unchecked")
+  private ArgumentCaptor<Criterion> stubPaymentMethodCriteria(MockedStatic<OBDal> obDal,
+      List<FIN_PaymentMethod> rows) {
+    OBDal obDalMock = mock(OBDal.class);
+    obDal.when(OBDal::getInstance).thenReturn(obDalMock);
+    OBCriteria<FIN_PaymentMethod> criteria = mock(OBCriteria.class);
+    when(obDalMock.createCriteria(FIN_PaymentMethod.class)).thenReturn(criteria);
+    ArgumentCaptor<Criterion> captor = ArgumentCaptor.forClass(Criterion.class);
+    when(criteria.add(captor.capture())).thenReturn(criteria);
+    when(criteria.addOrderBy(any(), anyBoolean())).thenReturn(criteria);
+    when(criteria.setMaxResults(org.mockito.ArgumentMatchers.anyInt())).thenReturn(criteria);
+    when(criteria.setFirstResult(org.mockito.ArgumentMatchers.anyInt())).thenReturn(criteria);
+    when(criteria.count()).thenReturn(rows.size());
+    when(criteria.list()).thenReturn(rows);
+    return captor;
+  }
+
+  /** Renders every captured restriction (read only AFTER invoking the method under test). */
+  private List<String> renderedCriteria(ArgumentCaptor<Criterion> captor) {
+    return captor.getAllValues().stream().map(Criterion::toString)
+        .collect(java.util.stream.Collectors.toList());
+  }
+
+  /**
+   * The paymentMethod SELECTOR request must be served by
+   * {@code com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport}, short-circuiting
+   * before {@code postingService}/{@code totalDiscountService} or any ACTION delegate is reached,
+   * and — since this window declares the {@code WINDOW} direction fallback — the criteria built
+   * when {@code IsSOTrx} is absent must be against {@code payoutAllow}, never {@code payinAllow}.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testHandleServesPaymentMethodSelectorIndependentOfFinancialAccount() throws Exception {
+    NeoContext ctx = purchaseWindowSelectorCtx();
+
+    try (MockedStatic<RequestContext> reqCtx = Mockito.mockStatic(RequestContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxMock = Mockito.mockStatic(OBContext.class)) {
+      stubPaymentMethodSelectorRequest(reqCtx, Collections.emptyMap());
+
+      ArgumentCaptor<Criterion> captor = stubPaymentMethodCriteria(obDal, Collections.emptyList());
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(200, response.getHttpStatus());
+      List<String> rendered = renderedCriteria(captor);
+      assertTrue("expected a payoutAllow filter, got: " + rendered,
+          rendered.stream().anyMatch(s -> s.toLowerCase().contains("payoutallow")));
+      assertFalse("must not filter on payinAllow for a purchase document, got: " + rendered,
+          rendered.stream().anyMatch(s -> s.toLowerCase().contains("payinallow")));
+    }
+  }
+
+  /**
+   * Same window, but with the request explicitly sending {@code IsSOTrx=N} (the normal case in
+   * production) — must resolve identically to the absent-param case above.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testHandleServesPaymentMethodSelectorBuildsPayoutCriteriaWhenIsSOTrxIsN() throws Exception {
+    NeoContext ctx = purchaseWindowSelectorCtx();
+
+    try (MockedStatic<RequestContext> reqCtx = Mockito.mockStatic(RequestContext.class);
+        MockedStatic<OBDal> obDal = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxMock = Mockito.mockStatic(OBContext.class)) {
+      Map<String, String> params = new HashMap<>();
+      params.put("IsSOTrx", "N");
+      stubPaymentMethodSelectorRequest(reqCtx, params);
+
+      ArgumentCaptor<Criterion> captor = stubPaymentMethodCriteria(obDal, Collections.emptyList());
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertNotNull(response);
+      assertEquals(200, response.getHttpStatus());
+      List<String> rendered = renderedCriteria(captor);
+      assertTrue("expected a payoutAllow filter, got: " + rendered,
+          rendered.stream().anyMatch(s -> s.toLowerCase().contains("payoutallow")));
+      assertFalse("must not filter on payinAllow for a purchase document, got: " + rendered,
+          rendered.stream().anyMatch(s -> s.toLowerCase().contains("payinallow")));
+    }
+  }
+
+  /**
+   * Non-selector requests are completely unaffected by the new SELECTOR branch (no-regression).
+   */
+  @Test
+  public void testHandleStillReturnsNullForNonSelectorRequestAfterPaymentMethodWiring() {
+    NeoContext ctx = NeoContext.builder().httpMethod("GET").endpointType(NeoEndpointType.CRUD).build();
+    assertNull(handler.handle(ctx));
   }
 }

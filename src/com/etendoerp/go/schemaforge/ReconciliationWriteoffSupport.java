@@ -103,7 +103,13 @@ final class ReconciliationWriteoffSupport {
       if (StringUtils.isBlank(scheduleId)) {
         continue;
       }
-      FIN_PaymentSchedule schedule = OBDal.getInstance().get(FIN_PaymentSchedule.class, scheduleId);
+      // Tenant-guarded, and it has to be guarded HERE rather than relying on the loadOwned in
+      // ReconciliationFlowSupport: the write-off limit is asserted BEFORE the payment is created, so
+      // this read runs first. Unguarded, a foreign scheduleId got its outstanding amount added to
+      // the total, and the "exceeds the write-off limit (N)" rejection then reported N — leaking the
+      // exact pending amount of another tenant's invoice instalment (ETP-4950).
+      FIN_PaymentSchedule schedule =
+          TenantOwnership.loadOwned(FIN_PaymentSchedule.class, scheduleId);
       if (schedule != null) {
         total = total.add(nullSafeAmount(schedule.getOutstandingAmount()).abs());
       }

@@ -243,7 +243,8 @@ class ProductPriceHandlerTest {
         "$",                           // [11] currency_symbol
         "USD",                         // [12] currency_iso
         "Y",                           // [13] is_default (pl.isdefault)
-        java.sql.Date.valueOf("2026-01-01") // [14] valid_from_date (plv.validfrom)
+        java.sql.Date.valueOf("2026-01-01"), // [14] valid_from_date (plv.validfrom)
+        "2026-08-15 10:30:00.123456"   // [15] updated (raw Postgres timestamp)
     };
     List<Object[]> rows = Collections.singletonList(row);
     when(nativeQuery.list()).thenReturn(rows);
@@ -282,6 +283,9 @@ class ProductPriceHandlerTest {
     assertTrue(item.getBoolean("priceListVersion$default"));
     assertEquals(String.valueOf(java.sql.Date.valueOf("2026-01-01")), item.getString("priceListVersion$validFromDate"));
     assertEquals("PricingProductPrice", item.getString("_entityName"));
+    // ETP-5203: updated (row[15]) must be present so PUT/PATCH can echo it back
+    // for the mandatory optimistic-concurrency check (missing_updated regression).
+    assertEquals("2026-08-15T10:30:00", item.getString("updated"));
   }
 
   /**
@@ -333,7 +337,8 @@ class ProductPriceHandlerTest {
         "S", "N", "Purchase Price List",                             // [7-9]
         "product-456 - Purchase Q1", null, "EUR",                    // [10-12]
         "N",                                                          // [13] is_default
-        null                                                          // [14] valid_from_date (null)
+        null,                                                         // [14] valid_from_date (null)
+        "2026-08-15 10:30:00.123456"                                 // [15] updated
     };
     when(nativeQuery.list()).thenReturn(Collections.singletonList(row));
 
@@ -367,7 +372,8 @@ class ProductPriceHandlerTest {
         BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,           // [4-6]
         "W", "Y", "PL Name", "ident", "$", "USD",                   // [7-12]
         "N",                                                          // [13] is_default
-        null                                                          // [14] valid_from_date (null)
+        null,                                                         // [14] valid_from_date (null)
+        "2026-08-15 10:30:00.123456"                                 // [15] updated
     };
     when(nativeQuery.list()).thenReturn(Collections.singletonList(row));
 
@@ -404,7 +410,8 @@ class ProductPriceHandlerTest {
         "S", "Y", "PL Default Test",                                      // [7-9]
         "product-defaults - PLV Default Test", "$", "USD",                // [10-12]
         "N",                                                               // [13] is_default = false
-        null                                                               // [14] valid_from_date = null
+        null,                                                              // [14] valid_from_date = null
+        "2026-08-15 10:30:00.123456"                                      // [15] updated
     };
     List<Object[]> rows = Collections.singletonList(row);
     when(nativeQuery.list()).thenReturn(rows);
@@ -445,7 +452,8 @@ class ProductPriceHandlerTest {
         "S", "Y", "PL True Test",                                          // [7-9]
         "product-default-true - PLV True Test", null, "EUR",               // [10-12]
         "Y",                                                                // [13] is_default = true
-        validFrom                                                           // [14] valid_from_date
+        validFrom,                                                          // [14] valid_from_date
+        "2026-08-15 10:30:00.123456"                                       // [15] updated
     };
     List<Object[]> rows = Collections.singletonList(row);
     when(nativeQuery.list()).thenReturn(rows);

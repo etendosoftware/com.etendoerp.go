@@ -16,7 +16,7 @@ on:
     paths:
       - "src-db/database/sourcedata/ETGO_SF_*.xml"
   push:
-    branches: [main, develop, "epic/**", "feature/ETP-3993"]
+    branches: [main, develop]
     paths:
       - "src-db/database/sourcedata/ETGO_SF_*.xml"
   workflow_dispatch:
@@ -48,7 +48,6 @@ jobs:
 
           case "$GIT_BRANCH" in
             hotfix/*)  FALLBACK="$MAIN_BRANCH" ;;
-            feature/*) FALLBACK="epic/ETP-3504" ;;
             *)         FALLBACK="$DEVELOP_BRANCH" ;;
           esac
           echo "FALLBACK=$FALLBACK" >> "$GITHUB_OUTPUT"

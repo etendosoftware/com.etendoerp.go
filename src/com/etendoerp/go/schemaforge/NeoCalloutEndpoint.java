@@ -107,6 +107,7 @@ class NeoCalloutEndpoint {
       if (calloutResult.getHttpStatus() == 200 && calloutResult.getBody() != null) {
         applyCascade(neoContext, tab, requestBody, calloutResult);
         applyAfterCalloutHook(neoContext, sfEntity, calloutResult);
+        stripReadOnlyOnCreateFields(sfEntity, tab, calloutResult);
       }
       return calloutResult;
     } catch (Exception e) {
@@ -128,6 +129,24 @@ class NeoCalloutEndpoint {
       mergeCalloutResponse(calloutResult.getBody(), cascade.toJSON());
       log.debug("[NEO-CALLOUT] Cascade merged additional fields into response");
     }
+  }
+
+  /**
+   * Strips fields the entity's {@link NeoFieldFilter} would reject as read-only-on-create
+   * (ETP-4917) from the final, fully-merged callout response, so the frontend never echoes a
+   * server-computed read-only field (e.g. {@code debit}/{@code credit} on a G/L journal line)
+   * back into a subsequent create request. Generic across every entity/window — reuses the same
+   * {@link NeoFieldFilter#forEntity} resolution {@link NeoCrudHandler} uses for the real write,
+   * so a field is stripped here if and only if writing it back would be rejected there. See
+   * {@link NeoFieldFilter#filterCalloutResponse} for why this is also safe when the callout
+   * precedes an update rather than a create.
+   */
+  private void stripReadOnlyOnCreateFields(SFEntity sfEntity, Tab tab, NeoResponse calloutResult) {
+    if (tab.getTable() == null) {
+      return;
+    }
+    NeoFieldFilter fieldFilter = NeoFieldFilter.forEntity(sfEntity, tab.getTable().getName());
+    fieldFilter.filterCalloutResponse(calloutResult.getBody());
   }
 
   private void applyAfterCalloutHook(NeoContext neoContext, SFEntity sfEntity,

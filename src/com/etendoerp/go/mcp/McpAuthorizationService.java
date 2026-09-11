@@ -24,7 +24,9 @@ import java.util.Set;
 import org.openbravo.base.exception.OBSecurityException;
 
 /**
- * Enforces MCP tool authorization at execution time.
+ * Enforces MCP tool authorization at execution time. Legacy browser JWT sessions
+ * receive the broad MCP scope set only after JWT validation; role/window access
+ * remains the authoritative operation-level permission check.
  */
 final class McpAuthorizationService {
 
@@ -75,11 +77,18 @@ final class McpAuthorizationService {
       case "neo_schema":
       case "docs":
       case McpConstants.TOOL_NEO_WIDGET:
+      case McpConstants.TOOL_NEO_VECTOR_SEARCH:
         return SCOPE_READ;
       case "neo_create":
       case "neo_update":
       case "neo_delete":
       case "neo_action":
+      // ETP-5184: all three image-upload tools are write-tier. The two upload tools create an
+      // AD_Image row; the status lookup is bundled with them deliberately — it is a step of the
+      // write flow and has nothing to offer a read-only session.
+      case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
+      case McpConstants.TOOL_NEO_UPLOAD_IMAGE:
+      case McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD:
         return SCOPE_WRITE;
       default:
         return toolName.startsWith(McpConstants.GENERATE_PREFIX)

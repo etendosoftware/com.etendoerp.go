@@ -17,9 +17,11 @@
 
 package com.etendoerp.go.schemaforge.email.contracts;
 
+import com.etendoerp.go.schemaforge.email.EmailDocumentDetail;
 import com.etendoerp.go.schemaforge.email.EmailDocumentRecord;
 import com.etendoerp.go.schemaforge.email.EmailDocumentRecordResolver;
 
+import java.util.Arrays;
 import java.util.Optional;
 
 import org.apache.commons.lang3.StringUtils;
@@ -64,6 +66,11 @@ final class DalShipmentEmailDocumentResolver implements EmailDocumentRecordResol
         shipment.getId(),
         shipment.getDocumentNo(),
         null,
-        shipment.getClient().getId()));
+        shipment.getClient().getId(),
+        // No total: a shipment carries no amount, which is why the record is built with a null one.
+        Arrays.asList(
+            EmailDocumentDetail.date("document.detail.movementDate", shipment.getMovementDate()),
+            EmailDocumentDetail.date("document.detail.shipDate", shipment.getShipDate()),
+            EmailDocumentDetail.date("document.detail.orderDate", shipment.getOrderDate()))));
   }
 }

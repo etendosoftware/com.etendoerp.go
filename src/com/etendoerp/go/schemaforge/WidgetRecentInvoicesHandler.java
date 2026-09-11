@@ -28,6 +28,7 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.model.ad.access.Role;
 
 /**
  * NeoHandler that returns the 5 most recent completed sales invoices for the requested date range.
@@ -44,6 +45,14 @@ public class WidgetRecentInvoicesHandler implements NeoHandler {
   public NeoResponse handle(NeoContext context) {
     if (!"GET".equals(context.getHttpMethod())) {
       return NeoResponse.error(405, "Method not allowed");
+    }
+
+    // ETP-5088 — role gate. Resolved BEFORE admin mode below, which exists only to bypass
+    // row-level security on the query, never to decide access. Denied returns an empty payload
+    // rather than a 403 (see WidgetAccessPolicy): these ARE sales invoices.
+    Role role = WidgetAccessPolicy.currentRole();
+    if (!WidgetAccessPolicy.canRead(role, WidgetAccessPolicy.WINDOW_SALES_INVOICE)) {
+      return WidgetQueryHelper.buildEmptyDataResponse();
     }
 
     WidgetQueryPolicyRegistry.WidgetQueryPolicy policy = WidgetQueryPolicyRegistry.recentInvoices();

@@ -251,6 +251,169 @@ class AgingReportHandlerTest {
     }
 
     /**
+     * ETP-5116: GET's gate must branch on {@code recOrPay} too, not just POST's. Before this fix,
+     * GET always hardcoded the receivables process id, so a role granted ONLY the payables
+     * process got a 403 on the side-agnostic {@code describeReport} call — even though that call
+     * returns no real financial data (static parameter descriptions) and the role legitimately
+     * has access to the side it actually asked for via the {@code recOrPay} query param.
+     */
+    @Test
+    @DisplayName("GET with recOrPay=PAYABLES query param succeeds for a payables-only role")
+    void getWithPayablesQueryParamSucceedsForPayablesOnlyRole() {
+      try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+        accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(
+                "0D37A9F6109549DEB058373EF2DAEB6A"))
+            .thenReturn(false);
+        accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(
+                "EB4C4053F3B94A17A08D1DD7E89CEB7E"))
+            .thenReturn(true);
+
+        NeoContext ctx = NeoContext.builder().httpMethod("GET")
+            .queryParams(java.util.Map.of("recOrPay", "PAYABLES"))
+            .build();
+        NeoResponse result = handler.handle(ctx);
+
+        assertEquals(200, result.getHttpStatus());
+        JSONObject body = result.getBody();
+        assertNotNull(body);
+        assertTrue(body.has("parameters"));
+      }
+    }
+
+    /**
+     * ETP-5116: the "absent → RECEIVABLES" default must be preserved for GET exactly as it is for
+     * POST — a bare GET with no {@code recOrPay} query param must still resolve to the receivables
+     * process and succeed for a receivables-only role.
+     */
+    @Test
+    @DisplayName("GET with no recOrPay query param still defaults to receivables")
+    void getWithNoQueryParamDefaultsToReceivables() {
+      try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+        accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(
+                "0D37A9F6109549DEB058373EF2DAEB6A"))
+            .thenReturn(true);
+        accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(
+                "EB4C4053F3B94A17A08D1DD7E89CEB7E"))
+            .thenReturn(false);
+
+        NeoContext ctx = NeoContext.builder().httpMethod("GET").build();
+        NeoResponse result = handler.handle(ctx);
+
+        assertEquals(200, result.getHttpStatus());
+        JSONObject body = result.getBody();
+        assertNotNull(body);
+        assertTrue(body.has("parameters"));
+      }
+    }
+
+    /**
+     * ETP-5116: symmetric denial case — a GET explicitly asking for {@code recOrPay=PAYABLES} via
+     * the query param must still be denied for a role that only has the RECEIVABLES grant. This is
+     * what proves the fix does not accidentally widen access: consulting the query param must gate
+     * on the side actually requested, not fall back to "any aging grant will do".
+     */
+    @Test
+    @DisplayName("GET with recOrPay=PAYABLES query param is still denied for a receivables-only role")
+    void getWithPayablesQueryParamDeniedForReceivablesOnlyRole() {
+      try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class)) {
+        accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(
+                "0D37A9F6109549DEB058373EF2DAEB6A"))
+            .thenReturn(true);
+        accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(
+                "EB4C4053F3B94A17A08D1DD7E89CEB7E"))
+            .thenReturn(false);
+
+        NeoContext ctx = NeoContext.builder().httpMethod("GET")
+            .queryParams(java.util.Map.of("recOrPay", "PAYABLES"))
+            .build();
+        NeoResponse result = handler.handle(ctx);
+
+        assertEquals(403, result.getHttpStatus());
+      }
+    }
+
+    /**
+     * ETP-5116: the access gate must branch on {@code recOrPay} instead of always checking the
+     * receivables process. A role with ONLY the payables OBUIAPP process-access grant must be
+     * denied on a receivables request (the default when {@code recOrPay} is omitted) even though
+     * it does have access to the OTHER process — proving the gate does not fall back to "any
+     * aging process grant will do".
+     */
+    @Test
+    @DisplayName("Receivables request denied for a role with only payables process access")
+    void receivablesRequestDeniedForPayablesOnlyRole() throws Exception {
+      try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+           MockedConstruction<AgingDao> daoConstruction = mockConstruction(AgingDao.class)) {
+        accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(
+                "0D37A9F6109549DEB058373EF2DAEB6A"))
+            .thenReturn(false);
+        accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(
+                "EB4C4053F3B94A17A08D1DD7E89CEB7E"))
+            .thenReturn(true);
+
+        JSONObject body = new JSONObject();
+        body.put("recOrPay", "RECEIVABLES");
+        NeoResponse result = handler.handle(
+            NeoContext.builder().httpMethod("POST").requestBody(body).build());
+
+        assertEquals(403, result.getHttpStatus());
+        assertTrue(daoConstruction.constructed().isEmpty());
+      }
+    }
+
+    /**
+     * ETP-5116: symmetric case — a payables request (POST body {@code recOrPay=PAYABLES}) must
+     * be gated on the payables process id, not the receivables one. Before this fix, the gate was
+     * hardcoded to the receivables process id regardless of {@code recOrPay}, so a role with only
+     * the RECEIVABLES grant could reach the payables report undetected — this proves that no
+     * longer happens: access is granted only when the PAYABLES process id itself is checked.
+     */
+    @Test
+    @DisplayName("Payables request is gated on the payables process id, not receivables")
+    void payablesRequestGatedOnPayablesProcessId() throws Exception {
+      try (MockedStatic<NeoAccessHelper> accessMock = mockStatic(NeoAccessHelper.class);
+           MockedStatic<FIN_Utility> paymentStatusMock = mockStatic(FIN_Utility.class);
+           MockedStatic<OBContext> contextMock = mockStatic(OBContext.class);
+           MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+           MockedConstruction<OrganizationStructureProvider> orgProviderConstruction =
+               mockConstruction(OrganizationStructureProvider.class, (provider, ignored) ->
+                   when(provider.getChildTree("org-id", true))
+                       .thenReturn(Collections.singleton("org-id")))) {
+        accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(
+                "0D37A9F6109549DEB058373EF2DAEB6A"))
+            .thenReturn(false);
+        accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(
+                "EB4C4053F3B94A17A08D1DD7E89CEB7E"))
+            .thenReturn(true);
+        paymentStatusMock.when(FIN_Utility::getListPaymentConfirmed)
+            .thenReturn(Collections.singletonList("RPR"));
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        Organization org = mock(Organization.class);
+        when(dal.get(Organization.class, "org-id")).thenReturn(org);
+        // No accounting schema resolvable — the request is expected to stop at the 422 for that,
+        // which is enough to prove the 403 gate was cleared (a denied gate would have stopped at
+        // 403 instead, before ever reaching this far).
+        when(org.getGeneralLedger()).thenReturn(null);
+        @SuppressWarnings("unchecked")
+        OBQuery<AcctSchema> schemaQuery = mock(OBQuery.class);
+        when(dal.createQuery(eq(AcctSchema.class), anyString())).thenReturn(schemaQuery);
+        when(schemaQuery.setNamedParameter(anyString(), anyString())).thenReturn(schemaQuery);
+        when(schemaQuery.setMaxResult(1)).thenReturn(schemaQuery);
+        when(schemaQuery.uniqueResult()).thenReturn(null);
+
+        JSONObject body = new JSONObject();
+        body.put("recOrPay", "PAYABLES");
+        body.put("orgId", "org-id");
+        NeoResponse result = handler.handle(
+            NeoContext.builder().httpMethod("POST").requestBody(body).build());
+
+        assertEquals(422, result.getHttpStatus());
+        assertEquals("accounting_schema_unresolved", result.getBody().getString("error"));
+      }
+    }
+
+    /**
      * AgingDao creates a HashSet from the payment statuses returned by FIN_Utility. A null
      * status collection is a missing server prerequisite, not an invalid MCP parameter, and
      * must therefore be reported before the DAO is constructed.

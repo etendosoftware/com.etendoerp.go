@@ -657,6 +657,40 @@ public class VerifactuConfigReadyHandlerTest {
   }
 
   @Test
+  public void markReadyIfNeededHaltsGuardWhenIsReadyComesBackAsCharacter() {
+    // Regression test for the Character/String comparison bug: some JDBC drivers return a
+    // single-char CHAR(1) column as java.lang.Character rather than java.lang.String. A naive
+    // "Y".equals(currentState[0]) is always false in that case, so the guard never halts and
+    // SET_READY_SQL re-runs on every save, clobbering the real adoption date. This test
+    // simulates that driver behavior directly and asserts the guard DOES halt.
+    VerifactuConfigReadyHandler handler = new VerifactuConfigReadyHandler();
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      Session session = mock(Session.class);
+      when(dal.getSession()).thenReturn(session);
+
+      @SuppressWarnings("rawtypes")
+      NativeQuery nqSelect = mock(NativeQuery.class);
+      when(session.createNativeQuery(Mockito.contains("SELECT"))).thenReturn(nqSelect);
+      when(nqSelect.setParameter(Mockito.anyString(), Mockito.any())).thenReturn(nqSelect);
+      // is_ready comes back as Character('Y'), not String "Y" — reproduces the driver behavior
+      // that triggered the original bug. in_vfactu_system is non-null (already adopted).
+      when(nqSelect.uniqueResult()).thenReturn(
+          new Object[] { Character.valueOf('Y'), java.sql.Timestamp.valueOf("2026-01-01 00:00:00") });
+
+      handler.markReadyIfNeeded(RECORD_ID);
+
+      // The guard must halt here: no UPDATE should run and the real adoption date must be
+      // left untouched.
+      verify(session, never()).createNativeQuery(Mockito.contains("UPDATE"));
+      verify(dal, never()).flush();
+    }
+  }
+
+  @Test
   public void markReadyIfNeededSkipsWhenRecordNotFound() {
     VerifactuConfigReadyHandler handler = new VerifactuConfigReadyHandler();
 

@@ -26,8 +26,11 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Method;
 import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.HashMap;
@@ -44,15 +47,22 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.mockito.MockedStatic;
 import org.mockito.junit.MockitoJUnitRunner;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
+import org.openbravo.model.financialmgmt.gl.GLItem;
+import org.openbravo.model.financialmgmt.gl.GLItemAccounts;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
 /**
  * Unit tests for {@link ChartOfAccountsHandler}.
@@ -66,6 +76,7 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * {@link ChartOfAccountsHandler#applyIsLeaf applyIsLeaf},
  * {@link ChartOfAccountsHandler#applyYtdBalances applyYtdBalances},
  * {@link ChartOfAccountsHandler#collectIds collectIds},
+ * {@code toAccountJson} (via reflection — private static, see ETP-4884 regression tests),
  * and handler routing / annotation contracts.
  *
  * <p>Methods that require OBDal ({@code loadTreeData}, {@code computeYtdBalances},
@@ -147,6 +158,121 @@ public class ChartOfAccountsHandlerTest {
     assertNull(handler.handle(ctx));
   }
 
+  // ── validateSave() — duplicate searchKey on create (ETP-5101) ──────────────
+  //
+  // The duplicate-code check itself is inlined into validateSave (not a separate method,
+  // java:S1448 — this class was already at the Sonar method-count limit), so these two
+  // tests drive it through handle() rather than calling a private method directly,
+  // mirroring the rest of this file's black-box style for validateSave-adjacent
+  // behaviour (see the class javadoc note re: validateSave being otherwise excluded as
+  // "integration-test territory" — these two cases only need OBDal/OBContext mocks, not a
+  // real Hibernate session, since OBCriteria itself is mocked).
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void handleReturnsConflictWhenSearchKeyAlreadyExistsOnCreate() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    JSONObject body = new JSONObject().put("searchKey", "20000005");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    OBContext obCtx = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(obCtx.getCurrentClient()).thenReturn(client);
+    when(ctx.getObContext()).thenReturn(obCtx);
+
+    ElementValue existing = mock(ElementValue.class);
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<ElementValue> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(ElementValue.class)).thenReturn(criteria);
+    when(criteria.uniqueResult()).thenReturn(existing);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse resp = handler.handle(ctx);
+
+      assertNotNull("a duplicate searchKey must be rejected", resp);
+      assertEquals(409, resp.getHttpStatus());
+      assertEquals("Account 20000005 already exists.",
+          resp.getBody().getJSONObject("error").getString("message"));
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void handleReturnsConflictWhenSearchKeyMatchesInactiveExistingAccountOnCreate() throws Exception {
+    // ETP-5101 regression: OBCriteria defaults to active-only filtering. Without
+    // setFilterOnActive(false) on the duplicate-searchKey lookup, an INACTIVE ElementValue
+    // already using this code would be invisible to this pre-check, so the POST would silently
+    // pass validation and only fail later on the raw DB unique constraint (or a generic error)
+    // instead of the intended 409 "Account %s already exists." contract. This mock does not
+    // itself filter by active — it proves the code asks OBCriteria not to.
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    JSONObject body = new JSONObject().put("searchKey", "20000007");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    OBContext obCtx = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(obCtx.getCurrentClient()).thenReturn(client);
+    when(ctx.getObContext()).thenReturn(obCtx);
+
+    ElementValue existingInactive = mock(ElementValue.class); // isActive() defaults to false
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<ElementValue> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(ElementValue.class)).thenReturn(criteria);
+    when(criteria.uniqueResult()).thenReturn(existingInactive);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse resp = handler.handle(ctx);
+
+      assertNotNull("a searchKey matching an INACTIVE existing account must still be rejected as a duplicate",
+          resp);
+      assertEquals(409, resp.getHttpStatus());
+      assertEquals("Account 20000007 already exists.",
+          resp.getBody().getJSONObject("error").getString("message"));
+    }
+
+    verify(criteria).setFilterOnActive(false);
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void handleReturnsNullWhenSearchKeyIsNotDuplicateOnCreate() throws Exception {
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    JSONObject body = new JSONObject().put("searchKey", "20000006");
+    when(ctx.getRequestBody()).thenReturn(body);
+
+    OBContext obCtx = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(obCtx.getCurrentClient()).thenReturn(client);
+    when(ctx.getObContext()).thenReturn(obCtx);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<ElementValue> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(ElementValue.class)).thenReturn(criteria);
+    when(criteria.uniqueResult()).thenReturn(null); // no existing account with this code
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      // Falls through to the default CRUD handler — format/protected-code validations
+      // (covered by the other handleReturnsError*OnCreate tests above) still apply first.
+      // This test only proves the duplicate check itself does not block a genuinely new code.
+      assertNull(handler.handle(ctx));
+    }
+  }
+
   // ── afterHandle() routing ─────────────────────────────────────────────────
 
   @Test
@@ -178,56 +304,56 @@ public class ChartOfAccountsHandlerTest {
   @Test
   public void errInvalidCodeMessageIsInSpanish() {
     assertTrue("Error must be a user-facing Spanish message",
-        ChartOfAccountsHandler.ERR_INVALID_CODE.contains("8 dígitos"));
+        ChartOfAccountsSaveValidationSupport.ERR_INVALID_CODE.contains("8 dígitos"));
   }
 
   @Test
   public void errSummaryLockedMessageIsInSpanish() {
-    assertTrue(ChartOfAccountsHandler.ERR_SUMMARY_LOCKED.length() > 5);
+    assertTrue(ChartOfAccountsSaveValidationSupport.ERR_SUMMARY_LOCKED.length() > 5);
   }
 
   @Test
   public void errPrefixLockedMessageIsInSpanish() {
-    assertTrue(ChartOfAccountsHandler.ERR_PREFIX_LOCKED.length() > 5);
+    assertTrue(ChartOfAccountsSaveValidationSupport.ERR_PREFIX_LOCKED.length() > 5);
   }
 
   @Test
   public void errProtectedParentLikeSubaccountMessageIsInSpanish() {
     assertTrue("Error must mention protected parent-like subaccounts",
-        ChartOfAccountsHandler.ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT.contains("subcuentas padre"));
-    assertTrue(ChartOfAccountsHandler.ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT.contains("0000"));
+        ChartOfAccountsSaveValidationSupport.ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT.contains("subcuentas padre"));
+    assertTrue(ChartOfAccountsSaveValidationSupport.ERR_PROTECTED_PARENT_LIKE_SUBACCOUNT.contains("0000"));
   }
 
   // ── account code validation ────────────────────────────────────────────────
 
   @Test
   public void isValidAccountCodeAcceptsExactlyEightDigits() {
-    assertTrue(ChartOfAccountsHandler.isValidAccountCode("12345678"));
-    assertTrue(ChartOfAccountsHandler.isValidAccountCode("00000000"));
+    assertTrue(ChartOfAccountsSaveValidationSupport.isValidAccountCode("12345678"));
+    assertTrue(ChartOfAccountsSaveValidationSupport.isValidAccountCode("00000000"));
   }
 
   @Test
   public void isValidAccountCodeRejectsNullNonDigitsAndWrongLength() {
-    assertFalse(ChartOfAccountsHandler.isValidAccountCode(null));
-    assertFalse(ChartOfAccountsHandler.isValidAccountCode("1234567"));
-    assertFalse(ChartOfAccountsHandler.isValidAccountCode("123456789"));
-    assertFalse(ChartOfAccountsHandler.isValidAccountCode("1234A678"));
-    assertFalse(ChartOfAccountsHandler.isValidAccountCode(" 12345678"));
+    assertFalse(ChartOfAccountsSaveValidationSupport.isValidAccountCode(null));
+    assertFalse(ChartOfAccountsSaveValidationSupport.isValidAccountCode("1234567"));
+    assertFalse(ChartOfAccountsSaveValidationSupport.isValidAccountCode("123456789"));
+    assertFalse(ChartOfAccountsSaveValidationSupport.isValidAccountCode("1234A678"));
+    assertFalse(ChartOfAccountsSaveValidationSupport.isValidAccountCode(" 12345678"));
   }
 
   @Test
   public void isProtectedParentLikeSubaccountAcceptsEightDigitCodesEndingInFourZeros() {
-    assertTrue(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("10000000"));
-    assertTrue(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("10100000"));
-    assertTrue(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("99990000"));
+    assertTrue(ChartOfAccountsSaveValidationSupport.isProtectedParentLikeSubaccount("10000000"));
+    assertTrue(ChartOfAccountsSaveValidationSupport.isProtectedParentLikeSubaccount("10100000"));
+    assertTrue(ChartOfAccountsSaveValidationSupport.isProtectedParentLikeSubaccount("99990000"));
   }
 
   @Test
   public void isProtectedParentLikeSubaccountRejectsLeafCodesAndInvalidCodes() {
-    assertFalse(ChartOfAccountsHandler.isProtectedParentLikeSubaccount(null));
-    assertFalse(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("10000001"));
-    assertFalse(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("1000"));
-    assertFalse(ChartOfAccountsHandler.isProtectedParentLikeSubaccount("1000000A"));
+    assertFalse(ChartOfAccountsSaveValidationSupport.isProtectedParentLikeSubaccount(null));
+    assertFalse(ChartOfAccountsSaveValidationSupport.isProtectedParentLikeSubaccount("10000001"));
+    assertFalse(ChartOfAccountsSaveValidationSupport.isProtectedParentLikeSubaccount("1000"));
+    assertFalse(ChartOfAccountsSaveValidationSupport.isProtectedParentLikeSubaccount("1000000A"));
   }
 
   @Test
@@ -1071,6 +1197,454 @@ public class ChartOfAccountsHandlerTest {
 
   // NOTE: countChildren requires OBDal.getInstance().getSession() which is unavailable
   // in unit tests. It is covered by integration tests in the full Etendo test suite.
+
+  // ── toAccountJson — ETP-4884: NativeQuery bpchar(1) columns are not always plain String ──
+
+  /**
+   * Regression coverage for ETP-4884.
+   *
+   * <p>Live evidence: for a real tenant, ALL 657 leaf accounts returned by
+   * {@code fetchElementValuesDirectly} came back with {@code "active": false} in the JSON
+   * response — with ZERO exceptions — while a direct DB query confirmed every one of those
+   * rows has {@code isactive = 'Y'} in Postgres. A 100%-always-false pattern with no
+   * correlation to any real data condition is the signature of {@code "Y".equals(row[6])}
+   * structurally never succeeding: Hibernate's native query ({@code NativeQuery<Object>},
+   * unnamed/generic result mapping) does not always hand back a plain {@code java.lang.String}
+   * for {@code bpchar(1)} columns like {@code isactive}/{@code issummary} — it may hand back a
+   * {@code Character} or another JDBC-driver-specific wrapper, against which
+   * {@code String.equals("Y")} is structurally always {@code false}.
+   *
+   * <p>{@code toAccountJson} already applied the correct defensive pattern
+   * ({@code String.valueOf(row[1])}) two lines below for
+   * {@code protectedParentLikeSubaccount} — these tests prove {@code summaryLevel} and
+   * {@code active} now get the same treatment.
+   */
+  /** Raw Postgres timestamp shape for {@code row[7]} ({@code updated}) — see ETP-5101. */
+  private static final String SAMPLE_UPDATED_RAW = "2026-09-02 14:30:00.123456";
+
+  /** Canonical ISO form {@link NeoDateFormat#toCanonical} produces for {@link #SAMPLE_UPDATED_RAW}. */
+  private static final String SAMPLE_UPDATED_CANONICAL = "2026-09-02T14:30:00";
+
+  private static Object[] rowWith(Object issummary, Object isactive) {
+    return rowWith(issummary, isactive, SAMPLE_UPDATED_RAW);
+  }
+
+  /**
+   * ETP-5101: {@code toAccountJson} now reads an 8th column, {@code row[7]} ({@code updated}),
+   * mandatory for every PUT/PATCH by {@code NeoCrudHandler#validateUpdateRequest}
+   * (ETP-5073/DOC-04). {@code updated} lets a caller pass a specific raw value (including
+   * {@code null}) to exercise the {@link NeoDateFormat#toCanonical} formatting and its
+   * null-safety independently of the {@code summaryLevel}/{@code active} coverage above.
+   */
+  private static Object[] rowWith(Object issummary, Object isactive, Object updated) {
+    return new Object[]{"EV1", "10000001", "Test Account", null, null, issummary, isactive, updated};
+  }
+
+  private static JSONObject invokeToAccountJson(Object[] row) throws Exception {
+    Method method = ChartOfAccountsHandler.class.getDeclaredMethod("toAccountJson", Object[].class);
+    method.setAccessible(true);
+    return (JSONObject) method.invoke(null, (Object) row);
+  }
+
+  @Test
+  public void toAccountJsonHandlesPlainStringYValues() throws Exception {
+    JSONObject entry = invokeToAccountJson(rowWith("Y", "Y"));
+    assertTrue("summaryLevel must be true for a plain String \"Y\"", entry.getBoolean("summaryLevel"));
+    assertTrue("active must be true for a plain String \"Y\"", entry.getBoolean("active"));
+    // ETP-5101: row[7] (raw Postgres timestamp) must be reformatted through
+    // NeoDateFormat.toCanonical into the ISO wire shape NeoRecordVersion/JsonUtils parse back,
+    // not passed through verbatim — this is what let missing_updated PATCH/PUT requests through.
+    assertEquals("updated must be reformatted to the canonical ISO datetime via NeoDateFormat.toCanonical",
+        SAMPLE_UPDATED_CANONICAL, entry.getString("updated"));
+  }
+
+  @Test
+  public void toAccountJsonHandlesPlainStringNValues() throws Exception {
+    JSONObject entry = invokeToAccountJson(rowWith("N", "N"));
+    assertFalse(entry.getBoolean("summaryLevel"));
+    assertFalse(entry.getBoolean("active"));
+  }
+
+  @Test
+  public void toAccountJsonHandlesNonStringYValueViaCharacter() throws Exception {
+    // Reproduces the exact defect: row[5]/row[6] handed back as Character('Y') instead of
+    // String("Y") — a raw "Y".equals(row[N]) is structurally always false against this,
+    // regardless of the real isactive/issummary value in the database. String.valueOf(...)
+    // must correctly stringify it to "Y" so the comparison succeeds.
+    JSONObject entry = invokeToAccountJson(rowWith(Character.valueOf('Y'), Character.valueOf('Y')));
+    assertTrue("summaryLevel must be true when row[5] is a Character('Y'), not a String",
+        entry.getBoolean("summaryLevel"));
+    assertTrue("active must be true when row[6] is a Character('Y'), not a String",
+        entry.getBoolean("active"));
+  }
+
+  @Test
+  public void toAccountJsonHandlesNonStringNValueViaCharacter() throws Exception {
+    JSONObject entry = invokeToAccountJson(rowWith(Character.valueOf('N'), Character.valueOf('N')));
+    assertFalse(entry.getBoolean("summaryLevel"));
+    assertFalse(entry.getBoolean("active"));
+  }
+
+  /**
+   * ETP-5101: a {@code null} {@code row[7]} (record was never previously updated, or the raw
+   * value was unparseable) must produce {@code JSONObject.NULL} for {@code "updated"} — never
+   * throw, and never the literal string {@code "null"}.
+   */
+  @Test
+  public void toAccountJsonHandlesNullUpdatedValue() throws Exception {
+    JSONObject entry = invokeToAccountJson(rowWith("Y", "Y", null));
+    assertTrue("updated must be JSON null, not absent, when row[7] is null", entry.isNull("updated"));
+    assertEquals(JSONObject.NULL, entry.get("updated"));
+  }
+
+  /** A non-null {@code row[7]} shape {@link NeoDateFormat#toCanonical} cannot parse. */
+  private static final String SAMPLE_UPDATED_UNPARSEABLE = "not-a-real-timestamp";
+
+  /**
+   * ETP-5101 regression. {@code NeoDateFormat.toCanonical} returning {@code null} does not mean
+   * "no value" — per that class's own contract (see its class javadoc: "an input it does not
+   * recognise yields {@code null}, and every caller must then pass the original value through
+   * verbatim rather than blank it"), {@code toAccountJson} must fall back to the RAW {@code
+   * row[7]} string when canonicalization fails, never to {@code JSONObject.NULL}. Blanking it
+   * would leave a client with no {@code updated} token to echo back on its next PATCH/PUT,
+   * tripping the mandatory-{@code updated} concurrency guard ({@code missing_updated}) — the
+   * exact bug class ETP-5101 already fixed once, via a different code path (see {@link
+   * #toAccountJsonHandlesPlainStringYValues}).
+   */
+  @Test
+  public void toAccountJsonPassesThroughRawUpdatedWhenUnparseable() throws Exception {
+    JSONObject entry = invokeToAccountJson(rowWith("Y", "Y", SAMPLE_UPDATED_UNPARSEABLE));
+    assertEquals(
+        "an unparseable row[7] must be passed through verbatim as 'updated', not blanked to null",
+        SAMPLE_UPDATED_UNPARSEABLE, entry.getString("updated"));
+  }
+
+  // ── afterHandle() CRUD POST — ETP-5020 GL Item auto-provisioning (F) ───────
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void afterHandlePostProvisionsGlItemForNewSubaccount() throws Exception {
+    JSONArray dataArray = new JSONArray().put(new JSONObject().put("id", "EV-NEW"));
+    JSONObject responseJson = new JSONObject().put("data", dataArray);
+    JSONObject body = new JSONObject().put("response", responseJson);
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    ElementValue subaccount = mock(ElementValue.class);
+    Client client = mock(Client.class);
+    when(subaccount.getClient()).thenReturn(client);
+
+    AcctSchema schema = mock(AcctSchema.class);
+    AccountingCombination combo = mock(AccountingCombination.class);
+    GLItem glItem = mock(GLItem.class);
+    GLItemAccounts link = mock(GLItemAccounts.class);
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(ElementValue.class, "EV-NEW")).thenReturn(subaccount);
+
+    OBCriteria<AcctSchema> schemaCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AcctSchema.class)).thenReturn(schemaCrit);
+    when(schemaCrit.list()).thenReturn(Collections.singletonList(schema));
+
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(combo);
+    when(comboCrit.list()).thenReturn(Collections.emptyList());
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(null);
+
+    OBProvider obProviderInstance = mock(OBProvider.class);
+    when(obProviderInstance.get(GLItem.class)).thenReturn(glItem);
+    when(obProviderInstance.get(GLItemAccounts.class)).thenReturn(link);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class);
+        MockedStatic<OBProvider> obProviderStatic = mockStatic(OBProvider.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dal);
+      obProviderStatic.when(OBProvider::getInstance).thenReturn(obProviderInstance);
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNull("afterHandle keeps the original POST response (returns null)", result);
+      verify(dal).save(glItem);
+      verify(link).setGlitemDebitAcct(combo);
+      verify(link).setGlitemCreditAcct(combo);
+      verify(dal).save(link);
+      verify(dal).flush();
+    }
+  }
+
+  @Test
+  public void afterHandlePostSkipsWhenNoCreatedRecordId() {
+    JSONObject body = new JSONObject(); // no "response.data" at all
+    NeoResponse prevResult = mock(NeoResponse.class);
+    when(prevResult.getBody()).thenReturn(body);
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("POST");
+    when(ctx.getPreviousResult()).thenReturn(prevResult);
+
+    // No OBDal/OBContext mocking at all — if the handler tried to touch either without a
+    // resolvable created record id, this test would blow up with a real (unmocked) static call.
+    NeoResponse result = handler.afterHandle(ctx);
+    assertNull(result);
+  }
+
+  // ── afterHandle() CRUD PATCH/PUT — ETP-5020 GL Item active-state sync (G) ──
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void afterHandlePatchSyncsGlItemActiveStateWhenBodyTouchesActive() throws Exception {
+    assertAfterHandleSyncsGlItemActiveStateWhenBodyTouchesActive("PATCH");
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void afterHandlePutSyncsGlItemActiveStateWhenBodyTouchesActive() throws Exception {
+    assertAfterHandleSyncsGlItemActiveStateWhenBodyTouchesActive("PUT");
+  }
+
+  private void assertAfterHandleSyncsGlItemActiveStateWhenBodyTouchesActive(String httpMethod)
+      throws Exception {
+    JSONObject requestBody = new JSONObject().put("active", false);
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn(httpMethod);
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+    when(ctx.getRecordId()).thenReturn("EV-1");
+
+    ElementValue subaccount = mock(ElementValue.class);
+    Client client = mock(Client.class);
+    when(subaccount.getClient()).thenReturn(client);
+    when(subaccount.isActive()).thenReturn(false); // already-saved new state
+
+    AcctSchema schema = mock(AcctSchema.class);
+    AccountingCombination combo = mock(AccountingCombination.class);
+    GLItemAccounts link = mock(GLItemAccounts.class);
+    when(link.isActive()).thenReturn(true); // was active — must flip to false
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(ElementValue.class, "EV-1")).thenReturn(subaccount);
+
+    Session sessionMock = mock(Session.class);
+    when(dal.getSession()).thenReturn(sessionMock);
+
+    OBCriteria<AcctSchema> schemaCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AcctSchema.class)).thenReturn(schemaCrit);
+    when(schemaCrit.list()).thenReturn(Collections.singletonList(schema));
+
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(combo);
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(link);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNull(result);
+      // ETP-5101 (QA finding): pins the refresh() this method now performs BEFORE reading
+      // subaccount.isActive() — without it, deleting the refresh() call would not fail this test
+      // even though it reintroduces the stale-read bug (OBDal.get() returning the same managed
+      // instance the generic CRUD service just wrote to, without reflecting that write).
+      verify(sessionMock).refresh(subaccount);
+      verify(link).setActive(false);
+      verify(dal).save(link);
+      verify(dal).flush();
+    }
+  }
+
+  @Test
+  public void afterHandlePatchDoesNotTouchOBContextWhenBodyOmitsActive() {
+    JSONObject requestBody = new JSONObject(); // does not touch "active" at all
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+
+    try (MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      NeoResponse result = handler.afterHandle(ctx);
+      assertNull(result);
+      obCtxStatic.verify(() -> OBContext.setAdminMode(true), never());
+    }
+  }
+
+  // ── afterHandle() CRUD PATCH/PUT — ETP-5101 GL Item name resync (H) ────────
+  //
+  // syncGlItemNameAfterUpdate closes the gap where a subaccount rename via PUT/PATCH never
+  // propagated to its linked GL Item's name (only POST create did, via
+  // provisionGlItemAfterCreate — see the section above). It reuses
+  // GlItemProvisioningSupport#ensureGlItemForSubaccount, whose idempotent-rerun branch already
+  // resyncs the composed name for any schema with an existing link — that internal behavior is
+  // GlItemProvisioningSupportTest's territory, so these tests only prove the handler's own
+  // early-exit guards and that it reaches and wires the call correctly.
+
+  @Test
+  public void afterHandlePatchDoesNotTouchOBDalWhenBodyOmitsNameAndSearchKey() {
+    JSONObject requestBody = new JSONObject(); // touches neither name, searchKey, nor active
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+
+    try (MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNull(result);
+      // Both syncGlItemActiveState and syncGlItemNameAfterUpdate early-exit on their own cheap
+      // body check before ever touching OBContext/OBDal.
+      obCtxStatic.verify(() -> OBContext.setAdminMode(true), never());
+      obDalStatic.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
+  public void afterHandlePatchSkipsGlItemNameResyncWhenRecordIdIsNull() throws Exception {
+    JSONObject requestBody = new JSONObject().put("name", "Renamed Subaccount");
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+    when(ctx.getRecordId()).thenReturn(null);
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNull(result);
+      obDalStatic.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void afterHandlePutSkipsGlItemNameResyncWhenSubaccountNotFound() throws Exception {
+    JSONObject requestBody = new JSONObject().put("searchKey", "10000002");
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+    when(ctx.getRecordId()).thenReturn("EV-GONE");
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(ElementValue.class, "EV-GONE")).thenReturn(null); // record not found
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNull(result);
+      verify(dal).get(ElementValue.class, "EV-GONE");
+      verify(dal, never()).flush();
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void afterHandlePatchResyncsGlItemNameWhenBodyTouchesName() throws Exception {
+    JSONObject requestBody = new JSONObject().put("name", "Renamed Subaccount");
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("PATCH");
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+    when(ctx.getRecordId()).thenReturn("EV-1");
+
+    ElementValue subaccount = mock(ElementValue.class);
+    Client client = mock(Client.class);
+    when(subaccount.getClient()).thenReturn(client);
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(ElementValue.class, "EV-1")).thenReturn(subaccount);
+
+    Session sessionMock = mock(Session.class);
+    when(dal.getSession()).thenReturn(sessionMock);
+
+    OBCriteria<AcctSchema> schemaCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AcctSchema.class)).thenReturn(schemaCrit);
+    // No active schemas: ensureGlItemForSubaccount's own isEmpty() guard short-circuits before
+    // touching AccountingCombination/GLItemAccounts — this test only needs to prove the handler
+    // reaches and wires the call correctly, not GlItemProvisioningSupport's internals (already
+    // covered by GlItemProvisioningSupportTest).
+    when(schemaCrit.list()).thenReturn(Collections.emptyList());
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNull(result);
+      verify(dal).get(ElementValue.class, "EV-1");
+      // ETP-5101 (QA finding): pins the refresh() call — see the identical comment on
+      // assertAfterHandleSyncsGlItemActiveStateWhenBodyTouchesActive above for why this must be
+      // asserted, not just tolerated as a no-crash NPE fix.
+      verify(sessionMock).refresh(subaccount);
+      verify(dal).createCriteria(AcctSchema.class);
+      verify(dal).flush();
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void afterHandlePutResyncsGlItemNameWhenBodyTouchesSearchKey() throws Exception {
+    JSONObject requestBody = new JSONObject().put("searchKey", "10000003");
+
+    NeoContext ctx = mock(NeoContext.class);
+    when(ctx.getEndpointType()).thenReturn(NeoEndpointType.CRUD);
+    when(ctx.getHttpMethod()).thenReturn("PUT");
+    when(ctx.getRequestBody()).thenReturn(requestBody);
+    when(ctx.getRecordId()).thenReturn("EV-2");
+
+    ElementValue subaccount = mock(ElementValue.class);
+    Client client = mock(Client.class);
+    when(subaccount.getClient()).thenReturn(client);
+
+    OBDal dal = mock(OBDal.class);
+    when(dal.get(ElementValue.class, "EV-2")).thenReturn(subaccount);
+
+    Session sessionMock = mock(Session.class);
+    when(dal.getSession()).thenReturn(sessionMock);
+
+    OBCriteria<AcctSchema> schemaCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AcctSchema.class)).thenReturn(schemaCrit);
+    when(schemaCrit.list()).thenReturn(Collections.emptyList());
+
+    try (MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> obCtxStatic = mockStatic(OBContext.class)) {
+      obDalStatic.when(OBDal::getInstance).thenReturn(dal);
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNull(result);
+      verify(dal).get(ElementValue.class, "EV-2");
+      // ETP-5101 (QA finding): pins the refresh() call — see the identical comment on
+      // assertAfterHandleSyncsGlItemActiveStateWhenBodyTouchesActive above for why this must be
+      // asserted, not just tolerated as a no-crash NPE fix.
+      verify(sessionMock).refresh(subaccount);
+      verify(dal).flush();
+    }
+  }
 
   // ── helpers ───────────────────────────────────────────────────────────────
 

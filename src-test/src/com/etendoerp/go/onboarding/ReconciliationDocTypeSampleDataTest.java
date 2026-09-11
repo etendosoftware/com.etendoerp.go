@@ -119,13 +119,27 @@ public class ReconciliationDocTypeSampleDataTest {
         + " current counter", SEQUENCE_START, childText(sequence, "CURRENTNEXT"));
   }
 
-  /** Both tables have to be in the import contract, or the rows above never reach a tenant. */
+  /**
+   * Every table backing the rows above has to be in the import contract, or those rows never reach
+   * a tenant.
+   *
+   * <p>{@code C_DOCTYPE_TRL} was added to this assertion by ETP-5079, and the reason is a warning
+   * worth keeping: it was MISSING from {@code INCLUDED_TABLES} while
+   * {@link #testTheDocumentTypeIsTranslated()} right below happily asserted that the dataset ships
+   * the es_ES translation. Both tests were green throughout, and every freshly onboarded tenant
+   * still landed with 49 document types and ZERO translations — the document types rendered in
+   * English in the UI. Shipping a row and importing it are two different claims; this class has to
+   * make both, for every file it reads.</p>
+   */
   @Test
-  public void testBothTablesAreImportedAtOnboarding() {
+  public void testTheRequiredTablesAreImportedAtOnboarding() {
     assertTrue("C_DOCTYPE must be an included table",
         OnboardingDatasetDefinition.getIncludedTables().contains("C_DOCTYPE"));
     assertTrue("AD_SEQUENCE must be an included table",
         OnboardingDatasetDefinition.getIncludedTables().contains("AD_SEQUENCE"));
+    assertTrue("C_DOCTYPE_TRL must be an included table — without it the translations asserted by"
+            + " testTheDocumentTypeIsTranslated() never reach the tenant (ETP-5079)",
+        OnboardingDatasetDefinition.getIncludedTables().contains("C_DOCTYPE_TRL"));
   }
 
   /** The document type is translated in both shipped languages, like every other one. */

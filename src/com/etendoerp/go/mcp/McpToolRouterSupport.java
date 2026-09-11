@@ -158,6 +158,20 @@ final class McpToolRouterSupport {
   }
 
   /**
+   * Tells whether a tab is a spec's primary (header-level) one.
+   *
+   * <p>Same criterion {@link #resolvePrimaryEntityName(List)} applies, expressed for a caller that
+   * already holds the tab and must not pay for a second query to learn it — {@code neo_get} and
+   * {@code neo_create} deciding whether the record has an app page of its own (ETP-5200).</p>
+   *
+   * @param tab the AD tab backing the addressed entity
+   * @return true when the tab is at level 0
+   */
+  static boolean isPrimaryTab(Tab tab) {
+    return tab != null && tab.getTabLevel() != null && tab.getTabLevel() == 0;
+  }
+
+  /**
    * Resolve the root ("header") entity of a window spec for {@code neo_discover} (IMP-9), so an
    * agent knows which entity to create first without calling {@code neo_schema} on each one.
    * <p>

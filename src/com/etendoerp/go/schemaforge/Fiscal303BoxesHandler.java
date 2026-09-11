@@ -24,6 +24,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 
 import javax.servlet.http.HttpServletRequest;
@@ -112,6 +113,24 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
   @Override
   protected boolean allowsPost(String entityName) {
     return SUBMIT.equals(entityName);
+  }
+
+  /**
+   * {@code submit} files the declaration with the AEAT, so it is POST-only — the same treatment
+   * {@code /fiscal349/validate-vies} already gets. {@code boxes}, {@code generate} and
+   * {@code modified} are reads and stay on GET.
+   *
+   * <p>ETP-5027 (QA F7): {@code submit} was listed in {@link #isKnownEntity} and accepted by
+   * {@link #allowsPost}, but {@code allowsGet} was never overridden, so the base default of
+   * {@code true} let a GET through the method check straight into a real AEAT filing. See
+   * {@link AbstractFiscalHandler#allowsGet} for why a side-effecting GET is unacceptable here
+   * (history/cache/log exposure, client and proxy auto-retry, and plain HTTP semantics) — the
+   * reason is NOT a drive-by or CSRF vector, which the Bearer-token requirement already rules
+   * out.
+   */
+  @Override
+  protected boolean allowsGet(String entityName) {
+    return !SUBMIT.equals(entityName);
   }
 
   @Override
@@ -227,19 +246,45 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
   // ── Package-private helpers (tested directly) ─────────────────────────────
 
   /**
+   * The 7 AEAT letter codes the frontend's {@code TIPO_DECLARACION_FIELD} (fm303Layouts.js)
+   * actually offers as selectable options — {@code C, D, I, U, N, V, X}, including {@code N}
+   * ("Resultado cero"/sin actividad, a genuine, deliberate selection, not merely an internal
+   * fallback value) — plus the legacy {@code G} alias accepted here since before ETP-5187 for
+   * backward compatibility with any caller still using it, even though the current frontend
+   * never sends it.
+   */
+  private static final Set<String> VALID_DECL_TYPES =
+      Set.of("C", "D", "I", "U", "N", "V", "X", "G");
+
+  /**
    * Maps a frontend AEAT letter code to the declaration type used by
-   * {@code AEAT303_Utility.getCheckedInputParameter}. Accepted codes: C, D, I, U, V, X, G —
-   * all 7 options the frontend's {@code TIPO_DECLARACION_FIELD} exposes, each backed by its own
-   * {@code Declaration_<letter>} search key in
-   * {@code 303_Report_Tax_Parameters.xml} (org.openbravo.module.aeat303.es).
-   * Anything else (null, empty, unknown alias) falls back to "N" (zero result).
+   * {@code AEAT303_Utility.getCheckedInputParameter}, each backed by its own
+   * {@code Declaration_<letter>} search key in {@code 303_Report_Tax_Parameters.xml}
+   * (org.openbravo.module.aeat303.es).
+   *
+   * <p>ETP-5187 hardening: before this fix, a null/blank/unrecognized {@code tipo} silently
+   * collapsed onto {@code "N"} here — the EXACT same code path a deliberate {@code "N"}
+   * selection took, so a missing declaration type was indistinguishable from "Sin actividad" and
+   * a malformed/missing value from a direct or malformed API call was never rejected; it always
+   * looked like a valid zero-result declaration downstream. Now only a code in
+   * {@link #VALID_DECL_TYPES} is accepted (including {@code "N"}, unchanged); anything else
+   * throws so the caller can turn it into a clean 400 instead. The frontend
+   * (FmModel303Page.jsx's required-field gate) already blocks "Generar fichero"/"Marcar como
+   * Presentado" while {@code tipo_declaracion} is unset, so this is defense-in-depth, not the
+   * primary guard.</p>
+   *
+   * @throws IllegalArgumentException if {@code tipo} is null, blank, or not one of
+   *     {@link #VALID_DECL_TYPES}
    */
   static String resolveDeclType(String tipo) {
-    if ("C".equals(tipo) || "D".equals(tipo) || "I".equals(tipo) || "U".equals(tipo)
-        || "V".equals(tipo) || "X".equals(tipo) || "G".equals(tipo)) {
+    if (tipo != null && VALID_DECL_TYPES.contains(tipo)) {
       return tipo;
     }
-    return "N";
+    // Message lists a fixed, deterministic order — VALID_DECL_TYPES is a Set.of(...), whose
+    // iteration order is unspecified across JVM runs.
+    throw new IllegalArgumentException(
+        "Missing or invalid declaration type (tipo_declaracion). "
+            + "Expected one of: C, D, I, U, N, V, X, G.");
   }
 
   // ── Internal ─────────────────────────────────────────────────────

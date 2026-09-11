@@ -113,6 +113,20 @@ public class ToolRegistryTest {
     assertTrue(ToolRegistry.isCrudTool("neo_batch"));
   }
 
+  /** The vector-search tool exposes the required query/targets contract and remains read-only. */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testVectorSearchToolSchema() {
+    McpToolDefinition tool = new ToolRegistry().buildVectorSearchTool();
+    assertEquals("neo_vector_search", tool.getName());
+    Map<String, Object> schema = tool.getInputSchema();
+    assertEquals(List.of("query", "targets"), schema.get("required"));
+    Map<String, Object> properties = (Map<String, Object>) schema.get("properties");
+    assertEquals("string", ((Map<String, Object>) properties.get("query")).get("type"));
+    assertEquals("array", ((Map<String, Object>) properties.get("targets")).get("type"));
+    assertEquals("number", ((Map<String, Object>) properties.get("minScore")).get("type"));
+  }
+
   /**
    * Tests the schema produced by buildBatchTool: required top-level 'operations' array,
    * with each item requiring id/spec/entity and supporting optional parentRef/body.

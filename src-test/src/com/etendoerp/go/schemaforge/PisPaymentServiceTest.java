@@ -437,11 +437,21 @@ class PisPaymentServiceTest {
   // validatePisEligibility tests
   // ========================================================================
 
-  private FIN_FinancialAccount connectedAccount() {
+  private FIN_FinancialAccount connectedAccount(String accountIsoCode) {
     FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
     when(account.getPSD2ConnectionStatus())
         .thenReturn(BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED);
+    if (accountIsoCode != null) {
+      Currency currency = mock(Currency.class);
+      when(currency.getISOCode()).thenReturn(accountIsoCode);
+      when(account.getCurrency()).thenReturn(currency);
+    }
     return account;
+  }
+
+  /** The common case: a connected account denominated in EUR. */
+  private FIN_FinancialAccount connectedAccount() {
+    return connectedAccount("EUR");
   }
 
   private FIN_PaymentMethod transferMethod() {
@@ -452,9 +462,11 @@ class PisPaymentServiceTest {
 
   private Invoice invoiceWithCurrency(String isoCode) {
     Invoice invoice = mock(Invoice.class);
-    Currency currency = mock(Currency.class);
-    when(currency.getISOCode()).thenReturn(isoCode);
-    when(invoice.getCurrency()).thenReturn(currency);
+    if (isoCode != null) {
+      Currency currency = mock(Currency.class);
+      when(currency.getISOCode()).thenReturn(isoCode);
+      when(invoice.getCurrency()).thenReturn(currency);
+    }
     return invoice;
   }
 
@@ -476,19 +488,56 @@ class PisPaymentServiceTest {
         connectedAccount(), method, invoiceWithCurrency("EUR")));
   }
 
+  /**
+   * The currency gate is on the ACCOUNT (ETP-5084): a CHF bank account cannot be instructed over
+   * PIS regardless of what the invoice is denominated in.
+   */
   @Test
-  void testValidatePisEligibilityThrowsWhenCurrencyUnsupported() {
+  void testValidatePisEligibilityThrowsWhenAccountCurrencyUnsupported() {
     assertThrows(OBException.class, () -> PisPaymentService.validatePisEligibility(
-        connectedAccount(), transferMethod(), invoiceWithCurrency("USD")));
+        connectedAccount("CHF"), transferMethod(), invoiceWithCurrency("EUR")));
   }
 
   @Test
-  void testValidatePisEligibilityPassesForEurTransfer() {
+  void testValidatePisEligibilityThrowsWhenAccountHasNoCurrency() {
+    assertThrows(OBException.class, () -> PisPaymentService.validatePisEligibility(
+        connectedAccount(null), transferMethod(), invoiceWithCurrency("EUR")));
+  }
+
+  /**
+   * Without an invoice currency the amount could not be converted to the account currency, and
+   * instructing the bank with an unconverted figure would move the wrong amount of money.
+   */
+  @Test
+  void testValidatePisEligibilityThrowsWhenInvoiceHasNoCurrency() {
+    assertThrows(OBException.class, () -> PisPaymentService.validatePisEligibility(
+        connectedAccount("EUR"), transferMethod(), invoiceWithCurrency(null)));
+  }
+
+  @Test
+  void testValidatePisEligibilityPassesForEveryEligibleAccountCurrency() {
+    for (String accountIso : new String[] { "EUR", "USD", "GBP" }) {
+      PisPaymentService.validatePisEligibility(
+          connectedAccount(accountIso), transferMethod(), invoiceWithCurrency(accountIso));
+    }
+  }
+
+  /**
+   * ETP-5084 — the case the ticket is about: a USD invoice paid from a connected EUR account. Before
+   * this change the gate read the INVOICE currency and rejected it outright ("only supported for EUR
+   * and GBP invoices"), even though the transfer is instructed in EUR after conversion.
+   */
+  @Test
+  void testValidatePisEligibilityPassesForForeignInvoiceOnEligibleAccount() {
     PisPaymentService.validatePisEligibility(
-        connectedAccount(), transferMethod(), invoiceWithCurrency("EUR"));
-    // No exception => eligible. Also confirm GBP (the other PIS-supported currency) passes.
+        connectedAccount("EUR"), transferMethod(), invoiceWithCurrency("USD"));
+  }
+
+  /** The mirror case: an EUR invoice paid from a connected GBP account. */
+  @Test
+  void testValidatePisEligibilityPassesForEurInvoiceOnGbpAccount() {
     PisPaymentService.validatePisEligibility(
-        connectedAccount(), transferMethod(), invoiceWithCurrency("GBP"));
+        connectedAccount("GBP"), transferMethod(), invoiceWithCurrency("EUR"));
   }
 
   // ========================================================================

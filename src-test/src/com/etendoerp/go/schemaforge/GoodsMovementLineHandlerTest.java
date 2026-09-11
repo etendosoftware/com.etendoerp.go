@@ -87,7 +87,7 @@ public class GoodsMovementLineHandlerTest {
 
   private static NeoContext postContext() {
     return NeoContext.builder()
-        .specName("goodsMovementLineHandler")
+        .specName("goods-movements")
         .entityName("movementLine")
         .httpMethod("POST")
         .build();
@@ -95,7 +95,7 @@ public class GoodsMovementLineHandlerTest {
 
   private static NeoContext patchContext(String recordId) {
     return NeoContext.builder()
-        .specName("goodsMovementLineHandler")
+        .specName("goods-movements")
         .entityName("movementLine")
         .httpMethod("PATCH")
         .recordId(recordId)

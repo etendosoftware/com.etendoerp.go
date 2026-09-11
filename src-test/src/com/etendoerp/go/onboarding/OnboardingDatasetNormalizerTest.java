@@ -146,12 +146,15 @@ public class OnboardingDatasetNormalizerTest {
   }
 
   /**
-   * Regression guard for ETP-4761 (gap I1): both bundled GOClient locators must ship with
+   * Regression guard for ETP-4761 (gap I1): every bundled GOClient locator must ship with
    * {@code M_INVENTORYSTATUS_ID = '2'} ("Available", {@code OVERISSUE='N'}) so a freshly onboarded
    * tenant cannot post negative stock from day one. The prior value, {@code '0'}
    * ("Undefined-OverIssue", {@code OVERISSUE='Y'}), is the root cause documented in
    * {@code docs/etendo-ad/onboarding-gaps.md} §I1 — assert it is gone, not merely that '2' appears,
-   * so a partial revert (only one of the two locators fixed) still fails this test.
+   * so a partial revert still fails this test. (ETP-5079 reduced the ONBOARDING output to a single
+   * locator, {@code AG-0-0-0} of "Almacen Principal" — the source dataset still ships the secondary
+   * warehouse's {@code AS-0-0-0} for GOClient, filtered out at import time. The assertion is
+   * deliberately count-agnostic.)
    */
   @Test
   public void testNormalizerLocatorsDefaultToAvailableInventoryStatus() {
@@ -207,8 +210,13 @@ public class OnboardingDatasetNormalizerTest {
   public void testNormalizerKeepsSharedSetupContent() {
     String xml = pathBackedNormalizer().buildDatasetXml();
 
-    assertTrue(xml.contains("Agua"));
-    assertTrue(xml.contains("Cuenta de Banco"));
+    // ETP-5079 keeps the four sample products and the three template financial accounts in the
+    // SOURCE dataset (GOClient demos with them at install time) and drops them from the NORMALIZED
+    // onboarding output instead, so this test no longer asserts on "Agua"/"Cuenta de Banco". The
+    // shared setup content it actually guards is the price lists, payment terms and payment
+    // methods.
+    assertTrue(xml.contains("Tarifa de venta principal"));
+    assertTrue(xml.contains("Tarifa de compra principal"));
     assertTrue(xml.contains("30 Días"));
     assertTrue(xml.contains("Inmediato"));
     assertTrue(xml.contains("Efectivo"));
@@ -216,6 +224,153 @@ public class OnboardingDatasetNormalizerTest {
     // commit 73d412c8, referencedata/sampledata/GOClient/C_BP_GROUP.xml) as part of adding the
     // "Acreedor" BP category; assert on the current bundled content.
     assertTrue(xml.contains("Cliente"));
+  }
+
+  /**
+   * Regression guard for ETP-5079 — the corrected initial dataset. A freshly onboarded tenant must
+   * NOT be born with the sample products, the second warehouse or the template financial accounts,
+   * while the pieces the runtime actually depends on must survive: the internal {@code ETGO_DTO}
+   * "Discount" product (resolved at runtime for inline discounts) and the single warehouse
+   * "Almacen Principal".
+   *
+   * <p>Asserted on the NORMALIZED output, which is the level that matters and the reason this test
+   * survived the fix. All of these rows are still present in the SOURCE dataset — GOClient is
+   * seeded from all 121 files by {@code install.source} and is meant to have sample data to demo
+   * with — and are dropped here by {@code DemoMasterDataFilter}. Deleting them at the source
+   * instead is what broke {@code ./gradlew install}; the complementary claim, that the source still
+   * defines them, is asserted by
+   * {@link OnboardingDatasetReferentialIntegrityTest#testTheDemoMasterDataStaysInTheSourceDatasetForGoClient()}.</p>
+   */
+  @Test
+  public void testNormalizerShipsCorrectedInitialDataset() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    // Sample products and their price rows are gone...
+    assertFalse(xml.contains("Agua"));
+    assertFalse(xml.contains("Cerveza"));
+    assertFalse(xml.contains("Fernet"));
+    assertFalse(xml.contains("Queso Sardo"));
+    // ...but the internal discount product is NOT sample data and must stay: TotalDiscountService
+    // requires it to exist before the discount feature is used, and it is invisible in the UI
+    // anyway because its category is flagged EM_Etgo_IsSystemCategory='Y'.
+    assertTrue(xml.contains("ETGO_DTO"));
+
+    // Product categories: exactly two survive. "Beverages" is filtered out (ETP-5079, after
+    // inspecting the FranOB2 tenant); the starter category stays, and "Discounts" is required by
+    // ETGO_DTO.
+    // The starter category was also renamed as part of ETP-5079 — English base name and VALUE
+    // "Generic", with the Spanish "Genérico" moved into a real M_PRODUCT_CATEGORY_TRL row, the
+    // same English-base-plus-translation convention this ticket applied to document types.
+    //
+    // It is still asserted BY ID rather than by name, and that reason has not weakened: an ID is
+    // the only handle that cannot be satisfied by a coincidental string somewhere else in the
+    // dataset. The old name Otros used to collide with the Spanish chart of accounts in
+    // C_ELEMENTVALUE. The new Generic and Generico are far less collision-prone, but a name
+    // assertion would still pass on a row that merely mentions the word, and it would break
+    // again on the next rename.
+    // Both halves of the filtered category: its English base name and the es_ES translation row
+    // the dataset now ships for it. "Bebidas" absent is the assertion that would catch the _TRL
+    // row leaking through while its parent category is dropped — a tenant would then hold a
+    // translation for a category it does not have.
+    assertFalse(xml.contains("Beverages"));
+    assertFalse(xml.contains("Bebidas"));
+    assertTrue("starter product category (M_Product_Category EBAE46FD...) missing",
+        xml.contains("EBAE46FD129049DEB26B948E160C6AD8"));
+    assertTrue("Discounts category (required by ETGO_DTO) missing", xml.contains("Discounts"));
+    // The rename itself. "Generic" is safe to assert as a bare substring: across the whole GOClient
+    // sampledata it occurs in M_PRODUCT_CATEGORY.xml and nowhere else. "Otros" is deliberately NOT
+    // asserted absent — it legitimately survives in the Spanish chart of accounts (C_ELEMENTVALUE
+    // and C_ELEMENTVALUE_TRL), which is the same collision that made the ID the right handle above.
+    assertTrue("starter product category must ship its English base name",
+        xml.contains("Generic"));
+    // The es_ES translation is asserted through the TRL ELEMENT, not through the string "Genérico":
+    // that word also names the A_ASSET_GROUP row, which is an included table, so a substring
+    // assertion would stay green with M_PRODUCT_CATEGORY_TRL.xml deleted. The element tag comes
+    // from the entity name (toLowerCamel of the table), so it can only be emitted by the category
+    // translation file being normalized into the dataset.
+    assertTrue("M_PRODUCT_CATEGORY_TRL.xml must be normalized into the dataset",
+        xml.contains("<mProductCategoryTrl"));
+    // ...and shipping the row is only half the claim: without the table in the import allowlist the
+    // es_ES name never reaches a tenant and the category renders as "Generic" for a Spanish user.
+    // That is the exact trap C_DOCTYPE_TRL fell into (ETP-5079).
+    assertTrue("M_PRODUCT_CATEGORY_TRL must be an included table",
+        OnboardingDatasetDefinition.getIncludedTables().contains("M_PRODUCT_CATEGORY_TRL"));
+
+    // Exactly one warehouse, renamed; the secondary one and its locator are gone.
+    assertTrue(xml.contains("Almacen Principal"));
+    assertFalse(xml.contains("Almacen GO"));
+    assertFalse(xml.contains("Almacén Secundario"));
+    assertFalse(xml.contains("AS-0-0-0"));
+
+    // No default financial accounts: a tenant creates its own.
+    assertFalse(xml.contains("Cuenta de Banco"));
+    // ...while the payment methods themselves are kept.
+    assertTrue(xml.contains("Transferencia bancaria"));
+
+    // Document types are English-named and carry real Spanish translations. ("Factura
+    // Rectificativa" itself is deliberately NOT asserted absent: it now legitimately appears as the
+    // es_ES C_DOCTYPE_TRL translation of "Corrective Sales Invoice".)
+    assertTrue(xml.contains("Corrective Sales Invoice"));
+    assertTrue(xml.contains("Corrective Purchase Invoice"));
+    assertTrue(OnboardingDatasetDefinition.getIncludedTables().contains("C_DOCTYPE_TRL"));
+  }
+
+  /**
+   * Row-exact counterpart to {@link #testNormalizerShipsCorrectedInitialDataset()}: every demo
+   * master-data row AND every child row hanging off one is dropped from the normalized output, and
+   * exactly the keepers survive.
+   *
+   * <p>Counted rather than string-matched because the four CHILD tables are invisible to a
+   * substring assertion — {@code M_PRODUCTPRICE}, {@code FIN_FINACC_PAYMENTMETHOD} and
+   * {@code AD_ORG_WAREHOUSE} carry no names, only ids and numbers, so a filter that dropped the
+   * parents and kept the children would leave every assertion above green while handing each new
+   * tenant 8 price rows, 6 payment-method rows and a warehouse assignment pointing at rows the
+   * tenant does not have. That is an import failure, not a cosmetic one.
+   *
+   * <p>The source dataset ships 3/6/5/8/2/2/3/2 rows for these tables (asserted by
+   * {@link OnboardingDatasetReferentialIntegrityTest#testTheDemoMasterDataStaysInTheSourceDatasetForGoClient()}),
+   * so each expectation below is also a statement about how many rows the filter removes.
+   */
+  @Test
+  public void testNormalizerDropsDemoMasterDataTogetherWithItsChildRows() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    // Parents.
+    assertEquals("only the internal ETGO_DTO product may survive", 1,
+        countEntities(xml, "mProduct"));
+    assertEquals("a tenant creates its own financial accounts", 0,
+        countEntities(xml, "finFinancialAccount"));
+    assertEquals("a tenant is born with a single warehouse", 1,
+        countEntities(xml, "mWarehouse"));
+    assertEquals("the starter category plus the system-flagged Discounts one", 2,
+        countEntities(xml, "mProductCategory"));
+
+    // Children of an excluded parent — the rows a name-based assertion cannot see.
+    assertEquals("price rows of the four sample products must go with them", 0,
+        countEntities(xml, "mProductprice"));
+    assertEquals("payment-method rows of the three template accounts must go with them", 0,
+        countEntities(xml, "finFinaccPaymentmethod"));
+    assertEquals("only the primary warehouse keeps its locator", 1,
+        countEntities(xml, "mLocator"));
+    assertEquals("only the primary warehouse keeps its organization assignment", 1,
+        countEntities(xml, "adOrgWarehouse"));
+    assertEquals("only the starter category keeps its es_ES translation", 1,
+        countEntities(xml, "mProductCategoryTrl"));
+  }
+
+  /**
+   * Counts normalized entity elements of one entity name. Matches {@code "<name "} rather than
+   * {@code "<name"}: every emitted row carries an {@code id} attribute, and the trailing space is
+   * what keeps {@code mProduct} from also counting {@code mProductCategory} and
+   * {@code mProductprice}.
+   */
+  private int countEntities(String xml, String entityName) {
+    String openingTag = "<" + entityName + " ";
+    int count = 0;
+    for (int at = xml.indexOf(openingTag); at >= 0; at = xml.indexOf(openingTag, at + 1)) {
+      count++;
+    }
+    return count;
   }
 
   /** Verifies that user-scoped sales representative columns are stripped from product rows. */
@@ -258,7 +413,7 @@ public class OnboardingDatasetNormalizerTest {
     String xml = classpathBackedNormalizer().buildDatasetXml();
 
     assertTrue(xml.contains("<Openbravo"));
-    assertTrue(xml.contains("Almacen GO"));
+    assertTrue(xml.contains("Almacen Principal"));
     assertFalse(xml.contains("<AD_CLIENT>"));
   }
 
@@ -310,16 +465,22 @@ public class OnboardingDatasetNormalizerTest {
   }
 
   /**
-   * ETP-4245 (TC-38): verifies the accounting schema ships fully predefined for posting — Allow
-   * Negatives and Centrally Maintained both {@code Y} — instead of the previous {@code N}/{@code N}
-   * defaults, so a new tenant never needs manual configuration of these flags.
+   * ETP-4245 (TC-38) originally asserted the accounting schema shipped fully predefined for
+   * posting — Allow Negatives AND Centrally Maintained both {@code Y}.
+   *
+   * <p><b>2026-08-28 (ETP-4947, R29):</b> the {@code allownegative=Y} half of that assertion is
+   * REVERSED here — TC-38 is being retired/superseded in Confluence by the ticket owner, and
+   * ETP-4947 is now the accepted requirement: {@code C_ACCTSCHEMA.AllowNegative} must default to
+   * {@code N} (unchecked), remaining user-editable. {@code IsCentrallyMaintained} is explicitly OUT
+   * of scope for ETP-4947 and stays {@code Y}, unchanged, per the original A3 assertion.</p>
    */
   @Test
-  public void testNormalizerAccountingSchemaIsPredefinedForPosting() {
+  public void testNormalizerAccountingSchemaAllowNegativeDefaultsToNo() {
     String xml = pathBackedNormalizer().buildDatasetXml();
 
-    assertTrue("allownegative must be Y", xml.contains("<allownegative>Y</allownegative>"));
-    assertTrue("iscentrallymaintained must be Y",
+    assertTrue("allownegative must be N (ETP-4947 reverts ETP-4245/A3's Y default)",
+        xml.contains("<allownegative>N</allownegative>"));
+    assertTrue("iscentrallymaintained must remain Y (out of scope for ETP-4947)",
         xml.contains("<iscentrallymaintained>Y</iscentrallymaintained>"));
   }
 
@@ -344,6 +505,68 @@ public class OnboardingDatasetNormalizerTest {
         xml.contains("35D2EC0EA8584EBE85C056293D1AA7E2"));
     assertTrue("P_Def_Expense_Acct (48000000) missing", xml.contains("801F214F5D434636935E753EF244816F"));
     assertTrue("P_Def_Revenue_Acct (48500000) missing", xml.contains("032942D16A9F417B88564FDAF211E4D9"));
+  }
+
+  /**
+   * ETP-5222 (Item 4, gap A8b, 2026-09-09): verifies that a freshly-provisioned tenant is born
+   * with {@code C_ACCTSCHEMA_DEFAULT.P_InvoicePriceVariance_Acct} already pointing at GOClient's
+   * own dimensionless combination for account 99904000 ("Diferencias entre el coste del producto
+   * y el precio de la fra[ctura]"), instead of NULL — the gap this ticket's Item 4 closes at the
+   * dataset-import baseline (Layer 0), alongside the R11-style accounts asserted above.
+   *
+   * <p>Note this is a dataset-baseline assertion only: it does not by itself prove the runtime
+   * {@code OnboardingAccountingWiringService#backfillInvoicePriceVarianceDefault} patch (Item 1)
+   * is unnecessary — that patch remains the self-healing backstop for any provisioning path that
+   * does not read this file, and is expected to no-op (its {@code IS NULL}/{@code = P_Expense_Acct}
+   * guard already fails to match) once this dataset baseline is in place.</p>
+   */
+  @Test
+  public void testNormalizerIncludesAcctSchemaDefaultInvoicePriceVarianceAccount() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    // Assert the ACTUAL new element (P_InvoicePriceVariance_Acct on C_ACCTSCHEMA_DEFAULT), not a
+    // bare substring: 29616DEC549948E7A65ABC28BCC18742 is also the C_ValidCombination row's own PK
+    // (that table is in INCLUDED_TABLES and the normalizer emits every row's id), so a bare
+    // xml.contains(id) check is a tautology that passes even with this ticket's actual XML edit
+    // reverted (ETP-5222 review finding W2). Tag name follows the same DAL-property camelCase
+    // convention as the sibling assertions above (e.g. "mInventorystatusId" for
+    // M_InventoryStatus_ID, "mProductCategoryTrl" for M_Product_Category_Trl):
+    // P_InvoicePriceVariance_Acct -> pInvoicepricevarianceAcct.
+    assertTrue("P_InvoicePriceVariance_Acct (99904000) element missing on C_ACCTSCHEMA_DEFAULT — "
+        + "expected GOClient's own 99904000 combination id",
+        xml.contains("<pInvoicepricevarianceAcct>29616DEC549948E7A65ABC28BCC18742"
+            + "</pInvoicepricevarianceAcct>"));
+  }
+
+  /**
+   * ETP-5222 (Item 4, QA second pass, 2026-09-09) — self-referential FK consistency check.
+   *
+   * <p>Item 4's whole mechanism (see the ledger's "Item 4" section, {@code EntityResolver
+   * #getId}) only works for a brand-new tenant if the referenced {@code C_ValidCombination}
+   * row ({@code 29616DEC549948E7A65ABC28BCC18742}) itself survives normalization and appears
+   * in the SAME generated dataset XML — {@code DataImportService}'s ID-translation only
+   * resolves a foreign key against a row inserted earlier in the SAME import batch. The
+   * sibling test above proves the FK reference (the {@code <pInvoicepricevarianceAcct>}
+   * element) is present; it does not prove the FK TARGET (the {@code C_ValidCombination} row
+   * itself, with that id as its own primary key) is also present after filtering. Both must
+   * hold for a real import to succeed — asserting only one leaves a residual, previously-
+   * untested gap (e.g. a hypothetical future row-exclusion filter dropping this specific
+   * combination while leaving the schema-default reference dangling would pass the sibling
+   * test but break a real onboarding run). Row ids are emitted as an {@code id} attribute on
+   * the entity element ({@code OnboardingDatasetNormalizer#convertRow}, not text content), so
+   * this checks the row's own PK attribute rather than a bare substring.
+   */
+  @Test
+  public void testNormalizerInvoicePriceVarianceCombinationRowSurvivesNormalization() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue("C_ACCTSCHEMA_DEFAULT must still reference the combination (sibling test guard)",
+        xml.contains("<pInvoicepricevarianceAcct>29616DEC549948E7A65ABC28BCC18742"
+            + "</pInvoicepricevarianceAcct>"));
+    assertTrue("The referenced C_ValidCombination row (29616DEC549948E7A65ABC28BCC18742) itself "
+        + "must survive normalization as its own row in the SAME dataset XML, or a real "
+        + "DataImportService import cannot resolve the FK for a brand-new tenant",
+        xml.contains("<cValidcombination id=\"29616DEC549948E7A65ABC28BCC18742\""));
   }
 
   /**

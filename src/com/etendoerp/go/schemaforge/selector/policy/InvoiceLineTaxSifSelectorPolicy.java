@@ -74,9 +74,12 @@ import com.etendoerp.go.schemaforge.selector.meta.SelectorMeta;
  * window would show the "needs SIF configuration" warning on every TBAI/Verifactu tax, even
  * correctly configured ones — not merely "no badge", but a wrong one.
  *
- * <p><b>SII is intentionally NOT enriched here</b> — confirmed by investigation that SII has
- * nothing to configure at tax level; its equivalent ({@code aeatsiiCauseExemption}) already
- * lives on the invoice HEADER and is handled by {@code SifTab.jsx}. The frontend's
+ * <p><b>SII is intentionally NOT enriched here</b> — {@code c_tax} does have an SII column
+ * ({@code em_aeatsii_cause_exemption_id}, with an active AD_Field), so this is not a technical
+ * gap. It is a deliberate ETP-5122 product decision: in GO the SII exemption cause is edited on
+ * the invoice HEADER ({@code SifTab.jsx}), and in Classic it is propagated tariff→header via
+ * {@code org.openbravo.module.sii.eventhandlers.InvoiceLineEventHandler.setExemption()} — so
+ * SII was deliberately excluded from this line-level tax-completeness mechanism. The frontend's
  * {@code selectSifFields()} already returns no fields for an SII-only tax, so even though this
  * policy projects the same columns unconditionally, the "missing" check on the frontend simply
  * never fires for SII.
@@ -115,36 +118,59 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
   // value via `row[field.column]`, so casing here must match theirs exactly (Postgres itself
   // is case-insensitive on unquoted identifiers, but the JSON keys are not).
   //
-  // `issummary`/`parent_tax_id`/`em_obspti_isequivalentcharge` are STRUCTURAL columns, not SIF
-  // values — they carry no `row[field.column]` lookup contract, so their JSON keys are plain
-  // camelCase (matching `taxExempt`/`notTaxable` above) rather than raw AD names. Added so the
-  // frontend can resolve a compound/summary tax (`c_tax.issummary='Y'`, e.g. "Entregas IVA+RE
-  // 21+5.2% ISP") down to its rate-component child WITHOUT a second request: the whole tax
-  // catalog is already fetched in one page-through (see `fetchAllTaxPages` in
-  // `useTaxSifLineRowActions.jsx`), so a child's own row is already present in the same
-  // client-side map, keyed by its own id, needing only these 3 extra columns to be linked up
-  // (`resolveEffectiveTaxRow()` in that file). Mirrors the exact child-selection criterion
-  // Etendo Classic's own completion validation uses (`em_obspti_isequivalentcharge = 'N'` — see
-  // `ETVFAC_ORDER_VFAC_VALIDATION.xml` / `InitialValidator.java` in com.etendoerp.verifactu).
+  // Split (ETP-5122) into two groups because they are read differently now:
+  //
+  // `STRUCTURAL_COLUMNS` (`issummary`/`parent_tax_id`/`em_obspti_isequivalentcharge`, plus
+  // `istaxexempt`/`isnotaxable`) carry no `row[field.column]` lookup contract, so their JSON
+  // keys are plain camelCase. They are always read straight off `c_tax` — there is no per-org
+  // override for them. Added so the frontend can resolve a compound/summary tax
+  // (`c_tax.issummary='Y'`, e.g. "Entregas IVA+RE 21+5.2% ISP") down to its rate-component child
+  // WITHOUT a second request: the whole tax catalog is already fetched in one page-through (see
+  // `fetchAllTaxPages` in `useTaxSifLineRowActions.jsx`), so a child's own row is already
+  // present in the same client-side map, keyed by its own id, needing only these extra columns
+  // to be linked up (`resolveEffectiveTaxRow()` in that file). Mirrors the exact child-selection
+  // criterion Etendo Classic's own completion validation uses
+  // (`em_obspti_isequivalentcharge = 'N'` — see `ETVFAC_ORDER_VFAC_VALIDATION.xml` /
+  // `InitialValidator.java` in com.etendoerp.verifactu).
+  //
+  // `SIF_VALUE_COLUMNS` are the 8 TBAI/Verifactu VALUE columns. `c_tax.<col>` wins when
+  // non-blank; otherwise `etsg_tax_sif_config.<col>` (the per-legal-entity override row, see
+  // `querySifColumns()`) is used — the same precedence the write-side handler
+  // (`TaxSifOverrideHandler`) and Classic apply (ETP-5122 decision D5).
+  private static final Map<String, String> STRUCTURAL_COLUMNS;
+  private static final Map<String, String> SIF_VALUE_COLUMNS;
   private static final Map<String, String> COLUMN_TO_JSON_KEY;
 
   static {
-    Map<String, String> m = new LinkedHashMap<>();
-    m.put("istaxexempt", "taxExempt");
-    m.put("isnotaxable", "notTaxable");
-    m.put("issummary", "isSummary");
-    m.put("parent_tax_id", "parentTaxId");
-    m.put("em_obspti_isequivalentcharge", "isEquivalentCharge");
-    m.put("em_tbai_claveregimeniva", "EM_Tbai_Claveregimeniva");
-    m.put("em_tbai_exemptioncause", "EM_Tbai_Exemptioncause");
-    m.put("em_tbai_nonsubjectcause", "EM_Tbai_Nonsubjectcause");
-    m.put("em_etvfac_vat_regime", "EM_Etvfac_Vat_Regime");
-    m.put("em_etvfac_igic_regime", "em_etvfac_igic_regime");
-    m.put("em_etvfac_ipsi_regime", "EM_Etvfac_Ipsi_Regime");
-    m.put("em_etvfac_exemption_cause", "EM_Etvfac_Exemption_Cause");
-    m.put("em_etvfac_cause_not_taxable", "em_etvfac_cause_not_taxable");
-    COLUMN_TO_JSON_KEY = Collections.unmodifiableMap(m);
+    Map<String, String> structural = new LinkedHashMap<>();
+    structural.put("istaxexempt", "taxExempt");
+    structural.put("isnotaxable", "notTaxable");
+    structural.put("issummary", "isSummary");
+    structural.put("parent_tax_id", "parentTaxId");
+    structural.put("em_obspti_isequivalentcharge", "isEquivalentCharge");
+    STRUCTURAL_COLUMNS = Collections.unmodifiableMap(structural);
+
+    Map<String, String> sifValues = new LinkedHashMap<>();
+    sifValues.put("em_tbai_claveregimeniva", "EM_Tbai_Claveregimeniva");
+    sifValues.put("em_tbai_exemptioncause", "EM_Tbai_Exemptioncause");
+    sifValues.put("em_tbai_nonsubjectcause", "EM_Tbai_Nonsubjectcause");
+    sifValues.put("em_etvfac_vat_regime", "EM_Etvfac_Vat_Regime");
+    sifValues.put("em_etvfac_igic_regime", "em_etvfac_igic_regime");
+    sifValues.put("em_etvfac_ipsi_regime", "EM_Etvfac_Ipsi_Regime");
+    sifValues.put("em_etvfac_exemption_cause", "EM_Etvfac_Exemption_Cause");
+    sifValues.put("em_etvfac_cause_not_taxable", "em_etvfac_cause_not_taxable");
+    SIF_VALUE_COLUMNS = Collections.unmodifiableMap(sifValues);
+
+    Map<String, String> combined = new LinkedHashMap<>(structural);
+    combined.putAll(sifValues);
+    COLUMN_TO_JSON_KEY = Collections.unmodifiableMap(combined);
   }
+
+  // Selector context param key carrying the requesting document's organization (see
+  // SelectorContextResolver.resolveContextOrganizationId), propagated into
+  // selectorContextParams by NeoSelectorService so this policy can resolve the
+  // etsg_tax_sif_config override row for the correct legal entity.
+  private static final String AD_ORG_ID_PARAM = "AD_Org_ID";
 
   public InvoiceLineTaxSifSelectorPolicy() {
     // Stateless policy; public constructor supports registry composition without CDI.
@@ -182,7 +208,10 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
       if (taxIds.isEmpty()) {
         return response;
       }
-      Map<String, Map<String, Object>> sifByTaxId = querySifColumns(taxIds);
+      String organizationId = contextParams != null
+          ? StringUtils.trimToNull(contextParams.get(AD_ORG_ID_PARAM))
+          : null;
+      Map<String, Map<String, Object>> sifByTaxId = querySifColumns(taxIds, organizationId);
       applyEnrichment(items, sifByTaxId);
     } catch (Exception e) {
       log.warn("[InvoiceLineTaxSifSelectorPolicy] Failed to enrich tax selector: {}",
@@ -216,9 +245,23 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
     return ids;
   }
 
+  /**
+   * Query the SIF-relevant columns for the given taxes, resolving each of the 8 TBAI/Verifactu
+   * VALUE columns with the ETP-5122 override precedence (D5): {@code c_tax.<col>} wins when
+   * non-blank, otherwise the active {@code etsg_tax_sif_config} row for
+   * {@code (c_tax_id, AD_GET_ORG_LE_BU(organizationId, 'LE'))} is used. Structural columns
+   * (compound-tax linkage, exemption/no-tax flags) are always read straight off {@code c_tax} —
+   * they have no per-org override. When {@code organizationId} is blank the override lookup is
+   * skipped entirely (no legal entity to resolve against), so VALUE columns fall back to the
+   * plain {@code c_tax} value, matching the pre-ETP-5122 behavior.
+   *
+   * @param taxIds tax identifiers present in the selector page being enriched
+   * @param organizationId context organization used to resolve the {@code etsg_tax_sif_config}
+   *     override row's legal entity, or {@code null}/blank to skip the override lookup
+   */
   @SuppressWarnings("java:S2077")
-  private static Map<String, Map<String, Object>> querySifColumns(List<String> taxIds)
-      throws SQLException {
+  private static Map<String, Map<String, Object>> querySifColumns(List<String> taxIds,
+      String organizationId) throws SQLException {
     StringBuilder placeholders = new StringBuilder();
     for (int i = 0; i < taxIds.size(); i++) {
       if (i > 0) {
@@ -226,15 +269,18 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
       }
       placeholders.append('?');
     }
-    String columnList = String.join(", ", COLUMN_TO_JSON_KEY.keySet());
-    String sql = "SELECT c_tax_id, " + columnList
-        + " FROM c_tax WHERE c_tax_id IN (" + placeholders + ")";
+    boolean withOverride = StringUtils.isNotBlank(organizationId);
+    String sql = buildSifColumnsSql(placeholders.toString(), withOverride);
 
     Map<String, Map<String, Object>> result = new HashMap<>();
     Connection conn = OBDal.getReadOnlyInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(sql)) {
-      for (int i = 0; i < taxIds.size(); i++) {
-        ps.setString(i + 1, taxIds.get(i));
+      int paramIndex = 1;
+      if (withOverride) {
+        ps.setString(paramIndex++, organizationId);
+      }
+      for (String taxId : taxIds) {
+        ps.setString(paramIndex++, taxId);
       }
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
@@ -243,6 +289,29 @@ public final class InvoiceLineTaxSifSelectorPolicy implements SelectorEnrichment
       }
     }
     return result;
+  }
+
+  private static String buildSifColumnsSql(String placeholders, boolean withOverride) {
+    StringBuilder select = new StringBuilder("t.c_tax_id");
+    for (String col : STRUCTURAL_COLUMNS.keySet()) {
+      select.append(", t.").append(col).append(" AS ").append(col);
+    }
+    for (String col : SIF_VALUE_COLUMNS.keySet()) {
+      if (withOverride) {
+        select.append(", COALESCE(NULLIF(TRIM(t.").append(col).append("), ''), NULLIF(TRIM(ovr.")
+            .append(col).append("), '')) AS ").append(col);
+      } else {
+        select.append(", t.").append(col).append(" AS ").append(col);
+      }
+    }
+    StringBuilder sql = new StringBuilder("SELECT ").append(select)
+        .append(" FROM c_tax t");
+    if (withOverride) {
+      sql.append(" LEFT JOIN etsg_tax_sif_config ovr ON ovr.c_tax_id = t.c_tax_id")
+          .append(" AND ovr.ad_org_id = ad_get_org_le_bu(?, 'LE') AND ovr.isactive = 'Y'");
+    }
+    sql.append(" WHERE t.c_tax_id IN (").append(placeholders).append(")");
+    return sql.toString();
   }
 
   private static Map<String, Object> extractRow(ResultSet rs) throws SQLException {

@@ -37,6 +37,7 @@ import org.mockito.ArgumentCaptor;
 import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
+import com.etendoerp.go.schemaforge.webhooks.SFPromoteUserRole;
 import com.etendoerp.go.schemaforge.webhooks.SFResendInvitation;
 import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
 import com.etendoerp.go.schemaforge.webhooks.SFSystemRoleTemplates;
@@ -55,6 +56,7 @@ public class NeoPseudoSpecDispatcherTest {
   private NeoServlet servlet;
   private BatchService batchService;
   private NeoSimSearchEndpoint simSearchEndpoint;
+  private NeoVectorSearchEndpoint vectorSearchEndpoint;
   private NeoGoWebhookBridge goWebhookBridge;
   private NeoPseudoSpecDispatcher dispatcher;
   private HttpServletRequest request;
@@ -65,8 +67,10 @@ public class NeoPseudoSpecDispatcherTest {
     servlet = mock(NeoServlet.class);
     batchService = mock(BatchService.class);
     simSearchEndpoint = mock(NeoSimSearchEndpoint.class);
+    vectorSearchEndpoint = mock(NeoVectorSearchEndpoint.class);
     goWebhookBridge = mock(NeoGoWebhookBridge.class);
-    dispatcher = new NeoPseudoSpecDispatcher(servlet, batchService, simSearchEndpoint, goWebhookBridge);
+    dispatcher = new NeoPseudoSpecDispatcher(servlet, batchService, simSearchEndpoint,
+        vectorSearchEndpoint, goWebhookBridge);
     request = mock(HttpServletRequest.class);
     response = mock(HttpServletResponse.class);
   }
@@ -138,6 +142,27 @@ public class NeoPseudoSpecDispatcherTest {
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         eq("Simsearch endpoint only supports GET"));
     verify(simSearchEndpoint, never()).handle(any());
+  }
+
+  @Test
+  public void vectorSearchGetWritesEndpointResponse() throws Exception {
+    NeoResponse payload = NeoResponse.ok(new JSONObject());
+    when(vectorSearchEndpoint.handle(request)).thenReturn(payload);
+
+    boolean handled = dispatcher.handle(pathInfo("vectorsearch"), "GET", request, response);
+
+    assertTrue(handled);
+    verify(servlet).writeResponse(response, payload);
+  }
+
+  @Test
+  public void vectorSearchRejectsNonGetMethod() throws Exception {
+    boolean handled = dispatcher.handle(pathInfo("vectorsearch"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Vectorsearch endpoint only supports GET"));
+    verify(vectorSearchEndpoint, never()).handle(any());
   }
 
   // -------------------------------------------------------------------------
@@ -285,6 +310,34 @@ public class NeoPseudoSpecDispatcherTest {
     assertTrue(handled);
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         eq("Systemroletemplates endpoint only supports GET"));
+    verify(goWebhookBridge, never()).handle(any(), any());
+  }
+
+  // -------------------------------------------------------------------------
+  // promoteuserrole (ETP-5019) — promote/demote a user's Admin role
+  // -------------------------------------------------------------------------
+
+  @Test
+  public void promoteUserRoleGetDispatchesThroughBridgeWithSFPromoteUserRole() throws Exception {
+    NeoResponse payload = NeoResponse.ok(new JSONObject());
+    when(goWebhookBridge.handle(eq(request), any(BaseWebhookService.class))).thenReturn(payload);
+
+    boolean handled = dispatcher.handle(pathInfo("promoteuserrole"), "GET", request, response);
+
+    assertTrue(handled);
+    ArgumentCaptor<BaseWebhookService> webhookCaptor = ArgumentCaptor.forClass(BaseWebhookService.class);
+    verify(goWebhookBridge).handle(eq(request), webhookCaptor.capture());
+    assertTrue(webhookCaptor.getValue() instanceof SFPromoteUserRole);
+    verify(servlet).writeResponse(response, payload);
+  }
+
+  @Test
+  public void promoteUserRoleRejectsNonGetMethod() throws Exception {
+    boolean handled = dispatcher.handle(pathInfo("promoteuserrole"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Promoteuserrole endpoint only supports GET"));
     verify(goWebhookBridge, never()).handle(any(), any());
   }
 

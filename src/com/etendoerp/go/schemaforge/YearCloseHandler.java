@@ -32,7 +32,10 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.ad_actionButton.CreateRegFactAcct;
 import org.openbravo.erpCommon.ad_actionButton.DropRegFactAcct;
+import org.openbravo.erpCommon.utility.AccDefUtility;
 import org.openbravo.erpCommon.utility.OBError;
+import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.financialmgmt.calendar.Calendar;
 import org.openbravo.model.financialmgmt.calendar.Period;
 import org.openbravo.model.financialmgmt.calendar.Year;
 import org.openbravo.service.db.DalConnectionProvider;
@@ -95,11 +98,32 @@ public class YearCloseHandler implements NeoHandler {
   static final String ACTION_CLOSE_YEAR = "closeYear";
   static final String ACTION_UNDO_CLOSE_YEAR = "undoCloseYear";
 
+  private static final String SPEC_FISCAL_CALENDAR = "fiscal-calendar";
+  private static final String ENTITY_YEAR = "year";
+  private static final String METHOD_POST = "POST";
+  private static final String FIELD_FISCAL_YEAR = "fiscalYear";
+  private static final String FIELD_CALENDAR = "calendar";
+  private static final int MIN_FISCAL_YEAR = 1900;
+  private static final int MAX_FISCAL_YEAR = 2999;
+
   private static final String STATUS_CLOSED = "C";
   private static final String STATUS_PERMANENTLY_CLOSED = "P";
 
+  private final FiscalYearPeriodsHandler fiscalYearPeriodsHandler = new FiscalYearPeriodsHandler();
+
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoResponse createResponse = validateAndEnrichFiscalCalendarCreate(context);
+    if (createResponse != null || isFiscalCalendarCreate(context)) {
+      return createResponse;
+    }
+    NeoResponse updateValidation = validateFiscalYearForUpdate(context);
+    if (updateValidation != null) {
+      return updateValidation;
+    }
+    if (fiscalYearPeriodsHandler.handles(context)) {
+      return fiscalYearPeriodsHandler.handle(context);
+    }
     if (context.getEndpointType() != NeoEndpointType.ACTION) {
       return null;
     }
@@ -138,6 +162,112 @@ public class YearCloseHandler implements NeoHandler {
       log.error("Error executing {} for year {}", action, yearId, e);
       return NeoResponse.error(500, action + " failed: " + e.getMessage());
     }
+  }
+
+  /**
+   * Fiscal Calendar exposes C_Year directly although it is a child AD tab of C_Calendar. The
+   * generic create route consequently has no parentId from which the mandatory-default service
+   * can resolve C_Calendar_ID. Derive it from the current organization instead of falling back to
+   * the first readable calendar, which can be the global organization calendar.
+   *
+   * <p><b>ETP-4948 REVIEW fix:</b> {@link Organization#getCalendar()} only reads the org's own
+   * directly-assigned {@code C_Calendar_ID} — it does NOT walk the org tree, so an org that
+   * inherits its calendar from a parent (a completely standard setup) resolved to {@code null}
+   * here, and the caller had no fallback other than erroring or (before this fix) silently
+   * accepting whatever the org-blind mandatory-defaults selector picked first — which can be the
+   * global (org {@code *}) calendar for a client with more than one. {@link
+   * AccDefUtility#getCalendar(Organization)} is the already-precedented pattern in this exact
+   * codebase (used by classic invoice/period logic) for "the calendar this organization should
+   * use, walking up the org tree" — it deliberately treats org {@code *} (id {@code "0"}) as "no
+   * usable calendar" rather than returning the global one, which is exactly the behavior wanted
+   * here.
+   */
+  private NeoResponse validateAndEnrichFiscalCalendarCreate(NeoContext context) {
+    if (!isFiscalCalendarCreate(context)) {
+      return null;
+    }
+    org.codehaus.jettison.json.JSONObject body = context.getRequestBody();
+    if (body == null) {
+      return NeoResponse.error(400, "Missing request body");
+    }
+    String fiscalYear = body.optString(FIELD_FISCAL_YEAR, "").trim();
+    if (!isValidFiscalYear(fiscalYear)) {
+      return NeoResponse.error(400, "Fiscal Year must be a four-digit year between 1900 and 2999");
+    }
+    Organization organization = OBContext.getOBContext().getCurrentOrganization();
+    Calendar calendar = organization != null ? AccDefUtility.getCalendar(organization) : null;
+    if (calendar == null || calendar.getId() == null) {
+      return NeoResponse.error(400, "The current organization has no fiscal calendar");
+    }
+    try {
+      // C_Calendar_ID is a system field, so never honor a caller-provided calendar from this route.
+      body.put(FIELD_CALENDAR, calendar.getId());
+      return null;
+    } catch (org.codehaus.jettison.json.JSONException e) {
+      log.error("Could not set fiscal calendar for organization {}", organization.getId(), e);
+      return NeoResponse.error(500, "Could not set the organization fiscal calendar");
+    }
+  }
+
+  private boolean isFiscalCalendarCreate(NeoContext context) {
+    return context != null
+        && NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && METHOD_POST.equals(context.getHttpMethod())
+        && context.getRecordId() == null
+        && SPEC_FISCAL_CALENDAR.equals(context.getSpecName())
+        && ENTITY_YEAR.equals(context.getEntityName());
+  }
+
+  /**
+   * ETP-4948 QA fix: {@link #isFiscalCalendarCreate} requires {@code recordId == null}, so the
+   * four-digit/1900-2999 fiscal-year format check in {@link
+   * #validateAndEnrichFiscalCalendarCreate} never ran on an UPDATE — a user could edit an
+   * existing year and set Fiscal Year to {@code "asd"} or {@code "1800"} with no rejection. This
+   * mirrors {@code isFiscalCalendarCreate}'s spec/entity match but for the update case
+   * (non-null {@code recordId}, any write method — {@code NeoHandlerUtils#isWriteMethod} covers
+   * {@code POST}/{@code PUT}/{@code PATCH}, matching whatever method the live UI or a direct API
+   * caller actually uses for a partial update). Deliberately does NOT gate on a specific method
+   * the way {@code isFiscalCalendarCreate} gates on {@code POST} only — an update's HTTP verb is
+   * not this validation's concern, only "is fiscalYear being changed."
+   */
+  private boolean isFiscalCalendarYearUpdate(NeoContext context) {
+    return context != null
+        && NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())
+        && context.getRecordId() != null
+        && SPEC_FISCAL_CALENDAR.equals(context.getSpecName())
+        && ENTITY_YEAR.equals(context.getEntityName());
+  }
+
+  /**
+   * Validates {@code fiscalYear} on an UPDATE to an existing {@code year} record — the calendar
+   * FK injection in {@link #validateAndEnrichFiscalCalendarCreate} is deliberately NOT repeated
+   * here (the calendar is set once, on create, from the organization, by design). Only runs the
+   * format/range check, and only when the update actually touches {@code fiscalYear} — a partial
+   * update that only changes e.g. {@code Description} must not be rejected for a field it never
+   * sent.
+   */
+  private NeoResponse validateFiscalYearForUpdate(NeoContext context) {
+    if (!isFiscalCalendarYearUpdate(context)) {
+      return null;
+    }
+    org.codehaus.jettison.json.JSONObject body = context.getRequestBody();
+    if (body == null || !body.has(FIELD_FISCAL_YEAR) || body.isNull(FIELD_FISCAL_YEAR)) {
+      return null;
+    }
+    String fiscalYear = body.optString(FIELD_FISCAL_YEAR, "").trim();
+    if (!isValidFiscalYear(fiscalYear)) {
+      return NeoResponse.error(400, "Fiscal Year must be a four-digit year between 1900 and 2999");
+    }
+    return null;
+  }
+
+  private boolean isValidFiscalYear(String value) {
+    if (!value.matches("\\d{4}")) {
+      return false;
+    }
+    int year = Integer.parseInt(value);
+    return year >= MIN_FISCAL_YEAR && year <= MAX_FISCAL_YEAR;
   }
 
   /**

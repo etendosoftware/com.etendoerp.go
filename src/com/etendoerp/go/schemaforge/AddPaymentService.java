@@ -102,10 +102,11 @@ final class AddPaymentService {
     Date paymentDate = parsePaymentDate(body.optString("paymentDate", ""));
 
     FIN_FinancialAccount account = require(
-        OBDal.getInstance().get(FIN_FinancialAccount.class, body.optString("FIN_Financial_Account_ID", null)),
+        TenantOwnership.loadOwned(FIN_FinancialAccount.class,
+            body.optString("FIN_Financial_Account_ID", null)),
         "Financial account not found");
     BusinessPartner bp = require(
-        OBDal.getInstance().get(BusinessPartner.class, body.optString("bpartnerId", null)),
+        TenantOwnership.loadOwned(BusinessPartner.class, body.optString("bpartnerId", null)),
         "A contact (bpartnerId) is required to register a payment");
     Currency currency = account.getCurrency();
     Organization org = resolveOrg(account, body.optString("organizationId", null));
@@ -127,7 +128,10 @@ final class AddPaymentService {
     AdvPaymentMngtDao dao = new AdvPaymentMngtDao();
 
     // ── Create the payment ──────────────────────────────────────────────────
-    String docNo = FIN_Utility.getDocumentNo(docType, "FIN_Payment");
+    // ETP-5230: the AR Receipt / AP Payment sequence lives at org *, which an Organization-level role
+    // may not write.
+    String docNo = StarOrgWriteScope.withWritableStarOrg(
+        () -> FIN_Utility.getDocumentNo(docType, "FIN_Payment"));
     String referenceNo = body.optString("referenceNo", "");
     FIN_Payment payment = dao.getNewPayment(isReceipt, org, docType, docNo, bp, paymentMethod,
         account, "0", paymentDate, referenceNo, currency, BigDecimal.ONE, amount);
@@ -175,8 +179,10 @@ final class AddPaymentService {
     if (!overpaid || !"refund".equals(overpaymentAction)) {
       return null;
     }
-    FIN_Payment refundPayment = FIN_AddPayment.createRefundPayment(conn, vars, payment,
-        leftover.negate(), null);
+    // ETP-5230: createRefundPayment numbers the refund off the AP Payment sequence (org *) and
+    // flushes internally, so the whole call has to sit inside the scope.
+    FIN_Payment refundPayment = StarOrgWriteScope.withWritableStarOrg(
+        () -> FIN_AddPayment.createRefundPayment(conn, vars, payment, leftover.negate(), null));
     failOnError(FIN_AddPayment.processPayment(vars, conn,
         PaymentRegistrationService.resolveProcessAction(refundPayment, false), refundPayment, "",
         "(" + payment.getId() + ")"));
@@ -239,7 +245,7 @@ final class AddPaymentService {
   /** The movement organization when provided and valid, otherwise the account's. */
   private static Organization resolveOrg(FIN_FinancialAccount account, String organizationId) {
     if (StringUtils.isNotBlank(organizationId)) {
-      Organization movementOrg = OBDal.getInstance().get(Organization.class, organizationId);
+      Organization movementOrg = TenantOwnership.loadOwned(Organization.class, organizationId);
       if (movementOrg != null) {
         return movementOrg;
       }
@@ -269,7 +275,11 @@ final class AddPaymentService {
       if (amt == null || amt.signum() == 0) {
         continue;
       }
-      FIN_PaymentScheduleDetail psd = OBDal.getInstance().get(FIN_PaymentScheduleDetail.class, psdId);
+      // The key comes from the request body and this goes on to write against that installment —
+      // with writeoffs[psdId]=true it would forgive the balance of another tenant's invoice
+      // (ETP-4950). Same guard the reconciliation path applies in ReconciliationFlowSupport.
+      FIN_PaymentScheduleDetail psd =
+          TenantOwnership.loadOwned(FIN_PaymentScheduleDetail.class, psdId);
       if (psd == null) {
         throw new OBException("Invoice installment not found: " + psdId);
       }
@@ -302,7 +312,7 @@ final class AddPaymentService {
       if (StringUtils.isBlank(glItemId) || glAmount.signum() == 0) {
         continue;
       }
-      GLItem glItem = OBDal.getInstance().get(GLItem.class, glItemId);
+      GLItem glItem = TenantOwnership.loadOwned(GLItem.class, glItemId);
       if (glItem == null) {
         throw new OBException("G/L item not found: " + glItemId);
       }
@@ -321,7 +331,8 @@ final class AddPaymentService {
         : FinAccPaymentMethod.PROPERTY_PAYOUTALLOW;
 
     if (StringUtils.isNotBlank(paymentMethodId)) {
-      FIN_PaymentMethod requested = OBDal.getInstance().get(FIN_PaymentMethod.class, paymentMethodId);
+      FIN_PaymentMethod requested =
+          TenantOwnership.loadOwned(FIN_PaymentMethod.class, paymentMethodId);
       if (requested != null && isMethodValid(account, requested, allowProp)) {
         return requested;
       }

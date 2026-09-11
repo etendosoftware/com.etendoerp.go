@@ -172,7 +172,7 @@ final class CandidatesSupport {
       counts.put(CNT_PAYMENTS, 0);
       counts.put(CNT_SALES_INVOICES, 0);
       counts.put(CNT_PURCHASE_INVOICES, 0);
-      FIN_FinancialAccount account = OBDal.getInstance().get(FIN_FinancialAccount.class, accountId);
+      FIN_FinancialAccount account = TenantOwnership.loadOwned(FIN_FinancialAccount.class, accountId);
       if (account == null) {
         return counts;
       }

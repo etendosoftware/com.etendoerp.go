@@ -157,8 +157,13 @@ final class ReconciliationPaymentService {
   /**
    * Ensures the account link for {@code method} in the given direction is flagged multi-currency
    * (payin/payout). Used by the reconciliation cross-currency path so a foreign-currency settlement
-   * is rejected with a clear message when the method is single-currency (e.g. a PSD2 bank-transfer
-   * method disabled by {@link FinancialAccountSupport#disableMulticurrencyForBankTransfer}).
+   * is rejected with a clear message, rather than a cryptic Core failure, when the method is
+   * single-currency.
+   *
+   * <p>Since ETP-5084 no Etendo Go code clears these flags on its own (the ETP-4503 bank-transfer
+   * exception was removed, and data-fix R29 re-enabled it on already-connected accounts), so this
+   * now only fires on a link an administrator has deliberately configured as single-currency. It
+   * stays as the honest guard for that case.
    */
   private static void assertMethodMultiCurrency(FIN_FinancialAccount account,
       FIN_PaymentMethod method, boolean isReceipt) {

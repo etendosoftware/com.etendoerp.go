@@ -122,6 +122,17 @@ public final class SalesDocumentEmailContractProvider implements EmailContractPr
 
 If a new document family has different abuse characteristics, override the policy and document the reason.
 
+### 5b. Know what your contract inherits about the readable history
+
+`DefaultDocumentSendEmailContract` also overrides `logsSendHistory()` to `true`, so **a new document-send contract writes a readable `ETGO_EMAIL_SEND_LOG` row for every send attempt the moment you extend the base class** — recipients, subject, the operator's message and the download link **in clear**, on the sending tenant's own client. That is the intended default for commercial documents a tenant emails to a business partner, and it is what makes the document's Emails card work with no further wiring.
+
+Two things follow, and both are your call to make deliberately:
+
+- **If the family is not that** — if its recipients are the platform's own users, or its copy carries single-use links or tokens — do **not** extend `DefaultDocumentSendEmailContract` blindly. Override `logsSendHistory()` back to `false` and say why in the class javadoc, the way the account/auth contracts inherit the interface default. Clear-text correspondence in a tenant-readable table is a privacy decision, not a free feature.
+- **`getSpecName()` matters.** The base class derives it by stripping the `-send` suffix from the contract name, so `return-to-vendor-send` yields `return-to-vendor`. It scopes the read endpoint's optional `specName` filter and resolves the row's `AD_Table` through `ETGO_SF_SPEC -> AD_Window -> first tab`. A contract whose name does not follow the `${windowName}-send` convention gets `null` and loses both — override `getSpecName()` rather than renaming the window.
+
+Reference: `docs/transactional-email-contracts.md` → *Readable send history (ETP-5069)*, and the functional repo's `docs/ops/transactional-email-security.md` → *Email Audit Redaction & Storage Policy* for the policy this sits under.
+
 ### 6. Add tests
 
 Update or add tests under:
@@ -139,6 +150,7 @@ Minimum coverage:
 5. Missing recipient returns `NO_RECIPIENT`.
 6. Provider passthrough fields are rejected by the executor.
 7. Repeated idempotency key does not call the provider twice.
+8. `logsSendHistory()` returns what the family actually intends — inherited `true` for a document a tenant emails to a business partner, explicitly `false` otherwise.
 
 ### 7. Update documentation
 
@@ -158,5 +170,6 @@ Update:
 - Browser-provided provider payload fields are rejected.
 - Default payload remains `name`, `document_type`, `document_number`, and `download_link`.
 - `amount` and aliases are explicit compatibility opt-ins only.
+- `logsSendHistory()` is correct for the family, and `getSpecName()` resolves (contract name follows `${windowName}-send`, or the method is overridden).
 - Provider registration, resolver, payload, failure, and idempotency behavior are covered by tests.
 - Runtime and Schema Forge docs are updated in the same change.

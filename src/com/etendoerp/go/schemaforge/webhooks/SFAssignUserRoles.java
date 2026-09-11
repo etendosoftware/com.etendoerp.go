@@ -133,10 +133,13 @@ public class SFAssignUserRoles extends BaseWebhookService {
     // in Tenant B (REVIEW cycle 1 finding, ETP-4852). See
     // UserRoleCompositionService#enforceCallerClientBoundary.
     //
-    // Same reasoning for the caller's own AD_User_ID (ETP-4830): resolved from the SAME
-    // OBContext currentRole came from, still BEFORE admin mode, so
-    // UserRoleCompositionService#enforceOwnerProtection can tell "the owner reassigning their
-    // own roles" apart from "anyone else targeting the owner".
+    // Same reasoning for the caller's own AD_User_ID (ETP-4830, tightened by ETP-5019):
+    // resolved from the SAME OBContext currentRole came from, still BEFORE admin mode, so
+    // UserRoleCompositionService#enforceOwnerProtection knows a real caller identity was
+    // supplied and can reject composing roles for the owner/admin unconditionally — including
+    // the owner/admin targeting themselves (ETP-5019: self-service composition was the reported
+    // bug, since the owner's Admin role can never be reused as a personal role, and composing
+    // even one template silently replaced it with a brand-new one).
     String callerUserId = currentRole != null && OBContext.getOBContext() != null
         && OBContext.getOBContext().getUser() != null
         ? OBContext.getOBContext().getUser().getId() : null;

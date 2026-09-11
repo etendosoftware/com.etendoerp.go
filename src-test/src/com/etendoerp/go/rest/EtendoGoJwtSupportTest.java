@@ -333,6 +333,104 @@ class EtendoGoJwtSupportTest {
   }
 
   @Nested
+  @DisplayName("applyClientAdminDisplayName")
+  class ApplyClientAdminDisplayName {
+
+    @Mock private OBQuery<User> userQuery;
+
+    @Test
+    @DisplayName("sets the display name on the found active user")
+    void setsDisplayNameOnFoundUser() {
+      User user = mock(User.class);
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(userQuery);
+      when(userQuery.uniqueResult()).thenReturn(user);
+
+      EtendoGoJwtSupport.applyClientAdminDisplayName("client-user", "Jane Doe");
+
+      verify(user).setName("Jane Doe");
+      verify(obDal).save(user);
+    }
+
+    @Test
+    @DisplayName("is a no-op when fullName is blank")
+    void noOpOnBlankFullName() {
+      EtendoGoJwtSupport.applyClientAdminDisplayName("client-user", "   ");
+
+      verify(obDal, times(0)).createQuery(eq(User.class), anyString());
+      verify(obDal, times(0)).save(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    @DisplayName("is a no-op when fullName is null")
+    void noOpOnNullFullName() {
+      EtendoGoJwtSupport.applyClientAdminDisplayName("client-user", null);
+
+      verify(obDal, times(0)).createQuery(eq(User.class), anyString());
+      verify(obDal, times(0)).save(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    @DisplayName("is a no-op when the user is not found")
+    void noOpWhenUserNotFound() {
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(userQuery);
+      when(userQuery.uniqueResult()).thenReturn(null);
+
+      EtendoGoJwtSupport.applyClientAdminDisplayName("missing-user", "Jane Doe");
+
+      verify(obDal, times(0)).save(org.mockito.ArgumentMatchers.any());
+    }
+  }
+
+  @Nested
+  @DisplayName("applyClientAdminEmail")
+  class ApplyClientAdminEmail {
+
+    @Mock private OBQuery<User> userQuery;
+
+    @Test
+    @DisplayName("ETP-5019: sets the email on the found active user")
+    void setsEmailOnFoundUser() {
+      User user = mock(User.class);
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(userQuery);
+      when(userQuery.uniqueResult()).thenReturn(user);
+
+      EtendoGoJwtSupport.applyClientAdminEmail("client-user", "founder@example.com");
+
+      verify(user).setEmail("founder@example.com");
+      verify(obDal).save(user);
+    }
+
+    @Test
+    @DisplayName("ETP-5019: is a no-op when email is blank")
+    void noOpOnBlankEmail() {
+      EtendoGoJwtSupport.applyClientAdminEmail("client-user", "   ");
+
+      verify(obDal, times(0)).createQuery(eq(User.class), anyString());
+      verify(obDal, times(0)).save(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    @DisplayName("ETP-5019: is a no-op when email is null")
+    void noOpOnNullEmail() {
+      EtendoGoJwtSupport.applyClientAdminEmail("client-user", null);
+
+      verify(obDal, times(0)).createQuery(eq(User.class), anyString());
+      verify(obDal, times(0)).save(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    @DisplayName("ETP-5019: is a no-op when the user is not found")
+    void noOpWhenUserNotFound() {
+      when(obDal.createQuery(eq(User.class), anyString())).thenReturn(userQuery);
+      when(userQuery.uniqueResult()).thenReturn(null);
+
+      EtendoGoJwtSupport.applyClientAdminEmail("missing-user", "founder@example.com");
+
+      verify(obDal, times(0)).save(org.mockito.ArgumentMatchers.any());
+    }
+  }
+
+  @Nested
   @DisplayName("RoleListData")
   class RoleListDataTest {
 

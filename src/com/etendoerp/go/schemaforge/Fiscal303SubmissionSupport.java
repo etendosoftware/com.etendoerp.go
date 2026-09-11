@@ -48,6 +48,7 @@ import org.openbravo.module.taxreportlauncher.TaxReport;
 import org.openbravo.module.taxreportlauncher.erpCommon.ad_reports.OBTL_TaxReport_I;
 
 import com.etendoerp.go.schemaforge.data.FiscalDecl;
+import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 
 /**
  * Handles the AEAT 303 telematic submission entities — {@code GET/POST /neo/fiscal303/generate}
@@ -84,6 +85,7 @@ class Fiscal303SubmissionSupport {
   private static final String ERR_MISSING_PRESENTER = "MISSING_PRESENTER";
   private static final String ERR_SUBMISSION_FAILED = "SUBMISSION_FAILED";
   private static final String ERR_ALREADY_SUBMITTED = "ALREADY_SUBMITTED";
+  private static final String ERR_INVALID_DECL_TYPE = "INVALID_DECL_TYPE";
 
   /**
    * Query params consumed structurally by this handler's own routing (year/period/tipo/id) —
@@ -104,8 +106,16 @@ class Fiscal303SubmissionSupport {
   void handleGenerate(String orgId, int year, String period, String tipo,
       HttpServletRequest request, HttpServletResponse response) throws Exception {
     String filename = "303_" + period + "_" + year;
-    HashMap<String, Object> result =
-        generateElectronicFile(orgId, year, period, tipo, filename, request);
+    HashMap<String, Object> result;
+    try {
+      result = generateElectronicFile(orgId, year, period, tipo, filename, request);
+    } catch (IllegalArgumentException e) {
+      // ETP-5187 — resolveDeclType rejects a missing/blank/unrecognized declaration type
+      // instead of silently defaulting it to "N"; surface that as a clean 400 rather than
+      // letting it bubble up through dispatch()'s generic 500 mapping.
+      owner.servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+      return;
+    }
     owner.writeGeneratedFile(result, filename + ".txt", response);
   }
 
@@ -286,12 +296,19 @@ class Fiscal303SubmissionSupport {
         throw new OBException("generateElectronicFile returned no file content");
       }
       fileContent = fileObj.toString();
+    } catch (IllegalArgumentException e) {
+      // ETP-5187 — resolveDeclType rejects a missing/blank/unrecognized declaration type
+      // instead of silently defaulting it to "N"; a clean 400 here, not the generic 500 below,
+      // which is reserved for genuine generation failures.
+      writeJson(response, HttpServletResponse.SC_BAD_REQUEST,
+          owner.buildFailureJson(testMode, ERR_INVALID_DECL_TYPE, e.getMessage()));
+      return;
     } catch (Exception e) {
       AbstractFiscalHandler.log.error("Could not generate the 303 electronic file for submission (decl=" + declId
           + ")", e);
       writeJson(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           owner.buildFailureJson(testMode, ERR_SUBMISSION_FAILED,
-              "Could not generate the declaration file: " + e.getMessage()));
+              NeoMessageTranslator.safeParseTranslation(e.getMessage())));
       return;
     }
 
@@ -318,7 +335,8 @@ class Fiscal303SubmissionSupport {
     } catch (OBException e) {
       AbstractFiscalHandler.log.error("AEAT 303 submission failed (decl=" + declId + ")", e);
       writeJson(response, HttpServletResponse.SC_BAD_GATEWAY,
-          owner.buildFailureJson(testMode, ERR_SUBMISSION_FAILED, e.getMessage()));
+          owner.buildFailureJson(testMode, ERR_SUBMISSION_FAILED,
+              NeoMessageTranslator.safeParseTranslation(e.getMessage())));
       return;
     }
 

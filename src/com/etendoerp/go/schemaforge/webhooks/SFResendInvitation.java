@@ -64,6 +64,11 @@ public class SFResendInvitation extends BaseWebhookService {
   private static final Logger log = LogManager.getLogger(SFResendInvitation.class);
 
   private static final String PARAM_AD_USER_ID = "AdUserId";
+  /**
+   * Operator locale. Optional: without it the email falls back to Spanish, which is right for most
+   * tenants but ignores the locale the operator is actually working in (ETP-5003).
+   */
+  private static final String PARAM_LANGUAGE = "Language";
 
   private static final String RESPONSE_VAR_RESULT = "result";
   private static final String FIELD_ERROR = "error";
@@ -95,7 +100,8 @@ public class SFResendInvitation extends BaseWebhookService {
     String userId = StringUtils.trimToEmpty(parameter.get(PARAM_AD_USER_ID));
     try {
       OBContext obContext = OBContext.getOBContext();
-      JSONObject result = service.resendInvitation(obContext, userId, null, null);
+      String language = StringUtils.trimToNull(parameter.get(PARAM_LANGUAGE));
+      JSONObject result = service.resendInvitation(obContext, userId, null, language);
       responseVars.put(RESPONSE_VAR_RESULT, result.toString());
     } catch (JSONException e) {
       log.error("Error building SFResendInvitation response for AdUserId {}", userId, e);

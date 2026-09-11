@@ -1,14 +1,25 @@
 # ADR-0004 — Spreadsheet formula neutralization for CSV exports
 
-- **Status:** Proposed
-- **Date:** 2026-07-29
+- **Status:** Accepted — implemented by ETP-5032 (2026-09-07)
+- **Date:** 2026-07-29 (accepted 2026-09-07)
 - **Deciders:** Etendo Go backend (ETP-4569 assessment)
-- **Jira:** ETP-4569 (assessment / this ADR) · ETP-4568 (implementation, Backend 1/3) · Epic ETP-3504
+- **Jira:** ETP-4569 (assessment / this ADR) · ETP-4568 (original implementation slot, superseded) ·
+  **ETP-5032 (implementation)** · Epic ETP-3504
 - **Source:** [PRD — Client & Delivery Security Hardening](https://etendoproject.atlassian.net/wiki/spaces/PYPI/pages/5106892804/), WS-5 / SEC-04
 - **Finding:** SEC-04 (Critical) — "Formula injection in CSV export" (CWE-1236)
 
-> Part of the ETP-4569 assessment (PRD phase P0). This ADR fixes the output contract so that
-> ETP-4568 can be implemented test-first without re-litigating the escaping strategy.
+> Part of the ETP-4569 assessment (PRD phase P0). This ADR fixes the output contract so that the
+> implementation could be done test-first without re-litigating the escaping strategy.
+>
+> **Implemented by ETP-5032**, which QA opened independently after reproducing the finding on the
+> Contacts window (`=HYPERLINK(...)` stored in the Name field, exported, opened in Excel as a live
+> hyperlink). ETP-5032 widened the trigger set per D3, converged the paths per D5 — plus **two
+> more paths this ADR had not found** (see the D5 addendum) — and closed the three open questions
+> below. The `csvField`/`isFormulaInjection` line references in the "Verified current state" table
+> predate the ETP-4997 refactor and are kept as historical record; the current entry points are
+> `NeoCsvExportService.neutralizeSpreadsheetCell` and, on the frontend,
+> `neutralizeSpreadsheetCell` in both `app-shell-core/lib/csv/csvSerializer.js` and
+> `templates/reports/helpers/report-html-helpers.js`.
 
 ---
 
@@ -163,6 +174,26 @@ header that starts with `-` must not silently become `'-`, breaking the round-tr
 **Out of scope:** PDF export. PDF has no spreadsheet formula semantics; the PRD explicitly forbids
 broadening the requirement there.
 
+#### D5 addendum (ETP-5032) — two paths this ADR had missed
+
+The four-path survey above was incomplete. ETP-5032 found two more CSV producers and brought them
+under the same policy:
+
+| Path | Repo | State found | Action taken |
+|---|---|---|---|
+| `ReportDrawer.CSV_TEMPLATE` — the list **Print → CSV**, reachable from EVERY list including Contacts | `schema_forge` | ❌ no neutralization **and no quoting at all** (raw `{{ }}` interpolation, so a value with a comma also split into two cells) | Every label and cell now goes through `{{{csvField}}}` — the canonical helper the drawer's own `buildHelpersCode()` already ships. This is the path that actually reproduced ETP-5032. |
+| Nine `artifacts/*/helpers.js` each declaring their own `csvField` (accounting reports: trial balance, general ledger, journal entries, P&L, balance sheet, tax, aging payable/receivable, inventory stock) | `schema_forge` | ❌ quoting only, nine hand-copied copies | `csvField` promoted to the canonical helper set (`createReportHelpers` + `JSREPORT_HELPER_SOURCES`). Because `CANONICAL_HELPER_NAMES` derives from that map, the per-report copies are stripped from a report's extras automatically; the nine dead copies were then deleted. |
+
+**Deliberate deviation from the D5 row for `FmPrimitives`.** That row said "delegate to
+`csvSerializer.csvField()`". `buildCsvAndDownload` quotes EVERY field and joins with LF, whereas
+`csvField` quotes conditionally — so delegating the whole function would have changed that export's
+observable format, which D4 explicitly keeps out of a security fix. It therefore delegates the
+**policy** (`neutralizeSpreadsheetCell`) and keeps its own quoting. The recorded LF/always-quote
+divergence in D4 is unchanged.
+
+`neutralizeSpreadsheetCell` is exported precisely so that a path with its own quoting style has a
+correct option other than hand-rolling a second policy.
+
 ---
 
 ## Consequences
@@ -216,18 +247,36 @@ distinguishable from a security fix.
 - Each trigger renders as **literal text**, no formula evaluation, no leading-`'` data loss.
 - Re-verified **after save and reopen** in each consumer.
 
-Module idiom for the backend: JUnit 4 + the existing test layout under
-`modules/com.etendoerp.go/src-test/`. Frontend: existing `lib/csv/__tests__/csvSerializer.test.js`
-extended (delegate test authoring to the Tester agent per the repos' CLAUDE.md rule).
+Test layout: the existing `modules/com.etendoerp.go/src-test/`. `NeoCsvExportServiceTest` is
+**JUnit 5** (this ADR's original "JUnit 4" note was already stale for that class), so the fixture
+table is a `@ParameterizedTest` + `@MethodSource` — one case per fixture row, run against a data
+cell and again against a header label.
+
+**As implemented by ETP-5032:**
+
+| Suite | Runner | What it pins |
+|---|---|---|
+| `NeoCsvExportServiceTest` | JUnit 5 | the fixture table on data cells AND header labels, neutralize-then-quote ordering with delimiters/quotes/newlines, JSON-null cells, plus the pre-existing characterization tests (BOM, comma, always-quote, CRLF, `dd-MM-yyyy`, content type, `.csv` suffix) that must pass unchanged |
+| `app-shell-core lib/csv/__tests__/csvSerializer.test.js` | `node --test` | the fixture table via `csvNeutralizationFixtures.js`, plus a guard that every declared trigger has a fixture |
+| `report-csv-formula-neutralization.test.js` | `node --test` | the live helper, the SOURCE TEXT jsreport receives, and a real `template-csv.hbs` rendered end to end |
+| `report-jsreport-helpers-builder.test.js` | `node --test` | live/emitted behavioural parity for `csvField` (the pre-existing guard already refused to let a new canonical helper ship untested) |
+| `ReportDrawer.csvTemplate.vitest.js` | Vitest | the Print → CSV template compiled with the drawer's real helper string |
+| `buildCsvAndDownload.vitest.js` | Vitest | fiscal-monitor neutralization AND that its always-quote/LF/BOM format is unchanged |
 
 ---
 
-## Open questions for ETP-4568
+## Open questions — resolved by ETP-5032
 
-1. **Negative numbers** — neutralize (safe, visible) or exempt values that parse as a number
-   (friendlier, and reintroduces a parser-dependent bypass surface)? Needs the functional owner.
-2. **Full-width variant list** — which exact code points are "agreed"? Requires a decision to avoid
-   an open-ended Unicode chase.
-3. **Fiscal-monitor line endings** — while delegating to `csvSerializer`, do we also switch that path
-   to CRLF for consistency with the backend? Recommendation: **no**, keep it out of a security fix
-   (see D4).
+1. **Negative numbers** — **neutralize**, without parsing. `-500.00` exports as `'-500.00`. This is
+   what the backend already did and what the fixture table already stated, so it is a
+   consistency decision, not a new trade-off: exempting "values that look numeric" would create a
+   second policy and a parser-dependent bypass surface, and `-CMD` must be caught anyway. The
+   visible apostrophe on a negative amount is accepted under D1.
+2. **Full-width variant list** — exactly four code points, closed: `＝` U+FF1D, `＋` U+FF0B,
+   `－` U+FF0D, `＠` U+FF20. No open-ended Unicode chase.
+3. **Fiscal-monitor line endings** — **no change**, per the recommendation. It keeps LF and
+   always-quote; only the neutralization policy is shared (see the D5 addendum).
+
+One item the assessment had not anticipated: the skip-prefix set needed **NBSP** spelled out. Java's
+`Character.isWhitespace` does not match U+00A0 while JavaScript's `\s` does, so the two runtimes
+disagreed on ` =1+1` — caught only because both are now driven by the same fixture table.

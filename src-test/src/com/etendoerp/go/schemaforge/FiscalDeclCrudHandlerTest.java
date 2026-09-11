@@ -1169,6 +1169,315 @@ public class FiscalDeclCrudHandlerTest {
     assertTrue(!((String) captorB.getValue()).contains("AAA"));
   }
 
+  // ── resolveNextDeclSeq (ETP-5187) ───────────────────────────────────
+
+  /** No declarations exist yet for the natural key -> the first one gets {@code DECL_SEQ = 0}. */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testResolveNextDeclSeqNoExistingDeclarationsReturnsZero() {
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+      when(query.list()).thenReturn(Collections.emptyList());
+
+      long seq = handler.resolveNextDeclSeq("client1", "org1", "303", 2026L, "1T");
+
+      assertEquals(0L, seq);
+    }
+  }
+
+  /** A single existing declaration with {@code DECL_SEQ = 0} -> the next one gets {@code 1}. */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testResolveNextDeclSeqOneExistingWithSeqZeroReturnsOne() {
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+      BaseOBObject existing = mock(BaseOBObject.class);
+      when(existing.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(0L);
+      when(query.list()).thenReturn(Collections.singletonList(existing));
+
+      long seq = handler.resolveNextDeclSeq("client1", "org1", "303", 2026L, "1T");
+
+      assertEquals(1L, seq);
+    }
+  }
+
+  /**
+   * Several existing declarations with non-contiguous, out-of-order {@code DECL_SEQ} values
+   * (3, 0, 5, 2) -> the next one gets {@code MAX + 1 = 6}, regardless of iteration order.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testResolveNextDeclSeqMultipleOutOfOrderReturnsMaxPlusOne() {
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+
+      BaseOBObject e1 = mock(BaseOBObject.class);
+      when(e1.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(3L);
+      BaseOBObject e2 = mock(BaseOBObject.class);
+      when(e2.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(0L);
+      BaseOBObject e3 = mock(BaseOBObject.class);
+      when(e3.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(5L);
+      BaseOBObject e4 = mock(BaseOBObject.class);
+      when(e4.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(2L);
+      when(query.list()).thenReturn(Arrays.asList(e1, e2, e3, e4));
+
+      long seq = handler.resolveNextDeclSeq("client1", "org1", "303", 2026L, "1T");
+
+      assertEquals(6L, seq);
+    }
+  }
+
+  /**
+   * Isolation: the query is parameterized on the FULL natural key
+   * ({@code clientId, orgId, model, year, period}) — a declaration for a different org, model,
+   * year or period is scoped out by the underlying HQL filter (not exercised against a real DB
+   * here), which this test verifies at the query-construction level by asserting every named
+   * parameter is bound to the exact value passed in.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testResolveNextDeclSeqScopesQueryToExactNaturalKey() {
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+      when(query.list()).thenReturn(Collections.emptyList());
+
+      handler.resolveNextDeclSeq("clientX", "orgY", "349", 2025L, "2T");
+
+      verify(query).setNamedParameter("clientId", "clientX");
+      verify(query).setNamedParameter("orgId", "orgY");
+      verify(query).setNamedParameter("model", "349");
+      verify(query).setNamedParameter("year", Long.valueOf(2025L));
+      verify(query).setNamedParameter("period", "2T");
+    }
+  }
+
+  // ── handleDeclPost (creation, ETP-5187) ─────────────────────────────
+
+  /** A brand-new natural key -> the created declaration gets {@code DECL_SEQ = 0}. */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleDeclPostFirstDeclarationForNewNaturalKeyGetsSeqZero() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getReader()).thenReturn(new BufferedReader(
+        new StringReader("{\"model\":\"303\",\"year\":2026,\"period\":\"1T\"}")));
+
+    BaseOBObject newDecl = mock(BaseOBObject.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+      when(query.list()).thenReturn(Collections.emptyList());
+
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL)).thenReturn(newDecl);
+
+      handler.handleDeclarations("POST", req, resp);
+
+      verify(newDecl).set(FiscalDeclCrudHandler.PROPERTY_FISCAL_MODEL, "303");
+      verify(newDecl).set(FiscalDeclCrudHandler.PROPERTY_PERIOD, "1T");
+      verify(newDecl).set(eq(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ), eq(0L));
+      verify(obDal).save(newDecl);
+      verify(obDal).commitAndClose();
+    }
+    verify(resp).setStatus(HttpServletResponse.SC_CREATED);
+  }
+
+  /**
+   * A 2nd declaration for an already-declared period must NOT throw (the ETP-5187 fix, replacing
+   * the old 2-declaration cap on {@code ETGO_FISCAL_DECL_UQ}) and must get the next free
+   * {@code DECL_SEQ}.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleDeclPostSecondDeclarationForSamePeriodGetsSeqOne() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getReader()).thenReturn(new BufferedReader(
+        new StringReader("{\"model\":\"303\",\"year\":2026,\"period\":\"1T\"}")));
+
+    BaseOBObject existing0 = mock(BaseOBObject.class);
+    when(existing0.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(0L);
+    BaseOBObject secondDecl = mock(BaseOBObject.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+      when(query.list()).thenReturn(Collections.singletonList(existing0));
+
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL)).thenReturn(secondDecl);
+
+      handler.handleDeclarations("POST", req, resp);
+
+      verify(secondDecl).set(eq(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ), eq(1L));
+      verify(obDal).save(secondDecl);
+      verify(obDal).commitAndClose();
+    }
+    verify(resp).setStatus(HttpServletResponse.SC_CREATED);
+  }
+
+  /**
+   * A 4th declaration for an already-declared period (3 prior rectificativas already on file) —
+   * there is no AEAT/legal cap, so this must succeed exactly like the 2nd, with a correctly
+   * incremented {@code DECL_SEQ}.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleDeclPostFourthDeclarationForSamePeriodGetsSeqThreeAndSucceeds()
+      throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getReader()).thenReturn(new BufferedReader(
+        new StringReader("{\"model\":\"303\",\"year\":2026,\"period\":\"1T\"}")));
+
+    BaseOBObject existing0 = mock(BaseOBObject.class);
+    when(existing0.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(0L);
+    BaseOBObject existing1 = mock(BaseOBObject.class);
+    when(existing1.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(1L);
+    BaseOBObject existing2 = mock(BaseOBObject.class);
+    when(existing2.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(2L);
+    BaseOBObject fourthDecl = mock(BaseOBObject.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+      // 3 declarations already exist for this exact period -- pre-fix, this used to 500 past the
+      // old 2-declaration cap on ETGO_FISCAL_DECL_UQ.
+      when(query.list()).thenReturn(Arrays.asList(existing0, existing1, existing2));
+
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL)).thenReturn(fourthDecl);
+
+      handler.handleDeclarations("POST", req, resp);
+
+      verify(fourthDecl).set(eq(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ), eq(3L));
+      verify(obDal).save(fourthDecl);
+      verify(obDal).commitAndClose();
+    }
+    verify(resp).setStatus(HttpServletResponse.SC_CREATED);
+  }
+
+  // ── handleDeclDelete (draft-only guard, ETP-5187) ───────────────────
+
+  /** Deleting a {@code draft} declaration succeeds: the row is removed and committed. */
+  @Test
+  public void testHandleDeclDeleteDraftStatusSucceeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("draft");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("DELETE", req, resp);
+
+      verify(obDal).remove(decl);
+      verify(obDal).commitAndClose();
+    }
+    assertEquals("{\"ok\":true}", sw.toString());
+  }
+
+  /**
+   * Deleting a declaration with any status other than {@code draft} (e.g. {@code submitted})
+   * must be rejected with 409 and must NOT remove the row.
+   */
+  @Test
+  public void testHandleDeclDeleteNonDraftStatusReturns409AndDoesNotDelete() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("DELETE", req, resp);
+
+      verify(obDal, never()).remove(any());
+    }
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT), anyString());
+  }
+
+  /** Deleting a non-existent declaration id follows the shared not-found convention (404). */
+  @Test
+  public void testHandleDeclDeleteNonExistentDeclarationReturns404() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("missing-id");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "missing-id")).thenReturn(null);
+
+      handler.handleDeclarations("DELETE", req, resp);
+
+      verify(obDal, never()).remove(any());
+    }
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_NOT_FOUND), anyString());
+  }
+
   // ── helpers ────────────────────────────────────────────────────────
 
   /**

@@ -44,6 +44,8 @@ import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
 import org.w3c.dom.Document;
 import org.w3c.dom.NodeList;
 
+import com.etendoerp.go.schemaforge.handlers.GlItemProvisioningSupport;
+
 /**
  * Wires the newly created organization to the general ledger that the onboarding dataset import
  * brings in (Gap A1).
@@ -70,6 +72,9 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
   /** Native-query bind-parameter name for the target client id, reused across this class's SQL. */
   private static final String PARAM_CLIENT_ID = "clientId";
 
+  /** Native-query bind-parameter name for the target accounting schema id, reused across this class's SQL. */
+  private static final String PARAM_SCHEMA_ID = "schemaId";
+
   /**
    * Source AD_Tree id of GOClient's chart-of-accounts (EV) tree as it ships in the bundled
    * {@code AD_TREENODE.xml}. The hierarchy is read from this tree only; the org-specific orphan tree
@@ -84,6 +89,9 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
       SAMPLE_DATA_RESOURCE_DIRECTORY + "/C_ELEMENTVALUE.xml";
   private static final String SOURCE_TREENODE_RESOURCE =
       SAMPLE_DATA_RESOURCE_DIRECTORY + "/AD_TREENODE.xml";
+
+  /** ETP-5020 — GL Item auto-provisioning behind subaccounts, shared with {@code ChartOfAccountsHandler}. */
+  private final GlItemProvisioningSupport glItemProvisioning = new GlItemProvisioningSupport();
 
   /**
    * Inserts one account-element tree node, mapping the bundled hierarchy onto the tenant's own
@@ -132,57 +140,8 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
         ensureOrganizationAcctSchema(client, org, ledger);
         wireAccountElementTree(client);
         rebrandImportedChartNames(client, ledger);
+        provisionGlItemsForImportedChart(client, ledger);
         provisionEntityPostingAccounts(client, ledger);
-        flushChanges();
-      } finally {
-        exitAdminMode();
-      }
-    } finally {
-      restoreExecutionContext(previousContext);
-    }
-  }
-
-  /**
-   * Provisions the per-business-partner posting accounts (Gap A2) once the tenant's business
-   * partners exist.
-   *
-   * <p>This is a SECOND, later entry point on purpose. {@link #wire} runs early in the onboarding
-   * chain (right after the dataset import) so it can provision the {@code *_acct} rows for the
-   * entities the import brings in (BP groups, product categories, products). But the tenant's first
-   * business partner — the default customer — is created by {@code OnboardingDefaultCustomerService}
-   * several steps LATER, and {@code C_BPARTNER} is not part of the imported dataset. If the per-BP
-   * accounts were provisioned only inside {@link #wire}, {@code C_BP_CUSTOMER_ACCT} (and
-   * {@code C_BP_VENDOR_ACCT}) would always be empty for a fresh tenant. The onboarding servlet
-   * therefore calls this method again AFTER {@code ensureDefaultCustomer}, when the customer row
-   * exists and is flushed in the same transaction.
-   *
-   * <p>Both inserts are idempotent ({@code NOT EXISTS} guards), so the earlier no-op run inside
-   * {@link #wire} and this run never collide.
-   *
-   * @param clientId    target client identifier
-   * @param orgId       target organization identifier
-   * @param adminUserId administrator user for DAL context
-   * @param adminRoleId administrator role for DAL context
-   */
-  public void wireBusinessPartnerAccounts(String clientId, String orgId, String adminUserId,
-      String adminRoleId) {
-    validateContext(clientId, orgId, adminUserId, adminRoleId);
-    OBContext previousContext = captureCurrentContext();
-    applyExecutionContext(adminUserId, adminRoleId, clientId, orgId);
-    try {
-      enterAdminMode();
-      try {
-        Client client = resolveClient(clientId);
-        if (client == null) {
-          throw new OBException("Client not found for business-partner accounting: " + clientId);
-        }
-        AcctSchema ledger = resolveImportedLedger(client);
-        if (ledger == null) {
-          throw new OBException("No accounting schema was imported for client " + clientId
-              + "; cannot provision business-partner posting accounts");
-        }
-        runEntityAcctInsert(BP_CUSTOMER_ACCT_SQL, clientId, ledger.getId());
-        runEntityAcctInsert(BP_VENDOR_ACCT_SQL, clientId, ledger.getId());
         flushChanges();
       } finally {
         exitAdminMode();
@@ -211,10 +170,9 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
    * <p>Wired as the LAST provisioning step of the onboarding chain (right before the data-fix
    * baseline is stamped), so it runs after every {@code C_BP_Group} row for the tenant has already
    * been created and after {@code C_AcctSchema_Default} has its own values (both dataset-provisioned
-   * in step 1). A THIRD entry point on this class, after {@link #wire} (right after the dataset
-   * import) and {@link #wireBusinessPartnerAccounts} (after the default customer exists) — unlike
-   * those two, this one needs neither a fresh business partner nor a specific schema id: it patches
-   * every schema the tenant has via one client-scoped statement, exactly like its corrective twin.
+   * in step 1). A SECOND entry point on this class, after {@link #wire} (right after the dataset
+   * import) — unlike that one, this needs no specific schema id: it patches every schema the tenant
+   * has via one client-scoped statement, exactly like its corrective twin.
    *
    * <p>Idempotent: {@code COALESCE} only ever fills a NULL, never overwrites an existing value, and
    * the {@code WHERE} clause skips a row that has nothing left to fix.
@@ -581,6 +539,75 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
   }
 
   /**
+   * ETP-5020 — bulk GL Item auto-provisioning for the tenant's imported default chart of accounts
+   * (requirement 2a: "creating a subaccount must auto-create a matching GL Item ... both at
+   * onboarding time for the default chart of accounts, and whenever a user creates a new
+   * subaccount afterward"). The live per-subaccount twin of this step is
+   * {@code ChartOfAccountsHandler.afterHandle}'s POST hook; both share
+   * {@link GlItemProvisioningSupport#ensureGlItemForSubaccount} so the two entry points can never
+   * drift into different behavior.
+   *
+   * <p><b>Placement decision (judgment call, both options were valid per the design doc):</b> wired
+   * right after {@link #rebrandImportedChartNames}, BEFORE {@link #provisionEntityPostingAccounts},
+   * rather than as a new sibling service. Reasoning:
+   * <ul>
+   *   <li>Names must be final BEFORE GL Items are minted — {@link #rebrandImportedChartNames}
+   *   renames the dataset's generic "GOClient" chart names to the tenant's own; a GL Item created
+   *   before that rename would immediately be named "GOClient ..." instead of the tenant's real
+   *   subaccount name, recreating the exact "GL Item can diverge from its subaccount" problem this
+   *   ticket exists to eliminate (see the design doc's dataset-vs-dynamic-onboarding analysis).</li>
+   *   <li>{@link #wireAccountElementTree} must have already run so every leaf {@code ElementValue}
+   *   is placed in the tenant's own tree — not strictly required by this step's own SQL, but
+   *   keeps the whole {@code wire()} chain in one clear "structure, then names, then accounting
+   *   plumbing" order.</li>
+   *   <li>A separate sibling service would need to duplicate this exact same
+   *   {@code client}/{@code ledger} resolution {@link #wire} already did two lines above, for no
+   *   benefit — this class already owns "things that must happen once, right after the dataset
+   *   import, before the tenant's business partners exist" (see {@link #provisionEntityPostingAccounts}'s
+   *   own javadoc for the same reasoning about its two-call-site split).</li>
+   * </ul>
+   *
+   * <p>Idempotent (delegates entirely to {@link GlItemProvisioningSupport}'s own idempotency
+   * guarantees) and best-effort per subaccount: a failure provisioning ONE subaccount's GL Item
+   * never blocks the rest of the chart or the onboarding chain.
+   *
+   * @param client target client
+   * @param ledger the accounting schema whose GL Items are being provisioned (used only to prove
+   *               onboarding reached this far with a resolved ledger; the actual schema set
+   *               provisioned per subaccount is {@link GlItemProvisioningSupport#resolveActiveSchemas}
+   *               — the same one the live {@code ChartOfAccountsHandler} path uses)
+   */
+  protected void provisionGlItemsForImportedChart(Client client, AcctSchema ledger) {
+    if (ledger == null) {
+      return;
+    }
+    List<AcctSchema> activeSchemas = glItemProvisioning.resolveActiveSchemas(client);
+    if (activeSchemas.isEmpty()) {
+      return;
+    }
+    for (ElementValue subaccount : loadLeafElementValues(client)) {
+      glItemProvisioning.ensureGlItemForSubaccount(subaccount, activeSchemas);
+    }
+  }
+
+  /**
+   * Loads every leaf ({@code elementLevel = 'S'}) {@code ElementValue} for {@code client} — the
+   * same "subaccount" population {@code C_ELEMENTVALUE_TRG} auto-creates a natural
+   * {@code C_ValidCombination} for (see {@link GlItemProvisioningSupport} class javadoc). Summary
+   * accounts are excluded here rather than relying solely on
+   * {@link GlItemProvisioningSupport#ensureGlItemForSubaccount}'s own Case-3 filter, so onboarding
+   * never even attempts (and logs, at debug level, zero times) a lookup doomed to find nothing.
+   */
+  protected List<ElementValue> loadLeafElementValues(Client client) {
+    OBCriteria<ElementValue> criteria = OBDal.getInstance().createCriteria(ElementValue.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    criteria.add(Restrictions.eq(ElementValue.PROPERTY_CLIENT, client));
+    criteria.add(Restrictions.eq(ElementValue.PROPERTY_ELEMENTLEVEL, "S"));
+    return criteria.list();
+  }
+
+  /**
    * Provisions the per-entity posting accounts (Gap A2) for the tenant's business-partner groups,
    * product categories, customers, vendors, products, financial accounts and warehouses.
    *
@@ -604,11 +631,14 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
    * already has its posting row); those triggers just never fire for the rows the dataset importer
    * inserts with triggers disabled, which is exactly the gap this method backfills (ETP-4565).
    *
-   * <p>NOTE: at this point in the onboarding chain the only business partners are those carried by
-   * the dataset import (none — {@code C_BPARTNER} is not imported), so the customer/vendor inserts
-   * are no-ops here. The default customer is created several steps later; its posting account is
-   * provisioned by {@link #wireBusinessPartnerAccounts}, which the servlet calls after
-   * {@code ensureDefaultCustomer}.
+   * <p>NOTE: a freshly onboarded tenant has NO business partners at all — {@code C_BPARTNER} is not
+   * in {@code OnboardingDatasetDefinition.INCLUDED_TABLES}, and ETP-5079 removed the synthetic
+   * "Default Customer" that onboarding used to create — so the customer/vendor inserts below match
+   * zero rows here. They are kept because both statements are set-based
+   * ({@code INSERT ... SELECT ... FROM c_bpartner WHERE ...}) and therefore cost nothing on an empty
+   * table, and because this method is the single place that provisions posting accounts for any
+   * business partner the dataset ever does carry. Partners the tenant creates later get their
+   * posting rows from Classic's own {@code c_bpartner_trg}.
    *
    * @param client target client
    * @param ledger the accounting schema whose defaults are copied
@@ -616,6 +646,7 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
   protected void provisionEntityPostingAccounts(Client client, AcctSchema ledger) {
     String clientId = client.getId();
     String schemaId = ledger.getId();
+    backfillInvoicePriceVarianceDefault(clientId, schemaId);
     runEntityAcctInsert(BP_GROUP_ACCT_SQL, clientId, schemaId);
     ensureAcreedorPrepaymentAccount(clientId, schemaId);
     overrideAcreedorGroupAccounts(clientId, schemaId);
@@ -626,6 +657,101 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
     runEntityAcctInsert(TAX_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(FIN_FINANCIAL_ACCOUNT_ACCT_SQL, clientId, schemaId);
     runEntityAcctInsert(WAREHOUSE_ACCT_SQL, clientId, schemaId);
+  }
+
+  /**
+   * Standard GL account code for Invoice Price Variance, product-decided for ALL clients
+   * (confirmed with product during ETP-5175; account corrected from 99905000 to {@code 99904000}
+   * during ETP-5222 itself — see below): {@code 99904000} ("Diferencias entre el coste del
+   * producto y el precio de la fra[ctura]" — the {@code C_ElementValue.name} column is truncated
+   * at 61 chars in the bundled data itself, not a display artifact; confirmed via {@code
+   * length(name)}). Ships in the bundled GOClient chart (present since {@code feature/ETP-4247})
+   * and, per the live measurement below, resolves to a real leaf/subaccount on effectively every
+   * tenant's own copy of that chart.
+   *
+   * <p><b>{@code AccountType = 'M'} (Memorandum), not {@code 'E'} (Gasto/Expense) — accepted,
+   * not live-tested.</b> Verified via {@code ad_ref_list} (reference 117, "C_ElementValue
+   * AccountType"): {@code 99904000} is Memo-type, same as the originally-proposed {@code
+   * 99905000} ("Diferencia entre el precio de compra y el coste estándar" — a sibling account
+   * one code apart). Real production evidence exists for {@code 99905000} specifically (a
+   * matched-purchase-invoice {@code M_MatchInv} record, {@code 920B74ACD78A4F358392E91FF1B2503B},
+   * product "Fernet", posted successfully against it) but does NOT directly cover {@code
+   * 99904000}. Product's call (ETP-5222): GOClient's entire {@code 999*} branch —
+   * {@code 99900000}/{@code 99902000}/{@code 99904000}/{@code 99905000}/{@code 99907000}/
+   * {@code 99908000}/{@code 99909000}, Etendo's own generic default/suspense-account family — is
+   * uniformly Memo-type by design, and that pattern alone is accepted as sufficient without a
+   * dedicated live {@code DocMatchInv} posting test for {@code 99904000} itself. No further
+   * live-posting verification requested before wiring this account.
+   */
+  private static final String INVOICE_PRICE_VARIANCE_ACCT_VALUE = "99904000";
+
+  /**
+   * Preventive front for ETP-5075 gap A8 / ETP-5222: backfills {@code C_ACCTSCHEMA_DEFAULT.
+   * P_InvoicePriceVariance_Acct} when the imported dataset left it {@code NULL} — confirmed true
+   * of every dataset-import chart family in this fleet at ETP-5075's authoring time except the one
+   * non-imported demo schema that happens to already carry a dedicated variance account.
+   *
+   * <p>{@code DocMatchInv} (the accounting engine for {@code M_MatchInv}, "Relación
+   * albarán-factura") requests this account ONLY when a match's invoiced amount differs from its
+   * receipt's costed amount — most matches never hit this, which is why an unconfigured chart goes
+   * unnoticed until a real price difference occurs, then fails to post with a misleadingly
+   * BP/BP-Group-flavored "Account could not be found." (see
+   * {@link #patchBpGroupAcctMissingColumns}'s sibling javadoc and
+   * {@code DocumentPostingService#enrichWithFailingEntity} in this same module for that unrelated
+   * enrichment). {@code ProductInfo#getAccount} resolves this account EXCLUSIVELY from {@code
+   * M_PRODUCT_ACCT} for any line that carries a product (every real purchase-invoice-match line),
+   * with NO fallback to this schema-level default once a product has its own posting row — so this
+   * step alone does not, by itself, fix an EXISTING tenant's EXISTING products (that correction is
+   * the corrective {@code R34-invoice-price-variance-backfill} data-fix, which directly backfills
+   * {@code M_PRODUCT_ACCT}/{@code M_PRODUCT_CATEGORY_ACCT} for tenants provisioned before this
+   * method existed — R34 must be kept in lockstep with the priority order below). What THIS step
+   * buys a brand-new tenant is that {@link #PRODUCT_CATEGORY_ACCT_SQL}/{@link #PRODUCT_ACCT_SQL} —
+   * which already copy {@code d.p_invoicepricevariance_acct} from this table into every
+   * product/category row at creation time — now copy a real account instead of propagating the
+   * same NULL forward. Must run before both of those, which is why it is the first statement in
+   * {@link #provisionEntityPostingAccounts}.
+   *
+   * <p><b>Resolution priority (ETP-5222, supersedes ETP-5075's single-source logic):</b>
+   * <ol>
+   *   <li>Resolve {@link #INVOICE_PRICE_VARIANCE_ACCT_VALUE}'s ({@code 99904000}) OWN natural
+   *   {@code C_ValidCombination} for this tenant's schema — the same
+   *   account-{@code value}-joined-by-{@code C_ValidCombination} lookup shape
+   *   {@link #overrideAcreedorGroupAccounts}/{@code ACREEDOR_GROUP_ACCT_OVERRIDE_SQL} already uses
+   *   elsewhere in this class, scoped through {@code C_AcctSchema_Element} ({@code elementtype =
+   *   'AC'}) so it always resolves the element actually wired to {@code :schemaId} — NOT just any
+   *   {@code C_ElementValue} row matching the code, since a tenant can carry a second, unwired
+   *   "orphan" element tree with its own independent {@code 99904000} row (confirmed live on
+   *   GOClient itself: {@code c_elementvalue} has 2 rows for {@code value = '99904000'}, one under
+   *   the wired "Arbol de cuentas GO" element, a second, unrelated one under an unwired "GOOrg
+   *   Account Tree" element — joining through {@code C_AcctSchema_Element} is what keeps this
+   *   deterministic).</li>
+   *   <li>Falls back to copying this SAME row's {@code P_Expense_Acct} (ETP-5075's original
+   *   logic) only when 99904000 does not resolve for this tenant's chart (e.g. genuinely absent
+   *   from an imported non-GOClient-family chart) — preserves ETP-5075's original safety net
+   *   rather than leaving the column null in that case.</li>
+   * </ol>
+   * Both branches remain guarded by the same {@code P_InvoicePriceVariance_Acct IS NULL} check, so
+   * this stays idempotent and never overwrites a value a human (or a prior run) already set.
+   *
+   * <p>{@code P_PurchasePriceVariance_Acct} (the sibling column for {@code
+   * ProductInfo.ACCTTYPE_P_PPV}) is deliberately NOT touched here: its Classic UI field on this same
+   * tab is {@code isactive='N'} (Etendo turned it off), and no purchasing document class in core
+   * ever requests {@code ACCTTYPE_P_PPV} — wiring a column nothing reads and the UI does not even
+   * expose would be unexplained noise for whoever reads this schema's config later.
+   *
+   * @param clientId target client identifier
+   * @param schemaId the accounting schema whose default is backfilled
+   */
+  protected void backfillInvoicePriceVarianceDefault(String clientId, String schemaId) {
+    int rows = OBDal.getInstance().getSession()
+        .createNativeQuery(ACCTSCHEMA_DEFAULT_IPV_BACKFILL_SQL)
+        .setParameter(PARAM_CLIENT_ID, clientId)
+        .setParameter(PARAM_SCHEMA_ID, schemaId)
+        .setParameter("ipvAcctValue", INVOICE_PRICE_VARIANCE_ACCT_VALUE)
+        .executeUpdate();
+    if (rows > 0 && log.isDebugEnabled()) {
+      log.debug("Backfilled Invoice Price Variance default for client {}", clientId);
+    }
   }
 
   /**
@@ -673,7 +799,7 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
     int rows = OBDal.getInstance().getSession()
         .createNativeQuery(ACREEDOR_GROUP_ACCT_OVERRIDE_SQL)
         .setParameter(PARAM_CLIENT_ID, clientId)
-        .setParameter("schemaId", schemaId)
+        .setParameter(PARAM_SCHEMA_ID, schemaId)
         .setParameter("liabilityAcctValue", ACREEDOR_LIABILITY_ACCT_VALUE)
         .setParameter("notInvoicedReceivablesAcctValue", ACREEDOR_NOT_INVOICED_RECEIVABLES_ACCT_VALUE)
         .setParameter("prepaymentAcctValue", ACREEDOR_PREPAYMENT_ACCT_VALUE)
@@ -739,7 +865,7 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
     int rows = OBDal.getInstance().getSession()
         .createNativeQuery(sql)
         .setParameter(PARAM_CLIENT_ID, clientId)
-        .setParameter("schemaId", schemaId)
+        .setParameter(PARAM_SCHEMA_ID, schemaId)
         .executeUpdate();
     if (rows > 0 && log.isDebugEnabled()) {
       log.debug("Provisioned {} posting-account row(s) for client {}", rows, clientId);
@@ -951,6 +1077,69 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
       + "  AND NOT EXISTS (SELECT 1 FROM c_bp_group_acct a"
       + "    WHERE a.c_bp_group_id = g.c_bp_group_id AND a.c_acctschema_id = :schemaId)";
 
+  /**
+   * Backfills {@code C_ACCTSCHEMA_DEFAULT.P_InvoicePriceVariance_Acct} when the imported dataset's
+   * own copy left it {@code NULL} — ETP-5075 gap A8, priority order updated by ETP-5222. Must run
+   * BEFORE {@link #PRODUCT_CATEGORY_ACCT_SQL}/{@link #PRODUCT_ACCT_SQL} below, which already copy
+   * {@code d.p_invoicepricevariance_acct} from this table into every new product/category at
+   * creation time — fixing the source here is what makes that existing copy-down cover this column
+   * too, for a brand-new tenant, with no change to those two INSERTs.
+   *
+   * <p>Resolves {@link #INVOICE_PRICE_VARIANCE_ACCT_VALUE}'s ({@code 99904000}) own NATURAL
+   * {@code C_ValidCombination} for {@code :schemaId} FIRST (joined through
+   * {@code C_AcctSchema_Element}/{@code elementtype = 'AC'} so it always finds the element actually
+   * wired to this schema, never an unwired orphan element that happens to share the account code —
+   * see {@link #backfillInvoicePriceVarianceDefault}'s javadoc); falls back to this SAME row's
+   * {@code P_Expense_Acct} (ETP-5075's original source) only when {@code 99904000} does not resolve
+   * for this tenant's chart.
+   *
+   * <p><b>Natural-combination filter (ETP-5222 review fix, Alex/W1):</b> {@code C_ValidCombination}
+   * can hold non-natural, dimension-specific rows for the same {@code (account, schema)} pair (e.g.
+   * a product- or business-partner-specific combination), and a plain join on
+   * {@code account_id}/{@code c_acctschema_id} alone can match more than one such row — Postgres
+   * {@code UPDATE ... FROM} then picks one ARBITRARILY (silent nondeterminism, not an error). The
+   * subquery below explicitly requires every OTHER dimension column NULL, mirroring {@link
+   * GlItemProvisioningSupport#resolveNaturalCombination} — the DAL/Criteria precedent for this exact
+   * "find the natural combination" operation elsewhere in this codebase — translated from its
+   * {@code Restrictions.isNull(...)} calls into plain {@code AND vc.<col> IS NULL} predicates (native
+   * SQL here, not HQL/Criteria) plus that same method's defensive {@code ORDER BY ... LIMIT 1}.
+   *
+   * <p>Structured as a single {@code resolved} derived table (one row per matching schema, PK-
+   * correlated into the {@code UPDATE} target in the outer {@code WHERE}) so the natural-combination
+   * subquery and its {@code P_Expense_Acct} fallback are computed exactly ONCE, not duplicated across
+   * {@code SET} and {@code WHERE} — Postgres does not allow an {@code UPDATE} target's own alias to
+   * be referenced inside its {@code FROM} clause's joins, so the derived table is keyed by
+   * {@code d2.ad_client_id = :clientId AND d2.c_acctschema_id = :schemaId} (already unique) rather
+   * than joining back to {@code d}.
+   */
+  private static final String ACCTSCHEMA_DEFAULT_IPV_BACKFILL_SQL =
+      "UPDATE c_acctschema_default d"
+      + " SET p_invoicepricevariance_acct = resolved.new_acct,"
+      + "     updated = now(), updatedby = '0'"
+      + " FROM ("
+      + "   SELECT d2.c_acctschema_default_id,"
+      + "     COALESCE("
+      + "       (SELECT vc.c_validcombination_id"
+      + "        FROM c_acctschema_element ae"
+      + "        JOIN c_elementvalue ev ON ev.c_element_id = ae.c_element_id AND ev.value = :ipvAcctValue"
+      + "        JOIN c_validcombination vc ON vc.account_id = ev.c_elementvalue_id"
+      + "          AND vc.c_acctschema_id = ae.c_acctschema_id AND vc.ad_client_id = ae.ad_client_id"
+      + "          AND vc.m_product_id IS NULL AND vc.c_bpartner_id IS NULL AND vc.ad_orgtrx_id IS NULL"
+      + "          AND vc.c_locfrom_id IS NULL AND vc.c_locto_id IS NULL AND vc.c_salesregion_id IS NULL"
+      + "          AND vc.c_project_id IS NULL AND vc.c_campaign_id IS NULL AND vc.c_activity_id IS NULL"
+      + "          AND vc.user1_id IS NULL AND vc.user2_id IS NULL"
+      + "        WHERE ae.c_acctschema_id = d2.c_acctschema_id AND ae.ad_client_id = d2.ad_client_id"
+      + "          AND ae.elementtype = 'AC'"
+      + "        ORDER BY vc.c_validcombination_id LIMIT 1),"
+      + "       d2.p_expense_acct) AS new_acct"
+      + "   FROM c_acctschema_default d2"
+      + "   WHERE d2.ad_client_id = :clientId AND d2.c_acctschema_id = :schemaId"
+      + " ) resolved"
+      + " WHERE d.c_acctschema_default_id = resolved.c_acctschema_default_id"
+      + "   AND d.ad_client_id = :clientId AND d.c_acctschema_id = :schemaId"
+      + "   AND d.p_invoicepricevariance_acct IS NULL"
+      + "   AND resolved.new_acct IS NOT NULL";
+
   private static final String PRODUCT_CATEGORY_ACCT_SQL =
       "INSERT INTO m_product_category_acct ("
       + "  m_product_category_acct_id, ad_client_id, ad_org_id, isactive, created, createdby, updated, updatedby,"
@@ -1034,21 +1223,33 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
   // Classic's own fin_financial_account_trg AFTER INSERT trigger — which otherwise auto-provisions
   // this exact row for every LIVE financial-account creation — never fires for the bundled template
   // accounts ("Caja", "Cuenta de Banco", "Tarjeta"). This statement mirrors that trigger's own
-  // column mapping one-for-one: the asset account resolves to CB_Asset_Acct for cash-type accounts
-  // (type='C') and B_Asset_Acct for every other type, and that same resolved value is reused for
-  // fin_deposit_acct/fin_withdrawal_acct/fin_out_clear_acct/fin_in_clear_acct, exactly as the trigger
-  // does (fin_debit_acct/fin_credit_acct are left NULL, also matching the trigger).
+  // column mapping, with ONE deliberate divergence (see below): the asset account resolves to
+  // CB_Asset_Acct for cash-type accounts (type='C') and B_Asset_Acct for every other type, and that
+  // same resolved value is reused for fin_deposit_acct/fin_withdrawal_acct, as the trigger does
+  // (fin_debit_acct/fin_credit_acct are left NULL, also matching the trigger).
+  //
+  // ETP-5207 — deliberate divergence from the trigger: fin_out_clear_acct and fin_in_clear_acct
+  // (the "Cleared payment account" IN/OUT pair) are NO LONGER selected here, so a newly onboarded
+  // tenant's template accounts are born with them empty. The trigger seeds them with the asset
+  // account, and a non-null cleared account is exactly what makes DocFINReconciliation queue a
+  // reconciliation for posting (#getDocumentConfirmation) — producing accounting entries that
+  // distorted Sumas y Saldos / Libro Mayor. Note the GOClient sampledata XML for
+  // FIN_FINANCIAL_ACCOUNT_ACCT is NOT the source of a tenant's row (that table is absent from
+  // OnboardingDatasetDefinition.INCLUDED_TABLES, so the file is never imported) — THIS statement
+  // is the preventive front. Lockstep partners that must stay consistent with this decision:
+  // FinancialAccountAccountingDefaultsSupport (the runtime/create path, which now actively clears
+  // the pair after the trigger has run) and data-fix R34-fin-account-cleared-payment-accounts (the
+  // corrective front for already-provisioned tenants). Data-fix R22 is the frozen twin that still
+  // fills both columns; it is immutable and R34 sorts after it, so the chain self-corrects.
   private static final String FIN_FINANCIAL_ACCOUNT_ACCT_SQL =
       "INSERT INTO fin_financial_account_acct ("
       + "  fin_financial_account_acct_id, ad_client_id, ad_org_id, isactive, created, createdby,"
       + "  updated, updatedby, fin_financial_account_id, c_acctschema_id,"
-      + "  fin_deposit_acct, fin_withdrawal_acct, fin_out_clear_acct, fin_in_clear_acct,"
+      + "  fin_deposit_acct, fin_withdrawal_acct,"
       + "  fin_bankfee_acct, fin_bankrevaluationgain_acct, fin_bankrevaluationloss_acct,"
       + "  fin_out_intransit_acct, fin_in_intransit_acct) "
       + "SELECT get_uuid(), :clientId, f.ad_org_id, 'Y', now(), '0', now(), '0',"
       + "  f.fin_financial_account_id, :schemaId,"
-      + "  CASE WHEN f.type = 'C' THEN d.cb_asset_acct ELSE d.b_asset_acct END,"
-      + "  CASE WHEN f.type = 'C' THEN d.cb_asset_acct ELSE d.b_asset_acct END,"
       + "  CASE WHEN f.type = 'C' THEN d.cb_asset_acct ELSE d.b_asset_acct END,"
       + "  CASE WHEN f.type = 'C' THEN d.cb_asset_acct ELSE d.b_asset_acct END,"
       + "  d.b_expense_acct, d.b_revaluationgain_acct, d.b_revaluationloss_acct,"
@@ -1061,8 +1262,9 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
 
   // Warehouse posting accounts (ETP-4565): M_WAREHOUSE is bulk-imported by the dataset importer
   // with triggers disabled (same INCLUDED_TABLES gap as FIN_FINANCIAL_ACCOUNT above), so Classic's
-  // own m_warehouse_trg AFTER INSERT trigger never fires for the bundled template warehouses
-  // ("Almacen GO", "Almacén Secundario"). Column mapping mirrors that trigger one-for-one.
+  // own m_warehouse_trg AFTER INSERT trigger never fires for the bundled template warehouse
+  // ("Almacen Principal" — ETP-5079 reduced the dataset to a single warehouse). Column mapping
+  // mirrors that trigger one-for-one.
   private static final String WAREHOUSE_ACCT_SQL =
       "INSERT INTO m_warehouse_acct ("
       + "  m_warehouse_acct_id, ad_client_id, ad_org_id, isactive, created, createdby, updated,"

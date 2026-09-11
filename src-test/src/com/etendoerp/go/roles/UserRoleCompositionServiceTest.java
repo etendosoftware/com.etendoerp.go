@@ -22,6 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -32,9 +33,11 @@ import static org.mockito.Mockito.when;
 import java.util.Collections;
 import java.util.List;
 
+import org.hibernate.criterion.Criterion;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
@@ -264,12 +267,19 @@ class UserRoleCompositionServiceTest {
   }
 
   /**
-   * The owner recomposing their OWN access must sail through the owner-protection check —
-   * reaching the (unrelated) template-validation error, rather than the owner-protection
-   * {@link OBException}, proves this specific guard did not block it.
+   * ETP-5019 regression guard — inverts the pre-fix behavior this test used to assert. The owner
+   * recomposing their OWN roles is NO LONGER a no-op: {@link
+   * UserRoleCompositionService#enforceOwnerProtection} used to special-case {@code
+   * callerUserId.equals(user.getId())}, but that self-service exception is exactly what let the
+   * owner silently overwrite their own "Admin" role with a fresh empty personal role (see the
+   * method's own javadoc). Self-targeting must now be rejected exactly like any other caller,
+   * BEFORE {@code resolveAndValidateTemplates} ever runs (reachable-but-unrelated {@code
+   * "missing-role"} template id proves the owner-protection guard is what fired) — and no
+   * persistence side effect (personal-role creation, {@code Default_Ad_Role_ID} rewrite) must
+   * happen as a result.
    */
   @Test
-  void ownerReassigningTheirOwnRolesPassesOwnerProtectionCheck() {
+  void ownerReassigningTheirOwnRolesIsRejectedByOwnerProtectionCheck() {
     User user = mock(User.class);
     when(user.getId()).thenReturn("owner-user-1");
     when(mockDal.get(User.class, "owner-user-1")).thenReturn(user);
@@ -280,14 +290,102 @@ class UserRoleCompositionServiceTest {
 
       OBException e = assertThrows(OBException.class, () -> service
           .assignTemplateRoles("owner-user-1", List.of("missing-role"), null, "owner-user-1"));
-      assertTrue(e.getMessage().contains("Template role not found or inactive"));
+      assertTrue(e.getMessage().toLowerCase().contains("owner"));
+      assertTrue(e.getMessage().toLowerCase().contains("admin"));
     }
+
+    verify(mockDal, never()).save(any());
+  }
+
+  /**
+   * ETP-5019: a user NOT flagged {@code EM_ETGO_Is_Owner} but whose {@code
+   * user.getDefaultRole().isClientAdmin()} reads {@code true} (e.g. a second user manually
+   * granted the classic "Admin" role via the core UI) must also be rejected — the {@code
+   * isOwner} flag and the client-admin default-role check are OR'd in {@link
+   * UserRoleCompositionService#enforceOwnerProtection}. Covers self-targeting.
+   */
+  @Test
+  void clientAdminRoleHolderTargetingSelfIsRejectedEvenWhenNotFlaggedAsOwner() {
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("admin-holder-1");
+    when(mockDal.get(User.class, "admin-holder-1")).thenReturn(user);
+    when(mockDal.get(Role.class, "missing-role")).thenReturn(null);
+
+    Role currentAdminRole = mock(Role.class);
+    when(currentAdminRole.isClientAdmin()).thenReturn(true);
+    when(user.getDefaultRole()).thenReturn(currentAdminRole);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner("admin-holder-1")).thenReturn(false);
+
+      OBException e = assertThrows(OBException.class, () -> service
+          .assignTemplateRoles("admin-holder-1", List.of("missing-role"), null, "admin-holder-1"));
+      assertTrue(e.getMessage().toLowerCase().contains("owner"));
+    }
+
+    verify(mockDal, never()).save(any());
+  }
+
+  /**
+   * Same as {@link #clientAdminRoleHolderTargetingSelfIsRejectedEvenWhenNotFlaggedAsOwner} but
+   * with a DIFFERENT caller targeting the client-admin-role holder — proves the OR'd check
+   * rejects regardless of who is asking, matching {@link #rejectsOwnerRoleReassignmentByNonOwner}
+   * for the {@code isOwner=true} signal.
+   */
+  @Test
+  void clientAdminRoleHolderTargetedByAnotherCallerIsRejectedEvenWhenNotFlaggedAsOwner() {
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("admin-holder-2");
+    when(mockDal.get(User.class, "admin-holder-2")).thenReturn(user);
+    when(mockDal.get(Role.class, "missing-role")).thenReturn(null);
+
+    Role currentAdminRole = mock(Role.class);
+    when(currentAdminRole.isClientAdmin()).thenReturn(true);
+    when(user.getDefaultRole()).thenReturn(currentAdminRole);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner("admin-holder-2")).thenReturn(false);
+
+      OBException e = assertThrows(OBException.class, () -> service
+          .assignTemplateRoles("admin-holder-2", List.of("missing-role"), null, "some-other-admin"));
+      assertTrue(e.getMessage().toLowerCase().contains("owner"));
+    }
+
+    verify(mockDal, never()).save(any());
+  }
+
+  /**
+   * Edge case: {@code user.getDefaultRole()} returns {@code null} (e.g. a brand-new {@code
+   * AD_User} with no role assigned yet) — {@link UserRoleCompositionService#enforceOwnerProtection}
+   * must not NPE on {@code currentRole.isClientAdmin()} and must fall through to evaluating the
+   * {@code isOwner} flag alone. Here {@code isOwner=true}, so the guard still rejects.
+   */
+  @Test
+  void nullDefaultRoleDoesNotNpeAndFallsThroughToOwnerFlagCheck() {
+    User user = mock(User.class);
+    when(user.getId()).thenReturn("owner-user-4");
+    when(mockDal.get(User.class, "owner-user-4")).thenReturn(user);
+    when(mockDal.get(Role.class, "missing-role")).thenReturn(null);
+    when(user.getDefaultRole()).thenReturn(null);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner("owner-user-4")).thenReturn(true);
+
+      OBException e = assertThrows(OBException.class, () -> service
+          .assignTemplateRoles("owner-user-4", List.of("missing-role"), null, "some-other-admin"));
+      assertTrue(e.getMessage().toLowerCase().contains("owner"));
+    }
+
+    verify(mockDal, never()).save(any());
   }
 
   /**
    * Baseline (every pre-existing user until the ETP-4830 backfill data-fix runs): {@code
-   * is_owner=false/unset} means the guard never triggers at all, regardless of who the caller is
-   * — reaching the template-validation error (not an owner-protection rejection) proves it.
+   * is_owner=false/unset} AND a non-client-admin (or absent) default role means the guard never
+   * triggers at all, regardless of who the caller is — reaching the template-validation error
+   * (not an owner-protection rejection) proves it. {@code user.getDefaultRole()} is explicitly
+   * stubbed to {@code null} here (rather than relying on Mockito's default null-return) to make
+   * explicit that the OR'd client-admin signal is also false for this baseline case.
    */
   @Test
   void ownerProtectionIsNoOpWhenTargetIsNotFlaggedAsOwner() {
@@ -295,6 +393,7 @@ class UserRoleCompositionServiceTest {
     when(user.getId()).thenReturn("regular-user-1");
     when(mockDal.get(User.class, "regular-user-1")).thenReturn(user);
     when(mockDal.get(Role.class, "missing-role")).thenReturn(null);
+    when(user.getDefaultRole()).thenReturn(null);
 
     try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
       ownerMock.when(() -> OwnerSupport.isOwner("regular-user-1")).thenReturn(false);
@@ -924,6 +1023,247 @@ class UserRoleCompositionServiceTest {
       verify(user, never()).setDefaultWarehouse(any());
       verify(user).setDefaultClient(userClient);
       verify(user).setSmfswsDefaultWsRole(newRole);
+    }
+  }
+
+  // ── ETP-5019: promoteToAdmin (promotion workflow) ────────────────────────
+
+  @Test
+  void promoteToAdminRejectsWhenCallerIsNotOwnerOrAdmin() {
+    User caller = mock(User.class);
+    when(caller.getId()).thenReturn("caller-1");
+    Role callerRole = mock(Role.class);
+    when(callerRole.isClientAdmin()).thenReturn(false);
+
+    User target = mock(User.class);
+    when(target.getId()).thenReturn("target-1");
+
+    when(mockDal.get(User.class, "target-1")).thenReturn(target);
+    when(mockDal.get(User.class, "caller-1")).thenReturn(caller);
+    when(caller.getDefaultRole()).thenReturn(callerRole);
+
+    try (MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class)) {
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("caller-1")).thenReturn(false);
+
+      OBException ex = assertThrows(OBException.class,
+          () -> service.promoteToAdmin("caller-1", callerRole, "target-1"));
+      assertTrue(ex.getMessage().toLowerCase().contains("not authorized")
+          || ex.getMessage().toLowerCase().contains("admin"));
+      verify(mockDal, never()).save(any());
+    }
+  }
+
+  @Test
+  void promoteToAdminRejectsWhenTargetAlreadyClientAdmin() {
+    User caller = mock(User.class);
+    when(caller.getId()).thenReturn("caller-1");
+    Role callerRole = mock(Role.class);
+    when(callerRole.isClientAdmin()).thenReturn(true);
+    Client callerClient = mock(Client.class);
+    when(callerClient.getId()).thenReturn("client-1");
+    when(callerRole.getClient()).thenReturn(callerClient);
+
+    User target = mock(User.class);
+    when(target.getId()).thenReturn("target-1");
+    when(target.getClient()).thenReturn(callerClient);
+    Role targetCurrentRole = mock(Role.class);
+    when(targetCurrentRole.isClientAdmin()).thenReturn(true);
+    when(target.getDefaultRole()).thenReturn(targetCurrentRole);
+
+    when(mockDal.get(User.class, "target-1")).thenReturn(target);
+    when(mockDal.get(User.class, "caller-1")).thenReturn(caller);
+    when(caller.getDefaultRole()).thenReturn(callerRole);
+
+    try (MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class)) {
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("target-1")).thenReturn(false);
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("caller-1")).thenReturn(false);
+
+      OBException ex = assertThrows(OBException.class,
+          () -> service.promoteToAdmin("caller-1", callerRole, "target-1"));
+      assertTrue(ex.getMessage().toLowerCase().contains("already")
+          && ex.getMessage().toLowerCase().contains("admin"));
+      verify(mockDal, never()).save(any());
+    }
+  }
+
+  @Test
+  void demoteFromAdminRejectsWhenTargetIsOwner() {
+    Role callerRole = mock(Role.class);
+    when(callerRole.isClientAdmin()).thenReturn(true);
+
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("client-1");
+    when(callerRole.getClient()).thenReturn(client);
+
+    User target = mock(User.class);
+    when(target.getId()).thenReturn("owner-1");
+    when(target.getClient()).thenReturn(client);
+
+    when(mockDal.get(User.class, "owner-1")).thenReturn(target);
+
+    try (MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class)) {
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("caller-1")).thenReturn(true);
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("owner-1")).thenReturn(true);
+
+      OBException ex = assertThrows(OBException.class,
+          () -> service.demoteFromAdmin("caller-1", callerRole, "owner-1"));
+      assertTrue(ex.getMessage().toLowerCase().contains("owner")
+          && ex.getMessage().toLowerCase().contains("demoted"));
+      verify(mockDal, never()).save(any());
+    }
+  }
+
+  @Test
+  void demoteFromAdminRestoresPriorPersonalRoleByName() {
+    Role callerRole = mock(Role.class);
+    when(callerRole.isClientAdmin()).thenReturn(true);
+
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("client-1");
+    when(callerRole.getClient()).thenReturn(client);
+
+    User target = mock(User.class);
+    when(target.getId()).thenReturn("target-1");
+    when(target.getClient()).thenReturn(client);
+    when(target.getName()).thenReturn("Jane Doe");
+    Role adminRole = mock(Role.class);
+    when(adminRole.isClientAdmin()).thenReturn(true);
+    when(target.getDefaultRole()).thenReturn(adminRole);
+
+    Role priorPersonalRole = mock(Role.class);
+    when(priorPersonalRole.isActive()).thenReturn(true);
+    when(priorPersonalRole.isTemplate()).thenReturn(false);
+    when(priorPersonalRole.isClientAdmin()).thenReturn(false);
+    when(priorPersonalRole.getClient()).thenReturn(client);
+    when(priorPersonalRole.getId()).thenReturn("role-prior");
+
+    when(mockDal.get(User.class, "target-1")).thenReturn(target);
+
+    OBCriteria<Role> roleCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(Role.class)).thenReturn(roleCriteria);
+    when(roleCriteria.list()).thenReturn(Collections.singletonList(priorPersonalRole));
+    // ETP-5019 C1 regression guard: the dormant role ALREADY occupies the base name, so a
+    // uniqueResult() lookup against that same name (what buildPersonalRoleName's roleNameExists
+    // would run) must "see" it as a collision on the FIRST check. If the fix ever regresses back
+    // to calling buildPersonalRoleName(user) here, that collision drives its suffix loop —
+    // bounded to a second call returning null so the loop terminates after one suffix attempt
+    // instead of spinning forever, turning a regression into a fast, clear test failure (a wrong
+    // role restored) rather than a hung test run / CI timeout.
+    when(roleCriteria.uniqueResult()).thenReturn(priorPersonalRole).thenReturn(null);
+    when(roleCriteria.setMaxResults(1)).thenReturn(roleCriteria);
+    when(roleCriteria.setFilterOnReadableClients(false)).thenReturn(roleCriteria);
+    when(roleCriteria.setFilterOnReadableOrganization(false)).thenReturn(roleCriteria);
+    when(roleCriteria.add(any())).thenReturn(roleCriteria);
+
+    OBCriteria<UserRoles> userRolesCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(UserRoles.class)).thenReturn(userRolesCriteria);
+    when(userRolesCriteria.list()).thenReturn(Collections.emptyList());
+
+    OBCriteria<org.openbravo.model.ad.access.RoleInheritance> inheritanceCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(org.openbravo.model.ad.access.RoleInheritance.class)).thenReturn(inheritanceCriteria);
+    when(inheritanceCriteria.setMaxResults(1)).thenReturn(inheritanceCriteria);
+    when(inheritanceCriteria.list()).thenReturn(Collections.emptyList());
+
+    try (MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<com.etendoerp.go.schemaforge.util.UserRoleSyncSupport> userRoleSyncMock = mockStatic(com.etendoerp.go.schemaforge.util.UserRoleSyncSupport.class)) {
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("caller-1")).thenReturn(true);
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("target-1")).thenReturn(false);
+
+      UserRoleCompositionService.AssignmentResult result =
+          service.demoteFromAdmin("caller-1", callerRole, "target-1");
+
+      assertEquals("role-prior", result.personalRoleId);
+      verify(target).setDefaultRole(priorPersonalRole);
+      // ETP-5019 C2: the web-services default role must be kept in lockstep with Default_Ad_Role
+      // on restore too, otherwise the user's next JWT mint could still resolve the dormant role.
+      verify(target).setSmfswsDefaultWsRole(priorPersonalRole);
+
+      // ETP-5019 C1: the lookup must use personalRoleBaseName (the UNSUFFIXED base name) — NOT
+      // buildPersonalRoleName, which would suffix this name away since the dormant role already
+      // occupies it (see UserRoleCompositionService#findDormantPersonalRoleByName's javadoc).
+      // Capture EVERY add() call on this shared criteria mock — under a C1 regression,
+      // buildPersonalRoleName's own internal roleNameExists() collision check ALSO runs a
+      // Restrictions.eq(Role.PROPERTY_NAME, ...) against this same mock (createCriteria(Role.class)
+      // always returns this one instance), using the exact unsuffixed base name first before
+      // suffixing it away — so an earlier round's "does any captured criterion CONTAIN the base
+      // name" check passed under both the correct fix AND a regression: the regressed final
+      // query's own name is "Personal – Jane Doe (2)", which still contains the substring
+      // "Personal – Jane Doe". Confirmed empirically (Criterion#toString() format is exactly
+      // "name=<value>", verified by temporarily printing it): only the LAST name-restriction
+      // value, checked for EXACT equality (not containment), distinguishes the two cases —
+      // findDormantPersonalRoleByName's own query always adds its Restrictions AFTER any
+      // roleNameExists() sub-calls a regression would trigger, so the last one is always the
+      // value actually used for the real, outer lookup.
+      ArgumentCaptor<Criterion> criterionCaptor = ArgumentCaptor.forClass(Criterion.class);
+      verify(roleCriteria, atLeastOnce()).add(criterionCaptor.capture());
+      String expectedName = "Personal – Jane Doe";
+      String namePrefix = org.openbravo.model.ad.access.Role.PROPERTY_NAME + "=";
+      String lastNameRestrictionValue = null;
+      for (Criterion criterion : criterionCaptor.getAllValues()) {
+        String criterionStr = criterion.toString();
+        if (criterionStr.startsWith(namePrefix)) {
+          lastNameRestrictionValue = criterionStr.substring(namePrefix.length());
+        }
+      }
+      boolean foundNameRestriction = expectedName.equals(lastNameRestrictionValue);
+      assertTrue(foundNameRestriction,
+          "Expected the FINAL name-based restriction to be exactly Restrictions.eq(Role.PROPERTY_NAME, '"
+              + expectedName + "'), but it was '" + lastNameRestrictionValue
+              + "'. All captured criteria: " + criterionCaptor.getAllValues());
+    }
+  }
+
+  /**
+   * ETP-5019 C2 happy-path coverage: a non-owner, non-admin user with a personal role gets
+   * promoted to the client's Admin role. Asserts {@code Default_Ad_Role_ID} is set to the Admin
+   * role AND (the C2 fix) {@code EM_Smfsws_Default_Ws_Role_ID} is kept in lockstep — without the
+   * latter, {@code SecureWebServicesUtils.getRole} could still mint the target's next JWT scoped
+   * to their old, now-dormant personal role instead of the freshly assigned Admin role.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void promoteToAdminHappyPathSetsAdminRoleAndWebServicesDefault() {
+    Role callerRole = mock(Role.class);
+    when(callerRole.isClientAdmin()).thenReturn(true);
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("client-1");
+    when(callerRole.getClient()).thenReturn(client);
+
+    User target = mock(User.class);
+    when(target.getId()).thenReturn("target-1");
+    when(target.getClient()).thenReturn(client);
+    when(target.getDefaultRole()).thenReturn(null);
+
+    when(mockDal.get(User.class, "target-1")).thenReturn(target);
+
+    Role adminRole = mock(Role.class);
+    when(adminRole.getId()).thenReturn("admin-role-1");
+
+    OBCriteria<Role> adminRoleCriteria = mock(OBCriteria.class);
+    when(mockDal.createCriteria(Role.class)).thenReturn(adminRoleCriteria);
+    when(adminRoleCriteria.setFilterOnReadableClients(false)).thenReturn(adminRoleCriteria);
+    when(adminRoleCriteria.setFilterOnReadableOrganization(false)).thenReturn(adminRoleCriteria);
+    when(adminRoleCriteria.add(any())).thenReturn(adminRoleCriteria);
+    when(adminRoleCriteria.setMaxResults(1)).thenReturn(adminRoleCriteria);
+    when(adminRoleCriteria.list()).thenReturn(Collections.singletonList(adminRole));
+
+    try (MockedStatic<OwnerSupport> ownerSupportMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<com.etendoerp.go.schemaforge.util.UserRoleSyncSupport> userRoleSyncMock =
+            mockStatic(com.etendoerp.go.schemaforge.util.UserRoleSyncSupport.class)) {
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("caller-1")).thenReturn(true);
+      ownerSupportMock.when(() -> OwnerSupport.isOwner("target-1")).thenReturn(false);
+
+      UserRoleCompositionService.AssignmentResult result =
+          service.promoteToAdmin("caller-1", callerRole, "target-1");
+
+      assertEquals("admin-role-1", result.personalRoleId);
+      verify(target).setDefaultRole(adminRole);
+      verify(target).setSmfswsDefaultWsRole(adminRole);
+      verify(mockDal).save(target);
+      userRoleSyncMock.verify(() -> com.etendoerp.go.schemaforge.util.UserRoleSyncSupport
+          .syncSingleActiveUserRole(target, adminRole));
     }
   }
 }

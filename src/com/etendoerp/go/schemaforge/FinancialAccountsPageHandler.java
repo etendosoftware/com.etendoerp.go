@@ -38,6 +38,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.service.json.JsonUtils;
+
 
 /**
  * NeoHandler that powers the Cuentas (Financial Accounts) landing page introduced
@@ -119,7 +121,15 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           // (ETP-4896 QA follow-up): the edit modal opened from the account DETAIL page reads its
           // record from this R spec, so without this column its BIC/SWIFT field would render empty
           // even for an account that has one stored.
-          + "       fa.swiftcode "
+          + "       fa.swiftcode, "
+          // Appended at the END for the same positional-read reason as the columns above.
+          // ETP-5073/DOC-04 made `updated` mandatory on every PUT/PATCH
+          // (NeoCrudHandler#validateUpdateRequest): the client has to echo back the value it read.
+          // This R spec is what the edit modal reads its record from — both from the Cuentas list
+          // and from the account detail page — so without this column there was nothing to echo
+          // and every save through it 400'd with `missing_updated`, exactly as it did on
+          // ChartOfAccountsHandler's own bypass-the-generic-service path.
+          + "       fa.updated "
           + "  FROM fin_financial_account fa "
           + "  JOIN c_currency cur ON cur.c_currency_id = fa.c_currency_id "
           + "  LEFT JOIN c_glitem gli ON gli.c_glitem_id = fa.em_aprm_glitem_diff "
@@ -330,6 +340,16 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           // "was null" artefact.
           row.pendingCount = rs.getInt(22);
           row.swiftCode = StringUtils.trimToEmpty(rs.getString(23));
+          // Formatted with core's OWN writer, because core's reader is what has to accept it back:
+          // JsonUtils.createDateTimeFormat() is `yyyy-MM-dd'T'HH:mm:ssZZZZZ` and the offset is
+          // MANDATORY — convertFromXSDToJavaFormat appends "+0000" to a token that lacks one
+          // ("make them utc, the timezone must be there"). A local-time string with no offset is
+          // therefore read as UTC, so on a UTC-3 server every write looked three hours old and the
+          // concurrency check refused it as `stale_record`. NeoDateFormat.toCanonical is the wrong
+          // tool here: it deliberately DROPS the offset.
+          java.sql.Timestamp rawUpdated = rs.getTimestamp(24);
+          row.updated = rawUpdated != null
+              ? JsonUtils.createDateTimeFormat().format(rawUpdated) : "";
           rows.add(row);
         }
       }
@@ -407,6 +427,7 @@ public class FinancialAccountsPageHandler implements NeoHandler {
       json.put("countryName", account.country != null ? account.country.name : "");
       json.put("iban", account.iban);
       json.put("swiftCode", account.swiftCode);
+    json.put("updated", account.updated);
       json.put("maskedPan", account.maskedPan);
       json.put("bankConnected", account.bankConnected);
       json.put("bankReconnectable", account.bankReconnectable);
@@ -554,6 +575,13 @@ public class FinancialAccountsPageHandler implements NeoHandler {
     /** BIC/SWIFT code (ETP-4896 QA follow-up). Blank for Cash/Card accounts and for Bank accounts
      *  that never got one. Loader-set for the same 7-parameter reason as {@link #country}. */
     String swiftCode = "";
+    /**
+     * The record's read version, echoed back by the client on every PUT/PATCH so
+     * {@code NeoCrudHandler}'s optimistic-locking check (ETP-5073/DOC-04) can verify nobody else
+     * changed the row in the meantime. Without it every save through this spec is refused with
+     * {@code missing_updated}.
+     */
+    String updated = "";
 
     AccountRow(String id, String name, String type, BigDecimal currentBalance,
         Currency currency, String iban, boolean isDefault) {

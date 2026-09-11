@@ -17,6 +17,14 @@
 
 package com.etendoerp.go.mcp;
 
+import static com.etendoerp.go.mcp.McpJsonSchema.KEY_REQUIRED;
+import static com.etendoerp.go.mcp.McpJsonSchema.buildObjectSchema;
+import static com.etendoerp.go.mcp.McpJsonSchema.enumProp;
+import static com.etendoerp.go.mcp.McpJsonSchema.numericProp;
+import static com.etendoerp.go.mcp.McpJsonSchema.objectProp;
+import static com.etendoerp.go.mcp.McpJsonSchema.stringArrayProp;
+import static com.etendoerp.go.mcp.McpJsonSchema.stringProp;
+
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -35,6 +43,7 @@ import org.openbravo.model.ad.ui.Process;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoImageHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 import com.etendoerp.go.schemaforge.util.NeoReportContract;
 import com.etendoerp.go.schemaforge.util.NeoReportParam;
@@ -63,8 +72,8 @@ public class ToolRegistry {
 
   private static final Logger log = LogManager.getLogger(ToolRegistry.class);
 
-  /** The JSON-schema {@code required} keyword, kept as one constant so it is not re-typed. */
-  private static final String KEY_REQUIRED = "required";
+  /** JSON-schema numeric type used by integer-valued MCP arguments. */
+  private static final String TYPE_INTEGER = "integer";
 
   /**
    * Generate all MCP tools the authenticated user can access.
@@ -83,6 +92,7 @@ public class ToolRegistry {
       // neo_widget wraps the handler-backed business widgets (gap G4, ETP-4284). It is a
       // built-in read tool, not gated on any accessible window spec.
       tools.add(buildWidgetTool());
+      tools.add(buildVectorSearchTool());
     }
 
     // Query all active specs
@@ -107,6 +117,15 @@ public class ToolRegistry {
 
     registerCrudTools(tools, accessibleWindowSpecs, creatableWindowSpecs,
         updatableWindowSpecs, deletableWindowSpecs, permissions);
+
+    // ETP-5184: the image-upload tools are built-in and type-driven, not spec-driven — they create
+    // an AD_Image row and nothing else, and the same three tools serve every image-typed field in
+    // the instance. Gated on write scope because they do write a row.
+    if (permissions.canWrite) {
+      tools.add(buildRequestImageUploadTool());
+      tools.add(buildUploadImageTool());
+      tools.add(buildGetImageUploadTool());
+    }
 
     log.debug("Generated {} MCP tools for scopes {}", tools.size(), scopes);
     return tools;
@@ -175,13 +194,16 @@ public class ToolRegistry {
     // Split the write catalog per method. A spec with one PUT/PATCH entity but no POST or
     // DELETE entity (monitor-verifactu) belongs only in neo_update; a shared "writable"
     // enum would incorrectly advertise it to neo_create and neo_delete.
-    if (McpToolRouterSupport.hasEntityWithMethod(spec, "POST")) {
+    if (McpToolRouterSupport.hasEntityWithMethod(spec, "POST")
+        && NeoAccessUtils.hasWindowAccessForSpec(spec, "POST")) {
       creatableWindowSpecs.add(spec.getName());
     }
-    if (McpToolRouterSupport.hasEntityWithMethod(spec, "PUT")) {
+    if (McpToolRouterSupport.hasEntityWithMethod(spec, "PUT")
+        && NeoAccessUtils.hasWindowAccessForSpec(spec, "PUT")) {
       updatableWindowSpecs.add(spec.getName());
     }
-    if (McpToolRouterSupport.hasEntityWithMethod(spec, "DELETE")) {
+    if (McpToolRouterSupport.hasEntityWithMethod(spec, "DELETE")
+        && NeoAccessUtils.hasWindowAccessForSpec(spec, "DELETE")) {
       deletableWindowSpecs.add(spec.getName());
     }
   }
@@ -278,7 +300,7 @@ public class ToolRegistry {
    */
   public static String resolveSpecName(String toolName, org.codehaus.jettison.json.JSONObject arguments) {
     // Static tools (e.g. docs) are not tied to any spec
-    if ("docs".equals(toolName)) {
+    if ("docs".equals(toolName) || McpConstants.TOOL_NEO_VECTOR_SEARCH.equals(toolName)) {
       return null;
     }
 
@@ -317,6 +339,12 @@ public class ToolRegistry {
       case "neo_action":
       case McpConstants.TOOL_NEO_WIDGET:
       case McpConstants.TOOL_GENERATE_AMORTIZATION_PLAN:
+      // ETP-5184: listed here so resolveSpecName does not derive a spec name from the tool name.
+      // These tools address no spec at all — they create an AD_Image row — and "neo-upload-image"
+      // would be looked up as a spec and denied.
+      case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
+      case McpConstants.TOOL_NEO_UPLOAD_IMAGE:
+      case McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD:
         return true;
       default:
         return false;
@@ -345,7 +373,7 @@ public class ToolRegistry {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("topic", stringProp(
         "Term/topic to search in the Etendo Go docs (e.g. 'finance', 'payment')."));
-    props.put("tokens", intProp(
+    props.put("tokens", numericProp(TYPE_INTEGER,
         "Approximate max size of the returned docs (default 5000, clamped to 500-20000)."));
     props.put("type", stringProp(
         "Response format: 'txt' (default) or 'json'."));
@@ -429,6 +457,26 @@ public class ToolRegistry {
         buildObjectSchema(props, List.of(McpConstants.PARAM_WIDGET)));
   }
 
+  // ── Global vector search tool ─────────────────────────────────────────
+
+  /** Build the read-only DB Extended semantic-search tool. */
+  McpToolDefinition buildVectorSearchTool() {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put(McpConstants.PARAM_QUERY,
+        stringProp("Natural-language search query"));
+    props.put("targets", stringArrayProp(
+        "DB Extended search-target keys to query"));
+    props.put("topK", numericProp(TYPE_INTEGER, "Maximum results (default 10, maximum 50)"));
+    props.put("minScore", numericProp("number", "Minimum similarity score from 0 to 1 (default 0.60)"));
+    props.put("maxScore", numericProp("number", "Maximum similarity score from 0 to 1 (default 1.0)"));
+    return new McpToolDefinition(
+        McpConstants.TOOL_NEO_VECTOR_SEARCH,
+        "Search indexed business records by semantic similarity using DB Extended. "
+            + "Targets are authorized against their physical source entity for the current role. "
+            + "Scores are ranking signals, not confidence probabilities.",
+        buildObjectSchema(props, List.of(McpConstants.PARAM_QUERY, "targets")));
+  }
+
   // ── CRUD tools (registered once with spec enum) ───────────────────────
 
   private McpToolDefinition buildListTool(List<String> specNames) {
@@ -443,8 +491,8 @@ public class ToolRegistry {
             + "(3) named business filter {\"status\": \"<name>\"} — the spec's own hand-authored "
             + "statuses (e.g. \"pending\", \"partial\", \"completed\"). Call neo_schema to see the "
             + "named filters available for a given spec; an unknown name returns the valid list."));
-    props.put("limit", intProp("Maximum number of records to return (default 100)"));
-    props.put("offset", intProp("Number of records to skip for pagination"));
+    props.put("limit", numericProp(TYPE_INTEGER, "Maximum number of records to return (default 100)"));
+    props.put("offset", numericProp(TYPE_INTEGER, "Number of records to skip for pagination"));
     props.put("orderBy", stringProp("Column name to sort by, prefix with '-' for descending"));
     props.put(McpFieldProjection.PARAM_FIELDS, stringArrayProp(
         "Optional projection: return only these field names per row (e.g. "
@@ -484,7 +532,8 @@ public class ToolRegistry {
     return new McpToolDefinition(
         "neo_get",
         "Get a single record by ID from a NEO Headless API spec. Supports field projection "
-            + "(`fields` / view:\"summary\").",
+            + "(`fields` / view:\"summary\"). "
+            + McpConstants.RECORD_URL_NOTE,
           buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY, "id")));
   }
 
@@ -503,7 +552,8 @@ public class ToolRegistry {
             + "user for every field or guessing values that already have a sensible default "
             + "(document number, dates, prices, etc.). "
             + "Dates must be ISO-8601: 'YYYY-MM-DD' for date fields and "
-            + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported.",
+            + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported. "
+            + McpConstants.RECORD_URL_NOTE,
         buildObjectSchema(props,
           List.of("spec", McpConstants.PARAM_ENTITY, McpConstants.PARAM_FIELDS)));
   }
@@ -514,14 +564,27 @@ public class ToolRegistry {
     props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
     props.put("id", stringProp("Record ID to update"));
     props.put(McpConstants.PARAM_FIELDS, objectProp("Field values to update"));
+    // ETP-5073 / DOC-04: required, and described in terms of where to obtain it. The schema alone
+    // would only tell an agent that something is missing; naming neo_get as the source is what
+    // lets it recover on the first retry instead of guessing a timestamp (which cannot work — any
+    // value other than the one actually stored is rejected as a conflict).
+    props.put(McpConstants.PARAM_UPDATED, stringProp(
+        "The record's 'updated' value exactly as neo_get returned it. Required: it is how the "
+            + "server verifies nobody else changed the record since you read it. Copy it verbatim "
+            + "— do not reformat, round or invent it. If you do not have it, call neo_get first."));
 
     return new McpToolDefinition(
         "neo_update",
         "Update an existing record in a NEO Headless API spec. "
+            + "Read the record with neo_get first: its 'updated' value is a required argument and "
+            + "guards against overwriting somebody else's concurrent edit. A 409 with "
+            + "error 'stale_record' means the record changed since that read — re-read it, reapply "
+            + "your changes and retry; re-sending the same payload will fail identically. "
             + "Dates must be ISO-8601: 'YYYY-MM-DD' for date fields and "
             + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported.",
         buildObjectSchema(props,
-          List.of("spec", McpConstants.PARAM_ENTITY, "id", McpConstants.PARAM_FIELDS)));
+          List.of("spec", McpConstants.PARAM_ENTITY, "id", McpConstants.PARAM_FIELDS,
+            McpConstants.PARAM_UPDATED)));
   }
 
   private McpToolDefinition buildDeleteTool(List<String> specNames) {
@@ -600,9 +663,13 @@ public class ToolRegistry {
             + "are required vs optional, and computed/system defaults (document number, dates, "
             + "prices, etc.). Recommended: call this BEFORE neo_create, then use its result as "
             + "the starting point and only override the fields the user actually wants to set — "
-            + "instead of asking the user for every value from scratch. neo_create will still "
-            + "auto-fill any field you omit, but calling this first lets you see the full base "
-            + "dataset up front. When entity is a child/line tab (not the spec's top-level "
+            + "instead of asking the user for every value from scratch. neo_create only auto-fills "
+            + "what it needs to satisfy a NOT-NULL column or a computed value (sequence numbers, "
+            + "dates, currency, ...) — an optional field this call resolved (a price list, payment "
+            + "terms, a financial account, ...) is NOT copied into the record unless you send it "
+            + "explicitly in fields, even though it showed a value here. Copy across every field "
+            + "from this result you want on the record; do not assume omitting one lets neo_create "
+            + "fill it in the same way. When entity is a child/line tab (not the spec's top-level "
             + "entity), pass parentId with the parent record's id — omitting it does not resolve "
             + "parent-dependent fields (a storage bin scoped to the parent's warehouse, a "
             + "price-list version, a running line number); they are silently absent rather than "
@@ -786,7 +853,7 @@ public class ToolRegistry {
     Map<String, Object> paramProps = buildProcessParamSchema(spec);
 
     Map<String, Object> props = new LinkedHashMap<>();
-    props.put(McpConstants.PARAM_PARAMETERS, objectPropWithProperties("Process input parameters", paramProps));
+    props.put(McpConstants.PARAM_PARAMETERS, objectProp("Process input parameters", paramProps));
 
     return new McpToolDefinition(toolName, desc, buildObjectSchema(props, List.of()));
   }
@@ -800,7 +867,7 @@ public class ToolRegistry {
    * <p>The parameters used to come from {@code buildProcessParamSchema}, which emits a property
    * only for a field backed by an {@code AD_Column}. Every active report spec has zero
    * {@code ETGO_SF_FIELD} rows — report inputs are not AD columns — so that produced an empty map
-   * and, because {@code objectPropWithProperties} omits the key when the map is empty, a bare
+   * and, because {@code objectProp} omits the key when the map is empty, a bare
    * {@code parameters:{type:"object"}} with no properties and no {@code required} list. An agent
    * had to guess {@code dateFrom} and its date shape, then learn from a 400 that it had guessed
    * wrong. The handler declares the truth, so the schema is built from that instead.</p>
@@ -818,7 +885,7 @@ public class ToolRegistry {
       paramProps.put(param.getName(), reportParamProp(param));
     }
 
-    Map<String, Object> parametersProp = objectPropWithProperties("Report input parameters",
+    Map<String, Object> parametersProp = objectProp("Report input parameters",
         paramProps);
     // An empty `properties` map is itself a statement — "this report takes no inputs" — where an
     // absent one reads as "any object", which is the very ambiguity IMP-19 removes. The shared
@@ -860,7 +927,7 @@ public class ToolRegistry {
       return prop;
     }
     if (NeoReportParam.TYPE_INTEGER.equals(param.getType())) {
-      return intProp(description);
+      return numericProp(TYPE_INTEGER, description);
     }
     if (NeoReportParam.TYPE_BOOLEAN.equals(param.getType())) {
       Map<String, Object> prop = new LinkedHashMap<>();
@@ -909,68 +976,68 @@ public class ToolRegistry {
     return paramProps;
   }
 
-  // ── JSON Schema builder helpers ────────────────────────────────────────
+  // ── Image upload tools (ETP-5184) ─────────────────────────────────────
 
-  private Map<String, Object> buildObjectSchema(Map<String, Object> properties,
-      List<String> required) {
-    Map<String, Object> schema = new LinkedHashMap<>();
-    schema.put("type", McpConstants.TYPE_OBJECT);
-    schema.put(McpConstants.KEY_PROPERTIES, properties);
-    if (required != null && !required.isEmpty()) {
-      schema.put(KEY_REQUIRED, required);
-    }
-    return schema;
+  /**
+   * Description of {@link McpConstants#TOOL_NEO_REQUEST_IMAGE_UPLOAD}.
+   *
+   * <p>Held as a constant because a test asserts it names the cheap path and the cap: the guidance
+   * an agent reads and the validation the server enforces must not be able to drift apart.
+   */
+  static final String REQUEST_IMAGE_UPLOAD_DESCRIPTION =
+      "Returns a single-use URL to upload an image to Etendo, plus a ready-to-run curl command. "
+      + "Prefer this over " + McpConstants.TOOL_NEO_UPLOAD_IMAGE + " whenever you can run a shell "
+      + "command or the user can open a link: the image bytes never pass through the conversation, "
+      + "so it costs almost no tokens. After the upload succeeds you get an imageId — write it to "
+      + "any field of type 'image' with neo_update. The URL works exactly once and expires in 10 "
+      + "minutes.";
+
+  /** Description of {@link McpConstants#TOOL_NEO_UPLOAD_IMAGE}. See above for why it is a constant. */
+  static final String UPLOAD_IMAGE_DESCRIPTION =
+      "Uploads an image inline as base64 and returns its imageId. Use only for images under 256 KB: "
+      + "base64 in a tool argument is model output, so ~100 KB of image costs ~100k tokens. If you "
+      + "can run a shell command, use " + McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD + " instead. "
+      + "image/png or image/jpeg only; resize to max 1024 px on the long side before encoding.";
+
+  /** Description of {@link McpConstants#TOOL_NEO_GET_IMAGE_UPLOAD}. */
+  static final String GET_IMAGE_UPLOAD_DESCRIPTION =
+      "Looks up an upload ticket returned by " + McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD
+      + " and reports whether the file has arrived, plus the imageId once it has. Use it only when "
+      + "you did not see the output of the upload itself — the PUT already returns the imageId.";
+
+  private McpToolDefinition buildRequestImageUploadTool() {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("name", stringProp(
+        "Optional name for the stored image (defaults to 'image')."));
+    props.put("mime_type", enumProp(
+        "Optional expected type. Omit it and the type is detected from the uploaded bytes; if you "
+            + "do send it, it is cross-checked against them and a mismatch is rejected.",
+        NeoImageHelper.ALLOWED_MIME_TYPES));
+    return new McpToolDefinition(McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD,
+        REQUEST_IMAGE_UPLOAD_DESCRIPTION, buildObjectSchema(props, null));
   }
 
-  private Map<String, Object> stringProp(String description) {
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", McpConstants.TYPE_STRING);
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    return prop;
+  private McpToolDefinition buildUploadImageTool() {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("data_base64", stringProp(
+        "The image file encoded as base64. A 'data:image/png;base64,' prefix is accepted and "
+            + "stripped. Hard limit: 256 KB decoded — over that the call is rejected and points you "
+            + "at " + McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD + "."));
+    props.put("name", stringProp(
+        "Optional name for the stored image (defaults to 'image')."));
+    props.put("mime_type", enumProp(
+        "Optional. Cross-checked against the actual bytes; omit it and the type is detected.",
+        NeoImageHelper.ALLOWED_MIME_TYPES));
+    return new McpToolDefinition(McpConstants.TOOL_NEO_UPLOAD_IMAGE, UPLOAD_IMAGE_DESCRIPTION,
+        buildObjectSchema(props, List.of("data_base64")));
   }
 
-  private Map<String, Object> enumProp(String description, List<String> values) {
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", McpConstants.TYPE_STRING);
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    prop.put("enum", values);
-    return prop;
-  }
-
-  private Map<String, Object> intProp(String description) {
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", "integer");
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    return prop;
-  }
-
-  private Map<String, Object> objectProp(String description) {
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", McpConstants.TYPE_OBJECT);
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    return prop;
-  }
-
-  /** A JSON-schema array of strings, used for the IMP-2 {@code fields} projection whitelist. */
-  private Map<String, Object> stringArrayProp(String description) {
-    Map<String, Object> items = new LinkedHashMap<>();
-    items.put("type", McpConstants.TYPE_STRING);
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", "array");
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    prop.put("items", items);
-    return prop;
-  }
-
-  private Map<String, Object> objectPropWithProperties(String description,
-      Map<String, Object> nestedProps) {
-    Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", McpConstants.TYPE_OBJECT);
-    prop.put(McpConstants.KEY_DESCRIPTION, description);
-    if (nestedProps != null && !nestedProps.isEmpty()) {
-      prop.put(McpConstants.KEY_PROPERTIES, nestedProps);
-    }
-    return prop;
+  private McpToolDefinition buildGetImageUploadTool() {
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("token", stringProp("The token returned by "
+        + McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD + "."));
+    return new McpToolDefinition(McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD,
+        GET_IMAGE_UPLOAD_DESCRIPTION, buildObjectSchema(props, List.of("token")));
   }
 
   // ── Naming helpers ─────────────────────────────────────────────────────

@@ -30,6 +30,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Property;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.ui.Tab;
 
 import org.openbravo.service.json.JsonConstants;
 
@@ -125,8 +126,18 @@ final class McpSupportInternals {
   static JSONObject buildDiscoverEntity(SFEntity entity) throws JSONException {
     JSONObject item = new JSONObject();
     item.put("name", entity.getName());
-    item.put("methods", McpToolRouterSupport.buildMethodsArray(entity));
-    item.put("readOnly", isReadOnlyEntity(entity));
+    JSONArray methods = buildDiscoverMethodsArray(entity);
+    item.put("methods", methods);
+    item.put("readOnly", isReadOnlyMethods(methods));
+    // ETP-5184: the parent scope answers both of discover's questions in one read — whether this
+    // entity may be served at all (a broken MCP_CONFIG or an unidentifiable parent withhold it,
+    // and the reason is named rather than left to be inferred), and, when it may, how the agent is
+    // expected to address it. Going through the scope instead of reading MCP_CONFIG here keeps the
+    // column to a single consumer; asking twice would also have meant two answers to reconcile.
+    // The descriptor is what stops the parent requirement from being pure friction: an agent that
+    // can read parentField and parentRequiredFor gets the call right the first time. neo_schema
+    // emits the same block from the same helper, so the two tools cannot drift apart.
+    McpParentScope.publishInto(item, McpParentScope.forEntity(entity));
     // Entity-level agent guidance (ETP-4278), additive to the spec-level and
     // per-field prompts. Emitted only when set so untagged entities stay lean.
     String agentPrompt = entity.getAgentPrompt();
@@ -134,6 +145,50 @@ final class McpSupportInternals {
       item.put("agentPrompt", agentPrompt.trim());
     }
     return item;
+  }
+
+  /**
+   * Build the methods advertised by {@code neo_discover} for the current role.
+   * Window-backed entities derive mutation visibility from {@code AD_Window_Access}; the
+   * configured entity methods alone are not enough because they describe the server surface,
+   * not the caller's role. Handler-backed entities have no AD window to consult and retain their
+   * configured methods for compatibility with their handler-specific authorization.
+   */
+  private static JSONArray buildDiscoverMethodsArray(SFEntity entity) {
+    JSONArray methods = McpToolRouterSupport.buildMethodsArray(entity);
+    Tab tab = entity.getADTab();
+    if (tab == null || tab.getWindow() == null) {
+      return methods;
+    }
+    JSONArray authorized = new JSONArray();
+    String windowId = tab.getWindow().getId();
+    for (int i = 0; i < methods.length(); i++) {
+      String method = methods.optString(i);
+      if ("GET".equals(method) || NeoAccessUtils.hasWindowAccess(windowId, method)) {
+        authorized.put(method);
+      }
+    }
+    return authorized;
+  }
+
+  private static boolean isReadOnlyMethods(JSONArray methods) {
+    for (int i = 0; i < methods.length(); i++) {
+      String method = methods.optString(i);
+      if ("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)
+          || "DELETE".equals(method)) {
+        return false;
+      }
+    }
+    return methods.length() > 0 && arrayContains(methods, "GET");
+  }
+
+  private static boolean arrayContains(JSONArray array, String value) {
+    for (int i = 0; i < array.length(); i++) {
+      if (value.equals(array.optString(i))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

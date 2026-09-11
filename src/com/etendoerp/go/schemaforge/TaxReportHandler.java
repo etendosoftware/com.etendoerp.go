@@ -313,11 +313,27 @@ public class TaxReportHandler implements NeoHandler {
         "  bp.c_bpartner_id      AS bp_id, " +
         "  " + bpNameCol + "     AS bp_name, " +
         "  COALESCE(bp.taxid,'') AS bp_taxid, " +
-        "  COALESCE(ctry.name,'') AS bp_country, " +
+        // Country is localized via c_country_trl (ETP-5013), same pattern as
+        // FinancialAccountTransactionsHandler.loadTrxTypes()'s ad_ref_list_trl join.
+        // COALESCE falls back to the base name for the handful of countries with no
+        // translation row (proper nouns like Curaçao) — never blank.
+        // Region deliberately has NO equivalent: Etendo core ships no c_region_trl
+        // table at all, so a province name has nowhere to be translated from. Classic
+        // renders it untranslated too ("A CORUÑA" in both languages) — matching that
+        // IS the correct behaviour here, not a gap.
+        "  COALESCE(ctryt.name, ctry.name, '') AS bp_country, " +
         "  COALESCE(reg.name,'')  AS bp_region, " +
         "  i.c_invoice_id        AS invoice_id, " +
         "  i.documentno          AS doc_no, " +
-        "  dt.name               AS doc_type, " +
+        // Doc type is localized via ad_ref_list_trl on c_doctype.docbasetype
+        // (ETP-5013 follow-up) — the same AD_Reference_ID=183 join Journal
+        // Entries' own SQL now uses, just done in Java here since Tax Report
+        // is a NeoHandler, not a source:sql report. dt is an INNER JOIN
+        // (c_doctypetarget_id is NOT NULL on c_invoice), so docbasetype is
+        // always populated — no table-name fallback needed like Journal
+        // Entries' fact_acct case. COALESCE falls back to the base
+        // ad_ref_list name, then the raw c_doctype name, never blank.
+        "  COALESCE(dbtt.name, dbt.name, dt.name) AS doc_type, " +
         "  TO_CHAR(i.dateinvoiced,'YYYY-MM-DD') AS doc_date, " +
         "  TO_CHAR(i.dateacct,   'YYYY-MM-DD') AS acct_date, " +
         "  " + cc.taxBaseCol + "    AS tax_base_amt, " +
@@ -335,6 +351,17 @@ public class TaxReportHandler implements NeoHandler {
         "  LEFT JOIN c_country ctry ON ctry.c_country_id = loc.c_country_id " +
         "  LEFT JOIN c_region reg   ON reg.c_region_id = loc.c_region_id " +
         cc.rateDocJoin +
+        // Placed AFTER rateDocJoin on purpose: placeholders are positional (see
+        // appendBaseParams' comment), so this '?' must land between the conversion
+        // params and the WHERE params. Putting the join up next to c_country instead
+        // would silently shift every conversion binding by one.
+        "  LEFT JOIN c_country_trl ctryt ON ctryt.c_country_id = ctry.c_country_id " +
+        "    AND ctryt.ad_language = ? " +
+        // Same positional-param discipline as ctryt above — this join and its
+        // '?' must stay right after it, still before the WHERE params.
+        "  LEFT JOIN ad_ref_list dbt ON dbt.ad_reference_id = '183' AND dbt.value = dt.docbasetype " +
+        "  LEFT JOIN ad_ref_list_trl dbtt ON dbtt.ad_ref_list_id = dbt.ad_ref_list_id " +
+        "    AND dbtt.ad_language = ? " +
         "WHERE i.docstatus IN ('CO','CL') " +
         "  AND i.isactive = 'Y' " +
         "  AND i.issotrx = ? " +
@@ -348,7 +375,7 @@ public class TaxReportHandler implements NeoHandler {
   // Placeholders are positional, and the conversion ones live in the SELECT list and
   // the join — both of which come BEFORE the WHERE — so they must be bound first.
   // Order: (currency, client) per converted column, in SELECT order, then the join's
-  // target currency.
+  // target currency, then the c_country_trl language, then the WHERE params.
   private static void appendBaseParams(ConversionClauses cc, String isSOTrx, ReportParams p,
       List<Object> params) {
     String clientId = OBContext.getOBContext().getCurrentClient().getId();
@@ -359,6 +386,19 @@ public class TaxReportHandler implements NeoHandler {
       }
       params.add(p.currencyId);
     }
+
+    // c_country_trl's language (ETP-5013) — the GO locale NeoAuthenticator already
+    // applied to the OBContext from the request's Accept-Language header, exactly
+    // the language the window selectors translate with (NeoLanguage/NeoTrl). Bound
+    // here, after the conversion params and before the WHERE ones, to match where
+    // its '?' sits in buildBaseSql.
+    String language = OBContext.getOBContext().getLanguage().getLanguage();
+    params.add(language);
+
+    // ad_ref_list_trl's language for doc_type (ETP-5013 follow-up) — same value,
+    // bound again right after ctryt's, matching where its own '?' sits in
+    // buildBaseSql (immediately after the c_country_trl join).
+    params.add(language);
 
     params.add(isSOTrx);
     params.add(clientId);

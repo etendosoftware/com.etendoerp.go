@@ -38,8 +38,4 @@ public final class SalesQuotationSendEmailContract extends DefaultDocumentSendEm
     super(NAME, "Sales Quotation", Objects.requireNonNull(documentResolver, "documentResolver"));
   }
 
-  @Override
-  protected String documentTypeLabel() {
-    return "Presupuesto de Ventas";
-  }
 }

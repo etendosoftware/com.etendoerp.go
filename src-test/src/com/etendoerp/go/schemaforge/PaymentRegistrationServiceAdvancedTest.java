@@ -100,8 +100,10 @@ import com.etendoerp.psd2.bank.integration.utils.PISPaymentDao;
  *   <li>{@code handleListCreditSources} - nets generatedCredit - usedCredit for accumulated
  *       credit, and lists unpaid negative PSDs (abonos) of any negative-total invoice, whatever
  *       its document type (ETP-4841), excluding the current invoice.</li>
- *   <li>{@code handleListPaymentMethods} - distinct payin/payout methods for accounts in
- *       the invoice's natural org tree.</li>
+ *   <li>{@code handleListPaymentMethods} - the full payin/payout catalog of
+ *       {@code FIN_PaymentMethod}, scoped to the invoice's natural org tree (plus org
+ *       {@code "0"}), independent of whether any method is linked to a Financial Account
+ *       (ETP-5238).</li>
  *   <li>{@code doRegisterPaymentAdvanced} - draft (not processed), confirm (processed),
  *       credit consumption (used-credit + FIN_Payment_Credit), abono consumption (negative
  *       detail), and over-payment resolution (leave-credit / refund).</li>
@@ -655,11 +657,17 @@ class PaymentRegistrationServiceAdvancedTest {
 
   @Test
   @SuppressWarnings("unchecked")
-  @DisplayName("Payment methods are de-duplicated and filtered to the natural org tree")
-  void testListPaymentMethodsDistinctWithinNaturalTree() throws Exception {
+  @DisplayName("ETP-5238: payment methods are queried directly (no FinAccPaymentMethod join) "
+      + "and scoped to the invoice's natural org tree plus org \"0\"")
+  void testListPaymentMethodsScopedToNaturalTreeIndependentOfAccounts() throws Exception {
     NeoContext context = creditSourcesContext();
     stubInvoiceOrgTree();
 
+    // ETP-5238: a method needs NO Financial Account link at all to be listed here — that is the
+    // entire point of the change (Payment Method must be selectable independent of which
+    // accounts exist). The old version of this test stubbed FinAccPaymentMethod link rows and
+    // asserted de-duplication across them; that join no longer exists, so pmA/pmB below have no
+    // account behind them whatsoever and must still come back.
     FIN_PaymentMethod pmA = mock(FIN_PaymentMethod.class);
     when(pmA.getId()).thenReturn("pm-A");
     when(pmA.getName()).thenReturn("Wire");
@@ -667,33 +675,40 @@ class PaymentRegistrationServiceAdvancedTest {
     when(pmB.getId()).thenReturn("pm-B");
     when(pmB.getName()).thenReturn("Cash");
 
-    FIN_FinancialAccount inTree = mock(FIN_FinancialAccount.class);
-    when(inTree.getOrganization()).thenReturn(org);
-    FIN_FinancialAccount outOfTree = mock(FIN_FinancialAccount.class);
-    Organization otherOrg = mock(Organization.class);
-    when(otherOrg.getId()).thenReturn("org-other");
-    when(outOfTree.getOrganization()).thenReturn(otherOrg);
-
-    // two FAPM rows for pm-A on the same in-tree account (duplicate), one pm-B in tree,
-    // and one pm-A on an out-of-tree account (must be excluded by org filter).
-    FinAccPaymentMethod fapm1 = fapm(inTree, pmA);
-    FinAccPaymentMethod fapm2 = fapm(inTree, pmA);
-    FinAccPaymentMethod fapm3 = fapm(inTree, pmB);
-    FinAccPaymentMethod fapm4 = fapm(outOfTree, pmA);
-
-    OBCriteria<FinAccPaymentMethod> crit = mock(OBCriteria.class);
-    when(dal.createCriteria(FinAccPaymentMethod.class)).thenReturn(crit);
+    OBCriteria<FIN_PaymentMethod> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(FIN_PaymentMethod.class)).thenReturn(crit);
     when(crit.setFilterOnReadableOrganization(anyBoolean())).thenReturn(crit);
-    when(crit.add(any(Criterion.class))).thenReturn(crit);
-    when(crit.list()).thenReturn(Arrays.asList(fapm1, fapm2, fapm3, fapm4));
+    ArgumentCaptor<Criterion> captor = ArgumentCaptor.forClass(Criterion.class);
+    when(crit.add(captor.capture())).thenReturn(crit);
+    when(crit.addOrderBy(anyString(), anyBoolean())).thenReturn(crit);
+    when(crit.list()).thenReturn(Arrays.asList(pmA, pmB));
 
     NeoResponse response = PaymentRegistrationService.handleListPaymentMethods(context, true);
 
     assertEquals(200, response.getHttpStatus());
     JSONArray items = response.getBody().getJSONArray(ITEMS);
-    assertEquals(2, items.length(), "pm-A de-duplicated, out-of-tree pm-A excluded");
+    assertEquals(2, items.length());
     assertEquals("pm-A", items.getJSONObject(0).getString("id"));
     assertEquals("pm-B", items.getJSONObject(1).getString("id"));
+
+    // The org-scoping predicate must reach the criteria: the invoice's own natural-tree org
+    // (ORG_ID, stubbed by stubInvoiceOrgTree) plus org "0" (the "*" org), and nothing else.
+    List<String> rendered = new ArrayList<>();
+    for (Criterion c : captor.getAllValues()) {
+      rendered.add(String.valueOf(c));
+    }
+    String orgFilter = "";
+    for (String s : rendered) {
+      if (s.contains("organization.id in")) {
+        orgFilter = s;
+        break;
+      }
+    }
+    assertFalse(orgFilter.isEmpty(), "expected an organization.id in filter, got: " + rendered);
+    assertTrue(orgFilter.contains(ORG_ID),
+        "expected the invoice's natural-tree org, got: " + orgFilter);
+    assertTrue(orgFilter.contains("0"),
+        "expected org \"0\" (the \"*\" org) to be added explicitly, got: " + orgFilter);
   }
 
   // ════════════════════════════════════════════════════════════════════════
@@ -1158,6 +1173,77 @@ class PaymentRegistrationServiceAdvancedTest {
       finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
           any(), any(), anyString(), any(), anyString()), never());
       // The request is snapshotted instead, so it can be replayed when that happens.
+      verify(localPis).setETGOPaymentIntent(anyString());
+    }
+  }
+
+  /**
+   * ETP-5084 — the ticket's own case: a USD invoice paid from a connected EUR account. The bank is
+   * instructed in the ACCOUNT's currency, so the amount that reaches
+   * {@code initiateDeferredPisPayment} must be the CONVERTED one (100.00 x 0.92 = 92.00 EUR), never
+   * the raw invoice figure. Before this change the request was rejected outright by the
+   * invoice-currency eligibility gate; had it passed, 100.00 would have been sent as if it were
+   * euros — a 8.00 EUR overpayment to the supplier.
+   *
+   * <p>The rate is deliberately the one from the request body, i.e. the same value the replayed
+   * payment is later booked at ({@code financialTransactionAmount}), so the instructed and the
+   * booked amount cannot diverge.
+   */
+  @Test
+  @DisplayName("ETP-5084: a USD invoice on an EUR account instructs the bank for the CONVERTED "
+      + "amount (100.00 x 0.92 = 92.00 EUR), not the invoice amount")
+  @SuppressWarnings("unchecked")
+  void testAdvancedPisConfirmConvertsAmountToAccountCurrency() throws Exception {
+    stubAdvancedBasics();
+    stubPendingPSDs(new BigDecimal("100.00"));
+    stubForeignEurAccount();
+
+    // PIS eligibility now keys off the ACCOUNT currency (EUR, above); the invoice is USD.
+    when(account.getPSD2ConnectionStatus())
+        .thenReturn(BankIntegrationConstants.FA_CONNECTION_STATUS_CONNECTED);
+    when(method.getName()).thenReturn("Bank Transfer");
+    when(currency.getISOCode()).thenReturn("USD");
+
+    when(invoice.getDocumentNo()).thenReturn("INV-5084");
+    OBCriteria<PisPayment> attemptCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(PisPayment.class)).thenReturn(attemptCrit);
+    when(attemptCrit.add(any(Criterion.class))).thenReturn(attemptCrit);
+    when(attemptCrit.count()).thenReturn(0);
+
+    BankIntegrationPISUtils.PISCreatePaymentResult bridgeResult =
+        mock(BankIntegrationPISUtils.PISCreatePaymentResult.class);
+    when(bridgeResult.getPaymentId()).thenReturn("se-adv-5084");
+    when(bridgeResult.getPaymentUrl()).thenReturn("https://sca.saltedge/5084");
+    PisPayment localPis = mock(PisPayment.class);
+    when(localPis.getId()).thenReturn("local-adv-5084");
+    when(localPis.getStatus()).thenReturn("requested");
+
+    JSONObject body = advancedBody("100.00", CONFIRM)
+        .put("pis", true)
+        .put("conversionRate", "0.92")
+        .put("pisTemplate", "SEPA")
+        .put("pisCreditorIban", "ES9121000418450200051332");
+
+    ArgumentCaptor<BigDecimal> bankAmountCaptor = ArgumentCaptor.forClass(BigDecimal.class);
+    try (MockedStatic<PisPaymentBridge> bridgeMock = mockStatic(PisPaymentBridge.class);
+         MockedStatic<PISPaymentDao> pisDaoMock = mockStatic(PISPaymentDao.class)) {
+      bridgeMock.when(() -> PisPaymentBridge.initiateDeferredPisPayment(
+          eq(invoice), eq(account), any(), anyString(), any(), any())).thenReturn(bridgeResult);
+      pisDaoMock.when(() -> PISPaymentDao.findBySaltedgePaymentId("se-adv-5084"))
+          .thenReturn(localPis);
+
+      NeoResponse response = PaymentRegistrationService.doRegisterPaymentAdvanced(
+          INVOICE_ID, body, true);
+
+      assertEquals(201, response.getHttpStatus());
+      bridgeMock.verify(() -> PisPaymentBridge.initiateDeferredPisPayment(
+          eq(invoice), eq(account), bankAmountCaptor.capture(), anyString(), any(), any()));
+      assertEquals(0, new BigDecimal("92.00").compareTo(bankAmountCaptor.getValue()),
+          "the bank must be instructed for the account-currency amount, got "
+              + bankAmountCaptor.getValue());
+      // Still no payment at confirm time (ETP-4895) — only the snapshot.
+      finAddPaymentMock.verify(() -> FIN_AddPayment.processPayment(
+          any(), any(), anyString(), any(), anyString()), never());
       verify(localPis).setETGOPaymentIntent(anyString());
     }
   }
@@ -1751,13 +1837,6 @@ class PaymentRegistrationServiceAdvancedTest {
     return new SimpleDateFormat("yyyy-MM-dd").parse(yyyyMMdd);
   }
 
-  private FinAccPaymentMethod fapm(FIN_FinancialAccount acc, FIN_PaymentMethod pm) {
-    FinAccPaymentMethod f = mock(FinAccPaymentMethod.class);
-    when(f.getAccount()).thenReturn(acc);
-    when(f.getPaymentMethod()).thenReturn(pm);
-    return f;
-  }
-
   /**
    * Stubs the common entity loads and payment-method resolution path needed by every
    * {@code doRegisterPaymentAdvanced} test (invoice, schedule, account, doc type, a valid
@@ -1797,11 +1876,13 @@ class PaymentRegistrationServiceAdvancedTest {
    * Makes the selected financial account foreign to the invoice: EUR with a standard precision of
    * 2 decimals, while the invoice keeps the global (USD-like) test currency.
    */
-  private void stubForeignEurAccount() {
+  private Currency stubForeignEurAccount() {
     Currency accountCurrency = mock(Currency.class);
     when(accountCurrency.getId()).thenReturn("EUR-ID");
+    when(accountCurrency.getISOCode()).thenReturn("EUR");
     when(accountCurrency.getStandardPrecision()).thenReturn(2L);
     when(account.getCurrency()).thenReturn(accountCurrency);
+    return accountCurrency;
   }
 
   /**

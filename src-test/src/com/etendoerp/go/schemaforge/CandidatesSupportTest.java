@@ -207,6 +207,11 @@ public class CandidatesSupportTest {
       OrganizationStructureProvider osp = mock(OrganizationStructureProvider.class);
       when(osp.getNaturalTree(ORG_ID)).thenReturn(Collections.singleton(ORG_ID));
       when(ctx.getOrganizationStructureProvider(CLIENT_ID)).thenReturn(osp);
+      // The account id comes from the request, so it is resolved through TenantOwnership, which
+      // checks it against these two sets (ETP-4950). Mockito defaults them to EMPTY arrays, which
+      // would make the account invisible and silently zero every count.
+      when(ctx.getReadableClients()).thenReturn(new String[] {CLIENT_ID});
+      when(ctx.getReadableOrganizations()).thenReturn(new String[] {ORG_ID});
       obContext.when(OBContext::getOBContext).thenReturn(ctx);
 
       JSONObject counts = CandidatesSupport.candidateCounts(ACC_ID, null, null);

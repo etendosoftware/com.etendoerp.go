@@ -32,12 +32,15 @@ import javax.inject.Named;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.Location;
+import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
+import org.openbravo.model.pricing.pricelist.PriceList;
 
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
 
@@ -181,6 +184,7 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
         rec.put("returnStatus", computeReturnStatus(context.getRecordId()));
         enrichLinkedInvoices(rec, context.getRecordId());
         enrichLinkedOrder(rec, context.getRecordId());
+        enrichResolvedPriceList(rec, context.getRecordId());
         enrichLinkedReturns(rec, context.getRecordId());
       } else {
         List<String> ids = NeoHandlerUtils.collectIds(dataArr);
@@ -374,10 +378,16 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
 
   @SuppressWarnings("java:S2077")
   private void enrichLinkedOrder(JSONObject rec, String receiptId) {
+    // ETP-4942: also brings the order's own purchase price list (id + name) via a
+    // LEFT JOIN to m_pricelist, so enrichResolvedPriceList can reuse this SAME
+    // "first linked order" resolution instead of duplicating the query — mirrors
+    // GoodsShipmentHeaderHandler#enrichLinkedOrder (ETP-5052).
     String sql =
-        "SELECT DISTINCT co.c_order_id, co.documentno, co.grandtotal, co.docstatus, cur.iso_code "
+        "SELECT DISTINCT co.c_order_id, co.documentno, co.grandtotal, co.docstatus, cur.iso_code, "
+        + "  co.m_pricelist_id, pl.name "
         + "FROM c_order co "
         + "LEFT JOIN c_currency cur ON cur.c_currency_id = co.c_currency_id "
+        + "LEFT JOIN m_pricelist pl ON pl.m_pricelist_id = co.m_pricelist_id "
         + "WHERE co.isactive = 'Y' AND co.c_order_id IN ("
         + "  SELECT io.c_order_id FROM m_inout io WHERE io.m_inout_id = ? AND io.c_order_id IS NOT NULL"
         + "  UNION"
@@ -397,12 +407,88 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
           order.put("grandTotalAmount", total != null ? total : JSONObject.NULL);
           order.put(FIELD_DOCUMENT_STATUS, rs.getString(4));
           order.put("currency$_identifier", rs.getString(5));
+          String orderPriceListId = rs.getString(6);
+          order.put("priceListId", orderPriceListId != null ? orderPriceListId : JSONObject.NULL);
+          String orderPriceListName = rs.getString(7);
+          order.put("priceList$_identifier", orderPriceListName != null ? orderPriceListName : JSONObject.NULL);
           orders.put(order);
         }
       }
       rec.put("linkedOrders", orders);
     } catch (Exception e) {
       log.warn("Could not enrich linked orders for receipt {}: {}", receiptId, e.getMessage());
+    }
+  }
+
+  /**
+   * Resolves the effective purchase price list to preselect in the frontend's tariff picker
+   * (ETP-4942 — extending the sales-side fix, {@link GoodsShipmentHeaderHandler
+   * #enrichResolvedPriceList}, to Goods Receipt → Purchase Invoice), replicating the EXACT
+   * priority {@code CreatePurchaseInvoiceHandler#createFromReceiptNoPo} uses to build the
+   * real invoice header:
+   * <ol>
+   *   <li>the price list of the first linked purchase order — same "linked order" notion as
+   *       {@link #enrichLinkedOrder} (i.e. {@code rec.linkedOrders[0]}), which this method
+   *       reads rather than re-querying;</li>
+   *   <li>otherwise, the Business Partner's own configured PURCHASE price list
+   *       ({@code BusinessPartner#getPurchasePricelist()} — never {@code getPriceList()},
+   *       which is the sales tariff);</li>
+   *   <li>otherwise, neither field is added — the frontend picker leaves the tariff empty
+   *       and blocks confirm, matching {@code createFromReceiptNoPo}'s own hard failure
+   *       when no purchase price list can be resolved at all.</li>
+   * </ol>
+   * Adds {@code resolvedPriceListId} / {@code resolvedPriceList$_identifier} to the header
+   * JSON. Must run AFTER {@link #enrichLinkedOrder} in {@link #afterHandle}, since it reads
+   * the {@code linkedOrders} array that method just populated. Defensive by design — like
+   * every other {@code enrich*} method here, a failure is logged and swallowed, never
+   * propagated to the response.
+   */
+  private void enrichResolvedPriceList(JSONObject rec, String receiptId) {
+    try {
+      if (applyPriceListFromLinkedOrder(rec)) {
+        return;
+      }
+      applyPriceListFromBusinessPartner(rec, receiptId);
+    } catch (Exception e) {
+      log.warn("Could not resolve price list for receipt {}: {}", receiptId, e.getMessage());
+    }
+  }
+
+  private boolean applyPriceListFromLinkedOrder(JSONObject rec) throws JSONException {
+    JSONArray linkedOrders = rec.optJSONArray("linkedOrders");
+    if (linkedOrders == null || linkedOrders.length() == 0) {
+      return false;
+    }
+    JSONObject firstOrder = linkedOrders.getJSONObject(0);
+    Object rawPriceListId = firstOrder.opt("priceListId");
+    String priceListId = (rawPriceListId == null || JSONObject.NULL.equals(rawPriceListId))
+        ? null : rawPriceListId.toString();
+    if (priceListId == null || priceListId.isEmpty()) {
+      return false;
+    }
+    Object rawPriceListName = firstOrder.opt("priceList$_identifier");
+    Object priceListName = (rawPriceListName == null || JSONObject.NULL.equals(rawPriceListName))
+        ? JSONObject.NULL : rawPriceListName.toString();
+    rec.put("resolvedPriceListId", priceListId);
+    rec.put("resolvedPriceList$_identifier", priceListName);
+    return true;
+  }
+
+  private void applyPriceListFromBusinessPartner(JSONObject rec, String receiptId)
+      throws JSONException {
+    try {
+      OBContext.setAdminMode(true);
+      ShipmentInOut receipt = OBDal.getReadOnlyInstance().get(ShipmentInOut.class, receiptId);
+      if (receipt == null || receipt.getBusinessPartner() == null) {
+        return;
+      }
+      PriceList priceList = receipt.getBusinessPartner().getPurchasePricelist();
+      if (priceList != null) {
+        rec.put("resolvedPriceListId", priceList.getId());
+        rec.put("resolvedPriceList$_identifier", priceList.getName());
+      }
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 }

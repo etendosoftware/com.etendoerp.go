@@ -252,7 +252,14 @@ public class VerifactuConfigReadyHandler extends AbstractSmartDeactivationHandle
       return;
     }
 
-    boolean isReady = "Y".equals(currentState[0]);
+    // currentState[0] backs a Postgres CHAR(1) column read via a native query. Depending on
+    // the JDBC driver/Hibernate version, a single-char bpchar can come back as either a
+    // java.lang.String or a java.lang.Character — a direct "Y".equals(currentState[0]) is
+    // always false when the driver returns Character, since String#equals never matches a
+    // different runtime type. String.valueOf(...) normalizes both cases (and a null column
+    // becomes the literal "null", which still correctly compares unequal to "Y"). Any other
+    // CHAR(1) column read this way in this file must use the same normalization.
+    boolean isReady = "Y".equals(String.valueOf(currentState[0]));
     boolean hasAdoptionDate = currentState[1] != null;
     if (isReady && hasAdoptionDate) {
       return;

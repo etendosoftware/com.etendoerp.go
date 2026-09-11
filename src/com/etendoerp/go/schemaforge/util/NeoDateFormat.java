@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge.util;
 
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.time.format.ResolverStyle;
@@ -55,9 +56,11 @@ import org.openbravo.base.session.OBPropertiesProvider;
  * produced this way are already in the database — see
  * {@code docs/mcp-evaluation/imps/IMP-16.md} §3.6 in the schema_forge repo.
  *
- * <p>This class therefore does three things and nothing else: it tells callers what the
+ * <p>This class therefore does four things and nothing else: it tells callers what the
  * canonical form is, it says which properties the canonical form even applies to
- * ({@link #canonicalShapeFor}), and it converts the three known shapes into it. It is
+ * ({@link #canonicalShapeFor}), it converts the three known shapes into it, and it renders
+ * an outbound business timestamp in it ({@link #toWireDateTime} / {@link #toWireDate}) — the
+ * direction that five hand-rolled UTC formatters used to get wrong. It is
  * deliberately <b>total but conservative</b> — an input it does not recognise yields
  * {@code null}, and every caller must then pass the original value through verbatim rather
  * than blank it. A value we cannot interpret is the caller's problem to report, never this
@@ -85,9 +88,58 @@ public final class NeoDateFormat {
 
   private static final String MIDNIGHT = "00:00:00";
 
+  /** Outbound counterparts of {@link #ISO_DATETIME} / {@link #ISO_DATE}. See {@link #toWireDateTime}. */
+  private static final DateTimeFormatter WIRE_DATETIME = DateTimeFormatter.ofPattern(ISO_DATETIME);
+  private static final DateTimeFormatter WIRE_DATE = DateTimeFormatter.ofPattern(ISO_DATE);
+
   private static volatile String cachedUiDatePattern = null;
 
   private NeoDateFormat() {
+  }
+
+  /**
+   * Renders a business timestamp as the canonical wire datetime {@value #ISO_DATETIME},
+   * read in the server's own zone — the zone the value was written in.
+   *
+   * <p>Business dates (an accounting date, a statement date, a transaction date) are civil
+   * dates: the day is the datum, and it is stored at the server's local start-of-day (see
+   * {@code FinancialAccountTransactionsSupport.parseLocalDate}). Reading one back through
+   * {@code Instant} + {@code ZoneOffset.UTC} — as five hand-rolled formatters in this module
+   * did — reinterprets that civil value as an instant and re-expresses it elsewhere, so a
+   * row written at 21:43 local under a negative UTC offset goes out as the NEXT calendar day
+   * (ETP-5100: funds transfers made after 21:00 in UTC-3 vanished from the movements list,
+   * because the React range filter reads the {@code yyyy-MM-dd} prefix via
+   * {@code parseCalendarDate} and the row fell past "today").
+   *
+   * <p>The trailing {@code 'Z'} those formatters appended was wrong for the same reason: it
+   * asserts UTC on a value that carries no zone, and it is not part of the contract this
+   * class defines. Formatting in {@link ZoneId#systemDefault()} round-trips what was written.
+   *
+   * <p>Uses {@code getTime()} rather than {@code toInstant()} so a {@link java.sql.Date}
+   * argument is accepted — {@code java.sql.Date.toInstant()} throws.
+   *
+   * @param ts the timestamp to render; may be {@code null}
+   * @return the canonical wire datetime, or {@code null} when {@code ts} is {@code null} —
+   *         callers keep their own empty-vs-null convention
+   */
+  public static String toWireDateTime(java.util.Date ts) {
+    return ts == null ? null : zoned(ts).format(WIRE_DATETIME);
+  }
+
+  /**
+   * Renders a business timestamp as the canonical wire date {@value #ISO_DATE} (day only),
+   * in the server's own zone. Same rationale as {@link #toWireDateTime}, for the callers
+   * whose payload carries no time half.
+   *
+   * @param ts the timestamp to render; may be {@code null}
+   * @return the canonical wire date, or {@code null} when {@code ts} is {@code null}
+   */
+  public static String toWireDate(java.util.Date ts) {
+    return ts == null ? null : zoned(ts).format(WIRE_DATE);
+  }
+
+  private static java.time.ZonedDateTime zoned(java.util.Date ts) {
+    return java.time.Instant.ofEpochMilli(ts.getTime()).atZone(ZoneId.systemDefault());
   }
 
   /**

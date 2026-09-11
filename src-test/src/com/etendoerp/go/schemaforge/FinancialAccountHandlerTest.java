@@ -1509,15 +1509,16 @@ public class FinancialAccountHandlerTest {
     }
   }
 
-  // ── afterHandle: delegates default payment-method assignment to
+  // ── afterHandle: delegates provisioning of the new account to
   // FinancialAccountSupport ──────────────────────────────────────────────────
   //
-  // The assignment logic itself (findPaymentMethodByName/linkExists/createLink,
-  // one method per account type, default flag, idempotency) now lives on
-  // FinancialAccountSupport.assignDefaultPaymentMethods (static) and is covered
-  // end-to-end in FinancialAccountSupportTest. Here we only verify the hook
-  // orchestration: routing and that the static call is delegated with the
-  // loaded account.
+  // What provisioning consists of (default payment methods —
+  // findPaymentMethodByName/linkExists/createLink, one method list per account
+  // type, default flag, idempotency — followed by the accounting defaults) now
+  // lives behind FinancialAccountSupport.provisionNewAccount (static) and is
+  // covered end-to-end in FinancialAccountSupportTest. Here we only verify the
+  // hook orchestration: routing and that the single static seam call is
+  // delegated with the loaded account.
 
   /** A foreign spec is ignored by the post-hook (no account lookup). */
   @Test
@@ -1748,9 +1749,9 @@ public class FinancialAccountHandlerTest {
     }
   }
 
-  /** A POST whose response carries no id assigns nothing. */
+  /** A POST whose response carries no id provisions nothing. */
   @Test
-  public void testAfterHandleNoCreatedIdSkipsAssignment() {
+  public void testAfterHandleNoCreatedIdSkipsProvisioning() {
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getSpecName()).thenReturn(SPEC);
     when(ctx.getHttpMethod()).thenReturn("POST");
@@ -1761,12 +1762,20 @@ public class FinancialAccountHandlerTest {
   }
 
   /**
-   * A POST with a created id loads the account and delegates the assignment to
-   * {@link FinancialAccountSupport#assignDefaultPaymentMethods}, verified via a static mock
-   * since the method is now static on that helper (moved out of this handler).
+   * A POST with a created id loads the account and hands it to the ONE shared provisioning seam,
+   * {@link FinancialAccountSupport#provisionNewAccount} — verified via a static mock since the
+   * method is static on that helper.
+   *
+   * <p>This asserts delegation only, deliberately: what provisioning actually consists of (payment
+   * methods + accounting defaults, in that order) is pinned one level down in
+   * {@code FinancialAccountSupportTest#testProvisionNewAccountPerformsPaymentMethodsThenAccounting}.
+   * That split is what makes the seam worth having — the manual flow here and the bank-connection
+   * flow ({@code FinancialAccountBankConnectionHandler#handleCreateAndLink}) used to duplicate the
+   * call list and drifted from each other twice (ETP-4872, then ETP-5207); now neither handler can
+   * know a different list from the other.
    */
   @Test
-  public void testAfterHandlePostAssignsForCreatedAccount() {
+  public void testAfterHandlePostProvisionsCreatedAccount() {
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getSpecName()).thenReturn(SPEC);
     when(ctx.getHttpMethod()).thenReturn("POST");
@@ -1777,13 +1786,13 @@ public class FinancialAccountHandlerTest {
     try (MockedStatic<FinancialAccountSupport> support =
         mockStatic(FinancialAccountSupport.class)) {
       assertNull(handler.afterHandle(ctx));
-      support.verify(() -> FinancialAccountSupport.assignDefaultPaymentMethods(account));
+      support.verify(() -> FinancialAccountSupport.provisionNewAccount(account));
     }
   }
 
-  /** A failure during assignment is swallowed so account creation is not broken. */
+  /** A failure during provisioning is swallowed so account creation is not broken. */
   @Test
-  public void testAfterHandleSwallowsAssignmentFailure() {
+  public void testAfterHandleSwallowsProvisioningFailure() {
     NeoContext ctx = mock(NeoContext.class);
     when(ctx.getSpecName()).thenReturn(SPEC);
     when(ctx.getHttpMethod()).thenReturn("POST");

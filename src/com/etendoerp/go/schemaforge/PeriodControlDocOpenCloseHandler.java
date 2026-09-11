@@ -17,15 +17,22 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.Set;
+
 import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.process.ProcessInstance;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.financialmgmt.calendar.PeriodControl;
 import org.openbravo.service.db.CallProcess;
+
+import com.etendoerp.go.schemaforge.util.AccountingDocumentTypeSupport;
 
 /**
  * NeoHandler for the {@code documents} entity (C_PeriodControl records).
@@ -42,6 +49,14 @@ import org.openbravo.service.db.CallProcess;
  *   <li>Returns the translated process result.</li>
  * </ol>
  *
+ * <p>Also overrides {@link #afterHandle} (ETP-4948 Issue 3) to filter the plain generic-CRUD
+ * list this entity otherwise serves unfiltered: without this, every {@code C_PeriodControl} row
+ * for a period is returned — one per registered {@code DocumentCategory} (DocBaseType) — even
+ * for base types that never post to accounting at all (e.g. {@code SOO} Sales Order,
+ * {@code POO} Purchase Order, {@code POR} Purchase Requisition) or that are structurally
+ * excluded elsewhere in the app ({@link AccountingDocumentTypeSupport}, shared with the
+ * Not Posted Documents window so the two never diverge on what counts as accounting-relevant).
+ *
  * <p>Registered via {@code JAVA_QUALIFIER = 'period-control-doc-openclose'} on the
  * {@code documents} ETGO_SF_ENTITY record for the
  * {@code open-close-period-control} spec.
@@ -51,6 +66,10 @@ public class PeriodControlDocOpenCloseHandler extends AbstractPeriodOpenCloseHan
 
   private static final Logger log = LogManager.getLogger(PeriodControlDocOpenCloseHandler.class);
   private static final String PROCESS_168_ID = "168";
+  private static final String METHOD_GET = "GET";
+  private static final String FIELD_DOCUMENT_CATEGORY = "documentCategory";
+  private static final String KEY_RESPONSE = "response";
+  private static final String KEY_DATA = "data";
 
   @Override
   protected NeoResponse doHandle(String openCloseValue, String recordId) throws Exception {
@@ -73,6 +92,52 @@ public class PeriodControlDocOpenCloseHandler extends AbstractPeriodOpenCloseHan
     OBDal.getInstance().getSession().refresh(pInstance);
 
     return PeriodOpenCloseSupport.translateResult(pInstance, process168);
+  }
+
+  /**
+   * Filters the plain generic-CRUD list response for this entity down to accounting-relevant
+   * document categories only (ETP-4948 Issue 3). Every {@code C_PeriodControl} row for a period
+   * covers one registered {@code DocumentCategory} (DocBaseType) — including base types that
+   * never post to accounting at all ({@code SOO}, {@code POO}, {@code POR}, …) or that are
+   * structurally excluded elsewhere ({@link AccountingDocumentTypeSupport}) — none of which are
+   * useful in a period-closing breakdown.
+   *
+   * <p>Follows the same {@code GET} + {@code CRUD} convention {@code
+   * FinancialAccountHandler.afterHandle} uses to detect a list/getById fetch. No selector/
+   * defaults GET path exists on the {@code documents} entity today, so the extra {@code
+   * NeoEndpointType.CRUD} check is currently a no-op here in practice — kept anyway to match the
+   * documented convention exactly rather than relying on that happening to be true. Every other
+   * method — namely the {@code openClose} ACTION's own POST, handled by {@link #doHandle} —
+   * returns immediately via the guard below, so this override only ever touches the plain
+   * list/getById response.
+   */
+  @Override
+  public NeoResponse afterHandle(NeoContext context) {
+    if (!METHOD_GET.equals(context.getHttpMethod())
+        || !NeoEndpointType.CRUD.equals(context.getEndpointType())) {
+      return null;
+    }
+    JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
+    if (dataArr == null) {
+      return null;
+    }
+    try {
+      Set<String> accountedTableIds = AccountingDocumentTypeSupport.loadTablesWithActiveAccounting();
+      JSONArray filtered = new JSONArray();
+      for (int i = 0; i < dataArr.length(); i++) {
+        JSONObject row = dataArr.getJSONObject(i);
+        String category = row.optString(FIELD_DOCUMENT_CATEGORY, null);
+        if (AccountingDocumentTypeSupport.isAccountingRelevant(category, accountedTableIds)) {
+          filtered.put(row);
+        }
+      }
+      JSONObject body = context.getPreviousResult().getBody();
+      body.getJSONObject(KEY_RESPONSE).put(KEY_DATA, filtered);
+      return NeoResponse.ok(body);
+    } catch (JSONException e) {
+      log.error("Error filtering accounting-relevant document categories", e);
+      return null;
+    }
   }
 
   @Override

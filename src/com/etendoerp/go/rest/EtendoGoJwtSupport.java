@@ -211,6 +211,31 @@ public final class EtendoGoJwtSupport {
     }
   }
 
+  /**
+   * ETP-5019 — {@link org.openbravo.erpCommon.businessUtility.InitialSetupUtility#insertUser}
+   * (core Etendo, {@code InitialClientSetup}'s underlying primitive) sets {@code Name},
+   * {@code Description}, and {@code Username} on the newly-created client-admin {@code AD_User}
+   * but never {@code Email} — so the owner's Email field is genuinely {@code NULL} in the DB
+   * after onboarding, not a frontend display bug (confirmed by direct query: every
+   * {@code EM_ETGO_Is_Owner='Y'} row has {@code email IS NULL}). Backfills it from the real
+   * login/registration email (the {@code accountEmail} the founder verified during onboarding —
+   * NOT {@code username}, which may carry a client-name suffix via {@link
+   * #buildClientUsername}), the same fire-and-forget-save pattern {@link
+   * #applyClientAdminDisplayName} already uses for {@code Name}. No-op when the email is blank
+   * or the user is not found. The change is saved on the current DAL transaction (committed by
+   * the caller).
+   */
+  static void applyClientAdminEmail(String username, String email) {
+    if (email == null || email.isBlank()) {
+      return;
+    }
+    User user = findActiveUserByUsername(username);
+    if (user != null) {
+      user.setEmail(email);
+      OBDal.getInstance().save(user);
+    }
+  }
+
   private static User findActiveUserByUsername(String username) {
     OBQuery<User> query = OBDal.getInstance().createQuery(User.class,
         "as user where user.username = :username and user.active = true");

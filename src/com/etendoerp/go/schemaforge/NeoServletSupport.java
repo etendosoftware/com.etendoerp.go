@@ -126,6 +126,14 @@ class NeoServletSupport {
 
       NeoResponse defaultResult = crudHandler.handleDefault(context);
 
+      // Mirrors the pre-hook branch above: afterHandle is a post-CRUD side effect and must
+      // NOT run when the default CRUD write itself failed (e.g. invalid "updated" concurrency
+      // token, validation error) — otherwise a rejected save could still trigger writes
+      // (via OBDal.flush) meant to follow a successful one.
+      if (defaultResult != null && defaultResult.getHttpStatus() >= 400) {
+        return defaultResult;
+      }
+
       context.setPreviousResult(defaultResult);
       NeoResponse afterResult = handler.afterHandle(context);
       return afterResult != null ? afterResult : defaultResult;

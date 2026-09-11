@@ -49,6 +49,10 @@ Rejected provider passthrough shape:
 | `EmailSafetyStore` | Checks kill switches, idempotency, throttle counters, and audit capture |
 | `DalEmailSafetyStore` | Runtime DAL-backed safety store for audit, idempotency, throttle counters, and kill switches |
 | `InMemoryEmailSafetyStore` | Test-only process-local implementation for focused executor tests |
+| `EmailSendLogStore` | Captures the readable per-document send history, for contracts that opt in |
+| `DalEmailSendLogStore` | Runtime DAL-backed history store writing `ETGO_Email_Send_Log` rows |
+| `InMemoryEmailSendLogStore` | Test-only process-local implementation for focused executor tests |
+| `EmailSendHistoryRecord` | One history entry, built from the send context and the audit record of the same attempt |
 | `EmailProviderAdapter` | Backend-only boundary to the external provider |
 | `ApiGatewayEmailProviderAdapter` | HTTP adapter for API Gateway-style providers |
 | `EmailProviderConfig` | Reads provider configuration from server-side properties or environment variables |
@@ -155,6 +159,56 @@ The executor builds an `EmailSendContext` after authorization, recipient resolut
 - `EmailThrottleRule.perRecord(max, windowSeconds)`
 
 Rules whose context key is unavailable are skipped, so contracts can share policy helpers across flows where not every dimension applies.
+
+### Readable send history (ETP-5069)
+
+The anti-abuse ledger `ETGO_Email_Safety` is not, and must not become, a readable history. It lives at client 0 (`ACCESSLEVEL` 4), stores every recipient as a SHA-256 hash, and carries no subject and no body — an invariant asserted by `DalEmailSafetyStoreTest` and deliberately left untouched.
+
+`ETGO_Email_Send_Log` is the second, separate ledger that answers the operator's question instead: what was sent from this document, to whom, when, and did it go out. It is a Client/Organization table (`ACCESSLEVEL` 3), so a row carries the real tenant, and it stores recipients, subject, the operator's own message and the download link in clear.
+
+- **Written from one place.** `TransactionalEmailService#recordAudit` is the single choke point all eight audit call sites funnel through, and it runs after the `EmailSendContext` exists — the only point where the readable data and the audit outcome for the same attempt are both in hand. The history row is saved BEFORE `EmailSafetyStore#recordAudit`, so both rows share the transaction the DAL safety store closes with `SessionHandler.commitAndStart()`.
+- **Gated declaratively.** `EmailContract#logsSendHistory()` defaults to `false`; `DefaultDocumentSendEmailContract` overrides it to `true`, so the six document-send contracts opt in automatically and the account/auth family (invitation, reset password, login alert, organization joined) never reaches the table. There is no contract-name list.
+- **No admin mode, and no forced client 0.** `DalEmailSendLogStore` lets DAL fill `AD_Client_ID`/`AD_Org_ID`/`CreatedBy` from the caller's own session. That is what makes the readable-client filter on the read path a genuine access rule, and it makes `CreatedBy` the actual sender — closing the long-standing null-`userId` gap the client-0 ledger has.
+- **`messageBody` is the operator's text, not the rendered email.** The provider's `body` template value is the whole HTML document produced by `EmailLayout.render`; what gets stored is `EmailMessageEdits#getMessage()`, pre-escape. A send that used the contract's default copy stores `null` there and keeps its subject.
+- **Failures are swallowed.** A history row is a convenience; the send and its audit row are not. Every `VARCHAR` value is truncated to its column width before the insert for the same reason.
+- **Read path:** `GET /sws/neo/documentemailhistory?recordId=<id>` — see `docs/neo-headless.md` §8j for the row shape and the access-rule rationale. There is also a read-only backoffice window, *Email Send History* (`AD_WINDOW` `A42231FFB2764AB38EC8D1C46637BA4C`), client-scoped like the table.
+- **Six contracts record, five windows display.** `DefaultDocumentSendEmailContract` opts in all six document sends — sales-order, purchase-order, sales-quotation, sales-invoice, goods-shipment and **return-to-vendor** — but the app-shell's `EmailsCard` is currently wired into only four preview components covering five windows (`OrderPreview` serves sales-order and purchase-order, plus `InvoicePreview`, `QuotationPreview`, `GoodsShipmentPreview`). Return-to-vendor sends are recorded and readable through the backoffice window and the endpoint; they simply have no preview card yet. Nothing needs to change on the backend when one is added.
+- **Accepted limitation:** the rejection paths that answer before the send context is built — bad JSON, unknown contract, forbidden provider field, failed authorization, unresolved recipient, malformed `messageEdits`, document not found — write no audit row today and therefore write no history row either. The failure statuses an operator can act on (`PROVIDER_FAILED`, `THROTTLED`, `SUPPRESSED`, `DUPLICATE`) are all post-context and are recorded, so the card is not misleading — but an empty history is not proof that nothing was attempted.
+- **Accepted limitation: no retention or purge process.** Deferred deliberately, on sizing measured during ETP-5069 rather than on assumption. Rows are bounded by validation that already existed (`EmailMessageEdits.MAX_MESSAGE_LENGTH = 5000`, `MAX_SUBJECT_LENGTH = 200`) and by the per-column truncation `DalEmailSendLogStore` applies before every insert, giving ~1.5 KB typical / ~6.4 KB worst case per row — about **12–54 MB** for the full lifetime history of the local dataset's 8,454 documents, against `c_invoice` at 30 MB on the same instance. Cardinality does not increase either: one audit row per send attempt already existed, and this adds a second for six contracts. Revisit when a real instance's table grows past a size worth purging, or when a tenant asks for a deletion window (this table holds customer correspondence in clear). The two indexes — `ETGO_EMAIL_SEND_LOG_RECORD` on `RECORD_ID` and `ETGO_EMAIL_SEND_LOG_SENTAT` on `SENT_AT` — exist partly to make that future purge cheap; do not drop `SENT_AT` as unused.
+- **Status vocabulary:** the eight `STATUS_*` constants at `TransactionalEmailService.java:49-56` — `SENT`, `VALIDATION_FAILED`, `PROVIDER_FAILED`, `UNAUTHORIZED`, `DUPLICATE`, `THROTTLED`, `SUPPRESSED`, `NO_RECIPIENT` — mirrored by the `ETGO_EmailSendStatus` AD reference list. **There is no `DELIVERY_FAILED`**; that value belongs to `ETGO_INVITATION.STATUS`, a different subsystem, and the two are routinely confused.
+
+### Per-environment throttle ceilings
+
+The document-send family (`sales-invoice-send` and its five siblings) reads its ceilings from
+configuration instead of hardcoding them, because the production values are deliberately tight
+enough to block ordinary development. `perRecord` allows **3 sends of the same document per hour**,
+so re-sending one invoice while checking a template change locks that record out for the rest of
+the hour — indistinguishable, from the operator's side, from the email system being broken.
+
+| Property | Env var | Default | Scope |
+|---|---|---|---|
+| `etendo.go.email.throttle.maxPerRecord` | `ETGO_EMAIL_THROTTLE_MAX_PER_RECORD` | 3 | same document |
+| `etendo.go.email.throttle.maxPerRecipient` | `ETGO_EMAIL_THROTTLE_MAX_PER_RECIPIENT` | 20 | same address |
+| `etendo.go.email.throttle.maxPerUser` | `ETGO_EMAIL_THROTTLE_MAX_PER_USER` | 50 | sending operator |
+| `etendo.go.email.throttle.maxPerTenant` | `ETGO_EMAIL_THROTTLE_MAX_PER_TENANT` | 100 | client |
+| `etendo.go.email.throttle.maxPerDomain` | `ETGO_EMAIL_THROTTLE_MAX_PER_DOMAIN` | 200 | recipient domain |
+
+All windows are one rolling hour. Set them in the Etendo root `gradle.properties`; the defaults are
+the production values, so an environment that configures nothing behaves exactly as before this
+existed.
+
+The global rule (2000 per minute) is **not** configurable: it is a burst guard protecting the
+provider, not a per-actor quota, and no development loop reaches it.
+
+Two behaviours worth knowing:
+
+- **Raising a ceiling resets the counter.** `DalEmailSafetyStore.findThrottle()` matches a throttle
+  row on `maxAttempts` and `windowSeconds` as well as on scope and bucket key, so a changed ceiling
+  finds no existing row and starts a fresh one at zero. Clearing `ETGO_EMAIL_SAFETY` by hand to
+  unblock a developer is never necessary.
+- **A malformed override is ignored**, with a warning logged. This is deliberate: `EmailThrottleRule`
+  clamps with `Math.max(1, maxAttempts)`, so a typo parsing as `0` would silently mean *one* email
+  per hour — a far worse failure than the limit staying where it was.
 
 `EmailSafetyStore` is the persistence boundary for:
 
@@ -388,6 +442,35 @@ the cached `ETGO_PREVIEW_FILE` file for the token client/spec/record tuple. The 
 still audited by `TransactionalEmailService`, but the download endpoint does not depend on
 process-local audit state so links keep working across restarts and clustered nodes until their
 token expires.
+
+## Document summary block (ETP-5003)
+
+Document emails render a label/value table between the body copy and the call to action. It is built
+from `EmailDocumentRecord.getDetails()`, a list of `EmailDocumentDetail` rows the DAL resolver
+contributes.
+
+```java
+EmailDocumentRecord.withGeneratedDownloadLink(name, email, id, documentNo, amount, clientId,
+    Arrays.asList(
+        EmailDocumentDetail.date("document.detail.date", invoice.getInvoiceDate()),
+        EmailDocumentDetail.date("document.detail.dueDate", invoice.getETGODueDate()),
+        EmailDocumentDetail.text("document.detail.total", amount)));
+```
+
+- `date(...)` keeps the value unformatted. The resolver runs inside the **sender's** session and
+  cannot know the recipient's language; `DefaultDocumentSendEmailContract` formats it through
+  `EmailDates.format` once the language is known.
+- `text(...)` is for values already rendered, such as a currency amount.
+- A row whose value is `null` or blank is dropped by `EmailDocumentRecord`, so an absent due date
+  costs nothing and needs no branch at the call site.
+- **No rows means no block.** The contract prepends the document number as the first row only when
+  the resolver contributed at least one other, so a resolver returning `Collections.emptyList()`
+  opts that document type out entirely (`purchase-order-send` does exactly this).
+- Row labels and the date pattern (`document.detail.dateFormat`) are catalog keys in both
+  `emails_es_ES.properties` and `emails_en_US.properties`.
+
+The block is independent of `messageEdits`: an operator-authored message replaces the greeting and
+body copy, never the summary rows.
 
 ## Provider Configuration
 

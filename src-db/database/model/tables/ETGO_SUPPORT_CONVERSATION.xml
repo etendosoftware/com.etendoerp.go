@@ -91,6 +91,9 @@
       <foreign-key foreignTable="AD_ORG" name="ETGO_PORTCONVERSATION_RG_FK">
         <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
       </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_SUPPORTCONV_ADUSER_FK">
+        <reference local="AD_USER_ID" foreign="AD_USER_ID"/>
+      </foreign-key>
       <index name="ETGO_SC_CONV_JIRA" unique="false">
         <index-column name="JIRA_TICKET_KEY"/>
       </index>

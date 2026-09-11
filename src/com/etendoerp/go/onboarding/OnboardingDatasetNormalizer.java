@@ -447,12 +447,17 @@ public class OnboardingDatasetNormalizer {
   private static final class RowExclusionFilter {
     private final AccountElementTreeFilter accountElementTree = new AccountElementTreeFilter();
     private final DanglingCalendarFilter danglingCalendar = new DanglingCalendarFilter();
+    private final DemoMasterDataFilter demoMasterData = new DemoMasterDataFilter();
 
     private boolean isExcludedRow(String tableName, Map<String, String> rawColumns) {
-      // Sub-filters operate on disjoint table sets, so a row excluded by one is never relevant to
-      // the other; short-circuit evaluation keeps the unrelated filter's state untouched.
+      // Sub-filters still operate on disjoint table sets, so a row excluded by one is never
+      // relevant to another and short-circuit evaluation keeps the unrelated filters' state
+      // untouched. Verified when DemoMasterDataFilter was added: its nine tables (financial
+      // accounts, products, warehouses, locators, product categories and their four child tables)
+      // overlap neither the account-element tables (C_ELEMENT*) nor the fiscal calendar ones.
       return accountElementTree.isExcludedRow(tableName, rawColumns)
-          || danglingCalendar.isExcludedRow(tableName, rawColumns);
+          || danglingCalendar.isExcludedRow(tableName, rawColumns)
+          || demoMasterData.isExcludedRow(tableName, rawColumns);
     }
   }
 
@@ -486,6 +491,85 @@ public class OnboardingDatasetNormalizer {
         return false;
       }
       return CLIENT_LEVEL_ORG.equals(rawColumns.get(AD_ORG_ID_COLUMN));
+    }
+  }
+
+  /**
+   * Skips GOClient's demo master data — the four sample products with their price rows, the three
+   * template financial accounts with their payment-method rows, the secondary warehouse with its
+   * locator and org assignment, and the "Beverages" product category with its Spanish translation
+   * — so a new tenant is born without any of it.
+   *
+   * <p>The rows are dropped here, at import time, rather than removed from the source dataset,
+   * because that dataset has a second consumer with the opposite need: {@code install.source}
+   * seeds the GOClient sample client from all 121 files and is expected to get the sample data.
+   * Deleting the rows at the source is what broke {@code ./gradlew install} in {@code enableAllFK}
+   * — see {@link OnboardingDemoMasterData} for the full account of why. Which ids count as demo
+   * data lives there; this class only decides how a row is matched.
+   *
+   * <p><b>Unlike BOTH filters above, this one is stateless and keyed on a fixed id set.</b> That is
+   * a deliberate departure and the next reader should not assume the usual cascade:
+   * {@link AccountElementTreeFilter} discovers parent ids at runtime and relies on the alphabetical
+   * source-file order to reach the children afterwards, which cannot work here — {@code
+   * FIN_FINACC_PAYMENTMETHOD} sorts BEFORE {@code FIN_FINANCIAL_ACCOUNT} and {@code
+   * AD_ORG_WAREHOUSE} before {@code M_WAREHOUSE}, so both children are processed before their
+   * parent is ever seen. And unlike {@link DanglingCalendarFilter} there is no ownership column to
+   * key on: demo master data is indistinguishable from the rows a tenant genuinely needs, which sit
+   * in the very same files (the internal {@code ETGO_DTO} product, its {@code Discounts} category,
+   * the primary warehouse). So the ids are declared as constants of the curated dataset and each
+   * table matches either its own primary key or the foreign key pointing at an excluded parent,
+   * which makes the filter order-independent and free of mutable state.
+   */
+  private static final class DemoMasterDataFilter {
+
+    /**
+     * Per table, the columns whose value marks a row as demo data. A row is excluded when ANY of
+     * its table's entries matches — the parent tables match on their own primary key, the child
+     * tables on the foreign key pointing at an excluded parent.
+     */
+    private static final String FINANCIAL_ACCOUNT_ID_COLUMN = "FIN_FINANCIAL_ACCOUNT_ID";
+    private static final String PRODUCT_ID_COLUMN = "M_PRODUCT_ID";
+    private static final String WAREHOUSE_ID_COLUMN = "M_WAREHOUSE_ID";
+    private static final String LOCATOR_ID_COLUMN = "M_LOCATOR_ID";
+    private static final String PRODUCT_CATEGORY_ID_COLUMN = "M_PRODUCT_CATEGORY_ID";
+
+    private static final Map<String, Map<String, Set<String>>> EXCLUSIONS_BY_TABLE = Map.of(
+        "FIN_FINANCIAL_ACCOUNT",
+        Map.of(FINANCIAL_ACCOUNT_ID_COLUMN, OnboardingDemoMasterData.FINANCIAL_ACCOUNT_IDS),
+        "FIN_FINACC_PAYMENTMETHOD",
+        Map.of(FINANCIAL_ACCOUNT_ID_COLUMN, OnboardingDemoMasterData.FINANCIAL_ACCOUNT_IDS),
+        "M_PRODUCT",
+        Map.of(PRODUCT_ID_COLUMN, OnboardingDemoMasterData.PRODUCT_IDS),
+        "M_PRODUCTPRICE",
+        Map.of(PRODUCT_ID_COLUMN, OnboardingDemoMasterData.PRODUCT_IDS),
+        "M_WAREHOUSE",
+        Map.of(WAREHOUSE_ID_COLUMN, OnboardingDemoMasterData.WAREHOUSE_IDS),
+        "AD_ORG_WAREHOUSE",
+        Map.of(WAREHOUSE_ID_COLUMN, OnboardingDemoMasterData.WAREHOUSE_IDS),
+        // Both handles on purpose: the locator is demo data in its own right AND belongs to an
+        // excluded warehouse, so a future locator added to that warehouse is dropped too.
+        "M_LOCATOR",
+        Map.of(LOCATOR_ID_COLUMN, OnboardingDemoMasterData.LOCATOR_IDS,
+            WAREHOUSE_ID_COLUMN, OnboardingDemoMasterData.WAREHOUSE_IDS),
+        "M_PRODUCT_CATEGORY",
+        Map.of(PRODUCT_CATEGORY_ID_COLUMN, OnboardingDemoMasterData.PRODUCT_CATEGORY_IDS),
+        // The excluded category's es_ES translation. Dropping the parent while importing its
+        // translation would hand every tenant a _TRL row pointing at a category it does not have.
+        "M_PRODUCT_CATEGORY_TRL",
+        Map.of(PRODUCT_CATEGORY_ID_COLUMN, OnboardingDemoMasterData.PRODUCT_CATEGORY_IDS)
+    );
+
+    private boolean isExcludedRow(String tableName, Map<String, String> rawColumns) {
+      if (tableName == null) {
+        return false;
+      }
+      Map<String, Set<String>> exclusions = EXCLUSIONS_BY_TABLE.get(tableName.toUpperCase());
+      if (exclusions == null) {
+        return false;
+      }
+      return exclusions.entrySet()
+          .stream()
+          .anyMatch(exclusion -> exclusion.getValue().contains(rawColumns.get(exclusion.getKey())));
     }
   }
 }

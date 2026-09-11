@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -25,8 +26,12 @@ import java.util.Map;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
+
+import com.etendoerp.psd2.bank.integration.data.Provider;
 
 /**
  * Shared test fixtures for the {@link FinancialAccountBankConnectionHandler} test classes. The handler is one
@@ -95,5 +100,36 @@ final class BankConnectionHandlerTestSupport {
     when(ctx.getCurrentClient()).thenReturn(client);
     when(ctx.getCurrentOrganization()).thenReturn(mock(Organization.class));
     obContext.when(OBContext::getOBContext).thenReturn(ctx);
+  }
+
+  /**
+   * Stubs the {@code OBCriteria<Provider>} chain the provider-by-code lookup walks, resolving to
+   * {@code found} (pass null for "no such provider").
+   *
+   * <p>Shared by every suite that reaches a provider lookup — linking an account (which resolves
+   * or registers the provider) and the ETP-5181 max-fetch-interval read — so the criteria seam is
+   * described in exactly one place and all of them break together if it changes.
+   *
+   * @param obDal the open MockedStatic over {@link OBDal}
+   * @param found the Provider the query resolves to, or null
+   * @return the {@link OBDal} instance mock, for tests that also need to stub {@code save}/
+   *     {@code flush} or add further criteria on it
+   */
+  // java:S1854 — both locals below ARE read (dal by thenReturn and createCriteria and the return,
+  // criteria by createCriteria's stub), but Sonar's dataflow does not follow a value handed to a
+  // MockedStatic's thenReturn and reports the mock() assignments as dead stores. Same false
+  // positive, same suppression as stubObContext above; do not "clean up" by inlining the mocks,
+  // the chain needs the references.
+  @SuppressWarnings("java:S1854")
+  static OBDal stubProviderLookup(org.mockito.MockedStatic<OBDal> obDal, Provider found) {
+    OBDal dal = mock(OBDal.class);
+    obDal.when(OBDal::getInstance).thenReturn(dal);
+    @SuppressWarnings("unchecked")
+    OBCriteria<Provider> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(Provider.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.setMaxResults(1)).thenReturn(criteria);
+    when(criteria.uniqueResult()).thenReturn(found);
+    return dal;
   }
 }

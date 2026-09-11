@@ -32,10 +32,13 @@ class NeoBuiltInEndpointHandler {
   private static final String ATTACHMENTS_SEGMENT_FILE = "file";
   private static final String ATTACHMENTS_SEGMENT_ZIP = "zip";
   private static final String ATTACHMENTS_SEGMENT_MAIN = "main";
+  private static final String ATTACHMENTS_SEGMENT_CONFIG = "config";
   private static final String DESCRIPTION_FIELD = "description";
   private static final String IS_MAIN_FIELD = "isMain";
   private static final String MARK_AS_MAIN_PARAM = "markAsMain";
   private static final String INVALID_JSON_BODY_PREFIX = "Invalid JSON body: ";
+  /** Path segment that turns {@code /image/...} into the ETP-5184 upload-ticket endpoint. */
+  static final String IMAGE_UPLOAD_SEGMENT = "upload";
 
   private final NeoServlet servlet;
   private final NeoDiscoveryHandler discoveryHandler;
@@ -62,6 +65,14 @@ class NeoBuiltInEndpointHandler {
       return handleDiscoveryEndpoint(method, response);
     }
     if ("image".equals(pathInfo.specName)) {
+      // ETP-5184: /image/upload/{token} is the one-shot MCP upload ticket, not an image id. It also
+      // has a pre-authentication entry point in NeoServlet (the token is the credential, so the
+      // uploader has no session) — this branch is what serves it when the caller DOES send a
+      // bearer token, so both callers hit the same handler and the same validation.
+      if (IMAGE_UPLOAD_SEGMENT.equals(pathInfo.entityName)) {
+        NeoImageHelper.handleUploadTicketRequest(pathInfo.recordId, method, request, response);
+        return true;
+      }
       NeoImageHelper.handleImageRequest(pathInfo.entityName, method, request, response);
       return true;
     }
@@ -267,6 +278,8 @@ class NeoBuiltInEndpointHandler {
    * Dispatches {@code /sws/neo/attachments/*} requests to the cross-cutting
    * {@link NeoAttachmentsHelper}. Supported shapes:
    * <ul>
+   *   <li>{@code GET    /attachments/config}                        — the upload policy
+   *       (max size + accepted types) enforced by the upload endpoint below</li>
    *   <li>{@code GET    /attachments/{tableName}/{recordId}}        — list attachments
    *       (excludes the one marked as "main")</li>
    *   <li>{@code POST   /attachments/{tableName}/{recordId}}        — multipart upload;
@@ -285,10 +298,19 @@ class NeoBuiltInEndpointHandler {
   private void handleAttachmentsEndpoint(String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
     String[] segments = parseAttachmentsSegments(request.getPathInfo());
+    if (segments.length == 1 && ATTACHMENTS_SEGMENT_CONFIG.equals(segments[0])) {
+      if (!"GET".equals(method)) {
+        servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+            "Attachments config endpoint only supports GET");
+        return;
+      }
+      servlet.writeResponse(response, NeoAttachmentsHelper.handleGetPolicy());
+      return;
+    }
     if (segments.length < 2) {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "Attachments endpoint requires /attachments/{tableName}/{recordId} "
-              + "or /attachments/file/{attachmentId}");
+          "Attachments endpoint requires /attachments/{tableName}/{recordId}, "
+              + "/attachments/file/{attachmentId} or /attachments/config");
       return;
     }
 

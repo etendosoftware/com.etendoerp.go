@@ -61,6 +61,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.enterprise.OrganizationInformation;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.common.uom.UOM;
@@ -701,6 +702,67 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
       assertEquals("APC-001", returnInvoices.getJSONObject(0).getString("documentNo"));
       assertTrue(enriched.getBoolean("hasReturnInvoice"));
       assertEquals(2, enriched.getInt("linesCount"));
+    }
+  }
+
+  // ── afterHandle() — issuerOrg enrichment (ETP-4939) ───────────────────────
+
+  /**
+   * Detail GET (non-null recordId) for a record whose id matches: afterHandle must inject
+   * {@code issuerOrg}, mirroring the pattern already used by the goods-shipment sibling
+   * handler ({@code GoodsShipmentHeaderHandler#enrichIssuerOrg}). Resolves the shipment via
+   * {@code OBDal.getReadOnlyInstance().get(ShipmentInOut.class, "ret-1")}, then its
+   * organization via {@code NeoSessionService.resolveOrganization}, which itself reads
+   * {@code OrganizationInformation} through the same read-only DAL instance.
+   */
+  @Test
+  public void testAfterHandleEnrichesRecordWithIssuerOrg() throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      OBDal readOnlyDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(readOnlyDal);
+
+      // ReturnShipmentUtils.fetch* batch queries — all return empty result sets.
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      // Shipment + organization, resolved via the read-only DAL instance.
+      Organization org = mock(Organization.class);
+      when(org.getId()).thenReturn("org-1");
+      ShipmentInOut shipment = mock(ShipmentInOut.class);
+      when(shipment.getOrganization()).thenReturn(org);
+      when(readOnlyDal.get(ShipmentInOut.class, "ret-1")).thenReturn(shipment);
+
+      OrganizationInformation orgInfo = mock(OrganizationInformation.class);
+      when(readOnlyDal.get(OrganizationInformation.class, "org-1")).thenReturn(orgInfo);
+      when(orgInfo.getTaxID()).thenReturn("B12345678");
+      when(orgInfo.getLocationAddress()).thenReturn(null);
+      Organization infoOrg = mock(Organization.class);
+      when(infoOrg.getName()).thenReturn("Acme Corp");
+      when(orgInfo.getOrganization()).thenReturn(infoOrg);
+
+      JSONObject rec = new JSONObject().put("id", "ret-1");
+      JSONObject body = new JSONObject().put("response",
+          new JSONObject().put("data", new JSONArray().put(rec)));
+      NeoContext ctx = NeoContext.builder()
+          .specName("return-to-vendor-shipment").entityName("header")
+          .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+          .recordId("ret-1").build();
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject enriched = result.getBody()
+          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertTrue(enriched.has("issuerOrg"));
     }
   }
 

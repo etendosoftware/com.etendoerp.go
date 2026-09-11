@@ -9,5 +9,9 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="EM_ETGO_TBAI_STATUS" primaryKey="false" required="false" type="VARCHAR" size="10" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
     </table>
   </database>

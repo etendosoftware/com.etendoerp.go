@@ -38,7 +38,7 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
 import org.openbravo.model.financialmgmt.payment.FinAccPaymentMethod;
 import org.openbravo.model.financialmgmt.payment.MatchingAlgorithm;
 
-import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
+import com.etendoerp.go.schemaforge.handlers.FinancialAccountAccountingDefaultsSupport;
 
 /**
  * Helper for creating {@link FIN_FinancialAccount} records programmatically, outside the generic
@@ -161,16 +161,57 @@ final class FinancialAccountSupport {
   }
 
   /**
+   * THE single entry point for "everything a newly created financial account must receive",
+   * whatever path created it. Both creation flows call exactly this and nothing else:
+   *
+   * <ul>
+   *   <li>manual "sin conexión" — the generic NEO CRUD inserts the record, then
+   *       {@link FinancialAccountHandler#afterHandle}'s POST branch calls this;</li>
+   *   <li>bank connection (Salt Edge) —
+   *       {@link FinancialAccountBankConnectionHandler#handleCreateAndLink} builds the record via
+   *       {@link #createAccount} and then calls this, before its own Salt Edge linking.</li>
+   * </ul>
+   *
+   * <p><b>Why this exists (ETP-5207).</b> The two flows used to duplicate the provisioning call
+   * list, and they drifted — twice. ETP-4872 added
+   * {@code applyDefaultAccountingConfiguration} to the manual path only, and ETP-5207's first pass
+   * fixed the cleared-payment-account defect on the manual path only; the bank-connection handler
+   * carried a comment claiming to "mirror the manual flow" while calling just
+   * {@link #assignDefaultPaymentMethods} — half a mirror. QA caught it in the running app: an
+   * account created via CONNECT ACCOUNT was still born with "Cleared payment account" IN/OUT set
+   * to the ledger asset account, so its reconciliations still posted.
+   *
+   * <p><b>Contract for whoever adds the next default:</b> add it HERE, never inline in a handler.
+   * Anything every new account needs belongs in this method and reaches both flows automatically.
+   * Path-specific work does NOT belong here — it stays in the calling handler (e.g. the Salt Edge
+   * account linking, which only the connection flow performs).
+   *
+   * <p>Ordering matters and is deliberate: payment methods first, then accounting configuration.
+   * The caller must have already flushed the account, because core's AFTER INSERT trigger
+   * {@code FIN_FINANCIAL_ACCOUNT_TRG} is what creates the {@code fin_financial_account_acct} row
+   * the accounting step then corrects. Best-effort throughout: neither step may break account
+   * creation, and each swallows its own failures.
+   *
+   * @param account
+   *     the freshly created and flushed financial account; {@code null} is a no-op
+   */
+  static void provisionNewAccount(FIN_FinancialAccount account) {
+    if (account == null) {
+      return;
+    }
+    assignDefaultPaymentMethods(account);
+    FinancialAccountAccountingDefaultsSupport.applyDefaultAccountingConfiguration(account);
+  }
+
+  /**
    * Links the default payment methods that correspond to {@code account}'s type
    * ({@link #PAYMENT_METHODS_BY_TYPE}), so a Cash/Bank/Card account is usable for
    * receipts/payments without manual setup. Idempotent: existing links are left
    * untouched. Failures never propagate — callers persist the account first, so the
    * assignment is always best-effort on top of an already-committed record.
    *
-   * <p>Shared by {@link FinancialAccountHandler#afterHandle} (manual "sin conexión"
-   * creation) and {@link FinancialAccountBankConnectionHandler#handleCreateAndLink} (Salt Edge
-   * "create and link" flow), so every financial account gets the same treatment
-   * regardless of how it was created.
+   * <p>Not called directly by the creation flows any more — reach it through
+   * {@link #provisionNewAccount}, which is the shared seam both of them use.
    */
   static void assignDefaultPaymentMethods(FIN_FinancialAccount account) {
     List<String> methodNames = PAYMENT_METHODS_BY_TYPE.get(account.getType());
@@ -220,9 +261,11 @@ final class FinancialAccountSupport {
     link.setPaymentMethod(method);
     link.setDefault(isDefault);
     // Multicurrency ON by default (ETP-4503): runtime-created links are born multicurrency-ON,
-    // matching the onboarding sampledata. The bank-transfer exception (a Bank account with an
-    // active bank connection) is applied afterwards by FinancialAccountBankConnectionHandler through
-    // disableMulticurrencyForBankTransfer, so ordinary accounts keep multicurrency enabled.
+    // matching the onboarding sampledata. ETP-5084 removed the bank-transfer exception that used to
+    // clear these two flags when the account was connected to its bank: a PIS transfer converts the
+    // invoice amount to the account currency and instructs the bank in that currency, so a
+    // cross-currency transfer is a supported operation and the transfer link is multicurrency like
+    // every other payment method. Data-fix R29 re-enables it on already-connected accounts.
     link.setPayinIsMulticurrency(true);
     link.setPayoutIsMulticurrency(true);
     // The PSD2 "is bank transfer" identity flag has no sane column default (falls to 'N') and
@@ -253,57 +296,6 @@ final class FinancialAccountSupport {
     // created by hand — must not be able to propagate it to the link.
     link.setAutomaticWithdrawn(!isBankTransferMethod(method) && method.isAutomaticWithdrawn());
     OBDal.getInstance().save(link);
-  }
-
-  /**
-   * Disables multicurrency (both pay-in and pay-out) on the bank-transfer payment-method link of
-   * {@code account}, implementing the bank-connection exception to the "multicurrency ON by
-   * default" rule (ETP-4503): a bank transfer is executed by the bank in the account's own
-   * currency, so multicurrency on that link is misleading.
-   *
-   * <p>Called from {@link FinancialAccountBankConnectionHandler} right after a Bank account is
-   * connected to its bank (the create-and-link and link paths). The account-type gate lives here —
-   * the method only acts on Bank accounts ({@link BankIntegrationConstants#FA_TYPE_BANK}) — so the
-   * call site can invoke it unconditionally. The active-connection condition holds by construction:
-   * the call sites are exactly the points where a connection has just been established.
-   *
-   * <p>The transfer link is identified the same way as the corrective R14/R15 data-fixes: the
-   * extension flag {@code EM_PSD2_Is_Bank_Transfer='Y'} first, with a name fallback
-   * ({@code "Transferencia bancaria"} / {@code "Transferencia"} / {@code "Wire Transfer"}) because
-   * the live flag diverges from the seeded value on existing tenants.
-   *
-   * <p>Idempotent (only touches links still multicurrency-ON) and best-effort: the account is
-   * already persisted, so any failure here is logged and swallowed rather than propagated —
-   * mirroring {@link #assignDefaultPaymentMethods}.
-   */
-  static void disableMulticurrencyForBankTransfer(FIN_FinancialAccount account) {
-    if (account == null || !BankIntegrationConstants.FA_TYPE_BANK.equals(account.getType())) {
-      return;
-    }
-    try {
-      OBCriteria<FinAccPaymentMethod> criteria =
-          OBDal.getInstance().createCriteria(FinAccPaymentMethod.class);
-      criteria.add(Restrictions.eq(FinAccPaymentMethod.PROPERTY_ACCOUNT, account));
-      boolean changed = false;
-      for (FinAccPaymentMethod link : criteria.list()) {
-        if (isBankTransferMethod(link.getPaymentMethod())
-            && (Boolean.TRUE.equals(link.isPayinIsMulticurrency())
-                || Boolean.TRUE.equals(link.isPayoutIsMulticurrency()))) {
-          link.setPayinIsMulticurrency(false);
-          link.setPayoutIsMulticurrency(false);
-          OBDal.getInstance().save(link);
-          changed = true;
-        }
-      }
-      if (changed) {
-        OBDal.getInstance().flush();
-        log.info("disableMulticurrencyForBankTransfer: disabled multicurrency on the transfer "
-            + "link(s) of bank-connected Bank account {}", account.getId());
-      }
-    } catch (Exception e) {
-      log.warn("disableMulticurrencyForBankTransfer: skipped for account {} ({})",
-          account.getId(), e.getMessage());
-    }
   }
 
   /**

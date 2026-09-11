@@ -38,8 +38,4 @@ public final class SalesOrderSendEmailContract extends DefaultDocumentSendEmailC
     super(NAME, "Sales Order", Objects.requireNonNull(documentResolver, "documentResolver"));
   }
 
-  @Override
-  protected String documentTypeLabel() {
-    return "Pedido de Venta";
-  }
 }

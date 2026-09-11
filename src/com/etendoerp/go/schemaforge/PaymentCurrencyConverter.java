@@ -23,6 +23,7 @@ import java.math.RoundingMode;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
@@ -45,7 +46,41 @@ import org.openbravo.model.financialmgmt.payment.FIN_Payment;
  */
 final class PaymentCurrencyConverter {
 
+  /** Request field carrying the user-supplied (or seeded) invoice→account conversion rate. */
+  private static final String KEY_CONVERSION_RATE = "conversionRate";
+
   private PaymentCurrencyConverter() {
+  }
+
+  /** True when the payment crosses currencies: the invoice's differs from the debited account's. */
+  static boolean isCrossCurrency(Invoice invoice, FIN_FinancialAccount account) {
+    return invoice.getCurrency() != null && account.getCurrency() != null
+        && !invoice.getCurrency().getId().equals(account.getCurrency().getId());
+  }
+
+  /**
+   * Fills {@code body}'s {@code conversionRate} from the invoice's own exchange rate when a
+   * cross-currency request arrived without one.
+   *
+   * <p>Used by the PIS bank-transfer path (ETP-5084), where the rate is not optional in practice:
+   * the amount instructed to the bank has to be converted to the account currency. The SPA modal
+   * always sends a rate, so this only covers direct API callers — and it writes it back INTO the
+   * body on purpose, because that body is snapshotted as the payment intent and replayed when the
+   * bank resolves. A rate kept only in a local variable would be absent from the replay, which
+   * would then fail {@link #resolveConversionRate}'s own "rate required" check.
+   *
+   * <p>Deliberately the invoice's own rate ({@link #resolveInvoiceRate}: its
+   * {@code ConversionRateDoc} first, then the general table), matching the contract established for
+   * cross-currency reconciliation in ETP-4502. Throws when no rate exists at all, which is the
+   * honest outcome — the transfer amount would be unknowable.
+   */
+  static void seedInvoiceRateIfAbsent(JSONObject body, Invoice invoice,
+      FIN_FinancialAccount account) throws JSONException {
+    if (StringUtils.isNotBlank(body.optString(KEY_CONVERSION_RATE, "").trim())
+        || !isCrossCurrency(invoice, account)) {
+      return;
+    }
+    body.put(KEY_CONVERSION_RATE, resolveInvoiceRate(invoice, account).toPlainString());
   }
 
   /**
@@ -65,9 +100,8 @@ final class PaymentCurrencyConverter {
    */
   static RateResolution resolveConversionRate(JSONObject body, Invoice invoice,
       FIN_FinancialAccount account) {
-    boolean foreignCurrency = invoice.getCurrency() != null && account.getCurrency() != null
-        && !invoice.getCurrency().getId().equals(account.getCurrency().getId());
-    String rawRate = body.optString("conversionRate", "").trim();
+    boolean foreignCurrency = isCrossCurrency(invoice, account);
+    String rawRate = body.optString(KEY_CONVERSION_RATE, "").trim();
     BigDecimal conversionRate;
     if (StringUtils.isBlank(rawRate)) {
       // Defense-in-depth (B1): a genuinely foreign payment arriving with no rate would otherwise

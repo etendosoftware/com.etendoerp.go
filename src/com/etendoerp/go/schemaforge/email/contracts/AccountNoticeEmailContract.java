@@ -36,27 +36,26 @@ import com.etendoerp.go.schemaforge.email.EmailProviderRequest;
 import com.etendoerp.go.schemaforge.email.EmailRecipientResolution;
 import com.etendoerp.go.schemaforge.email.EmailThrottleRule;
 import com.etendoerp.go.schemaforge.email.TransactionalEmailService;
+import com.etendoerp.go.schemaforge.email.render.AccountEmailContent;
+import com.etendoerp.go.schemaforge.email.render.EmailLayout;
 
 final class AccountNoticeEmailContract implements EmailContract {
 
   private static final String ACCOUNT_RECORD_NOT_FOUND = "Email account record was not found";
+  /** The provider's bring-your-own-content template: the layout is rendered here, not there. */
+  private static final String CONTENT_TEMPLATE = "custom";
+  private static final String FIELD_SUBJECT = "subject";
+  private static final String FIELD_BODY = "body";
 
   private final String name;
-  private final String template;
   private final EmailContractDataResolver dataResolver;
-  private final AccountNoticeCustomContent customContent;
+  private final String[] noteKeys;
 
-  AccountNoticeEmailContract(String name, String template,
-      EmailContractDataResolver dataResolver) {
-    this(name, template, dataResolver, null);
-  }
-
-  AccountNoticeEmailContract(String name, String template,
-      EmailContractDataResolver dataResolver, AccountNoticeCustomContent customContent) {
+  AccountNoticeEmailContract(String name, EmailContractDataResolver dataResolver,
+      String... noteKeys) {
     this.name = name;
-    this.template = template;
     this.dataResolver = dataResolver;
-    this.customContent = customContent;
+    this.noteKeys = noteKeys == null ? new String[0] : noteKeys.clone();
   }
 
   @Override
@@ -107,22 +106,23 @@ final class AccountNoticeEmailContract implements EmailContract {
           TransactionalEmailService.STATUS_VALIDATION_FAILED, ACCOUNT_RECORD_NOT_FOUND);
     }
     try {
+      String language = EmailContractCommandSupport.text(command,
+          EmailContractCommandSupport.FIELD_LANGUAGE);
       JSONObject data = new JSONObject();
       data.put("name", StringUtils.defaultIfBlank(contact.get().getName(), "User"));
-      String date = EmailContractCommandSupport.text(command, EmailContractCommandSupport.FIELD_DATE);
+      String date = EmailContractCommandSupport.text(command,
+          EmailContractCommandSupport.FIELD_DATE);
       if (date != null) {
         data.put("date", date);
       }
-      String language = EmailContractCommandSupport.text(command,
-          EmailContractCommandSupport.FIELD_LANGUAGE);
       if (language != null) {
         data.put("language", language);
       }
-      if (customContent != null) {
-        customContent.apply(data, language);
-      }
+      data.put(FIELD_SUBJECT, AccountEmailContent.subject(name, language));
+      data.put(FIELD_BODY, EmailLayout.render(AccountEmailContent.buildWithNotes(name, language,
+          contact.get().getName(), null, noteKeys, null)));
       return EmailContractResolution.ready(new EmailProviderRequest(recipient.getRecipient(),
-          template, data, null));
+          CONTENT_TEMPLATE, data, null));
     } catch (JSONException e) {
       throw new OBException("Could not build account notice email payload", e);
     }
@@ -151,21 +151,4 @@ final class AccountNoticeEmailContract implements EmailContract {
         EmailContractCommandSupport.FIELD_ACCOUNT_ID));
   }
 
-  /**
-   * Functional interface to add custom content to the account notice email payload.
-   */
-  @FunctionalInterface
-  interface AccountNoticeCustomContent {
-    /**
-     * Adds custom notice content to the provider payload.
-     *
-     * @param data
-     *     provider payload to populate
-     * @param language
-     *     recipient language code
-     * @throws JSONException
-     *     when the payload cannot be populated
-     */
-    void apply(JSONObject data, String language) throws JSONException;
-  }
 }

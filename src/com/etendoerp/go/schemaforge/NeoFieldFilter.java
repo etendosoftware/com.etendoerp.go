@@ -24,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -55,18 +56,63 @@ public class NeoFieldFilter {
   private static final String IDENTIFIER_SUFFIX = "$_identifier";
 
   /**
-   * Audit keys a GET response always carries, whatever {@code ETGO_SF_FIELD} says.
+   * Audit <b>DAL property names</b> a GET response always carries, whatever {@code ETGO_SF_FIELD}
+   * says.
    *
-   * <p>{@code updated} is an AD <i>column</i> on every table but not an AD <i>field</i>, so
-   * {@code push-to-neo} cannot register it and no window can opt into it — yet the client needs
-   * it to tell a cached rendering of a record from a stale one (ETP-4787: the preview serves the
-   * marked attachment, which had no way of knowing the record had changed underneath it).
+   * <p>The AD columns {@code Updated} and {@code Created} exist on every table but are not AD
+   * <i>fields</i>, so {@code push-to-neo} cannot register them and no window can opt into them —
+   * yet clients need them. {@code updated} lets the client tell a cached rendering of a record
+   * from a stale one (ETP-4787: the preview serves the marked attachment, which had no way of
+   * knowing the record had changed underneath it). The creation timestamp is needed for
+   * date-of-creation eligibility checks (ETP-5122: Verifactu eligibility by invoice creation
+   * date).
+   *
+   * <p><b>These are DAL property names, NOT the keys the client sees.</b> That distinction is the
+   * whole reason ETP-5122's first attempt was a silent no-op: the payload keys here are whatever
+   * {@code DataToJsonConverter} emitted, and it emits {@code bob.getEntity().getProperties()} by
+   * name. DAL renames the {@code Created} column to the property {@code creationDate}
+   * ({@code Property#setName("creationDate")}, matching the generated
+   * {@code PROPERTY_CREATIONDATE} constant), while {@code Updated} keeps the name {@code updated}.
+   * So a response never contains a key literally called {@code created} — listing {@code created}
+   * here only exempted a key that was never in the payload, and {@code creationDate} went on being
+   * stripped. The client-facing name is restored by {@link #AUDIT_PROP_TO_API_KEY} instead.
    *
    * <p>Read side only, deliberately: this set is NOT unioned into {@code includedFields}, because
    * that same set gates {@link #filterCreateRequest}, and a client must never be able to write
-   * its own {@code updated}.
+   * its own audit stamps.
    */
-  private static final Set<String> ALWAYS_READABLE_KEYS = Set.of("updated");
+  private static final Set<String> ALWAYS_READABLE_PROPS = Set.of("updated", "creationDate");
+
+  /**
+   * Read-side rename applied to {@link #ALWAYS_READABLE_PROPS}: DAL property name → the API key
+   * the client sees. Same job {@code propNameToApiKey} does for configured fields, but audit
+   * columns have no {@code ETGO_SF_FIELD} row to carry a {@code java_qualifier}, so the alias is
+   * declared here.
+   *
+   * <p>{@code creationDate} is served as {@code created} — the name the frontend, the MCP schema
+   * and every other {@code Created}-column consumer already use, and the one
+   * {@link #emittableResponseKeys} advertises. {@code updated} needs no alias, which is why it is
+   * absent (a prop with no entry keeps its DAL name).
+   *
+   * <p>Deliberately NOT merged into {@code apiKeyToPropName}: that map drives {@code remapApiKeys}
+   * on the WRITE path, and a client must never be able to author its own {@code created}.
+   */
+  private static final Map<String, String> AUDIT_PROP_TO_API_KEY = Map.of(
+      "creationDate", "created");
+
+  /**
+   * {@link #ALWAYS_READABLE_PROPS} expressed as the API keys the caller actually receives, i.e.
+   * after {@link #AUDIT_PROP_TO_API_KEY}. This is what {@link #emittableResponseKeys} must
+   * advertise so the MCP field-projection validator does not call a served field unknown
+   * (ETP-5073) — nor advertise a name the payload never carries.
+   *
+   * <p>Derived rather than written out a second time, so the two read-side consumers cannot drift:
+   * {@link #filterGetResponse} keeps/renames exactly these, {@link #emittableResponseKeys}
+   * declares exactly these.
+   */
+  private static final Set<String> ALWAYS_READABLE_API_KEYS = ALWAYS_READABLE_PROPS.stream()
+      .map(prop -> AUDIT_PROP_TO_API_KEY.getOrDefault(prop, prop))
+      .collect(Collectors.toUnmodifiableSet());
 
   /**
    * Set of DAL property names that are included (IsIncluded=Y).
@@ -371,8 +417,9 @@ public class NeoFieldFilter {
       if (data != null) {
         for (int i = 0; i < data.length(); i++) {
           JSONObject item = data.getJSONObject(i);
-          filterRecord(item, includedFields, ALWAYS_READABLE_KEYS);
+          filterRecord(item, includedFields, ALWAYS_READABLE_PROPS);
           renameToApiKeys(item);
+          renameAuditPropsToApiKeys(item);
         }
       }
     } catch (Exception e) {
@@ -422,6 +469,18 @@ public class NeoFieldFilter {
    * undefined on an empty result set, which is exactly when a typo is most expensive to miss
    * (IMP-18). Read-only: the returned set is a copy.
    *
+   * <p><b>{@link #ALWAYS_READABLE_API_KEYS} is part of the answer</b> (ETP-5073). Those keys are
+   * what {@link #filterGetResponse} keeps on top of {@code includedFields}, so they genuinely ARE
+   * emittable; leaving them out made the MCP projection validator report {@code updated} in
+   * {@code unknownFields} while the very same response carried its value — a self-contradiction
+   * that teaches the consuming agent to distrust the array or to stop asking for a field that
+   * works. The <i>API</i>-key form is what belongs here, not the DAL-property form: the payload
+   * carries {@code created}, never {@code creationDate}, once
+   * {@link #renameAuditPropsToApiKeys} has run. Unioned HERE, on the read side only, and never
+   * into {@code includedFields} or {@code writableFields}: {@code ALWAYS_READABLE_PROPS} also
+   * gates {@link #filterCreateRequest}, and a client must still never be able to write its own
+   * {@code updated}/{@code created}.
+   *
    * @return {@link Optional#of} the emittable response keys, or {@link Optional#empty()} when this
    *     filter is inactive (no {@code ETGO_SF_FIELD} config), in which case the response is
    *     unfiltered and the caller must fall back to the DAL entity's own property list rather than
@@ -435,6 +494,9 @@ public class NeoFieldFilter {
     for (String propName : includedFields) {
       keys.add(propNameToApiKey.getOrDefault(propName, propName));
     }
+    // Audit keys served regardless of ETGO_SF_FIELD: they have no SFField row, so their rename
+    // comes from AUDIT_PROP_TO_API_KEY and is already applied in ALWAYS_READABLE_API_KEYS.
+    keys.addAll(ALWAYS_READABLE_API_KEYS);
     return Optional.of(keys);
   }
 
@@ -479,6 +541,60 @@ public class NeoFieldFilter {
       if (rejectableOnCreateFields.contains(propName)) {
         throw new ReadOnlyFieldRejectedException(key);
       }
+    }
+  }
+
+  /**
+   * Strips fields from a callout response that {@link #filterCreateRequest} would reject as
+   * read-only-on-create for this entity (see {@link #rejectableOnCreateFields}, IMP-28,
+   * ETP-4917).
+   *
+   * <p>A legacy Etendo callout answers with every field it recomputed, not just the one the
+   * client changed — e.g. {@code SL_JournalLineAmt} answers both the foreign-currency amount the
+   * user typed AND the derived accounted-amount columns ({@code AmtAcctDr}/{@code AmtAcctCr},
+   * whose DAL property names happen to literally be {@code debit}/{@code credit}). The frontend
+   * merges the whole callout response into local form state and later spreads that state into a
+   * create request, so an echoed read-only field silently becomes a client-supplied value on the
+   * next POST — which {@link #filterCreateRequest} then rejects with a 422 (ETP-4917).
+   *
+   * <p>Safe to apply unconditionally, whether the callout precedes a POST (create) or a
+   * PUT/PATCH (update) of an already-existing record: {@link #rejectableOnCreateFields} is by
+   * construction disjoint from {@link #writableFields} (see its javadoc and the IMP-37
+   * subtraction at the end of {@link #forEntity}), so every key this method removes is one
+   * {@link #filterWriteRequest} would have silently dropped anyway on an update. There is no
+   * separate "reject on update" set to consult instead — this is the correct rejection set for
+   * both write paths that can follow a callout.
+   *
+   * <p>Does not touch the callout's own server-side computation — {@link NeoCalloutService} has
+   * already computed and cached whatever it needed before this runs; only the JSON handed back
+   * to the client is affected.
+   *
+   * @param calloutBody
+   *     the callout response body ({@code updates}/{@code combos}/{@code messages}), modified
+   *     in place
+   * @return the same object, for chaining
+   */
+  public JSONObject filterCalloutResponse(JSONObject calloutBody) {
+    if (!active || calloutBody == null || rejectableOnCreateFields == null
+        || rejectableOnCreateFields.isEmpty()) {
+      return calloutBody;
+    }
+    stripRejectableKeys(calloutBody.optJSONObject("updates"));
+    stripRejectableKeys(calloutBody.optJSONObject("combos"));
+    return calloutBody;
+  }
+
+  /**
+   * Removes every key in {@link #rejectableOnCreateFields} from the given callout response
+   * section ({@code updates} or {@code combos}), if present.
+   */
+  @SuppressWarnings("unchecked")
+  private void stripRejectableKeys(JSONObject section) {
+    if (section == null) {
+      return;
+    }
+    for (String field : rejectableOnCreateFields) {
+      section.remove(field);
     }
   }
 
@@ -542,6 +658,53 @@ public class NeoFieldFilter {
   }
 
   /**
+   * Renames the audit DAL properties {@link #filterRecord} exempted into the API keys clients
+   * expect, per {@link #AUDIT_PROP_TO_API_KEY} — i.e. {@code creationDate} → {@code created}
+   * (ETP-5122).
+   *
+   * <p>Separate from {@link #renameToApiKeys} rather than folded into {@code propNameToApiKey}
+   * because that map is built from {@code ETGO_SF_FIELD} rows and audit columns have none, and
+   * because {@code renameToApiKeys} short-circuits when the map is empty — an entity with no
+   * aliased field at all would then skip the audit rename too.
+   *
+   * <p>An existing key wins: if some window really did register a field whose
+   * {@code java_qualifier} is {@code created}, that value is left alone and the audit property is
+   * simply dropped, mirroring the {@code !jsonObj.has(apiKey)} guard in
+   * {@link #renameToApiKeys}.
+   */
+  private void renameAuditPropsToApiKeys(JSONObject jsonObj) {
+    if (jsonObj == null) {
+      return;
+    }
+    for (Map.Entry<String, String> alias : AUDIT_PROP_TO_API_KEY.entrySet()) {
+      renameAuditProp(jsonObj, alias.getKey(), alias.getValue());
+    }
+  }
+
+  /**
+   * Renames a single audit DAL property into its API key, if present. Extracted out of
+   * {@link #renameAuditPropsToApiKeys}'s loop so each early exit is a {@code return} here
+   * rather than a {@code continue} there, keeping the caller's loop to a single exit point
+   * (java:S135).
+   */
+  private void renameAuditProp(JSONObject jsonObj, String propName, String apiKey) {
+    if (!jsonObj.has(propName)) {
+      return;
+    }
+    Object value = jsonObj.opt(propName);
+    jsonObj.remove(propName);
+    if (jsonObj.has(apiKey) || value == null) {
+      return;
+    }
+    try {
+      jsonObj.put(apiKey, value);
+    } catch (Exception e) {
+      log.warn("[NEO] renameAuditPropsToApiKeys: failed to rename '{}' → '{}': {}",
+          propName, apiKey, e.getMessage());
+    }
+  }
+
+  /**
    * Renames API keys (javaQualifier, e.g. "unitPrice") in the request body to
    * their DAL property names (e.g. "priceActual") before filtering and coercion.
    * If the DAL property name is already present in the body, the API key is
@@ -588,7 +751,7 @@ public class NeoFieldFilter {
    *
    * @param alsoKeep
    *     extra keys to preserve on top of {@code allowedFields} — empty on the write path, and
-   *     {@link #ALWAYS_READABLE_KEYS} on the read path
+   *     {@link #ALWAYS_READABLE_PROPS} (DAL property names) on the read path
    */
   @SuppressWarnings("unchecked")
   private void filterRecord(JSONObject item, Set<String> allowedFields, Set<String> alsoKeep) {

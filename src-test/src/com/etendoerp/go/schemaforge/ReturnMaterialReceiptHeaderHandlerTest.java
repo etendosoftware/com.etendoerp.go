@@ -52,6 +52,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.enterprise.OrganizationInformation;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.plm.Product;
 import org.hibernate.Session;
@@ -79,7 +80,8 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  *   <li>{@code handleCreateReturnInvoice()} — missing recordId, receipt not found,
  *       receipt not completed, no product lines, no rectificative (ARI) doc type.</li>
  *   <li>{@code afterHandle()} — guard conditions, no-id enrichment, SQL empty path,
- *       SQL with rows (addShipmentToMap + addInvoiceToMap), and outer-catch path.</li>
+ *       SQL with rows (addShipmentToMap + addInvoiceToMap), issuerOrg enrichment on a
+ *       detail GET (ETP-5124), and outer-catch path.</li>
  * </ul>
  */
 public class ReturnMaterialReceiptHeaderHandlerTest {
@@ -827,6 +829,68 @@ public class ReturnMaterialReceiptHeaderHandlerTest {
       assertEquals("INV-001", invoices.getJSONObject(0).getString("documentNo"));
       assertTrue(enriched.getBoolean("hasReturnInvoice"));
       assertEquals(3, enriched.getInt("linesCount"));
+    }
+  }
+
+  // ── afterHandle() — issuerOrg enrichment (ETP-5124) ───────────────────────
+
+  /**
+   * Detail GET (non-null recordId) for a record whose id matches: afterHandle must inject
+   * {@code issuerOrg}, mirroring the pattern already used by the return-to-vendor-shipment
+   * sibling handler ({@code ReturnToVendorShipmentHeaderHandler}, ETP-4939) via the shared
+   * {@code NeoHandlerUtils#enrichIssuerOrg}. Resolves the shipment via
+   * {@code OBDal.getReadOnlyInstance().get(ShipmentInOut.class, "rec-1")}, then its
+   * organization via {@code NeoSessionService.resolveOrganization}, which itself reads
+   * {@code OrganizationInformation} through the same read-only DAL instance.
+   */
+  @Test
+  public void testAfterHandleEnrichesRecordWithIssuerOrg() throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      OBDal readOnlyDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(readOnlyDal);
+
+      // ReturnShipmentUtils.fetch* batch queries — all return empty result sets.
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      ResultSet rs = mock(ResultSet.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(false);
+
+      // Shipment + organization, resolved via the read-only DAL instance.
+      Organization org = mock(Organization.class);
+      when(org.getId()).thenReturn("org-1");
+      ShipmentInOut receipt = mock(ShipmentInOut.class);
+      when(receipt.getOrganization()).thenReturn(org);
+      when(readOnlyDal.get(ShipmentInOut.class, "rec-1")).thenReturn(receipt);
+
+      OrganizationInformation orgInfo = mock(OrganizationInformation.class);
+      when(readOnlyDal.get(OrganizationInformation.class, "org-1")).thenReturn(orgInfo);
+      when(orgInfo.getTaxID()).thenReturn("B12345678");
+      when(orgInfo.getLocationAddress()).thenReturn(null);
+      Organization infoOrg = mock(Organization.class);
+      when(infoOrg.getName()).thenReturn("Acme Corp");
+      when(orgInfo.getOrganization()).thenReturn(infoOrg);
+
+      JSONObject rec = new JSONObject().put("id", "rec-1");
+      JSONObject body = new JSONObject().put("response",
+          new JSONObject().put("data", new JSONArray().put(rec)));
+      NeoContext ctx = NeoContext.builder()
+          .specName("return-material-receipt").entityName("header")
+          .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+          .recordId("rec-1").build();
+      ctx.setPreviousResult(NeoResponse.ok(body));
+
+      NeoResponse result = handler.afterHandle(ctx);
+
+      assertNotNull(result);
+      JSONObject enriched = result.getBody()
+          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertTrue(enriched.has("issuerOrg"));
     }
   }
 

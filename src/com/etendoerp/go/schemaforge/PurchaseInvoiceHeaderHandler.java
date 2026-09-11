@@ -37,12 +37,16 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.DocumentType;
 
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
+import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 
 /**
  * NeoHandler for the Purchase Invoice header entity.
  *
  * <p>Extends {@link AbstractInvoiceHeaderHandler} to inherit shared document-type-lock
  * enforcement, origin-invoice persistence, and GET enrichment logic.
+ *
+ * <p>ETP-5238: the {@code paymentMethod} SELECTOR is served by
+ * {@link PaymentMethodSelectorSupport}, independent of Financial Account linkage.
  *
  * <p>Dispatches custom ACTION requests to the appropriate handler:
  * <ul>
@@ -99,6 +103,11 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoResponse paymentMethodSelector = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(context,
+        PaymentMethodSelectorSupport.DirectionFallback.WINDOW);
+    if (paymentMethodSelector != null) {
+      return paymentMethodSelector;
+    }
     NeoHandlerUtils.mirrorAccountingDate(context, "invoiceDate", "accountingDate");
     captureOriginInvoice(context);
     NeoResponse siiAuthError = captureAndValidateSiiAuthorization(context);
@@ -146,6 +155,27 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     return handleInvoiceAfterCallout(context);
   }
 
+  /**
+   * Persists the origin-invoice / SII authorization data on writes, and on GET enriches every
+   * record with the virtual fields the AP invoice screens need (transfer state, total-discount
+   * adjustment, subtype, and — in detail view — linked receipts, origin invoice, docTypeLocked,
+   * rectificative flags and exempt taxes).
+   *
+   * <p>ETP-5216: the former {@code tbaiSyncEstado} injection is gone. The TicketBAI/Batuz status
+   * is now the stored computed AD column {@code EM_ETGO_Tbai_Status} on {@code C_Invoice}, shared
+   * by AR and AP, so it travels in the contract and is filterable and sortable. An injected field
+   * never was, and an injector failure was undetectable from the UI (ETP-4391).
+   *
+   * <p>ETP-5087 (same root cause, second symptom): in detail view it also injects
+   * {@code aeatsiiFacturaId} / {@code tbaiSyncInvoiceId} / {@code invoiceVerifactuId} (see
+   * {@link SifSubRecordAttachments}) so the SIF tab's Adjuntos sections can list and download the
+   * fiscal XML attached to each sub-record (ETP-4888). This mirrors
+   * {@link SalesInvoiceHeaderHandler#afterHandle}, where the call has always lived; the AP handler
+   * never made it, so a purchase invoice sent to Batuz showed neither its request nor its response
+   * XML — the frontend had no sub-record id to point the attachments endpoint at.
+   * {@code SifSubRecordAttachments} keys every lookup on {@code c_invoice_id} alone (no
+   * {@code issotrx} filter), so it resolves AP sub-records exactly as it does AR ones.
+   */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     autoCreateOrUpdateConversionRateDocument(context);
@@ -183,6 +213,7 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
         enrichIsRectificative(rec);
         enrichHasRectifications(rec, context.getRecordId());
         InvoiceExemptTaxes.enrich(rec, context.getRecordId());
+        SifSubRecordAttachments.enrich(rec, context.getRecordId());
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {

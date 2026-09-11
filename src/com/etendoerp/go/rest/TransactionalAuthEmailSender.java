@@ -19,6 +19,8 @@ package com.etendoerp.go.rest;
 
 import java.time.Instant;
 
+import java.util.Date;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -40,8 +42,13 @@ class TransactionalAuthEmailSender {
   private static final String CONTRACT_COMPANY_INVITATION = "company-invitation";
   private static final String CONTRACT_ENVIRONMENT_READY = "environment-ready";
   private static final String CONTRACT_NEW_ACCOUNT = "new-account";
+  private static final String CONTRACT_NEW_ACCOUNT_INVITEE = "new-account-invitee";
+  private static final String CONTRACT_ORGANIZATION_JOINED = "organization-joined";
   private static final String CONTRACT_PASSWORD_CHANGED = "password-changed";
+  private static final String CONTRACT_PASSWORD_ADDED = "password-added";
+  private static final String CONTRACT_AUTH_METHOD_REMOVED = "auth-method-removed";
   private static final String CONTRACT_RESET_PASSWORD = "reset-password";
+  private static final String CONTRACT_SET_PASSWORD = "set-password";
   private static final String CONTRACT_VERIFY_EMAIL = "verify-email";
 
   private final TransactionalEmailService emailService;
@@ -76,6 +83,15 @@ class TransactionalAuthEmailSender {
    *
    * @param verifyLink email-verification link, or null to fall back to the plain onboarding link
    */
+  boolean sendNewAccount(Account account, String language, String verifyLink, Date expiresAt) {
+    if (account == null) {
+      return false;
+    }
+    String link = StringUtils.isNotBlank(verifyLink) ? verifyLink
+        : EtendoGoAuthLinkBuilder.onboardingLink();
+    return sendAccountLink(CONTRACT_NEW_ACCOUNT, account, link, null, language, expiresAt);
+  }
+
   boolean sendNewAccount(Account account, String language, String verifyLink) {
     if (account == null) {
       return false;
@@ -101,7 +117,72 @@ class TransactionalAuthEmailSender {
         || StringUtils.isBlank(verifyLink)) {
       return false;
     }
-    return sendAccountLink(CONTRACT_VERIFY_EMAIL, account, verifyLink, verifyTokenHash, language);
+    return sendVerifyEmail(account, verifyTokenHash, verifyLink, language, null);
+  }
+
+  /**
+   * Sends the email-verification message, stating the token's real window.
+   *
+   * @param account the account being verified
+   * @param verifyTokenHash hash of the issued token, used as the record id
+   * @param verifyLink the verification link
+   * @param language the recipient language
+   * @param expiresAt when the token stops working; the copy states the remaining hours and omits
+   *     the claim when unknown
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendVerifyEmail(Account account, String verifyTokenHash, String verifyLink,
+      String language, Date expiresAt) {
+    return sendAccountLink(CONTRACT_VERIFY_EMAIL, account, verifyLink, verifyTokenHash, language,
+        expiresAt);
+  }
+
+  /**
+   * Welcome email for a user who created the account by accepting an invitation.
+   *
+   * <p>A separate contract from {@link #sendNewAccount}, because the two welcomes ask for different
+   * things. The standard one now carries the email-verification link; an invited operator has
+   * nothing to verify — the invitation is itself the proof that somebody meant to reach this
+   * address — and never runs onboarding, so its button goes to the dashboard.</p>
+   *
+   * @param account the account just created
+   * @param language the recipient language
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendNewAccountForInvitee(Account account, String language) {
+    if (account == null) {
+      return false;
+    }
+    return sendAccountLink(CONTRACT_NEW_ACCOUNT_INVITEE, account,
+        EtendoGoAuthLinkBuilder.dashboardLink(), null, language);
+  }
+
+  /**
+   * Tells a user they now belong to an organization, sent once an invitation is accepted.
+   *
+   * @param account the accepting account
+   * @param companyName the organization the user joined
+   * @param invitationId the invitation record, used as the idempotency record id
+   * @param language the recipient language
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendOrganizationJoined(Account account, String companyName, String invitationId,
+      String language) {
+    if (account == null || StringUtils.isBlank(companyName)) {
+      return false;
+    }
+    try {
+      JSONObject body = baseCommand(account);
+      body.put("companyName", companyName);
+      if (StringUtils.isNotBlank(invitationId)) {
+        body.put(EmailContractCommandSupport.FIELD_RECORD_ID, invitationId);
+      }
+      addLanguageField(body, language);
+      return sendBestEffort(CONTRACT_ORGANIZATION_JOINED, body);
+    } catch (JSONException e) {
+      log.warn("Could not build organization-joined email command", e);
+      return false;
+    }
   }
 
   boolean sendEnvironmentReady(Account account, String clientId) {
@@ -128,10 +209,52 @@ class TransactionalAuthEmailSender {
   }
 
   boolean sendPasswordReset(Account account, String resetTokenHash, String resetLink) {
+    return sendPasswordReset(account, resetTokenHash, resetLink, null);
+  }
+
+  /**
+   * Sends the password-reset email, stating the token's real expiry.
+   *
+   * @param account the account requesting the reset
+   * @param resetTokenHash hash of the issued token, used as the record id
+   * @param resetLink the reset link
+   * @param expiresAt when the token stops working; the email states the remaining window and omits
+   *     it when unknown
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendPasswordReset(Account account, String resetTokenHash, String resetLink,
+      Date expiresAt) {
     if (account == null || StringUtils.isBlank(resetTokenHash) || StringUtils.isBlank(resetLink)) {
       return false;
     }
-    return sendAccountLink(CONTRACT_RESET_PASSWORD, account, resetLink, resetTokenHash);
+    return sendAccountLink(CONTRACT_RESET_PASSWORD, account, resetLink, resetTokenHash, null,
+        expiresAt);
+  }
+
+  /**
+   * Sends the set-password email: the same link as a reset, worded for somebody who has no password
+   * yet rather than one who forgot theirs.
+   *
+   * <p>ETP-5115. An account created through an identity provider has no local password, so a reset
+   * request used to skip the send entirely while the screen still said a link had gone out — the
+   * account had no way to recover and no way to give itself one. It gets this instead. The link and
+   * the token are identical to a reset; only the copy differs, because telling someone we received
+   * a request to <em>reset</em> a password they never had is how you make a working flow read like
+   * a bug.
+   *
+   * @param account the account requesting the reset
+   * @param resetTokenHash hash of the issued token, used as the record id
+   * @param resetLink the link that lets the account choose its first password
+   * @param expiresAt when the token stops working; the email states the remaining window and omits
+   *     it when unknown
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendSetPassword(Account account, String resetTokenHash, String resetLink, Date expiresAt) {
+    if (account == null || StringUtils.isBlank(resetTokenHash) || StringUtils.isBlank(resetLink)) {
+      return false;
+    }
+    return sendAccountLink(CONTRACT_SET_PASSWORD, account, resetLink, resetTokenHash, null,
+        expiresAt);
   }
 
   boolean sendCompanyInvitation(Invitation invitation, String inviteLink) {
@@ -153,6 +276,64 @@ class TransactionalAuthEmailSender {
       return sendBestEffort(CONTRACT_COMPANY_INVITATION, body);
     } catch (JSONException e) {
       log.warn("Could not build company-invitation email command", e);
+      return false;
+    }
+  }
+
+  /**
+   * Notifies that a password was added to an account that had none.
+   *
+   * <p>ETP-5115. Separate from {@code password-changed} on purpose: telling somebody their password
+   * "was changed" when they just created their first one reads as though something happened to a
+   * credential they did not have, which is exactly the alarm this mail exists to avoid raising
+   * falsely. Like its sibling it carries a per-send record id so two operations in a row are not
+   * collapsed into one by the duplicate check.
+   *
+   * @param account the account that now has a local password
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendPasswordAdded(Account account) {
+    if (account == null) {
+      return false;
+    }
+    try {
+      JSONObject body = baseCommand(account);
+      addLanguageField(body, null);
+      body.put(EmailContractCommandSupport.FIELD_DATE, Instant.now().toString());
+      body.put(EmailContractCommandSupport.FIELD_RECORD_ID,
+          account.getId() + ":" + java.util.UUID.randomUUID());
+      return sendBestEffort(CONTRACT_PASSWORD_ADDED, body);
+    } catch (JSONException e) {
+      log.warn("Could not build password-added email command", e);
+      return false;
+    }
+  }
+
+  /**
+   * Notifies that a way of signing in was removed from an account.
+   *
+   * <p>ETP-5115. Deliberately does not name which one. The copy is one catalog entry and naming the
+   * method would mean interpolating it, which this contract shape does not carry — and the value of
+   * the notice does not depend on it: what the owner needs to know is that the ways into their
+   * account changed without them, and the remedy is the same either way. Naming it would be an
+   * improvement, not a prerequisite.
+   *
+   * @param account the account a method was removed from
+   * @return whether the email was accepted for delivery
+   */
+  boolean sendAuthMethodRemoved(Account account) {
+    if (account == null) {
+      return false;
+    }
+    try {
+      JSONObject body = baseCommand(account);
+      addLanguageField(body, null);
+      body.put(EmailContractCommandSupport.FIELD_DATE, Instant.now().toString());
+      body.put(EmailContractCommandSupport.FIELD_RECORD_ID,
+          account.getId() + ":" + java.util.UUID.randomUUID());
+      return sendBestEffort(CONTRACT_AUTH_METHOD_REMOVED, body);
+    } catch (JSONException e) {
+      log.warn("Could not build auth-method-removed email command", e);
       return false;
     }
   }
@@ -185,6 +366,11 @@ class TransactionalAuthEmailSender {
 
   private boolean sendAccountLink(String contractName, Account account, String link,
       String recordId, String language) {
+    return sendAccountLink(contractName, account, link, recordId, language, null);
+  }
+
+  private boolean sendAccountLink(String contractName, Account account, String link,
+      String recordId, String language, Date expiresAt) {
     if (account == null || link == null) {
       return false;
     }
@@ -194,6 +380,11 @@ class TransactionalAuthEmailSender {
       addLanguageField(body, language);
       if (recordId != null) {
         body.put(EmailContractCommandSupport.FIELD_RECORD_ID, recordId);
+      }
+      if (expiresAt != null) {
+        // The contract states the remaining window in the copy; it must come from the TTL the
+        // servlet actually applied, not from a number repeated in the message catalog.
+        body.put("expiresAt", expiresAt.toInstant().toString());
       }
       return sendBestEffort(contractName, body);
     } catch (JSONException e) {
@@ -235,8 +426,13 @@ class TransactionalAuthEmailSender {
       OBDal.getInstance().flush();
       OBDal.getInstance().commitAndClose();
       if (response != null && response.getHttpStatus() >= 400) {
-        log.warn("Transactional auth email {} finished with HTTP {}", contractName,
-            response.getHttpStatus());
+        // The contract's own message is the only thing that says WHY it refused — the
+        // observability sink records the status and the metrics, never the reason. Logging just
+        // "HTTP 400" cost a full investigation once (a 400 that turned out to be an unresolved
+        // invite link, indistinguishable from a bad recipient or a missing field): never drop it
+        // again.
+        log.warn("Transactional auth email {} finished with HTTP {}: {}", contractName,
+            response.getHttpStatus(), describeFailure(response));
         return false;
       }
       return response != null;
@@ -251,5 +447,24 @@ class TransactionalAuthEmailSender {
       }
       OBContext.setOBContext(previousContext);
     }
+  }
+
+  /**
+   * Extracts the contract's failure reason from a NEO response for logging.
+   *
+   * @param response the response the email service returned (never {@code null} here)
+   * @return the contract's {@code message}/{@code status}, or the raw body when neither is present
+   */
+  private static String describeFailure(NeoResponse response) {
+    JSONObject body = response.getBody();
+    if (body == null) {
+      return "no response body";
+    }
+    String message = body.optString("message", null);
+    String status = body.optString("status", null);
+    if (StringUtils.isNotBlank(message)) {
+      return StringUtils.isNotBlank(status) ? status + " - " + message : message;
+    }
+    return StringUtils.isNotBlank(status) ? status : body.toString();
   }
 }

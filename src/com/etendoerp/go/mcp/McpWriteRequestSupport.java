@@ -37,6 +37,7 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
+import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
 
 /**
  * Request-body preparation and DAL-response classification helpers extracted from
@@ -292,33 +293,42 @@ final class McpWriteRequestSupport {
 
   /**
    * Resolve parentId to the actual FK property name on child tabs.
-   * Replicates the same logic from NeoServlet's POST handler.
+   *
+   * <p><b>ETP-5184:</b> the target property now comes from {@link McpParentScope}, which picks the
+   * parent-link column whose target IS the parent tab's table (or the one declared in
+   * {@code MCP_CONFIG}). The previous implementation walked {@code getADColumnList()} and took the
+   * first {@code isLinkToParentColumn()} it found, without checking where that column pointed —
+   * and on the 17 entities whose first such column is not the parent link, it wrote the parent id
+   * into the wrong foreign key. {@code product/stock} is the clearest case: its SEQNO parent is
+   * {@code M_Product} but its only parent-link column is {@code M_RefInventory_ID}, so a create
+   * passing a product id stored it as "referenced inventory". It did not fail — it stored wrong
+   * data, which is why it went unnoticed. Both properties exist on the same entity
+   * ({@code product} and {@code referencedInventory}), so the write landed in the neighbouring
+   * field.</p>
+   *
+   * <p>A scope that cannot identify the parent writes nothing, exactly as before: the caller's
+   * gate is what refuses such an entity, and silently guessing a column here is what caused the
+   * defect in the first place.</p>
+   *
+   * @param adTab         the child tab
+   * @param body          the write payload, mutated in place
+   * @param parentIdValue the parent record id
+   * @param log           caller's logger
+   * @param sfEntity      the SchemaForge entity, needed to read its {@code MCP_CONFIG}
+   * @throws JSONException if the payload cannot be written to
    */
-  static void resolveParentFK(Tab adTab, JSONObject body, String parentIdValue, Logger log)
-      throws JSONException {
+  static void resolveParentFK(Tab adTab, JSONObject body, String parentIdValue, Logger log,
+      SFEntity sfEntity) throws JSONException {
     if (adTab.getTabLevel() == null || adTab.getTabLevel() <= 0) {
       return;
     }
-
-    Entity dalEntity = ModelProvider.getInstance()
-        .getEntityByTableName(adTab.getTable().getDBTableName());
-    if (dalEntity == null) {
+    McpParentScope.Scope scope = McpParentScope.forEntity(sfEntity);
+    if (scope.getParentField() == null) {
+      log.warn("No parent field resolved for tab '{}' — parentId not applied ({})",
+          adTab.getName(), scope.getProblem());
       return;
     }
-
-    for (Column col : adTab.getTable().getADColumnList()) {
-      if (col.isLinkToParentColumn() && col.isActive()) {
-        try {
-          Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName());
-          if (prop != null) {
-            body.put(prop.getName(), parentIdValue);
-            break;
-          }
-        } catch (Exception e) {
-          log.warn("Column '{}' not mappable to property in entity '{}': {}", col.getDBColumnName(), dalEntity.getName(), e.getMessage());
-        }
-      }
-    }
+    body.put(scope.getParentField(), parentIdValue);
   }
 
   /**
@@ -328,6 +338,10 @@ final class McpWriteRequestSupport {
    * Before ETP-4793 / IMP-17 this returned a bare {@code String} — core's own prose — which is how a
    * callout rejection reached agents with no status and no code (evidence B13).</p>
    *
+   * <p>Equivalent to calling the 3-arg overload with {@code callerProvidedFields = null}: every
+   * {@code fieldErrors} key is then described the old, caller-agnostic way. Kept for the read path
+   * and for {@code neo_delete}, neither of which tracks a pre-defaults snapshot of caller fields.
+   *
    * @param responseJson the raw DAL response
    * @param seeAlso      the {@code docs} recipe for the calling verb; also tells the failure builder
    *                     whether the caller submitted values, which decides 422 vs 500
@@ -336,6 +350,24 @@ final class McpWriteRequestSupport {
    */
   static JSONObject checkJsonServiceError(JSONObject responseJson, String seeAlso)
       throws JSONException {
+    return checkJsonServiceError(responseJson, seeAlso, null);
+  }
+
+  /**
+   * Same as {@link #checkJsonServiceError(JSONObject, String)}, but able to tell a caller-sent
+   * {@code fieldErrors} field apart from one the server itself filled in (a mandatory default,
+   * a callout, FK-by-name resolution, ...) before the write was attempted. See
+   * {@link #buildDalValidationEnvelope(JSONObject, String, Set)} for why that distinction matters.
+   *
+   * @param callerProvidedFields the field names present in the caller's own request body, taken
+   *                             BEFORE any server-side default/callout injection ran — typically
+   *                             {@code NeoCrudHelper.snapshotBodyFields} of that pre-injection
+   *                             snapshot. {@code null} when the call site does not track one
+   *                             (reads, deletes), in which case every {@code fieldErrors} key
+   *                             falls back to the old, caller-agnostic wording.
+   */
+  static JSONObject checkJsonServiceError(JSONObject responseJson, String seeAlso,
+      Set<String> callerProvidedFields) throws JSONException {
     JSONObject innerResponse = responseJson.optJSONObject(JsonConstants.RESPONSE_RESPONSE);
     if (innerResponse == null) {
       return null;
@@ -350,7 +382,7 @@ final class McpWriteRequestSupport {
       return buildDalFailureEnvelope(message, seeAlso);
     }
     if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
-      return buildDalValidationEnvelope(innerResponse, seeAlso);
+      return buildDalValidationEnvelope(innerResponse, seeAlso, callerProvidedFields);
     }
     return null;
   }
@@ -380,9 +412,25 @@ final class McpWriteRequestSupport {
   private static JSONObject buildDalFailureEnvelope(String rawMessage, String seeAlso)
       throws JSONException {
     String detail = NeoErrorSanitizer.stripRowDump(
-        NeoErrorSanitizer.redactObjectReferences(rawMessage));
+        NeoErrorSanitizer.redactObjectReferences(NeoListReferenceError.enrich(rawMessage)));
     boolean write = McpConstants.SEE_ALSO_WRITING.equals(seeAlso);
     JSONObject envelope = new JSONObject();
+    // ETP-5073 / DOC-04: core's optimistic-locking refusal, classified first because its remedy is
+    // the opposite of every branch below (re-read, do not correct-and-retry).
+    //
+    // `detail` arrives as prose, not as the AD code: DefaultJsonDataService funnels the exception
+    // through JsonUtils.convertExceptionToJson, which translates it before building the body. The
+    // match therefore goes through NeoErrorSanitizer, which resolves the code against AD_Message
+    // for the current language rather than comparing hardcoded text.
+    //
+    // The detail is still replaced rather than passed through, for a reason that is about the
+    // consumer and not about the code being opaque: this envelope is read by an agent, and a
+    // sentence whose wording depends on the session language is harder to act on than a stable one
+    // whose remedy lives in `hint`. The class stance above still holds — we substitute a
+    // description, we do not localize a message.
+    if (NeoErrorSanitizer.isStaleRecordMessage(detail)) {
+      return buildStaleRecordError();
+    }
     if (NeoErrorSanitizer.isDuplicateKeyMessage(detail)) {
       envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_CONFLICT);
       envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_CONFLICT);
@@ -411,9 +459,11 @@ final class McpWriteRequestSupport {
    * transport object — {@code status:-4} and all — into the agent's context. The per-field map is the
    * only part that was ever actionable, so it is lifted into {@code fieldErrors} and the transport is
    * dropped.</p>
+   *
+   * @param callerProvidedFields see {@link #checkJsonServiceError(JSONObject, String, Set)}
    */
-  private static JSONObject buildDalValidationEnvelope(JSONObject innerResponse, String seeAlso)
-      throws JSONException {
+  private static JSONObject buildDalValidationEnvelope(JSONObject innerResponse, String seeAlso,
+      Set<String> callerProvidedFields) throws JSONException {
     JSONObject envelope = new JSONObject();
     envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_UNPROCESSABLE);
     envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_VALIDATION);
@@ -424,14 +474,14 @@ final class McpWriteRequestSupport {
       while (keys.hasNext()) {
         String key = keys.next();
         fieldErrors.put(key, NeoErrorSanitizer.stripRowDump(
-            NeoErrorSanitizer.redactObjectReferences(rawErrors.optString(key, ""))));
+            NeoErrorSanitizer.redactObjectReferences(
+                NeoListReferenceError.enrich(rawErrors.optString(key, "")))));
       }
     }
     if (fieldErrors.length() > 0) {
       envelope.put(McpConstants.KEY_DETAIL, "One or more values were rejected by field validation");
       envelope.put("fieldErrors", fieldErrors);
-      envelope.put(McpConstants.KEY_HINT, "Each key in 'fieldErrors' is a field you sent; correct "
-          + "the value it describes and retry.");
+      envelope.put(McpConstants.KEY_HINT, buildFieldErrorsHint(fieldErrors, callerProvidedFields));
     } else {
       envelope.put(McpConstants.KEY_DETAIL, "Field validation rejected the request, and named no "
           + "field");
@@ -439,6 +489,90 @@ final class McpWriteRequestSupport {
           + "allowed values of every field sent.");
     }
     envelope.put(McpConstants.KEY_SEE_ALSO, seeAlso);
+    return envelope;
+  }
+
+  /**
+   * The {@code hint} for a per-field DAL validation failure, honest about who put the rejected
+   * value there.
+   *
+   * <p>Before this every {@code fieldErrors} key was described as "a field you sent" —
+   * unconditionally, even for a field the caller never mentioned. That happens whenever a
+   * mandatory default injected server-side (from {@code AD_Column.DefaultValue}) is itself
+   * invalid — e.g. a quoted SQL literal NEO forgot to unwrap — and the DAL rejects the very
+   * value it just manufactured. An agent creating a Business Partner with only {@code searchKey}
+   * and {@code name} hit exactly this: {@code oBTIKTaxIDKey} came back in {@code fieldErrors}
+   * with a hint telling it to "correct" a field it had never touched, and named that the single
+   * most confusing part of the whole exchange — there is nothing in the caller's own request to
+   * fix.
+   *
+   * <p>{@code callerProvidedFields} is what makes the distinction possible: it is a snapshot of
+   * the request body taken before any server-side default/callout ran, so a {@code fieldErrors}
+   * key absent from it can only have been filled in afterwards, by the server itself.
+   *
+   * @param fieldErrors           the per-field messages already built for the response
+   * @param callerProvidedFields  field names present in the caller's own request, pre-injection;
+   *                              {@code null} when the call site does not track one, in which
+   *                              case every key falls back to the original, caller-agnostic
+   *                              wording rather than risk a false "not yours" claim
+   */
+  private static String buildFieldErrorsHint(JSONObject fieldErrors,
+      Set<String> callerProvidedFields) {
+    String caseSentIt = "Each key in 'fieldErrors' is a field you sent; correct the value it "
+        + "describes and retry.";
+    if (callerProvidedFields == null) {
+      return caseSentIt;
+    }
+    List<String> callerFields = new ArrayList<>();
+    List<String> serverFields = new ArrayList<>();
+    Iterator<String> keys = fieldErrors.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      (callerProvidedFields.contains(key) ? callerFields : serverFields).add(key);
+    }
+    if (serverFields.isEmpty()) {
+      return caseSentIt;
+    }
+    String serverList = String.join(", ", serverFields);
+    if (callerFields.isEmpty()) {
+      return "None of these fields were in your request: " + serverList + " — the server filled "
+          + "them in from an AD default, and that default value itself failed validation. This "
+          + "is a configuration problem, not something wrong with your request. Work around it "
+          + "by sending an explicit, valid value for " + serverList + " yourself.";
+    }
+    return "You sent " + String.join(", ", callerFields) + "; correct the value(s) it/they "
+        + "describe(s) and retry. " + serverList + " came from the server's own default, not "
+        + "from your request, and that default value itself failed validation — a configuration "
+        + "problem you can work around by sending an explicit, valid value for " + serverList
+        + " too.";
+  }
+
+  /**
+   * ETP-5073 / DOC-04: the 409 envelope for a concurrent-modification conflict.
+   *
+   * <p>Public to the package because two callers need the identical body: {@code handleUpdate},
+   * which now detects the conflict itself before writing (see {@code NeoRecordVersion} for why
+   * reading core's refusal proved unworkable), and {@link #buildDalFailureEnvelope}, which keeps
+   * the message-based branch as a backstop for the stateless path where the untranslated code
+   * does survive.
+   *
+   * <p>The detail is written here rather than forwarded from core, and that is about the consumer:
+   * this envelope is read by an agent, and a sentence whose wording depends on the session
+   * language is harder to act on than a stable one whose remedy lives in {@code hint}. It is not a
+   * translation — a description is substituted, a message is not localized.
+   */
+  static JSONObject buildStaleRecordError() throws JSONException {
+    JSONObject envelope = new JSONObject();
+    envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_CONFLICT);
+    envelope.put(McpConstants.KEY_ERROR, McpConstants.ERROR_STALE_RECORD);
+    envelope.put(McpConstants.KEY_DETAIL, "This record was modified by someone else after the '"
+        + McpConstants.PARAM_UPDATED + "' value you sent was read. The write was refused so their "
+        + "change is not lost; nothing was written.");
+    envelope.put(McpConstants.KEY_HINT, "Re-read the record with neo_get, reapply your changes on "
+        + "top of the values it returns, and retry with the fresh '"
+        + McpConstants.PARAM_UPDATED + "'. Retrying the same payload unchanged will fail "
+        + "identically.");
+    envelope.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
     return envelope;
   }
 }

@@ -68,7 +68,10 @@ public class McpServlet extends HttpServlet {
   private static final String SERVER_VERSION = "1.0.0";
 
   private static final String CONTENT_TYPE_JSON = "application/json;charset=UTF-8";
-  private static final String LEGACY_JWT_FALLBACK_SCOPES = "neo:read";
+  // Browser sessions use the validated legacy JWT path. RBAC still filters the
+  // catalog and authorizes each operation by the user's role and window access.
+  private static final String LEGACY_JWT_FALLBACK_SCOPES =
+      "neo:read neo:write neo:process neo:report";
 
   // ── CORS ───────────────────────────────────────────────────────────────
 
@@ -325,26 +328,30 @@ public class McpServlet extends HttpServlet {
   // ── Handler: tools/list ─────────────────────────────────────────────────
 
   private JSONObject handleToolsList(AuthIdentity identity) throws Exception {
-    OBContext.setAdminMode(true);
-    try {
-      ToolRegistry registry = new ToolRegistry();
-      Set<String> scopes = parseScopes(identity.scopes);
-      List<McpToolDefinition> tools = registry.generateTools(scopes);
+    return McpSessionManager.executeInContext(
+        identity.userId, identity.roleId, identity.clientId,
+        identity.orgId, null, () -> {
+          OBContext.setAdminMode(true);
+          try {
+            ToolRegistry registry = new ToolRegistry();
+            Set<String> scopes = parseScopes(identity.scopes);
+            List<McpToolDefinition> tools = registry.generateTools(scopes);
 
-      JSONObject result = new JSONObject();
-      JSONArray toolsArray = new JSONArray();
-      for (McpToolDefinition tool : tools) {
-        JSONObject toolJson = new JSONObject();
-        toolJson.put("name", tool.getName());
-        toolJson.put("description", tool.getDescription());
-        toolJson.put("inputSchema", mapToJsonObject(tool.getInputSchema()));
-        toolsArray.put(toolJson);
-      }
-      result.put("tools", toolsArray);
-      return result;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+            JSONObject result = new JSONObject();
+            JSONArray toolsArray = new JSONArray();
+            for (McpToolDefinition tool : tools) {
+              JSONObject toolJson = new JSONObject();
+              toolJson.put("name", tool.getName());
+              toolJson.put("description", tool.getDescription());
+              toolJson.put("inputSchema", mapToJsonObject(tool.getInputSchema()));
+              toolsArray.put(toolJson);
+            }
+            result.put("tools", toolsArray);
+            return result;
+          } finally {
+            OBContext.restorePreviousMode();
+          }
+        });
   }
 
   // ── Handler: tools/call ─────────────────────────────────────────────────
@@ -378,19 +385,23 @@ public class McpServlet extends HttpServlet {
   private JSONObject handleResourcesList(AuthIdentity identity) throws Exception {
     Set<String> scopes = parseScopes(identity != null ? identity.scopes : null);
     McpAuthorizationService.authorizeResourceRead(scopes);
-    OBContext.setAdminMode(true);
-    try {
-      McpResourceProvider provider = new McpResourceProvider();
-      JSONObject result = new JSONObject();
-      result.put("resources", provider.listResources());
-      return result;
-    } catch (org.openbravo.base.exception.OBException e) {
-      throw e;
-    } catch (Exception e) {
-      throw new org.openbravo.base.exception.OBException(e);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    return McpSessionManager.executeInContext(
+        identity.userId, identity.roleId, identity.clientId,
+        identity.orgId, null, () -> {
+          OBContext.setAdminMode(true);
+          try {
+            McpResourceProvider provider = new McpResourceProvider();
+            JSONObject result = new JSONObject();
+            result.put("resources", provider.listResources());
+            return result;
+          } catch (org.openbravo.base.exception.OBException e) {
+            throw e;
+          } catch (Exception e) {
+            throw new org.openbravo.base.exception.OBException(e);
+          } finally {
+            OBContext.restorePreviousMode();
+          }
+        });
   }
 
   // ── Handler: resources/read ─────────────────────────────────────────────
@@ -403,23 +414,27 @@ public class McpServlet extends HttpServlet {
 
     Set<String> scopes = parseScopes(identity.scopes);
     McpAuthorizationService.authorizeResourceRead(scopes);
-    OBContext.setAdminMode(true);
-    try {
-      McpResourceProvider provider = new McpResourceProvider();
-      JSONObject resourceContent = provider.readResource(uri);
+    return McpSessionManager.executeInContext(
+        identity.userId, identity.roleId, identity.clientId,
+        identity.orgId, null, () -> {
+          OBContext.setAdminMode(true);
+          try {
+            McpResourceProvider provider = new McpResourceProvider();
+            JSONObject resourceContent = provider.readResource(uri);
 
-      JSONObject result = new JSONObject();
-      JSONArray contents = new JSONArray();
-      JSONObject content = new JSONObject();
-      content.put("uri", uri);
-      content.put("mimeType", "application/json");
-      content.put("text", resourceContent.toString(2));
-      contents.put(content);
-      result.put("contents", contents);
-      return result;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+            JSONObject result = new JSONObject();
+            JSONArray contents = new JSONArray();
+            JSONObject content = new JSONObject();
+            content.put("uri", uri);
+            content.put("mimeType", "application/json");
+            content.put("text", resourceContent.toString(2));
+            contents.put(content);
+            result.put("contents", contents);
+            return result;
+          } finally {
+            OBContext.restorePreviousMode();
+          }
+        });
   }
 
   // ── JSON-RPC error builder ──────────────────────────────────────────────

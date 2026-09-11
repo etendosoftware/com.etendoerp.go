@@ -24,7 +24,9 @@ import javax.servlet.http.HttpServletResponse;
 import com.etendoerp.go.common.GoRuntimeProperties;
 import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
+import com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistory;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
+import com.etendoerp.go.schemaforge.webhooks.SFPromoteUserRole;
 import com.etendoerp.go.schemaforge.webhooks.SFResendInvitation;
 import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
 import com.etendoerp.go.schemaforge.webhooks.SFSystemRoleTemplates;
@@ -57,13 +59,16 @@ class NeoPseudoSpecDispatcher {
   private final NeoServlet servlet;
   private final BatchService batchService;
   private final NeoSimSearchEndpoint simSearchEndpoint;
+  private final NeoVectorSearchEndpoint vectorSearchEndpoint;
   private final NeoGoWebhookBridge goWebhookBridge;
 
   NeoPseudoSpecDispatcher(NeoServlet servlet, BatchService batchService,
-      NeoSimSearchEndpoint simSearchEndpoint, NeoGoWebhookBridge goWebhookBridge) {
+      NeoSimSearchEndpoint simSearchEndpoint, NeoVectorSearchEndpoint vectorSearchEndpoint,
+      NeoGoWebhookBridge goWebhookBridge) {
     this.servlet = servlet;
     this.batchService = batchService;
     this.simSearchEndpoint = simSearchEndpoint;
+    this.vectorSearchEndpoint = vectorSearchEndpoint;
     this.goWebhookBridge = goWebhookBridge;
   }
 
@@ -89,6 +94,9 @@ class NeoPseudoSpecDispatcher {
     if ("simsearch".equals(pathInfo.specName)) {
       return dispatchSimSearch(method, request, response);
     }
+    if ("vectorsearch".equals(pathInfo.specName)) {
+      return dispatchVectorSearch(method, request, response);
+    }
 
     // Etendo GO's own webhooks, reached through NEO's own JWT auth instead of the Webhooks
     // module's per-role SMFWHE_DEFINEDWEBHOOK_ROLE grant table (wiped by update.database — see
@@ -103,6 +111,14 @@ class NeoPseudoSpecDispatcher {
     }
     if ("rolesoverview".equals(pathInfo.specName)) {
       return dispatchGoWebhook("Rolesoverview", method, request, response, new SFRolesOverview());
+    }
+    // ETP-5069: one document's readable email send history, feeding the preview panel's Emails
+    // card. Unlike its neighbours above it needs no role gate and no admin mode — DAL's default
+    // readable-client/org filtering over the client-level ETGO_Email_Send_Log IS the access
+    // rule. See SFDocumentEmailHistory's class javadoc.
+    if ("documentemailhistory".equals(pathInfo.specName)) {
+      return dispatchGoWebhook("Documentemailhistory", method, request, response,
+          new SFDocumentEmailHistory());
     }
     // ETP-4852: compose a user's access from 1+ system-level template roles. See
     // SFAssignUserRoles's class javadoc for the full mechanism and response shape.
@@ -123,6 +139,13 @@ class NeoPseudoSpecDispatcher {
     if ("systemroletemplates".equals(pathInfo.specName)) {
       return dispatchGoWebhook("Systemroletemplates", method, request, response,
           new SFSystemRoleTemplates());
+    }
+    // ETP-5019: promote an invited user to the client's Admin role, or demote an Admin back
+    // to their personal role. See SFPromoteUserRole's class javadoc for the full mechanism
+    // and response shape.
+    if ("promoteuserrole".equals(pathInfo.specName)) {
+      return dispatchGoWebhook("Promoteuserrole", method, request, response,
+          new SFPromoteUserRole());
     }
     // ETP-4830 (item #4) — dev/QA-only endpoint to force-accept an invitation or force an
     // ETGO_INVITATION.STATUS value, so the invite-email flow and the frontend's status pill can
@@ -161,6 +184,17 @@ class NeoPseudoSpecDispatcher {
       return true;
     }
     servlet.writeResponse(response, simSearchEndpoint.handle(request));
+    return true;
+  }
+
+  private boolean dispatchVectorSearch(String method, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (!"GET".equals(method)) {
+      servlet.sendError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED,
+          "Vectorsearch endpoint only supports GET");
+      return true;
+    }
+    servlet.writeResponse(response, vectorSearchEndpoint.handle(request));
     return true;
   }
 

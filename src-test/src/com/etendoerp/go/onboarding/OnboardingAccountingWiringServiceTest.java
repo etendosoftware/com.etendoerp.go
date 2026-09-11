@@ -52,9 +52,12 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.utility.Tree;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.OrganizationAcctSchema;
+import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.accounting.coa.Element;
 import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
+import org.openbravo.model.financialmgmt.gl.GLItem;
+import org.openbravo.model.financialmgmt.gl.GLItemAccounts;
 
 /**
  * Unit tests for {@link OnboardingAccountingWiringService} (Gap A1/A2).
@@ -174,62 +177,30 @@ public class OnboardingAccountingWiringServiceTest {
     assertEquals(1, service.ensureAcctSchemaCount);
     assertEquals(1, service.wireTreeCount);
     assertEquals(1, service.rebrandCount);
+    assertEquals(1, service.provisionGlItemsCount);
     assertEquals(1, service.provisionEntityCount);
     assertTrue("wire() must flush", service.flushed);
     assertSame("wire() must restore the previous context", previous, OBContext.getOBContext());
   }
 
-  // ---------------------------------------------------------------------------------------------
-  // wireBusinessPartnerAccounts()
-  // ---------------------------------------------------------------------------------------------
-
+  /**
+   * ETP-5020 — GL Items must be provisioned AFTER chart names are finalized (a GL Item created
+   * against the dataset's generic "GOClient" names would immediately diverge from the rebranded
+   * subaccount name) and BEFORE the unrelated per-entity posting-account provisioning step, per
+   * the placement rationale documented on {@code provisionGlItemsForImportedChart}.
+   */
   @Test
-  public void testWireBusinessPartnerAccountsFailsWhenClientIdMissing() {
-    try {
-      new TestableService().wireBusinessPartnerAccounts(null, "ORG-1", "USER-1", "ROLE-1");
-      fail("Expected OBException for missing client");
-    } catch (OBException e) {
-      assertTrue(e.getMessage().contains("Missing client"));
-    }
-  }
-
-  @Test
-  public void testWireBusinessPartnerAccountsFailsWhenClientNotFound() {
+  public void testWireProvisionsGlItemsAfterRebrandBeforePosting() {
     TestableService service = new TestableService();
-    service.clientMissing = true;
+    service.wire("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
 
-    try {
-      service.wireBusinessPartnerAccounts("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
-      fail("Expected OBException for missing client");
-    } catch (OBException e) {
-      assertTrue(e.getMessage().contains("Client not found for business-partner accounting"));
-    }
-  }
+    int rebrandIndex = service.callOrder.indexOf("rebrand");
+    int glItemsIndex = service.callOrder.indexOf("provisionGlItems");
+    int postingIndex = service.callOrder.indexOf("provisionEntity");
 
-  @Test
-  public void testWireBusinessPartnerAccountsFailsWhenNoLedgerImported() {
-    TestableService service = new TestableService();
-    service.ledgerMissing = true;
-
-    try {
-      service.wireBusinessPartnerAccounts("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
-      fail("Expected OBException for missing accounting schema");
-    } catch (OBException e) {
-      assertTrue(e.getMessage().contains("cannot provision business-partner posting accounts"));
-    }
-  }
-
-  @Test
-  public void testWireBusinessPartnerAccountsRunsTwoInsertsFlushesAndRestoresContext() {
-    OBContext previous = mock(OBContext.class);
-    OBContext.setOBContext(previous);
-
-    TestableService service = new TestableService();
-    service.wireBusinessPartnerAccounts("CLIENT-1", "ORG-1", "USER-1", "ROLE-1");
-
-    assertEquals("exactly two posting-account inserts", 2, service.acctInserts.size());
-    assertTrue("wireBusinessPartnerAccounts() must flush", service.flushed);
-    assertSame("must restore the previous context", previous, OBContext.getOBContext());
+    assertTrue("rebrand must run before GL Item provisioning", rebrandIndex < glItemsIndex);
+    assertTrue("GL Item provisioning must run before posting-account provisioning",
+        glItemsIndex < postingIndex);
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -275,7 +246,7 @@ public class OnboardingAccountingWiringServiceTest {
 
   @Test
   public void testPatchBpGroupAcctMissingColumnsDoesNotResolveClientOrLedger() {
-    // Unlike wire()/wireBusinessPartnerAccounts(), this method needs neither a Client entity nor a
+    // Unlike wire(), this method needs neither a Client entity nor a
     // resolved AcctSchema — it patches every schema the tenant has via one client-scoped statement
     // (see the corrective R21 fix it mirrors). Prove that by leaving clientMissing/ledgerMissing
     // set and confirming no exception is thrown (those seams are never consulted).
@@ -296,10 +267,10 @@ public class OnboardingAccountingWiringServiceTest {
   public void testProvisionEntityPostingAccountsRunsEightInsertsWithClientAndSchemaId() {
     // Use a double that records inserts but keeps the REAL provisionEntityPostingAccounts body,
     // so the eight runEntityAcctInsert calls (and their ordering of clientId/schemaId) are
-    // exercised. ensureAcreedorPrepaymentAccount()/overrideAcreedorGroupAccounts() are stubbed by
-    // InsertRecordingService: they bypass the runEntityAcctInsert seam and hit
-    // OBDal.getInstance().getSession() directly, so leaving them real would reach an uninitialized
-    // Hibernate session in this pure-unit test.
+    // exercised. ensureAcreedorPrepaymentAccount()/overrideAcreedorGroupAccounts()/
+    // backfillInvoicePriceVarianceDefault() are stubbed by InsertRecordingService: they bypass the
+    // runEntityAcctInsert seam and hit OBDal.getInstance().getSession() directly, so leaving them
+    // real would reach an uninitialized Hibernate session in this pure-unit test.
     //
     // ETP-4565: count went from six to eight when the financial-account and warehouse posting-
     // account backfills were added (see the dedicated test below for their SQL content).
@@ -321,6 +292,8 @@ public class OnboardingAccountingWiringServiceTest {
         service.ensureAcreedorPrepaymentAccountCount);
     assertEquals("Acreedor group posting-account override must run once", 1,
         service.overrideAcreedorGroupAccountsCount);
+    assertEquals("Invoice Price Variance default backfill must run once", 1,
+        service.backfillInvoicePriceVarianceDefaultCount);
   }
 
   /**
@@ -328,8 +301,11 @@ public class OnboardingAccountingWiringServiceTest {
    * {@code warehouse}: {@code FIN_FINANCIAL_ACCOUNT} and {@code M_WAREHOUSE} are bulk-imported by
    * the onboarding dataset importer (triggers disabled during that import — see
    * {@code OnboardingDatasetDefinition.INCLUDED_TABLES}), so their native {@code _trg} triggers
-   * never fire for the bundled template rows ("Caja"/"Cuenta de Banco"/"Tarjeta",
-   * "Almacen GO"/"Almacén Secundario"). Every other included entity in this same method
+   * never fire for the bundled template rows. (ETP-5079 later removed the three template financial
+   * accounts from the dataset entirely and reduced the warehouses to a single "Almacen Principal",
+   * so the FIN_Financial_Account_Acct backfill is now a no-op on a freshly onboarded tenant and
+   * only matters for accounts the tenant creates itself.) Every other included entity in this same
+   * method
    * (BP group, product category, BP customer/vendor, product, tax) already gets a matching
    * backfill {@code runEntityAcctInsert} call right here; {@code FIN_Financial_Account_Acct} and
    * {@code M_Warehouse_Acct} do not, which is the gap this ticket closes.
@@ -802,6 +778,134 @@ public class OnboardingAccountingWiringServiceTest {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // backfillInvoicePriceVarianceDefault() — native query parameter binding (real implementation)
+  // ETP-5075 gap A8 / ETP-5222 (99904000-first, P_Expense_Acct-fallback priority)
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBackfillInvoicePriceVarianceDefaultBindsClientAndSchemaIdWhenRowsAffected() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    NativeQuery query = mock(NativeQuery.class);
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    when(session.createNativeQuery(sqlCaptor.capture())).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.executeUpdate()).thenReturn(1);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.backfillInvoicePriceVarianceDefault("C1", "S1");
+    }
+
+    String sql = sqlCaptor.getValue();
+    assertTrue("backfill SQL must target c_acctschema_default", sql.contains("c_acctschema_default"));
+    assertTrue("backfill SQL must copy p_expense_acct into p_invoicepricevariance_acct as the fallback",
+        sql.contains("p_invoicepricevariance_acct") && sql.contains("p_expense_acct"));
+    assertTrue("backfill SQL must resolve the 99904000 combination FIRST via a COALESCE-wrapped subquery",
+        sql.contains("COALESCE(") && sql.contains("vc.c_validcombination_id") && sql.contains("d2.p_expense_acct"));
+    assertTrue("backfill SQL must scope the account lookup through C_AcctSchema_Element (elementtype = 'AC')"
+        + " so an unwired orphan element sharing the same account code is never picked",
+        sql.contains("c_acctschema_element") && sql.contains("elementtype = 'AC'"));
+    assertTrue("backfill SQL must join c_validcombination for the natural combination lookup",
+        sql.contains("c_validcombination"));
+    // ETP-5222 review fix (Alex/W1): the resolved combination must be the NATURAL one — every other
+    // C_ValidCombination dimension column explicitly required NULL, mirroring
+    // GlItemProvisioningSupport#resolveNaturalCombination's Restrictions.isNull(...) list, translated
+    // to native SQL. Without this, a non-natural (e.g. product-specific) row for the same
+    // account+schema could match too, and Postgres UPDATE...FROM would pick one ARBITRARILY.
+    for (String dimensionColumn : new String[] {
+        "m_product_id", "c_bpartner_id", "ad_orgtrx_id", "c_locfrom_id", "c_locto_id",
+        "c_salesregion_id", "c_project_id", "c_campaign_id", "c_activity_id", "user1_id", "user2_id" }) {
+      assertTrue("backfill SQL must require vc." + dimensionColumn + " IS NULL for the natural-combination filter",
+          sql.contains("vc." + dimensionColumn + " IS NULL"));
+    }
+    assertTrue("backfill SQL must defensively order + limit the natural-combination subquery to 1 row,"
+        + " mirroring resolveNaturalCombination's own ORDER BY + setMaxResults(1) guard",
+        sql.contains("ORDER BY vc.c_validcombination_id LIMIT 1"));
+    verify(query).setParameter("clientId", "C1");
+    verify(query).setParameter("schemaId", "S1");
+    verify(query).setParameter("ipvAcctValue", "99904000");
+    verify(query).executeUpdate();
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBackfillInvoicePriceVarianceDefaultScopesBothSourceAndTargetToTheCallersOwnSchema() {
+    // ETP-5222 QA (Sentinel): a client can have MORE THAN ONE row in c_acctschema_default (one per
+    // accounting schema — confirmed live on local dev DB against a real 2-schema client, "F&B
+    // International Group"). This asserts, at the SQL-text level, that BOTH halves of the statement
+    // are scoped to the caller's own schemaId — not just the client — so a resolved combination for
+    // schema A can never be written onto schema B's row:
+    //   1) the natural-combination SOURCE (the "resolved" derived table, aliased d2) filters its
+    //      c_acctschema_default rows by client id together with the caller's schema id — it never
+    //      considers a c_acctschema_default row belonging to a different accounting schema.
+    //   2) the UPDATE TARGET (aliased d) is correlated back to that resolved row by its primary key,
+    //      AND independently re-asserts the same client id + schema id filter on its own row — so
+    //      the correlation alone (by primary key) is not trusted to carry the scoping.
+    // Without both halves, a client with 2+ schemas could have one schema's resolved 99904000
+    // combination silently written onto a DIFFERENT schema's row.
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    NativeQuery query = mock(NativeQuery.class);
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    when(session.createNativeQuery(sqlCaptor.capture())).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.executeUpdate()).thenReturn(1);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.backfillInvoicePriceVarianceDefault("C1", "S1");
+    }
+
+    String sql = sqlCaptor.getValue().replaceAll("\\s+", " ");
+    assertTrue("the resolution SOURCE (derived table) must scope to the caller's own schemaId,"
+        + " not every schema of the client",
+        sql.contains("d2.ad_client_id = :clientId AND d2.c_acctschema_id = :schemaId"));
+    assertTrue("the UPDATE TARGET must be correlated back to the source row by primary key",
+        sql.contains("d.c_acctschema_default_id = resolved.c_acctschema_default_id"));
+    assertTrue("the UPDATE TARGET must ALSO re-assert the caller's own schemaId (defense in depth"
+        + " alongside the PK correlation, mirroring c_acctschema_default's own unique key)",
+        sql.contains("d.ad_client_id = :clientId AND d.c_acctschema_id = :schemaId"));
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testBackfillInvoicePriceVarianceDefaultDoesNotFailWhenZeroRowsAffected() {
+    // Covers the "nothing to backfill" outcome (already-configured schema, or no matching row) —
+    // must still bind all three parameters and simply skip the debug log, never throw.
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+
+    OBDal dal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    when(dal.getSession()).thenReturn(session);
+    NativeQuery query = mock(NativeQuery.class);
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    when(session.createNativeQuery(sqlCaptor.capture())).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.executeUpdate()).thenReturn(0);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      // Must not throw when 0 rows are affected.
+      service.backfillInvoicePriceVarianceDefault("C1", "S1");
+    }
+
+    assertTrue("backfill SQL must still target c_acctschema_default on the 0-row outcome",
+        sqlCaptor.getValue().contains("c_acctschema_default"));
+    verify(query).setParameter("clientId", "C1");
+    verify(query).setParameter("schemaId", "S1");
+    verify(query).setParameter("ipvAcctValue", "99904000");
+    verify(query).executeUpdate();
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // ensureAcreedorPrepaymentAccount() — SQL-dispatch sequencing (real implementation)
   // ---------------------------------------------------------------------------------------------
 
@@ -975,6 +1079,110 @@ public class OnboardingAccountingWiringServiceTest {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // provisionGlItemsForImportedChart() / loadLeafElementValues() — ETP-5020
+  // ---------------------------------------------------------------------------------------------
+
+  @Test
+  public void testProvisionGlItemsForImportedChartNoOpsWhenLedgerNull() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    // No OBDal mocking at all — a real (unmocked) static touch would blow up this test if the
+    // null-ledger guard did not return immediately.
+    service.provisionGlItemsForImportedChart(mock(Client.class), null);
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testProvisionGlItemsForImportedChartNoOpsWhenNoActiveSchemas() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    Client client = mock(Client.class);
+    AcctSchema ledger = mock(AcctSchema.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<AcctSchema> schemaCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AcctSchema.class)).thenReturn(schemaCrit);
+    when(schemaCrit.list()).thenReturn(Collections.emptyList());
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      service.provisionGlItemsForImportedChart(client, ledger);
+      verify(dal, never()).createCriteria(ElementValue.class);
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testProvisionGlItemsForImportedChartProvisionsOneGlItemPerLeaf() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    Client client = mock(Client.class);
+    AcctSchema ledger = mock(AcctSchema.class);
+    AcctSchema activeSchema = mock(AcctSchema.class);
+
+    ElementValue leaf1 = mock(ElementValue.class);
+    ElementValue leaf2 = mock(ElementValue.class);
+    AccountingCombination combo1 = mock(AccountingCombination.class);
+    AccountingCombination combo2 = mock(AccountingCombination.class);
+    GLItem glItem1 = mock(GLItem.class);
+    GLItem glItem2 = mock(GLItem.class);
+    GLItemAccounts link1 = mock(GLItemAccounts.class);
+    GLItemAccounts link2 = mock(GLItemAccounts.class);
+
+    OBDal dal = mock(OBDal.class);
+
+    OBCriteria<AcctSchema> schemaCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AcctSchema.class)).thenReturn(schemaCrit);
+    when(schemaCrit.list()).thenReturn(Collections.singletonList(activeSchema));
+
+    OBCriteria<ElementValue> evCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(ElementValue.class)).thenReturn(evCrit);
+    when(evCrit.list()).thenReturn(Arrays.asList(leaf1, leaf2));
+
+    OBCriteria<AccountingCombination> comboCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(AccountingCombination.class)).thenReturn(comboCrit);
+    when(comboCrit.uniqueResult()).thenReturn(combo1, combo2); // one natural combo per leaf
+    when(comboCrit.list()).thenReturn(Collections.emptyList()); // no cross-schema GL Item to reuse
+
+    OBCriteria<GLItemAccounts> linkCrit = mock(OBCriteria.class);
+    when(dal.createCriteria(GLItemAccounts.class)).thenReturn(linkCrit);
+    when(linkCrit.uniqueResult()).thenReturn(null, null); // neither leaf provisioned yet
+
+    OBProvider obProviderInstance = mock(OBProvider.class);
+    when(obProviderInstance.get(GLItem.class)).thenReturn(glItem1, glItem2);
+    when(obProviderInstance.get(GLItemAccounts.class)).thenReturn(link1, link2);
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProvider = mockStatic(OBProvider.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      obProvider.when(OBProvider::getInstance).thenReturn(obProviderInstance);
+
+      service.provisionGlItemsForImportedChart(client, ledger);
+
+      verify(obProviderInstance, times(2)).get(GLItem.class);
+      verify(dal).save(glItem1);
+      verify(dal).save(glItem2);
+      verify(link1).setGlitemDebitAcct(combo1);
+      verify(link2).setGlitemDebitAcct(combo2);
+    }
+  }
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testLoadLeafElementValuesReturnsCriteriaListResult() {
+    OnboardingAccountingWiringService service = new OnboardingAccountingWiringService();
+    Client client = mock(Client.class);
+    ElementValue leaf = mock(ElementValue.class);
+
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<ElementValue> crit = mock(OBCriteria.class);
+    when(dal.createCriteria(ElementValue.class)).thenReturn(crit);
+    when(crit.list()).thenReturn(Collections.singletonList(leaf));
+
+    try (MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      assertEquals(Collections.singletonList(leaf), service.loadLeafElementValues(client));
+    }
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Test double
   // ---------------------------------------------------------------------------------------------
 
@@ -1005,12 +1213,16 @@ public class OnboardingAccountingWiringServiceTest {
     int ensureAcctSchemaCount;
     int wireTreeCount;
     int rebrandCount;
+    int provisionGlItemsCount;
     int provisionEntityCount;
     int bpGroupAcctPatchCount;
     String bpGroupAcctPatchClientId;
     int bpGroupAcctPatchRowsToReturn;
 
     final List<AcctInsert> acctInserts = new ArrayList<>();
+
+    /** ETP-5020 — records call order for {@link #testWireProvisionsGlItemsAfterRebrandBeforePosting}. */
+    final List<String> callOrder = new ArrayList<>();
 
     // --- OnboardingContextSupport seams ---------------------------------------------------------
 
@@ -1085,11 +1297,19 @@ public class OnboardingAccountingWiringServiceTest {
     @Override
     protected void rebrandImportedChartNames(Client client, AcctSchema ledger) {
       rebrandCount++;
+      callOrder.add("rebrand");
+    }
+
+    @Override
+    protected void provisionGlItemsForImportedChart(Client client, AcctSchema ledger) {
+      provisionGlItemsCount++;
+      callOrder.add("provisionGlItems");
     }
 
     @Override
     protected void provisionEntityPostingAccounts(Client client, AcctSchema ledger) {
       provisionEntityCount++;
+      callOrder.add("provisionEntity");
     }
 
     @Override
@@ -1117,6 +1337,7 @@ public class OnboardingAccountingWiringServiceTest {
     final List<AcctInsert> acctInserts = new ArrayList<>();
     int ensureAcreedorPrepaymentAccountCount;
     int overrideAcreedorGroupAccountsCount;
+    int backfillInvoicePriceVarianceDefaultCount;
 
     @Override
     protected void runEntityAcctInsert(String sql, String clientId, String schemaId) {
@@ -1131,6 +1352,11 @@ public class OnboardingAccountingWiringServiceTest {
     @Override
     protected void overrideAcreedorGroupAccounts(String clientId, String schemaId) {
       overrideAcreedorGroupAccountsCount++;
+    }
+
+    @Override
+    protected void backfillInvoicePriceVarianceDefault(String clientId, String schemaId) {
+      backfillInvoicePriceVarianceDefaultCount++;
     }
   }
 }

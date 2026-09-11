@@ -56,8 +56,14 @@ import com.etendoerp.webhookevents.services.BaseWebhookService;
  * <ol>
  *   <li>No role assigned → {@code {"windowAccess": {}, "capabilities": {}}}.</li>
  *   <li>Admin/client-admin bypass ({@link NeoAccessHelper#isAdminOrClientAdmin(Role)}) → every
- *       active Etendo GO window (every distinct {@code AD_Window} backing an active,
- *       {@code SPEC_TYPE = 'W'} {@code ETGO_SF_SPEC}) resolves to {@code "full"}, and
+ *       window Etendo GO exposes resolves to {@code "full"}: the union of (a) every distinct
+ *       {@code AD_Window} backing an active, {@code SPEC_TYPE = 'W'} {@code ETGO_SF_SPEC}, and
+ *       (b) every distinct {@code AD_Window} with at least one active {@code AD_Window_Access}
+ *       row for ANY role (ETP-5240 — some windows, e.g. the report-viewer "permission-anchor"
+ *       windows Financial Reports/Smart Scan/Inventory Stock Report, are granted directly via
+ *       {@code AD_Window_Access} and never get an {@code ETGO_SF_SPEC} row at all, since they
+ *       have no real Etendo GO spec behind them; without (b) the admin bypass would miss them
+ *       and admin/client-admin would see "none" for a window a real role can already open).
  *       {@code capabilities.showAccountingFields} / {@code capabilities.isAdminOrClientAdmin}
  *       are both always {@code true}.</li>
  *   <li>Otherwise, for every active {@code AD_Window_Access} row the role has: {@code
@@ -150,7 +156,9 @@ public class SFWindowAccessMap extends BaseWebhookService {
     JSONObject capabilities = new JSONObject();
 
     if (NeoAccessHelper.isAdminOrClientAdmin(role)) {
-      for (String windowId : resolveActiveEtendoGoWindowIds()) {
+      Set<String> windowIds = new LinkedHashSet<>(resolveActiveEtendoGoWindowIds());
+      windowIds.addAll(resolveWindowsWithAnyGrant());
+      for (String windowId : windowIds) {
         windowAccess.put(windowId, FULL);
       }
       capabilities.put(SHOW_ACCOUNTING_FIELDS, true);
@@ -184,6 +192,34 @@ public class SFWindowAccessMap extends BaseWebhookService {
     Set<String> windowIds = new LinkedHashSet<>();
     for (SFSpec spec : (List<SFSpec>) criteria.list()) {
       Window window = spec.getADWindow();
+      if (window != null) {
+        windowIds.add(window.getId());
+      }
+    }
+    return windowIds;
+  }
+
+  /**
+   * Resolves every distinct {@code AD_Window} with at least one active {@code AD_Window_Access}
+   * row for ANY role — i.e. every window Etendo GO exposes via a real permission grant,
+   * regardless of whether it has a backing {@code ETGO_SF_SPEC}. Used only for the admin/
+   * client-admin bypass, unioned with {@link #resolveActiveEtendoGoWindowIds()}, so that
+   * "permission-anchor" windows (report-viewer pages such as Financial Reports, Smart Scan,
+   * Inventory Stock Report — granted straight via {@code AD_Window_Access} to gate access, with
+   * no {@code ETGO_SF_SPEC} row behind them at all) are not silently dropped from the admin's
+   * map (ETP-5240). Mirrors {@link #populateWindowAccessForRole(Role, JSONObject)}'s query shape
+   * minus the per-role restriction.
+   *
+   * @return the distinct window IDs (insertion order) with at least one active grant
+   */
+  @SuppressWarnings("unchecked")
+  private Set<String> resolveWindowsWithAnyGrant() {
+    OBCriteria<WindowAccess> criteria = OBDal.getInstance().createCriteria(WindowAccess.class);
+    criteria.add(Restrictions.eq(WindowAccess.PROPERTY_ACTIVE, true));
+
+    Set<String> windowIds = new LinkedHashSet<>();
+    for (WindowAccess access : (List<WindowAccess>) criteria.list()) {
+      Window window = access.getWindow();
       if (window != null) {
         windowIds.add(window.getId());
       }

@@ -17,10 +17,13 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -37,6 +40,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -45,6 +49,9 @@ import org.mockito.quality.Strictness;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.access.Role;
+
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
  * Unit tests for {@link WidgetRevenueTrendHandler}.
@@ -64,9 +71,20 @@ class WidgetRevenueTrendHandlerTest {
   private MockedStatic<OBContext> obContextMock;
   private MockedStatic<OBDal> obDalMock;
 
+  // ETP-5088 — every widget now resolves the caller's role and gates on AD_Window_Access before
+  // querying. These suites cover the widget's own behaviour, so they grant access and let the
+  // real WidgetAccessPolicy run on top of a mocked NeoAccessHelper; the gate itself is covered by
+  // WidgetAccessPolicyTest and by the per-role denial case at the end of this file.
+  @Mock private Role role;
+  private MockedStatic<NeoAccessHelper> accessHelperMock;
+
   @BeforeEach
   void setUp() {
     handler = new WidgetRevenueTrendHandler();
+    accessHelperMock = mockStatic(NeoAccessHelper.class);
+    accessHelperMock.when(NeoAccessHelper::resolveCurrentRole).thenReturn(role);
+    accessHelperMock.when(() -> NeoAccessHelper.hasWindowAccess(any(Role.class), anyString(), anyString()))
+        .thenReturn(true);
     obContextMock = mockStatic(OBContext.class);
     obDalMock = mockStatic(OBDal.class);
 
@@ -81,6 +99,7 @@ class WidgetRevenueTrendHandlerTest {
 
   @AfterEach
   void tearDown() {
+    accessHelperMock.close();
     obContextMock.close();
     obDalMock.close();
   }
@@ -147,6 +166,26 @@ class WidgetRevenueTrendHandlerTest {
       assertEquals(3000L, expenseValues.getLong(1));
     }
 
+    /**
+     * Regression test for ETP-5011 (Inconsistency 2): the trend query must sum
+     * {@code totallines} (tax-exclusive "base imponible"), not {@code grandtotal}
+     * (VAT/IVA included) — keeps this widget's monthly totals consistent with the
+     * net figures now returned by WidgetKpisHandler ("Resumen Financiero").
+     */
+    @Test
+    void usesTaxExclusiveTotalNotGrandtotal() throws Exception {
+      when(nativeQuery.list()).thenReturn(Collections.emptyList());
+
+      handler.handle(buildContext("GET"));
+
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      verify(session, atLeastOnce()).createNativeQuery(sqlCaptor.capture());
+      String sql = sqlCaptor.getValue();
+
+      assertTrue(sql.contains("totallines"), "Trend query must sum totallines");
+      assertFalse(sql.contains("grandtotal"), "Trend query must not sum grandtotal (VAT included)");
+    }
+
     @Test
     void labelTrimsWhitespace() throws Exception {
       Object[] row = { "  Mar  ", new BigDecimal("100"), new BigDecimal("50") };
@@ -156,6 +195,24 @@ class WidgetRevenueTrendHandlerTest {
       JSONObject trend = response.getBody()
           .getJSONObject("response").getJSONArray("data").getJSONObject(0);
       assertEquals("Mar", trend.getJSONArray("labels").getString(0));
+    }
+
+    /**
+     * Regression test for ETP-5011: revenue/expense totals must preserve cents instead
+     * of being truncated to whole euros, which caused the "Resumen Financiero" KPI
+     * (71,39 €) to disagree with this widget's tooltip (71,00 €) for the same month.
+     */
+    @Test
+    void preservesCentsInsteadOfTruncating() throws Exception {
+      Object[] row = { "Aug", new BigDecimal("319114.00"), new BigDecimal("71.39") };
+      when(nativeQuery.list()).thenReturn(Collections.singletonList(row));
+
+      NeoResponse response = handler.handle(buildContext("GET"));
+      JSONObject trend = response.getBody()
+          .getJSONObject("response").getJSONArray("data").getJSONObject(0);
+
+      assertEquals(319114.00, trend.getJSONArray("values").getDouble(0), 0.001);
+      assertEquals(71.39, trend.getJSONArray("expenseValues").getDouble(0), 0.001);
     }
   }
 }

@@ -31,8 +31,13 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.ad_process.ConvertQuotationIntoOrder;
 import org.openbravo.model.common.order.Order;
 
+import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
+
 /**
  * NeoHandler for the Sales Quotation header entity.
+ *
+ * <p>ETP-5238: the {@code paymentMethod} SELECTOR is served by
+ * {@link PaymentMethodSelectorSupport}, independent of Financial Account linkage.
  *
  * Dispatches custom ACTION requests:
  * <ul>
@@ -87,6 +92,11 @@ public class SalesQuotationHeaderHandler extends AbstractOrderHeaderHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoResponse paymentMethodSelector = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(context,
+        PaymentMethodSelectorSupport.DirectionFallback.WINDOW);
+    if (paymentMethodSelector != null) {
+      return paymentMethodSelector;
+    }
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, false);
     AbstractOrderHeaderHandler.syncTotalDiscountOnDocAction(context, totalDiscountService, false);
 

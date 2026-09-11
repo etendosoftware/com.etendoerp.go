@@ -117,7 +117,10 @@ class McpSchemaFieldBuilderTest {
         "'13', id",
         "'19', foreignKey",
         "'18', foreignKey",
-        "'30', foreignKey"
+        "'30', foreignKey",
+        // ETP-5184: Image BLOB. Before this case existed it fell through to "string", so
+        // neo_schema advertised an image column as ordinary text.
+        "'4AA6C3BE9D3B4D84A3B80489505A23E5', image"
     })
     void knownRefIdsMappedCorrectly(String refId, String expectedType) {
       assertEquals(expectedType, McpSchemaFieldBuilder.mapColumnType(refId));

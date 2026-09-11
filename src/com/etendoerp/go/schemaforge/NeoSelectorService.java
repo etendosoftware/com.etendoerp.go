@@ -232,6 +232,7 @@ public class NeoSelectorService {
       String combinedFilter = buildCombinedFilter(
           column, validationFilter, filterAlias);
       Map<String, String> selectorContextParams = withSourceEntityName(contextParams, sourceEntity);
+      selectorContextParams = withContextOrganizationId(selectorContextParams, contextOrganizationId);
       NeoResponse selectorResult = executeSelectorQuery(
           meta, search, safeLimit, safeOffset, contextOrganizationId, combinedFilter, selectorContextParams);
       return enrichProductSelectorIfNeeded(selectorResult, meta, selectorContextParams);
@@ -288,6 +289,26 @@ public class NeoSelectorService {
    * {@code DocTypeResolver}/{@code NeoDefaultsService}. Returns {@code null} (never throws)
    * when the spec has no linked window (e.g. a process spec) or the chain cannot be resolved.
    */
+  /**
+   * Returns a copy of {@code params} augmented with the resolved context organization id
+   * (under the canonical {@value #AD_ORG_ID} key), without mutating the caller's map, so
+   * selector enrichment policies (e.g. {@code InvoiceLineTaxSifSelectorPolicy}) can resolve
+   * per-organization overrides without re-deriving the organization themselves. When {@code
+   * organizationId} is blank or already present in {@code params}, the original reference is
+   * returned unchanged.
+   */
+  private static Map<String, String> withContextOrganizationId(Map<String, String> params,
+      String organizationId) {
+    if (StringUtils.isBlank(organizationId)
+        || (params != null && params.containsKey(AD_ORG_ID))) {
+      return params;
+    }
+    Map<String, String> augmented = new HashMap<>(
+        params != null ? params : Collections.emptyMap());
+    augmented.put(AD_ORG_ID, organizationId);
+    return augmented;
+  }
+
   private static String resolveSourceWindowId(SFEntity sourceEntity) {
     try {
       com.etendoerp.go.schemaforge.data.SFSpec spec = sourceEntity.getETGOSFSpec();

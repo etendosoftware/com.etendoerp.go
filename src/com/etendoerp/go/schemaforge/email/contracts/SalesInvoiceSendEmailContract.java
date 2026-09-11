@@ -28,7 +28,6 @@ import java.util.Objects;
 public final class SalesInvoiceSendEmailContract extends DefaultDocumentSendEmailContract {
 
   static final String NAME = "sales-invoice-send";
-  private static final String TEMPLATE = "invoice";
 
   /**
    * Creates the sales invoice send contract.
@@ -36,16 +35,11 @@ public final class SalesInvoiceSendEmailContract extends DefaultDocumentSendEmai
    * @param documentResolver resolver for trusted sales invoice records
    */
   public SalesInvoiceSendEmailContract(EmailDocumentRecordResolver documentResolver) {
-    super(NAME, TEMPLATE, "Sales Invoice", "invoice_number", true,
+    // ETP-5003 — off the provider's branded "invoice" template and onto the shared layout, so an
+    // edited send no longer downgrades the design. invoice_number and the amount stay in the
+    // payload for the gateway's own records.
+    super(NAME, CONTENT_TEMPLATE, "Sales Invoice", "invoice_number", true,
         Objects.requireNonNull(documentResolver, "documentResolver"));
   }
 
-  /**
-   * Only used when an operator edits the copy: this contract then leaves the branded
-   * {@code invoice} template for the content template, which needs a subject.
-   */
-  @Override
-  protected String documentTypeLabel() {
-    return "Factura de Venta";
-  }
 }

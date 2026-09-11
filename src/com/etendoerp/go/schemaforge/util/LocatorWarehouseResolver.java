@@ -23,6 +23,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.hibernate.criterion.Restrictions;
@@ -127,13 +128,18 @@ public class LocatorWarehouseResolver {
    * lookalike columns (e.g. {@code M_LocatorTo_ID}, which also targets {@code M_Locator} and is
    * therefore intentionally treated as a locator FK too).</p>
    *
+   * <p>Columns whose name does not end in {@code _ID} are rejected up front, without resolving
+   * the selector target: every FK is an {@code _ID} column, so this cannot hide a real locator,
+   * and it spares the OBUISEL lookup that resolving a date/number/string column would cost on
+   * every read.</p>
+   *
    * <p>Fail-safe: any resolution error returns {@code false} without throwing.</p>
    *
    * @param col the AD column to inspect
    * @return {@code true} if the column resolves to the {@code M_Locator} entity
    */
   public static boolean isLocatorRef(Column col) {
-    if (col == null) {
+    if (col == null || !StringUtils.endsWith(col.getDBColumnName(), "_ID")) {
       return false;
     }
     try {

@@ -60,6 +60,9 @@
       <foreign-key foreignTable="AD_ORG" name="ETGO_SURVEY_RESPONSE_AD_ORG_FK">
         <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
       </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_SURVEYRESP_ADUSER_FK">
+        <reference local="AD_USER_ID" foreign="AD_USER_ID"/>
+      </foreign-key>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_URVEYRESPONSE_DCLIENT_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>

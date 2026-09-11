@@ -31,6 +31,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
@@ -50,6 +51,7 @@ import org.openbravo.service.db.DalConnectionProvider;
 final class NeoHandlerUtils {
 
   private static final String FIELD_STORAGE_BIN = "storageBin";
+  private static final String FIELD_MOVEMENT_QUANTITY = "movementQuantity";
   private static final String PARAM_PARENT_ID = "parentId";
   // Matches an unresolved raw AD default literal such as "@OnHandLocatorDefault@". See
   // injectDefaultLocatorIfMissing's javadoc for why this must be treated as absent.
@@ -262,6 +264,85 @@ final class NeoHandlerUtils {
   }
 
   /**
+   * Runs the whole {@code afterHandle} "enrich every GET row from a batched by-id lookup"
+   * shape, so a handler only supplies the two parts that are actually its own: how to load
+   * the values for a page of ids, and what to write onto a row.
+   *
+   * <p>Extracted because that skeleton — read the data array, bail when it or the previous
+   * result is absent, collect the ids, bail when empty, loop the rows, return
+   * {@code NeoResponse.ok(previousResult.getBody())}, log-and-passthrough on failure — was
+   * byte-identical in three handlers ({@code MatchedInvoiceHandler},
+   * {@code PaymentScheduleDetailHandler}, {@code BinContentsHandler}) and tripped
+   * SonarQube's duplicated-lines-on-new-code gate, the same way
+   * {@link #enrichLinesWithProductCode} was extracted before it.
+   *
+   * <p>Behaviour is exactly what those handlers already did: a row whose id has no entry in
+   * the lookup is skipped untouched, and any exception logs and returns the unmodified
+   * previous result rather than failing the request.
+   *
+   * @param <T>     per-row value type the lookup produces
+   * @param context the current NeoContext
+   * @param lookup  loads the values for all ids on this page, keyed by record id
+   * @param enrich  writes one row's value onto that row; only called when a value exists
+   * @param errorMessage log message used if the enrichment throws
+   * @param log     caller's logger, so the failure is attributed to the real handler
+   * @return the enriched response, or {@code null} when there is nothing to enrich
+   */
+  static <T> NeoResponse enrichGetRowsById(NeoContext context,
+      ThrowingFunction<List<String>, Map<String, T>> lookup,
+      ThrowingBiConsumer<JSONObject, T> enrich, String errorMessage, Logger log) {
+    try {
+      NeoResponse previousResult = context.getPreviousResult();
+      JSONArray dataArr = extractGetDataArray(context);
+      if (dataArr == null || previousResult == null) {
+        return null;
+      }
+      List<String> ids = collectIds(dataArr);
+      if (ids.isEmpty()) {
+        return null;
+      }
+      Map<String, T> valuesById = lookup.apply(ids);
+      for (int i = 0; i < dataArr.length(); i++) {
+        JSONObject rec = dataArr.getJSONObject(i);
+        T value = valuesById.get(rec.optString("id", null));
+        if (value != null) {
+          enrich.accept(rec, value);
+        }
+      }
+      return NeoResponse.ok(previousResult.getBody());
+    } catch (Exception e) {
+      log.error(errorMessage, e);
+      return context.getPreviousResult();
+    }
+  }
+
+  /** {@link java.util.function.Function} that may throw — the JSON/DAL calls here all do. */
+  @FunctionalInterface
+  interface ThrowingFunction<T, R> {
+    /**
+     * Loads the values for a page of ids.
+     *
+     * @param input the argument to apply the function to
+     * @return the function result
+     * @throws JSONException if reading or building the result requires JSON access that fails
+     */
+    R apply(T input) throws JSONException;
+  }
+
+  /** {@link java.util.function.BiConsumer} that may throw — {@code JSONObject#put} does. */
+  @FunctionalInterface
+  interface ThrowingBiConsumer<A, B> {
+    /**
+     * Writes one row's looked-up value onto that row.
+     *
+     * @param first the row being enriched
+     * @param second the value to write onto it
+     * @throws JSONException if {@code JSONObject#put} rejects the value
+     */
+    void accept(A first, B second) throws JSONException;
+  }
+
+  /**
    * Extracts the {@code id} of a just-created record from a POST/create response, read via
    * {@code context.getPreviousResult()}.
    *
@@ -413,6 +494,27 @@ final class NeoHandlerUtils {
   }
 
   /**
+   * POST/CRUD gate around {@link #injectDefaultLocatorIfMissing}: shared by every
+   * {@code M_InOutLine}-based handler's {@code handle()} pre-hook so each one only has to call
+   * this single method instead of repeating the endpoint/method check and the try/catch —
+   * duplicating that boilerplate across handlers is exactly what trips Sonar's duplicated-lines
+   * gate (ETP-5062).
+   *
+   * @param context the current NeoContext; a no-op for anything other than a CRUD POST
+   * @param log     the caller's logger, used for a warn message if the injection throws
+   */
+  static void injectDefaultLocatorOnPost(NeoContext context, Logger log) {
+    if (context != null && NeoEndpointType.CRUD.equals(context.getEndpointType())
+        && "POST".equalsIgnoreCase(context.getHttpMethod())) {
+      try {
+        injectDefaultLocatorIfMissing(context.getRequestBody(), log);
+      } catch (Exception e) {
+        log.warn("Could not default storageBin: {}", e.getMessage(), e);
+      }
+    }
+  }
+
+  /**
    * Sets {@code storageBin} to the header {@code M_InOut}'s own warehouse default locator when
    * a line-create request did not already supply a REAL one. Shared by every
    * {@code M_InOutLine}-based create flow — Goods Receipt, Goods Shipment, and Return to Vendor
@@ -482,6 +584,38 @@ final class NeoHandlerUtils {
       log.debug("Defaulted storageBin={} to header warehouse={}", locatorId, headerWarehouseId);
     }
     body.put(FIELD_STORAGE_BIN, locatorId);
+  }
+
+  /**
+   * Strips the stock-derived {@code movementQuantity} update that the classic
+   * {@code SL_InOutLine_Product} callout (shared by every {@code M_InOutLine}-based window)
+   * echoes back on product selection whenever a line is not created from an order/invoice
+   * import. Shared by {@link GoodsReceiptLineHandler} (ETP-4671, purchase receipts) and
+   * {@link GoodsShipmentLineHandler} (ETP-5062, sales shipments) — for both, a manually-added
+   * line must always start at its own default (0) instead of silently jumping to the product's
+   * on-hand quantity, which risks moving an entire warehouse's stock by accident.
+   *
+   * <p>Mutates {@code context.getPreviousResult()} in place and returns nothing: the dispatcher
+   * (see {@link NeoHandler#afterCallout}) merges a returned {@code NeoResponse} additively only,
+   * so overriding an already-present {@code updates} key requires mutating the shared JSONObject
+   * directly rather than returning a new response.
+   *
+   * @param context the callout context; a no-op for anything other than a CALLOUT endpoint
+   * @param log     the caller's logger, used for a debug message when a value is stripped
+   */
+  static void stripStockDerivedMovementQuantity(NeoContext context, Logger log) {
+    if (context == null || !NeoEndpointType.CALLOUT.equals(context.getEndpointType())) {
+      return;
+    }
+    NeoResponse previous = context.getPreviousResult();
+    if (previous == null || previous.getBody() == null) {
+      return;
+    }
+    JSONObject updates = previous.getBody().optJSONObject("updates");
+    if (updates != null && updates.has(FIELD_MOVEMENT_QUANTITY)) {
+      updates.remove(FIELD_MOVEMENT_QUANTITY);
+      log.debug("Stripped stock-derived movementQuantity from callout response");
+    }
   }
 
   /**
@@ -719,6 +853,38 @@ final class NeoHandlerUtils {
       }
     } catch (Exception e) {
       log.warn("Could not reanchor lines to header warehouse for {}: {}", inOutId, e.getMessage());
+    }
+  }
+
+  /**
+   * Injects the issuing organization's info as {@code issuerOrg} into a single shipment record's
+   * GET response, mutating {@code shipmentRec} in place.
+   *
+   * <p>Shared implementation behind {@code GoodsShipmentHeaderHandler} and
+   * {@code ReturnToVendorShipmentHeaderHandler}'s {@code afterHandle} hooks (ETP-4939): both
+   * defined an identical private {@code enrichIssuerOrg} method — same
+   * admin-mode/lookup/resolve-organization shape — which SonarQube flagged as
+   * duplicated-lines-on-new-code (PR #972, 18.18% vs. the 3% gate).
+   *
+   * @param shipmentRec the single shipment record to mutate in place
+   * @param recordId    the {@code M_InOut} id to resolve the organization for
+   */
+  static void enrichIssuerOrg(JSONObject shipmentRec, String recordId) {
+    try {
+      OBContext.setAdminMode(true);
+      ShipmentInOut shipment = OBDal.getReadOnlyInstance().get(ShipmentInOut.class, recordId);
+      if (shipment == null) {
+        return;
+      }
+      String orgId = shipment.getOrganization().getId();
+      JSONObject orgInfo = NeoSessionService.resolveOrganization(orgId);
+      if (orgInfo != null) {
+        shipmentRec.put("issuerOrg", orgInfo);
+      }
+    } catch (Exception e) {
+      log.warn("Could not enrich issuer org for shipment {}: {}", recordId, e.getMessage());
+    } finally {
+      OBContext.restorePreviousMode();
     }
   }
 }

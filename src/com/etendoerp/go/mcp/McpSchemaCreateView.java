@@ -69,6 +69,8 @@ final class McpSchemaCreateView {
 
   private static final String KEY_NAME = "name";
   private static final String KEY_REQUIRED = "required";
+  /** ETP-5184: entity-level curated guidance, mirrored from {@code neo_discover}. */
+  private static final String KEY_AGENT_PROMPT = "agentPrompt";
   private static final String KEY_OPTIONAL = "optional";
 
   /**
@@ -122,18 +124,21 @@ final class McpSchemaCreateView {
    * whose default expression reads from the parent record (the parent's warehouse for a storage
    * bin, its price-list version, its running line number) — it does not error, the field is simply
    * absent from {@code confirm}. Passing {@code parentId} is what resolves them. This is additive
-   * text only; the {@code required}/{@code optional} split above is unaffected — the parent FK
+   * text only; the {@code required}/{@code optional} split above is unaffected. {@code parentId}
    * itself does not appear there because {@code view:"create"} lists only fields the schema
-   * describes as belonging to this entity, and the parent FK is always required regardless.</p>
+   * describes as belonging to this entity — the parent is named by {@code parentId} on both
+   * {@code neo_defaults} and {@code neo_create}, never by its own foreign key, which the server
+   * does not read to load the parent record.</p>
    */
   static final String CHILD_ENTITY_HINT_SUFFIX =
-      " This is a child/line entity: before calling neo_create, call neo_defaults with "
-      + "parentId set to the parent record's id — parent-dependent defaults (e.g. a storage bin "
-      + "scoped to the parent's warehouse, a price-list version, a line number) are resolved only "
-      + "when parentId is given; omitting it does not error, it just leaves those fields absent. "
-      + "Also send the parent foreign key itself among your neo_create fields (e.g. physInventory "
-      + "on inventoryLine, salesOrder on sales-order/lines) — it is required even though it is not "
-      + "listed above.";
+      " This is a child/line entity: pass parentId — the parent record's id — on neo_create, and "
+      + "on neo_defaults before it. Fields whose default reads from the parent (a storage bin "
+      + "scoped to the parent's warehouse, a price-list version, a running line number, a date or "
+      + "warehouse inherited from the parent document) are resolved only from parentId; omitting "
+      + "it does not error, it just leaves those fields absent. Do NOT name the parent by its own "
+      + "foreign key instead (salesOrder on sales-order/lines, physInventory on inventoryLine): "
+      + "the server loads the parent record only from parentId, so that form silently persists a "
+      + "record with parent-derived fields left null. Send parentId, not the parent FK.";
 
   /** @return {@code true} when {@code view} requests the create-shaped projection. */
   static boolean isCreateView(String view) {
@@ -222,41 +227,91 @@ final class McpSchemaCreateView {
    */
   static JSONObject buildResponse(String specName, String entityName, JSONArray fields,
       Set<String> serverResolved, boolean isChildEntity) throws JSONException {
+    return buildResponse(specName, entityName, fields, serverResolved, isChildEntity, null);
+  }
+
+  /**
+   * Same as {@link #buildResponse(String, String, JSONArray, Set, boolean)}, plus the entity-level
+   * {@code agentPrompt} from {@code ETGO_SF_ENTITY.AGENT_PROMPT}.
+   *
+   * <p>ETP-5184. The prompt was reaching {@code neo_discover} only, and discover is a catalogue an
+   * agent reads once; {@code view:"create"} is what it reads immediately before writing. When the
+   * entity is handler-backed, the prompt is the only place the divergence between the advertised
+   * contract and the one the handler implements can be stated. Its two current consumers are
+   * {@code contacts/bankAccount} and {@code financial-account/account}, both of which use it to
+   * separate a contact's own bank account from the company's — the mix-up an agent makes unaided.
+   *
+   * <p>Note that {@code contacts/locationAddress}, the case that motivated ETP-5184, is
+   * <b>not</b> served by this path: its guidance lives on {@code ETGO_SF_FIELD.AGENT_PROMPT} for
+   * the {@code C_Location_ID} field and reaches the response through
+   * {@code McpSchemaFieldBuilder}'s per-field {@code addAgentPrompt}, which predates this change.
+   * Omitting the key when the column is blank keeps the response byte-for-byte as before for the
+   * 285 entities that carry no prompt.
+   *
+   * @param agentPrompt the entity's curated guidance, or {@code null}/blank to omit the key
+   */
+  static JSONObject buildResponse(String specName, String entityName, JSONArray fields,
+      Set<String> serverResolved, boolean isChildEntity, String agentPrompt)
+      throws JSONException {
     JSONArray required = new JSONArray();
     JSONArray optional = new JSONArray();
-    Set<String> resolved = serverResolved == null ? Set.of() : serverResolved;
-    if (fields != null) {
-      for (int i = 0; i < fields.length(); i++) {
-        JSONObject field = fields.optJSONObject(i);
-        // Buttons are actions, not payload — they belong to view:"actions" (IMP-6).
-        if (field == null || McpActionsView.TYPE_BUTTON.equals(field.optString("type", null))
-            || !McpSchemaFieldBuilder.isAgentSuppliable(field)) {
-          continue;
-        }
-        JSONObject emitted = slim(field);
-        // Guard the null name explicitly: Set.of() throws on contains(null).
-        String name = field.optString(KEY_NAME, null);
-        if (name != null && resolved.contains(name)) {
-          // Distinguish "optional because nobody needs it" from "optional because the server fills
-          // it" — the second is the one the agent must not ask the user about.
-          emitted.put(KEY_SERVER_DEFAULTED, true);
-          optional.put(emitted);
-        } else if (field.optBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED, false)) {
-          required.put(emitted);
-        } else {
-          optional.put(emitted);
-        }
-      }
-    }
+    partitionFields(fields, serverResolved, required, optional);
     JSONObject response = new JSONObject();
     response.put("spec", specName);
     response.put("entity", entityName);
+    if (agentPrompt != null && !agentPrompt.trim().isEmpty()) {
+      response.put(KEY_AGENT_PROMPT, agentPrompt.trim());
+    }
     response.put(KEY_REQUIRED, required);
     response.put(KEY_OPTIONAL, optional);
     response.put("requiredCount", required.length());
     response.put("optionalCount", optional.length());
     response.put("hint", isChildEntity ? CREATE_HINT + CHILD_ENTITY_HINT_SUFFIX : CREATE_HINT);
     return response;
+  }
+
+  /**
+   * Splits the schema fields an agent may supply into the {@code required} and {@code optional}
+   * arrays, appending to whichever the field belongs to. Extracted from
+   * {@link #buildResponse(String, String, JSONArray, Set, boolean, String)}, which is otherwise
+   * one method holding both the partitioning rules and the response assembly; the rules are the
+   * half that carries the branching, and they are what this class's tests exercise field by field.
+   *
+   * <p>Three rules, in precedence order: buttons and non-agent-suppliable descriptors are dropped
+   * entirely; a field {@code neo_defaults} resolves is {@code optional} and flagged
+   * {@code serverDefaulted}, however mandatory AD says it is; otherwise the static
+   * {@code userRequired} rule decides. Both arrays are mutated in place rather than returned as a
+   * pair, because the caller already owns them and a wrapper type would exist only to be unpacked.
+   *
+   * @param serverResolved may be {@code null}, treated as empty
+   */
+  private static void partitionFields(JSONArray fields, Set<String> serverResolved,
+      JSONArray required, JSONArray optional) throws JSONException {
+    if (fields == null) {
+      return;
+    }
+    Set<String> resolved = serverResolved == null ? Set.of() : serverResolved;
+    for (int i = 0; i < fields.length(); i++) {
+      JSONObject field = fields.optJSONObject(i);
+      // Buttons are actions, not payload — they belong to view:"actions" (IMP-6).
+      if (field == null || McpActionsView.TYPE_BUTTON.equals(field.optString("type", null))
+          || !McpSchemaFieldBuilder.isAgentSuppliable(field)) {
+        continue;
+      }
+      JSONObject emitted = slim(field);
+      // Guard the null name explicitly: Set.of() throws on contains(null).
+      String name = field.optString(KEY_NAME, null);
+      if (name != null && resolved.contains(name)) {
+        // Distinguish "optional because nobody needs it" from "optional because the server fills
+        // it" — the second is the one the agent must not ask the user about.
+        emitted.put(KEY_SERVER_DEFAULTED, true);
+        optional.put(emitted);
+      } else if (field.optBoolean(McpSchemaFieldBuilder.KEY_USER_REQUIRED, false)) {
+        required.put(emitted);
+      } else {
+        optional.put(emitted);
+      }
+    }
   }
 
   /**

@@ -8,7 +8,7 @@ This directory stores module-specific technical documentation for `com.etendoerp
 - `neo-headless-guide.md` — detailed Neo Headless development guide.
 - `onboarding-sampledata-packaging.md` — how onboarding sampledata is staged into `WebContent/WEB-INF/classes` for WAR packaging.
 - `package-architecture.md` — current Java package boundaries, selector policy split, OAuth2 support split, and PR-scoped Sonar workflow.
-- `onboarding-flow.md` — the `ensureOnboardingDataset` step pipeline (dataset, accounting, periodControl, sequences, orgReady, fiscal, orgInfo, customer, bankConnectionSync, bpGroupAcctPatch, acctdimVisibility, baseline), service responsibilities, included-tables rationale, and NDJSON event format.
+- `onboarding-flow.md` — the `ensureOnboardingDataset` step pipeline (dataset, accounting chart/name wiring, GL Item provisioning, entity posting-account provisioning, periodControl, sequences, orgReady, fiscal, orgInfo, customer, bankConnectionSync, bpGroupAcctPatch, acctdimVisibility, baseline), service responsibilities, included-tables rationale, and NDJSON event format.
 - `transactional-email-contracts.md` — runtime endpoint, executor/provider boundary, and server-side provider configuration for transactional email contracts.
 - `document-email-contract-implementation.md` — step-by-step Java guide for adding document-send transactional email contracts.
 - `aeat-303-submit-endpoint.md` — `POST /neo/fiscal303/submit` contract (AEAT Modelo 303 electronic submission, ETP-4456 Phase 2): request/response shapes, error codes, the idempotency guard, certificate flow, and known gaps.

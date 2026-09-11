@@ -1128,7 +1128,22 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * the uninvoiced (pending) quantity so that already-invoiced lines are skipped.
    * Returns {@code null} when the line is inactive, excluded by overrides,
    * has zero/null movement quantity, or is already fully invoiced.
-   * When overrides are present the result is capped at min(override, pendingQty).
+   * When overrides are present the result is capped at min(|override|, |pendingQty|),
+   * with the shipment line's own sign reapplied to the result.
+   *
+   * <p><b>ETP-4567:</b> movement quantity can be NEGATIVE (return-style shipment
+   * line, since ETP-4567 removed the {@code min: 0} constraint on order/shipment
+   * lines). {@code pendingQtyMap} (see {@link #computePendingQtyPerLine}) is itself
+   * magnitude-only — its underlying query {@code ABS()}s both movement and invoiced
+   * quantities at the SQL level so that a negative return-style line and a positive
+   * shipment line are tracked on the same sign-agnostic "remaining magnitude" scale.
+   * This method therefore does all its pending-quantity arithmetic in magnitude
+   * (absolute-value) space and reapplies the line's own sign only at the very end —
+   * comparing/clamping a negative {@code movementQty} directly against that
+   * magnitude-only map (or a {@code max(ZERO)} clamp) would silently destroy the
+   * sign or drop the line outright, exactly as the sibling {@code
+   * CreatePurchaseInvoiceHandler#getPendingQuantity} bug did for fully-negative
+   * purchase orders (QA "Hallazgo 1").
    *
    * @param sl
    *     the shipment line to evaluate
@@ -1137,9 +1152,9 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * @param lineOverrides
    *     caller-supplied quantity caps per shipment line
    * @param pendingQtyMap
-   *     pre-computed uninvoiced qty per {@code M_InOutLine_ID}; empty map
+   *     pre-computed uninvoiced qty MAGNITUDE per {@code M_InOutLine_ID}; empty map
    *     means treat all lines as fully pending (backward-compat behaviour)
-   * @return quantity to invoice, or {@code null} to skip this line
+   * @return quantity to invoice (sign matches the shipment line), or {@code null} to skip this line
    */
   protected BigDecimal resolveShipmentLineQty(ShipmentInOutLine sl, boolean hasOverrides,
       Map<String, BigDecimal> lineOverrides, Map<String, BigDecimal> pendingQtyMap) {
@@ -1147,18 +1162,24 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       return null;
     }
     BigDecimal movementQty = sl.getMovementQuantity();
-    if (movementQty == null || movementQty.compareTo(BigDecimal.ZERO) <= 0) {
+    if (movementQty == null || movementQty.compareTo(BigDecimal.ZERO) == 0) {
       return null;
     }
-    // Fall back to movement qty when map is absent (backward-compat / no-DB path).
-    BigDecimal pendingQty = pendingQtyMap.getOrDefault(sl.getId(), movementQty)
-        .min(movementQty)
-        .max(BigDecimal.ZERO);
-    if (pendingQty.compareTo(BigDecimal.ZERO) <= 0) {
+    int sign = movementQty.signum();
+    BigDecimal movementQtyAbs = movementQty.abs();
+    // Fall back to movement qty magnitude when map is absent (backward-compat / no-DB path).
+    BigDecimal pendingQtyAbs = pendingQtyMap.getOrDefault(sl.getId(), movementQtyAbs)
+        .min(movementQtyAbs);
+    if (pendingQtyAbs.compareTo(BigDecimal.ZERO) <= 0) {
       return null; // already fully invoiced
     }
-    BigDecimal qty = hasOverrides ? lineOverrides.get(sl.getId()).min(pendingQty) : pendingQty;
-    return qty.compareTo(BigDecimal.ZERO) > 0 ? qty : null;
+    BigDecimal qtyAbs = hasOverrides
+        ? lineOverrides.get(sl.getId()).abs().min(pendingQtyAbs)
+        : pendingQtyAbs;
+    if (qtyAbs.compareTo(BigDecimal.ZERO) <= 0) {
+      return null;
+    }
+    return sign < 0 ? qtyAbs.negate() : qtyAbs;
   }
 
   /**

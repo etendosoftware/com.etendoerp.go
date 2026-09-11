@@ -18,6 +18,8 @@
 package com.etendoerp.go.schemaforge;
 
 
+import java.util.Set;
+
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
@@ -100,6 +102,16 @@ public final class PisPaymentService {
    * (SEPA / DOMESTIC / FPS) drive which creditor fields the SPA shows and validates.
    */
   private static final String PIS_TEMPLATE_REFERENCE_ID = "C2ED369FE83548AD9AAA47186502F1BF";
+
+  /**
+   * Currencies a PIS transfer can be instructed in, keyed by the currency of the DEBTOR bank
+   * account — not the invoice's (ETP-5084). A transfer always leaves the bank in the account's own
+   * currency, so that is what decides both eligibility and the payment template
+   * (EUR → SEPA, USD → DOMESTIC, GBP → FPS; see {@code PisPaymentBridge.templateForCurrency}).
+   * An invoice in any other currency is payable as long as a conversion rate is available — the
+   * amount is converted to the account currency before it is sent to the bank.
+   */
+  private static final Set<String> PIS_ELIGIBLE_ACCOUNT_CURRENCIES = Set.of("EUR", "USD", "GBP");
 
   private PisPaymentService() {
   }
@@ -420,7 +432,14 @@ public final class PisPaymentService {
   /**
    * Validates that {@code account}/{@code paymentMethod}/{@code invoice} are eligible for a
    * real PIS bank transfer: the account must have a bank connection, the payment method must be a
-   * bank transfer, and the invoice currency must be one PIS supports (EUR → SEPA, GBP → FPS).
+   * bank transfer, and the ACCOUNT currency must be one PIS supports.
+   *
+   * <p>The currency check deliberately keys off the debtor account, not the invoice (ETP-5084).
+   * The transfer leaves the bank in the account's own currency, so that is the currency the bank
+   * is instructed in and the one that selects the payment template. An invoice in a different
+   * currency is perfectly payable: {@link PaymentRegistrationService} converts the amount with the
+   * request's conversion rate before it reaches the bank — the very same rate the resulting
+   * {@code FIN_Payment} is later booked at, so the instructed and booked amounts cannot diverge.
    */
   static void validatePisEligibility(FIN_FinancialAccount account,
       FIN_PaymentMethod paymentMethod, Invoice invoice) {
@@ -432,10 +451,18 @@ public final class PisPaymentService {
     if (!isTransferMethod(paymentMethod)) {
       throw new OBException("Bank transfer (PIS) payment requires a transfer payment method.");
     }
-    String isoCode = invoice.getCurrency() != null ? invoice.getCurrency().getISOCode() : null;
-    if (!"EUR".equalsIgnoreCase(isoCode) && !"GBP".equalsIgnoreCase(isoCode)) {
-      throw new OBException("Bank transfer (PIS) payments are only supported for EUR and "
-          + "GBP invoices.");
+    // Without it the amount could not be converted to the account currency, and instructing the
+    // bank with an unconverted figure would move the wrong amount of money.
+    if (invoice.getCurrency() == null) {
+      throw new OBException("The invoice has no currency, so the transfer amount cannot be "
+          + "converted to the bank account currency.");
+    }
+    String accountIso = account.getCurrency() != null ? account.getCurrency().getISOCode() : null;
+    if (accountIso == null || PIS_ELIGIBLE_ACCOUNT_CURRENCIES.stream()
+        .noneMatch(eligible -> eligible.equalsIgnoreCase(accountIso))) {
+      throw new OBException("Bank transfer (PIS) payments require a bank account in EUR, USD or "
+          + "GBP. The selected account is in " + (accountIso != null ? accountIso : "no currency")
+          + ".");
     }
   }
 

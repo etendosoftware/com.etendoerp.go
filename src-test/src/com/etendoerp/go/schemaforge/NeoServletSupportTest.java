@@ -377,5 +377,32 @@ class NeoServletSupportTest {
         assertSame(defaultResponse, handler.lastAfterHandleContext.getPreviousResult());
       }
     }
+
+    @Test
+    @DisplayName("skips afterHandle when the default CRUD write itself fails (status >= 400), "
+        + "mirroring the pre-hook error branch")
+    void afterHandleSkippedWhenDefaultCrudFails() {
+      NeoCrudHandler crudHandler = mock(NeoCrudHandler.class);
+      NeoContext context = NeoContext.builder().build();
+      NeoResponse failedDefaultResponse = NeoResponse.error(409, "concurrency conflict");
+      when(crudHandler.handleDefault(context)).thenReturn(failedDefaultResponse);
+
+      NamedFakeHandler handler = new NamedFakeHandler();
+      handler.preResult = null;
+      // Would corrupt state if called after a failed default CRUD write.
+      handler.postResult = NeoResponse.ok(new JSONObject());
+
+      try (MockedStatic<WeldUtils> weld = mockStatic(WeldUtils.class)) {
+        weld.when(() -> WeldUtils.getInstances(NeoHandler.class))
+            .thenReturn(List.<NeoHandler>of(handler));
+
+        NeoResponse result = NeoServletSupport.handleWithHooks("test-handler-qualifier", context, crudHandler);
+
+        assertSame(failedDefaultResponse, result);
+        verify(crudHandler, times(1)).handleDefault(context);
+        assertNull(handler.lastAfterHandleContext,
+            "afterHandle must not be called when the default CRUD write failed");
+      }
+    }
   }
 }

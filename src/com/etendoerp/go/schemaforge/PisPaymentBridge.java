@@ -26,8 +26,11 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.exception.OBException;
+import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 import org.openbravo.model.financialmgmt.payment.FIN_Payment;
@@ -60,9 +63,11 @@ import com.etendoerp.psd2.bank.integration.utils.PISPaymentDao;
  * <p>The {@code params} JSON built here uses the exact same keys that {@code GenerateBankPayment}
  * normalizes: {@code template}, {@code end_to_end_id}, {@code creditor_name}, {@code amount},
  * {@code currency_id}, {@code description}, {@code creditor_iban}. Template selection is
- * currency-driven — {@code SEPA} for EUR, {@code FPS} for GBP — any other currency must already
- * have been rejected by the caller's eligibility check (see
- * {@code PaymentRegistrationService#validatePisEligibility}) before this class is reached.
+ * currency-driven — {@code SEPA} for EUR, {@code DOMESTIC} for USD, {@code FPS} for GBP — and the
+ * currency that drives it is the DEBTOR ACCOUNT's, not the invoice's (ETP-5084), because that is
+ * the currency the money actually leaves the bank in. Any other account currency must already have
+ * been rejected by the caller's eligibility check (see
+ * {@code PisPaymentService#validatePisEligibility}) before this class is reached.
  */
 final class PisPaymentBridge {
 
@@ -73,6 +78,8 @@ final class PisPaymentBridge {
   private static final String KEY_DESCRIPTION = "description";
   private static final String TEMPLATE_SEPA = "SEPA";
   private static final String TEMPLATE_FPS = "FPS";
+  private static final String TEMPLATE_DOMESTIC = "DOMESTIC";
+  private static final String CURRENCY_USD = "USD";
   private static final String CURRENCY_GBP = "GBP";
 
   private static final Logger log = LogManager.getLogger(PisPaymentBridge.class);
@@ -98,6 +105,9 @@ final class PisPaymentBridge {
    */
   private static final String PIS_RETURN_SERVLET_PATH = "/sws/pis-return";
 
+  private static final String HEADER_FORWARDED_PROTO = "X-Forwarded-Proto";
+  private static final String HEADER_FORWARDED_HOST = "X-Forwarded-Host";
+
   private PisPaymentBridge() {
   }
 
@@ -109,9 +119,14 @@ final class PisPaymentBridge {
    * <p>The payment-derived fields (end-to-end id, creditor name, amount, currency, description)
    * are set here; the template and creditor account identifiers come from {@code pisInput} — the
    * user's choices in the SPA (mirroring the classic "Generate Bank Payment" dialog). When the
-   * template is missing it defaults from the currency (EUR→SEPA, GBP→FPS) for backwards
-   * compatibility. {@code GenerateBankPayment} validates which creditor fields are required per
-   * template.
+   * template is missing it defaults from the DEBTOR ACCOUNT's currency (EUR→SEPA, USD→DOMESTIC,
+   * GBP→FPS) for backwards compatibility. {@code GenerateBankPayment} validates which creditor
+   * fields are required per template.
+   *
+   * <p><b>Currency (ETP-5084).</b> The bank is instructed in the account's currency, so a payment
+   * whose invoice was in another currency is sent with its already-converted
+   * {@code financialTransactionAmount} — not {@code getAmount()}, which stays in the invoice
+   * currency. See {@link #bankAmountFor}.
    *
    * @param payment  the draft {@link FIN_Payment} to submit for a real bank transfer
    * @param pisInput template + creditor fields, keyed by the orchestrator's parameter names
@@ -126,9 +141,10 @@ final class PisPaymentBridge {
       JSONObject pisInput, HttpServletRequest request) throws JSONException {
     String apiKey = BankIntegrationUtils.getPsd2ApiKey(OBContext.getOBContext().getCurrentClient());
 
+    Currency bankCurrency = bankCurrencyFor(payment);
     JSONObject params = pisInput != null ? pisInput : new JSONObject();
     if (!params.has(KEY_TEMPLATE) || StringUtils.isBlank(params.optString(KEY_TEMPLATE, null))) {
-      params.put(KEY_TEMPLATE, templateForCurrency(payment.getCurrency().getISOCode()));
+      params.put(KEY_TEMPLATE, templateForCurrency(bankCurrency.getISOCode()));
     }
     // The payment's own documentNo is only the default. A retry passes its own reference, because
     // end-to-end ids must be unique per debtor account and resending this one verbatim risks a
@@ -137,8 +153,8 @@ final class PisPaymentBridge {
       params.put(BankIntegrationConstants.END_TO_END_ID, payment.getDocumentNo());
     }
     params.put(BankIntegrationConstants.CREDITOR_NAME, payment.getBusinessPartner().getName());
-    params.put(KEY_AMOUNT, payment.getAmount().toString());
-    params.put(KEY_CURRENCY_ID, payment.getCurrency().getId());
+    params.put(KEY_AMOUNT, bankAmountFor(payment, bankCurrency).toString());
+    params.put(KEY_CURRENCY_ID, bankCurrency.getId());
     params.put(KEY_DESCRIPTION, descriptionFor(payment));
 
     // Salt Edge returns to our own servlet, which resolves the status server-side and only then
@@ -149,7 +165,7 @@ final class PisPaymentBridge {
 
     // Reuse Classic's exact payload/validation/persistence via its now-public processPayment.
     BankIntegrationPISUtils.PISCreatePaymentResult result = new GenerateBankPayment()
-        .processPayment(payment, params, apiKey, request, resolveBackendReturnUrl());
+        .processPayment(payment, params, apiKey, request, resolveBackendReturnUrl(request));
     persistAppReturnUrl(result.getPaymentId(), appReturnUrl);
     return result;
   }
@@ -164,44 +180,154 @@ final class PisPaymentBridge {
    * (invoice + selected account here, the FIN_Payment there). Validation, payload shape and
    * persistence are therefore identical.
    *
+   * @param bankAmount
+   *     the amount to instruct the bank for, already expressed in {@code account}'s currency. When
+   *     the invoice is in another currency the caller converted it (ETP-5084) with the very same
+   *     rate the replayed {@code FIN_Payment} is booked at, so what leaves the bank and what is
+   *     posted to the ledger agree by construction. Never the raw invoice-currency figure.
    * @param endToEndId
    *     the bank reference for this attempt; the caller guarantees it is unique, since with no
    *     payment there is no {@code documentNo} to borrow and a reused reference risks a duplicate
    *     rejection at the bank
    */
   static BankIntegrationPISUtils.PISCreatePaymentResult initiateDeferredPisPayment(Invoice invoice,
-      FIN_FinancialAccount account, BigDecimal amount, String endToEndId, JSONObject pisInput,
+      FIN_FinancialAccount account, BigDecimal bankAmount, String endToEndId, JSONObject pisInput,
       HttpServletRequest request) throws JSONException {
     String apiKey = BankIntegrationUtils.getPsd2ApiKey(OBContext.getOBContext().getCurrentClient());
 
     JSONObject params = pisInput != null ? pisInput : new JSONObject();
     if (!params.has(KEY_TEMPLATE) || StringUtils.isBlank(params.optString(KEY_TEMPLATE, null))) {
-      params.put(KEY_TEMPLATE, templateForCurrency(invoice.getCurrency().getISOCode()));
+      params.put(KEY_TEMPLATE, templateForCurrency(account.getCurrency().getISOCode()));
     }
     params.put(BankIntegrationConstants.END_TO_END_ID, endToEndId);
     params.put(BankIntegrationConstants.CREDITOR_NAME, invoice.getBusinessPartner().getName());
-    params.put(KEY_AMOUNT, amount.toString());
-    params.put(KEY_CURRENCY_ID, invoice.getCurrency().getId());
+    params.put(KEY_AMOUNT, bankAmount.toString());
+    params.put(KEY_CURRENCY_ID, account.getCurrency().getId());
     params.put(KEY_DESCRIPTION, invoice.getDocumentNo());
 
     GenerateBankPayment.PisRequestContext context = GenerateBankPayment.PisRequestContext.of(
-        account, invoice.getBusinessPartner(), amount, invoice.getCurrency(), endToEndId,
+        account, invoice.getBusinessPartner(), bankAmount, account.getCurrency(), endToEndId,
         invoice.getDocumentNo());
 
     String appReturnUrl = resolveGoReturnUrl(request);
     BankIntegrationPISUtils.PISCreatePaymentResult result = new GenerateBankPayment()
-        .processPayment(context, params, apiKey, request, resolveBackendReturnUrl());
+        .processPayment(context, params, apiKey, request, resolveBackendReturnUrl(request));
     persistAppReturnUrl(result.getPaymentId(), appReturnUrl);
     return result;
   }
 
   /**
-   * Absolute URL of {@link PisReturnCallbackServlet}, built from the instance's own configured base
-   * URL — the same {@link BankIntegrationUrlUtils#buildBaseUrl()} PSD2 uses for its own default
-   * {@code /pisPaymentCallback}, so both callbacks resolve identically in every environment.
+   * Absolute URL of {@link PisReturnCallbackServlet}, the address Salt Edge sends the browser back
+   * to after SCA.
+   *
+   * <p>Taken from the request that is initiating the payment, because that request already carries
+   * the address the browser is actually reaching this server at: the deployed context path comes
+   * from Tomcat itself, so it cannot be doubled, and the host is whatever the proxy is publishing.
+   *
+   * <p><b>Why not the configured base URL alone.</b> {@link BankIntegrationUrlUtils#buildBaseUrl()}
+   * composes {@code context.url} with {@code context.name}. That holds for PSD2's own convention
+   * ({@code context.url} = bare server, as its README documents), but Etendo's own
+   * {@code Openbravo.properties.template} ships {@code context.url} WITH the context path — and on
+   * a server configured that way the result repeats it, so Salt Edge was sent to
+   * {@code https://host/etendo/etendo/sws/pis-return}. That path matches no servlet mapping and the
+   * user landed on Etendo's generic error page after paying (ETP-4895). PSD2's helper is shared
+   * with Classic and keeps its convention untouched; the collapse below is applied on this side.
+   *
+   * <p>The configured base URL is still the fallback, for a request that cannot say where it is
+   * publicly reachable — behind a proxy that forwards no {@code X-Forwarded-*}, Tomcat sees its own
+   * internal address, which is useless to a bank redirecting a browser.
    */
-  private static String resolveBackendReturnUrl() {
-    return StringUtils.removeEnd(BankIntegrationUrlUtils.buildBaseUrl(), "/") + PIS_RETURN_SERVLET_PATH;
+  private static String resolveBackendReturnUrl(HttpServletRequest request) {
+    String fromRequest = publicBaseFromRequest(request);
+    String base = fromRequest != null ? fromRequest
+        : collapseRepeatedContext(BankIntegrationUrlUtils.buildBaseUrl());
+    String returnUrl = StringUtils.removeEnd(base, "/") + PIS_RETURN_SERVLET_PATH;
+    // One line per initiated transfer (a handful a day), and the only way to tell from a server's
+    // logs which of the two branches produced the address the bank was given.
+    log.info("PIS return URL: {} (from {}; X-Forwarded-Proto={}, X-Forwarded-Host={}, Host={})",
+        returnUrl, fromRequest != null ? "request" : "context.url",
+        header(request, HEADER_FORWARDED_PROTO), header(request, HEADER_FORWARDED_HOST),
+        header(request, "Host"));
+    return returnUrl;
+  }
+
+  /**
+   * Where this server is publicly reachable, according to the request being served, or {@code null}
+   * when that cannot be established.
+   *
+   * <p>{@code X-Forwarded-Proto} / {@code X-Forwarded-Host} win when the proxy sets them (each may
+   * carry a comma-separated chain — the first entry is the original client-facing hop). Otherwise
+   * the request's own scheme and host are used, which is correct for a directly exposed Tomcat and
+   * wrong behind a silent proxy — hence the reachability check: an address a bank cannot redirect a
+   * browser to is worse than falling back to the configured one.
+   */
+  private static String publicBaseFromRequest(HttpServletRequest request) {
+    if (request == null) {
+      return null;
+    }
+    String proto = firstHop(header(request, HEADER_FORWARDED_PROTO));
+    String host = firstHop(header(request, HEADER_FORWARDED_HOST));
+    if (proto == null) {
+      proto = request.getScheme();
+    }
+    if (host == null) {
+      host = request.getServerName() + defaultPortSuffix(request);
+    }
+    if (!isPubliclyAddressable(host)) {
+      return null;
+    }
+    return proto + "://" + host + StringUtils.trimToEmpty(request.getContextPath());
+  }
+
+  /** The first entry of a possibly comma-separated proxy header chain, or {@code null}. */
+  private static String firstHop(String headerValue) {
+    return StringUtils.trimToNull(StringUtils.substringBefore(StringUtils.trimToEmpty(headerValue), ","));
+  }
+
+  private static String header(HttpServletRequest request, String name) {
+    return request != null ? request.getHeader(name) : null;
+  }
+
+  /** {@code :port} unless it is the default for the scheme, which browsers omit. */
+  private static String defaultPortSuffix(HttpServletRequest request) {
+    int port = request.getServerPort();
+    boolean isDefault = ("http".equals(request.getScheme()) && port == 80)
+        || ("https".equals(request.getScheme()) && port == 443);
+    return isDefault || port <= 0 ? "" : ":" + port;
+  }
+
+  /**
+   * Whether a bank could redirect a browser to this host. Loopback and single-label names (a
+   * container or service name) are only reachable from inside the deployment.
+   */
+  private static boolean isPubliclyAddressable(String host) {
+    String name = StringUtils.substringBefore(StringUtils.trimToEmpty(host), ":");
+    if (StringUtils.isBlank(name) || StringUtils.equalsAnyIgnoreCase(name, "localhost", "127.0.0.1",
+        "::1", "0.0.0.0")) {
+      return false;
+    }
+    return StringUtils.contains(name, ".");
+  }
+
+  /**
+   * Undoes the context path {@link BankIntegrationUrlUtils#buildBaseUrl()} repeats when
+   * {@code context.url} already ends with {@code context.name}.
+   *
+   * <p>Deliberately narrow: it collapses only a base ending in exactly
+   * {@code /<context.name>/<context.name>}, the one shape that composition can produce. Anything
+   * else is passed through untouched, so a deployment that genuinely nests a path is not mangled.
+   */
+  private static String collapseRepeatedContext(String baseUrl) {
+    String name = StringUtils.trimToNull(
+        OBPropertiesProvider.getInstance().getOpenbravoProperties().getProperty("context.name"));
+    if (name == null || baseUrl == null) {
+      return baseUrl;
+    }
+    String bare = StringUtils.stripStart(name, "/");
+    String doubled = "/" + bare + "/" + bare;
+    return StringUtils.endsWith(baseUrl, doubled)
+        ? StringUtils.removeEnd(baseUrl, "/" + bare)
+        : baseUrl;
   }
 
   /**
@@ -259,8 +385,65 @@ final class PisPaymentBridge {
     return StringUtils.removeEnd(origin, "/") + PIS_CALLBACK_PATH;
   }
 
-  /** SEPA for EUR, FPS for GBP. Fallback only — the SPA normally sends the template explicitly. */
+  /**
+   * Payment template for the currency the transfer is instructed in — i.e. the DEBTOR ACCOUNT's
+   * currency, never the invoice's (ETP-5084): EUR → SEPA, USD → DOMESTIC, GBP → FPS.
+   *
+   * <p>Fallback only — the SPA normally sends the template explicitly, derived from the same
+   * account currency by {@code defaultPisTemplate} in {@code NewPaymentEntryModal.jsx}. Any other
+   * currency has already been rejected by {@code PisPaymentService.validatePisEligibility}; SEPA
+   * stays the default so an unforeseen code degrades instead of failing.
+   */
   private static String templateForCurrency(String isoCode) {
-    return CURRENCY_GBP.equalsIgnoreCase(isoCode) ? TEMPLATE_FPS : TEMPLATE_SEPA;
+    if (CURRENCY_GBP.equalsIgnoreCase(isoCode)) {
+      return TEMPLATE_FPS;
+    }
+    if (CURRENCY_USD.equalsIgnoreCase(isoCode)) {
+      return TEMPLATE_DOMESTIC;
+    }
+    return TEMPLATE_SEPA; // EUR and anything unforeseen
+  }
+
+  /**
+   * The currency the transfer is instructed in: the debtor financial account's (ETP-5084), falling
+   * back to the payment's own for a payment with no account set, which cannot be cross-currency
+   * anyway.
+   */
+  private static Currency bankCurrencyFor(FIN_Payment payment) {
+    Currency accountCurrency = payment.getAccount() != null
+        ? payment.getAccount().getCurrency()
+        : null;
+    return accountCurrency != null ? accountCurrency : payment.getCurrency();
+  }
+
+  /**
+   * The amount to instruct the bank for, in {@code bankCurrency}.
+   *
+   * <p>{@code FIN_Payment.amount} is denominated in the INVOICE currency, so for a cross-currency
+   * payment it is the wrong figure to send — the money leaves the account in the account's
+   * currency. The converted value already lives on the payment as {@code financialTransactionAmount}
+   * (written by {@link PaymentCurrencyConverter#applyTransactionAmountAndRate} at registration
+   * time), so a retry reuses it verbatim and cannot drift from what the ledger holds. Only if that
+   * column was never populated do we recompute from the stored rate; with neither we refuse rather
+   * than silently instruct an unconverted amount.
+   */
+  private static BigDecimal bankAmountFor(FIN_Payment payment, Currency bankCurrency) {
+    Currency paymentCurrency = payment.getCurrency();
+    if (bankCurrency == null || paymentCurrency == null
+        || StringUtils.equals(bankCurrency.getId(), paymentCurrency.getId())) {
+      return payment.getAmount();
+    }
+    BigDecimal txnAmount = payment.getFinancialTransactionAmount();
+    if (txnAmount != null && txnAmount.signum() != 0) {
+      return txnAmount;
+    }
+    BigDecimal rate = payment.getFinancialTransactionConvertRate();
+    if (rate != null && rate.signum() > 0) {
+      return PaymentCurrencyConverter.convertedAmount(payment.getAmount(), rate,
+          payment.getAccount());
+    }
+    throw new OBException("Payment " + payment.getDocumentNo() + " is in "
+        + paymentCurrency.getISOCode() + " but the bank account is in " + bankCurrency.getISOCode()
+        + ", and it carries no conversion rate, so the transfer amount cannot be determined.");
   }
 }

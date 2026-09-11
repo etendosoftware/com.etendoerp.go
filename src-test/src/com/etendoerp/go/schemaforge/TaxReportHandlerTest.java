@@ -52,6 +52,7 @@ import org.mockito.quality.Strictness;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.system.Language;
 import org.openbravo.model.common.enterprise.Organization;
 
 /**
@@ -77,6 +78,8 @@ class TaxReportHandlerTest {
   @Mock
   private Organization organization;
   @Mock
+  private Language language;
+  @Mock
   private Connection connection;
   @Mock
   private PreparedStatement preparedStatement;
@@ -98,6 +101,8 @@ class TaxReportHandlerTest {
     when(client.getId()).thenReturn("test-client-id");
     when(obContext.getCurrentOrganization()).thenReturn(organization);
     when(organization.getId()).thenReturn("test-org-id");
+    when(obContext.getLanguage()).thenReturn(language);
+    when(language.getLanguage()).thenReturn("en_US");
     when(obDal.getConnection()).thenReturn(connection);
     when(connection.prepareStatement(anyString())).thenReturn(preparedStatement);
   }
@@ -1126,7 +1131,8 @@ class TaxReportHandlerTest {
     assertEquals(200, handler.handle(buildPostContext(body)).getHttpStatus());
 
     List<Object> binds = captureBinds();
-    assertEquals(12, binds.size(), "3 converted columns (2 binds each) + join + 5 WHERE binds");
+    assertEquals(14, binds.size(),
+        "3 converted columns (2 binds each) + join + 2 language binds (ETP-5013) + 5 WHERE binds");
 
     // SELECT list: (targetCurrency, clientId) per converted amount column, in SELECT order.
     assertEquals("curr-001", binds.get(0));
@@ -1137,12 +1143,16 @@ class TaxReportHandlerTest {
     assertEquals("test-client-id", binds.get(5));
     // Join: target currency.
     assertEquals("curr-001", binds.get(6));
+    // ETP-5013: c_country_trl and ad_ref_list_trl language binds, right after the
+    // conversion params and before the WHERE ones.
+    assertEquals("en_US", binds.get(7), "c_country_trl language");
+    assertEquals("en_US", binds.get(8), "ad_ref_list_trl language");
     // WHERE, unchanged from before the fix.
-    assertEquals("N", binds.get(7), "isSOTrx for the purchase query");
-    assertEquals("test-client-id", binds.get(8));
-    assertEquals("test-org-id", binds.get(9));
-    assertEquals("2025-01-01", binds.get(10));
-    assertEquals("2025-12-31", binds.get(11));
+    assertEquals("N", binds.get(9), "isSOTrx for the purchase query");
+    assertEquals("test-client-id", binds.get(10));
+    assertEquals("test-org-id", binds.get(11));
+    assertEquals("2025-01-01", binds.get(12));
+    assertEquals("2025-12-31", binds.get(13));
   }
 
   /**
@@ -1156,12 +1166,14 @@ class TaxReportHandlerTest {
     assertEquals(200, handler.handle(buildPostContext(body)).getHttpStatus());
 
     List<Object> binds = captureBinds();
-    assertEquals(5, binds.size(), "only the WHERE binds");
-    assertEquals("Y", binds.get(0), "isSOTrx for the sales query");
-    assertEquals("test-client-id", binds.get(1));
-    assertEquals("test-org-id", binds.get(2));
-    assertEquals("2025-01-01", binds.get(3));
-    assertEquals("2025-12-31", binds.get(4));
+    assertEquals(7, binds.size(), "2 language binds (ETP-5013) + the WHERE binds");
+    assertEquals("en_US", binds.get(0), "c_country_trl language");
+    assertEquals("en_US", binds.get(1), "ad_ref_list_trl language");
+    assertEquals("Y", binds.get(2), "isSOTrx for the sales query");
+    assertEquals("test-client-id", binds.get(3));
+    assertEquals("test-org-id", binds.get(4));
+    assertEquals("2025-01-01", binds.get(5));
+    assertEquals("2025-12-31", binds.get(6));
   }
 
   /**

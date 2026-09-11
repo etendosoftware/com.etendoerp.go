@@ -53,13 +53,15 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+
 /**
  * Unit tests for {@link InventoryStockReportHandler}.
  *
- * <p>Covers: HTTP method guard (405 for non-POST), POST with no filters,
- * POST with product filter, POST with warehouse filter, empty result set,
- * exception path (500), and private helpers via reflection (parseIds,
- * buildNamedParams, toBigDecimal).
+ * <p>Covers: the ETP-5116 window-access gate (403 when denied, proceeds normally when granted),
+ * HTTP method guard (405 for non-POST), POST with no filters, POST with product filter, POST
+ * with warehouse filter, empty result set, exception path (500), and private helpers via
+ * reflection (parseIds, buildNamedParams, toBigDecimal).
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -85,12 +87,19 @@ class InventoryStockReportHandlerTest {
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBContext> obContextMock;
+  private MockedStatic<NeoAccessHelper> neoAccessHelperMock;
 
   @BeforeEach
   void setUp() {
     handler = new InventoryStockReportHandler();
     obDalMock = mockStatic(OBDal.class);
     obContextMock = mockStatic(OBContext.class);
+    neoAccessHelperMock = mockStatic(NeoAccessHelper.class);
+
+    // Access granted by default so every pre-existing test below (written before the ETP-5116
+    // gate existed) keeps exercising the report logic unchanged. The two dedicated access-gate
+    // tests override this per-test to cover the denied path.
+    neoAccessHelperMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
 
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
     obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
@@ -114,6 +123,62 @@ class InventoryStockReportHandlerTest {
     if (obContextMock != null) {
       obContextMock.close();
     }
+    if (neoAccessHelperMock != null) {
+      neoAccessHelperMock.close();
+    }
+  }
+
+  // ── ETP-5116 window-access gate ─────────────────────────────────────────
+
+  /**
+   * When the current role has {@code NeoAccessHelper#hasWindowAccess} for the "Informes de
+   * inventario" / Inventory Stock Report pseudo-window, the handler must proceed exactly as
+   * before this gate was added — a POST still reaches the query and returns its data.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testAccessGrantedProceedsNormally() throws Exception {
+    List<Object[]> rows = Collections.singletonList(
+        new Object[]{ "Main Warehouse", "Beverages", "P001", "Test Product", "Unit",
+            new BigDecimal("100"), new BigDecimal("10.50"), new BigDecimal("1050.00") });
+    mockQueryReturning(rows);
+
+    NeoResponse response = handler.handle(postContextNoBody());
+
+    assertEquals(200, response.getHttpStatus());
+    JSONObject responseObj = response.getBody().getJSONObject("response");
+    assertEquals(1, responseObj.getInt("count"));
+  }
+
+  /**
+   * When the current role does NOT have {@code NeoAccessHelper#hasWindowAccess} for the
+   * Inventory Stock Report window, {@code handle} must deny with a 403 before doing anything
+   * else — even for a well-formed POST — and must never reach the query (verified via the
+   * session/native-query mocks never being touched).
+   */
+  @Test
+  void testAccessDeniedReturns403BeforeQuery() {
+    neoAccessHelperMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
+
+    NeoResponse response = handler.handle(postContextNoBody());
+
+    assertEquals(403, response.getHttpStatus());
+    verify(session, org.mockito.Mockito.never()).createNativeQuery(anyString());
+  }
+
+  /** Same denial for a non-POST method — the gate must run before the method-not-allowed check. */
+  @Test
+  void testAccessDeniedReturns403BeforeMethodGuard() {
+    neoAccessHelperMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
+
+    NeoContext ctx = NeoContext.builder()
+        .specName("inventory")
+        .entityName("stock-report")
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .build();
+
+    assertEquals(403, handler.handle(ctx).getHttpStatus());
   }
 
   private NeoContext postContext(JSONObject body) {

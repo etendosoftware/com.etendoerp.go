@@ -32,6 +32,8 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 
 import com.etendoerp.copilot.toolpack.webhooks.SimSearch;
+import com.etendoerp.go.schemaforge.util.NeoLanguage;
+import com.etendoerp.go.schemaforge.util.NeoTrl;
 import com.smf.securewebservices.utils.WSResult;
 
 /** Tests for {@link NeoSimSearchEndpoint}. */
@@ -151,6 +153,65 @@ public class NeoSimSearchEndpointTest {
 
       assertEquals(200, resp.getHttpStatus());
       simSearchMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void translatedTermIsRewrittenToTheBaseNameBeforeDelegating() throws Exception {
+    // SimSearch only ever compares trigrams against the BASE row — translated text lives in a
+    // sibling *_Trl table it never reads — so a Spanish session searching "España" scores 0.083
+    // against "Spain" and resolves nothing. Substituting the base name first is what makes the
+    // match possible; SimSearch itself is untouched and still does the matching.
+    NeoSimSearchEndpoint endpoint = new NeoSimSearchEndpoint();
+    HttpServletRequest req = requestWith("Country", "[\"España\"]", "1", "30");
+
+    WSResult result = mock(WSResult.class);
+    when(result.getJSONResponse()).thenReturn(mock(JSONObject.class));
+
+    try (MockedStatic<SimSearch> simSearchMock = mockStatic(SimSearch.class);
+        MockedStatic<NeoLanguage> language = mockStatic(NeoLanguage.class);
+        MockedStatic<NeoTrl> trl = mockStatic(NeoTrl.class)) {
+      language.when(NeoLanguage::currentCode).thenReturn("es_ES");
+      trl.when(() -> NeoTrl.baseNameForTranslation("Country", "España", "es_ES"))
+          .thenReturn("Spain");
+      simSearchMock
+          .when(() -> SimSearch.handleSimSearch(anyString(), anyString(), anyInt(), anyString()))
+          .thenReturn(result);
+
+      NeoResponse resp = endpoint.handle(req);
+
+      assertEquals(200, resp.getHttpStatus());
+      simSearchMock.verify(
+          () -> SimSearch.handleSimSearch("Spain", "Country", 1, "30"), times(1));
+    }
+  }
+
+  @Test
+  public void untranslatableTermIsDelegatedVerbatim() throws Exception {
+    // No translation row, no *_Trl sibling, or a translation shared by several base rows:
+    // NeoTrl returns null and the request behaves exactly as it did before translation existed.
+    // This fall-through is what keeps typo tolerance and base-language sessions unchanged.
+    NeoSimSearchEndpoint endpoint = new NeoSimSearchEndpoint();
+    HttpServletRequest req = requestWith("Country", "[\"Sparta\"]", "1", "30");
+
+    WSResult result = mock(WSResult.class);
+    when(result.getJSONResponse()).thenReturn(mock(JSONObject.class));
+
+    try (MockedStatic<SimSearch> simSearchMock = mockStatic(SimSearch.class);
+        MockedStatic<NeoLanguage> language = mockStatic(NeoLanguage.class);
+        MockedStatic<NeoTrl> trl = mockStatic(NeoTrl.class)) {
+      language.when(NeoLanguage::currentCode).thenReturn("es_ES");
+      trl.when(() -> NeoTrl.baseNameForTranslation(anyString(), anyString(), anyString()))
+          .thenReturn(null);
+      simSearchMock
+          .when(() -> SimSearch.handleSimSearch(anyString(), anyString(), anyInt(), anyString()))
+          .thenReturn(result);
+
+      NeoResponse resp = endpoint.handle(req);
+
+      assertEquals(200, resp.getHttpStatus());
+      simSearchMock.verify(
+          () -> SimSearch.handleSimSearch("Sparta", "Country", 1, "30"), times(1));
     }
   }
 }
