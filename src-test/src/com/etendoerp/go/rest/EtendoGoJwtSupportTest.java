@@ -172,9 +172,9 @@ class EtendoGoJwtSupportTest {
 
       EtendoGoJwtSupport.RoleListData data = EtendoGoJwtSupport.loadRoleListData("user-id");
 
-      assertNotNull(data.roleArray);
-      assertEquals(0, data.roleArray.length());
-      assertNull(data.firstRoleId);
+      assertNotNull(data.getRoleArray());
+      assertEquals(0, data.getRoleArray().length());
+      assertNull(data.getFirstRoleId());
       verify(query).setParameter("userId", "user-id");
     }
 
@@ -188,9 +188,9 @@ class EtendoGoJwtSupportTest {
 
       EtendoGoJwtSupport.RoleListData data = EtendoGoJwtSupport.loadRoleListData("user-id");
 
-      assertEquals("role-1", data.firstRoleId);
-      assertEquals(2, data.roleArray.length());
-      JSONObject firstRole = data.roleArray.getJSONObject(0);
+      assertEquals("role-1", data.getFirstRoleId());
+      assertEquals(2, data.getRoleArray().length());
+      JSONObject firstRole = data.getRoleArray().getJSONObject(0);
       assertEquals("role-1", firstRole.getString("id"));
       assertEquals("Admin", firstRole.getString("name"));
       JSONArray orgList = firstRole.getJSONArray("orgList");
@@ -199,7 +199,7 @@ class EtendoGoJwtSupportTest {
       assertEquals("Main Org", orgList.getJSONObject(0).getString("name"));
       assertEquals("org-2", orgList.getJSONObject(1).getString("id"));
       assertEquals("Second Org", orgList.getJSONObject(1).getString("name"));
-      assertEquals(0, data.roleArray.getJSONObject(1).getJSONArray("orgList").length());
+      assertEquals(0, data.getRoleArray().getJSONObject(1).getJSONArray("orgList").length());
       verify(session, times(1)).createNativeQuery(anyString());
       verify(query).setParameter("userId", "user-id");
       verify(query).list();
@@ -435,24 +435,23 @@ class EtendoGoJwtSupportTest {
   class RoleListDataTest {
 
     @Test
-    @DisplayName("fields are accessible and default to null")
+    @DisplayName("getters default to null when constructed with null values")
     void defaultValues() {
-      EtendoGoJwtSupport.RoleListData data = new EtendoGoJwtSupport.RoleListData();
+      EtendoGoJwtSupport.RoleListData data = new EtendoGoJwtSupport.RoleListData(null, null);
 
-      assertNull(data.firstRoleId);
-      assertNull(data.roleArray);
+      assertNull(data.getFirstRoleId());
+      assertNull(data.getRoleArray());
     }
 
     @Test
-    @DisplayName("fields can be assigned")
+    @DisplayName("getters return the values passed to the constructor")
     void assignFields() {
-      EtendoGoJwtSupport.RoleListData data = new EtendoGoJwtSupport.RoleListData();
-      data.firstRoleId = "role-abc";
-      data.roleArray = new JSONArray();
+      JSONArray roleArray = new JSONArray();
+      EtendoGoJwtSupport.RoleListData data = new EtendoGoJwtSupport.RoleListData("role-abc", roleArray);
 
-      assertEquals("role-abc", data.firstRoleId);
-      assertNotNull(data.roleArray);
-      assertEquals(0, data.roleArray.length());
+      assertEquals("role-abc", data.getFirstRoleId());
+      assertNotNull(data.getRoleArray());
+      assertEquals(0, data.getRoleArray().length());
     }
   }
 

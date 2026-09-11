@@ -25,6 +25,7 @@ import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAuditTokenRefresh;
 
 /**
  * Drives the pre/post hook pipeline for sub-endpoint dispatch. Resolves the
@@ -117,21 +118,30 @@ class NeoHookDispatcher {
     try {
       NeoResponse preResult = handler.handle(hookCtx);
       if (preResult != null) {
-        hookCtx.setPreviousResult(preResult);
-        NeoResponse afterResult = handler.afterHandle(hookCtx);
-        return afterResult != null ? afterResult : preResult;
+        return runPostHook(handler, hookCtx, preResult);
       }
 
       NeoResponse defaultResult = defaultAction.get();
-
-      hookCtx.setPreviousResult(defaultResult);
-      NeoResponse afterResult = handler.afterHandle(hookCtx);
-      return afterResult != null ? afterResult : defaultResult;
+      return runPostHook(handler, hookCtx, defaultResult);
 
     } catch (Exception e) {
       log.error("Error in hook dispatch for {}/{}: {}",
           endpointType, entityName, e.getMessage(), e);
       return NeoResponse.error(500, HOOK_ERROR_MSG);
     }
+  }
+
+  /**
+   * Runs the post-hook and refreshes the optimistic-lock token on the response.
+   * Sub-endpoint handlers can persist changes during {@code afterHandle()}, so
+   * the response must carry the version produced by those writes.
+   */
+  private NeoResponse runPostHook(NeoHandler handler, NeoContext hookCtx,
+      NeoResponse previousResult) {
+    hookCtx.setPreviousResult(previousResult);
+    NeoResponse afterResult = handler.afterHandle(hookCtx);
+    NeoResponse effectiveResult = afterResult != null ? afterResult : previousResult;
+    NeoAuditTokenRefresh.refreshInResponse(hookCtx, effectiveResult);
+    return effectiveResult;
   }
 }

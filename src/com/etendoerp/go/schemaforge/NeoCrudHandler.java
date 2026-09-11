@@ -452,11 +452,18 @@ class NeoCrudHandler {
     params.put(JsonConstants.WINDOW_ID, adTab.getWindow().getId());
     params.put(JsonConstants.NO_ACTIVE_FILTER, "true");
 
-    if (context.getRecordId() != null) {
-      params.put(JsonConstants.ID, context.getRecordId());
-    }
+    // ETP-5195, R3: query params are merged in FIRST, and the path-derived id (when present) is
+    // applied LAST, so it is always authoritative. Previously the path id was set before the
+    // query params were merged in, so a caller could pass a conflicting "id" on the query string
+    // (e.g. DELETE /sws/neo/user/user/<ordinary-id>?id=<protected-id>) and silently redirect the
+    // CRUD operation to a different record than the one guards like
+    // UserRoleAssignmentHandler#rejectDangerousDelete evaluated. When there is no path id, a
+    // query "id" still flows through unchanged, exactly as before.
     if (context.getQueryParams() != null) {
       params.putAll(context.getQueryParams());
+    }
+    if (context.getRecordId() != null) {
+      params.put(JsonConstants.ID, context.getRecordId());
     }
 
     normalizeBooleanCriteria(params, dalEntityName);
@@ -624,7 +631,9 @@ class NeoCrudHandler {
   private NeoResponse detectStaleRecord(NeoContext context, String dalEntityName) {
     JSONObject body = context.getRequestBody();
     String clientValue = body == null ? null : body.optString(FIELD_UPDATED, null);
-    if (!NeoRecordVersion.isStale(dalEntityName, context.getRecordId(), clientValue)) {
+    String route = NeoRecordVersion.routeOf(context.getHttpMethod(), context.getSpecName(),
+        context.getEntityName(), context.getRecordId());
+    if (!NeoRecordVersion.isStale(dalEntityName, context.getRecordId(), clientValue, route)) {
       return null;
     }
     NeoWriteRefusalLog.staleRecord(context, clientValue);

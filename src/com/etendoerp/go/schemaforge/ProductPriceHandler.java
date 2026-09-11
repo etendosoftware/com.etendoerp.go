@@ -17,7 +17,9 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
 import java.util.List;
+import java.util.function.Consumer;
 
 import javax.inject.Named;
 
@@ -26,16 +28,15 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Order;
-import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.model.pricing.pricelist.PriceListVersion;
+import org.openbravo.model.pricing.pricelist.ProductPrice;
 
 import com.etendoerp.go.schemaforge.util.NeoDateFormat;
+
 
 
 /**
@@ -167,6 +168,14 @@ public class ProductPriceHandler implements NeoHandler {
     boolean isSales = Boolean.TRUE.equals(pl.isSalesPriceList());
     item.put("salesPriceList", isSales);
     item.put("priceListVersion$salesPriceList", isSales);
+    // ETP-5245: the products import picks the tariff to write an imported price on straight from
+    // this selector, and until now it could only tell sales from purchase — so it took whichever
+    // version happened to come first. Exposing the tenant's own default flag lets it agree with
+    // PriceListVersionResolver, PriceListPicker and the ETGO_PRODUCT_*_PRICE computed columns
+    // about which tariff is "the" one.
+    boolean isDefault = Boolean.TRUE.equals(pl.isDefault());
+    item.put("default", isDefault);
+    item.put("priceListVersion$default", isDefault);
     item.put("priceList", pl.getId());
     item.put("priceList$_identifier", pl.getIdentifier());
   }
@@ -235,12 +244,20 @@ public class ProductPriceHandler implements NeoHandler {
     // ETP-5203: row[15] (updated) is mandatory for every PUT/PATCH by
     // NeoCrudHandler#validateUpdateRequest (ETP-5073) — omitting it left the
     // Product window's Price tab with no way to echo the value back, so every
-    // edit 400'd with missing_updated. Canonicalized through NeoDateFormat since a
-    // native-SQL Timestamp prints in the raw Postgres shape, mirroring
-    // ChartOfAccountsHandler#toAccountJson.
-    String rawUpdated = row[15] != null ? String.valueOf(row[15]) : null;
-    String canonicalUpdated = rawUpdated != null ? NeoDateFormat.toCanonical(rawUpdated, true) : null;
-    String updatedValue = canonicalUpdated != null ? canonicalUpdated : rawUpdated;
+    // edit 400'd with missing_updated.
+    //
+    // ETP-5245/ETP-5255: emitted through NeoDateFormat.toAuditToken, NOT toCanonical. This is a
+    // concurrency token, so it is read back by JsonUtils.createDateTimeFormat(), whose offset
+    // is MANDATORY — an offsetless value is re-read as UTC, and the check then refused every
+    // edit on this tab as stale by exactly the server's UTC offset. toCanonical is the wrong
+    // tool here because it deliberately DROPS the offset; see toAuditToken's javadoc. row[15] is
+    // the raw `updated` column, so a native-SQL Timestamp reaches the formatter directly.
+    Object rawUpdated = row[15];
+    String auditToken = NeoDateFormat.toAuditToken(rawUpdated);
+    // A token we could not render does not mean "no value": per NeoDateFormat's contract the
+    // original must go through verbatim, since a null `updated` trips the mandatory-token guard.
+    String rawFallback = rawUpdated != null ? String.valueOf(rawUpdated) : null;
+    String updatedValue = auditToken != null ? auditToken : rawFallback;
     item.put(FIELD_UPDATED, updatedValue != null ? updatedValue : JSONObject.NULL);
     return item;
   }
@@ -275,6 +292,11 @@ public class ProductPriceHandler implements NeoHandler {
           body.put(PRICE_LIST_VERSION_FIELD, versionId);
         }
       }
+
+      NeoResponse upserted = updateInsteadOfDuplicating(body);
+      if (upserted != null) {
+        return upserted;
+      }
     } catch (Exception e) {
       log.warn("Could not enrich ProductPrice defaults: {}", e.getMessage());
     }
@@ -283,52 +305,117 @@ public class ProductPriceHandler implements NeoHandler {
   }
 
   /**
-   * Resolve the ID of the most recent active sales price list version for the
-   * current client/org using OBDal — org-specific versions take priority over
-   * shared (org=0) ones.
+   * Turns a POST for a tariff the product is already priced on into an update of that row.
+   *
+   * <p>{@code M_ProductPrice} is unique on {@code (M_PriceList_Version_ID, M_Product_ID)}, so a
+   * second POST for the same pair used to fail with a raw constraint violation. Since ETP-5245
+   * that pair is much easier to hit: {@code ProductDefaultsHandler} seeds a zero-priced row on
+   * each default tariff the moment a product is created, and the products import then posts the
+   * real price for the very same tariff in the same {@code /batch} call — the product operation
+   * runs first, so the seeded row is always already there. Updating is also what the user means
+   * either way: naming a tariff twice is "set the price on this tariff", not "add a duplicate".
+   *
+   * <p>Returning a non-null response short-circuits the default CRUD
+   * ({@code NeoServletSupport#handleWithHooks}), so the insert never runs. The payload is read
+   * back through {@link #PRICE_LIST_SQL} so the caller gets exactly the same row shape a GET
+   * would return.
+   *
+   * @param body the enriched request body, already carrying product and price list version
+   * @return the updated row wrapped in a NEO list response, or {@code null} when there is no
+   *     existing row and the normal insert should proceed
    */
-  private String resolveDefaultSalesPriceListVersionId(OBContext obContext) {
-    if (obContext == null || obContext.getCurrentClient() == null) {
+  private NeoResponse updateInsteadOfDuplicating(JSONObject body) {
+    String productId = body.optString(PRODUCT_FIELD, null);
+    String versionId = body.optString(PRICE_LIST_VERSION_FIELD, null);
+    if (StringUtils.isBlank(productId) || StringUtils.isBlank(versionId)) {
       return null;
     }
-
-    String clientId = obContext.getCurrentClient().getId();
-    String orgId = obContext.getCurrentOrganization() != null
-        ? obContext.getCurrentOrganization().getId() : "0";
 
     try {
       OBContext.setAdminMode();
       try {
-        // Try org-specific version first; if not found, fall back to shared org=0
-        String[] orgsToTry = "0".equals(orgId)
-            ? new String[]{ "0" }
-            : new String[]{ orgId, "0" };
-
-        for (String targetOrg : orgsToTry) {
-          OBCriteria<PriceListVersion> crit = OBDal.getInstance()
-              .createCriteria(PriceListVersion.class);
-          crit.add(Restrictions.eq(PriceListVersion.PROPERTY_CLIENT + ".id", clientId));
-          crit.add(Restrictions.eq(PriceListVersion.PROPERTY_ORGANIZATION + ".id", targetOrg));
-          crit.add(Restrictions.eq(PriceListVersion.PROPERTY_ACTIVE, true));
-          crit.createAlias(PriceListVersion.PROPERTY_PRICELIST, "pl");
-          crit.add(Restrictions.eq("pl." + PriceList.PROPERTY_ACTIVE, true));
-          crit.add(Restrictions.eq("pl." + PriceList.PROPERTY_SALESPRICELIST, true));
-          crit.addOrder(Order.desc(PriceListVersion.PROPERTY_VALIDFROMDATE));
-          crit.setMaxResults(1);
-
-          List<PriceListVersion> results = crit.list();
-          if (!results.isEmpty()) {
-            return results.get(0).getId();
-          }
+        ProductPrice existing = ProductHandlerUtils.findExistingPrice(productId, versionId);
+        if (existing == null) {
+          return null;
         }
+        // The row may have been deactivated by hand. Someone posting a price for that tariff
+        // means it back in use, and leaving it inactive would keep it invisible while still
+        // holding the unique pair.
+        existing.setActive(true);
+        applyPrice(body, STANDARD_PRICE_FIELD, existing::setStandardPrice);
+        applyPrice(body, LIST_PRICE_FIELD, existing::setListPrice);
+        applyPrice(body, PRICE_LIMIT, existing::setPriceLimit);
+        OBDal.getInstance().save(existing);
+        OBDal.getInstance().flush();
+        return readBackPrice(productId, existing.getId());
       } finally {
         OBContext.restorePreviousMode();
       }
     } catch (Exception e) {
-      log.warn("Could not resolve default sales price list version: {}", e.getMessage());
+      log.error("Could not update the existing price of product {} on version {}: {}",
+          productId, versionId, e.getMessage(), e);
+      return NeoResponse.error(500, "Error updating product price");
     }
-
-    return null;
   }
 
+  /**
+   * Copies one price field from the request body onto the existing row, leaving it untouched when
+   * the caller did not send that field.
+   *
+   * @param body the request body
+   * @param field the field name to read
+   * @param setter the setter to apply the parsed amount to
+   */
+  private static void applyPrice(JSONObject body, String field, Consumer<BigDecimal> setter) {
+    if (!body.has(field) || body.isNull(field)) {
+      return;
+    }
+    String raw = body.optString(field, null);
+    if (StringUtils.isBlank(raw)) {
+      return;
+    }
+    try {
+      setter.accept(new BigDecimal(raw.trim()));
+    } catch (NumberFormatException e) {
+      log.warn("Ignoring unparseable {} value '{}' on product price update", field, raw);
+    }
+  }
+
+  /**
+   * Re-reads one price row through {@link #PRICE_LIST_SQL} so the response shape matches the GET.
+   *
+   * @param productId the product the row belongs to
+   * @param priceId the {@code M_ProductPrice_ID} to return
+   * @return the row wrapped in a NEO list response
+   * @throws Exception when the row cannot be serialised
+   */
+  private NeoResponse readBackPrice(String productId, String priceId) throws Exception {
+    NativeQuery<?> query = OBDal.getInstance().getSession().createNativeQuery(PRICE_LIST_SQL);
+    query.setParameter("productId", productId);
+    @SuppressWarnings("unchecked")
+    List<Object[]> rows = (List<Object[]>) query.list();
+    JSONArray data = new JSONArray();
+    for (Object[] row : rows) {
+      if (priceId.equals(String.valueOf(row[0]))) {
+        data.put(toPriceJson(row));
+      }
+    }
+    return ProductHandlerUtils.buildListResponse(data);
+  }
+
+  /**
+   * Resolve the ID of the sales price list version a new product price lands on when the caller
+   * did not name one.
+   *
+   * <p>Delegates to {@link PriceListVersionResolver#resolveDefaultVersionId(OBContext, boolean)},
+   * which prefers the list explicitly flagged {@code IsDefault} and only then falls back to the
+   * newest {@code ValidFromDate}. Before ETP-5245 this method ran that fallback alone, so it
+   * silently ignored the tenant's own choice of default tariff.
+   *
+   * @param obContext the context whose client/organisation scope the lookup runs in
+   * @return the default sales price list version id, or {@code null} if there is none
+   */
+  private String resolveDefaultSalesPriceListVersionId(OBContext obContext) {
+    return PriceListVersionResolver.resolveDefaultVersionId(obContext, true);
+  }
 }
