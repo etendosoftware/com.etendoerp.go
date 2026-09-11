@@ -43,9 +43,19 @@ public class JwtAuthUtils {
   private static final String BEARER_PREFIX = "Bearer ";
   private static final String CLAIM_USER = "user";
   private static final String CLAIM_ROLE = "role";
-  private static final String CLAIM_ORG = "organization";
   private static final String CLAIM_WAREHOUSE = "warehouse";
-  private static final String CLAIM_CLIENT = "client";
+  /**
+   * The two NEO session claims other servlets read directly off a decoded token to scope a
+   * request to its tenant. Public because this class is the module's single home for the claim
+   * NAMES, and the alternative is what {@code EtendoGoJwtServlet} was doing: repeating the bare
+   * literal, which Sonar's S1192 then answers by proposing the nearest same-valued constant —
+   * there, the onboarding progress-step ids {@code PROGRESS_CLIENT}/{@code PROGRESS_ORGANIZATION}.
+   * Those carry the same two values by coincidence, not by contract: binding token parsing to
+   * them would mean a renamed progress step silently breaks authentication.
+   */
+  public static final String CLAIM_ORG = "organization";
+  /** @see #CLAIM_ORG */
+  public static final String CLAIM_CLIENT = "client";
 
   private JwtAuthUtils() {
   }

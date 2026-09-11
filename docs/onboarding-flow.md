@@ -30,9 +30,10 @@ removed, or reordered.
  6. fiscal              — seed SII descriptions (AEATSII_DESCRIPTION)
  7. orgInfo             — wire org fiscal/address info from the signup form
  8. bankConnectionSync  — schedule the PSD2 daily bank-statement sync (non-fatal; wired live 2026-06-28)
- 9. bpGroupAcctPatch    — patch C_BP_Group_Acct columns the core trigger never populates (ETP-4720)
-10. acctdimVisibility   — force flat accounting-dimension visibility (gap K1, ETP-4854)
-11. baseline            — stamp the tenant's data-fix baseline (registerBaseline; always LAST)
+ 9. costingSchedule     — schedule the 5-minute Costing Background process (non-fatal, ETP-5190)
+10. bpGroupAcctPatch    — patch C_BP_Group_Acct columns the core trigger never populates (ETP-4720)
+11. acctdimVisibility   — force flat accounting-dimension visibility (gap K1, ETP-4854)
+12. baseline            — stamp the tenant's data-fix baseline (registerBaseline; always LAST)
 ```
 
 The `orgReady` and `fiscal` steps were added to fix the "environment not ready
@@ -186,8 +187,45 @@ auto-import statements. Has a post-commit companion,
 `activateSchedule(clientId)`, called right after `commitDalChanges` (not
 inside this chain) because the Quartz scheduler needs a committed row.
 
+### `OnboardingCostingScheduleService`
+Step 9 (ETP-5190). Same shape as step 8 and equally **non-fatal**: one
+`AD_Process_Request` per client running core's `CostingBackground` process every
+5 minutes, plus the post-commit `activateSchedule(clientId)` companion.
+
+Why it is needed: onboarding already imports a **validated** costing rule
+(`M_COSTING_RULE` is on `OnboardingDatasetDefinition`'s allowlist and the
+GOClient row ships `ISVALIDATED='Y'`), but nothing ever ran the process that
+consumes it, so no tenant calculated costs. Measured before the fix: 83
+validated costing rules across 74 clients, and **two** `CostingBackground`
+requests in the whole instance — both hand-made (core's F&B demo client, and
+GOClient). Over the same period the step-8 PSD2 schedule stood at 74/74.
+
+Three things worth knowing before touching it:
+
+- **It cannot be sampledata.** `referencedata/sampledata/GOClient/
+  AD_PROCESS_REQUEST.xml` *does* carry a `CostingBackground` row, which makes it
+  look as though tenants are covered — they are not. `AD_PROCESS_REQUEST` is on
+  the dataset's **EXCLUDED** list and is never imported, correctly: every dumped
+  row hardcodes GOClient's own user/role/client/org/warehouse inside its
+  `OB_CONTEXT` JSON. A Process Request is instance data, not model data.
+- **It must be per client.** Unlike `StoredColumnQueueScheduleStartup`, which
+  covers every tenant with one System (`client '0'`) request, `CostingBackground`
+  resolves what to cost with `ad_isorgincluded(o.id, :orgId, :clientId)` bound to
+  the request's own client and organization. A System request would match only
+  org `'0'` and silently cost nothing.
+- **The trigger fields are `timing='S'` + `frequency='2'` + `MINUTELY_INTERVAL=5`.**
+  `S2` is the key core's `TriggerProvider` maps to `repeatMinutelyForever`; it
+  reads the *minutely* interval, not the secondly one. Core's F&B demo client has
+  shipped exactly this shape since 2013.
+
+**Preventive only — the corrective half was declined.** Tenants onboarded
+before this step have no costing schedule and calculate no costs until someone
+adds the Process Request by hand in Classic. That was an explicit call on
+ETP-5190 (new tenants are enough), not a pending task: there is deliberately no
+`cli/src/data-fixes/` twin, unlike steps 10 and 11.
+
 ### `OnboardingAcctdimCentrallyMaintainedService`
-Step 10 (`forceFlatAccountingDimensionVisibility`, ETP-4854, gap K1). Backfills
+Step 11 (`forceFlatAccountingDimensionVisibility`, ETP-4854, gap K1). Backfills
 `C_AcctSchema_Element.isactive` per elementtype from the client's current
 effective `AD_Client.<Dim>_Acctdim_*` config, then flips
 `AD_Client.Acctdim_Centrally_Maintained` to `'N'` so the "Dimensiones
@@ -216,7 +254,7 @@ backfill is what makes that flat switch a reliable source for a tenant from birt
 `AccountingDimensionsSupport`'s own class javadoc for the full history.
 
 ### `OnboardingBaselineService`
-Step 11, always last. Stamps the data-fix baseline row (`applied_utc =
+Step 12, always last. Stamps the data-fix baseline row (`applied_utc =
 ONBOARDING_PROVISIONED_THROUGH`, a hardcoded cutoff — NOT `now()`) so the
 corrective data-fix runner knows which fixes a freshly-onboarded tenant
 already has natively and skips them. Single source of truth for the
@@ -243,7 +281,9 @@ sample business partners at all. Editing an XML for a non-listed table changes
 nothing for a new tenant.
 
 **Dataset content corrected by ETP-5079.** The bundled data now ships: price
-lists named "Tarifa de venta/compra principal"; a **single** warehouse
+lists named "Tarifa de venta/compra principal", both shipping `ISDEFAULT='Y'`
+so each is the default for its direction (ETP-5190 — the Product window's Price
+tab resolves the tariff through that flag); a **single** warehouse
 "Almacen Principal" (value `AG`) with one locator; **no** sample products —
 only the internal `ETGO_DTO` "Discount" product the inline-discount feature
 resolves at runtime, which is not sample data and must never be removed; **no**
@@ -347,6 +387,112 @@ account has zero environments, restores step + form, shows a one-time
 "progress restored" banner, and autosaves changes debounced (1.5 s) while the
 wizard is visible and not running.
 
+## First Steps Checklist (post-signup onboarding window)
+
+After an environment exists, the app shows a "First Steps" window that walks the
+user through the initial setup tasks. Its progress is persisted server-side in
+`ETGO_ACCOUNT.FIRST_STEPS` (nullable `VARCHAR(1000)` JSON blob:
+`{ "v": 1, "seen": true, "completed": ["company-data", "products"] }`), so the
+checklist keeps its state across logins and devices.
+
+### Which steps a tenant is shown (plan gate)
+
+The checklist is **shorter on a trial**. Two steps carry `productiveOnly` in
+`firstStepsConfig.js` — invoice numbering and the fiscal configuration — and are hidden while
+the tenant is on the free plan:
+
+| Plan | Steps shown | Counter |
+|---|---|---|
+| free / trial | create-account, company-data, products, contacts, team | `x/5` |
+| productive | the five above plus fiscal-config and invoice-sequence | `x/7` |
+
+The reason is functional, not cosmetic: a document series a tenant abandons after the trial
+numbers nothing, and the fiscal setup is what the productive environment gets created with.
+Before the gate a trial tenant could never finish the checklist — the two rows it had no way to
+act on held it at 5/7 permanently.
+
+**Where the plan comes from.** No endpoint answers "what plan is the environment I am inside
+on". `GET /sws/go/onboarding/first-steps` and `/sws/go/me` are account-scoped and do not know
+which client the shell opened; `POST /sws/go/login` returns only a JWT and the role list. So the
+browser derives it: `GET /sws/go/environments` reports `plan` per environment (ETP-4686) and the
+session's client id is in `localStorage.sf_auth_client_id` — `useTenantPlan` matches the two. It
+uses the same predicate as the company switcher's Demo/Productivo badge, so the badge and the
+checklist length cannot disagree.
+
+**An unknown plan shows everything.** `useTenantPlan` answers `null` when it cannot know — no
+platform token, a failed request, or a client id with no matching row — and
+`isProductivePlan(null)` is deliberately `true`. Hiding invoice numbering from a tenant that
+paid for it is a worse failure than showing a trial two extra rows, and it is also what every
+tenant saw before the gate existed.
+
+**The server allowlist is NOT gated.** `FIRST_STEPS_IDS` stays the full set of six toggleable
+ids: it has no notion of a plan, and a tenant that goes productive must be able to persist the
+two steps that just appeared. The narrowing happens client-side — `FirstStepsProvider` passes
+`toggleableStepIds(plan)` to `useFirstSteps` as its write allowlist, so a step the current plan
+does not show cannot be written by accident. The two lists are allowed to differ; only the
+client's may be the smaller one.
+
+**Progress is counted over the visible list**, not over the stored ids. A tenant that completed
+everything while productive and is later reported free (an `/environments` hiccup) would
+otherwise render `7/5`.
+
+Endpoints (session-token auth, same Bearer model as `/me`):
+
+- `GET  /sws/go/onboarding/first-steps` — returns `{ status, firstSteps }`;
+  `firstSteps` is the stored object or `null` when nothing has been saved yet.
+  Invalid stored JSON is logged as a warning and reported as `null`, never as an
+  error — a corrupt value can never lock the user out of the window.
+- `POST /sws/go/onboarding/first-steps` — body
+  `{ "firstSteps": { "v", "seen", "completed" } }` saves; `{ "firstSteps": null }`
+  clears the stored value.
+
+Both endpoints answer `401` without a valid `Authorization: Bearer <session_token>`
+header (via `runWithAuthenticatedAccount`, the same template the draft endpoints use).
+
+### Sanitization on write
+
+The client payload is never persisted as-is. `sanitizeFirstSteps` rebuilds the
+stored object field by field:
+
+| Field | Stored as |
+|---|---|
+| `v` | always `1` (`FIRST_STEPS_VERSION`), whatever the client sent |
+| `seen` | coerced to a real boolean, defaulting to `false` |
+| `completed` | the client array intersected with a fixed allowlist of step ids |
+
+The step-id allowlist is, in stored order:
+
+`company-data`, `fiscal-config`, `products`, `contacts`, `invoice-sequence`, `team`
+
+That is the order the checklist renders (`firstStepsConfig.js`), so a stored value reads
+the way the user saw it. The order is cosmetic — the frontend only tests membership — but
+keeping the two lists aligned is what makes a stored blob readable at a glance.
+
+Consequences of the intersection, all deliberate:
+
+- **Unknown step ids are dropped silently**, not rejected — an older or newer
+  frontend never gets a `400` for sending an id this backend does not know.
+- `create-account` is deliberately **not** allowlisted: it is implicit, the account
+  already exists. A client sending it has it dropped.
+- Non-string entries (numbers, `null`, nested objects) are dropped.
+- Duplicates collapse, and the stored array is always emitted in allowlist
+  order, so the persisted value is stable regardless of the order the client
+  sent its ids.
+- A `completed` value that is not an array at all is treated as empty.
+
+### Size cap
+
+The serialized value is capped at 1000 chars (`FIRST_STEPS_MAX_LENGTH`, matching
+the column width); a longer payload gets a `400 First steps payload is too large`.
+Because the sanitizer emits a fixed-shape object drawn from a closed allowlist,
+the current maximum output is well under 100 chars — the cap is a defensive guard
+that only becomes reachable if the allowlist grows substantially, and it exists so
+the endpoint can never write a value the column cannot hold.
+
+Unlike the onboarding draft, this value is **not** cleared by
+`POST /sws/go/onboarding` — the checklist is about what the user has done *after*
+the environment exists, so it must survive environment creation.
+
 ## Startup Access Self-Healer (`NeoAccessStartup`)
 
 `com.etendoerp.go.startup.NeoAccessStartup` is an `ApplicationInitializer`
@@ -395,3 +541,130 @@ self-healed existing tenants converge on the same access set.
   `AD_ROLE` row, so it can never trigger `AD_ROLE_TRG`'s destructive rebuild.
 - **Idempotent.** Re-running on the next restart grants nothing new.
 - **No SQL migration.** Existing databases self-heal on the next Tomcat restart.
+
+## Invoice numbering (First Steps step)
+
+Invoice numbering is configured in the **Document Sequence** window (`document-sequence`,
+AD window `112`), which the "Customize your invoices" First Steps step navigates to. There is no
+onboarding endpoint for it: the window is an ordinary NEO CRUD spec over `AD_Sequence`, so the
+prefix, suffix, starting number and next number are edited through the generic
+`/sws/neo/document-sequence` path like any other window.
+
+An earlier iteration of this step edited the sales and purchase prefixes inline through
+`GET`/`POST /sws/go/onboarding/invoice-sequence`. Both endpoints and
+`OnboardingInvoiceSequenceService` were removed when the window landed — a form that reached
+exactly two of a tenant's sequences was a narrower answer than the window, and keeping both
+meant two ways to write the same rows.
+
+### Prefix validation
+
+`DocumentSequenceHandler` (a `NeoHandler` bound to the spec's `Java_Qualifier`) rejects a prefix
+the Spanish fiscal localizations would refuse, **before** it is stored — see
+`docs/neo-headless-extensibility.md` for the handler pattern. Classic validates the same rules,
+but only inside `ProcessInvoiceTbaiHook.preProcess`, which runs when a *rectificative* invoice is
+completed in a TicketBAI-configured organization. A prefix chosen during onboarding therefore
+went unchecked for as long as it took to issue that first corrective invoice.
+
+The rules, taken from that hook:
+
+| Rule | Rejects |
+|---|---|
+| length | more than 20 characters |
+| lowercase / accents | `[a-záéíóúüñ]` |
+| forbidden letters | `[IOYWÑ]` |
+| character set | anything outside `A-Z0-9-` |
+
+They are applied **only when the organization's country is Spain** (`AD_OrgInfo` →
+`C_Location` → `C_Country.CountryCode = 'ES'`), because they are localization rules, not Etendo
+ones: `W`, for instance, is a perfectly ordinary prefix letter elsewhere. Widening or narrowing
+that gate is a Localization-team decision, not a GO one.
+
+
+## Tax identifier validation (NIF / CIF / NIE)
+
+A tenant sets its own fiscal identifier at exactly two moments, and both are guarded by
+`com.etendoerp.go.common.SpanishTaxIdValidator`:
+
+| Moment | Guard | Answer |
+|---|---|---|
+| Signup wizard (`fiscalIdValue`) | `EtendoGoJwtServlet#validateOnboardingTaxId`, called from `parseOnboardingRequest` | `400` before the NDJSON provisioning stream opens |
+| Signup wizard, in the browser | `CompanyStepWithTaxId` (`pages/onboarding/onboardingSteps.jsx`) | on blur and on **Empezar** — the click does not advance the view |
+| Organización window (`AD_OrgInfo.TaxID`) | `OrganizationInformationHandler` (`Java_Qualifier` `organization-information`) | `400` from the NEO CRUD write |
+
+The browser runs the same three rules in `tools/app-shell/src/lib/taxIdValidation.js` so the user
+is told before the round trip; the two Java call sites are what make it binding.
+
+The wizard's own step lives in the published `@etendosoftware/etendo-go-core` package, whose
+`CompanyStep` takes no validator from `config` — so it is guarded from the consuming repo instead:
+`coreSteps` is a plain `{ id, component }` array and `onNext` is a prop, so
+`pages/onboarding/onboardingSteps.jsx` swaps in a wrapper that validates before delegating.
+Two constraints shaped that wrapper and are worth knowing before changing it: it adds **no DOM of
+its own** (`OnboardingFlow` renders the step as a direct child of a `lg:grid-cols-[...]`
+container, so a wrapping `<div>` collapses the two-column layout), and it can show **no inline
+message under the field** (no error slot exists), so the message is a toast plus `aria-invalid`
+on the input. All three
+implementations share one case list — see `SpanishTaxIdValidatorTest` and
+`taxIdValidation.test.js`, which are deliberately the same values.
+
+### What classic validates, and why that was not enough
+
+Nothing validates `AD_OrgInfo.TaxID`: no callout, no validation rule, no event handler
+(verified against the instance's `AD_COLUMN`). The only check that ever looks at an
+organization's own identifier is `com.etendoerp.verifactu`'s `InitialValidator`, which calls
+`NIFValidator.validateCompanyNIF(VerifactuUtils.getTaxIDIssuer(...))` while **completing an
+invoice** — so a wrong NIF typed at signup surfaced as a failure to invoice, weeks later, on a
+value already stamped across the tenant's fiscal configuration.
+
+What classic does observe is the **business partner** identifier, through
+`org.openbravo.module.bptaxidkey`'s `ViesStatusObserver`. That one is not a substitute: it
+records a `V`/`I`/`P` status in `EM_OBTIK_VIESStatus`, logs and swallows its own failures
+("VIES check failed (non-fatal)"), and so never rejects anything — and it needs the
+country-prefixed form (`ES12345678Z`), whereas a bare NIF makes its `substring(0, 2)` read `12`
+as a country code.
+
+### The three accepted shapes
+
+| Shape | Pattern | Check digit |
+|---|---|---|
+| CIF (company) | `[ABCDEFGHJKLMNPQRSUVW]\d{7}[0-9A-J]` | Luhn-like mod 10; **both** the digit and its `JABCDEFGHI` letter are accepted |
+| DNI/NIF (natural person) | `\d{8}[A-Z]` | number mod 23 → `TRWAGMYFPDXBNJZSQVHLCKE` |
+| NIE (foreign resident) | `[XYZ]\d{7}[A-Z]` | same, with `X`/`Y`/`Z` read as a leading `0`/`1`/`2` |
+
+Accepting all three is not thoroughness for its own sake: the wizard offers `businessType`
+`company` / `freelancer`, and an autónomo has a personal DNI rather than a company CIF.
+Validating only the CIF form would have refused every freelancer in the product.
+
+The CIF algorithm is the one in Verifactu's `NIFValidator#validateCompanyNIF`, re-implemented
+rather than called: Verifactu is a Spain-localization module that is not installed on every
+instance, so depending on it would break the deployments that lack it. The person and NIE check
+digits are not in that class at all.
+
+### Gates and non-rules
+
+- **Blank is accepted.** The wizard marks the field optional and `wireOrgInfo()` only persists
+  a non-blank value; on the Organización window requiredness is a separate check that runs
+  first, so an emptied field reports "required", not "invalid format".
+- **A value made only of separators is rejected.** `normalize()` strips whitespace, `.` and
+  `-`, so `"---"` would otherwise normalize to empty and be waved through — and the window's
+  required check passes it too, since that one only tests for blankness.
+- **Applied only for Spain.** The signup path gates on the payload's `countryCode`, the handler
+  on the organization's `C_Country` (via `OrganizationCountrySupport`, shared with the
+  invoice-prefix rules). The browser module does NOT gate: `OnboardingPage.jsx` hardcodes
+  `countryCodes: ['ES']`, and the Organización screen has no ISO code to gate on — only a
+  country label derived from the address identifier. Shipping a second country means giving
+  that module the gate too.
+
+## Which tenant an onboarding endpoint writes to
+
+Applies to every account-authenticated onboarding endpoint — `/onboarding/first-steps`,
+`/onboarding/company-data` and `/onboarding/draft`.
+
+The onboarding endpoints authenticate an **account**, and an account can own several
+environments — so the account alone does not say which tenant to write to. The token the app
+sends from inside an environment is the NEO session JWT (the branch
+`findActiveAccountByBearerToken` resolves through the `user` claim), and it carries the
+session's own `client` and `organization` claims. Those scope the request.
+
+`resolveTenantSession` then re-checks the claimed client against the account that owns it, so a
+token can never name a client its account does not own. A pure account-session token, which has
+no environment behind it, is answered `400`.

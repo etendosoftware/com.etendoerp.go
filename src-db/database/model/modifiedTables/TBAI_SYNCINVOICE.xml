@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+  <database name="MODIFIED TABLE TBAI_SYNCINVOICE">
+    <table name="TBAI_SYNCINVOICE" primaryKey="TBAI_SYNCINVOICE_KEY">
+      <index name="EM_ETGO_TBAISYNC_INVOICE_IDX" unique="false">
+        <index-column name="C_INVOICE_ID"/>
+        <index-column name="CREATED"/>
+      </index>
+    </table>
+  </database>
