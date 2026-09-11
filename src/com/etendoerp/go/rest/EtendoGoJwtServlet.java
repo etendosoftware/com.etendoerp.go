@@ -28,8 +28,10 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -57,6 +59,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.EtendoGoCorsServlet;
+import com.etendoerp.go.common.JwtAuthUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.payment.TenantPaywallService;
@@ -75,11 +78,15 @@ import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
+import com.etendoerp.go.onboarding.OnboardingCostingScheduleService;
+import com.etendoerp.go.common.SpanishTaxIdValidator;
+import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.AccountIdentity;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
+import com.auth0.jwt.interfaces.DecodedJWT;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -184,6 +191,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_ORG_READY = "orgReady";
   private static final String PROGRESS_ORG_INFO = "orgInfo";
   private static final String PROGRESS_BASELINE = "baseline";
+  private static final String PROGRESS_COSTING_SCHEDULE = "costingSchedule";
   private static final String PROGRESS_BP_GROUP_ACCT_PATCH = "bpGroupAcctPatch";
   private static final String PROGRESS_ACCTDIM_VISIBILITY = "acctdimVisibility";
   private static final String PROGRESS_ADMIN_IDENTITY = "adminIdentity";
@@ -225,8 +233,27 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { FIELD_FULL_NAME, "businessType",
       FIELD_CLIENT_NAME, "currency", FIELD_LANGUAGE, FIELD_COUNTRY_CODE, "fiscalIdType",
       "fiscalIdValue", FIELD_ADDRESS, "sector" };
+  private static final String PATH_ONBOARDING_FIRST_STEPS = "/onboarding/first-steps";
+  private static final String FIELD_FIRST_STEPS = "firstSteps";
+  private static final String FIELD_FIRST_STEPS_VERSION = "v";
+  private static final String FIELD_FIRST_STEPS_SEEN = "seen";
+  private static final String FIELD_FIRST_STEPS_COMPLETED = "completed";
+  private static final int FIRST_STEPS_VERSION = 1;
+  private static final int FIRST_STEPS_MAX_LENGTH = 1000;
+  /**
+   * Allowlist of First Steps checklist ids that may be persisted, in the order they are stored.
+   * Kept in the same order the checklist renders (see {@code firstStepsConfig.js}) so a stored
+   * value reads the way the user saw it; the frontend only ever tests membership, so the order
+   * itself is cosmetic. {@code create-account} is deliberately absent — it is implicit, the
+   * account already exists — and a client sending it gets it dropped rather than rejected.
+   */
+  private static final String[] FIRST_STEPS_IDS = { "company-data", "fiscal-config", "products",
+      "contacts", "invoice-sequence", "team" };
+  private static final String PATH_ONBOARDING_COMPANY_DATA = "/onboarding/company-data";
+  private static final String FIELD_COMPANY_DATA = "companyData";
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
+  OnboardingCompanyDataService onboardingCompanyDataService = new OnboardingCompanyDataService();
   OnboardingAccountingWiringService onboardingAccountingWiringService =
       new OnboardingAccountingWiringService();
   OnboardingPeriodControlService onboardingPeriodControlService =
@@ -247,6 +274,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingBaselineService();
   OnboardingForceTestModeService onboardingForceTestModeService =
       new OnboardingForceTestModeService();
+  OnboardingCostingScheduleService onboardingCostingScheduleService =
+      new OnboardingCostingScheduleService();
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
   TenantPlanService tenantPlanService = new TenantPlanService();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
@@ -294,6 +323,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleMe(request, response);
     } else if (isPath(path, PATH_ONBOARDING_DRAFT)) {
       handleGetOnboardingDraft(request, response);
+    } else if (isPath(path, PATH_ONBOARDING_FIRST_STEPS)) {
+      handleGetFirstSteps(request, response);
+    } else if (isPath(path, PATH_ONBOARDING_COMPANY_DATA)) {
+      handleGetCompanyData(request, response);
     } else if (isPath(path, "/environments")) {
       handleEnvironments(request, response);
     } else if (isPath(path, "/login")) {
@@ -362,6 +395,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       HttpServletResponse response) throws IOException {
     if (isPath(path, PATH_ONBOARDING_DRAFT)) {
       handleSaveOnboardingDraft(request, response);
+    } else if (isPath(path, PATH_ONBOARDING_FIRST_STEPS)) {
+      handleSaveFirstSteps(request, response);
     } else if (isPath(path, "/onboarding")) {
       handleOnboarding(request, response);
     } else if (isPath(path, "/checkout/sessions")) {
@@ -1609,6 +1644,186 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
+  /**
+   * GET /sws/go/onboarding/first-steps
+   * Header: Authorization: Bearer &lt;session_token&gt;
+   * Returns 200 with { status, firstSteps } where firstSteps is the stored First Steps
+   * checklist state ({ v, seen, completed }) or null when nothing is stored.
+   */
+  private void handleGetFirstSteps(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "get onboarding first steps", account -> {
+      JSONObject result = new JSONObject();
+      result.put(FIELD_FIRST_STEPS, parseStoredFirstSteps(account));
+      writeSuccessStatus(response, result);
+    });
+  }
+
+  /**
+   * POST /sws/go/onboarding/first-steps
+   * Header: Authorization: Bearer &lt;session_token&gt;
+   * Body: { "firstSteps": { "v": 1, "seen": true, "completed": [ ... ] } } to save,
+   * { "firstSteps": null } to clear.
+   * Only allowlisted step ids are stored and the serialized value is capped at
+   * {@link #FIRST_STEPS_MAX_LENGTH} chars (400 otherwise).
+   */
+  private void handleSaveFirstSteps(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "save onboarding first steps", account -> {
+      JSONObject body = readJsonBodyOrBadRequest(request, response);
+      if (body == null) {
+        return;
+      }
+      JSONObject firstSteps = body.optJSONObject(FIELD_FIRST_STEPS);
+      String storedFirstSteps = null;
+      if (firstSteps != null) {
+        storedFirstSteps = sanitizeFirstSteps(firstSteps).toString();
+        if (storedFirstSteps.length() > FIRST_STEPS_MAX_LENGTH) {
+          writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+              "First steps payload is too large");
+          return;
+        }
+      }
+      // updateFirstSteps flushes and commits internally
+      // (FirstStepsDalHelper.flushAndCommit) — no extra commit here.
+      FirstStepsDalHelper.updateFirstSteps(account, storedFirstSteps);
+      writeSuccessStatus(response, new JSONObject());
+    });
+  }
+
+  /**
+   * Keep only the known checklist shape so arbitrary client payloads are never persisted: the
+   * version is forced to {@link #FIRST_STEPS_VERSION} whatever the client sent, {@code seen} is
+   * coerced to a real boolean, and {@code completed} is intersected with
+   * {@link #FIRST_STEPS_IDS}. Unknown ids and non-string entries are dropped silently and
+   * duplicates collapse, so the stored array is always deduplicated and in allowlist order
+   * regardless of the order the client sent.
+   */
+  private JSONObject sanitizeFirstSteps(JSONObject firstSteps) throws JSONException {
+    JSONObject clean = new JSONObject();
+    clean.put(FIELD_FIRST_STEPS_VERSION, FIRST_STEPS_VERSION);
+    clean.put(FIELD_FIRST_STEPS_SEEN, firstSteps.optBoolean(FIELD_FIRST_STEPS_SEEN, false));
+    Set<String> requested = new HashSet<>();
+    JSONArray completed = firstSteps.optJSONArray(FIELD_FIRST_STEPS_COMPLETED);
+    if (completed != null) {
+      for (int i = 0; i < completed.length(); i++) {
+        Object entry = completed.opt(i);
+        if (entry instanceof String) {
+          requested.add((String) entry);
+        }
+      }
+    }
+    JSONArray cleanCompleted = new JSONArray();
+    for (String stepId : FIRST_STEPS_IDS) {
+      if (requested.contains(stepId)) {
+        cleanCompleted.put(stepId);
+      }
+    }
+    clean.put(FIELD_FIRST_STEPS_COMPLETED, cleanCompleted);
+    return clean;
+  }
+
+  /**
+   * Reads the stored First Steps JSON, tolerating a corrupt value: malformed JSON is logged as a
+   * warning and reported as {@code null} instead of failing the request.
+   */
+  private Object parseStoredFirstSteps(Account account) {
+    String storedFirstSteps = FirstStepsDalHelper.getFirstSteps(account);
+    if (StringUtils.isBlank(storedFirstSteps)) {
+      return JSONObject.NULL;
+    }
+    try {
+      return new JSONObject(storedFirstSteps);
+    } catch (JSONException e) {
+      log.warn("Stored first steps for account {} is not valid JSON; ignoring", account.getId());
+      return JSONObject.NULL;
+    }
+  }
+
+  /**
+   * GET /sws/go/onboarding/company-data
+   * Header: Authorization: Bearer &lt;NEO session token&gt;
+   * Returns 200 with { status, companyData } where companyData is
+   * { name, tradeName, taxId, address } for the caller's own tenant — each value nullable — or
+   * null when the tenant has no organisation yet. Read-only: the Organization window is where
+   * these are edited.
+   */
+  private void handleGetCompanyData(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "get onboarding company data", account -> {
+      TenantSession session = resolveTenantSession(request, response, account);
+      if (session == null) {
+        return;
+      }
+      OnboardingCompanyDataService.CompanyData data =
+          onboardingCompanyDataService.read(session.clientId, session.orgId);
+      JSONObject result = new JSONObject();
+      result.put(FIELD_COMPANY_DATA, data == null ? JSONObject.NULL
+          : new JSONObject()
+              .put("name", nullSafe(data.getName()))
+              .put("tradeName", nullSafe(data.getTradeName()))
+              .put("taxId", nullSafe(data.getTaxId()))
+              .put(FIELD_ADDRESS, nullSafe(data.getAddress())));
+      writeSuccessStatus(response, result);
+    });
+  }
+
+  /** JSON-null for an absent value, so the client can tell "blank" from "not answered". */
+  private static Object nullSafe(String value) {
+    return value == null ? JSONObject.NULL : value;
+  }
+
+  /** The client and organization the caller is currently working in. */
+  private static final class TenantSession {
+    private final String clientId;
+    private final String orgId;
+
+    TenantSession(String clientId, String orgId) {
+      this.clientId = clientId;
+      this.orgId = orgId;
+    }
+  }
+
+  /**
+   * The tenant behind the presented token.
+   *
+   * The onboarding endpoints authenticate an ACCOUNT, which on its own does not say which
+   * environment the caller is in — an account can own several. The token the app sends from
+   * inside an environment is the NEO session JWT (that is the branch
+   * {@code findActiveAccountByBearerToken} resolves through the {@code user} claim), and it
+   * carries the session's own client and organization. Those claims are what scope this
+   * request.
+   *
+   * The claimed client is re-checked against the account that owns it: the account gate and
+   * the claim must agree, so a token cannot name a client its account does not own. Answers
+   * 400 for a pure account-session token, which has no environment to write to.
+   */
+  private TenantSession resolveTenantSession(HttpServletRequest request,
+      HttpServletResponse response, Account account) throws IOException {
+    String clientId = null;
+    String orgId = null;
+    try {
+      DecodedJWT jwt = SecureWebServicesUtils.decodeToken(extractBearerToken(request));
+      if (jwt != null) {
+        clientId = jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString();
+        orgId = jwt.getClaim(JwtAuthUtils.CLAIM_ORG).asString();
+      }
+    } catch (Exception e) {
+      log.debug("Bearer token carries no NEO session claims", e);
+    }
+    if (StringUtils.isBlank(clientId)) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "This endpoint requires an environment session");
+      return null;
+    }
+    if (!EtendoGoJwtDalHelper.clientBelongsToAccountEmail(clientId, account.getEmail())) {
+      writeError(response, HttpServletResponse.SC_FORBIDDEN,
+          "The session client is not owned by this account");
+      return null;
+    }
+    return new TenantSession(clientId, StringUtils.defaultIfBlank(orgId, "0"));
+  }
+
   private void clearOnboardingDraftBestEffort(Account account) {
     if (account == null) {
       return;
@@ -1911,6 +2126,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
 
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
+      // Activate the costing schedule now that its row is committed and therefore visible to the
+      // scheduler's own DB connection. Best-effort: internally swallows failures, and the SCH row
+      // is still picked up on the next scheduler initialization.
+      onboardingCostingScheduleService.activateSchedule(clientId);
       Account account = findAccountForCommittedOnboarding(token, accountEmail);
       clearOnboardingDraftBestEffort(account);
       String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
@@ -2168,6 +2387,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         writeFieldTooLongError(response, violation);
         return null;
       }
+      if (!validateOnboardingTaxId(response, data)) {
+        return null;
+      }
       return data;
     } catch (JSONException e) {
         String message = e.getMessage() != null && e.getMessage().contains(FIELD_CLIENT_NAME)
@@ -2175,6 +2397,43 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           : INVALID_JSON_BODY;
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, message);
       return null;
+    }
+  }
+
+  /**
+   * ETP-5190 — rejects a malformed fiscal identifier at signup, the first of the two moments a
+   * tenant sets one (the other is the Organization window, guarded by
+   * {@code OrganizationInformationHandler}). Both run {@link SpanishTaxIdValidator}.
+   *
+   * <p>Validated HERE, alongside the length checks, for the reason those are here: past this
+   * point the NDJSON provisioning stream is open, and a rejection halfway through tenant
+   * creation reaches the user as the opaque "@CreateClientFailed@" (ETP-4665).
+   *
+   * <p>Blank stays acceptable — the wizard marks the field optional and
+   * {@code wireOrgInfo()} only persists a non-blank value. Only a value the user actually
+   * typed, and typed wrong, is refused.
+   *
+   * <p>Gated on the requested country: these are Spanish rules, and {@code countryCode}
+   * defaults to {@code ES} a few lines above, so today every signup is covered — but a payload
+   * naming another country must not be judged by them.
+   *
+   * @return {@code true} to continue; {@code false} once an error response has been written
+   */
+  private boolean validateOnboardingTaxId(HttpServletResponse response,
+      OnboardingRequestData data) throws IOException {
+    if (!SpanishTaxIdValidator.SPAIN_COUNTRY_CODE.equalsIgnoreCase(data.countryCode)) {
+      return true;
+    }
+    switch (SpanishTaxIdValidator.validate(data.taxId)) {
+      case BAD_FORMAT:
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, SpanishTaxIdValidator.ERR_FORMAT);
+        return false;
+      case BAD_CHECK_DIGIT:
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+            SpanishTaxIdValidator.ERR_CHECK_DIGIT);
+        return false;
+      default:
+        return true;
     }
   }
 
@@ -2450,6 +2709,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return false;
     }
     if (!wireOrgInfo(writer, clientId, orgId, adminUserId, adminRoleId, requestData)) {
+      return false;
+    }
+    if (!scheduleCostingBackground(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
     // ETP-4720: patch the 5 C_BP_Group_Acct columns neither the core c_bp_group_trg() trigger nor
@@ -2742,6 +3004,28 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return true;
   }
 
+  /**
+   * Creates the per-client 5-minute costing schedule, backed by core's "Costing Background process"
+   * (idempotent). Onboarding already imports a VALIDATED costing rule, so without this schedule the
+   * rule sits there and no cost is ever calculated. Non-fatal: a missing costing schedule is worth
+   * a log line, never a failed environment creation. The Quartz job is activated after the commit
+   * (see {@code handleOnboarding}); even if that activation does not run, the {@code SCH} row is
+   * picked up on the next scheduler initialization.
+   */
+  boolean scheduleCostingBackground(PrintWriter writer, String clientId, String orgId,
+      String adminUserId, String adminRoleId) {
+    sendProgress(writer, PROGRESS_COSTING_SCHEDULE, PROGRESS_IN_PROGRESS,
+        "Scheduling automatic cost calculation...");
+    try {
+      onboardingCostingScheduleService.scheduleCostingBackground(clientId, orgId, adminUserId,
+          adminRoleId);
+      sendProgress(writer, PROGRESS_COSTING_SCHEDULE, "done", "Automatic cost calculation scheduled");
+    } catch (Exception e) {
+      log.warn("Could not schedule cost calculation for client {}: {}", clientId, e.getMessage());
+      sendProgress(writer, PROGRESS_COSTING_SCHEDULE, "done", "Automatic cost calculation skipped");
+    }
+    return true;
+  }
 
   /**
    * Write a NDJSON progress line.
