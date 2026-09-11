@@ -33,12 +33,16 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.DocumentType;
 
 import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
+import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 
 /**
  * NeoHandler for the Sales Invoice header entity.
  *
  * <p>Extends {@link AbstractInvoiceHeaderHandler} to inherit shared document-type-lock
  * enforcement and GET enrichment logic.
+ *
+ * <p>ETP-5238: the {@code paymentMethod} SELECTOR is served by
+ * {@link PaymentMethodSelectorSupport}, independent of Financial Account linkage.
  *
  * <p>Subtype resolution for AR invoices (ETP-4737 — unified "Factura Rectificativa"):
  * <ul>
@@ -97,6 +101,11 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoResponse paymentMethodSelector = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(context,
+        PaymentMethodSelectorSupport.DirectionFallback.WINDOW);
+    if (paymentMethodSelector != null) {
+      return paymentMethodSelector;
+    }
     NeoHandlerUtils.mirrorAccountingDate(context, "invoiceDate", "accountingDate");
     captureOriginInvoice(context);
     NeoResponse siiAuthError = captureAndValidateSiiAuthorization(context);
@@ -140,10 +149,14 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
   }
 
   /**
-   * Adjusts grandTotalAmount / outstandingAmount for draft invoices with a total discount, and
-   * injects {@code tbaiSyncEstado} (latest sync status from {@code tbai_syncinvoice}) into every
-   * record so the frontend can display it without a separate inSet GET request to the TBAI spec.
-   * In detail view, also injects {@code aeatsiiFacturaId} / {@code tbaiSyncInvoiceId} /
+   * Adjusts grandTotalAmount / outstandingAmount for draft invoices with a total discount.
+   *
+   * <p>ETP-5216: the former {@code tbaiSyncEstado} injection is gone. The TicketBAI status is now
+   * the stored computed AD column {@code EM_ETGO_Tbai_Status} on {@code C_Invoice}, so it travels
+   * in the contract like any other column and is filterable and sortable — an injected field never
+   * was, and its failures were invisible from the UI (ETP-4391).
+   *
+   * <p>In detail view, this also injects {@code aeatsiiFacturaId} / {@code tbaiSyncInvoiceId} /
    * {@code invoiceVerifactuId} (see {@link SifSubRecordAttachments}) so the SIF tab's Adjuntos
    * sections can list/download the fiscal XML attached to each sub-record (ETP-4888).
    */
@@ -195,7 +208,6 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
         enrichLinkedShipments(rec, context.getRecordId());
         SifSubRecordAttachments.enrich(rec, context.getRecordId());
       }
-      TbaiSyncStatusInjector.inject(dataArr);
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error enriching sales invoice response", e);

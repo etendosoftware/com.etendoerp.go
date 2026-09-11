@@ -113,9 +113,9 @@ public class EmailLayoutTest {
   @Test
   public void rendersNotesAndSignature() {
     String html = EmailLayout.render(
-        minimal().note("Válido 24 horas.").signature("Saludos, Equipo de Etendo Go").build());
+        minimal().note("Válido 7 días.").signature("Saludos, Equipo de Etendo Go").build());
 
-    assertTrue(html.contains("Válido 24 horas."));
+    assertTrue(html.contains("Válido 7 días."));
     assertTrue(html.contains("Saludos, Equipo de Etendo Go"));
   }
 
@@ -125,7 +125,7 @@ public class EmailLayoutTest {
         .greetingHtml("Hola, <strong>Santiago</strong>:")
         .cta("Aceptar invitación", "https://go.etendo.cloud/invite?token=abc")
         .linkFallbackText("Si el botón no funciona, copia el enlace:")
-        .note("Válido 24 horas.")
+        .note("Válido 7 días.")
         .signature("Saludos, Equipo de Etendo Go")
         .build());
 
