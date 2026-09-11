@@ -805,6 +805,35 @@ document window. Implemented in `NeoAttachmentsHelper.java`, routed from
 
 **Base path:** `/sws/neo/attachments`
 
+#### GET — Upload policy (accepted types + max size)
+
+```
+GET /sws/neo/attachments/config
+Authorization: Bearer {token}
+```
+
+Returns `200` with the policy the upload endpoint below enforces:
+
+```json
+{
+  "maxSizeMB": 10,
+  "allowedMimeTypes": ["application/pdf", "application/msword", "..."],
+  "allowedExtensions": ["pdf", "doc", "docx", "xls", "..."],
+  "typeGroups": ["pdf", "word", "excel", "powerpoint", "image", "xml", "zip", "rtf"]
+}
+```
+
+This is THE single source of truth (`NeoAttachmentPolicy.java`, ETP-5038). The React Attachments
+tab fetches it once per session and builds its `accept` attribute, its client-side check and its
+translated "Supported formats" label from it — `typeGroups` is the coarse bucket list the label is
+built from, so the label can never advertise a format the API would reject. Two hardcoded lists
+would drift, and the drift is user-hostile: the UI says yes, the API answers 400. Same pattern as
+`GET /sws/neo/currency-format`.
+
+Plain text (`text/plain`) is deliberately **not** accepted — the ticket's original complaint was
+that `.txt` uploaded fine while the UI advertised "PDF, Word, Excel, PowerPoint, images". ZIP, XML
+and RTF are kept: Facturae XML and zipped document bundles are real use cases.
+
 #### GET — List attachments
 
 ```
@@ -863,7 +892,23 @@ Content-Type: application/pdf
 ```
 
 Expects a single multipart part named `file`. Optional query parameter `tabId` overrides automatic
-tab resolution (useful when a table has multiple tabs). With `markAsMain=true`, the newly-created
+tab resolution (useful when a table has multiple tabs).
+
+**Validated server-side (ETP-5038), against `NeoAttachmentPolicy`:**
+
+| Check | Rejection (HTTP 400) |
+|---|---|
+| Declared part size, then the bytes actually written, vs `maxSizeMB` | `File exceeds the maximum allowed size of 10 MB` |
+| File extension against `allowedExtensions` | `File type not allowed: .txt. Allowed types: pdf, doc, ...` |
+| Leading bytes against the signature the extension implies | `File content does not match its .pdf extension` |
+
+The part's own `Content-Type` is deliberately **not** the check: the caller chooses it, so it
+proves nothing. Renaming `notes.txt` to `notes.pdf` and declaring `Content-Type: application/pdf`
+is still rejected by the magic-byte check. The published MIME list exists for the browser's file
+picker, not for server-side authorization.
+
+Known limit: XML and SVG have no binary signature, so the only structural check is "the first
+non-whitespace character is `<`". Both are stored, never rendered inline by the app. With `markAsMain=true`, the newly-created
 attachment is marked as the record's main document immediately after upload — deleting any
 previously-marked attachment, same as the PATCH above. Returns `201` with
 `{ "name", "message", "id"?, "isMain"? }` (the last two only present when `markAsMain=true`).
