@@ -69,6 +69,12 @@ final class SupportIntegrationClient {
       "support.adk.url", "ETGO_SUPPORT_ADK_URL", "");
   private static final String ADK_APP_NAME = "agent";
 
+  // Per-deployment environment name (local/experimental/staging/production), forwarded to the
+  // ADK session so the Jira ticket it creates can carry it as a custom field for Mixpanel
+  // (mirrors client_id above). Empty by default until each real deployment sets it.
+  private static final String ENVIRONMENT_NAME = ConfigPropertyReader.readConfigValue(
+      "support.environment", "ETGO_SUPPORT_ENVIRONMENT", "");
+
   /** Zero-width-prefixed marker appended to a reply's text when the ADK's response for that
    * turn set {@code pending_escalation=confirm} — i.e. ValerIA just offered to escalate to a
    * human. Persisted as part of the message text; the frontend strips it before rendering and
@@ -120,6 +126,9 @@ final class SupportIntegrationClient {
       if (clientId != null && !clientId.isEmpty()) {
         state.put("client_id", clientId);
       }
+      if (!ENVIRONMENT_NAME.isEmpty()) {
+        state.put("environment", ENVIRONMENT_NAME);
+      }
       String body = state.toString();
       HttpRequest req = HttpRequest.newBuilder()
           .uri(URI.create(url))
@@ -128,8 +137,8 @@ final class SupportIntegrationClient {
           .timeout(Duration.ofSeconds(10))
           .build();
       HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
-      log.debug("ADK session created: {} (locale={}, user_email={}, client_id={}) → {}", sessionId, locale,
-          userEmail, clientId, resp.statusCode());
+      log.debug("ADK session created: {} (locale={}, user_email={}, client_id={}, environment={}) → {}",
+          sessionId, locale, userEmail, clientId, ENVIRONMENT_NAME, resp.statusCode());
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       log.warn("Failed to create ADK session {}: {}", sessionId, e.getMessage());
