@@ -48,6 +48,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -1936,9 +1937,41 @@ class PaymentRegistrationServiceTest {
   }
 
   /**
+   * ETP-5238: {@code handleListPaymentMethods} now queries {@link FIN_PaymentMethod} directly —
+   * no {@link FinAccPaymentMethod} join at all — so the full catalog for the direction is offered
+   * regardless of which Financial Account (if any) is linked to a method. This is the safe
+   * counterpart of the Account list still filtering by method (see
+   * {@link #testHandleListAccountsActiveConnectionIsConnectedNotReconnectable} and siblings,
+   * unchanged by this ticket).
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandleListPaymentMethodsIncludesMethodsWithNoLinkedAccountAtAll() throws Exception {
+    stubInvoiceInTree();
+
+    // No FIN_FinancialAccount / FinAccPaymentMethod mock exists anywhere in this test — the
+    // method must still come back.
+    FIN_PaymentMethod unlinked = mock(FIN_PaymentMethod.class);
+    when(unlinked.getId()).thenReturn("pm-unlinked");
+    when(unlinked.getName()).thenReturn("Nuevo metodo sin cuenta");
+    when(unlinked.isPSD2IsBankTransfer()).thenReturn(Boolean.FALSE);
+
+    stubPaymentMethodCriteria(Collections.singletonList(unlinked));
+
+    NeoResponse response =
+        PaymentRegistrationService.handleListPaymentMethods(listContext(), true);
+
+    assertEquals(200, response.getHttpStatus());
+    JSONArray items = response.getBody().getJSONArray("items");
+    assertEquals(1, items.length());
+    assertEquals("pm-unlinked", items.getJSONObject(0).getString("id"));
+  }
+
+  /**
    * The listed payment methods carry the authoritative {@code isBankTransfer} flag, so the SPA no
    * longer has to guess from the label with a regex. It matters because that gate now BLOCKS a
-   * payment: a method merely NAMED like a transfer must report {@code false}.
+   * payment: a method merely NAMED like a transfer must report {@code false}. Also covers the
+   * response shape ({@code id}/{@code label}/{@code isBankTransfer}), unchanged by ETP-5238.
    */
   @Test
   @SuppressWarnings("unchecked")
@@ -1957,23 +1990,7 @@ class PaymentRegistrationServiceTest {
     when(internal.getName()).thenReturn("Transferencia interna");
     when(internal.isPSD2IsBankTransfer()).thenReturn(Boolean.FALSE);
 
-    FIN_FinancialAccount account = mock(FIN_FinancialAccount.class);
-    Organization accOrg = mock(Organization.class);
-    when(accOrg.getId()).thenReturn("org-1");
-    when(account.getOrganization()).thenReturn(accOrg);
-
-    FinAccPaymentMethod transferLink = mock(FinAccPaymentMethod.class);
-    when(transferLink.getAccount()).thenReturn(account);
-    when(transferLink.getPaymentMethod()).thenReturn(transfer);
-    FinAccPaymentMethod internalLink = mock(FinAccPaymentMethod.class);
-    when(internalLink.getAccount()).thenReturn(account);
-    when(internalLink.getPaymentMethod()).thenReturn(internal);
-
-    OBCriteria<FinAccPaymentMethod> crit = mock(OBCriteria.class);
-    when(obDal.createCriteria(FinAccPaymentMethod.class)).thenReturn(crit);
-    when(crit.setFilterOnReadableOrganization(anyBoolean())).thenReturn(crit);
-    when(crit.add(any(Criterion.class))).thenReturn(crit);
-    when(crit.list()).thenReturn(Arrays.asList(transferLink, internalLink));
+    stubPaymentMethodCriteria(Arrays.asList(transfer, internal));
 
     NeoResponse response =
         PaymentRegistrationService.handleListPaymentMethods(listContext(), false);
@@ -1990,6 +2007,106 @@ class PaymentRegistrationServiceTest {
     assertEquals("Transferencia interna", second.getString("label"));
     assertFalse(second.getBoolean("isBankTransfer"),
         "a method merely named like a transfer must not be reported as one");
+  }
+
+  /** {@code isReceipt=true} must filter on {@code payinAllow} only, never {@code payoutAllow}. */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandleListPaymentMethodsReceiptFiltersOnPayInAllowOnly() throws Exception {
+    stubInvoiceInTree();
+    ArgumentCaptor<Criterion> captor = stubPaymentMethodCriteria(Collections.emptyList());
+
+    PaymentRegistrationService.handleListPaymentMethods(listContext(), true);
+
+    List<String> rendered = renderedCriteria(captor);
+    assertTrue(rendered.stream().anyMatch(s -> s.toLowerCase().contains("payinallow")),
+        "expected a payinAllow filter, got: " + rendered);
+    assertFalse(rendered.stream().anyMatch(s -> s.toLowerCase().contains("payoutallow")),
+        "must not filter on payoutAllow for a receipt, got: " + rendered);
+  }
+
+  /** {@code isReceipt=false} must filter on {@code payoutAllow} only, never {@code payinAllow}. */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandleListPaymentMethodsPaymentFiltersOnPayOutAllowOnly() throws Exception {
+    stubInvoiceInTree();
+    ArgumentCaptor<Criterion> captor = stubPaymentMethodCriteria(Collections.emptyList());
+
+    PaymentRegistrationService.handleListPaymentMethods(listContext(), false);
+
+    List<String> rendered = renderedCriteria(captor);
+    assertTrue(rendered.stream().anyMatch(s -> s.toLowerCase().contains("payoutallow")),
+        "expected a payoutAllow filter, got: " + rendered);
+    assertFalse(rendered.stream().anyMatch(s -> s.toLowerCase().contains("payinallow")),
+        "must not filter on payinAllow for a payment, got: " + rendered);
+  }
+
+  /** Inactive payment methods must be excluded via an explicit {@code active=true} restriction. */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandleListPaymentMethodsFiltersOnActiveTrue() throws Exception {
+    stubInvoiceInTree();
+    ArgumentCaptor<Criterion> captor = stubPaymentMethodCriteria(Collections.emptyList());
+
+    PaymentRegistrationService.handleListPaymentMethods(listContext(), true);
+
+    List<String> rendered = renderedCriteria(captor);
+    assertTrue(rendered.stream().anyMatch(s -> s.equals("active=true")),
+        "expected an active=true filter, got: " + rendered);
+  }
+
+  /**
+   * Org scoping now applies to the METHOD's own org (not the account's, as before). The filter
+   * must include the invoice's natural-tree org AND org {@code "0"} (the "*" org) — same
+   * convention as {@code SelectorOrgFilter} — and must NOT include an unrelated org.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testHandleListPaymentMethodsScopesByMethodOwnOrgPlusOrgZero() throws Exception {
+    stubInvoiceInTree();
+    ArgumentCaptor<Criterion> captor = stubPaymentMethodCriteria(Collections.emptyList());
+
+    PaymentRegistrationService.handleListPaymentMethods(listContext(), true);
+
+    List<String> rendered = renderedCriteria(captor);
+    String orgFilter = rendered.stream()
+        .filter(s -> s.contains("organization.id in"))
+        .findFirst()
+        .orElse("");
+    assertFalse(orgFilter.isEmpty(), "expected an organization.id in filter, got: " + rendered);
+    String orgValuesPart = orgFilter.substring(orgFilter.indexOf('(') + 1, orgFilter.lastIndexOf(')'));
+    List<String> orgValues = Arrays.asList(orgValuesPart.split(",\\s*"));
+    assertTrue(orgValues.contains("org-1"),
+        "expected the invoice's natural-tree org, got: " + orgValues);
+    assertTrue(orgValues.contains("0"),
+        "expected org \"0\" (the \"*\" org) to be added explicitly, got: " + orgValues);
+    assertFalse(orgValues.contains("org-outside-tree"),
+        "must not include an org outside the natural tree, got: " + orgValues);
+  }
+
+  /**
+   * Stubs {@code OBDal.createCriteria(FIN_PaymentMethod.class)} the way
+   * {@code handleListPaymentMethods} consumes it, and returns the {@link ArgumentCaptor} that
+   * collects every {@link Criterion} passed to {@code add(...)} — read it (via
+   * {@link #renderedCriteria}) only AFTER invoking the method under test, since
+   * {@code getAllValues()} snapshots the captor's state at call time.
+   */
+  @SuppressWarnings("unchecked")
+  private ArgumentCaptor<Criterion> stubPaymentMethodCriteria(List<FIN_PaymentMethod> rows) {
+    OBCriteria<FIN_PaymentMethod> crit = mock(OBCriteria.class);
+    when(obDal.createCriteria(FIN_PaymentMethod.class)).thenReturn(crit);
+    when(crit.setFilterOnReadableOrganization(anyBoolean())).thenReturn(crit);
+    ArgumentCaptor<Criterion> captor = ArgumentCaptor.forClass(Criterion.class);
+    when(crit.add(captor.capture())).thenReturn(crit);
+    when(crit.addOrderBy(anyString(), anyBoolean())).thenReturn(crit);
+    when(crit.list()).thenReturn(rows);
+    return captor;
+  }
+
+  /** Renders captured restrictions via {@code toString()} (deterministic for Simple/InExpression). */
+  private List<String> renderedCriteria(ArgumentCaptor<Criterion> captor) {
+    return captor.getAllValues().stream().map(Criterion::toString)
+        .collect(java.util.stream.Collectors.toList());
   }
   // ========================================================================
   // resolveProcessAction (ETP-4891)
