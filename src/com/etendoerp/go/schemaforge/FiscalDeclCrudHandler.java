@@ -50,6 +50,35 @@ class FiscalDeclCrudHandler {
   static final String PROPERTY_FISCAL_YEAR = "fiscalYear";
   static final String PROPERTY_PERIOD = "period";
   static final String PROPERTY_DECLARATION_TYPE = "declarationType";
+  /**
+   * Java property for the {@code decl_seq} DECIMAL(10,0) column added to
+   * {@code ETGO_Fiscal_Decl} (ETP-5187 follow-up) — a zero-based, unbounded ordinal
+   * disambiguating multiple declarations filed for the same natural key
+   * ({@code client/org/model/fiscalYear/period}). Replaces the original ETP-5187 approach of
+   * repurposing {@link #PROPERTY_DECLARATION_TYPE} (AEAT's genuine ordinaria/complementaria
+   * business value, {@code VARCHAR(1)} CHECKed to exactly {@code 'O'}/{@code 'C'}) as an
+   * artificial 2-slot disambiguator: there is no AEAT/legal limit on how many rectificativas can
+   * be filed for a period, so capping the natural key at 2 rows was wrong, and conflating a real
+   * business field with a uniqueness counter risked corrupting its actual meaning the moment a
+   * future feature needs to let the user genuinely pick ordinaria vs. complementaria. See
+   * {@link #resolveNextDeclSeq}.
+   *
+   * <p><b>Value is {@code "declarationSequence"}, not an abbreviated {@code "declSeq"}.</b>
+   * Openbravo's dynamic {@code Entity}/{@code Property} model does NOT derive a property's Java
+   * name from {@code AD_Column.ColumnName} (the physical DB column, {@code Decl_Seq}) — it derives
+   * it from {@code AD_Column.Name} (see {@code NamingUtil#getPropertyMappingName}), camel-casing
+   * on both {@code "_"} and {@code " "}. This column's {@code AD_Column.Name}/
+   * {@code AD_Element.Name} is the human-readable {@code "Declaration Sequence"} (consistent with
+   * the sibling columns {@link #PROPERTY_DECLARATION_TYPE}, {@link #PROPERTY_DECLARATION_STATUS}
+   * and {@link #PROPERTY_DECLARATION_FILE_NAME}, all spelled out in full rather than abbreviated),
+   * so the runtime property name is {@code "declarationSequence"}. Using {@code "declSeq"} here
+   * — matching the abbreviated physical column name instead of the spelled-out element name —
+   * caused every {@code decl.set(...)}/{@code decl.get(...)} call to throw
+   * {@code CheckException: Property declSeq does not exist for entity ETGO_Fiscal_Decl}, even
+   * with a correct, active {@code AD_Column} row and a freshly rebuilt runtime model. See
+   * {@code docs/generated-custom-windows/fiscal-models.md} for the full writeup.
+   */
+  static final String PROPERTY_DECL_SEQ = "declarationSequence";
   static final String PROPERTY_DECLARATION_STATUS = "declarationStatus";
   static final String PROPERTY_DECLARATION_FILE_NAME = "declarationFileName";
   static final String PROPERTY_FILE_EXTERNAL = "fileExternal";
@@ -143,6 +172,7 @@ class FiscalDeclCrudHandler {
   private static final String PROPERTY_UPDATED = "updated";
   private static final String PROPERTY_UPDATED_BY = "updatedBy";
   private static final String JSON_CONTENT_TYPE = "application/json;charset=UTF-8";
+  private static final String MODEL_KEY         = "model";
   private static final String PERIOD_KEY        = "period";
   private static final String STATUS_KEY        = "status";
   private static final String FILE_NAME_KEY     = "fileName";
@@ -197,11 +227,22 @@ class FiscalDeclCrudHandler {
   private void handleDeclPost(HttpServletRequest request,
       HttpServletResponse response) throws Exception {
     JSONObject body = readJsonBody(request);
-    String model    = body.getString("model");
+    String model    = body.getString(MODEL_KEY);
     long   year     = body.getLong("year");
     String period   = body.getString(PERIOD_KEY);
-    String declType = "com".equals(body.optString("type")) ? "C" : "O";
+    String requestedDeclType = "com".equals(body.optString("type")) ? "C" : "O";
     String status   = body.has(STATUS_KEY) ? body.getString(STATUS_KEY) : DEFAULT_STATUS;
+
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    String orgId    = OBContext.getOBContext().getCurrentOrganization().getId();
+    // ETP-5187 — a 2nd (or later) declaration for the same model/year/period used to 500 on
+    // ETGO_FISCAL_DECL_UQ (unique on client/org/model/year/period/DECL_TYPE) because the frontend
+    // never sent a differentiator and every declaration defaulted to DECL_TYPE='O'. A follow-up
+    // fix replaced DECL_TYPE (AEAT's genuine ordinaria/complementaria business value) with the
+    // dedicated DECL_SEQ ordinal below as the uniqueness disambiguator: there is no AEAT/legal
+    // cap on how many rectificativas can be filed for a period, so DECL_SEQ has no ceiling — see
+    // resolveNextDeclSeq.
+    long declSeq = resolveNextDeclSeq(clientId, orgId, model, year, period);
 
     BaseOBObject decl = (BaseOBObject) OBProvider.getInstance().get(ENTITY_FISCAL_DECL);
     decl.set(PROPERTY_CLIENT, OBContext.getOBContext().getCurrentClient());
@@ -211,7 +252,8 @@ class FiscalDeclCrudHandler {
     decl.set(PROPERTY_FISCAL_MODEL, model);
     decl.set(PROPERTY_FISCAL_YEAR, year);
     decl.set(PROPERTY_PERIOD, period);
-    decl.set(PROPERTY_DECLARATION_TYPE, declType);
+    decl.set(PROPERTY_DECLARATION_TYPE, requestedDeclType);
+    decl.set(PROPERTY_DECL_SEQ, declSeq);
     decl.set(PROPERTY_DECLARATION_STATUS, status);
     OBDal.getInstance().save(decl);
     JSONObject created = declToJson(decl);
@@ -219,6 +261,51 @@ class FiscalDeclCrudHandler {
 
     response.setStatus(HttpServletResponse.SC_CREATED);
     response.getWriter().write(created.toString());
+  }
+
+  /**
+   * Resolves the next {@code DECL_SEQ} ordinal for the given natural key
+   * ({@code AD_CLIENT_ID, AD_ORG_ID, MODEL, FISCAL_YEAR, PERIOD}) — {@code MAX(DECL_SEQ) + 1}
+   * across every existing declaration sharing that key, or {@code 0} when none exist yet
+   * (ETP-5187 — "allow a new declaration for an already-declared period, warn instead of
+   * blocking"). {@code ETGO_FISCAL_DECL_UQ} is unique on this natural key plus {@code DECL_SEQ},
+   * so returning a fresh, always-incrementing ordinal here guarantees the insert never collides
+   * with the constraint — there is no cap: a 3rd, 4th, or Nth declaration for the same period
+   * (the rectificativa flow — filed early, more invoices/corrections arrived later) succeeds just
+   * like the 2nd, matching the real AEAT/legal rule that there is no limit on how many
+   * rectificativas can be filed for a period.
+   *
+   * <p>Deliberately does NOT use {@link #PROPERTY_DECLARATION_TYPE} for this: that column is
+   * AEAT's own ordinaria/complementaria business value (rendered verbatim by the frontend,
+   * {@code FmListPage.jsx}), not an artificial disambiguator, and overloading it as one (the
+   * original ETP-5187 approach) capped the whole system at 2 declarations per period since the
+   * column is {@code VARCHAR(1)} CHECKed to exactly {@code 'O'}/{@code 'C'}.
+   *
+   * @return the next free {@code DECL_SEQ} value, starting at {@code 0}.
+   */
+  // Package-private (not private) so FiscalDeclCrudHandlerTest can exercise it directly, matching
+  // the same test-visibility convention already used for splitAeatError/declToJson/replaceIncidents
+  // in this class rather than introducing a new one.
+  long resolveNextDeclSeq(String clientId, String orgId, String model, long year,
+      String period) {
+    OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY_FISCAL_DECL,
+        "client.id = :clientId and organization.id = :orgId and " + PROPERTY_FISCAL_MODEL
+            + " = :model and " + PROPERTY_FISCAL_YEAR + " = :year and " + PROPERTY_PERIOD
+            + " = :period");
+    query.setNamedParameter("clientId", clientId);
+    query.setNamedParameter("orgId", orgId);
+    query.setNamedParameter(MODEL_KEY, model);
+    query.setNamedParameter("year", Long.valueOf(year));
+    query.setNamedParameter(PERIOD_KEY, period);
+    long maxSeq = -1L;
+    for (BaseOBObject existing : query.list()) {
+      Object rawSeq = existing.get(PROPERTY_DECL_SEQ);
+      long seq = rawSeq instanceof Number ? ((Number) rawSeq).longValue() : 0L;
+      if (seq > maxSeq) {
+        maxSeq = seq;
+      }
+    }
+    return maxSeq + 1L;
   }
 
   private void handleDeclPut(HttpServletRequest request, HttpServletResponse response)
@@ -309,11 +396,24 @@ class FiscalDeclCrudHandler {
     }
   }
 
+  /**
+   * Deletes a declaration — restricted to {@code draft} status (ETP-5187, "edit/delete hover
+   * actions on the declaration list row"). Defense in depth: the frontend already only shows the
+   * delete action for draft rows ({@code FmListPage.jsx}), but this guard is what actually
+   * prevents a non-draft declaration (ready/submitted/…) from being removed, regardless of what
+   * the client sends.
+   */
   private void handleDeclDelete(HttpServletRequest request, HttpServletResponse response)
       throws Exception {
     String id = request.getParameter("id");
     BaseOBObject decl = resolveOwnedDeclaration(id, response);
     if (decl == null) {
+      return;
+    }
+    String status = asString(decl.get(PROPERTY_DECLARATION_STATUS));
+    if (!DEFAULT_STATUS.equals(status)) {
+      servlet.sendError(response, HttpServletResponse.SC_CONFLICT,
+          "Only draft declarations can be deleted: " + id);
       return;
     }
     OBDal.getInstance().remove(decl);
@@ -499,7 +599,7 @@ class FiscalDeclCrudHandler {
   JSONObject declToJson(BaseOBObject decl) throws Exception {
     JSONObject o = new JSONObject();
     o.put("id",           decl.getId() != null ? decl.getId() : "");
-    o.put("model",        asString(decl.get(PROPERTY_FISCAL_MODEL)));
+    o.put(MODEL_KEY,       asString(decl.get(PROPERTY_FISCAL_MODEL)));
     o.put("year",         asInt(decl.get(PROPERTY_FISCAL_YEAR)));
     o.put(PERIOD_KEY,     asString(decl.get(PROPERTY_PERIOD)));
     String dt = asString(decl.get(PROPERTY_DECLARATION_TYPE));
