@@ -713,10 +713,12 @@ class NeoDateFormatTest {
 
       String token = NeoDateFormat.toAuditToken(updated);
 
-      // Core's writer emits RFC-822 (`+0200`), not ISO (`+02:00`), so the offset is parsed with
-      // the matching java.time pattern rather than OffsetDateTime.parse's ISO default.
+      // ETP-5283: core's writer emits RFC-822 (`+0200`), but toAuditToken pairs it with
+      // convertToCorrectXSDFormat as core documents, so the token on the wire carries the XSD
+      // colon offset (`+02:00`) — the only shape core's own reader repair recognises. Hence the
+      // `XXX` pattern letter rather than `Z`.
       OffsetDateTime parsed = OffsetDateTime.parse(
-          token, DateTimeFormatter.ofPattern(NeoDateFormat.ISO_DATETIME + "Z"));
+          token, DateTimeFormatter.ofPattern(NeoDateFormat.ISO_DATETIME + "XXX"));
 
       ZoneOffset expected = ZoneId.systemDefault().getRules().getOffset(updated.toInstant());
       assertEquals(expected, parsed.getOffset());

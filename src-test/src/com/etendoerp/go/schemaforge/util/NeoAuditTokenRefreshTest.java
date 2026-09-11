@@ -198,10 +198,11 @@ class NeoAuditTokenRefreshTest {
       NeoAuditTokenRefresh.refreshInBody(crudWrite("PUT"), body);
 
       String refreshed = firstRecordOf(body).getString("updated");
-      // Core's writer is a SimpleDateFormat with `ZZZZZ`, i.e. RFC-822 (`+0200`), so the offset is
-      // parsed with the matching java.time pattern rather than the ISO default.
+      // ETP-5283: core's writer is a SimpleDateFormat with `ZZZZZ`, i.e. RFC-822 (`+0200`), but
+      // toAuditToken pairs it with convertToCorrectXSDFormat as core documents, so the refreshed
+      // token carries the XSD colon offset (`+02:00`). Hence `XXX`, not `Z`.
       OffsetDateTime parsed = OffsetDateTime.parse(
-          refreshed, DateTimeFormatter.ofPattern(NeoDateFormat.ISO_DATETIME + "Z"));
+          refreshed, DateTimeFormatter.ofPattern(NeoDateFormat.ISO_DATETIME + "XXX"));
       Timestamp storedTs = Timestamp.valueOf(STORED_LITERAL);
       ZoneOffset expected = ZoneId.systemDefault().getRules().getOffset(storedTs.toInstant());
 

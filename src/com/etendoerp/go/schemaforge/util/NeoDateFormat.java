@@ -166,7 +166,18 @@ public final class NeoDateFormat {
    * instead of the trap.
    *
    * <p>Formatting is done with core's own writer, not a pattern of ours: core's reader is what
-   * has to accept the value back, so the only safe emitter is the one paired with it.
+   * has to accept the value back, so the only safe emitter is the one paired with it. That pairing
+   * is why the result goes through {@code convertToCorrectXSDFormat} as well — core states it
+   * itself on {@code createDateTimeFormat}: <i>"Note users of this method will also use the
+   * convertToCorrectXSDFormat method"</i>. The writer emits an RFC-822 offset ({@code -0300}); the
+   * reader's repair only recognises the XSD colon form ({@code -03:00}), which it rewrites back to
+   * RFC-822 cleanly. Emitting the un-colonised form is NOT rejected — it is unrecognised, so the
+   * repair appends a second {@code "+0000"} and the value survives only because
+   * {@code SimpleDateFormat} discards trailing text once its pattern is satisfied (it would parse
+   * {@code +0200XYZZY} just as happily). {@code NeoRecordVersion.normalizeZoneDesignator} already
+   * refuses to rely on that accident for an inbound {@code Z}; this method must not rely on it for
+   * the token it emits. The colon form is also the only one ECMAScript's {@code Date.parse}
+   * guarantees, so the browser stops depending on a lenient engine parser too.
    *
    * @param rawUpdated the audit value as the row yielded it — a {@link java.util.Date} (which is
    *                   what a native-SQL {@code timestamp} column produces, and the preferred
@@ -182,7 +193,7 @@ public final class NeoDateFormat {
       return null;
     }
     if (rawUpdated instanceof java.util.Date) {
-      return JsonUtils.createDateTimeFormat().format((java.util.Date) rawUpdated);
+      return xsdStamp((java.util.Date) rawUpdated);
     }
     // A string input has no offset to preserve — a Postgres `timestamp without time zone`, and
     // Timestamp.toString(), are both server-local wall clock. So it is canonicalised (which
@@ -195,12 +206,20 @@ public final class NeoDateFormat {
       return null;
     }
     try {
-      return JsonUtils.createDateTimeFormat().format(new SimpleDateFormat(ISO_DATETIME)
-          .parse(canonical));
+      return xsdStamp(new SimpleDateFormat(ISO_DATETIME).parse(canonical));
     } catch (ParseException e) {
       log.debug("Could not render '{}' as an audit token: {}", rawUpdated, e.getMessage());
       return null;
     }
+  }
+
+  /**
+   * Core's datetime writer and its XSD colon-inserter, applied as the pair core documents them as.
+   * The single place the audit token's wire shape is decided, so the two branches above cannot
+   * drift apart.
+   */
+  private static String xsdStamp(java.util.Date instant) {
+    return JsonUtils.convertToCorrectXSDFormat(JsonUtils.createDateTimeFormat().format(instant));
   }
 
   private static java.time.ZonedDateTime zoned(java.util.Date ts) {

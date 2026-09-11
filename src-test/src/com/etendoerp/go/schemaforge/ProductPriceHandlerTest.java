@@ -107,7 +107,7 @@ class ProductPriceHandlerTest {
    * CI.
    */
   private static final Pattern AUDIT_TOKEN_SHAPE = Pattern
-      .compile("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}[+-]\\d{4}$");
+      .compile("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}[+-]\\d{2}:\\d{2}$");
 
   private ProductPriceHandler handler;
 
@@ -1734,7 +1734,14 @@ class ProductPriceHandlerTest {
     assertNotEquals(expectedWallClock, emitted,
         "the offsetless canonical form is NOT a valid concurrency token (ETP-5255)");
     Date expectedInstant = new SimpleDateFormat(NeoDateFormat.ISO_DATETIME).parse(expectedWallClock);
-    assertEquals(expectedInstant, JsonUtils.createDateTimeFormat().parse(emitted),
+    // ETP-5283: read back through core's FULL reader — the repair, then the parse. That is what
+    // JsonToDataConverter (JsonUtils.convertFromXSDToJavaFormat at 166/179/182/387) and
+    // NeoRecordVersion.parseClientValue both do; no production call site parses the raw token.
+    // createDateTimeFormat's pattern cannot read the XSD colon offset on its own — feeding it the
+    // unrepaired token asserted half the pipeline, and only passed while the emitter was skipping
+    // convertToCorrectXSDFormat.
+    assertEquals(expectedInstant,
+        JsonUtils.createDateTimeFormat().parse(JsonUtils.convertFromXSDToJavaFormat(emitted)),
         "the token must round-trip through core's own reader to the same instant");
   }
 }
