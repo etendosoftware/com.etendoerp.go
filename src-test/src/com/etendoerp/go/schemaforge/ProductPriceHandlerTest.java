@@ -19,21 +19,30 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.sql.Timestamp;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TimeZone;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -45,6 +54,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.function.Executable;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -57,6 +67,8 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.pricing.pricelist.PriceList;
 import org.openbravo.model.pricing.pricelist.PriceListVersion;
+import org.openbravo.model.pricing.pricelist.ProductPrice;
+import org.openbravo.service.json.JsonUtils;
 
 /**
  * Unit tests for {@link ProductPriceHandler}.
@@ -285,7 +297,21 @@ class ProductPriceHandlerTest {
     assertEquals("PricingProductPrice", item.getString("_entityName"));
     // ETP-5203: updated (row[15]) must be present so PUT/PATCH can echo it back
     // for the mandatory optimistic-concurrency check (missing_updated regression).
-    assertEquals("2026-08-15T10:30:00", item.getString("updated"));
+    //
+    // ETP-5245: and it must be formatted with core's OWN writer, offset included. This
+    // expectation used to read "2026-08-15T10:30:00" — a value with no zone offset — which is
+    // precisely what let the production bug through: core's reader
+    // (JsonUtils.convertFromXSDToJavaFormat) appends "+0000" to an offset-less token, so on a
+    // server west of UTC every echoed stamp came back looking hours older than the stored row
+    // and the optimistic-concurrency check refused every single edit as `stale_record`.
+    // The expected value is derived from core's formatter rather than hardcoded to "-0300",
+    // because the offset is the JVM's and CI may well run in UTC; what is asserted is that
+    // handler and core agree, plus the shape (see the dedicated cases at the end of this file).
+    String expectedUpdated = JsonUtils.convertToCorrectXSDFormat(
+        JsonUtils.createDateTimeFormat().format(Timestamp.valueOf("2026-08-15 10:30:00.123456")));
+    assertEquals(expectedUpdated, item.getString("updated"));
+    assertTrue(item.getString("updated").matches(OFFSET_STAMP_PATTERN),
+        "the echoed `updated` must carry a zone offset, got: " + item.getString("updated"));
   }
 
   /**
@@ -653,6 +679,9 @@ class ProductPriceHandlerTest {
     when(criteria.addOrder(any(Order.class))).thenReturn(criteria);
     when(criteria.setMaxResults(1)).thenReturn(criteria);
     when(criteria.list()).thenReturn(Collections.singletonList(mockPlv));
+    // ETP-5245: the POST path now also looks for an existing row on the resolved tariff; without
+    // this stub the test would silently traverse the upsert's error branch instead of the insert.
+    givenTheProductHasNoPriceOnThatTariff();
 
     NeoContext ctx = NeoContext.builder()
         .httpMethod("POST")
@@ -661,7 +690,7 @@ class ProductPriceHandlerTest {
         .obContext(obContext)
         .build();
 
-    handler.handle(ctx);
+    assertNull(handler.handle(ctx));
     assertEquals("resolved-plv-id", body.getString("priceListVersion"));
   }
 
@@ -673,6 +702,7 @@ class ProductPriceHandlerTest {
     JSONObject body = new JSONObject();
     body.put("product", "already-set");
     body.put("priceListVersion", "existing-plv-id");
+    givenTheProductHasNoPriceOnThatTariff();
 
     NeoContext ctx = NeoContext.builder()
         .httpMethod("POST")
@@ -681,7 +711,7 @@ class ProductPriceHandlerTest {
         .obContext(obContext)
         .build();
 
-    handler.handle(ctx);
+    assertNull(handler.handle(ctx));
     assertEquals("existing-plv-id", body.getString("priceListVersion"));
   }
 
@@ -719,6 +749,7 @@ class ProductPriceHandlerTest {
     when(sharedCriteria.addOrder(any(Order.class))).thenReturn(sharedCriteria);
     when(sharedCriteria.setMaxResults(1)).thenReturn(sharedCriteria);
     when(sharedCriteria.list()).thenReturn(Collections.singletonList(mockPlv));
+    givenTheProductHasNoPriceOnThatTariff();
 
     NeoContext ctx = NeoContext.builder()
         .httpMethod("POST")
@@ -727,7 +758,7 @@ class ProductPriceHandlerTest {
         .obContext(obContext)
         .build();
 
-    handler.handle(ctx);
+    assertNull(handler.handle(ctx));
     assertEquals("shared-plv-id", body.getString("priceListVersion"));
   }
 
@@ -754,6 +785,7 @@ class ProductPriceHandlerTest {
     when(criteria.addOrder(any(Order.class))).thenReturn(criteria);
     when(criteria.setMaxResults(1)).thenReturn(criteria);
     when(criteria.list()).thenReturn(Collections.singletonList(mockPlv));
+    givenTheProductHasNoPriceOnThatTariff();
 
     NeoContext ctx = NeoContext.builder()
         .httpMethod("POST")
@@ -762,7 +794,7 @@ class ProductPriceHandlerTest {
         .obContext(obContext)
         .build();
 
-    handler.handle(ctx);
+    assertNull(handler.handle(ctx));
     assertEquals("zero-org-plv-id", body.getString("priceListVersion"));
   }
 
@@ -1060,5 +1092,614 @@ class ProductPriceHandlerTest {
     assertTrue(enriched.getBoolean("priceListVersion$salesPriceList"));
     assertEquals("pl-id-1", enriched.getString("priceList"));
     assertEquals("Test Sales PL", enriched.getString("priceList$_identifier"));
+  }
+
+  // ── ETP-5245: POST on an already-priced tariff updates instead of duplicating ─────────────
+  //
+  // M_ProductPrice is unique on (M_PriceList_Version_ID, M_Product_ID). Since ProductDefaultsHandler
+  // seeds a zero-priced row on each default tariff at product creation, the products import's own
+  // price POST — same /batch call, same tariff — would otherwise hit that constraint. Returning a
+  // non-null response from handle() short-circuits the default CRUD, so the INSERT never runs.
+
+  private static final String UPSERT_PRODUCT_ID = "product-upsert";
+  private static final String UPSERT_VERSION_ID = "plv-upsert";
+  private static final String UPSERT_PRICE_ID = "pp-upsert";
+
+  /** Makes ProductHandlerUtils.findExistingPrice see one existing active row for the pair. */
+  @SuppressWarnings("unchecked")
+  private ProductPrice givenTheProductIsAlreadyPricedOnThatTariff() {
+    ProductPrice existing = mock(ProductPrice.class);
+    when(existing.getId()).thenReturn(UPSERT_PRICE_ID);
+    OBCriteria<ProductPrice> criteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(ProductPrice.class)).thenReturn(criteria);
+    when(criteria.add(any(Criterion.class))).thenReturn(criteria);
+    when(criteria.setMaxResults(anyInt())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.singletonList(existing));
+    return existing;
+  }
+
+  /** Makes ProductHandlerUtils.findExistingPrice see no row for the pair. */
+  @SuppressWarnings("unchecked")
+  private void givenTheProductHasNoPriceOnThatTariff() {
+    OBCriteria<ProductPrice> criteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(ProductPrice.class)).thenReturn(criteria);
+    when(criteria.add(any(Criterion.class))).thenReturn(criteria);
+    when(criteria.setMaxResults(anyInt())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.emptyList());
+  }
+
+  /** Stubs the read-back query so the updated row can be returned in the GET row shape. */
+  @SuppressWarnings("unchecked")
+  private void stubReadBackOf(String priceId) {
+    when(session.createNativeQuery(anyString())).thenReturn(nativeQuery);
+    when(nativeQuery.setParameter(eq("productId"), anyString())).thenReturn(nativeQuery);
+    Object[] row = new Object[]{
+        priceId, UPSERT_PRODUCT_ID, UPSERT_VERSION_ID, "Default Sales",
+        new BigDecimal("199.99"), new BigDecimal("199.99"), new BigDecimal("199.99"),
+        "S", "Y", "Default Sales PL", UPSERT_PRODUCT_ID + " - Default Sales", "\u20ac", "EUR",
+        "Y", java.sql.Date.valueOf("2026-01-01"), "2026-08-15 10:30:00.123456"
+    };
+    Object[] otherRow = new Object[]{
+        "pp-someone-else", UPSERT_PRODUCT_ID, "plv-other", "Other",
+        BigDecimal.ZERO, BigDecimal.ZERO, BigDecimal.ZERO,
+        "S", "N", "Other PL", "ident", null, "EUR",
+        "N", null, "2026-08-15 10:30:00.123456"
+    };
+    when(nativeQuery.list()).thenReturn(Arrays.asList(otherRow, row));
+  }
+
+  private NeoContext upsertCtx(JSONObject body) {
+    return NeoContext.builder()
+        .httpMethod("POST")
+        .endpointType(NeoEndpointType.CRUD)
+        .requestBody(body)
+        .obContext(obContext)
+        .build();
+  }
+
+  private static JSONObject upsertBody() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("product", UPSERT_PRODUCT_ID);
+    body.put("priceListVersion", UPSERT_VERSION_ID);
+    return body;
+  }
+
+  /**
+   * Verifies that posting a price for a tariff the product already sits on updates that row and
+   * returns it, short-circuiting the insert that would violate the unique constraint.
+   */
+  @Test
+  void testHandlePostUpdatesTheExistingRowInsteadOfInsertingADuplicate() throws Exception {
+    ProductPrice existing = givenTheProductIsAlreadyPricedOnThatTariff();
+    stubReadBackOf(UPSERT_PRICE_ID);
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", "199.99");
+    body.put("listPrice", "199.99");
+    body.put("priceLimit", "199.99");
+
+    NeoResponse response = handler.handle(upsertCtx(body));
+
+    // Non-null == the default CRUD never runs == no INSERT == no constraint violation.
+    assertNotNull(response);
+    assertEquals(200, response.getHttpStatus());
+    verify(existing).setStandardPrice(new BigDecimal("199.99"));
+    verify(existing).setListPrice(new BigDecimal("199.99"));
+    verify(existing).setPriceLimit(new BigDecimal("199.99"));
+    verify(obDal).save(existing);
+    verify(obDal).flush();
+
+    // The response carries only the updated row, in the same shape a GET would return.
+    JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+    assertEquals(1, data.length());
+    assertEquals(UPSERT_PRICE_ID, data.getJSONObject(0).getString("id"));
+    assertEquals(UPSERT_VERSION_ID, data.getJSONObject(0).getString("priceListVersion"));
+  }
+
+  /**
+   * ETP-5245: the row found may have been deactivated by hand. It is invisible in the UI but
+   * still occupies the unique (version, product) pair, so the upsert has to reactivate it —
+   * otherwise the price the user just posted is written to a row nobody can see, and the tariff
+   * still looks unpriced.
+   */
+  @Test
+  void testHandlePostReactivatesADeactivatedRowItUpserts() throws Exception {
+    ProductPrice existing = givenTheProductIsAlreadyPricedOnThatTariff();
+    when(existing.isActive()).thenReturn(Boolean.FALSE);
+    stubReadBackOf(UPSERT_PRICE_ID);
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", "42.00");
+
+    NeoResponse response = handler.handle(upsertCtx(body));
+
+    assertNotNull(response);
+    assertEquals(200, response.getHttpStatus());
+    verify(existing).setActive(true);
+    verify(existing).setStandardPrice(new BigDecimal("42.00"));
+    verify(obDal).save(existing);
+  }
+
+  /**
+   * The reactivation is unconditional, so an already-active row takes the same path — asserted
+   * separately so a future "only when inactive" optimisation cannot silently split the two.
+   */
+  @Test
+  void testHandlePostKeepsAnAlreadyActiveRowActive() throws Exception {
+    ProductPrice existing = givenTheProductIsAlreadyPricedOnThatTariff();
+    when(existing.isActive()).thenReturn(Boolean.TRUE);
+    stubReadBackOf(UPSERT_PRICE_ID);
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", "42.00");
+
+    assertNotNull(handler.handle(upsertCtx(body)));
+    verify(existing).setActive(true);
+    verify(existing, never()).setActive(false);
+  }
+
+  /**
+   * Verifies the other half of the upsert: with no existing row, handle() returns null so the
+   * generic CRUD performs the normal insert.
+   */
+  @Test
+  void testHandlePostLetsTheNormalInsertProceedWhenTheTariffIsUnpriced() throws Exception {
+    givenTheProductHasNoPriceOnThatTariff();
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", "10");
+
+    assertNull(handler.handle(upsertCtx(body)));
+    verify(obDal, never()).save(any());
+    verify(obDal, never()).flush();
+  }
+
+  /**
+   * Verifies that the upsert lookup is skipped entirely when the pair is incomplete — there is
+   * nothing to collide with, so the insert must proceed.
+   */
+  @Test
+  void testHandlePostSkipsTheUpsertLookupWhenNoPriceListVersionCouldBeResolved() throws Exception {
+    mockEmptyCriteria();
+
+    JSONObject body = new JSONObject();
+    body.put("product", UPSERT_PRODUCT_ID);
+    body.put("standardPrice", "10");
+
+    assertNull(handler.handle(upsertCtx(body)));
+    verify(obDal, never()).createCriteria(ProductPrice.class);
+  }
+
+  /**
+   * applyPrice: a field the caller did not send keeps its stored value. Note priceLimit IS still
+   * written here — handlePost derives it from the standard price before the upsert runs.
+   */
+  @Test
+  void testHandlePostLeavesUnsentPriceFieldsUntouched() throws Exception {
+    ProductPrice existing = givenTheProductIsAlreadyPricedOnThatTariff();
+    stubReadBackOf(UPSERT_PRICE_ID);
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", "42.00");
+
+    assertNotNull(handler.handle(upsertCtx(body)));
+
+    verify(existing).setStandardPrice(new BigDecimal("42.00"));
+    verify(existing).setPriceLimit(new BigDecimal("42.00"));
+    verify(existing, never()).setListPrice(any());
+  }
+
+  /**
+   * applyPrice: an explicit JSON null is ignored rather than wiping the stored amount.
+   */
+  @Test
+  void testHandlePostIgnoresNullPriceFields() throws Exception {
+    ProductPrice existing = givenTheProductIsAlreadyPricedOnThatTariff();
+    stubReadBackOf(UPSERT_PRICE_ID);
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", JSONObject.NULL);
+    body.put("listPrice", JSONObject.NULL);
+    body.put("priceLimit", JSONObject.NULL);
+
+    assertNotNull(handler.handle(upsertCtx(body)));
+
+    verify(existing, never()).setStandardPrice(any());
+    verify(existing, never()).setListPrice(any());
+    verify(existing, never()).setPriceLimit(any());
+  }
+
+  /**
+   * applyPrice: a blank cell is ignored rather than parsed as zero.
+   */
+  @Test
+  void testHandlePostIgnoresBlankPriceFields() throws Exception {
+    ProductPrice existing = givenTheProductIsAlreadyPricedOnThatTariff();
+    stubReadBackOf(UPSERT_PRICE_ID);
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", "   ");
+    body.put("listPrice", "");
+    body.put("priceLimit", "  ");
+
+    assertNotNull(handler.handle(upsertCtx(body)));
+
+    verify(existing, never()).setStandardPrice(any());
+    verify(existing, never()).setListPrice(any());
+    verify(existing, never()).setPriceLimit(any());
+  }
+
+  /**
+   * applyPrice: an unparseable amount is logged and skipped — it must not blow up the request nor
+   * overwrite the stored price with garbage.
+   */
+  @Test
+  void testHandlePostIgnoresUnparseablePriceFields() throws Exception {
+    ProductPrice existing = givenTheProductIsAlreadyPricedOnThatTariff();
+    stubReadBackOf(UPSERT_PRICE_ID);
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", "not-a-number");
+    body.put("listPrice", "12,50");
+
+    NeoResponse response = handler.handle(upsertCtx(body));
+
+    assertNotNull(response);
+    assertEquals(200, response.getHttpStatus());
+    verify(existing, never()).setStandardPrice(any());
+    verify(existing, never()).setListPrice(any());
+  }
+
+  /**
+   * applyPrice: surrounding whitespace is trimmed, and zero is a real value (not "blank").
+   */
+  @Test
+  void testHandlePostAcceptsPaddedAmountsAndZero() throws Exception {
+    ProductPrice existing = givenTheProductIsAlreadyPricedOnThatTariff();
+    stubReadBackOf(UPSERT_PRICE_ID);
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", " 12.50 ");
+    body.put("listPrice", "0");
+    body.put("priceLimit", "0");
+
+    assertNotNull(handler.handle(upsertCtx(body)));
+
+    verify(existing).setStandardPrice(new BigDecimal("12.50"));
+    verify(existing).setListPrice(new BigDecimal("0"));
+    verify(existing).setPriceLimit(new BigDecimal("0"));
+  }
+
+  /**
+   * Verifies a failing update surfaces as a 500 instead of falling through to the insert the
+   * unique constraint would reject anyway.
+   */
+  @Test
+  void testHandlePostReturns500WhenTheUpdateFails() throws Exception {
+    ProductPrice existing = givenTheProductIsAlreadyPricedOnThatTariff();
+    doThrow(new IllegalStateException("db down")).when(obDal).save(existing);
+
+    JSONObject body = upsertBody();
+    body.put("standardPrice", "10");
+
+    NeoResponse response = handler.handle(upsertCtx(body));
+
+    assertNotNull(response);
+    assertEquals(500, response.getHttpStatus());
+  }
+
+  // ── ETP-5245: the selector exposes the tenant's default-tariff flag ───────────────────────
+
+  /**
+   * Verifies the price list version selector now carries the M_PriceList.IsDefault flag, which the
+   * products import reads to agree with PriceListVersionResolver about which tariff is "the" one.
+   */
+  @Test
+  void testAfterHandleExposesTheDefaultFlagOnSelectorItems() throws Exception {
+    JSONArray items = new JSONArray();
+    JSONObject defaultItem = new JSONObject();
+    defaultItem.put("id", "plv-default");
+    items.put(defaultItem);
+    JSONObject otherItem = new JSONObject();
+    otherItem.put("id", "plv-other");
+    items.put(otherItem);
+
+    JSONObject body = new JSONObject();
+    body.put("items", items);
+
+    PriceListVersion defaultPlv = mock(PriceListVersion.class);
+    PriceList defaultPl = mock(PriceList.class);
+    when(defaultPlv.getPriceList()).thenReturn(defaultPl);
+    when(defaultPl.isSalesPriceList()).thenReturn(Boolean.TRUE);
+    when(defaultPl.isDefault()).thenReturn(Boolean.TRUE);
+    when(defaultPl.getId()).thenReturn("pl-default");
+    when(defaultPl.getIdentifier()).thenReturn("Default Sales PL");
+    when(obDal.get(PriceListVersion.class, "plv-default")).thenReturn(defaultPlv);
+
+    PriceListVersion otherPlv = mock(PriceListVersion.class);
+    PriceList otherPl = mock(PriceList.class);
+    when(otherPlv.getPriceList()).thenReturn(otherPl);
+    when(otherPl.isSalesPriceList()).thenReturn(Boolean.TRUE);
+    when(otherPl.isDefault()).thenReturn(Boolean.FALSE);
+    when(otherPl.getId()).thenReturn("pl-other");
+    when(otherPl.getIdentifier()).thenReturn("Other Sales PL");
+    when(obDal.get(PriceListVersion.class, "plv-other")).thenReturn(otherPlv);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.SELECTOR)
+        .fieldName("priceListVersion")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    assertEquals(200, handler.afterHandle(ctx).getHttpStatus());
+
+    assertTrue(items.getJSONObject(0).getBoolean("default"));
+    assertTrue(items.getJSONObject(0).getBoolean("priceListVersion$default"));
+    assertFalse(items.getJSONObject(1).getBoolean("default"));
+    assertFalse(items.getJSONObject(1).getBoolean("priceListVersion$default"));
+  }
+
+  /**
+   * Verifies an unset IsDefault (null on the model) reads as false rather than throwing.
+   */
+  @Test
+  void testAfterHandleTreatsAnUnsetDefaultFlagAsFalse() throws Exception {
+    JSONArray items = new JSONArray();
+    JSONObject item = new JSONObject();
+    item.put("id", "plv-unset");
+    items.put(item);
+
+    JSONObject body = new JSONObject();
+    body.put("items", items);
+
+    PriceListVersion plv = mock(PriceListVersion.class);
+    PriceList pl = mock(PriceList.class);
+    when(plv.getPriceList()).thenReturn(pl);
+    when(pl.isSalesPriceList()).thenReturn(Boolean.TRUE);
+    when(pl.isDefault()).thenReturn(null);
+    when(pl.getId()).thenReturn("pl-unset");
+    when(pl.getIdentifier()).thenReturn("Unset PL");
+    when(obDal.get(PriceListVersion.class, "plv-unset")).thenReturn(plv);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.SELECTOR)
+        .fieldName("priceListVersion")
+        .previousResult(new NeoResponse(200, body))
+        .build();
+
+    handler.afterHandle(ctx);
+
+    assertFalse(items.getJSONObject(0).getBoolean("default"));
+    assertFalse(items.getJSONObject(0).getBoolean("priceListVersion$default"));
+  }
+
+  // ── ETP-5245: the echoed `updated` has to survive core's own reader ───────────────────────
+  //
+  // The bug this section guards: `updated` was formatted with NeoDateFormat.toCanonical(raw,
+  // true), which DELIBERATELY drops the zone offset. Core's reader
+  // (JsonUtils.convertFromXSDToJavaFormat) treats an offset-less token as UTC — "make them utc,
+  // the timezone must be there" — so on a UTC-3 server the value the client echoed back parsed
+  // three hours earlier than the row's own `updated`, and NeoRecordVersion.isStale (an equality
+  // comparison to the second, not an "older than") answered "stale" for every write. Nobody had
+  // touched the row; no price could be edited at all.
+  //
+  // The old assertion could not catch this: it pinned the exact offset-less string, so dropping
+  // the offset was the expected outcome. These cases assert the property instead — the echoed
+  // stamp always carries an offset, and it round-trips through core's reader back to the very
+  // instant it came from, under any server time zone.
+
+  /**
+   * Core's datetime shape with the offset present, in either punctuation.
+   *
+   * <p>The colon is optional here on purpose. The handler emits the XSD form
+   * ({@code -03:00}) because that is the only one {@code convertFromXSDToJavaFormat} recognises
+   * without falling back to its {@code +"0000"} repair — but what this pattern is for is the
+   * property that broke production, namely that an offset is present AT ALL. Pinning the
+   * punctuation here too would make these cases fail for a reason that is not the bug, and the
+   * punctuation is asserted where it actually matters: by
+   * {@link #testEchoedUpdatedRoundTripsToTheStoredInstantUnderAnyServerZone}, which proves the
+   * reader parses the value without repairing it.
+   */
+  private static final String OFFSET_STAMP_PATTERN =
+      "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}[+-]\\d{2}:?\\d{2}";
+
+  /** The shape a native query hands the column over in when it arrives as raw text. */
+  private static final String RAW_PG_UPDATED = "2026-08-15 10:30:00.123456";
+
+  /**
+   * The server zones every echo case runs under.
+   *
+   * <p>Buenos Aires is the reported failure, UTC is the zone where the bug is invisible (and the
+   * one a CI runner is most likely to be in), and Kolkata is there for its <b>half-hour</b>
+   * offset: {@code JsonUtils.convertToCorrectXSDFormat} inserts the colon by POSITION
+   * ({@code length-2}), so {@code +0530} is the case that would expose a mis-placed colon —
+   * which the reader would then not recognise, silently falling back to its {@code +0000} repair.
+   */
+  private static final String[] SERVER_ZONES = {
+      "America/Argentina/Buenos_Aires", "UTC", "Asia/Kolkata" };
+
+  /**
+   * Runs {@code body} with the JVM default time zone forced to {@code zoneId} and restores the
+   * original zone afterwards.
+   *
+   * <p>The server's zone is the variable this whole bug turns on, so it has to be an input of
+   * the test rather than whatever the machine running the suite happens to be set to — a case
+   * pinned to {@code -0300} would pass here and fail in a UTC CI runner, and a case pinned to
+   * the ambient zone would go green on a UTC runner while the bug was still live.
+   *
+   * @param zoneId the zone to install for the duration of {@code body}
+   * @param body   the assertions to run under that zone
+   * @throws Throwable whatever {@code body} throws
+   */
+  private void withDefaultTimeZone(String zoneId, Executable body) throws Throwable {
+    TimeZone original = TimeZone.getDefault();
+    try {
+      TimeZone.setDefault(TimeZone.getTimeZone(zoneId));
+      body.execute();
+    } finally {
+      TimeZone.setDefault(original);
+    }
+  }
+
+  /** A price row whose column 15 carries {@code rawUpdated}; everything else is filler. */
+  private static Object[] priceRowWithUpdated(Object rawUpdated) {
+    return new Object[]{
+        "pp-upd-1", "product-upd", "plv-upd-1", "PLV Updated",   // [0-3]
+        new BigDecimal("10.00"), new BigDecimal("12.00"),         // [4-5]
+        new BigDecimal("9.00"),                                   // [6]
+        "S", "Y", "PL Updated",                                   // [7-9]
+        "product-upd - PLV Updated", "$", "USD",                  // [10-12]
+        "Y", java.sql.Date.valueOf("2026-01-01"),                 // [13-14]
+        rawUpdated                                                // [15] updated
+    };
+  }
+
+  /** Runs a GET list over {@code rows} and returns the serialised data array. */
+  @SuppressWarnings("unchecked")
+  private JSONArray runGetListWith(List<Object[]> rows) throws Exception {
+    Map<String, String> params = new HashMap<>();
+    params.put("parentId", "product-upd");
+    when(session.createNativeQuery(anyString())).thenReturn(nativeQuery);
+    when(nativeQuery.setParameter(anyString(), any())).thenReturn(nativeQuery);
+    when(nativeQuery.list()).thenReturn(rows);
+
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("GET")
+        .endpointType(NeoEndpointType.CRUD)
+        .queryParams(params)
+        .build();
+
+    NeoResponse response = handler.handle(ctx);
+    assertEquals(200, response.getHttpStatus());
+    return response.getBody().getJSONObject("response").getJSONArray("data");
+  }
+
+  /** The single row's serialised JSON for a given raw {@code updated} column value. */
+  private JSONObject singleRowFor(Object rawUpdated) throws Exception {
+    return runGetListWith(Collections.singletonList(priceRowWithUpdated(rawUpdated)))
+        .getJSONObject(0);
+  }
+
+  /**
+   * Reads a token back exactly the way core does on the next write:
+   * {@code NeoRecordVersion#parseClientValue} (and {@code JsonToDataConverter} behind it) run the
+   * caller's echo through these two calls and nothing else.
+   *
+   * @param token the {@code updated} value as the client echoed it
+   * @return the instant core resolves it to
+   * @throws Exception when the token is unparseable, which is itself a failure of the contract
+   */
+  private static Date readBackAsCoreDoes(String token) throws Exception {
+    String repaired = JsonUtils.convertFromXSDToJavaFormat(token);
+    return new Timestamp(JsonUtils.createDateTimeFormat().parse(repaired).getTime());
+  }
+
+  /**
+   * Verifies the echoed {@code updated} carries a zone offset whatever the server's zone is.
+   *
+   * <p>This is the assertion the previous expectation lacked: it pinned an offset-less literal,
+   * so the regression WAS the expected value.
+   */
+  @Test
+  void testEchoedUpdatedAlwaysCarriesAZoneOffset() throws Throwable {
+    for (String zone : SERVER_ZONES) {
+      withDefaultTimeZone(zone, () -> {
+        String echoed = singleRowFor(RAW_PG_UPDATED).getString("updated");
+        assertTrue(echoed.matches(OFFSET_STAMP_PATTERN),
+            "under " + zone + " the echoed `updated` must carry an offset, got: " + echoed);
+      });
+    }
+  }
+
+  /**
+   * Verifies the echoed stamp round-trips through core's reader back to the instant it came from,
+   * under a zone west of UTC, under UTC itself, and under a half-hour offset.
+   *
+   * <p>This is the case that matters most, because it is the only one that exercises the real
+   * path — {@code convertFromXSDToJavaFormat} then {@code createDateTimeFormat().parse()}, which
+   * is verbatim what {@code NeoRecordVersion#parseClientValue} and core's own
+   * {@code JsonToDataConverter#setData} run on the next write. Everything else here checks the
+   * string; this checks that core AGREES with it.
+   *
+   * <p>Two properties, and they fail for different reasons:
+   * <ul>
+   *   <li><b>the instant survives</b> — with the offset dropped, the Buenos Aires run comes back
+   *       three hours off and {@code NeoRecordVersion.isStale} (an equality check to the second,
+   *       not an "older than") refuses the write as {@code stale_record}. The UTC run passes
+   *       either way, which is exactly why one zone is not enough coverage;</li>
+   *   <li><b>the reader needs no repair</b> — {@code convertFromXSDToJavaFormat} recognises only
+   *       the colon form of the offset and, given anything else, appends {@code "+0000"} instead.
+   *       A bare {@code -0300} therefore became {@code -0300+0000} and parsed ONLY because
+   *       {@code SimpleDateFormat} ignores trailing characters. That accident is not something a
+   *       concurrency check should rest on, so it is asserted away: the repair must not be the
+   *       fallback branch. This also pins the colon's POSITION, which is what makes the Kolkata
+   *       ({@code +05:30}) run worth having — {@code convertToCorrectXSDFormat} inserts it at
+   *       {@code length-2}, and a colon placed anywhere else drops straight into the fallback.</li>
+   * </ul>
+   */
+  @Test
+  void testEchoedUpdatedRoundTripsToTheStoredInstantUnderAnyServerZone() throws Throwable {
+    for (String zone : SERVER_ZONES) {
+      withDefaultTimeZone(zone, () -> {
+        // What the row holds, truncated to the second — core zeroes milliseconds on both sides
+        // of the comparison before comparing (NeoRecordVersion#equalToTheSecond).
+        Timestamp stored = Timestamp.valueOf("2026-08-15 10:30:00");
+        String echoed = singleRowFor(RAW_PG_UPDATED).getString("updated");
+
+        assertNotEquals(echoed + "+0000", JsonUtils.convertFromXSDToJavaFormat(echoed),
+            "under " + zone + " core's reader must RECOGNISE the offset in `" + echoed
+                + "` and strip the colon, not fall back to appending +0000 to a token it did"
+                + " not understand");
+
+        assertEquals(stored.getTime(), readBackAsCoreDoes(echoed).getTime(),
+            "under " + zone + " core must read `" + echoed + "` back as the stored instant;"
+                + " any drift makes every edit a false stale_record");
+      });
+    }
+  }
+
+  /**
+   * Verifies a {@link Timestamp} (what the native query yields in production) and the equivalent
+   * raw Postgres string produce byte-identical output.
+   *
+   * <p>Both shapes reach this code — the tests feed strings, Hibernate feeds Timestamps — so a
+   * fix that only handled the one the tests exercise would have looked green and shipped broken.
+   */
+  @Test
+  void testTimestampAndRawPostgresStringEchoTheSameValue() throws Throwable {
+    withDefaultTimeZone("America/Argentina/Buenos_Aires", () -> {
+      String fromTimestamp = singleRowFor(Timestamp.valueOf(RAW_PG_UPDATED)).getString("updated");
+      String fromRawString = singleRowFor(RAW_PG_UPDATED).getString("updated");
+      assertEquals(fromRawString, fromTimestamp);
+      assertTrue(fromTimestamp.matches(OFFSET_STAMP_PATTERN),
+          "the Timestamp branch must carry an offset too, got: " + fromTimestamp);
+    });
+  }
+
+  /**
+   * Verifies a null {@code updated} column still serialises as JSON null, with the key present.
+   *
+   * <p>The key has to stay: {@code NeoCrudHandler#validateUpdateRequest} answers
+   * {@code missing_updated} on absence, so dropping it would trade one refusal for another.
+   */
+  @Test
+  void testNullUpdatedColumnStaysJsonNull() throws Exception {
+    JSONObject item = singleRowFor(null);
+    assertTrue(item.has("updated"));
+    assertTrue(item.isNull("updated"));
+  }
+
+  /**
+   * Verifies a value that is neither a date nor the Postgres shape is handed back untouched
+   * rather than throwing or being decorated with a fabricated offset.
+   *
+   * <p>Inventing an offset for a value whose zone is unknown is how this class of bug starts;
+   * passing it through leaves the (visible) problem where it belongs.
+   */
+  @Test
+  void testUnparseableUpdatedIsEchoedVerbatim() throws Exception {
+    assertEquals("not-a-timestamp", singleRowFor("not-a-timestamp").getString("updated"));
   }
 }

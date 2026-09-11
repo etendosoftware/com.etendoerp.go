@@ -2038,6 +2038,30 @@ the class javadoc in `YearCloseHandler.java` for the complete rationale. Treat t
 last-resort pattern, not a default — only reach for it once you've confirmed (not assumed) that
 `CallProcess` genuinely has no path for the process in question.
 
+**Advanced pattern — hand-writing into a table an engine owns (`ProductCostingHandler`, ETP-5245):**
+`M_Costing` is the costing engine's own table. Exposing its tab for manual entry (the Product
+window's Cost tab) is only safe because the handler forces every column whose value is not the
+user's to decide — `costType = 'STA'`, `permanent = false`, `production = false`, `manual = true`,
+the currency from the organization — and strips the columns that only belong to an engine-generated
+row. Three things generalize to any handler in this position:
+
+- **The forced columns must be `system` in `decisions.json`, never `discarded`.**
+  `NeoFieldFilter.filterCreateRequest` removes `discarded` fields from the POST body, which would
+  silently drop the handler's own values and create the row with the AD defaults instead. This
+  failure is invisible: the request succeeds and the row looks plausible.
+- **Guard update/delete in `handle`, not only in the UI.** `ProductCostingHandler.guardEngineRow`
+  returns `403` on any `PATCH`/`PUT`/`DELETE` against a row the engine produced. The UI's
+  read-only rule is a courtesy; this is what also covers the REST API and the MCP.
+- **Repair neighbouring state in `afterHandle` rather than rejecting the input.** Core resolves a
+  standard cost with `get(0)` over an unordered criteria, so overlapping date ranges make the
+  applied cost depend on the query plan. The handler closes the adjacent ranges — what
+  `StandardAlgorithm#insertCost` itself does — best-effort, so tidying failures never turn a valid
+  save into an error.
+
+The class javadoc in `ProductCostingHandler.java` carries the per-column rationale (which core
+class reads each flag, and what breaks if it is wrong); the user-facing behaviour is written up in
+`etendo_schema_forge`'s `docs/generated-custom-windows/product.md` § ETP-5245.
+
 **NeoContext fields:**
 
 | Field | Type | Description |
