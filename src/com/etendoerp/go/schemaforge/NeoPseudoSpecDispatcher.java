@@ -22,6 +22,7 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import com.etendoerp.go.common.GoRuntimeProperties;
+import com.etendoerp.go.schemaforge.webhooks.SFAcctProcessMonitor;
 import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
 import com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistory;
@@ -161,6 +162,14 @@ class NeoPseudoSpecDispatcher {
     if ("resendinvitation".equals(pathInfo.specName)) {
       return dispatchGoWebhook("Resendinvitation", method, request, response,
           new SFResendInvitation());
+    }
+    // ETP-5269 — status/history of the accounting server process, plus an admin-only manual
+    // trigger (?Action=trigger). The trigger schedules a SEPARATE one-shot AD_PROCESS_REQUEST and
+    // never touches the recurring every-5-minutes one; see SFAcctProcessMonitor's class javadoc for
+    // why that mechanism was chosen over the two alternatives.
+    if ("acctprocessmonitor".equals(pathInfo.specName)) {
+      return dispatchGoWebhook("Acctprocessmonitor", method, request, response,
+          new SFAcctProcessMonitor());
     }
     return false;
   }
