@@ -25,6 +25,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -69,11 +70,24 @@ final class SupportIntegrationClient {
       "support.adk.url", "ETGO_SUPPORT_ADK_URL", "");
   private static final String ADK_APP_NAME = "agent";
 
-  // Per-deployment environment name (local/experimental/staging/production), forwarded to the
-  // ADK session so the Jira ticket it creates can carry it as a custom field for Mixpanel
-  // (mirrors client_id above). Empty by default until each real deployment sets it.
-  private static final String ENVIRONMENT_NAME = ConfigPropertyReader.readConfigValue(
-      "support.environment", "ETGO_SUPPORT_ENVIRONMENT", "");
+  // Same hostname → environment-name mapping as the frontend's SENTRY_ENV_MAP
+  // (tools/app-shell/src/lib/sentry.js), so both sides report identical environment strings
+  // for the same deployment. Forwarded to the ADK session so the Jira ticket it creates can
+  // carry it as a custom field for Mixpanel (mirrors client_id above).
+  private static final Map<String, String> ENVIRONMENT_NAME_BY_HOSTNAME = Map.of(
+      "go.staging.etendo.cloud", "staging",
+      "go.experimental.etendo.cloud", "experimental",
+      "go.etendo.cloud", "production");
+  private static final String DEFAULT_ENVIRONMENT_NAME = "development";
+
+  /**
+   * Resolves the deployment environment name from the request's hostname, mirroring
+   * resolveSentryEnvironment() on the frontend. Unknown hostnames (including local dev,
+   * e.g. localhost) fall back to {@value #DEFAULT_ENVIRONMENT_NAME}.
+   */
+  static String resolveEnvironment(String hostname) {
+    return ENVIRONMENT_NAME_BY_HOSTNAME.getOrDefault(hostname, DEFAULT_ENVIRONMENT_NAME);
+  }
 
   /** Zero-width-prefixed marker appended to a reply's text when the ADK's response for that
    * turn set {@code pending_escalation=confirm} — i.e. ValerIA just offered to escalate to a
@@ -109,7 +123,7 @@ final class SupportIntegrationClient {
   // --- ADK session / messaging ---
 
   static void createAdkSession(String userId, String sessionId, String locale, String userEmail,
-      String clientId) {
+      String clientId, String environment) {
     String url = ADK_BASE_URL + "/apps/" + ADK_APP_NAME + "/users/" + userId + "/sessions/" + sessionId;
     try {
       // The body IS the initial state dict directly — NOT wrapped in a "state" key.
@@ -126,8 +140,8 @@ final class SupportIntegrationClient {
       if (clientId != null && !clientId.isEmpty()) {
         state.put("client_id", clientId);
       }
-      if (!ENVIRONMENT_NAME.isEmpty()) {
-        state.put("environment", ENVIRONMENT_NAME);
+      if (environment != null && !environment.isEmpty()) {
+        state.put("environment", environment);
       }
       String body = state.toString();
       HttpRequest req = HttpRequest.newBuilder()
@@ -138,7 +152,7 @@ final class SupportIntegrationClient {
           .build();
       HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
       log.debug("ADK session created: {} (locale={}, user_email={}, client_id={}, environment={}) → {}",
-          sessionId, locale, userEmail, clientId, ENVIRONMENT_NAME, resp.statusCode());
+          sessionId, locale, userEmail, clientId, environment, resp.statusCode());
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       log.warn("Failed to create ADK session {}: {}", sessionId, e.getMessage());
