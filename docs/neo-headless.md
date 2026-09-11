@@ -1179,12 +1179,14 @@ GET /sws/neo/debuginvitationbypass?Action=forceStatus&Email=<email>&Status=<stat
 GET /sws/neo/resendinvitation?AdUserId=<id>                               (§8h)
 GET /sws/neo/promoteuserrole?UserId=<id>&Mode=promote|demote              (§8i)
 GET /sws/neo/documentemailhistory?recordId=<id>[&specName=<spec>]         (§8j)
+GET /sws/neo/refreshtoken                                                 (§8k)
 Authorization: Bearer {token}
 ```
 
 `NeoGoWebhookBridge` runs `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview`/`SFAssignUserRoles`/
 `SFUserRoleAssignments`/`SFSystemRoleTemplates`/`SFDebugInvitationBypass`/`SFResendInvitation`/
-`SFPromoteUserRole`/`SFDocumentEmailHistory` (§8, §8b, §8c, §8d, §8e, §8f, §8g, §8h, §8i, §8j)
+`SFPromoteUserRole`/`SFDocumentEmailHistory`/`SFRefreshToken`
+(§8, §8b, §8c, §8d, §8e, §8f, §8g, §8h, §8i, §8j, §8k)
 through NEO's own
 JWT authentication instead of the Webhooks module's HTTP dispatch — the same pattern
 `NeoSimSearchEndpoint` (§4.9) already used for `SimSearch`. Each of these pseudo-specs constructs
@@ -1198,14 +1200,15 @@ original `/webhooks/*` paths too — the Webhooks module dispatch was not remove
 and no `SMFWHE_DEFINEDWEBHOOK_ROLE` grant is required for it. `SFAssignUserRoles` (ETP-4852),
 `SFUserRoleAssignments` (ETP-4906), `SFSystemRoleTemplates` (ETP-4906),
 `SFDebugInvitationBypass` (ETP-4830), `SFResendInvitation` (ETP-4830), `SFPromoteUserRole`
-(ETP-5019), and `SFDocumentEmailHistory` (ETP-5069) are `/sws/neo/*`-only — all seven were
-authored after this pattern was already established, so none ever had a legacy `/webhooks/*`
-path to keep.
+(ETP-5019), `SFDocumentEmailHistory` (ETP-5069), and `SFRefreshToken` (ETP-5195) are
+`/sws/neo/*`-only — all eight were authored after this pattern was already established, so none
+ever had a legacy `/webhooks/*` path to keep.
 
 Each webhook's own access rule is unaffected and still enforced inside its `get()` — see
-§8/§8b/§8c/§8d/§8e/§8f/§8g/§8h/§8i/§8j for what each one checks
+§8/§8b/§8c/§8d/§8e/§8f/§8g/§8h/§8i/§8j/§8k for what each one checks
 (`NeoAccessHelper.isAdminOrClientAdmin`, window/process access checks, and — for
-`documentemailhistory` alone — DAL's own readable-client/org filtering, §8j). Non-`GET`
+`documentemailhistory` alone — DAL's own readable-client/org filtering, §8j;
+`refreshtoken` has no role gate at all — see §8k for why). Non-`GET`
 requests get `405`; a webhook that throws gets
 `500` with the exception message (except `SFAssignUserRoles`'s own expected domain-validation
 rejections, `SFUserRoleAssignments`'s own expected domain rejections, and `SFPromoteUserRole`'s
@@ -3628,6 +3631,109 @@ sizing live in `docs/transactional-email-contracts.md` → *Readable send histor
 privacy decision and its operational rules live in the functional repo's
 `docs/ops/transactional-email-security.md` → *Email Audit Redaction & Storage Policy*. This section
 stays the reference for the endpoint itself.
+
+---
+
+## 8k. Refresh Token (SFRefreshToken Webhook, ETP-5195)
+
+`SFRefreshToken` (`GET /sws/neo/refreshtoken`, no parameters — reached ONLY through the NEO
+pseudo-spec bridge, §4.10/§4.11; no legacy `/webhooks/*` path, same as every sibling authored
+after the pattern existed) reissues the CALLER'S OWN NEO bearer JWT, embedding their CURRENT
+`AD_User.Default_Ad_Role_ID` instead of whatever role the token they are calling with happened to
+be minted with.
+
+**The bug this closes.** `NeoAuthenticator#authenticateJwt` rebuilds `OBContext` on every NEO
+request straight from the incoming token's `role` claim — that claim is fixed at mint time and is
+never re-derived from the DB on later requests. `UserRoleCompositionService#promoteToAdmin`/
+`#demoteFromAdmin` (§8i) DO swap `Default_Ad_Role_ID` when an owner/admin promotes or demotes a
+user, but the affected user's own already-issued token keeps authenticating as their
+pre-promotion/demotion role until a new token is minted — previously only possible by a full
+re-login. This endpoint gives the frontend a way to swap the role in place right after such an
+action.
+
+**Access rule: no role gate at all, and deliberately so.** Unlike every other webhook in this
+family, `SFRefreshToken` does not call `NeoAccessHelper.isAdminOrClientAdmin` or any other
+role check — reissuing your OWN token under your OWN current role is not a privileged operation,
+it is the same trust boundary a normal login already crosses. The only real security requirement
+is scope, not privilege: this endpoint must never be able to mint a token for anyone other than
+the caller (see below).
+
+**`userId` comes ONLY from the already-validated token, never from a request parameter.** By the
+time `SFRefreshToken#get` runs, `NeoServlet#processRequest` has already called
+`authenticator.authenticateRequest(...)` — the exact same signature/expiry validation every other
+NEO request goes through — and a failure there returns `401` before the pseudo-spec dispatcher,
+hence this webhook, is ever reached. `authenticateJwt` populates `OBContext` from that same
+token's own `user` claim, and `SFRefreshToken` reads the caller's id from
+`OBContext.getOBContext().getUser()` — nowhere else. There is intentionally no `UserId`-style
+parameter: accepting one would let any caller mint a token for an arbitrary target user, a
+privilege-escalation hole this endpoint must not open.
+
+**Role resolution.** The token's own `role` claim is discarded on purpose. The webhook re-reads
+the `User` fresh from `OBDal` by the id above and calls `user.getDefaultRole()` — the CURRENT
+`AD_User.Default_Ad_Role_ID` — then mints the new token via
+`SecureWebServicesUtils.generateToken(user, currentRole)`, the exact 2-argument overload
+`EtendoGoJwtServlet#writeEnvironmentLoginResponse` already uses at login (this is only the second
+production call site for that overload). Passing `org`/`warehouse` as `null` lets that method
+re-resolve a matching organization/warehouse for the new role itself, the same way login does,
+instead of carrying over whatever the stale token's `organization`/`warehouse` claims said.
+
+**R5 eligibility check.** Before that, `get()` rejects an inactive caller outright —
+`!Boolean.TRUE.equals(user.isActive())` fails with "User is not active" before any role
+resolution is attempted. Then, when `currentRole` is non-null, `isEligibleForRole(user,
+currentRole)` gates minting rather than trusting `Default_Ad_Role_ID` blindly:
+- the role must belong to the SAME client as the caller's own currently-authenticated session
+  (a cross-client guard — a role from a different client would otherwise mint a token embedding
+  that role, and its org/warehouse, from a different tenant than the caller's own validated
+  session);
+- the role must itself be `Active`;
+- and the user must hold a genuine, ACTIVE `AD_User_Roles` assignment to that role, rather than
+  assuming `Default_Ad_Role_ID` and `AD_User_Roles` always agree.
+
+Any of these failing returns `success:false` with "User is not eligible for the assigned role"
+instead of minting a token — role resolution here is NOT unconditional. A `currentRole == null`
+(no assignable role) is unaffected by this check and still flows straight through, per the
+existing "no assignable role" case below.
+
+**Response — session metadata extension (ETP-5195, backend half).** When `currentRole` is
+genuinely resolved for the caller (the ordinary case, having just passed the R5 eligibility
+check above), the response carries a `session` object alongside the token:
+
+```json
+{
+  "token": "<new signed JWT>",
+  "session": {
+    "version": 1,
+    "userId": "...",
+    "clientId": "...",
+    "selectedRoleId": "...",
+    "selectedOrgId": "...",
+    "roleList": [{ "id": "...", "name": "...", "orgList": [{ "id": "...", "name": "..." }] }]
+  }
+}
+```
+
+wrapped in the bridge's usual envelope, i.e. `{"result": "{\"token\": \"...\", \"session\": {...}}"}`.
+`userId`/`clientId`/`selectedRoleId`/`selectedOrgId` are read back from the `user`/`client`/
+`role`/`organization` claims of the token *just minted*, via
+`SecureWebServicesUtils.decodeToken(String)` — never re-derived independently, so the response
+can never disagree with what the JWT actually contains. `roleList` reuses
+`EtendoGoJwtSupport.loadRoleListData(String)` (widened to `public` for this call site), the same
+helper/query already used to build the equivalent list at login. This activates the richer
+validation `schema_forge_core`'s `reconcileSessionRefresh` already implements client-side (see
+`docs/auth-session-refresh.md` in that repo) instead of its "legacy" token-swap-only fallback.
+
+The `currentRole == null` case is UNCHANGED: the response stays the bare
+`{"token": "<new signed JWT>"}`, no `session` key, so the frontend's legacy fallback still
+applies. A user resolving to literally no assignable role at all — not the ordinary case; the
+promote/demote invariant this endpoint exists for always leaves one — is a genuinely unexpected
+state rather than an expected domain rejection, so unlike `SFPromoteUserRole`'s target-user
+validation it is NOT modeled as a `success:false` `200`; it surfaces as the bridge's normal
+`error`/`500` path.
+
+**Frontend usage.** Call this endpoint right after a promote/demote action (or any other flow
+that may have changed the caller's own `Default_Ad_Role_ID`) and swap the stored bearer token for
+the returned one before the next NEO request, instead of forcing the user through a full
+re-login.
 
 ---
 

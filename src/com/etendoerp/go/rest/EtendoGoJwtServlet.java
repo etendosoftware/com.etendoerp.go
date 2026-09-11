@@ -2336,14 +2336,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, "User not found");
         return;
       }
-      Role role = roleListData.firstRoleId != null
-          ? OBDal.getInstance().get(Role.class, roleListData.firstRoleId)
+      Role role = roleListData.getFirstRoleId() != null
+          ? OBDal.getInstance().get(Role.class, roleListData.getFirstRoleId())
           : null;
       String jwtToken = SecureWebServicesUtils.generateToken(user, role);
 
       JSONObject result = new JSONObject();
       result.put(FIELD_TOKEN, jwtToken);
-      result.put("roleList", roleListData.roleArray);
+      result.put("roleList", roleListData.getRoleArray());
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } finally {
       OBContext.restorePreviousMode();
