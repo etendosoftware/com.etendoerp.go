@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.util.List;
+
 import javax.inject.Named;
 import javax.servlet.http.HttpServletResponse;
 
@@ -26,11 +28,11 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.order.Order;
-import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 
 /**
@@ -73,10 +75,26 @@ public class CreateShipmentHandler implements NeoHandler {
               "Order not found: " + recordId);
         }
 
+        // ETP-5276: validate BEFORE creating/persisting anything. Doing this after
+        // OBDal.save(shipment) left an empty, orphaned shipment behind whenever the
+        // order had zero pending lines (Hibernate flushes the managed header on
+        // commit regardless of the 400 this method returns).
+        List<InOutLineFromOrderFactory.PendingOrderLine> pendingLines =
+            InOutLineFromOrderFactory.collectPendingLines(order);
+        if (pendingLines.isEmpty()) {
+          throw new OBException("No hay líneas pendientes de entrega en este pedido");
+        }
+        // Only a shipment with at least one stockable line needs a real storage bin —
+        // an order made up entirely of Service/Expense/Resource lines must not fail
+        // just because its warehouse has no locator configured (ETP-5276).
+        Locator defaultLocator = InOutLineFromOrderFactory.hasStockableLine(pendingLines)
+            ? resolveDefaultLocatorOrFail(order)
+            : null;
+
         ShipmentInOut shipment = createShipmentHeader(order);
         OBDal.getInstance().save(shipment);
 
-        createShipmentLines(shipment, order);
+        createShipmentLines(shipment, pendingLines, defaultLocator);
 
         OBDal.getInstance().flush();
 
@@ -96,9 +114,11 @@ public class CreateShipmentHandler implements NeoHandler {
         OBContext.restorePreviousMode();
       }
     } catch (OBException e) {
+      SessionHandler.getInstance().rollback();
       log.warn("Error creating shipment from order {}: {}", recordId, e.getMessage());
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {
+      SessionHandler.getInstance().rollback();
       log.error("Error creating shipment from order {}: {}", recordId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while creating the shipment");
@@ -118,22 +138,13 @@ public class CreateShipmentHandler implements NeoHandler {
         "C-");
   }
 
-  protected void createShipmentLines(ShipmentInOut shipment, Order order) {
-    Locator defaultLocator = resolveDefaultLocatorOrFail(order);
-
+  protected void createShipmentLines(ShipmentInOut shipment,
+      List<InOutLineFromOrderFactory.PendingOrderLine> pendingLines, Locator defaultLocator) {
     long lineNo = 10;
-    int addedLines = 0;
-    for (OrderLine orderLine : order.getOrderLineList()) {
-      java.math.BigDecimal pendingQty = InOutLineFromOrderFactory.pendingQuantityFor(orderLine);
-      if (pendingQty == null) {
-        continue;
-      }
-      InOutLineFromOrderFactory.createAndLinkLine(shipment, orderLine, defaultLocator, lineNo, pendingQty);
+    for (InOutLineFromOrderFactory.PendingOrderLine pendingLine : pendingLines) {
+      InOutLineFromOrderFactory.createAndLinkLine(shipment, pendingLine.getOrderLine(),
+          defaultLocator, lineNo, pendingLine.getPendingQty());
       lineNo += 10;
-      addedLines++;
-    }
-    if (addedLines == 0) {
-      throw new OBException("No hay líneas pendientes de entrega en este pedido");
     }
   }
 

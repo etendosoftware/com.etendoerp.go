@@ -47,21 +47,27 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  * Unit tests for {@link InOutLineFromOrderFactory#pendingQuantityFor(OrderLine)} and
  * {@link InOutLineFromOrderFactory#createAndLinkLine}.
  *
- * <p><b>ETP-4853:</b> when a Sales/Purchase Order carries a global discount, the
- * synthetic discount line materialized by {@link TotalDiscountService} (a
- * non-stockable, non-Item dummy product) must never be carried over into the
- * generated Goods Shipment/Receipt — it never represents physical stock
- * movement. {@code pendingQuantityFor} must skip (return {@code null}) any
- * order line whose product is not stockable and of type Item, mirroring the
- * discriminator the classic {@code M_INOUT_CREATE} stored procedure uses
- * ({@code IsStocked='Y' AND ProductType='I'}).
+ * <p><b>ETP-4844:</b> when a Sales/Purchase Order carries a global discount, the
+ * synthetic discount line materialized by {@link TotalDiscountService} (product id
+ * {@link TotalDiscountService#DISCOUNT_PRODUCT_ID}) must never be carried over into
+ * the generated Goods Shipment/Receipt — it never represents physical stock
+ * movement. {@code pendingQuantityFor} skips it by explicit product ID.
+ *
+ * <p><b>ETP-5276:</b> a Service/Expense/Resource product (or any non-stockable Item)
+ * is NOT excluded — it is a valid shipment/receipt line, exactly like classic
+ * {@code M_INOUT_CREATE} treats it. A previous revision (ETP-4853) dropped every
+ * non-stockable/non-Item line, which meant an order made up entirely of such lines
+ * produced an empty, orphaned shipment/receipt instead of one with those lines
+ * included. {@link InOutLineFromOrderFactory#isStockable} is what now decides
+ * whether a line gets a real storage bin, not whether it is included at all.
  *
  * <p><b>ETP-4863:</b> {@code createAndLinkLine} receives the locator resolved from the ORDER's
  * warehouse ({@code CreateShipmentHandler} / {@code CreateGoodsReceiptHandler} both call
  * {@code findDefaultLocator(order)}), but the stock transaction follows the LINE's bin against
  * the DOCUMENT header's warehouse. Those two warehouses are normally the same, yet nothing in
  * the code guarantees it. This normalizes the line's bin to {@code parentInOut.getWarehouse()},
- * the single rule shared by every {@code M_InOutLine} write path in this module.
+ * the single rule shared by every {@code M_InOutLine} write path in this module — but only for
+ * stockable lines; a non-stockable line's bin stays {@code null} unconditionally (ETP-5276).
  */
 public class InOutLineFromOrderFactoryTest {
 
@@ -94,31 +100,84 @@ public class InOutLineFromOrderFactoryTest {
   }
 
   /**
-   * ETP-4853 regression: a non-stockable product (e.g. the synthetic global-discount
-   * line, {@code ETGO_DTO}) must be skipped even though it has a nonzero ordered
-   * quantity and nothing has been "delivered" against it.
+   * ETP-5276 regression: a non-stockable product is a VALID shipment/receipt line —
+   * only its storage bin, not its inclusion, depends on stockability. This used to
+   * return {@code null} (ETP-4853), which is what produced empty, orphaned
+   * shipments/receipts for orders made up entirely of such lines.
    */
   @Test
-  public void testNonStockedProductWithPendingQuantityReturnsNull() {
+  public void testNonStockedProductWithPendingQuantityIsKept() {
     OrderLine orderLine = mockOrderLine(false, "I", new BigDecimal("-100"), BigDecimal.ZERO);
 
     BigDecimal pending = InOutLineFromOrderFactory.pendingQuantityFor(orderLine);
 
-    assertNull("A non-stockable product must never produce a shipment/receipt line", pending);
+    assertEquals(new BigDecimal("-100"), pending);
   }
 
   /**
-   * ETP-4853 regression: a product that is stocked but not of type Item (e.g. a
-   * Service or Expense product) must also be skipped — only stockable Items
-   * represent real stock movement.
+   * ETP-5276 regression: a Service product (stocked flag irrelevant, ProductType='S')
+   * must be kept — this is the exact case from the bug report (a Sales/Purchase Order
+   * whose only line is a Service product must still produce a shipment/receipt line).
    */
   @Test
-  public void testStockedButNonItemProductTypeReturnsNull() {
+  public void testServiceProductReturnsPendingQuantity() {
     OrderLine orderLine = mockOrderLine(true, "S", new BigDecimal("5"), BigDecimal.ZERO);
 
     BigDecimal pending = InOutLineFromOrderFactory.pendingQuantityFor(orderLine);
 
-    assertNull("A non-Item product type must never produce a shipment/receipt line", pending);
+    assertEquals(new BigDecimal("5"), pending);
+  }
+
+  /** ETP-5276: an Expense product ('E') must also be kept. */
+  @Test
+  public void testExpenseProductReturnsPendingQuantity() {
+    OrderLine orderLine = mockOrderLine(true, "E", new BigDecimal("2"), BigDecimal.ZERO);
+
+    BigDecimal pending = InOutLineFromOrderFactory.pendingQuantityFor(orderLine);
+
+    assertEquals(new BigDecimal("2"), pending);
+  }
+
+  /** ETP-5276: a Resource product ('R') must also be kept. */
+  @Test
+  public void testResourceProductReturnsPendingQuantity() {
+    OrderLine orderLine = mockOrderLine(true, "R", new BigDecimal("1"), BigDecimal.ZERO);
+
+    BigDecimal pending = InOutLineFromOrderFactory.pendingQuantityFor(orderLine);
+
+    assertEquals(new BigDecimal("1"), pending);
+  }
+
+  /** ETP-4844 regression: the synthetic global-discount line is still excluded by ID. */
+  @Test
+  public void testDiscountProductIsSkippedByExplicitId() {
+    OrderLine orderLine = mockOrderLine(false, "S", new BigDecimal("-3"), BigDecimal.ZERO);
+    when(orderLine.getProduct().getId()).thenReturn(TotalDiscountService.DISCOUNT_PRODUCT_ID);
+
+    BigDecimal pending = InOutLineFromOrderFactory.pendingQuantityFor(orderLine);
+
+    assertNull("The synthetic discount line must never produce a shipment/receipt line", pending);
+  }
+
+  /** {@link InOutLineFromOrderFactory#isStockable} true only for IsStocked='Y' + ProductType='I'. */
+  @Test
+  public void testIsStockable() {
+    Product stockableItem = mock(Product.class);
+    when(stockableItem.isStocked()).thenReturn(true);
+    when(stockableItem.getProductType()).thenReturn("I");
+    org.junit.Assert.assertTrue(InOutLineFromOrderFactory.isStockable(stockableItem));
+
+    Product service = mock(Product.class);
+    when(service.isStocked()).thenReturn(true);
+    when(service.getProductType()).thenReturn("S");
+    org.junit.Assert.assertFalse(InOutLineFromOrderFactory.isStockable(service));
+
+    Product notStocked = mock(Product.class);
+    when(notStocked.isStocked()).thenReturn(false);
+    when(notStocked.getProductType()).thenReturn("I");
+    org.junit.Assert.assertFalse(InOutLineFromOrderFactory.isStockable(notStocked));
+
+    org.junit.Assert.assertFalse(InOutLineFromOrderFactory.isStockable(null));
   }
 
   /** Existing edge case: an inactive order line is always skipped. */
@@ -186,9 +245,23 @@ public class InOutLineFromOrderFactoryTest {
     when(query.executeUpdate()).thenReturn(0);
   }
 
+  /**
+   * A generic order line with a stockable product ({@code IsStocked='Y'},
+   * {@code ProductType='I'}) — the ordinary case for the {@code createAndLinkLine}
+   * anchoring tests below, which exercise the locator cascade, not stockability.
+   * See {@link #mockOrderLine(String)} for the non-stockable variant.
+   */
   private static OrderLine mockOrderLine() {
+    return mockOrderLine("I");
+  }
+
+  private static OrderLine mockOrderLine(String productType) {
     OrderLine orderLine = mock(OrderLine.class);
     when(orderLine.getId()).thenReturn("ordln-1");
+    Product product = mock(Product.class);
+    when(product.isStocked()).thenReturn(true);
+    when(product.getProductType()).thenReturn(productType);
+    when(orderLine.getProduct()).thenReturn(product);
     return orderLine;
   }
 
@@ -321,6 +394,45 @@ public class InOutLineFromOrderFactoryTest {
           parentInOut, mockOrderLine(), orderLocator, 10L, BigDecimal.ONE);
 
       verify(line).setStorageBin(orderLocator);
+      verify(dal, never()).createCriteria(Locator.class);
+    }
+  }
+
+  /**
+   * ETP-5276: a non-stockable line (e.g. Service product) must get a {@code null} storage bin
+   * unconditionally, WITHOUT going through the anchoring cascade at all — even though the header
+   * warehouse has a perfectly good default locator and the caller passed a non-null candidate.
+   * {@code anchorLocatorToWarehouse} resolves a fallback bin whenever its candidate is
+   * {@code null}, so this line's bin must never be routed through it; if it were, this line would
+   * incorrectly end up with a real bin.
+   */
+  @Test
+  public void createAndLinkLine_nonStockableProduct_setsNullBinWithoutAnchoring() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubInvoiceLineLinker(dal);
+
+      Warehouse headerWarehouse = LocatorTestSupport.mockWarehouse(WH_PRINCIPAL);
+      Locator orderLocator = LocatorTestSupport.mockLocator("loc-principal-A", headerWarehouse);
+      Locator headerDefaultBin = LocatorTestSupport.mockLocator("loc-principal-default", headerWarehouse);
+      LocatorTestSupport.stubDefaultLocatorLookup(dal, headerDefaultBin);
+
+      ShipmentInOut parentInOut = mock(ShipmentInOut.class);
+      when(parentInOut.getWarehouse()).thenReturn(headerWarehouse);
+
+      ShipmentInOutLine line = mock(ShipmentInOutLine.class);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(ShipmentInOutLine.class)).thenReturn(line);
+
+      InOutLineFromOrderFactory.createAndLinkLine(
+          parentInOut, mockOrderLine("S"), orderLocator, 10L, BigDecimal.ONE);
+
+      verify(line).setStorageBin(null);
+      verify(line, never()).setStorageBin(orderLocator);
+      verify(line, never()).setStorageBin(headerDefaultBin);
       verify(dal, never()).createCriteria(Locator.class);
     }
   }

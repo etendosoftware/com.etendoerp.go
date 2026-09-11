@@ -17,13 +17,17 @@
 package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Locator;
+import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
+import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
@@ -43,7 +47,7 @@ final class InOutLineFromOrderFactory {
   /**
    * Returns the pending qty for an order line (ordered minus delivered), or
    * {@code null} when the line should be skipped from a new shipment/receipt
-   * (inactive, missing product/UOM, non-stockable/non-Item product, or fully
+   * (inactive, missing product/UOM, the synthetic discount line, or fully
    * shipped/received).
    *
    * <p>Returning {@code null} (instead of throwing or returning ZERO with a
@@ -56,17 +60,24 @@ final class InOutLineFromOrderFactory {
    * for the Order → Invoice path. Goods Receipt/Shipment are quantity-only,
    * non-fiscal documents that structurally cannot hold a priced discount line —
    * one leaking in corrupts any invoice generated downstream from that receipt/
-   * shipment. The ETP-4853 stockable/Item-type check below already excludes this
-   * product today (it is configured {@code IsStocked='N'}, {@code ProductType='S'}),
-   * but that protection depends on product master data staying that way; the
-   * explicit ID check here does not.
+   * shipment. This check is by explicit product ID, not by stockable/Item-type,
+   * so it does not depend on that product's master data staying configured a
+   * particular way (see ETP-5276 below).
    *
-   * <p><b>ETP-4853:</b> a product that is not stockable, or not of type Item
-   * (e.g. a Service/Expense product), never represents physical stock movement
-   * and must never become a shipment/receipt line. This mirrors the
-   * discriminator the classic {@code M_INOUT_CREATE} stored procedure uses
-   * ({@code IsStocked='Y' AND ProductType='I'}) to decide whether an order line
-   * belongs in the generated document.
+   * <p><b>ETP-5276:</b> a product that is not stockable, or not of type Item
+   * (e.g. a Service/Expense/Resource product), DOES represent a valid
+   * shipment/receipt line — the classic {@code M_INOUT_CREATE} stored
+   * procedure copies exactly these lines into the generated document (with a
+   * {@code NULL} storage bin, see its {@code -- Copy Ad-hoc lines, Comments OR
+   * Service Items} branch). A previous revision of this method (ETP-4853)
+   * dropped non-stockable/non-Item lines entirely, believing that mirrored
+   * {@code M_INOUT_CREATE}'s discriminator — it does not: that discriminator
+   * only selects HOW a line is built (with or without a bin), never WHETHER
+   * it is included. Dropping every such line meant an order made up only of
+   * service products produced an empty, orphaned shipment/receipt with a
+   * misleading "no pending lines" error (ETP-5276). See
+   * {@link #isStockable(Product)} for where the stockable/Item-type
+   * distinction is still used — to decide the storage bin, not eligibility.
    *
    * <p><b>ETP-4722:</b> ordered/delivered quantities can be NEGATIVE since
    * ETP-4567 removed the old {@code min: 0} constraint on order lines (e.g.
@@ -84,10 +95,6 @@ final class InOutLineFromOrderFactory {
     if (TotalDiscountService.DISCOUNT_PRODUCT_ID.equals(orderLine.getProduct().getId())) {
       return null;
     }
-    if (!Boolean.TRUE.equals(orderLine.getProduct().isStocked())
-        || !"I".equals(orderLine.getProduct().getProductType())) {
-      return null;
-    }
     BigDecimal orderedQty = orderLine.getOrderedQuantity();
     if (orderedQty == null) {
       return null;
@@ -96,6 +103,57 @@ final class InOutLineFromOrderFactory {
         ? orderLine.getDeliveredQuantity() : BigDecimal.ZERO;
     BigDecimal pending = orderedQty.subtract(deliveredQty);
     return pending.compareTo(BigDecimal.ZERO) != 0 ? pending : null;
+  }
+
+  /**
+   * True when {@code product} represents physical stock ({@code IsStocked='Y'}
+   * and {@code ProductType='I'}) and therefore needs a storage bin on its
+   * shipment/receipt line. A Service/Expense/Resource product (or any
+   * non-stockable Item) is a valid line — see {@link #pendingQuantityFor} —
+   * but must never be assigned one, mirroring how classic
+   * {@code M_INOUT_CREATE} leaves {@code M_Locator_ID} {@code NULL} for those
+   * lines.
+   */
+  static boolean isStockable(Product product) {
+    return product != null
+        && Boolean.TRUE.equals(product.isStocked())
+        && "I".equals(product.getProductType());
+  }
+
+  /**
+   * Walks every line of {@code order} and returns the ones still pending
+   * delivery/receipt, paired with their pending quantity. Single collection
+   * point shared by {@code CreateShipmentHandler} and
+   * {@code CreateGoodsReceiptHandler} so both can validate "are there any
+   * lines at all" BEFORE creating and persisting the document header —
+   * see ETP-5276, where persisting the header first left an empty, orphaned
+   * shipment/receipt behind whenever this list turned out empty.
+   */
+  static List<PendingOrderLine> collectPendingLines(Order order) {
+    List<PendingOrderLine> pendingLines = new ArrayList<>();
+    for (OrderLine orderLine : order.getOrderLineList()) {
+      BigDecimal pendingQty = pendingQuantityFor(orderLine);
+      if (pendingQty != null) {
+        pendingLines.add(new PendingOrderLine(orderLine, pendingQty));
+      }
+    }
+    return pendingLines;
+  }
+
+  /**
+   * True when at least one of {@code pendingLines} needs a real storage bin
+   * ({@link #isStockable}). Callers use this to decide whether resolving the
+   * order's default locator is required at all — an order made up entirely
+   * of Service/Expense/Resource lines has no stock to bin and must not fail
+   * just because its warehouse has no locator configured.
+   */
+  static boolean hasStockableLine(List<PendingOrderLine> pendingLines) {
+    for (PendingOrderLine pendingLine : pendingLines) {
+      if (isStockable(pendingLine.getOrderLine().getProduct())) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -113,6 +171,12 @@ final class InOutLineFromOrderFactory {
    * nothing enforced it, so this path is normalized through the same
    * {@link NeoHandlerUtils#anchorLocatorToWarehouse} rule as every other {@code M_InOutLine}
    * write path in the module rather than trusting an invariant that lives in another class.
+   *
+   * <p><b>ETP-5276:</b> that anchoring is applied ONLY when the line's product
+   * {@link #isStockable}. {@code anchorLocatorToWarehouse} resolves a fallback bin whenever its
+   * candidate is {@code null} (see its javadoc), so passing {@code locator=null} straight through
+   * for a non-stockable line would still end up anchoring a bin onto it. The bin must stay
+   * {@code null} for those lines, matching classic {@code M_INOUT_CREATE}.
    */
   static void createAndLinkLine(ShipmentInOut parentInOut, OrderLine orderLine,
       Locator locator, long lineNo, BigDecimal pendingQty) {
@@ -123,8 +187,9 @@ final class InOutLineFromOrderFactory {
     line.setLineNo(lineNo);
     line.setProduct(orderLine.getProduct());
     line.setUOM(orderLine.getUOM());
-    line.setStorageBin(
-        NeoHandlerUtils.anchorLocatorToWarehouse(locator, parentInOut.getWarehouse(), log));
+    line.setStorageBin(isStockable(orderLine.getProduct())
+        ? NeoHandlerUtils.anchorLocatorToWarehouse(locator, parentInOut.getWarehouse(), log)
+        : null);
     line.setMovementQuantity(pendingQty);
     line.setSalesOrderLine(orderLine);
     line.setDescription(orderLine.getDescription());
@@ -134,5 +199,28 @@ final class InOutLineFromOrderFactory {
     // helper, which uses it as the `inoutLineId` parameter of the UPDATE.
     OBDal.getInstance().flush();
     InvoiceLineLinker.linkPendingInvoiceLinesToInout(line, orderLine.getId());
+  }
+
+  /**
+   * Pairs an {@link OrderLine} with its still-pending quantity, as computed by
+   * {@link #pendingQuantityFor}. Immutable value holder returned by
+   * {@link #collectPendingLines}.
+   */
+  static final class PendingOrderLine {
+    private final OrderLine orderLine;
+    private final BigDecimal pendingQty;
+
+    private PendingOrderLine(OrderLine orderLine, BigDecimal pendingQty) {
+      this.orderLine = orderLine;
+      this.pendingQty = pendingQty;
+    }
+
+    OrderLine getOrderLine() {
+      return orderLine;
+    }
+
+    BigDecimal getPendingQty() {
+      return pendingQty;
+    }
   }
 }
