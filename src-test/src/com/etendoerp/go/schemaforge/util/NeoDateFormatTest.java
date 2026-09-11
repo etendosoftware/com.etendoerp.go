@@ -23,13 +23,17 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.lang.reflect.Field;
 import java.sql.Timestamp;
+import java.text.ParseException;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Date;
 import java.util.Optional;
@@ -40,6 +44,7 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.openbravo.base.model.Property;
+import org.openbravo.service.json.JsonUtils;
 
 /**
  * Unit tests for {@link NeoDateFormat} — the canonical NEO date format (ETP-4793 / IMP-16).
@@ -631,6 +636,149 @@ class NeoDateFormatTest {
       } finally {
         TimeZone.setDefault(original);
       }
+    }
+  }
+
+  /**
+   * ETP-5255 — the {@code updated} concurrency token, the direction where dropping the zone
+   * offset is not conservative but wrong.
+   *
+   * <p>The token exists to be compared for equality against the stored row, and both readers that
+   * do so ({@code NeoRecordVersion} and core's own {@code JsonToDataConverter}) go through
+   * {@code JsonUtils.createDateTimeFormat()}, whose offset is mandatory:
+   * {@code JsonUtils.convertFromXSDToJavaFormat} <b>appends {@code "+0000"}</b> to a token that
+   * carries none rather than refusing it. An offsetless local time was therefore not rejected on
+   * the way back in, it was silently re-read as UTC — and every write looked stale by exactly the
+   * server's UTC offset, on a record nobody else had touched.
+   *
+   * <p>So these tests do not compare the token against a literal. They push it through
+   * <b>core's own reader</b>, which is the only consumer whose verdict matters, and assert the
+   * instant that comes back. A literal expectation would have to spell out an offset, and would
+   * then pass only on a server in that zone — the very coupling this whole area is about.
+   * {@link #oldOffsetlessPathIsOffByTheServerOffsetUnlessRunningAtUtc} pins the failure the fix
+   * removes, by running the superseded rendering through the same reader.
+   */
+  @Nested
+  @DisplayName("toAuditToken — the outbound concurrency token")
+  class AuditToken {
+
+    /**
+     * The exact round trip the server performs: emit the token, then read it back the way
+     * {@code JsonToDataConverter} does.
+     */
+    private Date reread(String token) throws ParseException {
+      return JsonUtils.createDateTimeFormat().parse(JsonUtils.convertFromXSDToJavaFormat(token));
+    }
+
+    /** Core's comparison zeroes milliseconds, so the contract is equality to the second. */
+    private void assertSameInstantToTheSecond(Date expected, Date actual) {
+      assertEquals(Math.floorDiv(expected.getTime(), 1000L), Math.floorDiv(actual.getTime(), 1000L),
+          "the token did not survive core's own reader: emitted " + expected + ", read back "
+              + actual);
+    }
+
+    @Test
+    @DisplayName("a Timestamp round-trips through core's reader to the same instant")
+    void timestampRoundTripsThroughCoreReader() throws ParseException {
+      Timestamp updated = Timestamp.valueOf(CIVIL_LITERAL);
+
+      assertSameInstantToTheSecond(updated, reread(NeoDateFormat.toAuditToken(updated)));
+    }
+
+    /**
+     * The other input the callers really pass: a native-SQL read can hand back the value as its
+     * string form. A Postgres {@code timestamp without time zone} — and
+     * {@link Timestamp#toString()} — are both server-local wall clock, so the token built from
+     * the string must describe the same instant as the one built from the object.
+     */
+    @Test
+    @DisplayName("the equivalent raw-Postgres string yields the same instant")
+    void rawPostgresStringYieldsTheSameInstant() throws ParseException {
+      Timestamp updated = Timestamp.valueOf(CIVIL_LITERAL);
+
+      assertSameInstantToTheSecond(updated, reread(NeoDateFormat.toAuditToken(updated.toString())));
+      assertEquals(NeoDateFormat.toAuditToken(updated), NeoDateFormat.toAuditToken(updated.toString()));
+    }
+
+    /**
+     * The offset is asserted structurally — by parsing it — never against a literal like
+     * {@code "+0200"}, which would pin the suite to one timezone. What matters is that an offset
+     * is present at all and that it is the server's own for that instant; the alternative (no
+     * offset) is what the reader silently turns into UTC.
+     */
+    @Test
+    @DisplayName("the token carries the server's own zone offset, not none")
+    void tokenCarriesAZoneOffset() {
+      Timestamp updated = Timestamp.valueOf(CIVIL_LITERAL);
+
+      String token = NeoDateFormat.toAuditToken(updated);
+
+      // Core's writer emits RFC-822 (`+0200`), not ISO (`+02:00`), so the offset is parsed with
+      // the matching java.time pattern rather than OffsetDateTime.parse's ISO default.
+      OffsetDateTime parsed = OffsetDateTime.parse(
+          token, DateTimeFormatter.ofPattern(NeoDateFormat.ISO_DATETIME + "Z"));
+
+      ZoneOffset expected = ZoneId.systemDefault().getRules().getOffset(updated.toInstant());
+      assertEquals(expected, parsed.getOffset());
+      assertEquals(LocalDateTime.of(2026, 9, 1, 21, 43, 2), parsed.toLocalDateTime());
+      // And the offsetless rendering is a strict prefix: the token is that value PLUS an offset,
+      // which is the whole of the fix.
+      assertEquals(CIVIL_DATETIME, token.substring(0, CIVIL_DATETIME.length()));
+      assertTrue(token.length() > CIVIL_DATETIME.length(), "the offset must be there: " + token);
+    }
+
+    @Test
+    @DisplayName("null in, null out")
+    void nullYieldsNull() {
+      assertNull(NeoDateFormat.toAuditToken(null));
+    }
+
+    /**
+     * The class-wide conservative contract: an input this class cannot read yields {@code null} so
+     * the caller passes its ORIGINAL value through verbatim. Blanking it instead would strip the
+     * token from the response and 400 the client's next write with {@code missing_updated}, which
+     * is worse than the stale token this is all about.
+     */
+    @Test
+    @DisplayName("an unparseable string yields null rather than a guess")
+    void unparseableStringYieldsNull() {
+      assertNull(NeoDateFormat.toAuditToken("not-a-timestamp"));
+      assertNull(NeoDateFormat.toAuditToken(""));
+    }
+
+    /**
+     * The characterisation test: it pins what the superseded rendering actually did, through the
+     * same reader, so the size of the defect is on record rather than inferred.
+     *
+     * <p>{@code toCanonical(raw, true)} drops the offset by design — correct for a business
+     * datetime, and the trap three handlers fell into for an audit one. Its output re-read by core
+     * lands the server's UTC offset away from the true instant, in that direction: the local wall
+     * clock is taken for a UTC one, so the reading moves later by the offset under a positive
+     * offset and earlier under a negative one.
+     *
+     * <p><b>Skipped at UTC</b>, deliberately and by name: there the offset is zero, the two
+     * renderings agree, and the bug is invisible. That is also why it went unnoticed — it was
+     * reported from UTC-3.
+     */
+    @Test
+    @DisplayName("the old offsetless rendering is off by the server offset (skipped at UTC)")
+    void oldOffsetlessPathIsOffByTheServerOffsetUnlessRunningAtUtc() throws ParseException {
+      Timestamp updated = Timestamp.valueOf(CIVIL_LITERAL);
+      int serverOffsetMs = TimeZone.getDefault().getOffset(updated.getTime());
+      assumeTrue(serverOffsetMs != 0,
+          "at UTC the offset is zero and this defect has no observable effect — the round-trip"
+              + " tests above are what cover this machine");
+
+      String offsetless = NeoDateFormat.toCanonical(updated.toString(), true);
+      assertEquals(CIVIL_DATETIME, offsetless, "toCanonical is expected to drop the offset");
+
+      long delta = reread(offsetless).getTime() - updated.getTime();
+
+      assertEquals(serverOffsetMs, delta,
+          "the offsetless token was re-read as UTC, so it describes an instant one server offset"
+              + " away from the row's — which is the false `stale_record` 409");
+      // The named renderer, on the same value, is exact.
+      assertSameInstantToTheSecond(updated, reread(NeoDateFormat.toAuditToken(updated)));
     }
   }
 

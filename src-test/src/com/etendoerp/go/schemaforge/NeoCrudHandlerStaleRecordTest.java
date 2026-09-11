@@ -22,7 +22,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 
@@ -56,6 +55,13 @@ class NeoCrudHandlerStaleRecordTest {
   private static final String DAL_ENTITY = "Order";
   private static final String RECORD_ID = "95E2A8B50A254B2AAE6774B8C2F28120";
   private static final String UPDATED_TOKEN = "2026-08-28T12:30:15-03:00";
+
+  /**
+   * The route {@code detectStaleRecord} must derive from the context and hand to
+   * {@code NeoRecordVersion.isStale} — the shape {@code NeoRecordVersion.routeOf} produces from
+   * {@link #updateContext}'s spec/entity/verb.
+   */
+  private static final String EXPECTED_ROUTE = "PUT /testSpec/testEntity/" + RECORD_ID;
 
   private NeoCrudHandler handler;
 
@@ -177,13 +183,36 @@ class NeoCrudHandlerStaleRecordTest {
     assertNotEquals("missing_updated", response.getBody().optString("error", ""));
   }
 
+  /**
+   * Stubs the pair {@code detectStaleRecord} actually calls, with EXACT arguments.
+   *
+   * <p>ETP-5255 (production commit {@code f6bddbf9}) moved the call site from the
+   * three-argument {@code isStale} to the four-argument overload that names the route, so a stub
+   * of the three-argument one never matches under {@code mockStatic} — the delegation the real
+   * three-argument method performs is itself mocked away. Mockito then answers the unstubbed
+   * four-argument call with its default {@code false} — which turns
+   * {@link #staleVerdictBecomesConflict} red, and turns {@link #freshVerdictReturnsNull} into a
+   * pass for the wrong reason, since "not stale" and "never asked" are the same value.
+   *
+   * <p>Exact arguments rather than {@code anyString()} for the same reason: they are what makes
+   * these tests notice if the call site stops threading the route (or the record/entity) through.
+   * {@code routeOf} is a static on the same mocked class and would otherwise answer {@code null},
+   * so it is stubbed with the values the context carries.
+   */
+  private static void stubStaleVerdict(MockedStatic<NeoRecordVersion> version, boolean stale) {
+    version.when(() -> NeoRecordVersion.routeOf("PUT", "testSpec", "testEntity", RECORD_ID))
+        .thenReturn(EXPECTED_ROUTE);
+    version
+        .when(() -> NeoRecordVersion.isStale(DAL_ENTITY, RECORD_ID, UPDATED_TOKEN, EXPECTED_ROUTE))
+        .thenReturn(stale);
+  }
+
   @Test
   @DisplayName("a stale verdict becomes a 409 stale_record response")
   void staleVerdictBecomesConflict() throws Exception {
     NeoContext context = updateContext(RECORD_ID, bodyWithUpdated(UPDATED_TOKEN));
     try (MockedStatic<NeoRecordVersion> version = mockStatic(NeoRecordVersion.class)) {
-      version.when(() -> NeoRecordVersion.isStale(anyString(), anyString(), anyString()))
-          .thenReturn(true);
+      stubStaleVerdict(version, true);
 
       NeoResponse response = invokeDetectStaleRecord(context, DAL_ENTITY);
 
@@ -198,10 +227,35 @@ class NeoCrudHandlerStaleRecordTest {
   void freshVerdictReturnsNull() throws Exception {
     NeoContext context = updateContext(RECORD_ID, bodyWithUpdated(UPDATED_TOKEN));
     try (MockedStatic<NeoRecordVersion> version = mockStatic(NeoRecordVersion.class)) {
-      version.when(() -> NeoRecordVersion.isStale(anyString(), anyString(), anyString()))
-          .thenReturn(false);
+      stubStaleVerdict(version, false);
 
       assertNull(invokeDetectStaleRecord(context, DAL_ENTITY));
+
+      // Without this the assertion above passes whether or not the stub was ever reached: a
+      // never-matched stub also yields `false`, so "fresh" and "not asked" are indistinguishable.
+      version.verify(
+          () -> NeoRecordVersion.isStale(DAL_ENTITY, RECORD_ID, UPDATED_TOKEN, EXPECTED_ROUTE));
+    }
+  }
+
+  /**
+   * ETP-5255: the concurrency check must be asked with the endpoint NAMED, i.e. through the
+   * four-argument overload with a route built from the context — that is what makes a refusal line
+   * traceable to the request that produced it. Verified as its own test because the two tests
+   * above could, in principle, be satisfied by a call that passed no route.
+   */
+  @Test
+  @DisplayName("the stale check names the route it is being asked for")
+  void staleCheckPassesTheRouteThrough() throws Exception {
+    NeoContext context = updateContext(RECORD_ID, bodyWithUpdated(UPDATED_TOKEN));
+    try (MockedStatic<NeoRecordVersion> version = mockStatic(NeoRecordVersion.class)) {
+      stubStaleVerdict(version, false);
+
+      invokeDetectStaleRecord(context, DAL_ENTITY);
+
+      version.verify(() -> NeoRecordVersion.routeOf("PUT", "testSpec", "testEntity", RECORD_ID));
+      version.verify(
+          () -> NeoRecordVersion.isStale(DAL_ENTITY, RECORD_ID, UPDATED_TOKEN, EXPECTED_ROUTE));
     }
   }
 

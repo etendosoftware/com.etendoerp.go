@@ -723,7 +723,11 @@ public class McpToolRouter {
     // ETP-5073 / DOC-04: the conflict is detected before the write, for the same reason the REST
     // path does it there — core's refusal reaches us as translated prose with nothing stable to
     // key on. See NeoRecordVersion.
-    if (NeoRecordVersion.isStale(dalEntityName, recordId, updated)) {
+    // Named requestRoute, not route: this class already has a route(..) method and a local of
+    // that name would read like it.
+    String requestRoute = NeoRecordVersion.routeOf(HTTP_METHOD_PUT, specName, entityName,
+        recordId);
+    if (NeoRecordVersion.isStale(dalEntityName, recordId, updated, requestRoute)) {
       return wrapAsErrorContent(McpWriteRequestSupport.buildStaleRecordError().toString(2));
     }
 

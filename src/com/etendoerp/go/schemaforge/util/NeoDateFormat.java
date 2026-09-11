@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge.util;
 
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -30,6 +32,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.model.Property;
 import org.openbravo.base.session.OBPropertiesProvider;
+import org.openbravo.service.json.JsonUtils;
 
 /**
  * Single definition of the date format NEO speaks over JSON (ETP-4793 / IMP-16).
@@ -136,6 +139,68 @@ public final class NeoDateFormat {
    */
   public static String toWireDate(java.util.Date ts) {
     return ts == null ? null : zoned(ts).format(WIRE_DATE);
+  }
+
+  /**
+   * Renders an {@code updated} audit value as the <b>concurrency token</b> a client echoes back
+   * on its next write — {@code yyyy-MM-dd'T'HH:mm:ssZZZZZ}, <b>offset included</b>.
+   *
+   * <p><b>Why this is not {@link #toWireDateTime} or {@link #toCanonical}.</b>
+   * Those two are correct for a BUSINESS datetime and deliberately emit no offset: a civil date
+   * is a wall-clock datum and asserting a zone on it is what ETP-5100 fixed. An audit timestamp
+   * is the opposite kind of value — it is an instant, and it exists to be compared for equality
+   * against the stored row by {@code NeoRecordVersion} and by core's own
+   * {@code JsonToDataConverter}. Both read it through {@code JsonUtils.createDateTimeFormat()},
+   * whose pattern is {@code yyyy-MM-dd'T'HH:mm:ssZZZZZ} and whose offset is <b>mandatory</b>:
+   * {@code JsonUtils.convertFromXSDToJavaFormat} appends {@code "+0000"} to a token that lacks
+   * one ("make them utc, the timezone must be there") rather than rejecting it. So an offsetless
+   * local time is not refused on the way back in, it is silently re-read as UTC, and the
+   * comparison then fails by exactly the server's UTC offset — every write looks stale, on a
+   * record nobody else touched.
+   *
+   * <p>That defect has now been introduced three times, in three handlers, each of which reached
+   * for {@code toCanonical} because it is the obvious-looking tool and the wrong one (it
+   * <b>drops</b> the offset by design). ETP-5073 hit it on Financial Accounts (UTC-3: every write
+   * three hours old), and ETP-5255 found it still live on Product → Price and Chart of Accounts.
+   * Hence one named method, so the next handler that serialises {@code updated} finds the answer
+   * instead of the trap.
+   *
+   * <p>Formatting is done with core's own writer, not a pattern of ours: core's reader is what
+   * has to accept the value back, so the only safe emitter is the one paired with it.
+   *
+   * @param rawUpdated the audit value as the row yielded it — a {@link java.util.Date} (which is
+   *                   what a native-SQL {@code timestamp} column produces, and the preferred
+   *                   input), or its string form in the raw Postgres shape
+   * @return the token, or {@code null} when the input is {@code null} or is not a recognisable
+   *         timestamp — following this class's contract, the caller must then pass its ORIGINAL
+   *         value through verbatim rather than blank it, because a record that comes back with no
+   *         {@code updated} at all trips the mandatory-token guard and 400s with
+   *         {@code missing_updated}
+   */
+  public static String toAuditToken(Object rawUpdated) {
+    if (rawUpdated == null) {
+      return null;
+    }
+    if (rawUpdated instanceof java.util.Date) {
+      return JsonUtils.createDateTimeFormat().format((java.util.Date) rawUpdated);
+    }
+    // A string input has no offset to preserve — a Postgres `timestamp without time zone`, and
+    // Timestamp.toString(), are both server-local wall clock. So it is canonicalised (which
+    // normalises the Postgres shape and keeps the wall-clock reading intact), parsed back in the
+    // server's own zone, and re-emitted WITH that zone's offset. The offset is derived by the
+    // JDK from the parsed instant, never concatenated onto the string: hand-appending it would
+    // get DST wrong twice a year, which is precisely the class of bug this method exists to end.
+    String canonical = toCanonical(String.valueOf(rawUpdated), true);
+    if (canonical == null) {
+      return null;
+    }
+    try {
+      return JsonUtils.createDateTimeFormat().format(new SimpleDateFormat(ISO_DATETIME)
+          .parse(canonical));
+    } catch (ParseException e) {
+      log.debug("Could not render '{}' as an audit token: {}", rawUpdated, e.getMessage());
+      return null;
+    }
   }
 
   private static java.time.ZonedDateTime zoned(java.util.Date ts) {

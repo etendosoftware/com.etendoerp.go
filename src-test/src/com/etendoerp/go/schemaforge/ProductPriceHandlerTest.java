@@ -36,6 +36,8 @@ import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
 import java.sql.Timestamp;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
@@ -43,6 +45,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TimeZone;
+import java.util.regex.Pattern;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -70,6 +73,8 @@ import org.openbravo.model.pricing.pricelist.PriceListVersion;
 import org.openbravo.model.pricing.pricelist.ProductPrice;
 import org.openbravo.service.json.JsonUtils;
 
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
+
 /**
  * Unit tests for {@link ProductPriceHandler}.
  *
@@ -82,6 +87,27 @@ import org.openbravo.service.json.JsonUtils;
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
 class ProductPriceHandlerTest {
+
+  /**
+   * The server-local wall clock the {@code row[15]} fixture ({@code "2026-08-15 10:30:00.123456"},
+   * the raw Postgres shape) denotes, with NO zone offset.
+   *
+   * <p>Deliberately <b>not</b> the expected value: it is what {@code NeoDateFormat.toCanonical}
+   * emitted before ETP-5255, kept so the assertions can state that the token preserves this wall
+   * clock and is nevertheless never equal to it.
+   */
+  private static final String SAMPLE_UPDATED_WALL_CLOCK = "2026-08-15T10:30:00";
+
+  /**
+   * The shape of an {@code updated} audit token: the canonical ISO datetime plus a
+   * <b>mandatory</b> RFC-822 zone offset — the pattern
+   * {@code JsonUtils.createDateTimeFormat()} ({@code yyyy-MM-dd'T'HH:mm:ssZZZZZ}) emits and
+   * requires back. The offset is asserted as a shape, not a literal, because it is the JVM's
+   * default zone: hardcoding a developer machine's {@code -0300} would only move the failure to
+   * CI.
+   */
+  private static final Pattern AUDIT_TOKEN_SHAPE = Pattern
+      .compile("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}[+-]\\d{4}$");
 
   private ProductPriceHandler handler;
 
@@ -297,21 +323,11 @@ class ProductPriceHandlerTest {
     assertEquals("PricingProductPrice", item.getString("_entityName"));
     // ETP-5203: updated (row[15]) must be present so PUT/PATCH can echo it back
     // for the mandatory optimistic-concurrency check (missing_updated regression).
-    //
-    // ETP-5245: and it must be formatted with core's OWN writer, offset included. This
-    // expectation used to read "2026-08-15T10:30:00" — a value with no zone offset — which is
-    // precisely what let the production bug through: core's reader
-    // (JsonUtils.convertFromXSDToJavaFormat) appends "+0000" to an offset-less token, so on a
-    // server west of UTC every echoed stamp came back looking hours older than the stored row
-    // and the optimistic-concurrency check refused every single edit as `stale_record`.
-    // The expected value is derived from core's formatter rather than hardcoded to "-0300",
-    // because the offset is the JVM's and CI may well run in UTC; what is asserted is that
-    // handler and core agree, plus the shape (see the dedicated cases at the end of this file).
-    String expectedUpdated = JsonUtils.convertToCorrectXSDFormat(
-        JsonUtils.createDateTimeFormat().format(Timestamp.valueOf("2026-08-15 10:30:00.123456")));
-    assertEquals(expectedUpdated, item.getString("updated"));
-    assertTrue(item.getString("updated").matches(OFFSET_STAMP_PATTERN),
-        "the echoed `updated` must carry a zone offset, got: " + item.getString("updated"));
+    // ETP-5255: and it must be rendered by NeoDateFormat.toAuditToken, NOT toCanonical — the
+    // token is read back by JsonUtils.createDateTimeFormat(), whose offset is mandatory, so an
+    // offsetless value is silently re-read as UTC and every edit on this tab came back stale by
+    // exactly the server's UTC offset. See NeoDateFormat.toAuditToken's javadoc.
+    assertIsAuditTokenFor(SAMPLE_UPDATED_WALL_CLOCK, item.getString("updated"));
   }
 
   /**
@@ -1490,21 +1506,6 @@ class ProductPriceHandlerTest {
   // stamp always carries an offset, and it round-trips through core's reader back to the very
   // instant it came from, under any server time zone.
 
-  /**
-   * Core's datetime shape with the offset present, in either punctuation.
-   *
-   * <p>The colon is optional here on purpose. The handler emits the XSD form
-   * ({@code -03:00}) because that is the only one {@code convertFromXSDToJavaFormat} recognises
-   * without falling back to its {@code +"0000"} repair — but what this pattern is for is the
-   * property that broke production, namely that an offset is present AT ALL. Pinning the
-   * punctuation here too would make these cases fail for a reason that is not the bug, and the
-   * punctuation is asserted where it actually matters: by
-   * {@link #testEchoedUpdatedRoundTripsToTheStoredInstantUnderAnyServerZone}, which proves the
-   * reader parses the value without repairing it.
-   */
-  private static final String OFFSET_STAMP_PATTERN =
-      "\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}[+-]\\d{2}:?\\d{2}";
-
   /** The shape a native query hands the column over in when it arrives as raw text. */
   private static final String RAW_PG_UPDATED = "2026-08-15 10:30:00.123456";
 
@@ -1607,7 +1608,7 @@ class ProductPriceHandlerTest {
     for (String zone : SERVER_ZONES) {
       withDefaultTimeZone(zone, () -> {
         String echoed = singleRowFor(RAW_PG_UPDATED).getString("updated");
-        assertTrue(echoed.matches(OFFSET_STAMP_PATTERN),
+        assertTrue(AUDIT_TOKEN_SHAPE.matcher(echoed).matches(),
             "under " + zone + " the echoed `updated` must carry an offset, got: " + echoed);
       });
     }
@@ -1648,10 +1649,20 @@ class ProductPriceHandlerTest {
         Timestamp stored = Timestamp.valueOf("2026-08-15 10:30:00");
         String echoed = singleRowFor(RAW_PG_UPDATED).getString("updated");
 
-        assertNotEquals(echoed + "+0000", JsonUtils.convertFromXSDToJavaFormat(echoed),
-            "under " + zone + " core's reader must RECOGNISE the offset in `" + echoed
-                + "` and strip the colon, not fall back to appending +0000 to a token it did"
-                + " not understand");
+        // ETP-5283 (merge block): ETP-5245 asserted here that core's reader RECOGNISES the
+        // offset — i.e. that the token uses the colon form (`-03:00`), the only one
+        // convertFromXSDToJavaFormat accepts without falling back to appending "+0000".
+        // NeoDateFormat.toAuditToken (ETP-5255), which now renders every audit token in this
+        // module, emits core's RFC-822 form (`-0300`) instead and therefore DOES take that
+        // fallback. The instant still survives it — SimpleDateFormat parses the real offset and
+        // ignores the trailing "+0000", which the next assertion proves — so this is a hardening
+        // ETP-5245 found, not a live defect, and pinning it here would contradict
+        // NeoDateFormatTest, which pins the RFC-822 shape deliberately. What is asserted instead
+        // is the property that actually has to hold: whatever repair the reader applies, it must
+        // not move the instant.
+        assertNotEquals(SAMPLE_UPDATED_WALL_CLOCK, echoed,
+            "under " + zone + " the token must carry an offset; the offsetless wall clock is"
+                + " exactly what core re-reads as UTC");
 
         assertEquals(stored.getTime(), readBackAsCoreDoes(echoed).getTime(),
             "under " + zone + " core must read `" + echoed + "` back as the stored instant;"
@@ -1673,7 +1684,7 @@ class ProductPriceHandlerTest {
       String fromTimestamp = singleRowFor(Timestamp.valueOf(RAW_PG_UPDATED)).getString("updated");
       String fromRawString = singleRowFor(RAW_PG_UPDATED).getString("updated");
       assertEquals(fromRawString, fromTimestamp);
-      assertTrue(fromTimestamp.matches(OFFSET_STAMP_PATTERN),
+      assertTrue(AUDIT_TOKEN_SHAPE.matcher(fromTimestamp).matches(),
           "the Timestamp branch must carry an offset too, got: " + fromTimestamp);
     });
   }
@@ -1701,5 +1712,29 @@ class ProductPriceHandlerTest {
   @Test
   void testUnparseableUpdatedIsEchoedVerbatim() throws Exception {
     assertEquals("not-a-timestamp", singleRowFor("not-a-timestamp").getString("updated"));
+  }
+
+  /**
+   * Asserts that {@code emitted} is a valid {@code updated} concurrency token for the
+   * server-local wall clock {@code expectedWallClock}, per ETP-5255.
+   *
+   * <p>Three independent properties, each of which the pre-ETP-5255 offsetless output violates:
+   * the token carries a zone offset (an offsetless value is not rejected on the way back in, it
+   * is silently re-read as UTC by {@code JsonUtils.convertFromXSDToJavaFormat}, which appends
+   * {@code "+0000"}); core's own reader parses it back; and it round-trips to the same
+   * <b>instant</b> as the server-local wall clock, so the offset was derived from the value
+   * rather than concatenated onto a re-interpreted one.
+   */
+  private static void assertIsAuditTokenFor(String expectedWallClock, String emitted)
+      throws ParseException {
+    assertTrue(AUDIT_TOKEN_SHAPE.matcher(emitted).matches(),
+        () -> "'" + emitted + "' must carry a zone offset (yyyy-MM-dd'T'HH:mm:ssZ)");
+    assertTrue(emitted.startsWith(expectedWallClock),
+        () -> "'" + emitted + "' must keep the server-local wall clock " + expectedWallClock);
+    assertNotEquals(expectedWallClock, emitted,
+        "the offsetless canonical form is NOT a valid concurrency token (ETP-5255)");
+    Date expectedInstant = new SimpleDateFormat(NeoDateFormat.ISO_DATETIME).parse(expectedWallClock);
+    assertEquals(expectedInstant, JsonUtils.createDateTimeFormat().parse(emitted),
+        "the token must round-trip through core's own reader to the same instant");
   }
 }
