@@ -74,14 +74,23 @@ import com.smf.ticketbai.data.TbaiSyncinvoice;
  *
  * <p><strong>The adoption-date gate is a precondition, not a detail.</strong> The function grew an
  * ADOPTION-DATE GATE after this class was first written: it answers {@code 'NoAplica'} — before
- * reading {@code tbai_syncinvoice} at all — when the invoice's organization has no active
- * {@code tbai_config}, or when the invoice predates that config's {@code tbaisystemdate}. Every
+ * reading {@code tbai_syncinvoice} at all — when the invoice's organization has no
+ * {@code tbai_config} at all, or when the invoice predates the EARLIEST one. Every
  * test that asserts an ESTADO therefore has to open that gate first, via
  * {@link #adoptTicketBaiFor(Invoice)}; without it the function is right and the assertion is
  * meaningless — which is exactly how this class first ran red, 4 of its 6 tests reading
  * {@code 'NoAplica'}. A run against a database where {@code update.database} never created the
  * function fails differently, with a Postgres {@code 42883 ... does not exist} error: that is a
  * missing migration, not an assertion failure.</p>
+ *
+ * <p><strong>ETP-5229 — the gate is the EARLIEST config ever, active or not.</strong> The gate
+ * originally read only the currently-{@code isactive = 'Y'} config row. That reintroduced, at the
+ * DB layer, the exact bug ETP-5229 had just fixed client-side: an org that deactivates an OLD
+ * config and activates a NEWER one (cutover date strictly later) makes every invoice dated between
+ * the two cutovers regress to {@code 'NoAplica'}, even though it was genuinely submitted under the
+ * still-real old config. {@link #testUsesEarliestConfigAcrossActiveAndInactiveRows()} pins the
+ * fixed behaviour: {@code MIN(tbaisystemdate)} across ALL {@code tbai_config} rows for the org,
+ * regardless of {@code isactive}.</p>
  */
 public class EtgoGetTbaiStatusFunctionIntegrationTest extends OBBaseTest {
 
@@ -178,6 +187,24 @@ public class EtgoGetTbaiStatusFunctionIntegrationTest extends OBBaseTest {
     cal.setTime(invoice.getInvoiceDate());
     cal.add(Calendar.DAY_OF_MONTH, -1);
     config.setTbaisystemdate(new Timestamp(cal.getTimeInMillis()));
+    OBDal.getInstance().save(config);
+    OBDal.getInstance().flush();
+  }
+
+  /**
+   * Saves a {@code tbai_config} row for the invoice's own client/org with an EXPLICIT cutover
+   * date and active flag, unlike {@link #adoptTicketBaiFor(Invoice)} which always saves one
+   * active row dated relative to the invoice. Used by
+   * {@link #testUsesEarliestConfigAcrossActiveAndInactiveRows()} to build the two-row scenario
+   * (an old, deactivated config superseded by a newer, active one) that
+   * {@code testUsesEarliestConfigAcrossActiveAndInactiveRows()} pins.
+   */
+  private void saveConfigFor(Invoice invoice, Date cutoverDate, boolean active) {
+    TbaiConfig config = OBProvider.getInstance().get(TbaiConfig.class);
+    config.setClient(invoice.getClient());
+    config.setOrganization(invoice.getOrganization());
+    config.setTbaisystemdate(new Timestamp(cutoverDate.getTime()));
+    config.setActive(active);
     OBDal.getInstance().save(config);
     OBDal.getInstance().flush();
   }
@@ -413,6 +440,60 @@ public class EtgoGetTbaiStatusFunctionIntegrationTest extends OBBaseTest {
           "Repeated recomputes of UNCHANGED data must return the SAME value — a flapping "
               + "value would permanently desync ad_scd_check (R3 of the ETP-5216 migration plan)",
           firstCall, secondCall);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  // ── ETP-5229 — gate on the EARLIEST config ever, active or not ─────────────
+  // Regression for the DB-layer reintroduction of the bug ETP-5229 fixed
+  // client-side (`earliestTbaiCutoverDate` in the React list column, which this
+  // migration's `em_etgo_tbai_status` column replaced). Scenario: the org
+  // deactivates an OLD config and activates a NEWER one whose cutover date is
+  // strictly later. An invoice dated BETWEEN the two cutovers was genuinely
+  // submitted under the still-real old config and must keep showing its real
+  // historical ESTADO — not regress to 'NoAplica' just because the config that
+  // actually covered it is no longer the active row. Before the fix, the
+  // function filtered on `isactive = 'Y'` and would have read only the NEWER
+  // config's (later) cutover date, failing the `dateinvoiced >= v_adoption_date`
+  // check and returning 'NoAplica' for this exact invoice.
+  @Test
+  public void testUsesEarliestConfigAcrossActiveAndInactiveRows() throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      Invoice invoice = anyFixtureInvoice();
+      assertNotNull("The fixture invoice must carry a DateInvoiced for this scenario to be "
+          + "constructible at all", invoice.getInvoiceDate());
+
+      Calendar oldCutover = Calendar.getInstance();
+      oldCutover.setTime(invoice.getInvoiceDate());
+      oldCutover.add(Calendar.DAY_OF_MONTH, -10);
+
+      Calendar newCutover = Calendar.getInstance();
+      newCutover.setTime(invoice.getInvoiceDate());
+      newCutover.add(Calendar.DAY_OF_MONTH, 10);
+
+      // OLD config: earlier cutover, now DEACTIVATED (superseded).
+      saveConfigFor(invoice, oldCutover.getTime(), false);
+      // NEW config: later cutover, ACTIVE. Its cutover date is AFTER the
+      // invoice, so if the gate wrongly considered only active rows, this
+      // invoice would fail the `dateinvoiced >= v_adoption_date` check.
+      saveConfigFor(invoice, newCutover.getTime(), true);
+
+      String realEstado = "Aceptado";
+      TbaiSyncinvoice row = newSyncRow(invoice, realEstado, farFutureTimestamp());
+      OBDal.getInstance().save(row);
+      OBDal.getInstance().flush();
+
+      Session session = OBDal.getInstance().getSession();
+      String result = callFunction(session, invoice.getId());
+      assertEquals(
+          "An invoice dated between an OLD (deactivated) config's cutover and a NEWER (active) "
+              + "config's cutover must still show its real historical ESTADO — the gate must use "
+              + "the EARLIEST cutover across ALL config rows, active or not, never only the "
+              + "currently active one",
+          realEstado, result);
     } finally {
       OBContext.restorePreviousMode();
     }

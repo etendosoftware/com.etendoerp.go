@@ -42,22 +42,28 @@ BEGIN
   END IF;
 
   -- Matched on the invoice's OWN organization, exactly (no org-tree walk), which
-  -- is what Classic's TBAI_ExistConfigAndIsAvailable auxiliary input does. An
-  -- organization is capped at one config row today (verified in the AD), but the
-  -- ORDER BY ... LIMIT 1 keeps this single-valued and DETERMINISTIC even if that
-  -- ever changes - the engine writes unconditionally on every recompute, so an
-  -- arbitrary pick would make ad_scd_check report permanent phantom drift.
-  SELECT c.tbaisystemdate
+  -- is what Classic's TBAI_ExistConfigAndIsAvailable auxiliary input does.
+  --
+  -- ETP-5229: the gate is the EARLIEST-EVER config cutover date for the org,
+  -- across ALL tbai_config rows - active or not - not just the currently
+  -- active one. An org can deactivate an old config and activate a newer one
+  -- (e.g. a provider migration or a Batuz territory change); an invoice dated
+  -- between the OLD cutover and the NEW one was genuinely submitted under the
+  -- old config and must keep showing its real historical status, not regress
+  -- to 'NoAplica' because the config that covered it is no longer active.
+  -- MIN() is a total aggregate: zero rows (no config ever) or all-NULL
+  -- tbaisystemdate values both correctly yield NULL, handled by the
+  -- IS NULL check right below - no separate empty-set branch needed.
+  SELECT MIN(c.tbaisystemdate)
     INTO v_adoption_date
     FROM tbai_config c
-   WHERE c.ad_org_id = v_ad_org_id
-     AND c.isactive = 'Y'
-   ORDER BY c.tbaisystemdate ASC, c.tbai_config_id ASC
-   LIMIT 1;
+   WHERE c.ad_org_id = v_ad_org_id;
 
-  -- No active config: the organization never joined, so no invoice of it applies.
-  -- The dependency on tbai_config recomputes these the moment a config is
-  -- inserted, so an organization joining later is picked up automatically.
+  -- No config at all (active or not): the organization never joined, so no
+  -- invoice of it applies. The dependency on tbai_config recomputes these the
+  -- moment ANY config row for the org is inserted, updated (tbaisystemdate or
+  -- isactive) or deleted, so both "org joins" and "org's earliest config
+  -- changes" are picked up automatically.
   IF v_adoption_date IS NULL THEN
     RETURN 'NoAplica';
   END IF;
