@@ -309,6 +309,30 @@ final class InvoiceCalloutHelper {
    * Fires only when {@code triggerField} is {@code "transactionDocument"}.
    * No-op when {@link RectificativeSupport#isColumnPresent()} is {@code false}.
    *
+   * <p>{@code applyRectificativeFieldsFromDocType} is invoked from the shared
+   * {@code AbstractInvoiceHeaderHandler#handleInvoiceAfterCallout}, used identically by both
+   * {@code SalesInvoiceHeaderHandler} and {@code PurchaseInvoiceHeaderHandler} — this method has no
+   * built-in signal for invoice direction. In practice ALL THREE TicketBAI fields
+   * ({@code tbaiIsreverseinvoice}, {@code tbaiReverseinvoicetype}, {@code tbaiReverseinvoicecode})
+   * are already sales-only at the model level, confirmed 2026-09 (ETP-5229 investigation): their
+   * {@code ETGO_SF_FIELD.ISINCLUDED} flag is {@code 'N'} on the {@code purchase-invoice} header
+   * entity (spec {@code 6E4047EE1CD34DEC95D575599A2930A6}) and {@code 'Y'} on {@code sales-invoice}
+   * (spec {@code E0AD89F210BD4687AF397206F0735FB5}) — so the generated purchase-invoice frontend
+   * never renders these fields and any callout {@code updates} entry for them is UI-inert there.
+   * The classic AD_Field registration mirrors this: {@code EM_Tbai_Isreverseinvoice}/
+   * {@code EM_Tbai_Reverseinvoicetype}/{@code EM_Tbai_Reverseinvoicecode} are registered ONLY on the
+   * Sales Invoice window's Header tab, not on Purchase Invoice at all — the same structural pattern
+   * SII already uses for its own rectificative doc-type reference list (purchase doc types never
+   * offer a rectificative "Tipo Factura" option). So the two pre-existing fields needed no Java-side
+   * guard — they were already inert on purchase invoices via that model-level gate, not by accident.
+   * {@code tbaiReverseinvoicecode} (this fix) still gets an EXPLICIT {@code issotrx} guard below —
+   * belt-and-braces so the backend's intent doesn't silently depend on frontend field config, and
+   * so this callout never emits a stray {@code updates} entry for a field structurally absent on the
+   * purchase side. TicketBAI reverse-invoice codes (AD_REF_LIST
+   * 89C6433F71584D23B95140DE86EDC726, e.g. {@code "R4"} = "Factura rectificativa: Resto.") are an
+   * issued-document (AR) concept — a received (AP) purchase invoice is never TicketBAI-reported by
+   * the receiving party.
+   *
    * @param triggerField the callout trigger field name
    * @param requestBody  the callout request body
    * @param updates      the callout response's {@code updates} map; may be {@code null}
@@ -330,14 +354,16 @@ final class InvoiceCalloutHelper {
       if (docTypeId.isEmpty()) {
         return;
       }
-      String sql = "SELECT em_etsg_isrectificative FROM c_doctype WHERE c_doctype_id = ?";
+      String sql = "SELECT em_etsg_isrectificative, issotrx FROM c_doctype WHERE c_doctype_id = ?";
       Connection conn = OBDal.getReadOnlyInstance().getConnection();
       boolean isRectificative = false;
+      boolean isSalesTransaction = false;
       try (PreparedStatement ps = conn.prepareStatement(sql)) {
         ps.setString(1, docTypeId);
         try (ResultSet rs = ps.executeQuery()) {
           if (rs.next()) {
             isRectificative = "Y".equalsIgnoreCase(rs.getString(1));
+            isSalesTransaction = "Y".equalsIgnoreCase(rs.getString(2));
           }
         }
       }
@@ -351,8 +377,19 @@ final class InvoiceCalloutHelper {
       reverseTypeUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "I" : "");
       updates.put("tbaiReverseinvoicetype", reverseTypeUpdate);
 
-      log.debug("[ETP-4783] applyRectificativeFieldsFromDocType: docType={} isRectificative={}",
-          docTypeId, isRectificative);
+      // ETP-5229: tbaiReverseinvoicecode is SALES-ONLY (see javadoc) — never touched for a
+      // purchase (AP) doc type, so it is left exactly as-is on purchase invoices.
+      if (isSalesTransaction) {
+        JSONObject reverseCodeUpdate = new JSONObject();
+        // "R4" = "Factura rectificativa: Resto." (AD_REF_LIST VALUE for reference
+        // 89C6433F71584D23B95140DE86EDC726). Cleared when not rectificative.
+        reverseCodeUpdate.put(AbstractInvoiceHeaderHandler.FIELD_VALUE, isRectificative ? "R4" : "");
+        updates.put("tbaiReverseinvoicecode", reverseCodeUpdate);
+      }
+
+      log.debug("[ETP-4783/ETP-5229] applyRectificativeFieldsFromDocType: docType={} isRectificative={} "
+              + "isSalesTransaction={}",
+          docTypeId, isRectificative, isSalesTransaction);
     } catch (Exception e) {
       log.warn("[ETP-4783] applyRectificativeFieldsFromDocType failed (non-fatal): {}", e.getMessage());
     }
