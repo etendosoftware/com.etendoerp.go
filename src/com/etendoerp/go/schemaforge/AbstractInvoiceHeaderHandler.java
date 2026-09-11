@@ -263,7 +263,7 @@ public abstract class AbstractInvoiceHeaderHandler {
    * Captures and strips {@code originInvoice}/{@code originInvoices} from the raw request body
    * BEFORE the generic field filter runs, so {@link #persistOriginInvoice} can still use them
    * later in {@code afterHandle()}. Must be called from each subclass's {@code handle()} (the
-   * pre-hook), e.g. alongside the existing {@code NeoHandlerUtils.mirrorAccountingDate(...)}
+   * pre-hook), e.g. alongside the existing {@code NeoHandlerUtils.mirrorAccountingDateOnCreate(...)}
    * call.
    *
    * <p>Neither field is a decisions.json/contract field, so
@@ -1150,23 +1150,22 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   // ---------------------------------------------------------------------------
-  // Unified date (ETP-4531)
+  // Unified date (ETP-4531) / re-revert to independent accounting date (ETP-5273)
   // ---------------------------------------------------------------------------
   //
-  // The mirrorAccountingDate(NeoContext, String, String) logic itself lives in
-  // NeoHandlerUtils — shared with AbstractOrderHeaderHandler — see
-  // NeoHandlerUtils#mirrorAccountingDate. Call sites here invoke it with
-  // ("invoiceDate", "accountingDate").
+  // The mirrorAccountingDateOnCreate(NeoContext, String, String) logic itself lives in
+  // NeoHandlerUtils — shared with AbstractOrderHeaderHandler, GoodsReceiptHeaderHandler and
+  // GoodsShipmentHeaderHandler — see NeoHandlerUtils#mirrorAccountingDateOnCreate. Call sites
+  // here invoke it with ("invoiceDate", "accountingDate").
 
   /**
    * Shared {@code afterCallout} body: blocks callout-driven currency updates and appends an
    * exchange-rate warning when the user directly changes the invoice currency (ETP-4029); and
    * blocks callout-driven document type updates on an already-saved invoice (ETP-4535).
    *
-   * <p>{@code accountingDate} cascades from {@code invoiceDate} via the classic Etendo callout
-   * ({@code SE_Invoice_AccountingDate}) are intentionally left untouched — ETP-4531 now requires
-   * the single visible date to be mirrored into {@code accountingDate} on save, so that cascade
-   * is exactly the behavior wanted.
+   * <p>Note that {@code accountingDate} is deliberately NOT guarded here — see the comment at the
+   * call site for why matching Classic's one-way {@code DateInvoiced -> DateAcct} cascade is the
+   * intended behaviour (ETP-5273).
    *
    * <p>Identical for both {@link PurchaseInvoiceHeaderHandler} and {@link SalesInvoiceHeaderHandler}
    * — each subclass's {@code afterCallout()} override should just delegate here.
@@ -1178,6 +1177,14 @@ public abstract class AbstractInvoiceHeaderHandler {
         return null;
       }
       blockCalloutCurrencyUpdate(fields.updates(), fields.triggerField());
+      // ETP-5273: accountingDate is deliberately NOT guarded here. Classic propagates
+      // DateInvoiced -> DateAcct one way (SE_Invoice_AccountingDate, reached through
+      // SifInvoiceOperationDateCallout on C_Invoice.DateInvoiced), and this window must
+      // match that. The reverse cascade needs no guard either: the callout registered on
+      // DateAcct is SE_Invoice_TaxDate, which writes Taxdate only and never touches
+      // DateInvoiced. Independent editing is preserved by restricting the server-side
+      // mirror to creation (NeoHandlerUtils#mirrorAccountingDateOnCreate), not by
+      // stripping the cascade.
       checkExchangeRateWarning(fields.body(), fields.requestBody(), fields.formState(), fields.triggerField());
       String recordId = InvoiceCalloutHelper.resolveCalloutRecordId(context, fields.formState());
       blockCalloutDocTypeUpdateIfLocked(fields.updates(), fields.triggerField(), recordId);
@@ -1186,7 +1193,7 @@ public abstract class AbstractInvoiceHeaderHandler {
       InvoiceCalloutHelper.applyRectificativeFieldsFromDocType(fields.triggerField(), fields.requestBody(), fields.updates());
       InvoiceCalloutHelper.realignVerifactuDescWithFormStateDocType(fields.triggerField(), fields.formState(), fields.updates());
     } catch (Exception e) {
-      log.warn("[ETP-4029/ETP-4535] afterCallout failed (non-fatal): {}", e.getMessage());
+      log.warn("[ETP-4029/ETP-5273/ETP-4535] afterCallout failed (non-fatal): {}", e.getMessage());
     }
     return null; // mutations applied in-place; dispatcher merges nothing extra
   }
