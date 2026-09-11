@@ -72,13 +72,18 @@ final class NeoWriteRefusalLog {
    * touched. The tell was two requests logged in the same millisecond carrying an identical token,
    * one passing and one failing — invisible without the token in the line.
    *
-   * <p>WARN, not ERROR: unlike a missing token this can be legitimate — somebody really did save
-   * first — and the user can act on it by reloading. Only the impossible version of it (a conflict
-   * on a record with no other writer) is a defect, and that is what the token lets a reader spot.
+   * <p>ERROR since ETP-5255, having been WARN. The case for WARN was that, unlike a missing
+   * token, this can be legitimate — somebody really did save first, and the user recovers by
+   * reloading — so only the impossible version of it (a conflict on a record with no other
+   * writer) is a defect. That reasoning holds and still loses: the team reads production through
+   * log-analysis tooling that surfaces ERROR only, so the WARN was written, retained and never
+   * looked at, and the false conflicts of ETP-5255 reached users by report rather than by log.
+   * Since the two cases are indistinguishable at the moment of logging, the level has to serve
+   * the one that is a defect; the token in the line is what separates them on review.
    */
   static void staleRecord(NeoContext context, String clientValue) {
-    log.warn("Update refused as stale on {} /{}/{}/{} — caller sent '{}' but the row has moved on;"
-        + " a conflict here with no other writer means the token was corrupted, not outdated",
+    log.error("Update refused as stale on {} /{}/{}/{} — caller sent '{}' but the row has moved"
+        + " on; a conflict here with no other writer means the token was corrupted, not outdated",
         context.getHttpMethod(), context.getSpecName(), context.getEntityName(),
         context.getRecordId(), clientValue);
   }

@@ -17,18 +17,38 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Modifier;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Criterion;
+import org.hibernate.criterion.SimpleExpression;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.pricing.pricelist.ProductPrice;
 
 /**
  * Unit tests for {@link ProductHandlerUtils}.
@@ -131,6 +151,131 @@ class ProductHandlerUtilsTest {
       BigDecimal result = (BigDecimal) invokeStatic("toBigDecimal",
           new Class<?>[]{ Object.class }, "not-a-number");
       assertEquals(BigDecimal.ZERO, result);
+    }
+  }
+
+  /**
+   * ETP-5245: the shared "is this product already priced on this tariff?" lookup. Both writers of
+   * M_ProductPrice (the default-tariff seeding in {@code ProductDefaultsHandler} and the upsert in
+   * {@code ProductPriceHandler}) go through it, so the unique constraint on
+   * {@code (M_PriceList_Version_ID, M_Product_ID)} is checked the same way on both paths.
+   */
+  @Nested
+  @DisplayName("findExistingPrice")
+  class FindExistingPrice {
+
+    /** Criteria mock that records its Restrictions.eq calls and returns a canned result list. */
+    @SuppressWarnings("unchecked")
+    private OBCriteria<ProductPrice> stubCriteria(OBDal dal, Map<String, Object> restrictions,
+        java.util.List<ProductPrice> results) {
+      OBCriteria<ProductPrice> crit = mock(OBCriteria.class);
+      when(dal.createCriteria(ProductPrice.class)).thenReturn(crit);
+      when(crit.add(any(Criterion.class))).thenAnswer(invocation -> {
+        Criterion criterion = invocation.getArgument(0);
+        if (criterion instanceof SimpleExpression) {
+          SimpleExpression expression = (SimpleExpression) criterion;
+          restrictions.put(expression.getPropertyName(), expression.getValue());
+        }
+        return crit;
+      });
+      when(crit.setMaxResults(anyInt())).thenReturn(crit);
+      when(crit.list()).thenReturn(results);
+      return crit;
+    }
+
+    @Test
+    @DisplayName("null productId short-circuits without touching the database")
+    void nullProductIdReturnsNull() {
+      // OBDal is deliberately NOT mocked: reaching it would blow up, proving the guard runs first.
+      assertNull(ProductHandlerUtils.findExistingPrice(null, "plv-1"));
+    }
+
+    @Test
+    @DisplayName("null priceListVersionId short-circuits without touching the database")
+    void nullVersionIdReturnsNull() {
+      assertNull(ProductHandlerUtils.findExistingPrice("prod-1", null));
+    }
+
+    @Test
+    @DisplayName("returns null when the product has no price on that tariff")
+    void noRowReturnsNull() {
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        stubCriteria(dal, new HashMap<>(), Collections.emptyList());
+
+        assertNull(ProductHandlerUtils.findExistingPrice("prod-1", "plv-1"));
+      }
+    }
+
+    @Test
+    @DisplayName("returns the existing row when the product is already priced there")
+    void existingRowIsReturned() {
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        ProductPrice existing = mock(ProductPrice.class);
+        ProductPrice other = mock(ProductPrice.class);
+        stubCriteria(dal, new HashMap<>(), Arrays.asList(existing, other));
+
+        assertSame(existing, ProductHandlerUtils.findExistingPrice("prod-1", "plv-1"));
+      }
+    }
+
+    @Test
+    @DisplayName("scopes the lookup to the product and the version, and to nothing else")
+    void appliesTheExpectedRestrictions() {
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        Map<String, Object> restrictions = new HashMap<>();
+        OBCriteria<ProductPrice> crit = stubCriteria(dal, restrictions, Collections.emptyList());
+
+        ProductHandlerUtils.findExistingPrice("prod-1", "plv-1");
+
+        assertEquals("prod-1", restrictions.get("product.id"));
+        assertEquals("plv-1", restrictions.get("priceListVersion.id"));
+        // The lookup answers "is the unique pair taken?", and M_PRODUCTPRICE_PRICELIST_VE_UN
+        // covers (M_PriceList_Version_ID, M_Product_ID) only — a deactivated row still occupies
+        // it. Narrowing the search to active rows would report a taken pair as free and the
+        // INSERT that follows would hit the constraint, so the flag must not be restricted here.
+        assertFalse(restrictions.containsKey("active"),
+            "findExistingPrice must not restrict on the active flag");
+        verify(crit, times(1)).setMaxResults(1);
+      }
+    }
+
+    @Test
+    @DisplayName("turns OBCriteria's implicit active filter off, or the blindness is only half done")
+    void disablesTheImplicitActiveFilter() {
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        OBCriteria<ProductPrice> crit =
+            stubCriteria(dal, new HashMap<>(), Collections.emptyList());
+
+        ProductHandlerUtils.findExistingPrice("prod-1", "plv-1");
+
+        // OBCriteria filters on isActive by default, so dropping the explicit Restrictions.eq
+        // alone would change nothing — this call is what actually widens the search.
+        verify(crit, times(1)).setFilterOnActive(false);
+      }
+    }
+
+    @Test
+    @DisplayName("finds a DEACTIVATED row — the case that used to violate the unique constraint")
+    void inactiveRowIsStillFound() {
+      try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        ProductPrice deactivated = mock(ProductPrice.class);
+        when(deactivated.isActive()).thenReturn(Boolean.FALSE);
+        stubCriteria(dal, new HashMap<>(), Collections.singletonList(deactivated));
+
+        // The row is invisible in the UI but still holds the (version, product) pair, so it has
+        // to be reported as "already priced" and upserted rather than inserted alongside.
+        assertSame(deactivated, ProductHandlerUtils.findExistingPrice("prod-1", "plv-1"));
+      }
     }
   }
 }
