@@ -2010,6 +2010,16 @@ public class Fiscal303SubmitHandlerTest {
    * generateElectronicFile} param-forwarding tests below. {@code getParameterMap()} is stubbed
    * unconditionally (even to an empty map) because {@code generateElectronicFile} always calls
    * it; an unstubbed Mockito mock would return {@code null} there and NPE on {@code entrySet()}.
+   *
+   * <p>ETP-5187: also defaults {@code getParameter("tipo")} to {@code "D"}, one of
+   * {@link Fiscal303BoxesHandler}'s {@code VALID_DECL_TYPES}. Before ETP-5187's
+   * {@code resolveDeclType} hardening, an unstubbed (null) {@code tipo} silently defaulted to
+   * {@code "N"} downstream; now it is rejected outright with {@code INVALID_DECL_TYPE}, which is
+   * correct/intentional for real callers but was breaking every test in this file that predates
+   * that hardening and never had a reason to care about {@code tipo} resolution itself (that
+   * behavior is covered on its own by {@code Fiscal303BoxesHandlerTest#testResolveDeclType_*}).
+   * Tests that stub {@code req.getParameter("tipo")} themselves after calling this factory
+   * override this default, since Mockito keeps the most recent stub for a given invocation.
    */
   private static HttpServletRequest requestFor(String year, String period, String declId,
       String jsonBody, Map<String, String[]> extraParams) throws IOException {
@@ -2017,6 +2027,7 @@ public class Fiscal303SubmitHandlerTest {
     when(req.getParameter("year")).thenReturn(year);
     when(req.getParameter("period")).thenReturn(period);
     when(req.getParameter("id")).thenReturn(declId);
+    when(req.getParameter("tipo")).thenReturn("D");
     when(req.getReader()).thenReturn(new BufferedReader(new StringReader(jsonBody)));
     when(req.getParameterMap()).thenReturn(extraParams);
     return req;
