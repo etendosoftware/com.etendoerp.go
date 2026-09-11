@@ -450,12 +450,12 @@ public class ProductDefaultsHandlerTest {
   /** A CRUD POST context whose previous result is the create response for {@code createdId}. */
   private static NeoContext createdProductCtx(String createdId, OBContext obContext)
       throws JSONException {
-    JSONObject record = new JSONObject();
+    JSONObject row = new JSONObject();
     if (createdId != null) {
-      record.put("id", createdId);
+      row.put("id", createdId);
     }
     JSONArray data = new JSONArray();
-    data.put(record);
+    data.put(row);
     return postAfterCtx(dataResponse(data), obContext);
   }
 
@@ -939,9 +939,9 @@ public class ProductDefaultsHandlerTest {
               obContextWithClient(CLIENT1)));
 
       assertNotNull(result);
-      JSONObject record = result.getBody().getJSONObject("response")
+      JSONObject row = result.getBody().getJSONObject("response")
           .getJSONArray("data").getJSONObject(0);
-      assertTrue(record.getBoolean("etgoHasCost"));
+      assertTrue(row.getBoolean("etgoHasCost"));
     }
   }
 
@@ -961,12 +961,12 @@ public class ProductDefaultsHandlerTest {
               obContextWithClient(CLIENT1)));
 
       assertNotNull(result);
-      JSONObject record = result.getBody().getJSONObject("response")
+      JSONObject row = result.getBody().getJSONObject("response")
           .getJSONArray("data").getJSONObject(0);
       // Present and false — an ABSENT flag is what the frontend reads as "cannot tell", and it
       // deliberately never blocks. Emitting it is what makes the block possible at all.
-      assertTrue(record.has("etgoHasCost"));
-      assertFalse(record.getBoolean("etgoHasCost"));
+      assertTrue(row.has("etgoHasCost"));
+      assertFalse(row.getBoolean("etgoHasCost"));
     }
   }
 
@@ -1112,12 +1112,12 @@ public class ProductDefaultsHandlerTest {
           .afterHandle(createdProductCtx(PRODUCT_ID, obContext));
 
       assertNotNull(result);
-      JSONObject record = result.getBody().getJSONObject("response")
+      JSONObject row = result.getBody().getJSONObject("response")
           .getJSONArray("data").getJSONObject(0);
       // Present and false — the banner can appear on the record the user just created, with no
       // page reload.
-      assertTrue(record.has("etgoHasCost"));
-      assertFalse(record.getBoolean("etgoHasCost"));
+      assertTrue(row.has("etgoHasCost"));
+      assertFalse(row.getBoolean("etgoHasCost"));
     }
   }
 

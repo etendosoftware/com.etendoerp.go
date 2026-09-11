@@ -593,8 +593,8 @@ public class ProductCostingHandler implements NeoHandler {
     if (data == null || data.length() == 0) {
       return null;
     }
-    JSONObject record = data.optJSONObject(0);
-    return record != null ? StringUtils.trimToNull(record.optString("id", null)) : null;
+    JSONObject row = data.optJSONObject(0);
+    return row != null ? StringUtils.trimToNull(row.optString("id", null)) : null;
   }
 
   /**

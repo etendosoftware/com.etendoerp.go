@@ -99,6 +99,7 @@ public class ProductDefaultsHandler implements NeoHandler {
   private static final String FIELD_TOTAL_ROWS = "totalRows";
   private static final String FIELD_END_ROW = "endRow";
   private static final String SYSTEM_CLIENT_ID = "0";
+  private static final String FIELD_RESPONSE = "response";
   /** Display-only flag consumed by the Product window's cost banner and save gate. */
   private static final String FIELD_HAS_COST = "etgoHasCost";
 
@@ -205,7 +206,7 @@ public class ProductDefaultsHandler implements NeoHandler {
       return filtered;
     }
     try {
-      JSONObject response = target.getBody().optJSONObject("response");
+      JSONObject response = target.getBody().optJSONObject(FIELD_RESPONSE);
       JSONArray data = response != null ? response.optJSONArray("data") : null;
       if (data == null) {
         return filtered;
@@ -213,9 +214,9 @@ public class ProductDefaultsHandler implements NeoHandler {
       OBContext.setAdminMode();
       try {
         for (int i = 0; i < data.length(); i++) {
-          JSONObject record = data.optJSONObject(i);
-          if (record != null) {
-            record.put(FIELD_HAS_COST, hasCostDefined(record.optString("id", null)));
+          JSONObject row = data.optJSONObject(i);
+          if (row != null) {
+            row.put(FIELD_HAS_COST, hasCostDefined(row.optString("id", null)));
           }
         }
       } finally {
@@ -344,7 +345,7 @@ public class ProductDefaultsHandler implements NeoHandler {
     if (previous == null || previous.getBody() == null) {
       return null;
     }
-    JSONObject response = previous.getBody().optJSONObject("response");
+    JSONObject response = previous.getBody().optJSONObject(FIELD_RESPONSE);
     if (response == null) {
       return null;
     }
@@ -352,8 +353,8 @@ public class ProductDefaultsHandler implements NeoHandler {
     if (data == null || data.length() == 0) {
       return null;
     }
-    JSONObject record = data.optJSONObject(0);
-    return record != null ? StringUtils.trimToNull(record.optString("id", null)) : null;
+    JSONObject row = data.optJSONObject(0);
+    return row != null ? StringUtils.trimToNull(row.optString("id", null)) : null;
   }
 
   private NeoResponse injectDefaults(NeoContext context) {
@@ -394,7 +395,7 @@ public class ProductDefaultsHandler implements NeoHandler {
     }
     try {
       JSONObject body = previous.getBody();
-      JSONObject responseWrapper = body.optJSONObject("response");
+      JSONObject responseWrapper = body.optJSONObject(FIELD_RESPONSE);
       JSONArray dataArr = responseWrapper != null ? responseWrapper.optJSONArray("data") : null;
       if (dataArr == null || dataArr.length() == 0) {
         return null;
