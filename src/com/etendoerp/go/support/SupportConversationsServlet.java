@@ -49,6 +49,13 @@ import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.schemaforge.data.SupportConversation;
 import com.etendoerp.go.schemaforge.data.SupportMessage;
+import com.etendoerp.go.session.GoLegacyBearer;
+import com.etendoerp.go.session.GoNeoAuth;
+import com.etendoerp.go.session.GoSessionAuthResult;
+import com.etendoerp.go.session.GoSessionAuthenticator;
+import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionService;
+import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -56,7 +63,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *
  * Mapped to /sws/support/* via AD_MODEL_OBJECT_MAPPING.
  *
- * Endpoints (all require Bearer JWT from Etendo's standard /sws/login):
+ * Endpoints (all require the `__Host-` cookie session, or a Bearer JWT as fallback):
  *   GET  /sws/support/conversations                          — List conversations for the user
  *   POST /sws/support/conversations                          — Start a new conversation
  *   GET  /sws/support/conversations/:id/messages             — Load message history
@@ -79,6 +86,8 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
 
   private static final String CONTENT_TYPE_JSON = "application/json";
   private static final String HEADER_AUTHORIZATION = "Authorization";
+  private static final GoSessionAuthenticator SESSION_AUTHENTICATOR =
+      new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore()));
   private static final String CHARSET_UTF8      = "UTF-8";
   private static final String FIELD_MESSAGE     = "message";
   private static final String FIELD_MESSAGES    = "messages";
@@ -698,7 +707,53 @@ public class SupportConversationsServlet extends EtendoGoCorsServlet {
     OBContext.setOBContext(previous);
   }
 
+  /**
+   * ETP-4575 — the `__Host-` cookie session is honoured first; the Bearer path below is the
+   * fallback for callers that have not migrated. This endpoint used to be bearer-only, and since
+   * the frontend logs out on a 401, the support widget asking for its conversations was enough to
+   * revoke a valid cookie session and blank every window behind it.
+   */
   private AuthContext authenticate(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    GoSessionAuthResult sessionAuth = SESSION_AUTHENTICATOR.authenticate(request);
+    switch (GoNeoAuth.decide(sessionAuth.getStatus(), GoLegacyBearer.isEnabled())) {
+      case USE_SESSION:
+        return sessionAuthContext(response, sessionAuth.getRecord());
+      case CSRF_REJECTED:
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, "CSRF validation failed");
+        return null;
+      case SESSION_INVALID:
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired session");
+        return null;
+      case NO_CREDENTIALS:
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
+            "Missing or invalid Authorization header");
+        return null;
+      case USE_LEGACY_BEARER:
+      default:
+        GoLegacyBearer.recordUse();
+        return authenticateBearer(request, response);
+    }
+  }
+
+  /** Builds the request context from a resolved cookie session. */
+  private AuthContext sessionAuthContext(HttpServletResponse response, GoSessionRecord session)
+      throws IOException {
+    String userId = session.getUserId();
+    String roleId = session.getRoleId();
+    if (userId == null || userId.isEmpty() || roleId == null || roleId.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
+          "Session has no environment selected");
+      return null;
+    }
+    String clientId = session.getCtxClientId();
+    String orgId = session.getCtxOrgId();
+    return new AuthContext(userId, roleId,
+        clientId == null || clientId.isEmpty() ? SYSTEM_USER_ID : clientId,
+        orgId == null || orgId.isEmpty() ? SYSTEM_USER_ID : orgId);
+  }
+
+  private AuthContext authenticateBearer(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     String authHeader = request.getHeader(HEADER_AUTHORIZATION);
     if (authHeader == null || !authHeader.startsWith("Bearer ")) {
