@@ -97,6 +97,28 @@ public class NeoProcessService {
   }
 
   /**
+   * Resolve a human-readable failure message from an exception caught around a
+   * reflective process invocation.
+   *
+   * <p>Reflection ({@link Method#invoke}) wraps any exception thrown by the invoked
+   * business logic in an {@link InvocationTargetException} whose own
+   * {@code getMessage()} always returns {@code null} -- the real message lives on
+   * {@code getCause()}. Without this unwrap, a bare exception with no message
+   * (e.g. a {@link NullPointerException}) surfaces to the caller as the literal,
+   * undiagnosable string "Process execution failed: null".
+   *
+   * @param e the exception caught around the process invocation
+   * @return the cause's message, or its simple class name if the message is null
+   */
+  private static String resolveFailureMessage(Throwable e) {
+    Throwable cause = (e instanceof InvocationTargetException && e.getCause() != null)
+        ? e.getCause()
+        : e;
+    String msg = cause.getMessage();
+    return msg != null ? msg : cause.getClass().getSimpleName();
+  }
+
+  /**
    * Execute a process with the given parameters.
    *
    * @param process the AD_Process to execute
@@ -132,7 +154,7 @@ public class NeoProcessService {
     } catch (Exception e) {
       log.error("Error executing process {}", process.getName(), e);
       result = NeoResponse.error(500,
-          PROCESS_EXECUTION_FAILED_PREFIX + e.getMessage());
+          PROCESS_EXECUTION_FAILED_PREFIX + resolveFailureMessage(e));
     }
     // Normalize at the single exit point: every early-return guard clause above
     // (access denied, missing mandatory param, unmet precondition) and every
@@ -518,7 +540,7 @@ public class NeoProcessService {
     } catch (Exception e) {
       log.error("Error executing OBUIAPP process {}", obuiappProcess.getName(), e);
       result = NeoResponse.error(500,
-          PROCESS_EXECUTION_FAILED_PREFIX + e.getMessage());
+          PROCESS_EXECUTION_FAILED_PREFIX + resolveFailureMessage(e));
     }
     return NeoResponse.ensureTopLevelMessage(result);
   }
@@ -551,7 +573,7 @@ public class NeoProcessService {
     } catch (Exception e) {
       log.error("Error executing OBUIAPP action handler {}", className, e);
       result = NeoResponse.error(500,
-          PROCESS_EXECUTION_FAILED_PREFIX + e.getMessage());
+          PROCESS_EXECUTION_FAILED_PREFIX + resolveFailureMessage(e));
     }
     return NeoResponse.ensureTopLevelMessage(result);
   }
