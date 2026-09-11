@@ -253,17 +253,22 @@ public class SiiSendHandlerTest {
   // ── executeAction() routing — ETP-5272 ─────────────────────────────────────
   //
   // executeAction must route to CorrectDuplicateInvoiceError (registry-error resend, A1)
-  // when Invoice#isAeatsiiErrorRegistral() is true, and to the existing MultiEnvioFactura
-  // path (via NeoProcessService#executeObuiappClass, A0) otherwise. CorrectDuplicateInvoiceError
-  // is constructed directly (it is not a BaseActionHandler), so its construction is intercepted
-  // with Mockito's inline mock-maker (mockConstruction) rather than exercising the real SOAP
-  // call inside #doExecute — that call needs a live AEAT/DB environment and is out of scope for
-  // a unit test.
+  // ONLY when Invoice#isAeatsiiErrorRegistral() is true AND the invoice's actual AEAT error
+  // code is exactly "3000" (duplicate registration) — CorrectDuplicateInvoiceError hard-gates
+  // on that code itself. Any OTHER registry error (or a null/blank error code) with the
+  // registral flag set must route to MultiInvoiceSIIModification instead (also A1, but a real
+  // resend, via the same NeoProcessService#executeObuiappClass bridge MultiEnvioFactura uses).
+  // With the registral flag unset, the existing MultiEnvioFactura path (A0) is untouched.
+  // CorrectDuplicateInvoiceError is constructed directly (it is not a BaseActionHandler), so its
+  // construction is intercepted with Mockito's inline mock-maker (mockConstruction) rather than
+  // exercising the real SOAP call inside #doExecute — that call needs a live AEAT/DB environment
+  // and is out of scope for a unit test.
 
   @Test
-  public void testExecuteActionRoutesToRegistralCorrectionWhenFlagSet() throws Exception {
+  public void testExecuteActionRoutesToRegistralCorrectionWhenErrorCodeIs3000() throws Exception {
     Invoice invoice = mock(Invoice.class);
     when(invoice.isAeatsiiErrorRegistral()).thenReturn(Boolean.TRUE);
+    when(invoice.getAeatsiiErrorCode()).thenReturn("3000");
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
          MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class);
@@ -284,6 +289,74 @@ public class SiiSendHandlerTest {
       assertEquals(1, correctionMock.constructed().size());
       verify(correctionMock.constructed().get(0)).doExecute("inv-registral");
       processMock.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  public void testExecuteActionRoutesToModificationWhenErrorCodeIsNot3000() throws Exception {
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.isAeatsiiErrorRegistral()).thenReturn(Boolean.TRUE);
+    when(invoice.getAeatsiiErrorCode()).thenReturn("1130");
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("org-1");
+    when(invoice.getOrganization()).thenReturn(org);
+
+    NeoResponse expected = NeoResponse.ok(new JSONObject().put("sent", true));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class);
+         MockedConstruction<CorrectDuplicateInvoiceError> correctionMock = Mockito.mockConstruction(
+             CorrectDuplicateInvoiceError.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "inv-other-error")).thenReturn(invoice);
+      processMock.when(() -> NeoProcessService.executeObuiappClass(
+              eq("org.openbravo.module.sii.process.MultiInvoiceSIIModification"),
+              eq("F5CCFE8DCAC04FBD9B4A217C6383032B"),
+              any(JSONObject.class)))
+          .thenReturn(expected);
+
+      NeoResponse result = handler.executeAction("inv-other-error");
+
+      assertEquals(expected, result);
+      assertTrue("CorrectDuplicateInvoiceError must not be constructed for a non-3000 error code",
+          correctionMock.constructed().isEmpty());
+      processMock.verify(() -> NeoProcessService.executeObuiappClass(
+          eq("org.openbravo.module.sii.process.MultiInvoiceSIIModification"),
+          eq("F5CCFE8DCAC04FBD9B4A217C6383032B"),
+          any(JSONObject.class)));
+    }
+  }
+
+  @Test
+  public void testExecuteActionRoutesToModificationWhenErrorCodeIsNull() throws Exception {
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.isAeatsiiErrorRegistral()).thenReturn(Boolean.TRUE);
+    when(invoice.getAeatsiiErrorCode()).thenReturn(null);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("org-1");
+    when(invoice.getOrganization()).thenReturn(org);
+
+    NeoResponse expected = NeoResponse.ok(new JSONObject().put("sent", true));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class);
+         MockedConstruction<CorrectDuplicateInvoiceError> correctionMock = Mockito.mockConstruction(
+             CorrectDuplicateInvoiceError.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "inv-null-error-code")).thenReturn(invoice);
+      processMock.when(() -> NeoProcessService.executeObuiappClass(any(), any(), any()))
+          .thenReturn(expected);
+
+      NeoResponse result = handler.executeAction("inv-null-error-code");
+
+      assertEquals(expected, result);
+      assertTrue(correctionMock.constructed().isEmpty());
+      processMock.verify(() -> NeoProcessService.executeObuiappClass(
+          eq("org.openbravo.module.sii.process.MultiInvoiceSIIModification"),
+          eq("F5CCFE8DCAC04FBD9B4A217C6383032B"),
+          any(JSONObject.class)));
     }
   }
 
@@ -371,6 +444,7 @@ public class SiiSendHandlerTest {
   public void testExecuteActionWrapsRegistralCorrectionExceptionInto500() throws Exception {
     Invoice invoice = mock(Invoice.class);
     when(invoice.isAeatsiiErrorRegistral()).thenReturn(Boolean.TRUE);
+    when(invoice.getAeatsiiErrorCode()).thenReturn("3000");
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
          MockedConstruction<CorrectDuplicateInvoiceError> correctionMock = Mockito.mockConstruction(

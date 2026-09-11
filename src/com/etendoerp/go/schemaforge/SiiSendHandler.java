@@ -36,15 +36,22 @@ import org.openbravo.module.sii.process.CorrectDuplicateInvoiceError;
  * server-side action handler with the same payload shape used by the classic UI.
  *
  * <p>ETP-5272: {@code MultiEnvioFactura} always sends communication type {@code A0}
- * ("alta" / new registration) and skips any invoice already marked as sent to SII
- * ({@code SIIUtils.isSentToSII}). That is wrong for an invoice pending a registry-error
- * correction ({@link Invoice#isAeatsiiErrorRegistral()} {@code = true}): AEAT expects the
- * correction envelope, communication type {@code A1}, and the invoice must actually be
- * resent even though {@code aeatsiiIssent} is already {@code true} (the classic backend
- * never resets that flag after the correction cycle). The classic module's own resend path
- * for exactly this case is {@code org.openbravo.module.sii.process.CorrectDuplicateInvoiceError}
- * — it branches to {@code A1} internally when the invoice's error-registral flag is set — so
- * this handler routes there instead, reusing that process as-is.
+ * ("alta" / new registration). That is wrong for an invoice pending a registry-error
+ * correction ({@link Invoice#isAeatsiiErrorRegistral()} {@code = true}) — AEAT expects the
+ * correction/modification envelope, communication type {@code A1}. Classic Etendo itself
+ * splits that case in two, by the invoice's actual AEAT error code
+ * ({@link Invoice#getAeatsiiErrorCode()}):
+ * <ul>
+ *   <li>error code exactly {@code "3000"} (duplicate registration) — the classic
+ *       "Corregir" button, {@code org.openbravo.module.sii.process.CorrectDuplicateInvoiceError}.
+ *       It does a {@code ConsultaLR*} read-back against AEAT and syncs local fields; it does
+ *       NOT resend. This handler calls it directly (it is a plain class, not a
+ *       {@code BaseActionHandler}).</li>
+ *   <li>any other registry error (or no error code at all) — the classic "Modificar" button,
+ *       {@code org.openbravo.module.sii.process.MultiInvoiceSIIModification}. This is the real
+ *       resend: like {@code MultiEnvioFactura}, it extends {@code BaseActionHandler}, so it is
+ *       invoked through the same {@link NeoProcessService#executeObuiappClass} bridge.</li>
+ * </ul>
  */
 @Named("sii-send")
 public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
@@ -54,6 +61,10 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
   static final String ACTION_NAME_QUALIFIER = "aeatsiiSend";
   private static final String PROCESS_ID = "2ECF46DAAEEB486EAF79D3594D50DE5F";
   private static final String PROCESS_CLASS = "org.openbravo.module.sii.process.MultiEnvioFactura";
+  private static final String MODIFICATION_PROCESS_ID = "F5CCFE8DCAC04FBD9B4A217C6383032B";
+  private static final String MODIFICATION_PROCESS_CLASS =
+      "org.openbravo.module.sii.process.MultiInvoiceSIIModification";
+  private static final String DUPLICATE_REGISTRATION_ERROR_CODE = "3000";
   private static final String STATUS = "status";
   private static final String MESSAGE = "message";
   private static final String ERROR = "error";
@@ -66,9 +77,39 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
     Invoice invoice = OBDal.getInstance().get(Invoice.class, recordId);
 
     if (invoice != null && Boolean.TRUE.equals(invoice.isAeatsiiErrorRegistral())) {
-      return executeRegistralCorrection(recordId);
+      if (DUPLICATE_REGISTRATION_ERROR_CODE.equals(invoice.getAeatsiiErrorCode())) {
+        return executeRegistralCorrection(recordId);
+      }
+      return executeRegistralModification(recordId, invoice);
     }
 
+    NeoResponse response = NeoProcessService.executeObuiappClass(PROCESS_CLASS, PROCESS_ID,
+        buildInvoiceSendParams(recordId, invoice));
+    return normalizeErrorShape(response);
+  }
+
+  /**
+   * Routes a registry-error resend (any AEAT error code other than the duplicate-registration
+   * {@code "3000"}) to {@code MultiInvoiceSIIModification}, the classic module's "Modificar"
+   * action (communication type {@code A1}). Unlike {@code CorrectDuplicateInvoiceError}, this
+   * is a real {@code BaseActionHandler}, so it is invoked through the same
+   * {@link NeoProcessService#executeObuiappClass} bridge already used for {@code MultiEnvioFactura}.
+   */
+  private static NeoResponse executeRegistralModification(String recordId, Invoice invoice)
+      throws Exception {
+    NeoResponse response = NeoProcessService.executeObuiappClass(MODIFICATION_PROCESS_CLASS,
+        MODIFICATION_PROCESS_ID, buildInvoiceSendParams(recordId, invoice));
+    return normalizeErrorShape(response);
+  }
+
+  /**
+   * Builds the payload shape both {@code MultiEnvioFactura} and
+   * {@code MultiInvoiceSIIModification} expect: a single-invoice {@code ids} array plus the
+   * invoice's organization id, alongside the generic {@code recordId}/{@code inpRecordId} keys
+   * {@link NeoProcessService#executeObuiappClass} forwards for record-context resolution.
+   */
+  private static JSONObject buildInvoiceSendParams(String recordId, Invoice invoice)
+      throws JSONException {
     JSONObject params = new JSONObject();
     params.put("recordId", recordId);
     params.put("inpRecordId", recordId);
@@ -76,9 +117,7 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
     JSONArray ids = new JSONArray();
     ids.put(recordId);
     params.put("ids", ids);
-
-    NeoResponse response = NeoProcessService.executeObuiappClass(PROCESS_CLASS, PROCESS_ID, params);
-    return normalizeErrorShape(response);
+    return params;
   }
 
   /**
