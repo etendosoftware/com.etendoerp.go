@@ -1179,12 +1179,14 @@ GET /sws/neo/debuginvitationbypass?Action=forceStatus&Email=<email>&Status=<stat
 GET /sws/neo/resendinvitation?AdUserId=<id>                               (§8h)
 GET /sws/neo/promoteuserrole?UserId=<id>&Mode=promote|demote              (§8i)
 GET /sws/neo/documentemailhistory?recordId=<id>[&specName=<spec>]         (§8j)
+GET /sws/neo/acctprocessmonitor[?Limit=<n>][&Action=trigger]              (§8k)
 Authorization: Bearer {token}
 ```
 
 `NeoGoWebhookBridge` runs `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview`/`SFAssignUserRoles`/
 `SFUserRoleAssignments`/`SFSystemRoleTemplates`/`SFDebugInvitationBypass`/`SFResendInvitation`/
-`SFPromoteUserRole`/`SFDocumentEmailHistory` (§8, §8b, §8c, §8d, §8e, §8f, §8g, §8h, §8i, §8j)
+`SFPromoteUserRole`/`SFDocumentEmailHistory`/`SFAcctProcessMonitor`
+(§8, §8b, §8c, §8d, §8e, §8f, §8g, §8h, §8i, §8j, §8k)
 through NEO's own
 JWT authentication instead of the Webhooks module's HTTP dispatch — the same pattern
 `NeoSimSearchEndpoint` (§4.9) already used for `SimSearch`. Each of these pseudo-specs constructs
@@ -1198,12 +1200,13 @@ original `/webhooks/*` paths too — the Webhooks module dispatch was not remove
 and no `SMFWHE_DEFINEDWEBHOOK_ROLE` grant is required for it. `SFAssignUserRoles` (ETP-4852),
 `SFUserRoleAssignments` (ETP-4906), `SFSystemRoleTemplates` (ETP-4906),
 `SFDebugInvitationBypass` (ETP-4830), `SFResendInvitation` (ETP-4830), `SFPromoteUserRole`
-(ETP-5019), and `SFDocumentEmailHistory` (ETP-5069) are `/sws/neo/*`-only — all seven were
+(ETP-5019), `SFDocumentEmailHistory` (ETP-5069), and `SFAcctProcessMonitor` (ETP-5269) are
+`/sws/neo/*`-only — all eight were
 authored after this pattern was already established, so none ever had a legacy `/webhooks/*`
 path to keep.
 
 Each webhook's own access rule is unaffected and still enforced inside its `get()` — see
-§8/§8b/§8c/§8d/§8e/§8f/§8g/§8h/§8i/§8j for what each one checks
+§8/§8b/§8c/§8d/§8e/§8f/§8g/§8h/§8i/§8j/§8k for what each one checks
 (`NeoAccessHelper.isAdminOrClientAdmin`, window/process access checks, and — for
 `documentemailhistory` alone — DAL's own readable-client/org filtering, §8j). Non-`GET`
 requests get `405`; a webhook that throws gets
@@ -3579,6 +3582,166 @@ stays the reference for the endpoint itself.
 
 ---
 
+## 8k. Accounting Process Monitor (SFAcctProcessMonitor Webhook, ETP-5269)
+
+`SFAcctProcessMonitor` (`GET /sws/neo/acctprocessmonitor[?Limit=<n>][&Action=trigger]` — reached
+ONLY through the NEO pseudo-spec bridge, §4.10/§4.11; no legacy `/webhooks/*` path) reports the
+status and recent execution history of Etendo's accounting server process
+(`AD_Process.Value = 'AcctServerProcess'`, resolved by search key so no id is hardcoded), and lets
+an administrator launch a run manually. It backs the admin-only page at `/acct-process-monitor`
+(`tools/app-shell/src/pages/AcctProcessMonitorPage.jsx` in `etendo_schema_forge`), whose full
+functional guide is `docs/generated-custom-windows/acct-process-monitor.md` there.
+
+**Two actions on one endpoint, and reading is the default.** `Action` is compared
+case-insensitively against `"trigger"`; any other value — including absent — is a read. Because
+the whole pseudo-spec family is reached over `GET`, a side-effecting action cannot be inferred
+from the HTTP method, so making it opt-in is what keeps an accidental, prefetched, bookmarked or
+retried request from firing the accounting process. `Limit` defaults to 20, is clamped to 100, and
+falls back to 20 for anything unparseable. Within a triggering request the webhook **schedules
+first and reads afterwards**, so `running`, `lastRun` and `history` in one response all describe
+the same moment.
+
+**Access rule: `NeoAccessHelper.isAdminOrClientAdmin`, checked before anything is read or
+scheduled.** A caller with a restricted role, or with no role at all, gets the `notAuthorized`
+payload. The frontend's `acct-process-monitor` feature flag gates only the menu entry — the React
+route is registered unconditionally — so this check is the actual authorization boundary and must
+not be weakened on the assumption that the flag protects anything.
+
+It enters `OBContext.setAdminMode(true)` — the **stricter** variant, which keeps the cross-client
+write check, unlike the no-arg form its ten siblings in this package use. Admin mode is required
+because the recurring request is a System (`AD_Client_ID = '0'`) row a tenant admin's own context
+cannot read; `true` is affordable because this class performs no OBDal writes at all (its only
+mutation goes through raw XSQL in `ProcessRequestData.insert`, which never reaches
+`SecurityChecker`). Every criteria then states its client restriction explicitly and sets
+`setFilterOnReadableClients(false)`/`setFilterOnReadableOrganization(false)`, so the scope never
+depends on ambient context.
+
+**Tenant scope — a manual run posts only the CALLER's client.** `AcctServerProcess.doExecute`
+branches on the bundle context's client: `'0'` loops over every non-System client, anything else
+processes that client alone. The recurring cadence is a System row and therefore sweeps the whole
+instance, which is right for an unattended job and wrong for a button any client-admin can press.
+The one-shot bundle is built from `OBContext.getOBContext().getCurrentClient().getId()` with
+organization `'0'` (= every organization *within* that one client), so a manual run is scoped to
+the caller. A System-context caller has no own tenant to scope to and is refused with
+`systemClientNotScopable` rather than silently widened. This was a product decision (2026-09-10)
+that overrode the original design — see `flags-registry.json` → `acct-process-monitor` →
+`$scopeChangeComment` in `etendo_schema_forge`.
+
+Reads are scoped the same way: history and the in-progress probe cover the caller's own client
+**plus System**. System is included deliberately and is not a leak — the System cadence posts this
+caller's documents too, so its runs are the history of work done on the caller's own data.
+Excluding them would make the page look as though the process had never run. Another tenant's
+*manual* runs are excluded. The pending-one-shot guard is the exception: it looks at the caller's
+client only, because another tenant's queued run must not disable this caller's button.
+
+**Mechanism — a one-shot sibling request, never the recurring row.** Triggering calls
+`OBScheduler.schedule(ProcessBundle)` (the no-requestId overload), which mints a fresh id, INSERTs
+its own `AD_PROCESS_REQUEST` with status `SCH` and NULL timing, and schedules it;
+`TriggerProvider` maps null timing to `TimingOption.IMMEDIATE` (`newTrigger().startNow()`). **The
+recurring row is read for its identity and its `nextExecution` and is never written — not one
+column.** Two alternatives were rejected because both mutate it: invoking the "Schedule Process"
+AD_Process (`0515E6559C31478E92703A3D10E6783B`, which rewrites the schedule of the row it runs
+against), and updating `start_date`/`start_time` directly (`OBScheduler.initialize()` reads that
+table exactly once at Quartz startup, so the UPDATE would be invisible until a Tomcat restart
+while still having corrupted the stored schedule). The one-shot carries no frequency, so it can
+never become a second recurring job.
+
+The channel is **`Channel.BACKGROUND`, never `DIRECT`**. `AcctServerProcess` sets
+`isDirect = bundle.getChannel() == Channel.DIRECT` and then loads its table/org/date parameters
+from `AD_PINSTANCE_PARA`. A scheduled one-shot has no pinstance, and those generated finders
+return `""` rather than `null`, so `strOrg` would be silently overwritten from `"0"` to `""` and
+**the run would report success while posting nothing.** `BACKGROUND` keeps `isDirect` false and
+takes the same path as the automatic run; it also stays distinct from `"Direct"` (the interactive
+*Posting by DB tables* form) and `"Process Scheduler"` (the recurring row), which is what lets the
+queries tell the three kinds of row apart without a new column. **Accepted trade-off:**
+`OBScheduler.initialize()` skips rescheduling a leftover `SCH` row only when its channel is
+`Direct` or its timing is IMMEDIATE, so a `BACKGROUND` one-shot interrupted between INSERT and
+firing is re-fired once on the next startup. Harmless — `AcctServer` only posts still-unposted
+documents — and far better than a run that silently posts nothing.
+
+**Concurrency: the System cadence cannot veto a manual run.** `AD_Process.preventconcurrent` is
+`'Y'` and the flag does reach the trigger, but `ProcessMonitor.vetoJobExecution` treats another
+job as concurrent only when it matches on **both** client and organization, comparing
+`ProcessBundle.getContext().getClient()`. The manual run is the caller's client; the recurring run
+is System. Different client, mutually invisible. The only reachable veto is same-client-same-org
+(a second manual run through the TOCTOU gap, or a tenant holding its own recurring request), where
+vetoing is **correct** and must not be worked around — the in-flight run is already posting exactly
+those documents. An automatic retry was evaluated and rejected on those grounds.
+
+A veto is **not reliably distinguishable from a real failure** here: `ProcessMonitor.stopConcurrency`
+writes an `AD_PROCESS_RUN` row with status `ERR` and duration `"00:00:00.000"` — identical to any
+genuine sub-millisecond failure, since `getDuration(0)` renders the same string — and puts its
+explanation in `LOG`, which this endpoint never exposes. Neither path writes `RESULT` or `REPORT`
+(they are not even parameters of `ProcessRunData.insert`). **Do not build logic that branches on
+"zero-duration `ERR` means it was skipped".**
+
+**`AD_PROCESS_RUN.LOG` and `REPORT` are never read into the response** — not in the list, not
+truncated, not behind a drill-down. The log is a CLOB of raw process output that can carry
+arbitrary internal detail, and this endpoint is reachable by every client-admin, not only by a
+system administrator. `toRunJson` carries a standing comment saying so. Do not add a log field,
+and do not add one on the frontend either.
+
+**Which recurring row wins when there is more than one.** The shipped configuration is a single
+System row, but a tenant may also hold its own. The lookup excludes both one-shot channels
+(`Background`, `Direct`), then orders by soonest `nextExecution`, tie-broken by id. Soonest — not
+"prefer the caller's client": the row feeds only *Next automatic run*, both candidates post the
+caller's documents, so the truthful answer is whichever fires first. Preferring the caller's client
+would announce a nightly tenant job while a five-minute System sweep was about to post the same
+documents.
+
+**Response.** The bridge's usual envelope — `{"result": "<JSON string>"}` — carrying either the
+status object or a refusal. Timestamps are `yyyy-MM-dd'T'HH:mm:ss` with **no zone**, because the
+underlying columns are `timestamp without time zone` (server wall clock); the browser formats them.
+
+```json
+{
+  "error": false,
+  "processName": "<AD_Process.Name for AcctServerProcess>",
+  "scheduled": true,
+  "nextRunTime": "2026-09-10T18:35:00",
+  "running": false,
+  "lastRun": {
+    "id": "A1B2...", "status": "SUC",
+    "startTime": "2026-09-10T18:30:00", "endTime": "2026-09-10T18:30:00",
+    "duration": "00:00:00.085", "manual": false
+  },
+  "history": [ "…same row shape, newest first, at most Limit rows…" ],
+  "triggered": { "started": true, "reason": "started" }
+}
+```
+
+- A run row carries exactly six keys: `duration`, `endTime`, `id`, `manual`, `startTime`,
+  `status`. `manual` is derived from the owning request's `CHANNEL` (`Background` → manual), so it
+  needs no extra column and stays correct for runs created before this feature existed.
+- `triggered` is present only on a triggering request.
+- `running` is bounded by a 1-hour staleness window: a `PRC` row is only moved out of that state by
+  `ProcessMonitor` when the job finishes, so a JVM killed mid-run would otherwise leave the manual
+  trigger disabled for the life of the instance. The same bound applies to the pending-one-shot
+  guard.
+- A refusal is a **200** with `{"error": true, "reason": "...", "message": "..."}` — the
+  "answer, don't 403" convention this family uses. `reason` is `notAuthorized` or `notInstalled`;
+  it exists so callers never string-match `message`, since those two states need very different UI.
+
+**`triggered.reason`** — one success value and five refusals. `started: true` means the job was
+handed to **Quartz**, not that it has run or even that its `AD_PROCESS_RUN` row exists yet
+(`ProcessMonitor.jobToBeExecuted` writes that row on the scheduler's own thread). Callers must
+poll after a successful trigger rather than treating the triggering response as final; the
+frontend hook does exactly that, on a bounded deadline.
+
+| `reason` | `started` | Meaning |
+|---|:---:|---|
+| `started` | `true` | Handed to Quartz. The run row appears shortly. |
+| `alreadyRunning` | `false` | A run is already in progress for this client, or a one-shot it queued has not fired yet. |
+| `notScheduled` | `false` | No active recurring request for this process on the instance. |
+| `schedulerUnavailable` | `false` | Quartz is in standby (no-execute background policy), where `schedule(...)` silently no-ops. Reported rather than claimed as success. |
+| `systemClientNotScopable` | `false` | The caller's session is the System context, which has no single company to scope the run to. |
+| `scheduleFailed` | `false` | The scheduler threw; logged server-side and reported rather than escaping to the bridge. |
+
+Covered by `SFAcctProcessMonitorTest` (31 tests) and the two `NeoPseudoSpecDispatcherTest` routing
+cases — see §9.
+
+---
+
 ## 9. Testing
 
 The module includes unit tests that run without a backend:
@@ -3610,6 +3773,9 @@ The module includes unit tests that run without a backend:
 | `OwnerSupportTest` (ETP-4830) | -- | Unit test for §7 item 10's `EM_ETGO_Is_Owner` read/write helper, mirroring `SFWindowAccessMapTest`'s native-query mocking convention (`MockedStatic<OBDal>` + a mocked `Session`/`NativeQuery`, `Character` rows for the `char(1)` column, never `String`): `isOwner` true/false/null-column/missing-user, and `false` for a blank/`null` id without ever touching `OBDal`; `clientHasOwner` true/false, same blank/`null` short-circuit; `markAsOwnerIfNoneExists` executes the `UPDATE` only when `clientHasOwner` first reads empty (2 native queries), is a complete no-op (only 1 native query, the check) when the client already has an owner, and never touches `OBDal` at all for a missing client id or user id. |
 | `UserRoleAssignmentHandlerTest` (owner-protection additions, ETP-4830) | -- | `rejectNonOwnerEditingOwner` (§7 item 10's path (a)): a non-owner's PATCH/PUT on an `EM_ETGO_Is_Owner`-flagged record is rejected with `400` regardless of which field it touches (separate cases for `name`, `email`, and `active`, the last two proving the owner guard's own message wins over the ALSO-400 email-immutability/self-lockout guards it runs before — and that `OBDal` is never even reached for those); the owner editing their own record is a no-op that falls through to the other guards unchanged; a target NOT flagged as owner is unaffected regardless of caller (baseline); and an `OwnerSupport.isOwner` lookup failure fails CLOSED (`500`), same convention as every other guard in this handler. Every PRE-EXISTING PUT/PATCH test in this file also gained a `MockedStatic<OwnerSupport>` stub (`isOwner` → `false`) plus, where the test did not already mock it, a matching `MockedStatic<OBContext>` stub — the new guard's own `OBContext.setAdminMode`/`OwnerSupport.isOwner` calls run unconditionally on every PUT/PATCH now, ahead of the email/deactivation guards those tests actually target. **ETP-4830 item #4 additions (`attachOwnerFlag`):** `isOwner` attached `true`/`false` per row on a list GET (`OwnerSupport.isOwner` mocked statically, one stub per row id); attached on a single-record GET the same way; attached with NO `obContext`/`clientId` at all (unlike `invitationStatus`, confirming the two attach steps are independently scoped); and left unattached (best-effort, no field written, `afterHandle` itself never throws) when `OwnerSupport.isOwner` throws. |
 
+| `SFAcctProcessMonitorTest` (ETP-5269) | -- | Unit test (31 tests) for §8k, `OBDal`/`OBContext`/`OBScheduler`/`NeoAccessHelper` as Mockito static mocks. Access gate: non-admin, no role, and a restricted role that explicitly asks to trigger are all refused without reading or scheduling; client-admin and System Administrator are allowed. Action semantics: a bare GET never reaches the scheduler, an unrelated `Action` value is treated as a read, matching is case-insensitive. The trigger's two load-bearing invariants: **the one-shot `ProcessBundle` is built from the CALLING client, not the recurring System row**, and **its channel is `BACKGROUND`, never `DIRECT`** (the defect that would have made a run report success while posting nothing) — plus a System-context caller refused with `systemClientNotScopable` and nothing scheduled, and an assertion that triggering never writes or mutates the recurring request. Scope: history is the caller's client PLUS System and nobody else; the in-progress probe shares that scope; the pending-one-shot guard is caller's-client-only. Lookup determinism: the recurring query excludes both one-shot channels (so it cannot pick up our own run) and is ordered, so `setMaxResults(1)` picks the same row every time. Non-exposure: the run log and report never reach the response. Plus `lastRun`/history ordering, the `manual` label derived from the owning request's channel, the four refusal paths (`alreadyRunning` from a run in progress and from a queued one-shot, `schedulerUnavailable`, `notScheduled`, `scheduleFailed`), `notInstalled` on an instance with no accounting process, and the post-trigger read ORDER — history and the in-progress flag are both captured after scheduling, exactly once, so the response's fields agree with each other. |
+| `NeoPseudoSpecDispatcherTest#acctProcessMonitor*` (ETP-5269) | -- | §8k routing: a `GET` on `acctprocessmonitor` dispatches through `NeoGoWebhookBridge` with a real `SFAcctProcessMonitor` instance (captured and type-asserted) and writes the bridge's response; a non-`GET` returns `405 "Acctprocessmonitor endpoint only supports GET"` with the bridge never invoked. |
+
 Tests are located in `src-test/src/com/etendoerp/go/schemaforge/` (including its `webhooks/`
 subpackage, e.g. `SFAssignUserRolesTest`/`SFUserRoleAssignmentsTest`/`SFSystemRoleTemplatesTest`/
 `SFDebugInvitationBypassTest`/`SFResendInvitationTest`, and its `handlers/`/`util/` subpackages,
@@ -3618,7 +3784,8 @@ e.g. `UserRoleAssignmentHandlerTest`/`OwnerSupportTest`) and `src-test/src/com/e
 `resendInvitation` coverage, §8h, lives alongside its pre-existing `createInvitation`/
 `findLatestInvitationStatus` suites, same file, no separate class).
 The `NeoPseudoSpecDispatcher` routing for `userroleassignments`, `systemroletemplates`,
-`debuginvitationbypass`, `resendinvitation`, and `promoteuserrole` is covered by
+`debuginvitationbypass`, `resendinvitation`, `promoteuserrole`, and `acctprocessmonitor` is
+covered by
 `NeoPseudoSpecDispatcherTest` (same package), mirroring its existing per-endpoint dispatch/
 method-not-allowed test pairs — `debuginvitationbypass` additionally covers the flag-off/flag-on
 branch described in §8g (`resendinvitation` and `promoteuserrole` have no such flag to test, §8h/
