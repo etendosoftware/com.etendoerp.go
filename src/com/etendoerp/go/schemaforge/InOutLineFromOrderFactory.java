@@ -19,9 +19,11 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Function;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Locator;
@@ -157,6 +159,44 @@ final class InOutLineFromOrderFactory {
   }
 
   /**
+   * The single validate-before-mutate step shared by {@code CreateShipmentHandler} and
+   * {@code CreateGoodsReceiptHandler}: computes the pending lines, throws {@code emptyLinesMessage}
+   * when there are none, and — only when at least one pending line {@link #isStockable} — resolves
+   * and validates the order's default locator, throwing when the warehouse has none configured.
+   * Extracted here (rather than duplicated per handler) because both handlers previously carried
+   * near-identical copies of this exact sequence (ETP-5276 Sonar duplication follow-up).
+   *
+   * <p>{@code locatorResolver} is a method reference to the CALLING handler's own
+   * {@code findDefaultLocator(Order)} — a {@code protected} hook each handler's tests override to
+   * bypass the criteria query — so this static helper still dispatches through that per-instance
+   * override instead of hardcoding one handler's lookup.
+   *
+   * @param order the order being converted to a shipment/receipt
+   * @param emptyLinesMessage the handler-specific message to throw when there are zero pending lines
+   * @param locatorResolver resolves the calling handler's default locator for {@code order}
+   * @return the validated pending lines plus the resolved default locator ({@code null} when no
+   *         pending line needs one)
+   * @throws OBException when there are no pending lines, or a stockable line exists but the
+   *         order's warehouse has no locator configured
+   */
+  static PendingLinesResult resolvePendingLinesAndLocator(Order order, String emptyLinesMessage,
+      Function<Order, Locator> locatorResolver) {
+    List<PendingOrderLine> pendingLines = collectPendingLines(order);
+    if (pendingLines.isEmpty()) {
+      throw new OBException(emptyLinesMessage);
+    }
+    Locator defaultLocator = null;
+    if (hasStockableLine(pendingLines)) {
+      defaultLocator = locatorResolver.apply(order);
+      if (defaultLocator == null) {
+        String warehouseName = order.getWarehouse() != null ? order.getWarehouse().getName() : "unknown";
+        throw new OBException("No storage locator found for warehouse: " + warehouseName);
+      }
+    }
+    return new PendingLinesResult(pendingLines, defaultLocator);
+  }
+
+  /**
    * Persists a new {@link ShipmentInOutLine} populated from {@code orderLine}
    * and attached to {@code parentInOut}, then links any draft invoice lines
    * of the same order line via {@link InvoiceLineLinker}. The flow mirrors
@@ -221,6 +261,28 @@ final class InOutLineFromOrderFactory {
 
     BigDecimal getPendingQty() {
       return pendingQty;
+    }
+  }
+
+  /**
+   * Return value of {@link #resolvePendingLinesAndLocator}: the pending lines to create, plus the
+   * default locator to use for stockable ones ({@code null} when none of them need a bin).
+   */
+  static final class PendingLinesResult {
+    private final List<PendingOrderLine> pendingLines;
+    private final Locator locator;
+
+    private PendingLinesResult(List<PendingOrderLine> pendingLines, Locator locator) {
+      this.pendingLines = pendingLines;
+      this.locator = locator;
+    }
+
+    List<PendingOrderLine> getPendingLines() {
+      return pendingLines;
+    }
+
+    Locator getLocator() {
+      return locator;
     }
   }
 }

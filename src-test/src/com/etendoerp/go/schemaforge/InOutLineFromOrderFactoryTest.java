@@ -37,6 +37,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Warehouse;
+import org.openbravo.model.common.order.Order;
 import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.common.uom.UOM;
@@ -228,6 +229,82 @@ public class InOutLineFromOrderFactoryTest {
     BigDecimal pending = InOutLineFromOrderFactory.pendingQuantityFor(orderLine);
 
     assertEquals(new BigDecimal("-5"), pending);
+  }
+
+  /**
+   * Unit tests for {@link InOutLineFromOrderFactory#resolvePendingLinesAndLocator}, the
+   * validate-before-mutate step extracted out of {@code CreateShipmentHandler} and
+   * {@code CreateGoodsReceiptHandler} (ETP-5276 Sonar duplication follow-up) so both handlers
+   * share one copy instead of two near-identical ones.
+   */
+  private static Order mockOrder(OrderLine... lines) {
+    Order order = mock(Order.class);
+    when(order.getOrderLineList()).thenReturn(java.util.Arrays.asList(lines));
+    return order;
+  }
+
+  @Test
+  public void resolvePendingLinesAndLocator_noPendingLines_throwsGivenMessage() {
+    Order order = mockOrder();
+    try {
+      InOutLineFromOrderFactory.resolvePendingLinesAndLocator(
+          order, "custom empty-lines message", o -> mock(Locator.class));
+      org.junit.Assert.fail("expected OBException");
+    } catch (org.openbravo.base.exception.OBException e) {
+      assertEquals("custom empty-lines message", e.getMessage());
+    }
+  }
+
+  @Test
+  public void resolvePendingLinesAndLocator_stockableLine_resolvesAndReturnsLocator() {
+    OrderLine stockLine = mockOrderLine(true, "I", new BigDecimal("10"), BigDecimal.ZERO);
+    Order order = mockOrder(stockLine);
+    Locator resolved = mock(Locator.class);
+
+    InOutLineFromOrderFactory.PendingLinesResult result =
+        InOutLineFromOrderFactory.resolvePendingLinesAndLocator(
+            order, "unused", o -> resolved);
+
+    assertEquals(1, result.getPendingLines().size());
+    org.junit.Assert.assertSame(resolved, result.getLocator());
+  }
+
+  @Test
+  public void resolvePendingLinesAndLocator_stockableLineAndNoLocator_throws() {
+    OrderLine stockLine = mockOrderLine(true, "I", new BigDecimal("10"), BigDecimal.ZERO);
+    Warehouse warehouse = mock(Warehouse.class);
+    when(warehouse.getName()).thenReturn("WH Central");
+    Order order = mockOrder(stockLine);
+    when(order.getWarehouse()).thenReturn(warehouse);
+
+    try {
+      InOutLineFromOrderFactory.resolvePendingLinesAndLocator(order, "unused", o -> null);
+      org.junit.Assert.fail("expected OBException");
+    } catch (org.openbravo.base.exception.OBException e) {
+      org.junit.Assert.assertTrue(e.getMessage().contains("WH Central"));
+    }
+  }
+
+  /**
+   * ETP-5276: an order made up entirely of non-stockable lines must not even ask for a locator —
+   * the resolver callback must never run.
+   */
+  @Test
+  public void resolvePendingLinesAndLocator_onlyNonStockableLines_neverResolvesLocator() {
+    OrderLine serviceLine = mockOrderLine(true, "S", new BigDecimal("5"), BigDecimal.ZERO);
+    Order order = mockOrder(serviceLine);
+    java.util.concurrent.atomic.AtomicBoolean resolverCalled = new java.util.concurrent.atomic.AtomicBoolean(false);
+
+    InOutLineFromOrderFactory.PendingLinesResult result =
+        InOutLineFromOrderFactory.resolvePendingLinesAndLocator(order, "unused", o -> {
+          resolverCalled.set(true);
+          return mock(Locator.class);
+        });
+
+    assertEquals(1, result.getPendingLines().size());
+    assertNull(result.getLocator());
+    org.junit.Assert.assertFalse("locatorResolver must not run when no line is stockable",
+        resolverCalled.get());
   }
 
   /**

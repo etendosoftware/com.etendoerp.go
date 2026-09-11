@@ -80,21 +80,13 @@ public class CreateGoodsReceiptHandler implements NeoHandler {
         // OBDal.save(receipt) left an empty, orphaned receipt behind whenever the
         // order had zero pending lines (Hibernate flushes the managed header on
         // commit regardless of the 400 this method returns).
-        List<InOutLineFromOrderFactory.PendingOrderLine> pendingLines =
-            InOutLineFromOrderFactory.collectPendingLines(order);
-        if (pendingLines.isEmpty()) {
-          throw new OBException("No pending lines to receive in this purchase order");
-        }
-        // Only a receipt with at least one stockable line needs a real storage bin —
-        // an order made up entirely of Service/Expense/Resource lines must not fail
-        // just because its warehouse has no locator configured (ETP-5276).
-        Locator defaultLocator = InOutLineFromOrderFactory.hasStockableLine(pendingLines)
-            ? resolveDefaultLocatorOrFail(order)
-            : null;
+        InOutLineFromOrderFactory.PendingLinesResult result =
+            InOutLineFromOrderFactory.resolvePendingLinesAndLocator(order,
+                "No pending lines to receive in this purchase order", this::findDefaultLocator);
 
         ShipmentInOut receipt = createReceiptHeader(order);
         OBDal.getInstance().save(receipt);
-        createReceiptLines(receipt, pendingLines, defaultLocator);
+        createReceiptLines(receipt, result.getPendingLines(), result.getLocator());
         OBDal.getInstance().flush();
         ensureDocumentNo(receipt);
 
@@ -183,22 +175,6 @@ public class CreateGoodsReceiptHandler implements NeoHandler {
           defaultLocator, lineNo, pendingLine.getPendingQty());
       lineNo += 10;
     }
-  }
-
-  /**
-   * Returns the locator for the order's warehouse, or throws when none is
-   * configured. Kept here (rather than in the shared factory) because the
-   * underlying {@link #findDefaultLocator(Order)} is a per-handler hook that
-   * tests override to bypass the criteria query.
-   */
-  private Locator resolveDefaultLocatorOrFail(Order order) {
-    Locator defaultLocator = findDefaultLocator(order);
-    if (defaultLocator == null) {
-      String warehouseName = order.getWarehouse() != null
-          ? order.getWarehouse().getName() : "unknown";
-      throw new OBException("No storage locator found for warehouse: " + warehouseName);
-    }
-    return defaultLocator;
   }
 
   private DocumentType findReceiptDocType(Order order) {
