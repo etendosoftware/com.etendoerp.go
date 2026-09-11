@@ -44,7 +44,7 @@ BEGIN
   -- Matched on the invoice's OWN organization, exactly (no org-tree walk), which
   -- is what Classic's TBAI_ExistConfigAndIsAvailable auxiliary input does.
   --
-  -- ETP-5229: the gate is the EARLIEST-EVER config cutover date for the org,
+  -- ETP-5229: the gate is the EARLIEST-EVER config cutover DATE for the org,
   -- across ALL tbai_config rows - active or not - not just the currently
   -- active one. An org can deactivate an old config and activate a newer one
   -- (e.g. a provider migration or a Batuz territory change); an invoice dated
