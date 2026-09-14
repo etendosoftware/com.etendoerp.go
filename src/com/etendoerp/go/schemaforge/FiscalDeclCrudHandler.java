@@ -177,6 +177,8 @@ class FiscalDeclCrudHandler {
   private static final String STATUS_KEY        = "status";
   private static final String FILE_NAME_KEY     = "fileName";
   private static final String FILE_EXTERNAL_KEY = "fileExternal";
+  private static final String PARAM_CLIENT_ID   = "clientId";
+  private static final String PARAM_ORG_ID      = "orgId";
   private static final String MANUAL_DATA_KEY   = "manualData";
   private static final String SUBMISSION_METHOD_KEY = "submissionMethod";
   private static final String CODE_KEY          = "code";
@@ -215,8 +217,8 @@ class FiscalDeclCrudHandler {
     OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY_FISCAL_DECL,
         "client.id = :clientId and organization.id = :orgId "
             + "order by fiscalYear desc, period desc, fiscalModel asc");
-    query.setNamedParameter("clientId", clientId);
-    query.setNamedParameter("orgId", orgId);
+    query.setNamedParameter(PARAM_CLIENT_ID, clientId);
+    query.setNamedParameter(PARAM_ORG_ID, orgId);
     JSONArray arr = new JSONArray();
     for (BaseOBObject decl : query.list()) arr.put(declToJson(decl));
     JSONObject out = new JSONObject();
@@ -300,8 +302,8 @@ class FiscalDeclCrudHandler {
         "client.id = :clientId and organization.id = :orgId and " + PROPERTY_FISCAL_MODEL
             + " = :model and " + PROPERTY_FISCAL_YEAR + " = :year and " + PROPERTY_PERIOD
             + " = :period");
-    query.setNamedParameter("clientId", clientId);
-    query.setNamedParameter("orgId", orgId);
+    query.setNamedParameter(PARAM_CLIENT_ID, clientId);
+    query.setNamedParameter(PARAM_ORG_ID, orgId);
     query.setNamedParameter(MODEL_KEY, model);
     query.setNamedParameter("year", Long.valueOf(year));
     query.setNamedParameter(PERIOD_KEY, period);
@@ -342,8 +344,8 @@ class FiscalDeclCrudHandler {
         "client.id = :clientId and organization.id = :orgId and " + PROPERTY_FISCAL_MODEL
             + " = :model and " + PROPERTY_FISCAL_YEAR + " = :year and " + PROPERTY_PERIOD
             + " = :period");
-    query.setNamedParameter("clientId", clientId);
-    query.setNamedParameter("orgId", orgId);
+    query.setNamedParameter(PARAM_CLIENT_ID, clientId);
+    query.setNamedParameter(PARAM_ORG_ID, orgId);
     query.setNamedParameter(MODEL_KEY, model);
     query.setNamedParameter("year", Long.valueOf(year));
     query.setNamedParameter(PERIOD_KEY, period);
