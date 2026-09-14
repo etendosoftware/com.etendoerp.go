@@ -52,8 +52,8 @@ import org.openbravo.service.db.DalConnectionProvider;
  * Costs therefore stayed uncalculated on every tenant: at the time of writing the instance held 83
  * validated costing rules across 74 clients and exactly TWO {@code CostingBackground} requests, both
  * created by hand (core's own F&B demo client, and GOClient). The PSD2 statement-sync schedule, which
- * IS provisioned by {@link OnboardingBankConnectionSyncService}, sat at 74/74 over the same period —
- * that contrast is the whole argument for doing this here instead of by hand.
+ * onboarding DID provision at the time (that step was later removed by ETP-5275), sat at 74/74 over
+ * the same period — that contrast is the whole argument for doing this here instead of by hand.
  *
  * <p><b>Not solvable with sampledata.</b> {@code referencedata/sampledata/GOClient/
  * AD_PROCESS_REQUEST.xml} does contain a {@code CostingBackground} row, which makes it look as
@@ -79,8 +79,8 @@ import org.openbravo.service.db.DalConnectionProvider;
  * exact shape (minutely, interval 5) since 2013, and {@code StoredColumnQueueScheduleStartup} uses it
  * for the queue drain — so 5 is the conventional value here, not a number invented for this ticket.
  *
- * <p>Creating the row and activating it in Quartz are split exactly as in
- * {@link OnboardingBankConnectionSyncService}: {@link #scheduleCostingBackground} runs inside the
+ * <p>Creating the row and activating it in Quartz are split, the same shape
+ * {@code SiiTbaiAutoSendScheduleService} uses: {@link #scheduleCostingBackground} runs inside the
  * onboarding transaction so it commits atomically with the rest of provisioning, and
  * {@link #activateSchedule(String)} is called AFTER that commit, once the row is visible to the
  * scheduler's own DB connection. Both halves are non-fatal — a costing schedule is worth having, but
@@ -94,14 +94,14 @@ import org.openbravo.service.db.DalConnectionProvider;
  * oversight, and note the consequence: an already-onboarded client calculates no costs until someone
  * schedules the process for it by hand in Classic's Process Request window.
  *
- * <p><b>Deliberate duplication.</b> This is the third per-client scheduled-request builder in the
- * module ({@link OnboardingBankConnectionSyncService}, {@code SiiTbaiAutoSendScheduleService}) and it
- * repeats their {@code resolveProcess}/{@code findExistingRequest}/{@code buildObContext} shape
- * rather than sharing a base class. That is a decision, not an oversight: the three differ in
- * frequency shape (daily / hourly / minutely), in idempotency scope (client / client+org / client)
- * and in lifecycle (onboarding step / handler hook), and extracting a common parent would mean
- * touching two services that are stable and covered. Extracting it is worth its own ticket once a
- * fourth appears.
+ * <p><b>Deliberate duplication.</b> This is the second per-client scheduled-request builder left in
+ * the module ({@code SiiTbaiAutoSendScheduleService} is the other; a third,
+ * {@code OnboardingBankConnectionSyncService}, was removed by ETP-5275) and it repeats its
+ * {@code resolveProcess}/{@code findExistingRequest}/{@code buildObContext} shape rather than
+ * sharing a base class. That is a decision, not an oversight: the two differ in frequency shape
+ * (minutely / hourly), in idempotency scope (client / client+org) and in lifecycle (onboarding step
+ * / handler hook), and extracting a common parent would mean touching a service that is stable and
+ * covered. Extracting it is worth its own ticket once a third appears again.
  */
 public class OnboardingCostingScheduleService {
 
