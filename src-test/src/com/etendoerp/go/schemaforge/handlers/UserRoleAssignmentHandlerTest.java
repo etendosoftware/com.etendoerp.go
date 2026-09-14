@@ -104,6 +104,17 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  * must run, and must complete, BEFORE {@link CompanyInvitationService#createInvitationForNewlyCreatedUser}
  * is ever called — see the {@code afterHandleAssignsPersonalRoleBeforeInvitationOnCreate} test and
  * its siblings below the existing invitation tests.
+ *
+ * <p>Duplicate-email guard on create (ETP-5264): covers {@link
+ * UserRoleAssignmentHandler#rejectDuplicateEmail} short-circuiting {@link
+ * UserRoleAssignmentHandler#handleCreate} with a 400 BEFORE the {@code username} is derived when
+ * an {@code AD_User} with the same {@code email} already exists for the current client (see
+ * {@code handleRejectsDuplicateEmailOnCreateBeforeUsernameIsDerived} and its case-insensitivity
+ * sibling below {@code handleRejectsPostWithBlankEmail}), that a non-duplicate email falls
+ * through to the pre-existing username-derivation flow unchanged ({@code
+ * handleAllowsCreateWhenNoDuplicateEmailExistsForClient}), and that the guard is a no-op when no
+ * client is resolved (already covered by {@code handleForcesUsernameToMirrorEmailOnPost}, which
+ * mocks no {@code OBContext} at all).
  */
 public class UserRoleAssignmentHandlerTest {
 
@@ -167,6 +178,9 @@ public class UserRoleAssignmentHandlerTest {
 
   @Test
   public void handleForcesUsernameToMirrorEmailOnPost() throws Exception {
+    // No OBContext is mocked here, so OBContext.getOBContext() resolves no client — this also
+    // covers rejectDuplicateEmail's client==null no-op path (ETP-5264): the guard must not block
+    // (or otherwise touch OBDal for) a create when no client is resolved.
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
     JSONObject requestBody = new JSONObject();
     requestBody.put("email", "  New.User@Example.com  ");
@@ -198,10 +212,21 @@ public class UserRoleAssignmentHandlerTest {
     when(client.getName()).thenReturn("Second Client");
 
     try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
-        MockedStatic<EtendoGoJwtSupport> usernameMock = mockStatic(EtendoGoJwtSupport.class)) {
+        MockedStatic<EtendoGoJwtSupport> usernameMock = mockStatic(EtendoGoJwtSupport.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
       obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
       usernameMock.when(() -> EtendoGoJwtSupport.buildClientUsername(
           "user@example.com", "Second Client")).thenReturn("user@example.com+secondclient");
+
+      // ETP-5264: a non-null client now also routes handleCreate through rejectDuplicateEmail
+      // before the username is derived — mock an empty match so the new query resolves cleanly
+      // (no pre-existing duplicate) and the pre-existing assertions below stay unaffected.
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<User> criteria = mock(OBCriteria.class);
+      when(obDal.createCriteria(User.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.emptyList());
 
       assertNull(handler.handle(ctx));
       assertEquals("user@example.com+secondclient", requestBody.getString("username"));
@@ -221,6 +246,120 @@ public class UserRoleAssignmentHandlerTest {
 
     NeoResponse response = handler.handle(ctx);
     assertEquals(400, response.getHttpStatus());
+  }
+
+  // ─── handle(): duplicate-email guard on create (ETP-5264) ───────────────────
+
+  @Test
+  public void handleRejectsDuplicateEmailOnCreateBeforeUsernameIsDerived() throws Exception {
+    // A duplicate email within the same client must be rejected with a clear 400 BEFORE the
+    // username is derived — otherwise the derived username would also collide and the DB's raw
+    // unique-constraint violation (naming a field this create form never shows) would leak
+    // through instead. See rejectDuplicateEmail's javadoc.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", "duplicate@example.com");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(requestBody)
+        .build();
+
+    OBContext obContext = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<User> criteria = mock(OBCriteria.class);
+      when(obDal.createCriteria(User.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.singletonList(mock(User.class)));
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("A user with this email address already exists", ownerGuardMessage(response));
+      assertFalse(requestBody.has("username"));
+    }
+  }
+
+  @Test
+  public void handleAllowsCreateWhenNoDuplicateEmailExistsForClient() throws Exception {
+    // Counterpart to the above: an empty match list must NOT short-circuit the create — it falls
+    // through to the pre-existing username-derivation flow, unchanged from before ETP-5264.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", "unique@example.com");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(requestBody)
+        .build();
+
+    OBContext obContext = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+    when(client.getName()).thenReturn(null);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<User> criteria = mock(OBCriteria.class);
+      when(obDal.createCriteria(User.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.emptyList());
+
+      assertNull(handler.handle(ctx));
+      assertEquals("unique@example.com", requestBody.getString("username"));
+    }
+  }
+
+  @Test
+  public void handleRejectsDuplicateEmailOnCreateRegardlessOfInputCasing() throws Exception {
+    // rejectDuplicateEmail always receives the ALREADY-lowercased email (handleCreate normalizes
+    // before calling it) and queries with Restrictions.ilike(..., MatchMode.EXACT), so a
+    // case-only difference against a stored email must still be caught. Restrictions.ilike
+    // returns a Criterion with no introspectable equality/case semantics to assert against, so —
+    // following this file's existing mocking idioms (no static-mocking of Hibernate's
+    // Restrictions) — this is asserted behaviorally: a mixed-case input email still hits the
+    // duplicate short-circuit when the criteria mock reports a match, mirroring the plain
+    // lower-case case above.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject requestBody = new JSONObject();
+    requestBody.put("email", "Duplicate.User@EXAMPLE.com");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(requestBody)
+        .build();
+
+    OBContext obContext = mock(OBContext.class);
+    Client client = mock(Client.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      @SuppressWarnings("unchecked")
+      OBCriteria<User> criteria = mock(OBCriteria.class);
+      when(obDal.createCriteria(User.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.singletonList(mock(User.class)));
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(400, response.getHttpStatus());
+    }
   }
 
   @Test
@@ -990,6 +1129,394 @@ public class UserRoleAssignmentHandlerTest {
 
       // Fail CLOSED, same reasoning as the other write-path guards in this class.
       assertEquals(500, response.getHttpStatus());
+    }
+  }
+
+  // ─── handle(): DELETE guard — self/owner/last-admin (ETP-5195 Bug 3) ─────────
+
+  @Test
+  public void handleReturnsNullForDeleteWithNoRecordId() {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("DELETE")
+        .build();
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      assertNull(handler.handle(ctx));
+      ownerMock.verify(() -> OwnerSupport.isOwner(any()), never());
+      obDalMock.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
+  public void handleRejectsSelfDelete() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    User actingUser = mock(User.class);
+    when(actingUser.getId()).thenReturn(USER_ID);
+    OBContext requestObContext = mock(OBContext.class);
+    when(requestObContext.getUser()).thenReturn(actingUser);
+
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("DELETE")
+        .recordId(USER_ID)
+        .obContext(requestObContext)
+        .build();
+
+    // The self-check short-circuits before OwnerSupport/OBDal are ever touched, same as the
+    // self-deactivation guard above.
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("You cannot delete your own user account",
+          response.getBody().getJSONObject("error").getString("message"));
+      obCtxMock.verify(() -> OBContext.setAdminMode(true), never());
+      ownerMock.verify(() -> OwnerSupport.isOwner(any()), never());
+      obDalMock.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
+  public void handleRejectsSelfDeleteViaQueryParamIdFallback() throws Exception {
+    // ETP-5195, R3: a path-less DELETE (.../user?id=<protected-id>) must fall back to the query
+    // "id" param the same way NeoCrudHandler#buildDalParams resolves the effective target, so
+    // this guard cannot be bypassed by simply omitting the path id. No recordId is set on the
+    // context here — only queryParams — proving the fallback itself reaches and triggers the
+    // same self-delete guard as the path-id case above, not just a null short-circuit.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    User actingUser = mock(User.class);
+    when(actingUser.getId()).thenReturn(USER_ID);
+    OBContext requestObContext = mock(OBContext.class);
+    when(requestObContext.getUser()).thenReturn(actingUser);
+
+    Map<String, String> queryParams = new HashMap<>();
+    // "id" mirrors the handler's private FIELD_ID constant (not accessible from this test).
+    queryParams.put("id", USER_ID);
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("DELETE")
+        .queryParams(queryParams)
+        .obContext(requestObContext)
+        .build();
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("You cannot delete your own user account",
+          response.getBody().getJSONObject("error").getString("message"));
+      obCtxMock.verify(() -> OBContext.setAdminMode(true), never());
+      ownerMock.verify(() -> OwnerSupport.isOwner(any()), never());
+      obDalMock.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
+  public void handleRejectsOwnerDelete() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    String ownerId = "owner-delete-001";
+    String actingId = "other-admin-delete-001";
+
+    User actingUser = mock(User.class);
+    when(actingUser.getId()).thenReturn(actingId);
+    OBContext requestObContext = mock(OBContext.class);
+    when(requestObContext.getUser()).thenReturn(actingUser);
+
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("DELETE")
+        .recordId(ownerId)
+        .obContext(requestObContext)
+        .build();
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      ownerMock.when(() -> OwnerSupport.isOwner(ownerId)).thenReturn(true);
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("This user is the tenant owner and cannot be deleted",
+          response.getBody().getJSONObject("error").getString("message"));
+      // The owner check short-circuits before the target User is ever looked up.
+      obDalMock.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
+  public void handleRejectsOwnerSelfDelete() throws Exception {
+    // Even though the owner-delete guard is unconditional (unlike the update guard's owner
+    // protection), the self-delete check runs FIRST in rejectDangerousDelete — so an owner
+    // deleting their own record is actually rejected by the self-check, not the owner check.
+    // Assert on the exact message to prove which guard fired.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    String ownerId = "owner-delete-002";
+
+    User actingUser = mock(User.class);
+    when(actingUser.getId()).thenReturn(ownerId);
+    OBContext requestObContext = mock(OBContext.class);
+    when(requestObContext.getUser()).thenReturn(actingUser);
+
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("DELETE")
+        .recordId(ownerId)
+        .obContext(requestObContext)
+        .build();
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner(ownerId)).thenReturn(true);
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("You cannot delete your own user account",
+          response.getBody().getJSONObject("error").getString("message"));
+      // Proves the self-check (not the owner check) fired: OwnerSupport is never consulted.
+      ownerMock.verify(() -> OwnerSupport.isOwner(any()), never());
+      obDalMock.verify(OBDal::getInstance, never());
+    }
+  }
+
+  @Test
+  public void handleRejectsDeletingLastActiveClientAdmin() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    String targetId = "target-admin-delete-001";
+    String actingId = "acting-admin-delete-001";
+
+    User actingUser = mock(User.class);
+    when(actingUser.getId()).thenReturn(actingId);
+    OBContext requestObContext = mock(OBContext.class);
+    when(requestObContext.getUser()).thenReturn(actingUser);
+
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("DELETE")
+        .recordId(targetId)
+        .obContext(requestObContext)
+        .build();
+
+    Client client = mock(Client.class);
+    User targetUser = mock(User.class);
+    when(targetUser.getId()).thenReturn(targetId);
+    when(targetUser.getClient()).thenReturn(client);
+
+    UserRoles targetAdminRow = mock(UserRoles.class);
+    User targetAdminRowUser = mock(User.class);
+    when(targetAdminRowUser.getId()).thenReturn(targetId);
+    when(targetAdminRow.getUserContact()).thenReturn(targetAdminRowUser);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, targetId)).thenReturn(targetUser);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<UserRoles> criteria = mock(OBCriteria.class);
+      when(obDal.createCriteria(UserRoles.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Collections.singletonList(targetAdminRow));
+
+      NeoResponse response = handler.handle(ctx);
+
+      assertEquals(400, response.getHttpStatus());
+      assertEquals("Cannot delete the last active administrator for this client",
+          response.getBody().getJSONObject("error").getString("message"));
+    }
+  }
+
+  @Test
+  public void handleAllowsDeletingNonSelfNonOwnerNonLastAdminUser() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    String targetId = "target-admin-delete-002";
+    String actingId = "acting-admin-delete-002";
+    String otherAdminId = "other-admin-delete-002";
+
+    User actingUser = mock(User.class);
+    when(actingUser.getId()).thenReturn(actingId);
+    OBContext requestObContext = mock(OBContext.class);
+    when(requestObContext.getUser()).thenReturn(actingUser);
+
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("DELETE")
+        .recordId(targetId)
+        .obContext(requestObContext)
+        .build();
+
+    Client client = mock(Client.class);
+    User targetUser = mock(User.class);
+    when(targetUser.getId()).thenReturn(targetId);
+    when(targetUser.getClient()).thenReturn(client);
+
+    UserRoles targetAdminRow = mock(UserRoles.class);
+    User targetAdminRowUser = mock(User.class);
+    when(targetAdminRowUser.getId()).thenReturn(targetId);
+    when(targetAdminRow.getUserContact()).thenReturn(targetAdminRowUser);
+
+    UserRoles otherAdminRow = mock(UserRoles.class);
+    User otherAdminRowUser = mock(User.class);
+    when(otherAdminRowUser.getId()).thenReturn(otherAdminId);
+    when(otherAdminRow.getUserContact()).thenReturn(otherAdminRowUser);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, targetId)).thenReturn(targetUser);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<UserRoles> criteria = mock(OBCriteria.class);
+      when(obDal.createCriteria(UserRoles.class)).thenReturn(criteria);
+      when(criteria.list()).thenReturn(Arrays.asList(targetAdminRow, otherAdminRow));
+
+      assertNull(handler.handle(ctx));
+    }
+  }
+
+  @Test
+  public void handleAllowsDeletingTargetWhoseOwnAdminRoleAssignmentIsInactive() throws Exception {
+    // QA (ETP-5195) — isLastActiveClientAdmin's criteria filters on
+    // UserRoles.PROPERTY_ACTIVE == true, so a target whose OWN admin-role assignment is
+    // inactive never shows up in activeAdminAssignments at all: the query comes back empty,
+    // activeAdminUserIds.size() == 0 (not 1), and the guard is a no-op — a target who is not
+    // CURRENTLY an active admin is never "the last active admin" no matter what, so the delete
+    // is allowed. This mirrors the pre-existing (unmodified) isLastActiveClientAdmin behavior,
+    // now exercised on the new DELETE path.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    String targetId = "target-inactive-admin-role-001";
+    String actingId = "acting-admin-delete-005";
+
+    User actingUser = mock(User.class);
+    when(actingUser.getId()).thenReturn(actingId);
+    OBContext requestObContext = mock(OBContext.class);
+    when(requestObContext.getUser()).thenReturn(actingUser);
+
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("DELETE")
+        .recordId(targetId)
+        .obContext(requestObContext)
+        .build();
+
+    Client client = mock(Client.class);
+    User targetUser = mock(User.class);
+    when(targetUser.getId()).thenReturn(targetId);
+    when(targetUser.getClient()).thenReturn(client);
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, targetId)).thenReturn(targetUser);
+
+      @SuppressWarnings("unchecked")
+      OBCriteria<UserRoles> criteria = mock(OBCriteria.class);
+      when(obDal.createCriteria(UserRoles.class)).thenReturn(criteria);
+      // The target's admin-role assignment IS inactive (or the role/user themself is), so the
+      // active-only criteria returns nothing for this client at all.
+      when(criteria.list()).thenReturn(Collections.emptyList());
+
+      assertNull(handler.handle(ctx));
+    }
+  }
+
+  @Test
+  public void handleAllowsDeletingUserWhenTargetLookupReturnsNull() throws Exception {
+    // Defensive branch: OwnerSupport says not-owner, but the target User can't be resolved
+    // (already gone, or a stale id) — nothing left to check, so the guard is a no-op and lets
+    // the default CRUD delete produce its own not-found error.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    String targetId = "missing-user-delete-001";
+    String actingId = "acting-admin-delete-003";
+
+    User actingUser = mock(User.class);
+    when(actingUser.getId()).thenReturn(actingId);
+    OBContext requestObContext = mock(OBContext.class);
+    when(requestObContext.getUser()).thenReturn(actingUser);
+
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("DELETE")
+        .recordId(targetId)
+        .obContext(requestObContext)
+        .build();
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class)) {
+      ownerMock.when(() -> OwnerSupport.isOwner(any())).thenReturn(false);
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, targetId)).thenReturn(null);
+
+      assertNull(handler.handle(ctx));
+    }
+  }
+
+  @Test
+  public void handleFailsClosedWhenDeleteGuardThrows() throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    String targetId = "target-admin-delete-004";
+    String actingId = "acting-admin-delete-004";
+
+    User actingUser = mock(User.class);
+    when(actingUser.getId()).thenReturn(actingId);
+    OBContext requestObContext = mock(OBContext.class);
+    when(requestObContext.getUser()).thenReturn(actingUser);
+
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("DELETE")
+        .recordId(targetId)
+        .obContext(requestObContext)
+        .build();
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class);
+        MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      ownerMock.when(() -> OwnerSupport.isOwner(any()))
+          .thenThrow(new RuntimeException("DB unavailable"));
+
+      NeoResponse response = handler.handle(ctx);
+
+      // Fail CLOSED: an unexpected error must surface as a 500, never silently let a
+      // dangerous delete through unverified.
+      assertEquals(500, response.getHttpStatus());
+      assertTrue(response.getBody().getJSONObject("error").getString("message")
+          .startsWith("Error validating delete: "));
     }
   }
 

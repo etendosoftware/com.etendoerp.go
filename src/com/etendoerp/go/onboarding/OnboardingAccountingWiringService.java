@@ -660,11 +660,36 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
   }
 
   /**
-   * Preventive front for ETP-5075 gap A8: backfills {@code C_ACCTSCHEMA_DEFAULT.
-   * P_InvoicePriceVariance_Acct} from that same row's {@code P_Expense_Acct} when the imported
-   * dataset left it {@code NULL} — confirmed true of every dataset-import chart family in this
-   * fleet at authoring time except the one non-imported demo schema that happens to already carry
-   * a dedicated variance account.
+   * Standard GL account code for Invoice Price Variance, product-decided for ALL clients
+   * (confirmed with product during ETP-5175; account corrected from 99905000 to {@code 99904000}
+   * during ETP-5222 itself — see below): {@code 99904000} ("Diferencias entre el coste del
+   * producto y el precio de la fra[ctura]" — the {@code C_ElementValue.name} column is truncated
+   * at 61 chars in the bundled data itself, not a display artifact; confirmed via {@code
+   * length(name)}). Ships in the bundled GOClient chart (present since {@code feature/ETP-4247})
+   * and, per the live measurement below, resolves to a real leaf/subaccount on effectively every
+   * tenant's own copy of that chart.
+   *
+   * <p><b>{@code AccountType = 'M'} (Memorandum), not {@code 'E'} (Gasto/Expense) — accepted,
+   * not live-tested.</b> Verified via {@code ad_ref_list} (reference 117, "C_ElementValue
+   * AccountType"): {@code 99904000} is Memo-type, same as the originally-proposed {@code
+   * 99905000} ("Diferencia entre el precio de compra y el coste estándar" — a sibling account
+   * one code apart). Real production evidence exists for {@code 99905000} specifically (a
+   * matched-purchase-invoice {@code M_MatchInv} record, {@code 920B74ACD78A4F358392E91FF1B2503B},
+   * product "Fernet", posted successfully against it) but does NOT directly cover {@code
+   * 99904000}. Product's call (ETP-5222): GOClient's entire {@code 999*} branch —
+   * {@code 99900000}/{@code 99902000}/{@code 99904000}/{@code 99905000}/{@code 99907000}/
+   * {@code 99908000}/{@code 99909000}, Etendo's own generic default/suspense-account family — is
+   * uniformly Memo-type by design, and that pattern alone is accepted as sufficient without a
+   * dedicated live {@code DocMatchInv} posting test for {@code 99904000} itself. No further
+   * live-posting verification requested before wiring this account.
+   */
+  private static final String INVOICE_PRICE_VARIANCE_ACCT_VALUE = "99904000";
+
+  /**
+   * Preventive front for ETP-5075 gap A8 / ETP-5222: backfills {@code C_ACCTSCHEMA_DEFAULT.
+   * P_InvoicePriceVariance_Acct} when the imported dataset left it {@code NULL} — confirmed true
+   * of every dataset-import chart family in this fleet at ETP-5075's authoring time except the one
+   * non-imported demo schema that happens to already carry a dedicated variance account.
    *
    * <p>{@code DocMatchInv} (the accounting engine for {@code M_MatchInv}, "Relación
    * albarán-factura") requests this account ONLY when a match's invoiced amount differs from its
@@ -679,23 +704,34 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
    * step alone does not, by itself, fix an EXISTING tenant's EXISTING products (that correction is
    * the corrective {@code R34-invoice-price-variance-backfill} data-fix, which directly backfills
    * {@code M_PRODUCT_ACCT}/{@code M_PRODUCT_CATEGORY_ACCT} for tenants provisioned before this
-   * method existed). What THIS step buys a brand-new tenant is that {@link
-   * #PRODUCT_CATEGORY_ACCT_SQL}/{@link #PRODUCT_ACCT_SQL} — which already copy {@code
-   * d.p_invoicepricevariance_acct} from this table into every product/category row at creation
-   * time — now copy a real account instead of propagating the same NULL forward. Must run before
-   * both of those, which is why it is the first statement in {@link
-   * #provisionEntityPostingAccounts}.
+   * method existed — R34 must be kept in lockstep with the priority order below). What THIS step
+   * buys a brand-new tenant is that {@link #PRODUCT_CATEGORY_ACCT_SQL}/{@link #PRODUCT_ACCT_SQL} —
+   * which already copy {@code d.p_invoicepricevariance_acct} from this table into every
+   * product/category row at creation time — now copy a real account instead of propagating the
+   * same NULL forward. Must run before both of those, which is why it is the first statement in
+   * {@link #provisionEntityPostingAccounts}.
    *
-   * <p>Deliberately copies {@code P_Expense_Acct} rather than pointing at a new dedicated account:
-   * confirmed live via the "Pérdidas y Ganancias" (P&L) report that GOClient's own Spanish-PGC-style
-   * chart ("Árbol de cuentas GO") has no such account at all — its whole "Aprovisionamientos" group
-   * only ever shows {@code 600 - Compras de mercaderías}/{@code 610 - Variación de existencias},
-   * unlike an Anglo-Saxon-style chart (e.g. the F&B International Group US Dollar demo schema),
-   * whose P&L shows a full COGS breakdown including a dedicated {@code 5610 - Invoice price
-   * variance} sibling of {@code 5360 - Product Expense}. Verified live: posting a previously-failing
-   * {@code M_MatchInv} record after wiring both to the same account (GOClient's {@code 60000000})
-   * produced a balanced 3-line entry — the usual 2 lines plus the variance amount landing as a
-   * THIRD line in that very same account.
+   * <p><b>Resolution priority (ETP-5222, supersedes ETP-5075's single-source logic):</b>
+   * <ol>
+   *   <li>Resolve {@link #INVOICE_PRICE_VARIANCE_ACCT_VALUE}'s ({@code 99904000}) OWN natural
+   *   {@code C_ValidCombination} for this tenant's schema — the same
+   *   account-{@code value}-joined-by-{@code C_ValidCombination} lookup shape
+   *   {@link #overrideAcreedorGroupAccounts}/{@code ACREEDOR_GROUP_ACCT_OVERRIDE_SQL} already uses
+   *   elsewhere in this class, scoped through {@code C_AcctSchema_Element} ({@code elementtype =
+   *   'AC'}) so it always resolves the element actually wired to {@code :schemaId} — NOT just any
+   *   {@code C_ElementValue} row matching the code, since a tenant can carry a second, unwired
+   *   "orphan" element tree with its own independent {@code 99904000} row (confirmed live on
+   *   GOClient itself: {@code c_elementvalue} has 2 rows for {@code value = '99904000'}, one under
+   *   the wired "Arbol de cuentas GO" element, a second, unrelated one under an unwired "GOOrg
+   *   Account Tree" element — joining through {@code C_AcctSchema_Element} is what keeps this
+   *   deterministic).</li>
+   *   <li>Falls back to copying this SAME row's {@code P_Expense_Acct} (ETP-5075's original
+   *   logic) only when 99904000 does not resolve for this tenant's chart (e.g. genuinely absent
+   *   from an imported non-GOClient-family chart) — preserves ETP-5075's original safety net
+   *   rather than leaving the column null in that case.</li>
+   * </ol>
+   * Both branches remain guarded by the same {@code P_InvoicePriceVariance_Acct IS NULL} check, so
+   * this stays idempotent and never overwrites a value a human (or a prior run) already set.
    *
    * <p>{@code P_PurchasePriceVariance_Acct} (the sibling column for {@code
    * ProductInfo.ACCTTYPE_P_PPV}) is deliberately NOT touched here: its Classic UI field on this same
@@ -711,6 +747,7 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
         .createNativeQuery(ACCTSCHEMA_DEFAULT_IPV_BACKFILL_SQL)
         .setParameter(PARAM_CLIENT_ID, clientId)
         .setParameter(PARAM_SCHEMA_ID, schemaId)
+        .setParameter("ipvAcctValue", INVOICE_PRICE_VARIANCE_ACCT_VALUE)
         .executeUpdate();
     if (rows > 0 && log.isDebugEnabled()) {
       log.debug("Backfilled Invoice Price Variance default for client {}", clientId);
@@ -1041,18 +1078,67 @@ public class OnboardingAccountingWiringService extends OnboardingContextSupport 
       + "    WHERE a.c_bp_group_id = g.c_bp_group_id AND a.c_acctschema_id = :schemaId)";
 
   /**
-   * Backfills {@code C_ACCTSCHEMA_DEFAULT.P_InvoicePriceVariance_Acct} from that SAME row's
-   * {@code P_Expense_Acct} when the imported dataset's own copy left it {@code NULL} — ETP-5075
-   * gap A8. Must run BEFORE {@link #PRODUCT_CATEGORY_ACCT_SQL}/{@link #PRODUCT_ACCT_SQL} below,
-   * which already copy {@code d.p_invoicepricevariance_acct} from this table into every new
-   * product/category at creation time — fixing the source here is what makes that existing
-   * copy-down cover this column too, for a brand-new tenant, with no change to those two INSERTs.
+   * Backfills {@code C_ACCTSCHEMA_DEFAULT.P_InvoicePriceVariance_Acct} when the imported dataset's
+   * own copy left it {@code NULL} — ETP-5075 gap A8, priority order updated by ETP-5222. Must run
+   * BEFORE {@link #PRODUCT_CATEGORY_ACCT_SQL}/{@link #PRODUCT_ACCT_SQL} below, which already copy
+   * {@code d.p_invoicepricevariance_acct} from this table into every new product/category at
+   * creation time — fixing the source here is what makes that existing copy-down cover this column
+   * too, for a brand-new tenant, with no change to those two INSERTs.
+   *
+   * <p>Resolves {@link #INVOICE_PRICE_VARIANCE_ACCT_VALUE}'s ({@code 99904000}) own NATURAL
+   * {@code C_ValidCombination} for {@code :schemaId} FIRST (joined through
+   * {@code C_AcctSchema_Element}/{@code elementtype = 'AC'} so it always finds the element actually
+   * wired to this schema, never an unwired orphan element that happens to share the account code —
+   * see {@link #backfillInvoicePriceVarianceDefault}'s javadoc); falls back to this SAME row's
+   * {@code P_Expense_Acct} (ETP-5075's original source) only when {@code 99904000} does not resolve
+   * for this tenant's chart.
+   *
+   * <p><b>Natural-combination filter (ETP-5222 review fix, Alex/W1):</b> {@code C_ValidCombination}
+   * can hold non-natural, dimension-specific rows for the same {@code (account, schema)} pair (e.g.
+   * a product- or business-partner-specific combination), and a plain join on
+   * {@code account_id}/{@code c_acctschema_id} alone can match more than one such row — Postgres
+   * {@code UPDATE ... FROM} then picks one ARBITRARILY (silent nondeterminism, not an error). The
+   * subquery below explicitly requires every OTHER dimension column NULL, mirroring {@link
+   * GlItemProvisioningSupport#resolveNaturalCombination} — the DAL/Criteria precedent for this exact
+   * "find the natural combination" operation elsewhere in this codebase — translated from its
+   * {@code Restrictions.isNull(...)} calls into plain {@code AND vc.<col> IS NULL} predicates (native
+   * SQL here, not HQL/Criteria) plus that same method's defensive {@code ORDER BY ... LIMIT 1}.
+   *
+   * <p>Structured as a single {@code resolved} derived table (one row per matching schema, PK-
+   * correlated into the {@code UPDATE} target in the outer {@code WHERE}) so the natural-combination
+   * subquery and its {@code P_Expense_Acct} fallback are computed exactly ONCE, not duplicated across
+   * {@code SET} and {@code WHERE} — Postgres does not allow an {@code UPDATE} target's own alias to
+   * be referenced inside its {@code FROM} clause's joins, so the derived table is keyed by
+   * {@code d2.ad_client_id = :clientId AND d2.c_acctschema_id = :schemaId} (already unique) rather
+   * than joining back to {@code d}.
    */
   private static final String ACCTSCHEMA_DEFAULT_IPV_BACKFILL_SQL =
       "UPDATE c_acctschema_default d"
-      + " SET p_invoicepricevariance_acct = d.p_expense_acct, updated = now(), updatedby = '0'"
-      + " WHERE d.ad_client_id = :clientId AND d.c_acctschema_id = :schemaId"
-      + "   AND d.p_invoicepricevariance_acct IS NULL AND d.p_expense_acct IS NOT NULL";
+      + " SET p_invoicepricevariance_acct = resolved.new_acct,"
+      + "     updated = now(), updatedby = '0'"
+      + " FROM ("
+      + "   SELECT d2.c_acctschema_default_id,"
+      + "     COALESCE("
+      + "       (SELECT vc.c_validcombination_id"
+      + "        FROM c_acctschema_element ae"
+      + "        JOIN c_elementvalue ev ON ev.c_element_id = ae.c_element_id AND ev.value = :ipvAcctValue"
+      + "        JOIN c_validcombination vc ON vc.account_id = ev.c_elementvalue_id"
+      + "          AND vc.c_acctschema_id = ae.c_acctschema_id AND vc.ad_client_id = ae.ad_client_id"
+      + "          AND vc.m_product_id IS NULL AND vc.c_bpartner_id IS NULL AND vc.ad_orgtrx_id IS NULL"
+      + "          AND vc.c_locfrom_id IS NULL AND vc.c_locto_id IS NULL AND vc.c_salesregion_id IS NULL"
+      + "          AND vc.c_project_id IS NULL AND vc.c_campaign_id IS NULL AND vc.c_activity_id IS NULL"
+      + "          AND vc.user1_id IS NULL AND vc.user2_id IS NULL"
+      + "        WHERE ae.c_acctschema_id = d2.c_acctschema_id AND ae.ad_client_id = d2.ad_client_id"
+      + "          AND ae.elementtype = 'AC'"
+      + "        ORDER BY vc.c_validcombination_id LIMIT 1),"
+      + "       d2.p_expense_acct) AS new_acct"
+      + "   FROM c_acctschema_default d2"
+      + "   WHERE d2.ad_client_id = :clientId AND d2.c_acctschema_id = :schemaId"
+      + " ) resolved"
+      + " WHERE d.c_acctschema_default_id = resolved.c_acctschema_default_id"
+      + "   AND d.ad_client_id = :clientId AND d.c_acctschema_id = :schemaId"
+      + "   AND d.p_invoicepricevariance_acct IS NULL"
+      + "   AND resolved.new_acct IS NOT NULL";
 
   private static final String PRODUCT_CATEGORY_ACCT_SQL =
       "INSERT INTO m_product_category_acct ("
