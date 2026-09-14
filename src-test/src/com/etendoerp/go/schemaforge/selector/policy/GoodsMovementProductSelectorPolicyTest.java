@@ -33,11 +33,13 @@ import com.etendoerp.go.schemaforge.NeoSelectorService;
  * Unit tests for {@link GoodsMovementProductSelectorPolicy} (ETP-4606, ETP-5282).
  *
  * <p>{@code resolveFilter} is a pure function of the context params, so no DB access is needed.
- * Guards that Service-type products AND zero-stock rows are excluded ONLY from the Goods
- * Movement line's, Physical Inventory line's and Internal Consumption line's Product selectors
- * ({@code movementLine} / {@code inventoryLine} / {@code internalConsumptionLine} source
- * entities), and that every other {@code Product}-family selector (sales order lines, invoices,
- * etc.) is left untouched.
+ * Guards that Service-type products are excluded from the Goods Movement line's, Physical
+ * Inventory line's and Internal Consumption line's Product selectors ({@code movementLine} /
+ * {@code inventoryLine} / {@code internalConsumptionLine} source entities), that the zero-stock
+ * row is excluded ONLY for {@code movementLine} and {@code internalConsumptionLine} (NOT
+ * {@code inventoryLine} — Physical Inventory legitimately needs zero-stock products pickable),
+ * and that every other {@code Product}-family selector (sales order lines, invoices, etc.) is
+ * left untouched.
  */
 public class GoodsMovementProductSelectorPolicyTest {
 
@@ -97,13 +99,18 @@ public class GoodsMovementProductSelectorPolicyTest {
   }
 
   @Test
-  public void excludesZeroStockRowForInventoryLineSource() {
+  public void doesNotExcludeZeroStockRowForInventoryLineSource() {
+    // ETP-5282 regression: Physical Inventory count legitimately needs to let the user pick a
+    // zero-stock product in the manual "+ Add line" picker (to record a discrepancy or an
+    // explicit zero count) — only the service-type exclusion applies here, never the stock
+    // filter. See InventoryProductSelectorPolicy / InventoryLineHandler: bookQuantity = 0 is a
+    // valid, expected value for this entity.
     Map<String, String> ctx = new HashMap<>();
     ctx.put(SOURCE_PARAM, "inventoryLine");
 
     String filter = policy.resolveFilter(ENTITY_PRODUCT_STOCK_VIEW, ctx, "e");
 
-    assertEquals("e.product.productType <> 'S' and e.stocked = true", filter);
+    assertEquals("e.product.productType <> 'S'", filter);
   }
 
   @Test
