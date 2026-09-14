@@ -49,7 +49,7 @@ import org.openbravo.model.common.enterprise.Organization;
 /**
  * Unit tests for {@link OnboardingCostingScheduleService}.
  *
- * <p>Mirrors {@code OnboardingBankConnectionSyncServiceTest}: the protected seams
+ * <p>Testing convention: the protected seams
  * ({@code resolveProcess}, {@code findExistingRequest}, {@code buildObContext}) are stubbed via a
  * Mockito spy so the tests assert only this service's own orchestration — the skip / idempotent
  * branches, the scheduling field values written on a fresh request, and the best-effort error

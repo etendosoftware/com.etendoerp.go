@@ -23,7 +23,9 @@ import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.pricing.pricelist.PriceList;
@@ -44,6 +46,9 @@ import org.openbravo.model.pricing.pricelist.PriceListVersion;
 public final class PriceListVersionResolver {
 
   private static final Logger log = LogManager.getLogger(PriceListVersionResolver.class);
+
+  /** The shared/System organisation every tenant falls back to. */
+  private static final String SHARED_ORG = "0";
 
   private PriceListVersionResolver() {
   }
@@ -112,5 +117,85 @@ public final class PriceListVersionResolver {
       result.putIfAbsent(plId, v.getId());
     }
     return result;
+  }
+
+  /**
+   * Resolves the {@link PriceListVersion} of the tenant's <em>default</em> price list for one
+   * direction (sales or purchase), or {@code null} when the tenant has none.
+   *
+   * <p>This is the single place that answers "which tariff does Etendo Go use when nobody said
+   * otherwise". It is deliberately biased towards the explicit {@code M_PriceList.IsDefault} flag:
+   * a human ticking "default" on a price list is a stronger statement than the organisation a
+   * version happens to live in, so a default list in the shared organisation wins over a
+   * non-default one in the current organisation. Only when NO direction-matching list is flagged
+   * at all does it fall back to the previous behaviour (most recent {@code ValidFromDate}), so a
+   * tenant that never set the flag keeps working exactly as before.
+   *
+   * <p>Organisation precedence within each pass is org-specific first, then the shared
+   * organisation {@code '0'} — the same COALESCE semantics
+   * {@code ProductDefaultsHandler#resolveDefaultId} uses for the other tenant-wide defaults.
+   *
+   * @param obContext the context whose client/organisation scope the lookup runs in
+   * @param salesPriceList {@code true} for the sales tariff, {@code false} for the purchase one
+   * @return the version id of the default price list, or {@code null} if there is none
+   */
+  public static String resolveDefaultVersionId(OBContext obContext, boolean salesPriceList) {
+    if (obContext == null || obContext.getCurrentClient() == null) {
+      return null;
+    }
+    String clientId = obContext.getCurrentClient().getId();
+    String orgId = obContext.getCurrentOrganization() != null
+        ? obContext.getCurrentOrganization().getId() : SHARED_ORG;
+    String[] orgsToTry = SHARED_ORG.equals(orgId)
+        ? new String[] { SHARED_ORG }
+        : new String[] { orgId, SHARED_ORG };
+
+    try {
+      OBContext.setAdminMode();
+      try {
+        // Pass 1: honour the IsDefault flag. Pass 2: any direction-matching list.
+        for (boolean requireDefault : new boolean[] { true, false }) {
+          for (String targetOrg : orgsToTry) {
+            String versionId = queryVersionId(clientId, targetOrg, salesPriceList, requireDefault);
+            if (versionId != null) {
+              return versionId;
+            }
+          }
+        }
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.warn("Could not resolve the default {} price list version: {}",
+          salesPriceList ? "sales" : "purchase", e.getMessage());
+    }
+    return null;
+  }
+
+  /**
+   * Single criteria query behind {@link #resolveDefaultVersionId(OBContext, boolean)}.
+   *
+   * @param clientId the client to scope the lookup to
+   * @param orgId the organisation to scope the lookup to
+   * @param salesPriceList {@code true} for the sales tariff, {@code false} for the purchase one
+   * @param requireDefault when {@code true}, only price lists flagged as default match
+   * @return the newest matching version id, or {@code null} when nothing matches
+   */
+  private static String queryVersionId(String clientId, String orgId, boolean salesPriceList,
+      boolean requireDefault) {
+    OBCriteria<PriceListVersion> crit = OBDal.getInstance().createCriteria(PriceListVersion.class);
+    crit.add(Restrictions.eq(PriceListVersion.PROPERTY_CLIENT + ".id", clientId));
+    crit.add(Restrictions.eq(PriceListVersion.PROPERTY_ORGANIZATION + ".id", orgId));
+    crit.add(Restrictions.eq(PriceListVersion.PROPERTY_ACTIVE, true));
+    crit.createAlias(PriceListVersion.PROPERTY_PRICELIST, "pl");
+    crit.add(Restrictions.eq("pl." + PriceList.PROPERTY_ACTIVE, true));
+    crit.add(Restrictions.eq("pl." + PriceList.PROPERTY_SALESPRICELIST, salesPriceList));
+    if (requireDefault) {
+      crit.add(Restrictions.eq("pl." + PriceList.PROPERTY_DEFAULT, true));
+    }
+    crit.addOrder(Order.desc(PriceListVersion.PROPERTY_VALIDFROMDATE));
+    crit.setMaxResults(1);
+    List<PriceListVersion> results = crit.list();
+    return results.isEmpty() ? null : results.get(0).getId();
   }
 }
