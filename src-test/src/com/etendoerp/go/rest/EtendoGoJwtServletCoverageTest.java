@@ -598,9 +598,8 @@ public class EtendoGoJwtServletCoverageTest {
 
     User user = mock(User.class);
     Role role = mock(Role.class);
-    EtendoGoJwtSupport.RoleListData roleListData = new EtendoGoJwtSupport.RoleListData();
-    roleListData.firstRoleId = "role-1";
-    roleListData.roleArray = new JSONArray();
+    EtendoGoJwtSupport.RoleListData roleListData =
+        new EtendoGoJwtSupport.RoleListData("role-1", new JSONArray());
 
     OBDal obDal = mock(OBDal.class);
     when(obDal.get(User.class, "user-1")).thenReturn(user);
@@ -636,9 +635,8 @@ public class EtendoGoJwtServletCoverageTest {
     when(req.getHeader("Authorization")).thenReturn("Bearer valid-token");
     when(req.getParameter("userId")).thenReturn("user-1");
 
-    EtendoGoJwtSupport.RoleListData roleListData = new EtendoGoJwtSupport.RoleListData();
-    roleListData.firstRoleId = null;
-    roleListData.roleArray = new JSONArray();
+    EtendoGoJwtSupport.RoleListData roleListData =
+        new EtendoGoJwtSupport.RoleListData(null, new JSONArray());
 
     OBDal obDal = mock(OBDal.class);
     when(obDal.get(User.class, "user-1")).thenReturn(null);
