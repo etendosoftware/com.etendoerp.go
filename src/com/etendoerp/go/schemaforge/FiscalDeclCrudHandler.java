@@ -235,6 +235,23 @@ class FiscalDeclCrudHandler {
 
     String clientId = OBContext.getOBContext().getCurrentClient().getId();
     String orgId    = OBContext.getOBContext().getCurrentOrganization().getId();
+
+    // ETP-5272 — block creating a new declaration for a period that already has one sitting in
+    // draft: a draft is an unfinished, in-progress declaration, and letting the user spawn a 2nd
+    // one for the exact same period just fragments their work across two half-finished rows
+    // instead of them completing (or deleting) the existing draft first. Mirrors the exact
+    // draft-status guard already enforced by handleDeclDelete, but on the OPPOSITE direction:
+    // delete allows ONLY a draft to be removed, creation blocks ONLY when a draft already
+    // exists — a non-draft (ready/submitted/...) existing declaration is the intended
+    // corrective/rectificativa case (ETP-5187) and must keep working exactly as before, via
+    // resolveNextDeclSeq below, untouched by this check.
+    if (hasDraftDeclaration(clientId, orgId, model, year, period)) {
+      servlet.sendError(response, HttpServletResponse.SC_CONFLICT,
+          "A draft declaration already exists for this period — complete or delete it before "
+              + "creating a new one.");
+      return;
+    }
+
     // ETP-5187 — a 2nd (or later) declaration for the same model/year/period used to 500 on
     // ETGO_FISCAL_DECL_UQ (unique on client/org/model/year/period/DECL_TYPE) because the frontend
     // never sent a differentiator and every declaration defaulted to DECL_TYPE='O'. A follow-up
@@ -261,6 +278,39 @@ class FiscalDeclCrudHandler {
 
     response.setStatus(HttpServletResponse.SC_CREATED);
     response.getWriter().write(created.toString());
+  }
+
+  /**
+   * Returns {@code true} if ANY existing declaration for the given natural key
+   * ({@code AD_CLIENT_ID, AD_ORG_ID, MODEL, FISCAL_YEAR, PERIOD}) currently has
+   * {@link #DEFAULT_STATUS} ({@code "draft"}) — ETP-5272, the creation-time gate that mirrors
+   * {@link #handleDeclDelete}'s existing draft-only guard.
+   *
+   * <p>Deliberately a separate, self-contained query rather than folded into
+   * {@link #resolveNextDeclSeq}: that method has its own long-established, verified contract
+   * ({@code MAX(DECL_SEQ) + 1}, no cap, no status awareness) and is explicitly NOT to be touched
+   * by this feature — this is a distinct pre-condition, checked BEFORE it, not part of computing
+   * the next ordinal. The extra query is one cheap indexed lookup on the same natural key
+   * {@code ETGO_FISCAL_DECL_UQ} already covers; not worth entangling with resolveNextDeclSeq's
+   * own iteration for that.
+   */
+  private boolean hasDraftDeclaration(String clientId, String orgId, String model, long year,
+      String period) {
+    OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY_FISCAL_DECL,
+        "client.id = :clientId and organization.id = :orgId and " + PROPERTY_FISCAL_MODEL
+            + " = :model and " + PROPERTY_FISCAL_YEAR + " = :year and " + PROPERTY_PERIOD
+            + " = :period");
+    query.setNamedParameter("clientId", clientId);
+    query.setNamedParameter("orgId", orgId);
+    query.setNamedParameter(MODEL_KEY, model);
+    query.setNamedParameter("year", Long.valueOf(year));
+    query.setNamedParameter(PERIOD_KEY, period);
+    for (BaseOBObject existing : query.list()) {
+      if (DEFAULT_STATUS.equals(asString(existing.get(PROPERTY_DECLARATION_STATUS)))) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
