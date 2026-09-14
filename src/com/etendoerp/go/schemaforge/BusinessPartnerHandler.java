@@ -152,6 +152,40 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   private static final String ERR_PASSPORT_FORMAT =
       "The passport ID is not valid. It must be up to 9 letters or digits.";
 
+  // ETP-5031 follow-up — email/web/phone format validation, moved server-side. Until now these
+  // three fields were only checked by contactsFieldValidation.js / recipientEdits.js (browser,
+  // save-blocking), the same gap TaxID had before this class started validating it too: a direct
+  // API/MCP write bypasses React entirely and reaches this handler with no format check at all
+  // (confirmed live — an MCP write previously stored "ABC-telefono-invalido-123456789" as
+  // etgoPhone and "f" / "a@" as etgoWeb / etgoEmail). Rules mirror the browser checks EXACTLY so
+  // a value rejected in one place is rejected in the other:
+  //   - email:  EMAIL_PATTERN, same regex as recipientEdits.js's EMAIL_PATTERN.
+  //   - web:    domain-shaped host (>=2 dot-separated labels, last a 2+ letter TLD), same shape
+  //             recipientEdits.js's isSecureUrl() checks on "https://" + value — etgoWeb stores
+  //             only the part after the UI's fixed "https://" inputPrefix, so the stored value
+  //             itself is the host to check, no scheme to strip.
+  //   - phone:  charset [0-9+()-. \s] with at least one digit, same as recipientEdits.js's
+  //             isValidPhone(), plus the AD column's own maxLength (15, E.164 cap per
+  //             artifacts/contacts/decisions.json -> etgoPhone.maxLength).
+  // Like validateTaxId(), a write that does not touch the field is never re-validated, and an
+  // incoming value identical to what is already persisted is never re-validated either — so a
+  // dirty legacy value does not block unrelated edits to the same record.
+  private static final String FIELD_WEB = "etgoWeb";
+  private static final String FIELD_PHONE = "etgoPhone";
+  private static final Pattern EMAIL_PATTERN =
+      Pattern.compile("^[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}$", Pattern.CASE_INSENSITIVE);
+  private static final Pattern DOMAIN_LABEL_PATTERN =
+      Pattern.compile("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", Pattern.CASE_INSENSITIVE);
+  private static final Pattern TLD_PATTERN = Pattern.compile("^[a-z]{2,}$", Pattern.CASE_INSENSITIVE);
+  private static final Pattern PHONE_CHARSET_PATTERN = Pattern.compile("^[0-9+()\\-.\\s]+$");
+  /** {@code EM_Etgo_Phone} column length (ETP-5031, E.164 cap). */
+  private static final int PHONE_MAX_LENGTH = 15;
+  /** Raw English literals, same mapping mechanism as {@link #ERR_PASSPORT_FORMAT}. */
+  private static final String ERR_EMAIL_FORMAT = "The email address is not valid.";
+  private static final String ERR_WEBSITE_FORMAT = "The website is not a valid domain, e.g. domain.com.";
+  private static final String ERR_PHONE_FORMAT =
+      "The phone number can only contain digits and the + ( ) - . characters, up to 15 characters.";
+
   // ETP-4565 posting-account backfill (see provisionMissingBpAcctRows()): scoped to a single
   // already-persisted business partner (bound by ? = c_bpartner_id) instead of a client-wide
   // sweep, and driven by AD_Org_AcctSchema/ad_isorgincluded off the BP's OWN org (mirroring
@@ -359,6 +393,10 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       if (taxIdError != null) {
         return taxIdError;
       }
+      NeoResponse formatError = validateContactFormats(ctx, body, method);
+      if (formatError != null) {
+        return formatError;
+      }
 
       deriveName(ctx, body);
 
@@ -463,6 +501,114 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       }
     }
     return new String[]{ null, null };
+  }
+
+  /**
+   * Pre-hook guard: rejects a malformed {@code etgoEmail}/{@code etgoWeb}/{@code etgoPhone}
+   * before it is stored (ETP-5031 follow-up). See the constants above for the exact rules,
+   * which mirror {@code recipientEdits.js} field-for-field.
+   *
+   * @return an error {@link NeoResponse} for the first rejected field, {@code null} to continue
+   *     with the default CRUD
+   */
+  private NeoResponse validateContactFormats(NeoContext ctx, JSONObject body, String method) throws Exception {
+    boolean touchesAny = body.has(FIELD_EMAIL) || body.has(FIELD_WEB) || body.has(FIELD_PHONE);
+    if (!touchesAny) {
+      return null;
+    }
+    String[] persisted = null;
+    if (!"POST".equals(method)) {
+      String recordId = ctx.getRecordId();
+      if (StringUtils.isNotBlank(recordId)) {
+        persisted = queryPersistedContactFormatParts(recordId);
+      }
+    }
+    NeoResponse emailError = validateFormatField(body, FIELD_EMAIL, persisted != null ? persisted[0] : null,
+        EMAIL_PATTERN.asPredicate(), ERR_EMAIL_FORMAT);
+    if (emailError != null) {
+      return emailError;
+    }
+    NeoResponse webError = validateFormatField(body, FIELD_WEB, persisted != null ? persisted[1] : null,
+        BusinessPartnerHandler::isDomainShaped, ERR_WEBSITE_FORMAT);
+    if (webError != null) {
+      return webError;
+    }
+    return validateFormatField(body, FIELD_PHONE, persisted != null ? persisted[2] : null,
+        BusinessPartnerHandler::isPlausiblePhone, ERR_PHONE_FORMAT);
+  }
+
+  /**
+   * Applies {@code isValid} to one field's incoming value, skipping (returning {@code null})
+   * when the write does not touch the field, the value is blank (emptying is the {@code
+   * required} mechanism's job, not this one's), or the incoming value is unchanged from what is
+   * already persisted — so a dirty legacy value never blocks an unrelated edit to the record.
+   */
+  private static NeoResponse validateFormatField(JSONObject body, String field, String persistedValue,
+      java.util.function.Predicate<String> isValid, String errorMessage) {
+    if (!body.has(field)) {
+      return null;
+    }
+    String value = StringUtils.trimToNull(body.optString(field, null));
+    if (value == null) {
+      return null;
+    }
+    if (value.equals(StringUtils.trimToNull(persistedValue))) {
+      return null;
+    }
+    return isValid.test(value) ? null : NeoResponse.error(400, errorMessage);
+  }
+
+  /**
+   * Domain-shaped host: at least two dot-separated labels, the last a 2+ letter TLD, each label
+   * a valid DNS label. Same shape {@code recipientEdits.js}'s {@code isSecureUrl()} checks on
+   * the host part — {@code etgoWeb} stores only what follows the UI's fixed {@code https://}
+   * prefix, so the stored value itself IS the host, with no scheme to strip first.
+   */
+  private static boolean isDomainShaped(String value) {
+    String[] labels = value.split("\\.");
+    if (labels.length < 2) {
+      return false;
+    }
+    if (!TLD_PATTERN.matcher(labels[labels.length - 1]).matches()) {
+      return false;
+    }
+    for (String label : labels) {
+      if (!DOMAIN_LABEL_PATTERN.matcher(label).matches()) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Charset guard mirroring {@code recipientEdits.js}'s {@code isValidPhone()} (digits and
+   * {@code + ( ) - .} and whitespace, at least one digit), plus the AD column's own
+   * {@value #PHONE_MAX_LENGTH}-character cap.
+   */
+  private static boolean isPlausiblePhone(String value) {
+    if (value.length() > PHONE_MAX_LENGTH) {
+      return false;
+    }
+    return PHONE_CHARSET_PATTERN.matcher(value).matches() && value.chars().anyMatch(Character::isDigit);
+  }
+
+  /**
+   * Returns {@code [etgoEmail, etgoWeb, etgoPhone]} for the given business partner, or three
+   * {@code null}s when the record does not exist (a race between the PATCH request and a
+   * concurrent delete) — same shape and rationale as {@link #queryPersistedTaxIdParts(String)}.
+   */
+  private static String[] queryPersistedContactFormatParts(String recordId) throws Exception {
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(
+        "SELECT em_etgo_email, em_etgo_web, em_etgo_phone FROM c_bpartner WHERE c_bpartner_id = ?")) {
+      ps.setString(1, recordId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          return new String[]{ rs.getString(1), rs.getString(2), rs.getString(3) };
+        }
+      }
+    }
+    return new String[]{ null, null, null };
   }
 
   /**
