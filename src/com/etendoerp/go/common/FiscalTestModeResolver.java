@@ -62,6 +62,9 @@ public final class FiscalTestModeResolver {
   }
 
   /**
+   * Resolves whether fiscal test mode is effectively forced for the given Client, falling
+   * back to the System-wide default row when the Client has no own preference row.
+   *
    * @param client the Client to resolve the effective value for. {@code null} resolves
    *               straight to the System-wide default row.
    * @return {@code true} when fiscal test mode is effectively forced for this Client.
