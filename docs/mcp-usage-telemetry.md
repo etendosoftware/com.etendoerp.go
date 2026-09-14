@@ -3,7 +3,7 @@
 One row per MCP tool call, so that what agents actually do — and where they actually get stuck — is
 measurable on real traffic rather than only on the synthetic traffic of the test harness.
 
-Design source: `schema_forge/docs/plans/drafts/2026-09-11-mcp-test-harness-design.md`, Track B,
+Design source: `schema_forge/docs/plans/2026-09-11-mcp-test-harness-design.md`, Track B,
 decisions D23–D33. This document covers **B1 only**. The Mixpanel exporter (B2) and the
 `neo_feedback` tool (B3) are not built.
 
