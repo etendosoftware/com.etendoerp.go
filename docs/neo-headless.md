@@ -1179,12 +1179,14 @@ GET /sws/neo/debuginvitationbypass?Action=forceStatus&Email=<email>&Status=<stat
 GET /sws/neo/resendinvitation?AdUserId=<id>                               (§8h)
 GET /sws/neo/promoteuserrole?UserId=<id>&Mode=promote|demote              (§8i)
 GET /sws/neo/documentemailhistory?recordId=<id>[&specName=<spec>]         (§8j)
+GET /sws/neo/refreshtoken                                                 (§8k)
 Authorization: Bearer {token}
 ```
 
 `NeoGoWebhookBridge` runs `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview`/`SFAssignUserRoles`/
 `SFUserRoleAssignments`/`SFSystemRoleTemplates`/`SFDebugInvitationBypass`/`SFResendInvitation`/
-`SFPromoteUserRole`/`SFDocumentEmailHistory` (§8, §8b, §8c, §8d, §8e, §8f, §8g, §8h, §8i, §8j)
+`SFPromoteUserRole`/`SFDocumentEmailHistory`/`SFRefreshToken`
+(§8, §8b, §8c, §8d, §8e, §8f, §8g, §8h, §8i, §8j, §8k)
 through NEO's own
 JWT authentication instead of the Webhooks module's HTTP dispatch — the same pattern
 `NeoSimSearchEndpoint` (§4.9) already used for `SimSearch`. Each of these pseudo-specs constructs
@@ -1198,14 +1200,15 @@ original `/webhooks/*` paths too — the Webhooks module dispatch was not remove
 and no `SMFWHE_DEFINEDWEBHOOK_ROLE` grant is required for it. `SFAssignUserRoles` (ETP-4852),
 `SFUserRoleAssignments` (ETP-4906), `SFSystemRoleTemplates` (ETP-4906),
 `SFDebugInvitationBypass` (ETP-4830), `SFResendInvitation` (ETP-4830), `SFPromoteUserRole`
-(ETP-5019), and `SFDocumentEmailHistory` (ETP-5069) are `/sws/neo/*`-only — all seven were
-authored after this pattern was already established, so none ever had a legacy `/webhooks/*`
-path to keep.
+(ETP-5019), `SFDocumentEmailHistory` (ETP-5069), and `SFRefreshToken` (ETP-5195) are
+`/sws/neo/*`-only — all eight were authored after this pattern was already established, so none
+ever had a legacy `/webhooks/*` path to keep.
 
 Each webhook's own access rule is unaffected and still enforced inside its `get()` — see
-§8/§8b/§8c/§8d/§8e/§8f/§8g/§8h/§8i/§8j for what each one checks
+§8/§8b/§8c/§8d/§8e/§8f/§8g/§8h/§8i/§8j/§8k for what each one checks
 (`NeoAccessHelper.isAdminOrClientAdmin`, window/process access checks, and — for
-`documentemailhistory` alone — DAL's own readable-client/org filtering, §8j). Non-`GET`
+`documentemailhistory` alone — DAL's own readable-client/org filtering, §8j;
+`refreshtoken` has no role gate at all — see §8k for why). Non-`GET`
 requests get `405`; a webhook that throws gets
 `500` with the exception message (except `SFAssignUserRoles`'s own expected domain-validation
 rejections, `SFUserRoleAssignments`'s own expected domain rejections, and `SFPromoteUserRole`'s
@@ -2038,6 +2041,30 @@ the class javadoc in `YearCloseHandler.java` for the complete rationale. Treat t
 last-resort pattern, not a default — only reach for it once you've confirmed (not assumed) that
 `CallProcess` genuinely has no path for the process in question.
 
+**Advanced pattern — hand-writing into a table an engine owns (`ProductCostingHandler`, ETP-5245):**
+`M_Costing` is the costing engine's own table. Exposing its tab for manual entry (the Product
+window's Cost tab) is only safe because the handler forces every column whose value is not the
+user's to decide — `costType = 'STA'`, `permanent = false`, `production = false`, `manual = true`,
+the currency from the organization — and strips the columns that only belong to an engine-generated
+row. Three things generalize to any handler in this position:
+
+- **The forced columns must be `system` in `decisions.json`, never `discarded`.**
+  `NeoFieldFilter.filterCreateRequest` removes `discarded` fields from the POST body, which would
+  silently drop the handler's own values and create the row with the AD defaults instead. This
+  failure is invisible: the request succeeds and the row looks plausible.
+- **Guard update/delete in `handle`, not only in the UI.** `ProductCostingHandler.guardEngineRow`
+  returns `403` on any `PATCH`/`PUT`/`DELETE` against a row the engine produced. The UI's
+  read-only rule is a courtesy; this is what also covers the REST API and the MCP.
+- **Repair neighbouring state in `afterHandle` rather than rejecting the input.** Core resolves a
+  standard cost with `get(0)` over an unordered criteria, so overlapping date ranges make the
+  applied cost depend on the query plan. The handler closes the adjacent ranges — what
+  `StandardAlgorithm#insertCost` itself does — best-effort, so tidying failures never turn a valid
+  save into an error.
+
+The class javadoc in `ProductCostingHandler.java` carries the per-column rationale (which core
+class reads each flag, and what breaks if it is wrong); the user-facing behaviour is written up in
+`etendo_schema_forge`'s `docs/generated-custom-windows/product.md` § ETP-5245.
+
 **NeoContext fields:**
 
 | Field | Type | Description |
@@ -2221,6 +2248,7 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 **Real-world example — `UserRoleAssignmentHandler`'s admin-created-user invitation (ETP-4830, superseding ETP-4829):** the `user` entity's `POST` post-hook used to eagerly provision an `etgo_account` row via a now-deleted `EtendoGoAccountProvisioning` bridge class — `pending` by default, or `active` immediately if the admin typed a password on the create form (a temporary workaround gated by `PasswordPolicy.isStrong` in the `handle()` pre-hook). ETP-4830 replaced both:
 
   - The `handle()` pre-hook no longer reads or validates a `password` field at all — the field, if the frontend still sends one, is simply ignored by this handler (it still reaches `AD_User.Password`, Openbravo's own classic-backend login, unrelated to `etgo_account`). Invite-email is now the only way to activate an admin-created user's account.
+  - **Duplicate-email pre-check (ETP-5264).** Before deriving `username` from `email`, `handleCreate`'s `handle()` pre-hook now calls `rejectDuplicateEmail(normalizedEmail, client)`, which queries for another `AD_User` of the SAME client whose `email` already matches (case-insensitive exact match) and, if found, short-circuits with a clear `400` — `"A user with this email address already exists"` — WITHOUT ever writing `username` onto the request body. Previously a duplicate email fell through to username derivation, so both users ended up with colliding derived `username`s and the create failed on the DB's own unique-constraint violation instead — a raw message naming `username`, a field this create form never shows, which read as confusing/misleading to the admin. A `null` client (no `OBContext`) is a no-op, same as before ETP-5264: `handleCreate` still falls through to its best-effort username derivation in that case. On the frontend (`etendo_schema_forge`), this 400 is mapped via `backendErrors.js`'s `backendError.duplicateUserEmail` key to a correctly-worded toast — see that repo's `docs/generated-custom-windows/user.md` step 1a-bis. Covered by `UserRoleAssignmentHandlerTest#handleRejectsDuplicateEmailOnCreateBeforeUsernameIsDerived`/`#handleAllowsCreateWhenNoDuplicateEmailExistsForClient`.
   - **Ordering (ETP-4830 human-directed requirement, item #14): "create user → assign personal role → invite."** `afterHandle()`'s `POST` branch FIRST calls `ensurePersonalRoleForNewlyCreatedUser` — which delegates to `UserRoleCompositionService#createFreshPersonalRole(User)`, never the get-or-create `ensurePersonalRole(User)`, so a brand-new user can never end up with someone else's orphaned role (see the org-access/defaults writeup in §8d) — and only THEN calls `CompanyInvitationService#createInvitationForNewlyCreatedUser`, so no other role can ever land on the user before its own personal role exists. The strict ordering is proven by a call-order test, not just "both ran" (`UserRoleAssignmentHandlerTest`'s `afterHandleAssignsPersonalRoleBeforeInvitationOnCreate`). Template-role composition on top of that empty personal role happens independently, any time after creation, via `AssignTemplateRolesControl`'s own save — which is why the invitation intentionally skips the "invited user already has an active role" check below (an empty personal role with no templates composed onto it is not a meaningful "active role" from that check's perspective).
   - `afterHandle()`'s `POST` branch then calls `CompanyInvitationService#createInvitationForNewlyCreatedUser(obContext, email, appBaseUrl, language)` — the same invitation/token/`company-invitation`-contract/dedup/throttle machinery ETP-4894 built for a company administrator inviting an *existing* user (§ `docs/transactional-email-contracts.md`). It resolves the inviter from `context.getObContext()` (captured by the dispatcher before this method's own `OBContext.setAdminMode(true)`, so it still reflects the real acting admin's client/org/user) rather than from an authenticated `etgo_account` bearer token, since this runs from a NeoHandler post-hook, not from the public `/sws/go/invitations` endpoint. It deliberately skips the "invited user already has an active role in the invitation organization" check `createInvitation` otherwise enforces — a freshly `POST`-created `AD_User` has zero roles yet by construction beyond the empty personal role just created above (role composition happens independently, any time after creation, via `AssignTemplateRolesControl`'s own save/`PUT`), so that check would always 400 here and adds no real safety. `CompanyInvitationService` grew a `requireExistingRole` private overload for this rather than a bespoke duplicate of `createInvitationForInviter`, so the new call site still gets dedup-of-an-open-invitation and throttling for free.
   - There is no eager `etgo_account` row on this path any more: the invitation's `register-and-accept` flow is now the *sole* place an `etgo_account` gets created for an admin-created user, lazily, once the invitee actually accepts. Accepting that invitation does not require the invited `AD_User` to already hold a role — an earlier revision's `hasActiveRoleForOrganization` accept-time check was dropped from both `acceptExistingAccountInAdminMode` and `registerAndAcceptInAdminMode` for exactly this reason (a freshly-created user has none yet by construction); see `docs/transactional-email-contracts.md` for the full accept-time contract this handler's invitation flows into.
@@ -2229,6 +2257,33 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
   Both changes are best-effort, same contract as the handler's other two concerns: any failure is logged and swallowed, never failing the parent `AD_User` request.
 
   - **`ETGO_INVITATION_USER_FK` cascade delete (ETP-4830):** because this handler makes admin-created-user invitations part of the normal create flow, `ETGO_INVITATION` rows now exist for ordinary users, not just for ETP-4894's opt-in "invite an existing user" path. `ETGO_INVITATION.AD_USER_ID` originally referenced `AD_USER` with no `ON DELETE` behavior (`onDelete` omitted in `src-db/database/model/tables/ETGO_INVITATION.xml`, i.e. `NO ACTION`), so deleting an `AD_User` that had ever received an invitation failed with a 500 ("Este registro no puede ser eliminado ya que está relacionado con otros elementos existentes.") — a pre-existing ETP-4894 schema gap, only surfaced now that this handler makes invitation rows routine. Fixed by adding `onDelete="cascade"` to `ETGO_INVITATION_USER_FK`: deleting the `AD_User` now deletes its `ETGO_INVITATION` row(s) with it, since a dangling invitation for a user that no longer exists can never sensibly be accepted. The sibling `ETGO_INVITATION_CREATEDBY_FK`/`ETGO_INVITATION_UPDATEDBY_FK`/`ETGO_INVITATION_ACCOUNT_FK`/`ETGO_INVITATION_CLIENT_FK`/`ETGO_INVITATION_ORG_FK` constraints are intentionally left as `NO ACTION` — those reference the actor/tenant, not the invited user, and Etendo audit columns (`CREATEDBY`/`UPDATEDBY`) are never expected to be deleted out from under a row.
+
+#### 5.3.1 Post-hook writes and the `updated` audit token (ETP-5255 / ETP-5262)
+
+See also the shorter, author-facing version of this rule in `docs/neo-headless-extensibility.md` §2.3a in the `schema_forge_core` repo.
+
+**The rule for handler authors: a handler MAY write its own record inside `afterHandle`, and it does not need to hand back a refreshed response to keep the `updated` token correct — the dispatcher already does that.** Both hook entry points, `NeoServletSupport.runPostHook` (`schemaforge/NeoServletSupport.java:166-173`) and `McpHookExecutor.runPostHook` (`mcp/McpHookExecutor.java:158-178`), call `NeoAuditTokenRefresh.refreshInResponse` / `refreshInBody` on the EFFECTIVE response — whichever of `afterHandle`'s own return value or the previous result ends up going to the client — immediately after the hook runs. If you find yourself hand-building a "corrected" response just to fix up `updated` after a save inside `afterHandle`, that is now redundant: return `null` (or your normal replacement response) and let the refresh happen underneath you.
+
+**Why this lives in the dispatcher and not in each handler.** `UserRoleAssignmentHandler` handles user creation entirely in `afterHandle` (`schemaforge/handlers/UserRoleAssignmentHandler.java:487`): `inviteNewlyCreatedUser` (`:594`) reads `context.getPreviousResult()` — the response body the CRUD write already serialised, carrying the `updated` token the client is about to cache — and then calls `ensurePersonalRoleForNewlyCreatedUser` (`:696-715`), which writes `AD_User.defaultRole` and flushes (`:715`), bumping the row's real `updated` past what the cached response says. Because returning `null` from `afterHandle` means "keep the default result" (`NeoAuditTokenRefresh.java:44-48`), the client walked away with a token the row had already moved past — and ETP-5122 made the React client harvest exactly that value as the record's version, so the very first edit of a user an admin had just created was refused as a `stale_record` 409 against nobody (ETP-5262). It was intermittent, not constant, because the comparison zeroes milliseconds (`NeoRecordVersion.equalToTheSecond`) — it only misfired when the personal-role flush happened to cross a wall-clock second boundary from the create.
+
+A per-handler fix — every post-hook patching the body it just invalidated — is a rule that has to be remembered by every handler ever written, on a failure mode that shows up as an unreproducible 409 in production, not as a broken test. This is not hypothetical: the sibling defect of a post-hook's own field values being invisible in the response has already been independently rediscovered once (ETP-4783's `injectAuthorizationnoIntoSaveResponse`), and the token's *format* bug below shipped three separate times. `NeoAuditTokenRefresh` (`schemaforge/util/NeoAuditTokenRefresh.java`) exists precisely so a fourth handler that writes its own record in `afterHandle` is covered automatically, by construction, rather than by every author remembering this section. It costs one `OBDal.get` per write response — a session-cache hit for the record the request just wrote — and only runs for CRUD `POST`/`PUT`/`PATCH` (never `GET`, never `DELETE`, never a non-CRUD `ACTION`).
+
+**The one thing an author must still get right: if you serialise `updated` yourself, use `NeoDateFormat.toAuditToken`, never `toCanonical`.** This only applies to a handler that builds its own response JSON outside the generic `DataSourceServlet` path — typically one reading straight from native SQL, like `ChartOfAccountsHandler`'s list/detail reads (§5.3 above). `toCanonical` is correct for a *business* datetime (a civil, wall-clock value, deliberately offset-free per §4.3.1) but wrong for a *concurrency* token: core's reader, `JsonUtils.createDateTimeFormat()`, requires a trailing zone offset, and `JsonUtils.convertFromXSDToJavaFormat` appends `"+0000"` to a token that lacks one instead of rejecting it (`NeoDateFormat.java:155-156`; also documented at `NeoRecordVersion.java:191-195`, the parse-repair step that hits this same behavior on the read side). An offsetless token is therefore not refused — it is silently re-read as UTC, and every write on that record then fails as stale by exactly the server's UTC offset, regardless of how recently it was read. `toAuditToken` (`NeoDateFormat.java:180-204`) is the one method that formats through core's own writer instead of a hand-rolled pattern, so the value it produces is guaranteed to round-trip through the same reader that will later compare it.
+
+This exact mistake shipped three times, in three different handlers, each time by reaching for `toCanonical` because it looks like the obvious tool (`NeoDateFormat.java:161-166`): first in `FinancialAccountsPageHandler` (ETP-5073, on a UTC-3 tenant — every write read as three hours stale), then reintroduced independently in `ProductPriceHandler` and in `ChartOfAccountsHandler` (both found together during ETP-5255). All three were routed through `toAuditToken` in the same change that added it.
+
+**How to diagnose it in the field.** `NeoRecordVersion.isStale` (`schemaforge/util/NeoRecordVersion.java:135-154`) logs every decided verdict — WARN on refusal, DEBUG on a pass, gated by `isDebugEnabled()` so the successful case only costs anything when someone is actually looking — through `describeComparison` (`:257-267`), which prints both sides of the comparison as rendered timestamps *and* as epoch milliseconds, the **signed delta** (`client - stored`, in ms), and the server's own timezone ID. Read the delta like this:
+
+| Delta | Likely cause |
+|---|---|
+| `0` | The two instants are equal and the check still said stale — a defect in the comparison itself, not in the data. |
+| A whole-hour multiple (e.g. `±3600000`, `±7200000`) equal to the server's UTC offset | The offset bug above: the token lost its zone somewhere and was re-read as UTC. Check whether the handler formats `updated` by hand with `toCanonical` instead of `toAuditToken`. |
+| Sub-second, non-zero | A post-hook wrote to the record after the response body was serialised — the ETP-5262 scenario. Check whether the entity's `afterHandle` writes its own record and, if this predates `NeoAuditTokenRefresh` reaching that code path, whether the refresh is actually wired in for that dispatch route. |
+| An arbitrary, larger delta, with another writer identifiable | A genuine concurrent modification — the check did its job. |
+
+The three "cannot decide" guards inside `isStale` — a blank/missing client token, a non-`Traceable` entity, an unparseable client value (`NeoRecordVersion.java:138-141`, `:170-173`, `:202-204`) — are logged at WARN too, and worth checking first: they all silently answer "not stale" and let core's own check be the final word, so a concurrency check that never ran is otherwise indistinguishable in the client's eyes from one that ran and passed.
+
+**The failure mode of the refresh itself.** `NeoAuditTokenRefresh` is best-effort by construction: an unreadable row, an unrecognised response body shape, or a token `toAuditToken` cannot render all leave the response body byte-identical to what it would have been without the refresh, and log a WARN naming the entity and record id (`NeoAuditTokenRefresh.java:168-172`, `:291-295`). It never adds an `updated` key that was not already there, never flushes on the entity's behalf, and never touches `NeoRecordVersion`'s comparison — it only corrects a value the response already publishes. So the refresh degrades to the pre-ETP-5262 behavior on failure (the client may hit one spurious, retriable `stale_record` 409) rather than breaking the write that already succeeded.
 
 ---
 
@@ -3576,6 +3631,109 @@ sizing live in `docs/transactional-email-contracts.md` → *Readable send histor
 privacy decision and its operational rules live in the functional repo's
 `docs/ops/transactional-email-security.md` → *Email Audit Redaction & Storage Policy*. This section
 stays the reference for the endpoint itself.
+
+---
+
+## 8k. Refresh Token (SFRefreshToken Webhook, ETP-5195)
+
+`SFRefreshToken` (`GET /sws/neo/refreshtoken`, no parameters — reached ONLY through the NEO
+pseudo-spec bridge, §4.10/§4.11; no legacy `/webhooks/*` path, same as every sibling authored
+after the pattern existed) reissues the CALLER'S OWN NEO bearer JWT, embedding their CURRENT
+`AD_User.Default_Ad_Role_ID` instead of whatever role the token they are calling with happened to
+be minted with.
+
+**The bug this closes.** `NeoAuthenticator#authenticateJwt` rebuilds `OBContext` on every NEO
+request straight from the incoming token's `role` claim — that claim is fixed at mint time and is
+never re-derived from the DB on later requests. `UserRoleCompositionService#promoteToAdmin`/
+`#demoteFromAdmin` (§8i) DO swap `Default_Ad_Role_ID` when an owner/admin promotes or demotes a
+user, but the affected user's own already-issued token keeps authenticating as their
+pre-promotion/demotion role until a new token is minted — previously only possible by a full
+re-login. This endpoint gives the frontend a way to swap the role in place right after such an
+action.
+
+**Access rule: no role gate at all, and deliberately so.** Unlike every other webhook in this
+family, `SFRefreshToken` does not call `NeoAccessHelper.isAdminOrClientAdmin` or any other
+role check — reissuing your OWN token under your OWN current role is not a privileged operation,
+it is the same trust boundary a normal login already crosses. The only real security requirement
+is scope, not privilege: this endpoint must never be able to mint a token for anyone other than
+the caller (see below).
+
+**`userId` comes ONLY from the already-validated token, never from a request parameter.** By the
+time `SFRefreshToken#get` runs, `NeoServlet#processRequest` has already called
+`authenticator.authenticateRequest(...)` — the exact same signature/expiry validation every other
+NEO request goes through — and a failure there returns `401` before the pseudo-spec dispatcher,
+hence this webhook, is ever reached. `authenticateJwt` populates `OBContext` from that same
+token's own `user` claim, and `SFRefreshToken` reads the caller's id from
+`OBContext.getOBContext().getUser()` — nowhere else. There is intentionally no `UserId`-style
+parameter: accepting one would let any caller mint a token for an arbitrary target user, a
+privilege-escalation hole this endpoint must not open.
+
+**Role resolution.** The token's own `role` claim is discarded on purpose. The webhook re-reads
+the `User` fresh from `OBDal` by the id above and calls `user.getDefaultRole()` — the CURRENT
+`AD_User.Default_Ad_Role_ID` — then mints the new token via
+`SecureWebServicesUtils.generateToken(user, currentRole)`, the exact 2-argument overload
+`EtendoGoJwtServlet#writeEnvironmentLoginResponse` already uses at login (this is only the second
+production call site for that overload). Passing `org`/`warehouse` as `null` lets that method
+re-resolve a matching organization/warehouse for the new role itself, the same way login does,
+instead of carrying over whatever the stale token's `organization`/`warehouse` claims said.
+
+**R5 eligibility check.** Before that, `get()` rejects an inactive caller outright —
+`!Boolean.TRUE.equals(user.isActive())` fails with "User is not active" before any role
+resolution is attempted. Then, when `currentRole` is non-null, `isEligibleForRole(user,
+currentRole)` gates minting rather than trusting `Default_Ad_Role_ID` blindly:
+- the role must belong to the SAME client as the caller's own currently-authenticated session
+  (a cross-client guard — a role from a different client would otherwise mint a token embedding
+  that role, and its org/warehouse, from a different tenant than the caller's own validated
+  session);
+- the role must itself be `Active`;
+- and the user must hold a genuine, ACTIVE `AD_User_Roles` assignment to that role, rather than
+  assuming `Default_Ad_Role_ID` and `AD_User_Roles` always agree.
+
+Any of these failing returns `success:false` with "User is not eligible for the assigned role"
+instead of minting a token — role resolution here is NOT unconditional. A `currentRole == null`
+(no assignable role) is unaffected by this check and still flows straight through, per the
+existing "no assignable role" case below.
+
+**Response — session metadata extension (ETP-5195, backend half).** When `currentRole` is
+genuinely resolved for the caller (the ordinary case, having just passed the R5 eligibility
+check above), the response carries a `session` object alongside the token:
+
+```json
+{
+  "token": "<new signed JWT>",
+  "session": {
+    "version": 1,
+    "userId": "...",
+    "clientId": "...",
+    "selectedRoleId": "...",
+    "selectedOrgId": "...",
+    "roleList": [{ "id": "...", "name": "...", "orgList": [{ "id": "...", "name": "..." }] }]
+  }
+}
+```
+
+wrapped in the bridge's usual envelope, i.e. `{"result": "{\"token\": \"...\", \"session\": {...}}"}`.
+`userId`/`clientId`/`selectedRoleId`/`selectedOrgId` are read back from the `user`/`client`/
+`role`/`organization` claims of the token *just minted*, via
+`SecureWebServicesUtils.decodeToken(String)` — never re-derived independently, so the response
+can never disagree with what the JWT actually contains. `roleList` reuses
+`EtendoGoJwtSupport.loadRoleListData(String)` (widened to `public` for this call site), the same
+helper/query already used to build the equivalent list at login. This activates the richer
+validation `schema_forge_core`'s `reconcileSessionRefresh` already implements client-side (see
+`docs/auth-session-refresh.md` in that repo) instead of its "legacy" token-swap-only fallback.
+
+The `currentRole == null` case is UNCHANGED: the response stays the bare
+`{"token": "<new signed JWT>"}`, no `session` key, so the frontend's legacy fallback still
+applies. A user resolving to literally no assignable role at all — not the ordinary case; the
+promote/demote invariant this endpoint exists for always leaves one — is a genuinely unexpected
+state rather than an expected domain rejection, so unlike `SFPromoteUserRole`'s target-user
+validation it is NOT modeled as a `success:false` `200`; it surfaces as the bridge's normal
+`error`/`500` path.
+
+**Frontend usage.** Call this endpoint right after a promote/demote action (or any other flow
+that may have changed the caller's own `Default_Ad_Role_ID`) and swap the stored bearer token for
+the returned one before the next NEO request, instead of forcing the user through a full
+re-login.
 
 ---
 
