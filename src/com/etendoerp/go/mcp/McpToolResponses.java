@@ -102,7 +102,7 @@ final class McpToolResponses {
    */
   static JSONObject imageToolResult(JSONObject body) throws JSONException {
     boolean failed = body.has(McpConstants.KEY_ERROR);
-    return failed ? McpToolRouter.wrapAsErrorContent(body.toString(2))
-        : McpToolRouter.wrapAsTextContent(body.toString(2));
+    return failed ? McpToolRouter.wrapAsErrorContent(body)
+        : McpToolRouter.wrapAsTextContent(body);
   }
 }

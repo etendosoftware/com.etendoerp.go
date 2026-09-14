@@ -1758,6 +1758,44 @@ Making the schema itself tell the truth is the deeper fix and is proposed, not i
 `MCP_CONFIG` section). It touches `validateMandatoryFields`, the write gate for the whole MCP, so it
 was deferred to its own cycle.
 
+#### 4.12.7 Reserved keys are stripped from every MCP tool result (ETP-5306)
+
+`$ref` is a **reserved key inside Google Gemini's `function_response.response`**: it means "a
+pointer to an attached part, resolvable by `display_name`". Openbravo's
+`DataToJsonConverter#toJsonObject` puts one on every serialised record (`JsonConstants.REF`), so
+every row of a `neo_list` / `neo_get` carried:
+
+```json
+"$ref": "BusinessPartner/BC8DDDF69DDA49E9938729F19B0F330E"
+```
+
+Gemini tried to resolve that pointer, found no matching part, and rejected the **entire** request
+with HTTP 400 `INVALID_ARGUMENT` — *"The referenced name `BusinessPartner/BC8D…` in
+function_response.response does not match to a display_name in the function_response.parts"*. The
+rejection is on the tool **result**, so no prompt change and no retry worked around it: the MCP
+server was unusable with any Gemini model as soon as the agent read a record.
+
+Measured against the live gateway with hand-built tool results, the trigger is the **literal key
+name**, irrespective of its value — a `$ref` carrying the string `"hello world"` fails the same
+way. Keys that merely *contain* a `$` are fine, which is why the `xxx$_identifier` columns are
+untouched, and a `"$ref:<opId>"` **value** (the `neo_batch` placeholder, §4.12.4) is untouched too:
+only key names are inspected.
+
+**Where it is stripped.** `McpResponseSanitizer`, called from the JSON overloads of
+`McpToolRouter.wrapAsTextContent` / `wrapAsErrorContent` — the MCP's single content egress, which
+every tool result and every `NeoResponse`-carrying path (`McpHookExecutor.neoResponseToMcpResult`)
+passes through. Stripping is recursive, because rows nest. **The NEO REST API is unchanged**: the
+`$ref` comes from the shared core serialiser, and the MCP removes it on its own way out rather than
+touching that serialiser, so the React SPA and every other REST consumer still get the platform
+shape. The overloads take a `JSONObject` and render it, rather than sanitising rendered text, so no
+number is re-parsed on the way out (jettison would degrade a decimal wider than a `double`).
+
+**Nothing is lost.** The value is exactly `_entityName` + `"/"` + `id`, both already on the same
+row. The construction rule is now declared once per session instead of paid for on every row —
+`McpConstants.RECORD_REF_NOTE`, emitted in the `neo_schema` hint and as the `docs` preamble. That
+makes this an Agent Context Economy win as well as a fix (see the ACE index in
+`schema_forge/docs/mcp-evaluation/mcp-improvements-registry.md`).
+
 ---
 
 ### 4.13 Image Fields and Image Upload (ETP-5184)
