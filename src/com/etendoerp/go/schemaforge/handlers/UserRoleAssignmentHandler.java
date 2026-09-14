@@ -30,6 +30,7 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -125,7 +126,14 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  *   pill fix) attached directly onto the {@code POST} create response itself, right after the
  *   invitation is created (see {@link #inviteNewlyCreatedUser}), so the pill renders on the
  *   detail header's FIRST paint instead of only after a subsequent GET (leaving and re-entering
- *   the record).</li>
+ *   the record). <b>Duplicate-email guard (ETP-5264):</b> because the create form never shows
+ *   {@code username}, a client submitting an email that already belongs to one of its users used
+ *   to fail on the DB's {@code username} unique-constraint violation instead — the derived
+ *   username collides too, but the resulting error names the technical {@code username} column,
+ *   which the user never typed and the frontend ({@code backendErrors.js}) has no mapping for, so
+ *   it surfaced raw and misleadingly. {@link #rejectDuplicateEmail} runs BEFORE the {@code
+ *   username} derivation above and returns a clear 400 instead, so the confusing DB message is
+ *   never reached.</li>
  *
  *   <li><b>Write-path guards on {@code PUT}/{@code PATCH} (ETP-4830 QA rejection cycle 1):</b>
  *   {@link #handle(NeoContext)} rejects two dangerous updates with a 400 BEFORE the default CRUD
@@ -173,6 +181,18 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  *   "the owner can't deactivate themselves" generically — no separate case needed here). A
  *   target that is not flagged as owner (every pre-existing user until a separate,
  *   human-reviewed backfill data-fix runs) never triggers this guard at all.</li>
+ *
+ *   <li><b>Delete-path guards on {@code DELETE} (ETP-5195 Bug 3):</b> {@link
+ *   #handle(NeoContext)} previously had no {@code DELETE} case at all, so a delete request fell
+ *   straight through to the default CRUD delete with none of this window's other guards applied
+ *   — an administrator could delete their own {@code AD_User} record outright. {@link
+ *   #rejectDangerousDelete} now rejects three cases before the default CRUD delete ever runs:
+ *   a self-delete (same {@code actingUserId.equals(userId)} pattern as the deactivation guard
+ *   above), a delete of the record flagged as the client's owner via {@link OwnerSupport#isOwner}
+ *   (unconditional — unlike the update guard's owner protection, the owner is NOT exempt from
+ *   deleting their own record here), and a delete of the last remaining active client-admin
+ *   (reusing {@link #isLastActiveClientAdmin} as-is). Same fail-CLOSED contract as the other
+ *   guards in this class.</li>
  * </ol>
  *
  * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
@@ -187,6 +207,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   private static final String METHOD_POST = "POST";
   private static final String METHOD_PUT = "PUT";
   private static final String METHOD_PATCH = "PATCH";
+  private static final String METHOD_DELETE = "DELETE";
 
   /** {@code AD_User_ID} of the System-client "Admin" and "System" bootstrap accounts. */
   private static final Set<String> HIDDEN_BOOTSTRAP_USER_IDS = Set.of("0", "100");
@@ -207,9 +228,10 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * Pre-hook dispatch: on a {@code user} {@code POST} (create), derives a unique {@code
    * username}; on a {@code user} {@code PUT}/{@code PATCH} (update), guards against the
    * email-immutability and self/last-admin-lockout writes described in the class javadoc's
-   * ETP-4830 write-path-guards concern; on a {@code user} list {@code GET}, excludes
-   * contact-only rows (see {@link #excludeContactOnlyUsers}, ETP-5019). No-op for every other
-   * method/endpoint.
+   * ETP-4830 write-path-guards concern; on a {@code user} {@code DELETE}, guards against the
+   * self/last-admin/owner deletes described in the class javadoc's ETP-5195 delete-guards
+   * concern; on a {@code user} list {@code GET}, excludes contact-only rows (see {@link
+   * #excludeContactOnlyUsers}, ETP-5019). No-op for every other method/endpoint.
    */
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -222,6 +244,9 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     }
     if (METHOD_PUT.equalsIgnoreCase(method) || METHOD_PATCH.equalsIgnoreCase(method)) {
       return validateUpdate(context);
+    }
+    if (METHOD_DELETE.equalsIgnoreCase(method)) {
+      return rejectDangerousDelete(context);
     }
     if (METHOD_GET.equalsIgnoreCase(method) && context.getRecordId() == null) {
       excludeContactOnlyUsers(context);
@@ -268,7 +293,10 @@ public class UserRoleAssignmentHandler implements NeoHandler {
 
   /**
    * Derives a unique {@code username} from {@code email} and the current client, and rejects a
-   * blank/missing email with 400.
+   * blank/missing email with 400. Before that derivation runs, also rejects a duplicate {@code
+   * email} within the same client with a clear 400 (see {@link #rejectDuplicateEmail}, ETP-5264)
+   * — otherwise the derived {@code username} would collide too, and the resulting DB
+   * unique-constraint error would confusingly name a field this create form never shows.
    *
    * <p>No longer validates or reads an admin-typed {@code password} (ETP-4830 removed that
    * temporary bypass — see the class javadoc's concern (3)): invite-email is now the only way
@@ -286,11 +314,15 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     if (email == null) {
       return NeoResponse.error(400, "Field 'email' is required to create a user");
     }
+    String normalizedEmail = email.toLowerCase();
+    OBContext obContext = OBContext.getOBContext();
+    Client client = obContext != null ? obContext.getCurrentClient() : null;
+    NeoResponse duplicateEmailGuard = rejectDuplicateEmail(normalizedEmail, client);
+    if (duplicateEmailGuard != null) {
+      return duplicateEmailGuard;
+    }
     try {
-      String normalizedEmail = email.toLowerCase();
-      OBContext obContext = OBContext.getOBContext();
-      String clientName = obContext != null && obContext.getCurrentClient() != null
-          ? obContext.getCurrentClient().getName() : null;
+      String clientName = client != null ? client.getName() : null;
       requestBody.put(FIELD_USERNAME,
           clientName == null
               ? normalizedEmail
@@ -298,6 +330,32 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     } catch (Exception e) {
       log.warn("UserRoleAssignmentHandler.handle: failed to derive username from email: {}",
           e.getMessage(), e);
+    }
+    return null;
+  }
+
+  /**
+   * Rejects a {@code user} create whose {@code email} (already lowercased by the caller) is
+   * already used by another {@code AD_User} of the same {@code client} — see the class javadoc's
+   * ETP-5264 duplicate-email-guard concern for why this proactive check exists (it stands in for
+   * the DB's own {@code username} unique-constraint, whose violation would otherwise surface a
+   * raw message naming a field this form never shows). Deliberately does NOT filter by {@code
+   * active} — the DB constraint this check stands in for doesn't care about the {@code active}
+   * flag either, so filtering here would create a gap where this pre-check passes but the DB
+   * insert still fails with the confusing raw message. A no-op ({@code null}) when {@code client}
+   * is {@code null} — {@link #handleCreate} still falls through to its own best-effort username
+   * derivation in that case, unchanged from before ETP-5264.
+   */
+  private NeoResponse rejectDuplicateEmail(String normalizedEmail, Client client) {
+    if (client == null) {
+      return null;
+    }
+    OBCriteria<User> criteria = OBDal.getInstance().createCriteria(User.class);
+    criteria.add(Restrictions.eq(User.PROPERTY_CLIENT, client));
+    criteria.add(Restrictions.ilike(User.PROPERTY_EMAIL, normalizedEmail, MatchMode.EXACT));
+    criteria.setMaxResults(1);
+    if (!criteria.list().isEmpty()) {
+      return NeoResponse.error(400, "A user with this email address already exists");
     }
     return null;
   }
@@ -439,6 +497,75 @@ public class UserRoleAssignmentHandler implements NeoHandler {
           userId, e.getMessage(), e);
       // Fail CLOSED: an error here must not silently let a lockout-risking deactivation through.
       return NeoResponse.error(500, "Error validating deactivation: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Pre-hook guard for a {@code user} {@code DELETE}: rejects a self-delete, a delete of the
+   * client's owner record (by anyone, including the owner themself), and a delete of the last
+   * remaining active client-admin. Runs BEFORE the default CRUD delete (this is a {@code
+   * handle()} pre-hook), so a rejection here never lets the record reach the DB delete at all.
+   *
+   * <p><b>ETP-5195 Bug 3.</b> {@link #handle(NeoContext)} previously had no {@code DELETE} case
+   * whatsoever, so a delete request fell straight through to the default CRUD delete with NONE
+   * of this window's existing write-path guards applied — an administrator could delete their
+   * own {@code AD_User} record outright. This mirrors the {@code
+   * actingUserId.equals(userId)} self-check from {@link #rejectDangerousDeactivation}, the
+   * {@link OwnerSupport#isOwner} check from {@link #rejectNonOwnerEditingOwner} (widened here:
+   * unlike the update guard, which lets the owner edit their OWN record, a delete of the owner's
+   * record is blocked unconditionally — the owner is not exempt from deleting themself), and
+   * reuses {@link #isLastActiveClientAdmin} as-is. Same fail-CLOSED reasoning as the other guards
+   * in this class: an unexpected error surfaces a 500 rather than silently letting the delete
+   * proceed.
+   *
+   * @return a 400/500 error response to short-circuit the request, or {@code null} to let the
+   *     default CRUD delete proceed
+   */
+  private NeoResponse rejectDangerousDelete(NeoContext context) {
+    // ETP-5195, R3: resolve the EFFECTIVE target id the same way NeoCrudHandler#buildDalParams
+    // now does — the path id wins when present, otherwise fall back to the query "id" — so this
+    // guard always evaluates the exact same record the CRUD delete will actually touch. Before
+    // this fix, a request like DELETE /sws/neo/user/user/<ordinary-id>?id=<protected-id> let a
+    // query "id" silently override the path id at the CRUD layer while this guard kept looking
+    // only at the path id, so guard and delete disagreed on the target; a path-less DELETE
+    // .../user?id=<protected-id> bypassed the guard outright, since it bailed out immediately
+    // below with no query fallback at all.
+    String userId = context.getRecordId();
+    if (userId == null && context.getQueryParams() != null) {
+      userId = context.getQueryParams().get(FIELD_ID);
+    }
+    if (userId == null) {
+      return null;
+    }
+    OBContext obContext = context.getObContext();
+    String actingUserId = obContext != null && obContext.getUser() != null
+        ? obContext.getUser().getId() : null;
+    if (actingUserId != null && actingUserId.equals(userId)) {
+      return NeoResponse.error(400, "You cannot delete your own user account");
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        if (OwnerSupport.isOwner(userId)) {
+          return NeoResponse.error(400, "This user is the tenant owner and cannot be deleted");
+        }
+        User targetUser = OBDal.getInstance().get(User.class, userId);
+        if (targetUser == null) {
+          return null;
+        }
+        if (isLastActiveClientAdmin(targetUser)) {
+          return NeoResponse.error(400,
+              "Cannot delete the last active administrator for this client");
+        }
+        return null;
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("UserRoleAssignmentHandler.rejectDangerousDelete error for user {}: {}", userId,
+          e.getMessage(), e);
+      // Fail CLOSED: an error here must not silently let a dangerous delete through unverified.
+      return NeoResponse.error(500, "Error validating delete: " + e.getMessage());
     }
   }
 

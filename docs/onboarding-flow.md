@@ -29,11 +29,10 @@ removed, or reordered.
  5. orgReady            — mark the org as ready (AD_ORG.isready = Y)
  6. fiscal              — seed SII descriptions (AEATSII_DESCRIPTION)
  7. orgInfo             — wire org fiscal/address info from the signup form
- 8. bankConnectionSync  — schedule the PSD2 daily bank-statement sync (non-fatal; wired live 2026-06-28)
- 9. costingSchedule     — schedule the 5-minute Costing Background process (non-fatal, ETP-5190)
-10. bpGroupAcctPatch    — patch C_BP_Group_Acct columns the core trigger never populates (ETP-4720)
-11. acctdimVisibility   — force flat accounting-dimension visibility (gap K1, ETP-4854)
-12. baseline            — stamp the tenant's data-fix baseline (registerBaseline; always LAST)
+ 8. costingSchedule     — schedule the 5-minute Costing Background process (non-fatal, ETP-5190)
+ 9. bpGroupAcctPatch    — patch C_BP_Group_Acct columns the core trigger never populates (ETP-4720)
+10. acctdimVisibility   — force flat accounting-dimension visibility (gap K1, ETP-4854)
+11. baseline            — stamp the tenant's data-fix baseline (registerBaseline; always LAST)
 ```
 
 The `orgReady` and `fiscal` steps were added to fix the "environment not ready
@@ -41,7 +40,7 @@ for invoicing" error that occurred when the org-accessibility filter hid all
 org-scoped records because `isready=N`.
 
 **Removed in ETP-5079 — the `customer` step.** Onboarding used to run a
-`customer` step between `orgInfo` and `bankConnectionSync` that created a
+`customer` step between `orgInfo` and `costingSchedule` that created a
 synthetic "Default Customer" `C_BPARTNER` (search key
 `ONBOARDING_DEFAULT_CUSTOMER`), its address and a "Default Customer Contact"
 `AD_User`, so a demo Sales Invoice had a counterparty. **A new tenant is now
@@ -60,7 +59,35 @@ are all gone. Two consequences worth knowing:
   — without that change onboarding would finish provisioning and then refuse to
   let the user into the new environment.
 
-Steps 8–10 are corrective/preventive gap-closing steps layered on top of the
+**Removed in ETP-5275 — the `bankConnectionSync` step.** Onboarding used to run
+a `bankConnectionSync` step (wired live 2026-06-28) that created one daily
+`AD_Process_Request` per client for the PSD2 `Get Bank Statements` process
+(`PSD2_GetBankStatements`, `AD_Process` `F8704AB553464EFEABF8A5A82C74A308`),
+firing at a random time in the 03:00–06:00 window, plus a post-commit
+`activateSchedule(clientId)` companion right after `commitDalChanges`. **A new
+tenant is now born with no bank-statement schedule.** (It does still get the
+`costingSchedule` one from step 8 — ETP-5190, unrelated to PSD2.) The service
+(`OnboardingBankConnectionSyncService`), its servlet step, its helper
+`scheduleBankConnectionSync`, its `bankConnectionSync` NDJSON progress events
+and the `PROGRESS_BANK_CONNECTION_SYNC` constant are all gone. Three
+consequences worth knowing:
+* The PSD2 module is untouched. The `AD_Process` stays installed and a user (or
+  an operator) can still schedule it by hand from Classic's "Proceso
+  Programado" window — only the automatic per-tenant provisioning is gone.
+  `PSD2_RefreshPendingPayments` was never part of this step and is unaffected.
+* Existing tenants keep the schedule this step already created for them. The
+  corrective half is a data-fix in the functional repo
+  (`R36-psd2-bank-statement-schedule-removal`), which deletes those rows. It
+  deliberately keys on the `AD_Process` id, never on the process name, so the
+  separate `Get Bank Statements (All Clients)` process is left alone. Note the
+  delete cannot be a plain `DELETE`: core's `AD_PROCESS_REQUEST_TRG` refuses one
+  while the request is still `'SCH'`, so the fix unschedules to `'UNS'` first in
+  the same transaction.
+* `ONBOARDING_PROVISIONED_THROUGH` is deliberately NOT bumped — same reasoning
+  as ETP-5079: moving it forward would silently suppress the still-wanted fixes
+  stamped before it for every new tenant.
+
+Steps 9–10 are corrective/preventive gap-closing steps layered on top of the
 original five (`accounting`, `periodControl`, `orgInfo` predate them too, ETP
 numbers as noted). `baseline` is always the final step — it stamps
 `ONBOARDING_PROVISIONED_THROUGH` (in `OnboardingBaselineService`) so the
@@ -179,18 +206,14 @@ Step 7. Wires the org's fiscal/address information collected on the signup
 form (country, fiscal ID, address) onto the newly created `AD_Org`/legal
 entity.
 
-### `OnboardingBankConnectionSyncService`
-Step 8. Intentionally **non-fatal** — always returns `true` and swallows
-errors (logs + `done` "skipped"). Schedules one daily `AD_Process_Request` per
-client that runs PSD2 `Get Bank Statements`, so Salt Edge-connected accounts
-auto-import statements. Has a post-commit companion,
-`activateSchedule(clientId)`, called right after `commitDalChanges` (not
-inside this chain) because the Quartz scheduler needs a committed row.
-
 ### `OnboardingCostingScheduleService`
-Step 9 (ETP-5190). Same shape as step 8 and equally **non-fatal**: one
+Step 8 (ETP-5190). **Non-fatal**, like every step in this chain: it always
+returns `true` and swallows errors (logs + `done` "skipped"). Creates one
 `AD_Process_Request` per client running core's `CostingBackground` process every
-5 minutes, plus the post-commit `activateSchedule(clientId)` companion.
+5 minutes, plus a post-commit `activateSchedule(clientId)` companion called
+right after `commitDalChanges` (not inside this chain) because the Quartz
+scheduler needs a committed row. **This is the only schedule onboarding still
+creates** — ETP-5275 removed the PSD2 bank-statement one.
 
 Why it is needed: onboarding already imports a **validated** costing rule
 (`M_COSTING_RULE` is on `OnboardingDatasetDefinition`'s allowlist and the
@@ -198,7 +221,8 @@ GOClient row ships `ISVALIDATED='Y'`), but nothing ever ran the process that
 consumes it, so no tenant calculated costs. Measured before the fix: 83
 validated costing rules across 74 clients, and **two** `CostingBackground`
 requests in the whole instance — both hand-made (core's F&B demo client, and
-GOClient). Over the same period the step-8 PSD2 schedule stood at 74/74.
+GOClient). Over the same period the PSD2 bank-statement schedule that onboarding
+created back then (removed by ETP-5275) stood at 74/74.
 
 Three things worth knowing before touching it:
 
@@ -222,10 +246,10 @@ Three things worth knowing before touching it:
 before this step have no costing schedule and calculate no costs until someone
 adds the Process Request by hand in Classic. That was an explicit call on
 ETP-5190 (new tenants are enough), not a pending task: there is deliberately no
-`cli/src/data-fixes/` twin, unlike steps 10 and 11.
+`cli/src/data-fixes/` twin, unlike steps 9 and 10.
 
 ### `OnboardingAcctdimCentrallyMaintainedService`
-Step 11 (`forceFlatAccountingDimensionVisibility`, ETP-4854, gap K1). Backfills
+Step 10 (`forceFlatAccountingDimensionVisibility`, ETP-4854, gap K1). Backfills
 `C_AcctSchema_Element.isactive` per elementtype from the client's current
 effective `AD_Client.<Dim>_Acctdim_*` config, then flips
 `AD_Client.Acctdim_Centrally_Maintained` to `'N'` so the "Dimensiones
@@ -254,7 +278,7 @@ backfill is what makes that flat switch a reliable source for a tenant from birt
 `AccountingDimensionsSupport`'s own class javadoc for the full history.
 
 ### `OnboardingBaselineService`
-Step 12, always last. Stamps the data-fix baseline row (`applied_utc =
+Step 11, always last. Stamps the data-fix baseline row (`applied_utc =
 ONBOARDING_PROVISIONED_THROUGH`, a hardcoded cutoff — NOT `now()`) so the
 corrective data-fix runner knows which fixes a freshly-onboarded tenant
 already has natively and skips them. Single source of truth for the
@@ -296,6 +320,21 @@ every document type, with the Spanish wording in `C_DOCTYPE_TRL`. Two
 along with all four `FIN_PAYMENTMETHOD` rows. Corrective twin for
 already-provisioned tenants: `R31-document-sequence-startno` in
 `etendo_schema_forge`, which covers the sequences.
+
+**Dataset content corrected by ETP-5245 — `ISDEFAULT` on the price lists.**
+`referencedata/sampledata/GOClient/M_PRICELIST.xml` shipped both curated tariffs
+with `ISDEFAULT='N'`, so a newly onboarded tenant had **no** default price list
+in either direction. Four independent consumers disambiguate tariffs with
+`isdefault` and all of them degrade silently without it: the
+`ETGO_PRODUCT_SALE_PRICE` / `ETGO_PRODUCT_PURCHASE_PRICE` computed columns
+(`ORDER BY (pl.isdefault = 'Y') DESC, …`), the frontend `PriceListPicker`, the
+`R33` standard-cost anchor fix, and the `PriceListVersionResolver` that ETP-5245
+uses to seed a new product's zero prices. Both rows are now `ISDEFAULT='Y'` —
+one per direction (`Tarifa de venta principal` `ISSOPRICELIST='Y'`,
+`Tarifa de compra principal` `ISSOPRICELIST='N'`) — and
+`DefaultPriceListSampleDataTest` pins the invariant. Corrective twin for
+already-provisioned tenants: `R35-pricelist-isdefault` in `etendo_schema_forge`;
+the full analysis lives there, in `docs/etendo-ad/onboarding-gaps.md` § N5.
 
 ## NDJSON Progress Events
 
