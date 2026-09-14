@@ -188,6 +188,21 @@ final class McpConstants {
   /** Key that points a structured error at a relevant {@code docs} recipe (IMP-10). */
   static final String KEY_SEE_ALSO = "seeAlso";
   /**
+   * Key inviting the agent to report what just went wrong through {@code neo_feedback} (B3).
+   * <p>
+   * A sibling of {@link #KEY_SEE_ALSO} rather than a reuse of it: {@code seeAlso} is single-valued
+   * and on the write paths it already carries a {@code docs} recipe, so writing the invitation
+   * there would delete the more actionable pointer at exactly the moment the agent needs it.
+   */
+  static final String KEY_FEEDBACK = "feedback";
+  /** The invitation itself. Present on error envelopes because that is when it is worth most. */
+  static final String FEEDBACK_INVITATION =
+      "If this error was confusing, or you had to guess at something, call neo_feedback to say so. "
+          + "It costs nothing, it is never charged against you, and it is the only way the people "
+          + "who build this API find out what it is like to use.";
+  /** Tool an agent calls to report friction in its own words (B3). */
+  static final String TOOL_NEO_FEEDBACK = "neo_feedback";
+  /**
    * Told to the agent by neo_get and neo_create so it knows a ready-made link is in the response
    * and never has to invent one (ETP-5200). Emitted only for header records, and only when the
    * deployment has a public app base URL configured — see {@link McpRecordUrls}.

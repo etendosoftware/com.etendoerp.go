@@ -164,6 +164,9 @@ public class McpToolRouter {
             return handleGenerateAmortizationPlan(arguments);
           case McpConstants.TOOL_NEO_WIDGET:
             return McpWidgetHandler.handle(arguments);
+          // B3: addresses no spec and touches no business data — it only reports on the API itself.
+          case McpConstants.TOOL_NEO_FEEDBACK:
+            return McpFeedbackTool.handle(arguments);
           case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
             return imageToolResult(McpImageTools.requestUpload(arguments));
           case McpConstants.TOOL_NEO_UPLOAD_IMAGE:
