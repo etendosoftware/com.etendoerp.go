@@ -21,7 +21,7 @@ structural, and it is the primary correctness requirement:
   and the response is already written to the caller, before a row is even enqueued.
 - The write happens on a single daemon thread fed by a **bounded** queue (2 000 rows). The caller
   pays a queue offer, not a database round-trip. A full queue drops the row.
-- `McpUsageLogger.record`, the writer task, and `McpServlet.recordToolCall` each catch `Throwable`.
+- `McpUsageLogger.enqueue`, the writer task, and `McpServlet.recordToolCall` each catch `Throwable`.
   There is no code path from a telemetry failure back to the caller or to the tool result.
 
 Accepted costs, stated plainly: rows buffered at shutdown are lost, and rows are dropped rather

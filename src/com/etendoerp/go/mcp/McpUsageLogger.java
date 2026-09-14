@@ -229,7 +229,7 @@ final class McpUsageLogger {
    *
    * @param row the already-resolved row; ignored when null or when telemetry is disabled
    */
-  static void record(McpUsageRow row) {
+  static void enqueue(McpUsageRow row) {
     if (row == null || !isEnabled()) {
       return;
     }

@@ -20,11 +20,9 @@ package com.etendoerp.go.mcp;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 
 import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
@@ -156,8 +154,8 @@ public class McpServlet extends HttpServlet {
 
       // AFTER the business transaction has been committed and closed by McpSessionManager, and
       // after the caller already has its answer: nothing below can affect either.
-      recordToolCall(identity, request, toolName, callParams, result, null,
-          body, rendered, startedAtNanos);
+      recordToolCall(identity, new McpCallObservation(request, body, rendered, startedAtNanos),
+          toolName, callParams, result, null);
 
     } catch (Exception e) {
       log.error("Error processing MCP message: {}", e.getMessage(), e);
@@ -171,8 +169,8 @@ public class McpServlet extends HttpServlet {
         response.setStatus(HttpServletResponse.SC_OK);
         response.getWriter().write(rendered);
 
-        recordToolCall(identity, request, toolName, callParams, null,
-            McpConstants.ERROR_SERVER, body, rendered, startedAtNanos);
+        recordToolCall(identity, new McpCallObservation(request, body, rendered, startedAtNanos),
+            toolName, callParams, null, McpConstants.ERROR_SERVER);
       } catch (Exception ex) {
         response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
         response.getWriter().write("{\"error\":\"Internal server error\"}");
@@ -213,21 +211,18 @@ public class McpServlet extends HttpServlet {
    * @param forcedErrorCode the canonical code to record when the call blew up before producing a
    *     result envelope; null when {@code result} carries its own outcome
    */
-  private void recordToolCall(AuthIdentity identity, HttpServletRequest request, String toolName,
-      JSONObject params, JSONObject result, String forcedErrorCode, String requestBody,
-      String responseBody, long startedAtNanos) {
+  private void recordToolCall(AuthIdentity identity, McpCallObservation call, String toolName,
+      JSONObject params, JSONObject result, String forcedErrorCode) {
     try {
       if (StringUtils.isBlank(toolName) || !McpUsageLogger.isEnabled()) {
         return;
       }
       JSONObject arguments = params != null ? params.optJSONObject("arguments") : null;
-      String sessionKey = StringUtils.trimToNull(
-          request.getHeader(McpUsageTelemetry.HEADER_SESSION_ID));
+      String sessionKey = call.sessionKey();
       McpUsageTelemetry.ClientInfo client = McpUsageTelemetry.clientInfo(sessionKey);
 
       boolean failed = forcedErrorCode != null || McpUsageTelemetry.isError(result);
-      String errorCode = forcedErrorCode != null ? forcedErrorCode
-          : (failed ? McpUsageTelemetry.errorCodeFrom(result) : null);
+      String errorCode = errorCodeToRecord(forcedErrorCode, failed, result);
 
       // B3/D31: a neo_feedback call IS a tool call, so it produces exactly ONE row — this one —
       // discriminated by row_type and carrying the report. It therefore inherits the session,
@@ -237,7 +232,7 @@ public class McpServlet extends HttpServlet {
       boolean isFeedback = McpConstants.TOOL_NEO_FEEDBACK.equals(toolName);
       String payload = (isFeedback && !failed) ? McpFeedbackTool.payloadFor(arguments) : null;
 
-      McpUsageLogger.record(McpUsageRow.builder()
+      McpUsageLogger.enqueue(McpUsageRow.builder()
           .clientId(identity != null ? identity.clientId : null)
           .orgId(identity != null ? identity.orgId : null)
           .userId(identity != null ? identity.userId : null)
@@ -248,9 +243,9 @@ public class McpServlet extends HttpServlet {
           .fieldsTouched(McpUsageTelemetry.fieldsTouched(arguments))
           .outcome(failed ? McpUsageRow.OUTCOME_ERROR : McpUsageRow.OUTCOME_OK)
           .errorCode(errorCode)
-          .durationMs(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos))
-          .reqBytes(byteLength(requestBody))
-          .respBytes(byteLength(responseBody))
+          .durationMs(call.durationMs())
+          .reqBytes(call.reqBytes())
+          .respBytes(call.respBytes())
           .clientName(client.getName())
           .clientVersion(client.getVersion())
           .rowType(isFeedback ? McpUsageRow.ROW_TYPE_FEEDBACK : McpUsageRow.ROW_TYPE_TOOL_CALL)
@@ -261,8 +256,25 @@ public class McpServlet extends HttpServlet {
     }
   }
 
-  private static Long byteLength(String value) {
-    return value == null ? null : (long) value.getBytes(StandardCharsets.UTF_8).length;
+  /**
+   * The canonical error code to store on the row, or null when the call succeeded.
+   *
+   * <p>Its own method rather than a nested ternary (java:S3358): this expression decides whether a
+   * call is remembered as failed and under which code, so it is worth reading at a glance. The
+   * order matters — a {@code forcedErrorCode} is set when the call blew up <i>before</i> producing
+   * a result envelope, so there is no envelope to derive a code from and it wins outright.</p>
+   *
+   * @param forcedErrorCode the code imposed by the caller, or null to derive one
+   * @param failed          whether the call is being recorded as a failure
+   * @param result          the tool result envelope, which may carry its own code
+   * @return the code to store, or null for a successful call
+   */
+  private static String errorCodeToRecord(String forcedErrorCode, boolean failed,
+      JSONObject result) {
+    if (forcedErrorCode != null) {
+      return forcedErrorCode;
+    }
+    return failed ? McpUsageTelemetry.errorCodeFrom(result) : null;
   }
 
   // ── GET: Server info / health check ────────────────────────────────────
