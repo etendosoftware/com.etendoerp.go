@@ -28,6 +28,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Savepoint;
+import java.util.regex.Pattern;
 
 import javax.inject.Named;
 
@@ -42,6 +43,7 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
+import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 
 /**
@@ -63,6 +65,19 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  *       (merging with the persisted values for whichever part is absent from the body)
  *       only when the record's current {@code name} is blank in the database.</li>
  * </ul>
+ *
+ * <p>On POST/PATCH/PUT, {@code handle()} also rejects a malformed {@code TaxID} (ETP-5031)
+ * before it is stored. Dispatch is keyed by the sibling {@code EM_OBTIK_Tax_ID_Key} field on the
+ * SAME record: {@code "1"} (NIF) is checked with {@link SpanishTaxIdValidator} — the same
+ * algorithm {@link com.etendoerp.go.schemaforge.handlers.OrganizationInformationHandler} applies
+ * to {@code AD_OrgInfo.TaxID} (ETP-5190) — {@code "3"} (Pasaporte) is checked against the ICAO
+ * Doc 9303 shape (up to 9 letters/digits, no check digit), and every other value is left
+ * unvalidated. Unlike the Organization window, this is deliberately NOT gated on country: a
+ * Business Partner carries no country of its own (only its addresses do), and
+ * {@code oBTIKTaxIDKey} is already the semantic discriminator for the foreign case (value
+ * {@code "4"}). To keep dirty legacy data editable, the check only runs on create or when the
+ * incoming {@code TaxID} differs from what is already persisted — see
+ * {@link #validateTaxId(NeoContext, JSONObject, String)}.
  *
  * <p>On GET (single record, i.e. {@code /contacts/businessPartner/{id}}):
  * <ul>
@@ -119,6 +134,23 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   private static final String FIELD_CURRENCY = "bPCurrencyID";
   private static final String FIELD_CUSTOMER = "customer";
   private static final String FIELD_VENDOR = "vendor";
+
+  // ETP-5031 — TaxID validation. Field names mirror the contract (artifacts/contacts/contract.json).
+  private static final String FIELD_TAX_ID = "taxID";
+  private static final String FIELD_TAX_ID_KEY = "oBTIKTaxIDKey";
+  /** {@code EM_OBTIK_Tax_ID_Key} enum value for "NIF" (see the window's decisions.json). */
+  private static final String TAX_ID_KEY_NIF = "1";
+  /** {@code EM_OBTIK_Tax_ID_Key} enum value for "Pasaporte". */
+  private static final String TAX_ID_KEY_PASSPORT = "3";
+  /** ICAO Doc 9303 passport number shape: up to 9 letters/digits, no check digit. */
+  private static final Pattern PASSPORT_PATTERN = Pattern.compile("^[A-Z0-9]{1,9}$");
+  /**
+   * Raw English literal returned as-is (same mechanism as {@link SpanishTaxIdValidator}'s own
+   * messages): the frontend's {@code BACKEND_ERROR_MAP} (`lib/backendErrors.js`) maps this exact
+   * string to an i18n key. Keep both sides in sync when changing this text.
+   */
+  private static final String ERR_PASSPORT_FORMAT =
+      "The passport ID is not valid. It must be up to 9 letters or digits.";
 
   // ETP-4565 posting-account backfill (see provisionMissingBpAcctRows()): scoped to a single
   // already-persisted business partner (bound by ? = c_bpartner_id) instead of a client-wide
@@ -323,6 +355,11 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       return null;
     }
     try {
+      NeoResponse taxIdError = validateTaxId(ctx, body, method);
+      if (taxIdError != null) {
+        return taxIdError;
+      }
+
       deriveName(ctx, body);
 
       if ("POST".equals(method)) {
@@ -340,9 +377,92 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       }
     } catch (Exception e) {
       log.error("BusinessPartnerHandler: error in handle()", e);
-      throw new OBException("Error processing BusinessPartner name derivation", e);
+      throw new OBException("Error processing BusinessPartner pre-save hooks", e);
     }
     return null;
+  }
+
+  /**
+   * Pre-hook guard: rejects a malformed {@code TaxID} before it is stored (ETP-5031). See the
+   * class javadoc for the full dispatch and legacy-data rules.
+   *
+   * @return an error {@link NeoResponse} when the value is rejected, {@code null} to continue
+   *     with the default CRUD
+   */
+  private NeoResponse validateTaxId(NeoContext ctx, JSONObject body, String method) throws Exception {
+    if (!body.has(FIELD_TAX_ID)) {
+      // A write that does not touch TaxID must not be re-validated against an already-stored
+      // value it is not sending — otherwise a dirty legacy value would block every later edit,
+      // including the edit that fixes it.
+      return null;
+    }
+    String taxId = StringUtils.trimToNull(body.optString(FIELD_TAX_ID, null));
+    if (taxId == null) {
+      // Clearing the field is the `required` mechanism's business, not the format rules'.
+      return null;
+    }
+
+    String[] persisted = null;
+    if (!"POST".equals(method)) {
+      String recordId = ctx.getRecordId();
+      if (StringUtils.isBlank(recordId)) {
+        return null;
+      }
+      persisted = queryPersistedTaxIdParts(recordId);
+      if (taxId.equals(StringUtils.trimToNull(persisted[0]))) {
+        // Unchanged from what is already persisted: never block edits to unrelated fields on a
+        // record carrying a dirty legacy TaxID.
+        return null;
+      }
+    }
+
+    String taxIdKey = resolveTaxIdKey(body, persisted);
+
+    if (TAX_ID_KEY_NIF.equals(taxIdKey)) {
+      switch (SpanishTaxIdValidator.validate(taxId)) {
+        case BAD_FORMAT:
+          return NeoResponse.error(400, SpanishTaxIdValidator.ERR_FORMAT);
+        case BAD_CHECK_DIGIT:
+          return NeoResponse.error(400, SpanishTaxIdValidator.ERR_CHECK_DIGIT);
+        default:
+          return null;
+      }
+    }
+    if (TAX_ID_KEY_PASSPORT.equals(taxIdKey)) {
+      String normalized = taxId.toUpperCase();
+      return PASSPORT_PATTERN.matcher(normalized).matches() ? null : NeoResponse.error(400, ERR_PASSPORT_FORMAT);
+    }
+    return null;
+  }
+
+  /**
+   * Resolves the document-type key ({@code EM_OBTIK_Tax_ID_Key}) to dispatch on: the body's own
+   * value when the request sends it, otherwise the persisted value queried for the legacy-data
+   * check above (so a PATCH that omits the key still dispatches on what the record actually is).
+   */
+  private static String resolveTaxIdKey(JSONObject body, String[] persisted) {
+    if (body.has(FIELD_TAX_ID_KEY)) {
+      return StringUtils.trimToNull(body.optString(FIELD_TAX_ID_KEY, null));
+    }
+    return persisted != null ? StringUtils.trimToNull(persisted[1]) : null;
+  }
+
+  /**
+   * Returns {@code [taxId, taxIdKey]} for the given business partner, or two {@code null}s when
+   * the record does not exist (a race between the PATCH request and a concurrent delete).
+   */
+  private static String[] queryPersistedTaxIdParts(String recordId) throws Exception {
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(
+        "SELECT taxid, em_obtik_tax_id_key FROM c_bpartner WHERE c_bpartner_id = ?")) {
+      ps.setString(1, recordId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          return new String[]{ rs.getString(1), rs.getString(2) };
+        }
+      }
+    }
+    return new String[]{ null, null };
   }
 
   /**
