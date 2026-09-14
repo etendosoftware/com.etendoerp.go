@@ -24,9 +24,9 @@ import org.apache.commons.lang3.StringUtils;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 
 /**
- * Excludes Service-type products ({@code M_Product.ProductType == "S"}) from the Product
- * selector of any line entity that represents a physical inventory movement (ETP-4606):
- * Goods Movement lines ({@code movementLine}), Physical Inventory lines
+ * Excludes Service-type products ({@code M_Product.ProductType == "S"}) and zero-stock rows
+ * from the Product selector of any line entity that represents a physical inventory movement
+ * (ETP-4606, ETP-5282): Goods Movement lines ({@code movementLine}), Physical Inventory lines
  * ({@code inventoryLine}) and Internal Consumption lines ({@code internalConsumptionLine}) —
  * all three are not-stockable-safe contexts, same business rule.
  *
@@ -35,6 +35,16 @@ import com.etendoerp.go.schemaforge.NeoSelectorService;
  * is the write pre-hook on the corresponding NeoHandler — {@code goodsMovementLineHandler},
  * {@code inventoryLine}, {@code internalConsumptionLineHandler}) — it just keeps non-stockable
  * products out of the search results in the first place.
+ *
+ * <p>ETP-5282: {@code M_PRODUCT_STOCK_V} is a {@code UNION ALL} of real stock rows and a
+ * synthetic "every active product, {@code qtyonhand = 0}, no locator" row (marked
+ * {@code stocked = 'N'}) so every product is pickable somewhere in the app (e.g. receipts,
+ * which must offer never-stocked products too). That view is intentionally left untouched —
+ * other consumers rely on the synthetic row. For these three movement-line contexts, though,
+ * the synthetic row is exactly the bug: it lets a zero-stock product be picked for a movement
+ * that needs real stock to move. The fix filters it out here, at the row level: a product with
+ * stock at one locator and none at another keeps the real-stock row and loses only the
+ * zero-stock one, it is never excluded as a whole.
  *
  * <p>Scoped via the internal {@link NeoSelectorService#SOURCE_ENTITY_NAME_PARAM} context param
  * that {@code NeoSelectorService} injects from the requesting Schema Forge entity. A plain
@@ -50,6 +60,11 @@ public final class GoodsMovementProductSelectorPolicy implements SelectorContext
   private static final String ENTITY_PRODUCT_STOCK_VIEW = "ProductStockView";
   private static final String FILTER_SUFFIX_DIRECT = ".productType <> 'S'";
   private static final String FILTER_SUFFIX_VIA_PRODUCT = ".product.productType <> 'S'";
+  // ProductStockView.stocked is the view's own 'Y'/'N' flag (ETP-5282): 'Y' on real
+  // m_storage_detail rows, 'N' on the synthetic zero-stock row unioned in for every active
+  // product. It is a direct property of the row itself, so it is NOT traversed via `.product`
+  // like productType is.
+  private static final String FILTER_SUFFIX_STOCKED = ".stocked = true";
 
   public GoodsMovementProductSelectorPolicy() {
     // Stateless policy; public constructor supports registry composition without CDI.
@@ -74,8 +89,12 @@ public final class GoodsMovementProductSelectorPolicy implements SelectorContext
     String effectiveAlias = StringUtils.isNotBlank(alias) ? alias : "e";
     // ProductStockView (M_Product_Stock_V) has no direct productType column — it exposes the
     // FK `product` instead, so the filter must traverse it. The plain `Product` entity exposes
-    // productType directly.
-    String suffix = ENTITY_PRODUCT_STOCK_VIEW.equals(entityName) ? FILTER_SUFFIX_VIA_PRODUCT : FILTER_SUFFIX_DIRECT;
-    return effectiveAlias + suffix;
+    // productType directly. Stock presence (ETP-5282) can only be checked on ProductStockView
+    // itself — the plain `Product` entity carries no stock information at all — so that
+    // condition is appended only for the ProductStockView branch.
+    if (ENTITY_PRODUCT_STOCK_VIEW.equals(entityName)) {
+      return effectiveAlias + FILTER_SUFFIX_VIA_PRODUCT + " and " + effectiveAlias + FILTER_SUFFIX_STOCKED;
+    }
+    return effectiveAlias + FILTER_SUFFIX_DIRECT;
   }
 }
