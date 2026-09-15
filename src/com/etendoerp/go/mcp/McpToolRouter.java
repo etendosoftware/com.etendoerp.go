@@ -98,6 +98,8 @@ import com.etendoerp.go.schemaforge.util.NeoReportCallability;
 public class McpToolRouter {
 
   private static final Logger log = LogManager.getLogger(McpToolRouter.class);
+  /** Shared by the three funnels that wrap a failure into MCP content (java:S1192). */
+  private static final String ERROR_BUILDING_CONTENT = "Error building MCP error content";
   private static final String ACCESS_DENIED_FOR_CURRENT_ROLE_SUFFIX = "' for current role";
   /** OBPreference property name holding the optional Context7 API token. */
   static final String PREF_CONTEXT7_TOKEN = "ETGO_Context7Token";
@@ -217,11 +219,13 @@ public class McpToolRouter {
       // IMP-41: `targets` is optional, and omitting it means "search everywhere I may read".
       // The MCP surface exposes no `namespaces` alternative, so demanding a target up front asked
       // the agent for the one thing a natural-language question does not come with.
-      List<String> allowed = NeoVectorSearchEndpoint.authorizedTargetKeys();
-      if (allowed != null && allowed.isEmpty()) {
+      java.util.Optional<List<String>> allowed = NeoVectorSearchEndpoint.authorizedTargetKeys();
+      if (allowed.isPresent() && allowed.get().isEmpty()) {
         return wrapAsErrorContent(buildNoSearchableTargetsBody());
       }
-      targets = allowed == null ? null : String.join(",", allowed);
+      // Absent means the catalogue could not be read at all, which is not the same as "you may
+      // search nothing": leave targets null so the endpoint decides, as it did before IMP-41.
+      targets = allowed.map(keys -> String.join(",", keys)).orElse(null);
     }
     NeoResponse response = new NeoVectorSearchEndpoint().handle(query, null, targets,
         McpArgumentUtils.optionalString(arguments, "topK"),
@@ -254,7 +258,7 @@ public class McpToolRouter {
           + "Use neo_list or neo_selectors to find the record instead.");
       return envelope;
     } catch (JSONException e) {
-      throw new McpToolException("Error building MCP error content", e);
+      throw new McpToolException(ERROR_BUILDING_CONTENT, e);
     }
   }
 
@@ -544,10 +548,12 @@ public class McpToolRouter {
     if (arguments == null) {
       return;
     }
-    java.util.Set<String> declared = ToolRegistry.declaredArgumentNames(toolName);
-    if (declared == null) {
+    java.util.Optional<java.util.Set<String>> maybeDeclared =
+        ToolRegistry.declaredArgumentNames(toolName);
+    if (!maybeDeclared.isPresent()) {
       return;
     }
+    java.util.Set<String> declared = maybeDeclared.get();
     Iterator<String> keys = arguments.keys();
     while (keys.hasNext()) {
       String key = keys.next();
@@ -1917,7 +1923,7 @@ public class McpToolRouter {
     try {
       return wrapAsErrorContent(McpResponseSanitizer.render(body));
     } catch (JSONException e) {
-      throw new McpToolException("Error building MCP error content", e);
+      throw new McpToolException(ERROR_BUILDING_CONTENT, e);
     }
   }
 
@@ -1961,7 +1967,7 @@ public class McpToolRouter {
       result.put("isError", true);
       return result;
     } catch (JSONException e) {
-      throw new McpToolException("Error building MCP error content", e);
+      throw new McpToolException(ERROR_BUILDING_CONTENT, e);
     }
   }
 }

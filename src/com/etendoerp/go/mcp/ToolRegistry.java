@@ -33,6 +33,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import org.apache.logging.log4j.LogManager;
@@ -574,7 +575,8 @@ public class ToolRegistry {
 
   /** Build the read-only DB Extended semantic-search tool. */
   McpToolDefinition buildVectorSearchTool() {
-    return buildVectorSearchTool(NeoVectorSearchEndpoint.configuredTargetKeys());
+    return buildVectorSearchTool(
+        NeoVectorSearchEndpoint.configuredTargetKeys().orElse(List.of()));
   }
 
   /**
@@ -634,9 +636,11 @@ public class ToolRegistry {
    * and are therefore not guarded.</p>
    *
    * @param toolName the tool being called
-   * @return the declared argument names, or {@code null} when this tool is not guarded
+   * @return the declared argument names, or {@link Optional#empty()} when this tool is not guarded.
+   *     Empty and absent are different answers here: an empty set would mean "this tool declares no
+   *     arguments, so reject every one", which is the opposite of "do not check this tool".
    */
-  static Set<String> declaredArgumentNames(String toolName) {
+  static Optional<Set<String>> declaredArgumentNames(String toolName) {
     ToolRegistry registry = new ToolRegistry();
     McpToolDefinition definition;
     switch (toolName) {
@@ -648,17 +652,17 @@ public class ToolRegistry {
       case "neo_selectors": definition = registry.buildSelectorsTool(List.of()); break;
       case "neo_defaults": definition = registry.buildDefaultsTool(List.of()); break;
       case "neo_schema": definition = registry.buildSchemaTool(List.of()); break;
-      default: return null;
+      default: return Optional.empty();
     }
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
     if (!(props instanceof Map)) {
-      return null;
+      return Optional.empty();
     }
     Set<String> names = new java.util.LinkedHashSet<>();
     for (Object key : ((Map<?, ?>) props).keySet()) {
       names.add(String.valueOf(key));
     }
-    return names;
+    return Optional.of(names);
   }
 
   private McpToolDefinition buildListTool(List<String> specNames) {

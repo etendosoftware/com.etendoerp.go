@@ -2,7 +2,6 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import javax.servlet.http.HttpServletRequest;
@@ -220,7 +219,7 @@ public class NeoVectorSearchEndpointTest {
         namespaces -> true,
         (targets, query, topK, minScore, maxScore) -> "{\"items\":[]}",
         targets -> authorized,
-        () -> knownKeys);
+        () -> java.util.Optional.ofNullable(knownKeys));
   }
 
   // ── IMP-41: unknown-vs-forbidden target refusal ────────────────────────
@@ -345,18 +344,20 @@ public class NeoVectorSearchEndpointTest {
    * IS the failure mode under test.
    */
   @Test
-  public void configuredTargetKeysReturnsNullWhenNoLiveSessionExists() {
-    assertNull(NeoVectorSearchEndpoint.configuredTargetKeys());
+  public void configuredTargetKeysReturnsEmptyOptionalWhenNoLiveSessionExists() {
+    assertFalse(NeoVectorSearchEndpoint.configuredTargetKeys().isPresent());
   }
 
   /**
-   * {@code authorizedTargetKeys()} must propagate a {@code null} catalogue (unreadable) as-is,
-   * not collapse it into an empty (all-denied) one — the two drive different branches in
-   * {@code McpToolRouter.handleVectorSearch}. Same no-mocking rationale as the test above.
+   * {@code authorizedTargetKeys()} must propagate an unreadable catalogue as {@code
+   * Optional.empty()}, not collapse it into a present-but-empty (all-denied) list — the two drive
+   * different branches in {@code McpToolRouter.handleVectorSearch}. Same no-mocking rationale as
+   * the test above. The distinction used to be null-vs-empty and is now absent-vs-empty; what must
+   * not change is that there are still two answers.
    */
   @Test
-  public void authorizedTargetKeysReturnsNullWhenCatalogueCannotBeRead() {
-    assertNull(NeoVectorSearchEndpoint.authorizedTargetKeys());
+  public void authorizedTargetKeysReturnsEmptyOptionalWhenCatalogueCannotBeRead() {
+    assertFalse(NeoVectorSearchEndpoint.authorizedTargetKeys().isPresent());
   }
 
   /**
@@ -393,7 +394,7 @@ public class NeoVectorSearchEndpointTest {
             })) {
       dals.when(OBDal::getInstance).thenReturn(dal);
 
-      List<String> allowed = NeoVectorSearchEndpoint.authorizedTargetKeys();
+      List<String> allowed = NeoVectorSearchEndpoint.authorizedTargetKeys().orElseThrow();
 
       assertEquals(Collections.singletonList("readable-target"), allowed);
     }

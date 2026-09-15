@@ -496,7 +496,7 @@ class McpToolRouterRouteTest {
     void discoverReturnsSpecs() throws Exception {
       OBCriteria<SFSpec> specCriteria = mock(OBCriteria.class);
       when(mockOBDal.createCriteria(SFSpec.class)).thenReturn(specCriteria);
-      when(specCriteria.list()).thenReturn(Collections.emptyList());
+      when(specCriteria.list()).thenReturn(java.util.Optional.of(Collections.emptyList()));
 
       JSONObject result = router.route("neo_discover", null, READ_SCOPES);
 
@@ -1478,7 +1478,7 @@ class McpToolRouterRouteTest {
                    when(endpointMock.handle(any(), any(), any(), any(), any(), any(), any()))
                        .thenReturn(NeoResponse.ok(new JSONObject().put("items", new JSONArray()))))) {
         endpointStatics.when(NeoVectorSearchEndpoint::authorizedTargetKeys)
-            .thenReturn(List.of("sales-quotation", "purchase-order"));
+            .thenReturn(java.util.Optional.of(List.of("sales-quotation", "purchase-order")));
 
         JSONObject result = router.route("neo_vector_search", args, READ_SCOPES);
 
@@ -1523,7 +1523,8 @@ class McpToolRouterRouteTest {
 
       try (MockedStatic<NeoVectorSearchEndpoint> endpointStatics =
                mockStatic(NeoVectorSearchEndpoint.class)) {
-        endpointStatics.when(NeoVectorSearchEndpoint::authorizedTargetKeys).thenReturn(null);
+        endpointStatics.when(NeoVectorSearchEndpoint::authorizedTargetKeys)
+            .thenReturn(java.util.Optional.empty());
 
         // No mockConstruction here: the real endpoint runs, exactly as it did before this
         // feature existed. With no substitution, both namespaces and targets stay empty, so the

@@ -18,6 +18,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -197,7 +198,8 @@ public class NeoVectorSearchEndpoint {
               + "installed or not wired. This is not a permission problem — do not retry with "
               + "different targets.");
     }
-    List<String> known = targetCatalog == null ? null : targetCatalog.knownKeys();
+    List<String> known = targetCatalog == null
+        ? null : targetCatalog.knownKeys().orElse(null);
     if (known != null) {
       List<String> unknown = new ArrayList<>();
       for (String target : targets) {
@@ -257,7 +259,7 @@ public class NeoVectorSearchEndpoint {
    *
    * @return the configured keys, possibly empty; {@code null} when the catalogue cannot be read
    */
-  public static List<String> configuredTargetKeys() {
+  public static Optional<List<String>> configuredTargetKeys() {
     // The admin-mode switch is INSIDE the try on purpose: it is itself a call that can fail (no
     // live Hibernate session, as in tool generation outside a request), and when it did, the
     // exception escaped this method, broke buildVectorSearchTool and took the whole MCP tool list
@@ -275,7 +277,7 @@ public class NeoVectorSearchEndpoint {
             keys.add(target.getSearchKey());
           }
         }
-        return keys;
+        return Optional.of(keys);
       } finally {
         // Only reached when setAdminMode succeeded, so there is always a mode to restore.
         OBContext.restorePreviousMode();
@@ -283,7 +285,9 @@ public class NeoVectorSearchEndpoint {
     } catch (Exception e) {
       // A catalogue that cannot be read must not turn every search into a 422, nor break tool
       // generation: fall back to the pre-IMP-41 behaviour, where the authorizer alone decides.
-      return null;
+      // Optional.empty() is "could not be read" and is NOT the same as a readable-but-empty
+      // catalogue, which is Optional.of(List.of()) — conflating the two is the defect IMP-41 fixed.
+      return Optional.empty();
     }
   }
 
@@ -300,13 +304,16 @@ public class NeoVectorSearchEndpoint {
    * because of one target the role cannot read. A restricted role must get the subset it can see,
    * not a denial.</p>
    *
-   * @return the searchable keys, possibly empty; {@code null} when the catalogue cannot be read
+   * @return the searchable keys, possibly an empty list; {@link Optional#empty()} when the
+   *     catalogue itself cannot be read — a distinction the caller must keep, since "no target you
+   *     may search" and "no catalogue" call for different answers
    */
-  public static List<String> authorizedTargetKeys() {
-    List<String> configured = configuredTargetKeys();
-    if (configured == null) {
-      return null;
+  public static Optional<List<String>> authorizedTargetKeys() {
+    Optional<List<String>> catalogue = configuredTargetKeys();
+    if (!catalogue.isPresent()) {
+      return Optional.empty();
     }
+    List<String> configured = catalogue.get();
     TargetEntityAuthorizer authorizer = new TargetEntityAuthorizer();
     List<String> allowed = new ArrayList<>();
     for (String key : configured) {
@@ -314,16 +321,16 @@ public class NeoVectorSearchEndpoint {
         allowed.add(key);
       }
     }
-    return allowed;
+    return Optional.of(allowed);
   }
 
   /** Supplies the configured target keys, so the unknown-vs-forbidden split is testable. */
   interface TargetCatalog {
     /**
      * Returns every configured target key.
-     * @return the keys, or {@code null} to skip the unknown-target check entirely
+     * @return the keys, or {@link Optional#empty()} to skip the unknown-target check entirely
      */
-    List<String> knownKeys();
+    Optional<List<String>> knownKeys();
   }
 
   /** Executes a namespace-scoped vector search and returns its JSON response. */
