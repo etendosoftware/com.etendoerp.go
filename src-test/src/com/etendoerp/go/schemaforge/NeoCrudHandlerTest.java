@@ -75,6 +75,8 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
+import org.openbravo.model.common.plm.Product;
+import org.openbravo.model.common.uom.UOM;
 import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
@@ -631,6 +633,157 @@ class NeoCrudHandlerTest {
       assertNotNull(result);
       assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
       assertEquals("missing_updated", result.getBody().getString("error"));
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // applyProductDerivedUomOnUpdate tests (via reflection) — ETP-5286
+  //
+  // Bug: PATCHing a document line's `product` to one with a different UOM (e.g. Unidad ->
+  // Centimetro) returned 500 with AD message 20111 ("La unidad del producto en la ficha y la
+  // de la operación en curso son distintas"), even though the frontend's outgoing PATCH body
+  // DID contain the correct new `uOM`. Root cause: `uOM` is a "system"-visibility field, so
+  // NeoFieldFilter#filterWriteRequest strips it as read-only before the DAL write — the
+  // client's (correct) value never reached C_ORDERLINE_TRG, which still saw the OLD uOM.
+  //
+  // Fix: executeUpdate now calls this helper right after filterWriteRequest to re-derive `uOM`
+  // from the NEW `product` and inject it into filteredBody, via the existing (and already
+  // extensively unit-tested in NeoCommercialLinePolicyTest) NeoCommercialLinePolicy
+  // #injectProductDerivedUomIfMissing — the same helper POST/create already uses for this exact
+  // purpose (IMP-15) — unconditionally with userProvidedUom=false: the client's own uOM is
+  // deliberately never trusted here, even though it happens to be correct in the live repro.
+  //
+  // Tested here as its own extracted static method (not through executeUpdate/PATCH end-to-end)
+  // because DefaultJsonDataService cannot be constructed or mocked outside a full Openbravo
+  // context (Mockito: "Cannot instrument class ... because it or one of its supertypes could not
+  // be initialized") — this is the same reason NeoCrudHandlerTest has no other executeUpdate/
+  // executePostCreate test exercising the real DAL write path either.
+  // -------------------------------------------------------------------------
+
+  @Nested
+  @DisplayName("applyProductDerivedUomOnUpdate — ETP-5286 product-driven uOM re-derivation")
+  class ApplyProductDerivedUomOnUpdate {
+
+    private static final String DAL_ENTITY_NAME = "OrderLine";
+    private static final String NEW_PRODUCT_ID = "PRODUCT-CM";
+    private static final String NEW_PRODUCT_UOM_ID = "UOM-CM";
+
+    private void invoke(JSONObject filteredBody) throws Exception {
+      invokeStaticPrivate(NeoCrudHandler.class, "applyProductDerivedUomOnUpdate",
+          new Class<?>[] { JSONObject.class, String.class }, filteredBody, DAL_ENTITY_NAME);
+    }
+
+    /** Stubs a transactional-line Entity (declares orderedQuantity) on ModelProvider. */
+    private void stubTransactionalLineEntity(ModelProvider mp) {
+      Entity entity = mock(Entity.class);
+      when(entity.hasProperty("orderedQuantity")).thenReturn(true);
+      when(mp.getEntity(DAL_ENTITY_NAME, false)).thenReturn(entity);
+    }
+
+    private Product mockProductWithUom(String uomId) {
+      Product product = mock(Product.class);
+      UOM uom = mock(UOM.class);
+      when(uom.getId()).thenReturn(uomId);
+      when(product.getUOM()).thenReturn(uom);
+      return product;
+    }
+
+    @Test
+    @DisplayName("Re-derives uOM from the new product, overriding even a stale/incorrect existing "
+        + "value already present in the body")
+    void productChanged_uomReDerivedFromProduct_overridesExistingValue() throws Exception {
+      // filteredBody as it would look right after filterWriteRequest strips the readOnly `uOM`
+      // key the client sent — except here it still carries a STALE value (e.g. left over from a
+      // defaults pass, exactly the IMP-15 regression shape) to prove it gets overridden, not just
+      // filled in when absent.
+      JSONObject filteredBody = new JSONObject()
+          .put("product", NEW_PRODUCT_ID)
+          .put("uOM", "STALE-OLD-UOM");
+
+      try (MockedStatic<ModelProvider> mpMock = Mockito.mockStatic(ModelProvider.class);
+           MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        ModelProvider mp = mock(ModelProvider.class);
+        mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+        stubTransactionalLineEntity(mp);
+
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        // Build the product mock BEFORE opening the outer when(): mockProductWithUom stubs two
+        // other mocks, and Mockito rejects that inside a pending thenReturn argument
+        // (UnfinishedStubbingException) — same gotcha documented in NeoCommercialLinePolicyTest.
+        Product productWithUom = mockProductWithUom(NEW_PRODUCT_UOM_ID);
+        when(dal.get(Product.class, NEW_PRODUCT_ID)).thenReturn(productWithUom);
+
+        invoke(filteredBody);
+      }
+
+      assertEquals(NEW_PRODUCT_UOM_ID, filteredBody.getString("uOM"));
+    }
+
+    @Test
+    @DisplayName("filteredBody without `product` is left untouched, no DAL interaction")
+    void productNotChanged_bodyUntouchedNoDalInteraction() throws Exception {
+      JSONObject filteredBody = new JSONObject().put("description", "just a text edit");
+
+      try (MockedStatic<ModelProvider> mpMock = Mockito.mockStatic(ModelProvider.class);
+           MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        ModelProvider mp = mock(ModelProvider.class);
+        mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+        stubTransactionalLineEntity(mp);
+
+        invoke(filteredBody);
+
+        obDalMock.verifyNoInteractions();
+      }
+
+      assertFalse(filteredBody.has("uOM"));
+      assertEquals("just a text edit", filteredBody.getString("description"));
+    }
+
+    @Test
+    @DisplayName("Product resolves with no UOM configured — does not throw, uOM simply left "
+        + "uninjected (total function contract)")
+    void productHasNoUom_doesNotThrow() throws Exception {
+      JSONObject filteredBody = new JSONObject().put("product", NEW_PRODUCT_ID);
+
+      try (MockedStatic<ModelProvider> mpMock = Mockito.mockStatic(ModelProvider.class);
+           MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        ModelProvider mp = mock(ModelProvider.class);
+        mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+        stubTransactionalLineEntity(mp);
+
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        Product productWithoutUom = mock(Product.class);
+        when(productWithoutUom.getUOM()).thenReturn(null);
+        when(dal.get(Product.class, NEW_PRODUCT_ID)).thenReturn(productWithoutUom);
+
+        invoke(filteredBody);
+      }
+
+      assertFalse(filteredBody.has("uOM"));
+    }
+
+    @Test
+    @DisplayName("Product lookup throws — exception is swallowed, filteredBody left unchanged, "
+        + "nothing propagates (never rolls back the update transaction)")
+    void productLookupThrows_exceptionSwallowed() throws Exception {
+      JSONObject filteredBody = new JSONObject().put("product", NEW_PRODUCT_ID);
+
+      try (MockedStatic<ModelProvider> mpMock = Mockito.mockStatic(ModelProvider.class);
+           MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        ModelProvider mp = mock(ModelProvider.class);
+        mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+        stubTransactionalLineEntity(mp);
+
+        OBDal dal = mock(OBDal.class);
+        obDalMock.when(OBDal::getInstance).thenReturn(dal);
+        when(dal.get(Product.class, NEW_PRODUCT_ID)).thenThrow(new RuntimeException("DAL boom"));
+
+        invoke(filteredBody);
+      }
+
+      assertFalse(filteredBody.has("uOM"));
     }
   }
 

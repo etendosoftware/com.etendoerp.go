@@ -979,6 +979,39 @@ class NeoCrudHandler {
 
 
   /**
+   * ETP-5286: on a PATCH that changes {@code product} on a transactional document line (e.g. a
+   * sales/purchase order line), re-derives {@code uOM} from the NEW product and injects it into
+   * {@code filteredBody}, the same way {@code executePostCreate} already does for POST (see its
+   * own call to {@link NeoCommercialLinePolicy#injectProductDerivedUomIfMissing}). {@code uOM} is
+   * a "system"-visibility field — readOnly by contract, so {@code filterWriteRequest} strips it
+   * before this runs — and its only legitimate source is the product, never the client: even
+   * though the frontend callout DOES echo the correct new {@code uOM} back in this same PATCH
+   * body (verified live, ETP-5286 repro), trusting that echoed value would (a) defeat the whole
+   * point of the field being non-writable, and (b) silently keep working only by accident of the
+   * frontend never having a bug in that callout. Deriving it server-side here is what actually
+   * fixes AD message 20111 ("La unidad del producto en la ficha y la de la operación en curso son
+   * distintas") on product-change PATCHes, which previously reached {@code C_ORDERLINE_TRG} with
+   * the OLD {@code uOM} still in place.
+   *
+   * <p>{@code userProvidedUom=false} unconditionally: unlike create (where an external caller such
+   * as an OCR import may legitimately pre-select a specific uOM), there is no UI path where a user
+   * picks {@code uOM} independently of {@code product} on an existing line, so nothing here should
+   * ever defer to a client-submitted value.
+   *
+   * <p>Total: delegates entirely to {@link NeoCommercialLinePolicy#injectProductDerivedUomIfMissing},
+   * which is a no-op (and never throws) when {@code filteredBody} carries no {@code product} key —
+   * i.e. this PATCH did not touch the product — or when the product/UOM cannot be resolved.
+   *
+   * <p>Extracted as its own method (rather than inlined in {@link #executeUpdate}) so it can be
+   * unit-tested directly via reflection without needing a working {@link DefaultJsonDataService}
+   * instance, which cannot be mocked/instantiated outside a full Openbravo context.
+   */
+  private static void applyProductDerivedUomOnUpdate(JSONObject filteredBody, String dalEntityName) {
+    NeoCommercialLinePolicy.injectProductDerivedUomIfMissing(filteredBody,
+        ModelProvider.getInstance().getEntity(dalEntityName, false), false);
+  }
+
+  /**
    * Executes the PUT/PATCH (update) JSON service operation and returns the raw result string.
    */
   private String executeUpdate(NeoContext context, String dalEntityName,
@@ -1005,6 +1038,9 @@ class NeoCrudHandler {
     // its own timestamp on save.
     Object updatedBeforeFilter = rawBody != null ? rawBody.opt(FIELD_UPDATED) : null;
     JSONObject filteredBody = fieldFilter.filterWriteRequest(rawBody);
+    // ETP-5286: on a PATCH that changes `product` on a transactional document line, re-derive
+    // `uOM` from the NEW product. See applyProductDerivedUomOnUpdate's own javadoc for the why.
+    applyProductDerivedUomOnUpdate(filteredBody, dalEntityName);
     // Inject lineNetAmount when absent from filteredBody (stripped by readOnly filter).
     // The frontend sends invoicedQuantity and unitPrice as editable fields, so both are
     // available here to compute the correct net amount even for products where SL_Invoice_Amt
