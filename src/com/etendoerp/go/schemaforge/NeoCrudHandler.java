@@ -62,6 +62,7 @@ import com.etendoerp.go.schemaforge.util.NeoLocatorIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
+import com.etendoerp.go.schemaforge.util.NeoValidationErrorResponseBuilder;
 
 /**
  * Handles all CRUD operations for NEO window entity endpoints.
@@ -794,49 +795,12 @@ class NeoCrudHandler {
             NeoListReferenceError.enrich(translated))));
     }
     if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
-      return buildValidationErrorResponse(innerResponse);
+      // ETP-5323: delegated to NeoValidationErrorResponseBuilder (kept out of this class to stay
+      // under SonarQube's method-count limit, java:S1448) — see its javadoc for the full
+      // RPCREQUEST_STATUS_VALIDATION_ERROR body shape and rationale.
+      return NeoValidationErrorResponseBuilder.build(innerResponse);
     }
     return null;
-  }
-
-  /**
-   * ETP-5323: {@code DefaultJsonDataService.update()} catches a per-property setter failure
-   * (e.g. {@code StringPropertyValidator} rejecting a value that exceeds its AD column's field
-   * length) during JSON-to-entity conversion and reports it as a
-   * {@code RPCREQUEST_STATUS_VALIDATION_ERROR} response, never as a thrown exception. Unlike the
-   * {@code RPCREQUEST_STATUS_FAILURE} branch above, this body has no top-level {@code error}
-   * object — the raw {@code responseJson} used to be returned verbatim as the response body, a
-   * shape {@code parseBackendErrorMessage} (app-shell) does not recognize, so the frontend fell
-   * back to the bare {@code "Error 400"} even though the real message was sitting one level
-   * down.
-   *
-   * <p>The failing property's message lives under {@code response.errors.<propertyName>} —
-   * {@code DefaultJsonDataService} keys it by property name because a single request can touch
-   * several bobs/properties, but in practice the reported case is a single offending field.
-   * The FIRST entry is taken (deterministic per-request; multiple simultaneous property
-   * validation failures are rare and still land inside the same JSON body for a curious caller),
-   * translated and sanitized exactly like the FAILURE branch so behavior stays consistent
-   * between the two ways core can report a rejected write.
-   *
-   * @param innerResponse the parsed {@code response} object from the JsonDataService body
-   * @return the structured 400 response, or a generic fallback if the errors map is empty
-   */
-  private NeoResponse buildValidationErrorResponse(JSONObject innerResponse) {
-    JSONObject errors = innerResponse.optJSONObject(JsonConstants.RESPONSE_ERRORS);
-    if (errors == null || errors.length() == 0) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Validation failed");
-    }
-    String rawMsg = "Validation failed";
-    Iterator<String> keys = errors.keys();
-    if (keys.hasNext()) {
-      rawMsg = errors.optString(keys.next(), rawMsg);
-    }
-    String translated = OBMessageUtils.messageBD(rawMsg);
-    // Same defence-in-depth as the FAILURE branch: strip row dumps / object references before
-    // this reaches the client.
-    return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
-        NeoErrorSanitizer.stripRowDump(NeoErrorSanitizer.redactObjectReferences(
-            NeoListReferenceError.enrich(translated))));
   }
 
   /**
