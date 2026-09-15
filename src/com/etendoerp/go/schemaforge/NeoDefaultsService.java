@@ -321,7 +321,18 @@ public class NeoDefaultsService {
 
   private static void applyDefaultWithComboFallback(NeoContext ctx, SFField sfField, Object resolvedValue,
       Column adColumn, JSONObject defaults, String propertyName, Entity dalEntity) throws JSONException {
-    if (resolvedValue == null && !Boolean.TRUE.equals(sfField.isReadOnly())) {
+    // ETP-5277: the combo-preselection fallback below runs under the admin-mode block that
+    // wraps the whole of resolveDefaults (see its top-level OBContext.setAdminMode()), so its
+    // OBCriteria query is NOT scoped by the caller's own client/org — it picks literally the
+    // first row of the ENTIRE table across every tenant. Confirmed live: with only the
+    // session-fallback guarded (not this one), defaultClient came back as an unrelated client
+    // from a different tenant entirely ("aaa"), which is a worse leak than the session-derived
+    // value this ticket set out to fix, not a fix. Columns excluded from the session/prefs
+    // fallback above must therefore also be excluded here, so they come back genuinely
+    // null/absent — matching the "no default configured" contract this guard promises —
+    // instead of silently swapping one wrong value for a different, cross-tenant one.
+    if (resolvedValue == null && !Boolean.TRUE.equals(sfField.isReadOnly())
+        && !isUserSessionFallbackExcludedColumn(adColumn)) {
       resolvedValue = resolveFirstComboOption(adColumn, ctx);
     }
     if (resolvedValue != null) {
@@ -752,6 +763,24 @@ public class NeoDefaultsService {
         : adColumn.getDefaultValue();
     if (defaultExpr == null || defaultExpr.trim().isEmpty()
         || isBlankQuotedLiteral(defaultExpr.trim())) {
+      // ETP-5277: AD_User's Default_Ad_Role_ID/Default_Ad_Client_ID/Default_Ad_Org_ID/
+      // Default_M_Warehouse_ID have no AD_Column/ETGO_SF_FIELD default configured, so every
+      // call used to fall through to the generic session/prefs fallback below — which, for a
+      // NEW AD_User record, resolves to the CREATING admin's own current role/client/org/
+      // warehouse (Utility.getPreference's documented behavior when no AD_Preference row
+      // exists). The frontend's create-form bootstrap (GET .../user/defaults) then faithfully
+      // carries that wrong value into the create POST payload, so the just-created user briefly
+      // shows the creating admin's own role/client/org/warehouse until ensurePersonalRoleFor-
+      // NewlyCreatedUser's real values reach the client on a follow-up GET. Both callers of this
+      // method (NeoDefaultsEndpoint's /defaults bootstrap, NeoBackgroundDefaultsService, and
+      // NeoMandatoryDefaultsService's create-time mandatory-column injection) only ever run for
+      // a NEW record — there is no "existing record" call path into resolveFieldDefault — so
+      // skipping the fallback here cannot affect editing an existing user. Scoped narrowly by
+      // table + exact column name so every OTHER caller of resolveFromPrefsOrDocType (any other
+      // entity/column relying on this same generic mechanism) is completely unaffected.
+      if (isUserSessionFallbackExcludedColumn(adColumn)) {
+        return null;
+      }
       return resolveFromPrefsOrDocType(adColumn, request.vars, request.conn, request.windowId,
           dbColumnName, request.ctx);
     }
@@ -1024,6 +1053,40 @@ public class NeoDefaultsService {
           adColumn.getDBColumnName(), e.getMessage());
       return true; // on error, preserve legacy behavior
     }
+  }
+
+  /**
+   * ETP-5277: table {@code AD_User}, one DB column name per entry (upper-cased for a
+   * case-insensitive comparison in {@link #isUserSessionFallbackExcludedColumn}).
+   *
+   * <p>Deliberately a small, explicit deny-list rather than a broader "any {@code Default_*_ID}
+   * column" rule: the generic session/prefs fallback ({@link #resolveFromPrefsOrDocType}) is
+   * presumably relied upon, correctly, by other entities/columns not touched by this ticket —
+   * this set exists to exclude exactly the 4 columns confirmed (live repro, ETP-5277) to leak
+   * the creating admin's own session state into a brand-new, unrelated user's record, nothing
+   * broader.
+   */
+  private static final Set<String> USER_SESSION_FALLBACK_EXCLUDED_COLUMNS = Set.of(
+      "DEFAULT_AD_ROLE_ID", "DEFAULT_AD_CLIENT_ID", "DEFAULT_AD_ORG_ID",
+      "DEFAULT_M_WAREHOUSE_ID");
+
+  /** DB table name (as returned by {@code Table.getDBTableName()}) the deny-list above applies to. */
+  private static final String TABLE_AD_USER = "AD_USER";
+
+  /**
+   * True when {@code adColumn} is one of the 4 {@code AD_User} columns ETP-5277 excludes from
+   * the generic create-defaults session/prefs fallback (see
+   * {@link #USER_SESSION_FALLBACK_EXCLUDED_COLUMNS}'s javadoc for why). Table name is compared
+   * case-insensitively against the column's own table, so this never fires for a same-named
+   * column on a different table.
+   */
+  private static boolean isUserSessionFallbackExcludedColumn(Column adColumn) {
+    if (adColumn.getTable() == null || adColumn.getTable().getDBTableName() == null) {
+      return false;
+    }
+    return TABLE_AD_USER.equalsIgnoreCase(adColumn.getTable().getDBTableName())
+        && USER_SESSION_FALLBACK_EXCLUDED_COLUMNS.contains(
+            adColumn.getDBColumnName().toUpperCase(Locale.ROOT));
   }
 
   /**
