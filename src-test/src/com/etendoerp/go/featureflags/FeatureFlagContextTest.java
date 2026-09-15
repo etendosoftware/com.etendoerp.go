@@ -33,7 +33,8 @@ class FeatureFlagContextTest {
   void targetsOnTheAccountEmail() {
     FeatureFlagContext context = FeatureFlagContext.forAccount("user@example.com");
     assertEquals("user@example.com", context.getTargetingKey());
-    assertTrue(context.getAttributes().isEmpty());
+    assertEquals("user@example.com",
+        context.getAttributes().get(FeatureFlagContext.ATTRIBUTE_EMAIL));
   }
 
   @ParameterizedTest
@@ -48,7 +49,8 @@ class FeatureFlagContextTest {
     FeatureFlagContext base = FeatureFlagContext.forAccount("user@example.com");
     FeatureFlagContext scoped = base.with(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, "CLIENT1");
 
-    assertTrue(base.getAttributes().isEmpty());
+    assertEquals("user@example.com",
+        base.getAttributes().get(FeatureFlagContext.ATTRIBUTE_EMAIL));
     assertEquals("CLIENT1", scoped.getAttributes().get(FeatureFlagContext.ATTRIBUTE_CLIENT_ID));
     assertEquals("user@example.com", scoped.getTargetingKey());
   }
@@ -60,7 +62,9 @@ class FeatureFlagContextTest {
         .with(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, "  ")
         .with(null, "CLIENT1")
         .with("   ", "CLIENT1");
-    assertTrue(context.getAttributes().isEmpty());
+    assertEquals("user@example.com",
+        context.getAttributes().get(FeatureFlagContext.ATTRIBUTE_EMAIL));
+    assertNull(context.getAttributes().get(FeatureFlagContext.ATTRIBUTE_CLIENT_ID));
   }
 
   @Test
