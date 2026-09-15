@@ -69,10 +69,19 @@ abstract class SessionAwareStartup implements ApplicationInitializer {
     } catch (Exception e) {
       // Startup self-healing must never break the application: log and continue.
       log().error("{}: startup self-heal failed; skipping.", name(), e);
+    } finally {
+      // runPass() can return normally without ever reaching its own commitAndClose() (e.g. an
+      // idempotency check finds nothing to do and returns early) yet still have opened an
+      // OBDal/Hibernate session earlier in that same pass — the check itself borrows one. This
+      // thread is one-shot and terminates right after this method returns, so nothing else will
+      // ever commit or close that session: it would sit "idle in transaction" for the life of the
+      // server, pinning VACUUM's cleanup horizon so dead tuples can never be reclaimed.
+      // rollbackAndClose() is a safe no-op when runPass() already committed and closed its own
+      // session on its normal/success path.
       try {
         OBDal.getInstance().rollbackAndClose();
-      } catch (Exception rollbackError) {
-        log().debug("{}: rollback after failure also failed.", name(), rollbackError);
+      } catch (Exception cleanupError) {
+        log().debug("{}: session cleanup after startup pass failed.", name(), cleanupError);
       }
     }
   }
