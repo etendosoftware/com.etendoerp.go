@@ -140,6 +140,54 @@ public class RoleInheritanceReconciliationServiceSystemContextIntegrationTest ex
   }
 
   /**
+   * QA (ETP-5329, post-fix re-verification) — companion to {@link
+   * #testGetAppliedTemplateRoleIdsIsVisibleFromASystemOBContext()}: proves the SAME widened
+   * {@code findExistingInheritances} filter behaves for the "personal role exists but has ZERO
+   * composed templates" state too — {@code getAppliedTemplateRoleIds}'s own javadoc documents
+   * this as a legitimate empty-list return, never an exception. Not exercised by any existing
+   * test: {@code EtendoGoJwtSupportTest#omitsEffectiveRoleNamesWhenNoTemplatesApplied} asserts
+   * the same outward behavior but does so with {@code UserRoleCompositionService} entirely
+   * mocked out via {@code mockConstruction} — it never runs the real {@code OBCriteria} query
+   * this fix touches. Ensures the personal role via {@code assignTemplateRoles(userId,
+   * emptyList())} (same "compose zero templates" idiom {@code
+   * UserRoleCompositionServiceIntegrationTest} already uses, e.g. its {@code
+   * removesAllInheritancesWhenComposingWithEmptyList} case) under the tenant's own context, then
+   * reads it back under the reproduced system-login {@link OBContext}.
+   */
+  @Test
+  public void testGetAppliedTemplateRoleIdsIsEmptyFromASystemOBContextWhenNoTemplatesComposed()
+      throws Exception {
+    setTestUserContext();
+    OBContext.setAdminMode(true);
+    try {
+      UserRoleCompositionService.AssignmentResult result = new UserRoleCompositionService()
+          .assignTemplateRoles(TEST_USER_ID, Collections.emptyList());
+      assertNotNull("Sanity check: a personal role must exist (even with zero templates) before "
+          + "the system-context read is exercised", result.personalRoleId);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+
+    // Reproduce EtendoGoJwtServlet#handleEnvironmentLogin's exact caller context.
+    OBContext.setOBContext("0", "0", "0", "0");
+    OBContext.setAdminMode(true);
+    try {
+      List<String> appliedTemplateIds =
+          new UserRoleCompositionService().getAppliedTemplateRoleIds(TEST_USER_ID);
+
+      assertNotNull("Must return an empty list, never null, per this method's own javadoc",
+          appliedTemplateIds);
+      assertTrue("A personal role with zero composed templates must resolve to an empty list "
+              + "under a system OBContext too — the widened readable-clients/organization "
+              + "filter must not turn a genuinely empty AD_Role_Inheritance result into an "
+              + "error or a non-empty one",
+          appliedTemplateIds.isEmpty());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
    * Creates a throwaway system-level ({@code AD_Client_ID = '0'}) template role — same fixture
    * shape as {@code UserRoleCompositionServiceIntegrationTest#createSystemTemplateRole()}
    * (duplicated rather than shared, since that one is {@code private} and this test deliberately
