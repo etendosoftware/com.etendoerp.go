@@ -4034,7 +4034,10 @@ leave a user with more than one active `AD_User_Roles` row, and attaching the co
 list to a non-default entry would misrepresent a role it doesn't actually apply to. The key is
 omitted entirely when the default role has no composed templates (e.g. right after
 `ensurePersonalRole`, before any `assignTemplateRoles` call) — frontends should fall back to the
-role's own `name` in that case.
+role's own `name` in that case. A template role id with no matching (active) `Role` row — deleted
+or renamed out from under `AD_Role_Inheritance`, an ETP-4604-style anomaly — is silently skipped
+(logged as a `warn`, not thrown), so `effectiveRoleNames.length` can be smaller than the number of
+composed template roles; the array is never padded or nulled out for a single unresolved entry.
 
 The `currentRole == null` case is UNCHANGED: the response stays the bare
 `{"token": "<new signed JWT>"}`, no `session` key, so the frontend's legacy fallback still
