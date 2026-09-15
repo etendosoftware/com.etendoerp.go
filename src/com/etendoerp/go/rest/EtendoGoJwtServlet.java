@@ -63,10 +63,10 @@ import com.etendoerp.go.payment.TenantPaywallService;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.payment.HostedCheckoutService;
 import com.etendoerp.go.payment.CheckoutConfiguration;
-import com.etendoerp.go.payment.CheckoutPaymentRegistry;
+import com.etendoerp.go.payment.BillingEventStore;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
-import com.etendoerp.go.payment.CheckoutWebhookVerifier;
+import com.etendoerp.go.payment.CheckoutWebhookProcessor;
 import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
@@ -219,6 +219,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String CONTRACT_NEW_ACCOUNT = "new-account";
   private static final String SSO_PREFIX = "/sso/";
   private static final String PATH_ONBOARDING_DRAFT = "/onboarding/draft";
+  /** Maximum accepted age of a Stripe-Signature timestamp, per the provider's guidance. */
+  private static final long CHECKOUT_WEBHOOK_TOLERANCE_SECONDS = 300;
+  /** The event types that confirm a hosted-checkout payment; every other type is ignored. */
+  private static final List<String> CHECKOUT_PAID_EVENT_TYPES = List.of(
+      "checkout.session.completed", "checkout.session.async_payment_succeeded");
   private static final String FIELD_DRAFT = "draft";
   private static final String FIELD_DRAFT_STEP = "step";
   private static final String FIELD_DRAFT_FORM = "form";
@@ -257,6 +262,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   TenantPlanService tenantPlanService = new TenantPlanService();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
   CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
+  BillingEventStore billingEventStore = new BillingEventStore();
+  CheckoutWebhookProcessor checkoutWebhookProcessor =
+      new CheckoutWebhookProcessor(billingEventStore, CHECKOUT_WEBHOOK_TOLERANCE_SECONDS);
   CompanyInvitationService companyInvitationService;
   private final TransactionalAuthEmailSender authEmailSender;
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
@@ -433,42 +441,89 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     });
   }
 
+  /**
+   * POST /sws/go/checkout/webhook — the provider's signed event delivery.
+   *
+   * <p>Signature, payload and idempotency are decided by {@link CheckoutWebhookProcessor} over the
+   * durable {@link BillingEventStore}, so a redelivery after a restart is answered as a duplicate.
+   * The wire contract: invalid signature and unusable payload are 400 (the provider does not
+   * retry those); a duplicate is 200 {@code {"received":true}} without touching anything; an
+   * accepted event is applied and marked, and a failure while applying it is a 500 with the row
+   * marked {@code FAILED} — the provider retries, and that retry re-claims the row.
+   */
   private void handleCheckoutWebhook(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     String payload = readRawBody(request);
     String signature = request.getHeader("Stripe-Signature");
-    if (!CheckoutWebhookVerifier.verify(payload, signature, CheckoutConfiguration.webhookSecret(),
-        Instant.now().getEpochSecond(), 300)) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "INVALID_CHECKOUT_SIGNATURE",
-          "Invalid checkout webhook signature", "Invalid checkout webhook signature");
+    CheckoutWebhookProcessor.Acceptance acceptance = checkoutWebhookProcessor.evaluate(payload,
+        signature, CheckoutConfiguration.webhookSecret(), Instant.now().getEpochSecond());
+    switch (acceptance.result()) {
+      case INVALID_SIGNATURE:
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "INVALID_CHECKOUT_SIGNATURE",
+            "Invalid checkout webhook signature", "Invalid checkout webhook signature");
+        return;
+      case INVALID_PAYLOAD:
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "INVALID_CHECKOUT_PAYLOAD",
+            "Invalid checkout webhook payload", "Invalid checkout webhook payload");
+        return;
+      case DUPLICATE:
+        writeWebhookReceived(response);
+        return;
+      default:
+        break;
+    }
+    String eventId = acceptance.eventId();
+    String type = acceptance.event().optString("type", "");
+    try {
+      applyCheckoutEvent(eventId, type, acceptance.event());
+    } catch (RuntimeException e) {
+      // Only the id and type are logged: the payload may carry customer data the audit row
+      // deliberately does not keep either.
+      log.error("Checkout webhook event '{}' ({}) could not be applied", eventId, type, e);
+      billingEventStore.markFailed(eventId, e.getClass().getSimpleName() + ": " + e.getMessage());
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "CHECKOUT_WEBHOOK_FAILED", "Checkout webhook event could not be applied",
+          "Checkout webhook event could not be applied");
       return;
     }
+    writeWebhookReceived(response);
+  }
+
+  /**
+   * Applies one claimed event and records the outcome on its {@code ETGO_BILLING_EVENT} row.
+   *
+   * <p>Only the two payment-confirmation event types act; everything else is acknowledged and
+   * marked {@code IGNORED} with the reason, so the audit row says why nothing happened.
+   */
+  private void applyCheckoutEvent(String eventId, String type, JSONObject event) {
+    if (!CHECKOUT_PAID_EVENT_TYPES.contains(type)) {
+      billingEventStore.markIgnored(eventId, "unhandled event type");
+      return;
+    }
+    JSONObject data = event.optJSONObject("data");
+    JSONObject object = data == null ? null : data.optJSONObject("object");
+    JSONObject metadata = object == null ? null : object.optJSONObject("metadata");
+    String requestId = metadata == null ? "" : metadata.optString("request_id", "");
+    String email = metadata == null ? "" : metadata.optString("account_email", "");
+    if (StringUtils.isBlank(requestId) || StringUtils.isBlank(email)) {
+      billingEventStore.markIgnored(eventId, "missing correlation metadata");
+      return;
+    }
+    // The customer and subscription ids are read here and nowhere else: this is the only event
+    // that carries them alongside the correlation id, and every later subscription or invoice
+    // event arrives keyed by the subscription rather than by the request.
+    checkoutRequestStore.recordPaid(requestId, object.optString("customer", ""),
+        object.optString("subscription", ""));
+    billingEventStore.markApplied(eventId);
+    log.info("Checkout webhook event '{}' ({}) applied", eventId, type);
+  }
+
+  /** Acknowledges a webhook delivery the way the provider expects: 200 {@code {"received":true}}. */
+  private void writeWebhookReceived(HttpServletResponse response) throws IOException {
     try {
-      JSONObject event = new JSONObject(payload);
-      String eventId = event.optString("id", "");
-      if (!CheckoutPaymentRegistry.claimEvent(eventId)) {
-        writeResponse(response, HttpServletResponse.SC_OK, new JSONObject().put("received", true));
-        return;
-      }
-      String type = event.optString("type", "");
-      if ("checkout.session.completed".equals(type)
-          || "checkout.session.async_payment_succeeded".equals(type)) {
-        JSONObject object = event.getJSONObject("data").getJSONObject("object");
-        JSONObject metadata = object.optJSONObject("metadata");
-        String requestId = metadata == null ? "" : metadata.optString("request_id", "");
-        String email = metadata == null ? "" : metadata.optString("account_email", "");
-        if (!StringUtils.isBlank(requestId) && !StringUtils.isBlank(email)) {
-          // The customer and subscription ids are read here and nowhere else: this is the only
-          // event that carries them alongside the correlation id, and every later subscription or
-          // invoice event arrives keyed by the subscription rather than by the request.
-          checkoutRequestStore.recordPaid(requestId, object.optString("customer", ""),
-              object.optString("subscription", ""));
-        }
-      }
       writeResponse(response, HttpServletResponse.SC_OK, new JSONObject().put("received", true));
     } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "INVALID_CHECKOUT_PAYLOAD",
-          "Invalid checkout webhook payload", "Invalid checkout webhook payload");
+      throw new IllegalStateException("Could not build the webhook acknowledgement", e);
     }
   }
 
@@ -3320,8 +3375,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Same JSON key as ONBOARDING_DRAFT_FORM_FIELDS ("fiscalIdValue") for consistency.
     private String taxId;
     // Present only when the paid environment flow issued one (ETP-4686). Correlated against
-    // CheckoutPaymentRegistry: a token the Stripe webhook confirmed is what makes the resulting
-    // environment productive (ETP-4966).
+    // ETGO_CHECKOUT_REQUEST (CheckoutRequestStore): a token the Stripe webhook confirmed is what
+    // makes the resulting environment productive (ETP-4966, durable since ETP-5045).
     private String paymentToken;
     private String upgradeAction;
   }

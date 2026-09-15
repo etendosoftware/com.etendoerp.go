@@ -19,8 +19,9 @@ import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 
 /**
- * Durable persistence for hosted-checkout requests, replacing the correlation half of the
- * in-memory {@link CheckoutPaymentRegistry}.
+ * Durable persistence for hosted-checkout requests. Together with {@link BillingEventStore}
+ * ({@code ETGO_BILLING_EVENT}) it replaces the in-memory {@code CheckoutPaymentRegistry} that
+ * ETP-5045 retired: this table holds the payment correlation, that one the webhook idempotency.
  *
  * <p>Every method opens its own system context ({@code "0","0","0","0"} plus admin mode) and
  * restores it in a {@code finally}. This is deliberate rather than delegated to callers: the
@@ -362,7 +363,8 @@ public class CheckoutRequestStore {
   /**
    * Looks a request up by correlation id alone, for the write paths that have already established
    * who the caller is. Read paths must use {@link #find(String, String)} instead, which carries the
-   * account predicate.
+   * account predicate. Package-private so {@link BillingEventStore} can link an event to the
+   * request it references with the same lookup, inside its own session and context.
    *
    * <p>{@code REQUEST_ID} is a unique column and NOT the primary key, so this is a query and never
    * {@code OBDal.get(...)} — a primary-key lookup would compare a 36-character hyphenated UUID
@@ -371,7 +373,7 @@ public class CheckoutRequestStore {
    * @param requestId server-generated correlation id
    * @return the matching request, or null
    */
-  private CheckoutRequest findByRequestId(String requestId) {
+  static CheckoutRequest findByRequestId(String requestId) {
     if (StringUtils.isBlank(requestId)) {
       return null;
     }

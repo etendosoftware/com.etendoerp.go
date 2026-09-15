@@ -25,11 +25,11 @@ import org.junit.Test;
  * twice. Everything here is about the order in which the three checks run and what each one
  * refuses, because a mistake in that order is silent: the endpoint answers 200 either way.
  *
- * <p>Note on durability: the {@link CheckoutWebhookProcessor.EventStore} passed in by production
- * today is still process-memory, so the claim recorded here does not survive a restart. That is
- * the {@code ETGO_BILLING_EVENT} follow-up, and it is why these specs pin the claim
- * <em>protocol</em> — which store implementation satisfies it is deliberately left open by the
- * interface.
+ * <p>Note on durability: production wires {@link BillingEventStore}, so the claim is the
+ * {@code ETGO_BILLING_EVENT} unique constraint and survives a restart (ETP-5045). These specs
+ * still pin the claim <em>protocol</em> through a recording double — which store implementation
+ * satisfies it is deliberately left open by the interface, and the durable store's own behaviour
+ * (duplicate counting, FAILED re-claim, restart survival) is covered by its integration test.
  */
 public class CheckoutWebhookProcessorTest {
 
