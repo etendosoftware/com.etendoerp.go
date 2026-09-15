@@ -103,7 +103,8 @@ class HostedCheckoutServiceTest {
   void carriesTheCorrelationTheWebhookNeedsToConfirmThePayment() throws UnsupportedEncodingException {
     String body = form();
 
-    // CheckoutPaymentRegistry matches a confirmed payment on all three of these. Lose any one and
+    // CheckoutRequestStore.isPaidFor matches a confirmed payment on all three of these (the
+    // webhook records them into ETGO_CHECKOUT_REQUEST). Lose any one and
     // the webhook records a payment the paywall can never find, so the account is charged and
     // provisioning is refused.
     assertTrue(body.contains("metadata%5Brequest_id%5D=" + REQUEST_ID), body);

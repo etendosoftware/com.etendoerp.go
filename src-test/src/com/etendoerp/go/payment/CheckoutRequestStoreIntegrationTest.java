@@ -360,7 +360,8 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
   // ---------------------------------------------------------------------------------------------
 
   /**
-   * ETP-5045 replaced the in-memory {@code CheckoutPaymentRegistry} correlation because a Tomcat
+   * ETP-5045 replaced the in-memory {@code CheckoutPaymentRegistry} (since deleted; its two halves
+   * are now {@code ETGO_CHECKOUT_REQUEST} and {@code ETGO_BILLING_EVENT}) because a Tomcat
    * restart between Stripe's webhook and the customer's return wiped the payment: the customer had
    * been charged and the paywall no longer knew it.
    *
