@@ -1544,6 +1544,10 @@ reference.
 
 #### 4.12.4 `neo_batch` failure envelope (IMP-15)
 
+> **`neo_batch` is switched off** since ETP-5335 (§4.12.9). This section describes the contract the
+> tool had, and the one it resumes if the flag is flipped back; the REST `/batch` endpoint it shares
+> `BatchService` with is unaffected and this envelope still applies there.
+
 `BatchService` serves both the REST `/batch` endpoint and `neo_batch`, and its failure body forwards
 the offending sub-response verbatim under `error.detail`. For a REST caller that is useful; for an
 agent it meant a raw DAL payload — `{"response":{"status":-4,"errors":{…}}}` — with no stable code to
@@ -1828,6 +1832,125 @@ row. The construction rule is now declared once per session instead of paid for 
 `McpConstants.RECORD_REF_NOTE`, emitted in the `neo_schema` hint and as the `docs` preamble. That
 makes this an Agent Context Economy win as well as a fix (see the ACE index in
 `schema_forge/docs/mcp-evaluation/mcp-improvements-registry.md`).
+
+---
+
+#### 4.12.8 Server-derived mandatory fields on the MCP write path (ETP-5335)
+
+A column can be mandatory in AD, hidden from `neo_schema({view:"create"})` because Schema Forge
+classifies it `visibility:"system"`, and still have no working derivation behind it. The agent is
+then asked for a field it was never offered, in a 422 it cannot act on. Where the value is
+recoverable, the MCP derives it instead of refusing.
+
+**The case this exists for — `sales-order/header.invoiceAddress` (`C_Order.BillTo_ID`).**
+`SE_Order_BPartner` is the only writer of that column in the platform, and it writes it from one
+input, `inpcBpartnerId_LOC`. That is a selector auxiliary value, and NEO only produces those from
+OBUISEL selector fields flagged `isoutfield` **with a suffix**. The selector behind
+`C_Order.C_BPartner_ID` (reference `30` / `800057`) declares a single outfield, `identifier`, with a
+null suffix — so the aux value never exists and that branch of the callout never fires. The UI does
+not fill the column either: the only remaining producer of the `_LOC` suffix in core is the legacy
+Classic search popup (`SearchUniqueKeyResponse.html`), which reads a form field this version no
+longer has.
+
+What kept this invisible is an asymmetry in the *reach* of the mandatory check, not a derivation.
+`BillTo_ID` is `ismandatory='Y'` in AD while the physical column is nullable (`C_ORDER.xml`:
+`required="false"`), and the two create paths validate differently:
+
+| path | validator | scope |
+|---|---|---|
+| shared (React, REST, **`neo_batch`**) | `NeoMandatoryFieldValidator.findMissingMandatoryFields` | only properties the caller **submitted** (`userSubmittedFields`) — a mandatory field nobody mentions is never checked |
+| `neo_create` | `McpWriteRequestSupport.validateMandatoryFields` | **every** mandatory AD column, submitted or not |
+
+So the shared paths persist the null without complaint, and `neo_create` is the only caller that
+ever saw the problem.
+
+**Why the null is not harmless.** `C_INVOICE_CREATE` copies `Cur_Order.BillTo_ID` straight into
+`C_Invoice.C_BPartner_Location_ID` with no `COALESCE`, and that column *is* `NOT NULL` — so the
+order becomes one that cannot be invoiced through the PL/SQL path. The same address is what
+`C_GETTAX` reads `IsTaxExempt` and the partner tax category from, and one of the `InvoiceGrouping`
+keys.
+
+**Resolution order** (`McpBillToInjector`), most specific first:
+
+1. the ship-to already chosen for the document, when it belongs to the partner and is itself
+   flagged `IsBillTo` — keeps both addresses consistent, and is the whole story in a tenant where
+   each partner has one location;
+2. the partner's own active `IsBillTo` location;
+3. the ship-to as a last resort — the same fallback core applies in `SL_Order_Product` line 164.
+
+It abstains, leaving the body untouched, when the entity has no bill-to column, the column is not
+mandatory there (`C_Project.BillTo_ID` is optional and is deliberately not touched), the body
+already carries a value, the business partner is unknown or still a `$ref:` placeholder, or the
+partner exposes no usable location. The lookup runs in the caller's own DAL scope — no admin mode —
+so a location the role cannot read never becomes the invoicing address of a document it writes.
+
+**Where it runs.** `neo_create` runs it in `handleCreate`, before the mandatory check — this is the
+live call site. A second call site exists in the per-operation pre-pass `resolveBatchOpFkNames`,
+after the FK resolution so a partner given by name is already an id, but it is **dormant**:
+`neo_batch` is switched off (`McpConstants.BATCH_TOOL_ENABLED = false`, §4.12.9) and is neither
+published nor routable. It is kept wired so that flipping the flag back cannot silently reintroduce
+null bill-tos — on that path the missing value was never a 422 at all, because the shared
+`NeoCrudHandler` validator only checks submitted keys, so the document was simply persisted without
+one.
+
+**The REST `/sws/neo/batch` endpoint keeps the existing behaviour.** It shares `BatchService` but
+not the MCP pre-pass, and changing what the React frontend persists is out of scope for this fix.
+
+---
+
+#### 4.12.9 `neo_batch` is switched off (ETP-5335)
+
+`McpConstants.BATCH_TOOL_ENABLED` is `false`. The tool is not published in `tools/list`
+(`ToolRegistry`) **and** is refused if called by name (`McpToolRouter.route`) — withdrawing it from
+the listing alone would leave an agent that learned the name elsewhere reaching a code path we chose
+not to maintain, and a silent success there is worse than a refusal.
+
+**Why.** `neo_batch` and `neo_create` are two different implementations of "create".
+`neo_create` runs the MCP write pipeline in `handleCreate`; `neo_batch` delegates each operation to
+the shared REST path (`BatchService` → `NeoCrudHandler.handleDefault`). They had drifted apart in
+**both** directions:
+
+| | in `neo_create`, not in `neo_batch` |
+|---|---|
+| `validateMandatoryFields` | the full sweep of mandatory AD columns (the shared validator only checks keys the caller submitted) |
+| `coerceFieldTypes` + `buildInvalidDatesError` | the 422 for unreadable/ambiguous dates (ETP-4793 / IMP-24) |
+| `McpImageFieldSupport.validateImageFields` | which tool produces a valid image id (ETP-5184) |
+| `McpLinePriceInjector` | the unit price derived from the parent's price list |
+| `resolveFkSentinels` | the `"0"` sentinel cleanup |
+| entity pre-hook | `handleDefault` never goes through `handleWithHooks`, so `NeoHandler.handle()` does not run |
+
+| | in `neo_batch`, not in `neo_create` |
+|---|---|
+| `NeoCommercialLinePolicy.injectCommercialAmounts` | ETP-4855's net-before-gross ordering, reached only via `executePostCreate` |
+| `stripContactsPreCreateBillingDefaults` | — |
+| `handler.protectedCreateCalloutFields` | the fields each handler shields from the cascade |
+
+Keeping one write path correct is cheaper than keeping two in step, so the second is off until they
+converge.
+
+**What is given up.** Not the ability to create several records — an agent calls `neo_create` once
+per record — but **atomicity**. A batch was applied as a unit (IMP-23) and let a later operation
+reference an earlier one's id through `$ref:`. Without it, a run that fails halfway leaves the
+records already created in place, and the agent carries the parent id forward itself. The refusal
+says so, so an agent does not assume the two are equivalent:
+
+```json
+{
+  "status": 405,
+  "error": "tool_disabled",
+  "detail": "neo_batch is disabled on this server. Create the records one at a time with neo_create instead: create the parent first, then pass its returned id as parentId on each child create.",
+  "hint": "These are not equivalent in one respect: a batch was applied as a unit, so a failure undid the whole set. Separate creates are not undone — if one fails, the records already created stay. Check what exists before retrying.",
+  "seeAlso": "docs(topic:\"creating records\")"
+}
+```
+
+`tool_disabled` rather than `not_found` on purpose: the agent misspelled nothing and will not find a
+working variant by retrying.
+
+**Scope.** The flag governs the MCP tool only. The REST `/sws/neo/batch` endpoint is untouched and
+keeps serving its callers (the OCR purchase-invoice ingest), so `BatchService` stays live.
+`handleBatch` and the MCP-side pre-pass are kept as they are — flipping the flag to `true` restores
+the tool with nothing else to change.
 
 ---
 

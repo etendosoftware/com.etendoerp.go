@@ -266,7 +266,12 @@ public class ToolRegistry {
       if (!deletableWindowSpecs.isEmpty()) {
         tools.add(buildDeleteTool(deletableWindowSpecs));
       }
-      tools.add(buildBatchTool());
+      // ETP-5335: published only while the flag is on. See McpConstants#BATCH_TOOL_ENABLED for
+      // why it is off — neo_batch is a second create implementation that had drifted from
+      // neo_create in both directions, and one correct write path beats two out of step.
+      if (McpConstants.BATCH_TOOL_ENABLED) {
+        tools.add(buildBatchTool());
+      }
       tools.add(buildActionTool(accessibleWindowSpecs));
     }
   }

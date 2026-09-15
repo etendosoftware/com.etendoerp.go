@@ -162,6 +162,12 @@ public class McpToolRouter {
           case "neo_schema":
             return handleSchema(specName, arguments);
           case "neo_batch":
+            // Withdrawing it from tools/list is not enough: an agent that learned the name
+            // elsewhere would still reach the handler, and a silent success on a path we chose
+            // not to maintain is worse than the refusal.
+            if (!McpConstants.BATCH_TOOL_ENABLED) {
+              return wrapAsErrorContent(buildBatchDisabledError());
+            }
             return handleBatch(arguments);
           case "neo_action":
             return handleAction(specName, arguments);
@@ -710,6 +716,13 @@ public class McpToolRouter {
     // why this compensation lives in the MCP layer rather than in the shared path.
     McpLinePriceInjector.injectIfMissing(filteredBody, dalEntity, sfEntity,
         NeoCrudHelper.snapshotBodyFields(userProvided), log);
+
+    // ETP-5335: the bill-to address is mandatory in AD, hidden from view:"create" as a system
+    // field, and derivable by nobody — the callout branch that would fill it reads a selector aux
+    // value this selector does not declare. Derive it from the business partner before the
+    // mandatory check below rejects the write for a field the agent was never offered. See
+    // McpBillToInjector for why this compensation lives in the MCP layer.
+    McpBillToInjector.injectIfMissing(filteredBody, adTab, dalEntity, log);
 
     // Fix FK sentinel values: "0" is a UI-level sentinel (means "not yet set") that can't
     // go through the DAL as an entity reference. Replace with a real value from the body
@@ -1376,6 +1389,32 @@ public class McpToolRouter {
    * this method returns — the only remaining step is
    * {@code OBContext.restorePreviousMode()} in the {@code finally} block.</p>
    */
+  /**
+   * The refusal {@code neo_batch} answers with while {@link McpConstants#BATCH_TOOL_ENABLED} is off
+   * (ETP-5335).
+   *
+   * <p>Says three things, because an agent that only learns "no" retries. That the capability is
+   * switched off rather than missing or misspelled ({@code tool_disabled}, not
+   * {@code not_found}); what to do instead, in the agent's own terms — one {@code neo_create} per
+   * record, carrying the parent id forward by hand; and what it actually costs, so the agent does
+   * not assume the two are equivalent and silently leave half a document behind on a failure.
+   */
+  private JSONObject buildBatchDisabledError() throws JSONException {
+    JSONObject error = new JSONObject();
+    error.put(McpConstants.KEY_STATUS, McpConstants.STATUS_METHOD_NOT_ALLOWED);
+    error.put(McpConstants.KEY_ERROR, McpConstants.ERROR_TOOL_DISABLED);
+    error.put(McpConstants.KEY_DETAIL,
+        "neo_batch is disabled on this server. Create the records one at a time with neo_create "
+            + "instead: create the parent first, then pass its returned id as parentId on each "
+            + "child create.");
+    error.put("hint",
+        "These are not equivalent in one respect: a batch was applied as a unit, so a failure "
+            + "undid the whole set. Separate creates are not undone — if one fails, the records "
+            + "already created stay. Check what exists before retrying.");
+    error.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
+    return error;
+  }
+
   JSONObject handleBatch(JSONObject args) {
     if (args == null) {
       return wrapAsErrorContent("operations must be a non-empty array");
@@ -1534,6 +1573,12 @@ public class McpToolRouter {
       return McpToolRouterSupport.toMcpBatchPreflightFailure(fkError, i,
           op.optString("id", null));
     }
+    // ETP-5335: same derivation neo_create runs, and it must run here too — neo_batch never
+    // reaches handleCreate, so without this a batched document is persisted with a null bill-to
+    // instead of being refused, and the failure only surfaces later when C_INVOICE_CREATE copies
+    // that null into C_Invoice.C_BPartner_Location_ID (NOT NULL). Placed after the FK pre-pass so
+    // a business partner given by name is already an id. See McpBillToInjector.
+    McpBillToInjector.injectIfMissing(body, adTab, dalEntity, log);
     return null;
   }
 

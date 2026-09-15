@@ -130,6 +130,40 @@ final class McpConstants {
    */
   static final String ERROR_PARENT_REQUIRED = "parent_required";
   /**
+   * Machine-detectable error code for a tool that exists in this build but is switched off
+   * (ETP-5335). Distinct from {@link #ERROR_NOT_FOUND}: the agent did not misspell anything and
+   * will not find a working variant by retrying — the capability is deliberately unavailable, and
+   * the answer says what to use instead.
+   */
+  static final String ERROR_TOOL_DISABLED = "tool_disabled";
+  /**
+   * Whether {@code neo_batch} is published and routable (ETP-5335).
+   *
+   * <p><b>Off by decision, not by defect.</b> {@code neo_batch} and {@code neo_create} are two
+   * different implementations of "create": {@code neo_create} runs the MCP write pipeline in
+   * {@code McpToolRouter#handleCreate}, while {@code neo_batch} delegates each operation to the
+   * shared REST path through {@code BatchService} → {@code NeoCrudHandler#handleDefault}. They had
+   * drifted apart in both directions — {@code neo_batch} misses the full mandatory-column sweep,
+   * the unreadable-date 422, image-field validation, line-price derivation, FK-sentinel cleanup and
+   * the entity pre-hook; {@code neo_create} misses {@code injectCommercialAmounts}. Keeping one
+   * write path correct is cheaper than keeping two in step, so the second one is switched off until
+   * they converge.
+   *
+   * <p><b>What is given up.</b> Not the ability to create several records — an agent simply calls
+   * {@code neo_create} once per record — but <em>atomicity</em>: a batch rolls back as a unit
+   * (IMP-23) and lets a later operation reference an earlier one's id through {@code $ref:}. With
+   * it off, a run that fails halfway leaves the records already created in place, and the agent has
+   * to carry the parent id forward itself.
+   *
+   * <p><b>Scope.</b> This flag governs the MCP tool only. The REST {@code /sws/neo/batch} endpoint
+   * is untouched and keeps serving its callers (the OCR purchase-invoice ingest), so
+   * {@code BatchService} stays live either way.
+   *
+   * <p>To re-enable: flip to {@code true}. The tool then reappears in {@code tools/list} and routes
+   * again; nothing else has to change.
+   */
+  static final boolean BATCH_TOOL_ENABLED = false;
+  /**
    * How many names an {@code available} list may carry before it is truncated (ETP-5184). Twenty
    * is enough for the agent to spot its own typo; a wide entity has 150+ properties and dumping
    * them all turns a one-line correction into a context bill.
