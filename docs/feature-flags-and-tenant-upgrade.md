@@ -234,29 +234,47 @@ redirected to another account or another environment.
 >   constraint `ETGO_BILLEVT_EVENT_UQ` on `EVENT_ID` *is* the idempotency gate: the first delivery
 >   inserts the row, every later delivery hits the constraint and only increments
 >   `DUPLICATE_COUNT` / `LAST_DUPLICATE_AT`. `EVENT_RESULT` moves `RECEIVED → APPLIED | IGNORED |
->   FAILED`; `APPLIED` and `IGNORED` are once-only, while a `FAILED` row is atomically flipped back
->   to `RECEIVED` by the next delivery so Stripe's own retry repairs a transient handler failure.
+>   FAILED`, and the three end states are deliberately not equally locked:
+>   - **`APPLIED` is terminal and enforced as such.** Every write of another result carries an
+>     `eventResult <> 'APPLIED'` guard, so a late failure on a redelivery cannot reopen an event
+>     whose payment was already recorded (spec: `testAppliedIsTerminalAgainstALaterFailureOrIgnore`).
+>   - **`IGNORED` is terminal by intent but not locked** — a later `markFailed` does overwrite it,
+>     which makes the row re-claimable again. That is deliberate: a later delivery of the same id
+>     may carry the correlation the ignored one lacked (spec: `testIgnoredIsNotLockedTheWayAppliedIs`).
+>   - **`FAILED` is not terminal at all**: the next delivery flips the row back to `RECEIVED`
+>     atomically and re-claims it, so Stripe's own retry repairs a transient handler failure.
+>
 >   `PROCESSED_AT` is first-write-wins. `REQUEST_ID` always stores the raw `metadata.request_id`;
 >   `ETGO_CHECKOUT_REQUEST_ID` is resolved at claim time when that request exists (an event may
 >   legitimately reference a request this instance never issued). `PAYLOAD_SUMMARY` is an
 >   allow-list (`data.object.{id,customer,subscription,livemode,payment_status,amount_total,
 >   currency,mode}` + `metadata.request_id`, expanded objects reduced to their id, at most 2000
->   chars) — never the raw body, never card data.
+>   chars) — never the raw body, never card data. The allow-list itself lives in
+>   `WebhookPayloadSummary`, not in the store: it is pure JSON with no DAL, so the generic
+>   `EventStore` seam can build a summary without reaching into the concrete store
+>   (`BillingEventStore.summarize` is a thin delegate).
+> - **`FAILURE_REASON` is not only about failures.** The same column carries the `IGNORED` reason,
+>   so most rows in a healthy instance read `unhandled event type` in a column named failure
+>   reason. On the genuine failure path it holds a fixed phrase plus the **exception class name
+>   only** — never the exception message, because a provider-controlled message can quote payload
+>   fragments and this column is required to stay operationally safe. The detail stays in the log.
 >
 > `EtendoGoJwtServlet.handleCheckoutWebhook` runs `CheckoutWebhookProcessor.evaluate(...)`
 > (signature via the unchanged `CheckoutWebhookVerifier`, then payload shape, then the claim) with
 > the same wire contract as before: `400 INVALID_CHECKOUT_SIGNATURE`, `400 INVALID_CHECKOUT_PAYLOAD`,
 > `200 {"received":true}` for a duplicate. An accepted `checkout.session.completed` /
 > `checkout.session.async_payment_succeeded` with `metadata.request_id` + `account_email` calls
-> `CheckoutRequestStore.recordPaid` and marks the event `APPLIED`; any other type is `IGNORED`
-> ("unhandled event type") and a missing correlation is `IGNORED` ("missing correlation metadata").
-> A `RuntimeException` in the handler marks the event `FAILED` and answers
-> `500 CHECKOUT_WEBHOOK_FAILED`, which is what makes Stripe retry and re-claim it. Note that
-> `APPLIED` means the handler ran to completion, not that a checkout row changed: an event for a
-> request id this instance never issued is `APPLIED` with an empty `ETGO_CHECKOUT_REQUEST_ID` and
-> an error in the log. Both tables are readable as System Administrator from the read-only Classic
-> windows **Checkout Request** (with a **Billing Event** child tab linked through that FK) and
-> **Billing Event** (standalone, same menu parent).
+> `CheckoutRequestStore.recordPaid` and marks the event `APPLIED`. There are **three** ignore
+> reasons, all recorded on the row: `unhandled event type` (any other event type),
+> `missing correlation metadata` (no `metadata.request_id` / `account_email`) and
+> `unknown checkout request` (the correlation id names no `ETGO_CHECKOUT_REQUEST` this instance
+> issued — `recordPaid` reports that back rather than failing). A `RuntimeException` in the handler
+> marks the event `FAILED` and answers `500 CHECKOUT_WEBHOOK_FAILED`, which is what makes Stripe
+> retry and re-claim it. **`APPLIED` therefore always means a payment was actually recorded**, never
+> merely that the handler ran: an event whose request id is unknown is `IGNORED`, so the audit row
+> cannot claim an effect that did not happen. Both tables are readable as System Administrator from
+> the read-only Classic windows **Checkout Request** (with a **Billing Event** child tab linked
+> through that FK) and **Billing Event** (standalone, same menu parent).
 
 Money now moves for real, and these gaps are **open against real charges** — they are no longer
 hypothetical preconditions for a future gateway:
@@ -432,6 +450,7 @@ must never break the session.
 | Paywall decision + productive-plan derivation | `com.etendoerp.go.payment.TenantPaywallService` |
 | Stripe hosted checkout session | `com.etendoerp.go.payment.HostedCheckoutService`, `CheckoutConfiguration` |
 | Webhook signature, payload shape and durable event claim | `com.etendoerp.go.payment.CheckoutWebhookVerifier`, `CheckoutWebhookProcessor`, `BillingEventStore` (`ETGO_BILLING_EVENT`) |
+| Payload allow-list (what may ever be written down) | `com.etendoerp.go.payment.WebhookPayloadSummary` |
 | Confirmed-payment correlation, checkout lifecycle | `com.etendoerp.go.payment.CheckoutRequestStore` (`ETGO_CHECKOUT_REQUEST`) |
 | Plan read/write | `com.etendoerp.go.payment.TenantPlanService` |
 | Gate wiring, 402 response, plan marking | `com.etendoerp.go.rest.EtendoGoJwtServlet` |
