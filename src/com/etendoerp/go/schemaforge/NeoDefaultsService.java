@@ -316,7 +316,22 @@ public class NeoDefaultsService {
   }
 
   private static @Nullable Object resolveOrFirstComboOption(NeoContext ctx, Column column, Object resolved) {
-    return resolved != null ? resolved : resolveFirstComboOption(column, ctx);
+    if (resolved != null) {
+      return resolved;
+    }
+    // ETP-5277 (review hardening, W1): this is a THIRD call site into the combo first-option
+    // fallback, reached from the Pass-3 hidden-mandatory-defaults resolver — not the two sites
+    // already guarded in resolveFieldDefault/applyDefaultWithComboFallback above. It is inert
+    // today only because NeoHiddenMandatoryDefaultsResolver.shouldResolveColumn requires
+    // column.isMandatory()==true and the 4 excluded AD_User columns are all ismandatory='N' in
+    // the current DB — a coincidence of data, not a structural guarantee. Excluding them here
+    // too closes that landmine: if any of the 4 columns is ever made mandatory (or the deny-list
+    // is extended to a mandatory column), this path must still come back null/absent instead of
+    // reopening the cross-tenant first-row-of-the-table leak this ticket fixed.
+    if (isUserSessionFallbackExcludedColumn(column)) {
+      return null;
+    }
+    return resolveFirstComboOption(column, ctx);
   }
 
   private static void applyDefaultWithComboFallback(NeoContext ctx, SFField sfField, Object resolvedValue,
@@ -1079,8 +1094,12 @@ public class NeoDefaultsService {
    * {@link #USER_SESSION_FALLBACK_EXCLUDED_COLUMNS}'s javadoc for why). Table name is compared
    * case-insensitively against the column's own table, so this never fires for a same-named
    * column on a different table.
+   *
+   * <p>Package-private (review hardening, W1/W2) so {@link NeoMandatoryDefaultsService}'s
+   * create-request session-injection path ({@code tryInjectFromSession}) can reuse this exact
+   * deny-list check instead of a second copy of the column-name list.
    */
-  private static boolean isUserSessionFallbackExcludedColumn(Column adColumn) {
+  static boolean isUserSessionFallbackExcludedColumn(Column adColumn) {
     if (adColumn.getTable() == null || adColumn.getTable().getDBTableName() == null) {
       return false;
     }
