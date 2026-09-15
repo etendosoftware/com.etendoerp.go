@@ -104,6 +104,16 @@ class FiscalDeclCrudHandler {
    * {@link #PROPERTY_DECLARATION_STATUS} column.
    */
   static final String PROPERTY_SUBMISSION_METHOD = "submissionMethod";
+  /**
+   * {@code submissionMethod} value set only by {@code Fiscal303SubmissionSupport
+   * #persistSuccessfulSubmission} on a real, non-test-mode AEAT telematic success (ETP-4755).
+   * Duplicated here (rather than referencing {@code Fiscal303SubmissionSupport}'s private
+   * constant of the same value) because this class needs it purely as a guard value for the
+   * "Reactivar declaración" reverse transition below (ETP-5338) — reactivating a declaration
+   * that was actually filed with the AEAT would desync this table from what Hacienda has on
+   * record, so it is blocked here regardless of what the frontend sends.
+   */
+  static final String SUBMISSION_METHOD_AEAT_TELEMATIC = "aeat_telematic";
 
   /**
    * Entity name (= DB table name) for the AEAT validation-error rows persisted on every Modelo
@@ -393,6 +403,22 @@ class FiscalDeclCrudHandler {
     // a stray/racy PUT that happens to include a null for it.
     boolean hasSubmissionMethod = body.has(SUBMISSION_METHOD_KEY) && !body.isNull(SUBMISSION_METHOD_KEY);
     String submissionMethod = hasSubmissionMethod ? body.getString(SUBMISSION_METHOD_KEY) : null;
+
+    // "Reactivar declaración" (ETP-5338) reverts a presented declaration back to draft via this
+    // same PUT path (status: "draft"). Defense in depth, mirroring handleDeclDelete's draft-only
+    // guard below: the frontend already hides the Reactivar action for aeat_telematic
+    // declarations (FmRowActions.jsx / FmListPage.jsx), but this is what actually prevents one
+    // from being reopened regardless of what the client sends — reactivating a declaration that
+    // was genuinely filed with the AEAT would desync this table from what Hacienda has on record,
+    // which is unrecoverable from here.
+    if (hasStatus && DEFAULT_STATUS.equals(status)) {
+      String currentSubmissionMethod = asString(decl.get(PROPERTY_SUBMISSION_METHOD));
+      if (SUBMISSION_METHOD_AEAT_TELEMATIC.equals(currentSubmissionMethod)) {
+        servlet.sendError(response, HttpServletResponse.SC_CONFLICT,
+            "Cannot reactivate a declaration filed via AEAT telematic submission: " + id);
+        return;
+      }
+    }
 
     if (hasStatus)     decl.set(PROPERTY_DECLARATION_STATUS, status);
     if (hasFileExt)    decl.set(PROPERTY_FILE_EXTERNAL, fileExternal);
