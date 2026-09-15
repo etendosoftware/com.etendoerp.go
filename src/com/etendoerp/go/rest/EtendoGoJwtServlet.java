@@ -84,7 +84,6 @@ import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
 import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
-import com.etendoerp.go.onboarding.OnboardingBankConnectionSyncService;
 import com.etendoerp.go.onboarding.OnboardingCostingScheduleService;
 import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
@@ -222,7 +221,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_ORG_READY = "orgReady";
   private static final String PROGRESS_ORG_INFO = "orgInfo";
   private static final String PROGRESS_BASELINE = "baseline";
-  private static final String PROGRESS_BANK_CONNECTION_SYNC = "bankConnectionSync";
   private static final String PROGRESS_COSTING_SCHEDULE = "costingSchedule";
   private static final String PROGRESS_BP_GROUP_ACCT_PATCH = "bpGroupAcctPatch";
   private static final String PROGRESS_ACCTDIM_VISIBILITY = "acctdimVisibility";
@@ -306,8 +304,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingBaselineService();
   OnboardingForceTestModeService onboardingForceTestModeService =
       new OnboardingForceTestModeService();
-  OnboardingBankConnectionSyncService onboardingBankConnectionSyncService =
-      new OnboardingBankConnectionSyncService();
   OnboardingCostingScheduleService onboardingCostingScheduleService =
       new OnboardingCostingScheduleService();
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
@@ -2362,12 +2358,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
 
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
-      // Activate the bank statement-sync schedule now that its row is committed and therefore
-      // visible to the scheduler's own DB connection. Best-effort: internally swallows failures
-      // and the SCH row is still picked up on the next scheduler initialization.
-      onboardingBankConnectionSyncService.activateSchedule(clientId);
-      // Same contract for the costing schedule: created inside the transaction above, so it
-      // only becomes visible to the scheduler's own connection now.
+      // Activate the costing schedule now that its row is committed and therefore visible to the
+      // scheduler's own DB connection. Best-effort: internally swallows failures, and the SCH row
+      // is still picked up on the next scheduler initialization.
       onboardingCostingScheduleService.activateSchedule(clientId);
       // ETP-4576: looked up by account id, not by bearer token - under the cookie session the
       // request carries no token, and the id is already resolved from the authenticated session.
@@ -2561,14 +2554,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, "User not found");
         return;
       }
-      Role role = roleListData.firstRoleId != null
-          ? OBDal.getInstance().get(Role.class, roleListData.firstRoleId)
+      Role role = roleListData.getFirstRoleId() != null
+          ? OBDal.getInstance().get(Role.class, roleListData.getFirstRoleId())
           : null;
       String jwtToken = SecureWebServicesUtils.generateToken(user, role);
 
       JSONObject result = new JSONObject();
       result.put(FIELD_TOKEN, jwtToken);
-      result.put(FIELD_ROLE_LIST, roleListData.roleArray);
+      result.put(FIELD_ROLE_LIST, roleListData.getRoleArray());
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } finally {
       OBContext.restorePreviousMode();
@@ -2936,9 +2929,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!wireOrgInfo(writer, clientId, orgId, adminUserId, adminRoleId, requestData)) {
       return false;
     }
-    if (!scheduleBankConnectionSync(writer, clientId, orgId, adminUserId, adminRoleId)) {
-      return false;
-    }
     if (!scheduleCostingBackground(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
@@ -3233,33 +3223,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Creates the per-client daily bank statement-sync schedule, backed by the PSD2 module's
-   * "Get Bank Statements" process (idempotent). Non-fatal: a
-   * failure here must never block onboarding, so it is logged and reported as skipped rather than
-   * aborting. The Quartz job is activated after the commit (see {@code handleOnboarding}); even if
-   * activation does not run, the {@code SCH} row is picked up on the next scheduler initialization.
-   */
-  boolean scheduleBankConnectionSync(PrintWriter writer, String clientId, String orgId,
-      String adminUserId, String adminRoleId) {
-    sendProgress(writer, PROGRESS_BANK_CONNECTION_SYNC, PROGRESS_IN_PROGRESS,
-        "Scheduling automatic bank statement sync...");
-    try {
-      onboardingBankConnectionSyncService.scheduleBankConnectionStatementSync(clientId, orgId, adminUserId, adminRoleId);
-      sendProgress(writer, PROGRESS_BANK_CONNECTION_SYNC, "done", "Automatic bank statement sync scheduled");
-    } catch (Exception e) {
-      log.warn("Could not schedule bank statement sync for client {}: {}", clientId, e.getMessage());
-      sendProgress(writer, PROGRESS_BANK_CONNECTION_SYNC, "done", "Automatic bank statement sync skipped");
-    }
-    return true;
-  }
-
-  /**
    * Creates the per-client 5-minute costing schedule, backed by core's "Costing Background process"
    * (idempotent). Onboarding already imports a VALIDATED costing rule, so without this schedule the
-   * rule sits there and no cost is ever calculated. Non-fatal, exactly like the bank-sync step above:
-   * a missing costing schedule is worth a log line, never a failed environment creation. The Quartz
-   * job is activated after the commit (see {@code handleOnboarding}); even if that activation does
-   * not run, the {@code SCH} row is picked up on the next scheduler initialization.
+   * rule sits there and no cost is ever calculated. Non-fatal: a missing costing schedule is worth
+   * a log line, never a failed environment creation. The Quartz job is activated after the commit
+   * (see {@code handleOnboarding}); even if that activation does not run, the {@code SCH} row is
+   * picked up on the next scheduler initialization.
    */
   boolean scheduleCostingBackground(PrintWriter writer, String clientId, String orgId,
       String adminUserId, String adminRoleId) {
@@ -3275,8 +3244,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     return true;
   }
-
-
 
   /**
    * Write a NDJSON progress line.
@@ -3836,7 +3803,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
       result.put("environment", buildSessionEnvironment(rotated.getRecord()));
-      result.put(FIELD_ROLE_LIST, roleListData.roleArray);
+      result.put(FIELD_ROLE_LIST, roleListData.getRoleArray());
       result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
@@ -3891,7 +3858,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String requestedRoleId, String requestedOrgId, HttpServletResponse response)
       throws IOException, JSONException {
     String roleId = requestedRoleId.isEmpty() ? roleListData.firstRoleId : requestedRoleId;
-    JSONObject selectedRole = findRole(roleListData.roleArray, roleId);
+    JSONObject selectedRole = findRole(roleListData.getRoleArray(), roleId);
     if (roleId == null || selectedRole == null) {
       writeError(response, HttpServletResponse.SC_FORBIDDEN,
           "Requested role is not available to this user");

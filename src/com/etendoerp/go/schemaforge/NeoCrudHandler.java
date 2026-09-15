@@ -452,11 +452,18 @@ class NeoCrudHandler {
     params.put(JsonConstants.WINDOW_ID, adTab.getWindow().getId());
     params.put(JsonConstants.NO_ACTIVE_FILTER, "true");
 
-    if (context.getRecordId() != null) {
-      params.put(JsonConstants.ID, context.getRecordId());
-    }
+    // ETP-5195, R3: query params are merged in FIRST, and the path-derived id (when present) is
+    // applied LAST, so it is always authoritative. Previously the path id was set before the
+    // query params were merged in, so a caller could pass a conflicting "id" on the query string
+    // (e.g. DELETE /sws/neo/user/user/<ordinary-id>?id=<protected-id>) and silently redirect the
+    // CRUD operation to a different record than the one guards like
+    // UserRoleAssignmentHandler#rejectDangerousDelete evaluated. When there is no path id, a
+    // query "id" still flows through unchanged, exactly as before.
     if (context.getQueryParams() != null) {
       params.putAll(context.getQueryParams());
+    }
+    if (context.getRecordId() != null) {
+      params.put(JsonConstants.ID, context.getRecordId());
     }
 
     normalizeBooleanCriteria(params, dalEntityName);
@@ -568,9 +575,23 @@ class NeoCrudHandler {
       return errorResponse;
     }
     fieldFilter.filterGetResponse(responseJson);
-    if ("GET".equals(context.getHttpMethod()) && context.getSfEntity() != null) {
-      NeoListIdentifierHelper.enrichListIdentifiers(responseJson, context.getSfEntity());
-      NeoLocatorIdentifierHelper.enrichLocatorIdentifiers(responseJson, context.getSfEntity());
+    if (context.getSfEntity() != null) {
+      String httpMethod = context.getHttpMethod();
+      if ("GET".equals(httpMethod)) {
+        NeoListIdentifierHelper.enrichListIdentifiers(responseJson, context.getSfEntity());
+      }
+      // ETP-5037 (QA finding, Emilio Polliotti): a Locator FK's warehouse-name label must
+      // also survive a write, not just a GET. POST/PUT/PATCH echo the just-saved record back
+      // to the frontend, which uses it directly for the row's optimistic update (see
+      // DetailView.jsx's buildInlineRowUpdateHandler / applyLocalChildRowUpdate) — with
+      // GET-only enrichment, that echoed record showed the raw bin code (e.g. "AS-0-0-0")
+      // instead of the warehouse name until the next full refetch. Reproduced on both
+      // Goods Movements and Internal Consumption; the enrichment itself is generic
+      // (any Locator FK, any window), so this fix covers all of them at once.
+      if ("GET".equals(httpMethod) || "POST".equals(httpMethod) || "PUT".equals(httpMethod)
+          || METHOD_PATCH.equals(httpMethod)) {
+        NeoLocatorIdentifierHelper.enrichLocatorIdentifiers(responseJson, context.getSfEntity());
+      }
     }
     return NeoResponse.ok(responseJson);
   }
@@ -624,7 +645,9 @@ class NeoCrudHandler {
   private NeoResponse detectStaleRecord(NeoContext context, String dalEntityName) {
     JSONObject body = context.getRequestBody();
     String clientValue = body == null ? null : body.optString(FIELD_UPDATED, null);
-    if (!NeoRecordVersion.isStale(dalEntityName, context.getRecordId(), clientValue)) {
+    String route = NeoRecordVersion.routeOf(context.getHttpMethod(), context.getSpecName(),
+        context.getEntityName(), context.getRecordId());
+    if (!NeoRecordVersion.isStale(dalEntityName, context.getRecordId(), clientValue, route)) {
       return null;
     }
     NeoWriteRefusalLog.staleRecord(context, clientValue);
