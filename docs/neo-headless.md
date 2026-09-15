@@ -571,6 +571,104 @@ core's own check be the final word rather than fabricating a conflict.
 edit then 400s as `missing_updated` no matter how freshly the record was just read. See §5.3's
 `ChartOfAccountsHandler` example for a concrete case that hit exactly this gap.
 
+#### 4.3.4 Create-defaults exclusion for `AD_User`'s 4 `Default_*` columns (ETP-5277)
+
+Neither the `user` entity's create-defaults bootstrap (`GET /{specName}/user/defaults`, consulted
+by the create form on load) nor its `POST /{specName}/user` create response will ever resolve or
+echo a session-derived value for these 4 `AD_User` columns:
+
+- `Default_Ad_Role_ID`
+- `Default_Ad_Client_ID`
+- `Default_Ad_Org_ID`
+- `Default_M_Warehouse_ID`
+
+**Why.** These columns have no `AD_Column`/`ETGO_SF_FIELD` default configured, so resolution used
+to fall through to the generic create-defaults fallback chain — which, for a brand-new `AD_User`
+record with no matching `AD_Preference` row, resolves to whatever the *creating caller's own
+session* (or, in one variant of the bug, an arbitrary unscoped first row of the whole table)
+happens to hold. Concretely: creating a new user showed it, in the instant right after Guardar and
+before any refresh, already holding the *creating admin's own* role/client/org/warehouse — in one
+observed case even a **different tenant's** client/org entirely, since the combo-preselection
+fallback below queried with no scoping at all. Neither leak is a real grant: the backend
+(`UserRoleAssignmentHandler#ensurePersonalRoleForNewlyCreatedUser`) always persists the correct
+values (a fresh, empty personal role; the real client/organization/first-active-warehouse) in the
+same request — the bug was that the create response was never told about it, so the wrong values
+lingered until a follow-up `GET`.
+
+**Where the guard lives.** `NeoDefaultsService.isUserSessionFallbackExcludedColumn(Column)` is a
+small, explicit deny-list (table `AD_USER` + the 4 DB column names above, case-insensitive; fails
+open — returns `false` — on missing table/column metadata, so it can never accidentally exclude a
+column it can't positively identify). It is checked inside the **primitives themselves**, not at
+each call site, so every current and future caller is covered by construction:
+
+- `NeoDefaultsService.resolveFirstComboOption(Column, NeoContext)` — the combo/selector
+  first-option fallback (an unscoped "first row of the table" query when no other default
+  resolves). This is the primitive `resolveOrFirstComboOption`, `applyDefaultWithComboFallback`,
+  and `NeoMandatoryDefaultsService#tryInjectFirstFromLookup` all eventually reach.
+- `NeoDefaultsService.resolveFromPrefsOrDocType(...)` — the `Utility.getPreference` session/prefs
+  fallback used when no `AD_Preference` row exists for the column.
+- `NeoMandatoryDefaultsService#tryInjectFromSession` — a structurally separate mechanism (reads
+  `#ColumnName`/`ColumnName` straight off the session, bypassing both primitives above), reusing
+  the same deny-list rather than a second copy. Dormant in practice today only because core seeds
+  session vars as `#AD_Role_ID`/`#AD_Client_ID`/`#AD_Org_ID`/`#M_Warehouse_ID`, never as
+  `#Default_Ad_Role_ID` etc. — a naming coincidence, not a structural guarantee, which is exactly
+  why it is guarded rather than left to that coincidence.
+
+**Why the guard sits at the primitive, not the call site — read this before adding a 6th caller.**
+Every round of investigating this bug turned up one more unguarded caller of the same underlying
+fallback (the original `defaultRole` leak → an unscoped cross-tenant combo-fallback leak found
+while fixing it → two more call sites found in review → a fifth found while hardening those two).
+Guarding one call site at a time was whack-a-mole: each fix left the mechanism itself still capable
+of leaking through whatever caller nobody had looked at yet. The guard therefore lives inside
+`resolveFirstComboOption` and `resolveFromPrefsOrDocType` — the two low-level primitives every one
+of those callers eventually routes through — so a **new** caller added later (a new combo fallback,
+a new session/prefs read) inherits the exclusion automatically, with nothing to remember at the
+call site. If you are adding a new resolution path for create-defaults values, route it through
+one of these two primitives (or, if it must read the session directly like
+`tryInjectFromSession` does, call `isUserSessionFallbackExcludedColumn` yourself first) — do not
+special-case `AD_User` at your own call site instead.
+
+**Response-patch complement.** Because the 4 fields are still real, meaningful data once
+persisted, the create response is patched with their final values immediately after
+`ensurePersonalRoleForNewlyCreatedUser` runs (`UserRoleAssignmentHandler#patchUserDefaultsOntoRow`),
+re-reading them off the just-saved `User` entity and writing both `<field>` and its
+`<field>$_identifier` companion (via `BaseOBObject#getIdentifier()`, the same convention every
+other FK field's identifier uses — not a hand-rolled per-tenant name map). This mirrors the
+existing `attachInvitationStatusToRowSafely` pattern in the same file: best-effort, isolated in its
+own `try/catch`, logged (never thrown) on failure, and a `null` reference (e.g. no active warehouse
+yet) is omitted from the row rather than forced to `JSONObject.NULL`. Net effect: the create
+response is now honest about the field this same request just changed, instead of only becoming
+correct after a follow-up `GET`.
+
+**Scope — deliberately narrow.** The deny-list is exactly these 4 columns on exactly `AD_User`; it
+does not weaken `resolveFirstComboOption`/`resolveFromPrefsOrDocType`/`tryInjectFromSession` for any
+other entity or column (e.g. `AD_User.AD_Language`, on the same table, still resolves normally
+through the same fallback — that's the control case the regression tests assert). No
+existing-record path (`PUT`/`PATCH`) reaches either primitive — both are exclusively new-record
+paths — so nothing here affects editing an existing user.
+
+**Known limitations surfaced while fixing this, not fixed here:**
+
+- `WarehouseLookupHelper#findFirstActiveWarehouse` (`src/com/etendoerp/go/common/WarehouseLookupHelper.java`)
+  has no `ORDER BY` on either of its `OBCriteria` lookups, only `setMaxResults(1)` — so "first
+  active warehouse" is non-deterministic whenever 2+ are active for the same client/organization.
+  Pre-existing (ETP-4894), not introduced by ETP-5277 — but the response-patch above makes a
+  wrong-but-plausible warehouse **more visible** than before (previously `null` until a refresh;
+  now shown immediately in the create response). Candidate follow-up: add a stable `ORDER BY` (id
+  or creation date) to both criteria.
+- `Utility.getPreference` — the mechanism `resolveFromPrefsOrDocType` falls back from — was
+  **already structurally incapable of returning a real, admin-configured `AD_Preference` value**
+  through this call path, for *any* column, not just the 4 excluded here, before ETP-5277 existed.
+  It only ever consults the session snapshot (never a live DB query), and
+  `NeoSessionVarsCache`'s `IDENTITY_KEYS` whitelist (`src/com/etendoerp/go/schemaforge/util/NeoSessionVarsCache.java`)
+  — the fixed set of keys that snapshot is allowed to carry — does not include the `"P|"`-prefixed
+  keys `Preferences.savePreferenceInSession` writes real preferences under. So a legitimately
+  configured `AD_Preference` for a create-defaults column was already invisible to this endpoint
+  everywhere in NEO Headless, not just for `AD_User`. ETP-5277's guard changes nothing about this —
+  it is called out here because the investigation is what surfaced it. Candidate follow-up: widen
+  `IDENTITY_KEYS` to include `"P|"`-prefixed keys, or route this fallback through a live
+  `AD_Preference` query instead of the session snapshot.
+
 ### 4.4 Selectors (FK Dropdowns)
 
 The selector service resolves foreign key references and provides searchable dropdown values.
