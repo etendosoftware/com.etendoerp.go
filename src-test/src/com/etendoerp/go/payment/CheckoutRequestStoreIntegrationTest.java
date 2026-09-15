@@ -446,6 +446,50 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // Group 5 — recordPaid reports whether the correlation id named a request at all
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * ETP-5045 review follow-up. {@code recordPaid} used to return {@code void}, so the webhook
+   * handler could not tell "the payment was recorded" from "that correlation id means nothing
+   * here" — it marked the billing event {@code APPLIED} either way. In a shared Stripe test
+   * account an event referencing a request this instance never issued is ordinary traffic, so the
+   * audit row would routinely claim a payment had been applied when nothing had been. The boolean
+   * is what lets the handler mark those {@code IGNORED} instead.
+   *
+   * <p>"Found", not "advanced": a redelivery of a payment already recorded still returns
+   * {@code true}, because the request <em>is</em> known. Only an unknown correlation id is
+   * {@code false}. Conflating the two would make every Stripe retry of a genuine payment look
+   * like an unknown request.
+   */
+  @Test
+  public void testRecordPaidReportsWhetherTheCorrelationIdNamedAKnownRequest() {
+    String email = newEmail("record-paid");
+    String accountId = createAccount(email);
+    String requestId = createRequest(accountId, email);
+    store.recordSessionCreated(requestId, "cs_" + requestId);
+
+    assertTrue("A known request must report the payment as recorded",
+        store.recordPaid(requestId, "cus_" + requestId, "sub_" + requestId));
+    assertEquals(STATUS_PAID, rawStatus(requestId));
+
+    assertTrue("A redelivery of a known request is still 'found' — the status simply does not "
+        + "advance a second time", store.recordPaid(requestId, "cus_" + requestId,
+        "sub_" + requestId));
+    assertEquals(STATUS_PAID, rawStatus(requestId));
+
+    String unknown = MARKER + "never-issued-" + UUID.randomUUID();
+    assertFalse("An unknown correlation id must be reported, not silently treated as applied",
+        store.recordPaid(unknown, "cus_x", "sub_x"));
+    assertNull("And it must certainly not have created a request", rawColumn(unknown,
+        "CHECKOUT_STATUS"));
+
+    assertFalse("A null correlation id names nothing", store.recordPaid(null, "cus_x", "sub_x"));
+    assertFalse("A blank correlation id names nothing", store.recordPaid("   ", "cus_x",
+        "sub_x"));
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Fixtures
   // ---------------------------------------------------------------------------------------------
 

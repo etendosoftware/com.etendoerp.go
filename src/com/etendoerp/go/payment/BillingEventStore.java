@@ -2,15 +2,11 @@
 package com.etendoerp.go.payment;
 
 import java.sql.SQLException;
-import java.util.Arrays;
 import java.util.Date;
-import java.util.List;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.codehaus.jettison.json.JSONArray;
-import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.exception.ConstraintViolationException;
 import org.openbravo.base.provider.OBProvider;
@@ -36,10 +32,13 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
  * event and still shows how often the provider knocked.
  *
  * <p>Lifecycle: {@code RECEIVED} → {@code APPLIED} | {@code IGNORED} | {@code FAILED}.
- * {@code APPLIED} and {@code IGNORED} are terminal. {@code FAILED} is deliberately not: the next
- * delivery of the same id flips the row back to {@code RECEIVED} atomically and is treated as a
- * fresh claim, so the provider's own retry schedule repairs a transient handler failure without
- * anyone touching the database. {@code APPLIED} therefore stays strictly once-only.
+ * {@code APPLIED} is terminal and enforced as such: no later write may move a row out of it, so a
+ * late failure on a redelivery cannot overwrite the fact that the payment was applied.
+ * {@code IGNORED} is terminal by intent but not locked, because a later delivery of the same id
+ * may legitimately carry the correlation the ignored one lacked. {@code FAILED} is deliberately
+ * not terminal: the next delivery of the same id flips the row back to {@code RECEIVED}
+ * atomically and is treated as a fresh claim, so the provider's own retry schedule repairs a
+ * transient handler failure without anyone touching the database.
  *
  * <p>Same conventions as {@link CheckoutRequestStore}: every method opens the system context
  * ({@code "0","0","0","0"} plus admin mode) and restores it in a {@code finally}, because the
@@ -47,8 +46,18 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
  * stored at client and organization {@code 0}; bulk HQL names the entity as
  * {@link BillingEvent#ENTITY_NAME} (the Java simple name is not registered and throws at runtime).
  *
- * <p>No card data and no full provider payload is ever written here. {@link #summarize} is the
- * only path into {@code PAYLOAD_SUMMARY} and it is an allow-list.
+ * <p>No card data and no full provider payload is ever written here.
+ * {@link WebhookPayloadSummary#summarize} is the only path into {@code PAYLOAD_SUMMARY} and it is
+ * an allow-list.
+ *
+ * <p><b>Accepted crash window — at-most-once, not exactly-once.</b> The claim commits before the
+ * handler runs, so a JVM kill in between leaves a committed {@code RECEIVED} row with nothing
+ * applied. The next delivery reads that row as a duplicate and answers 200, so the payment is
+ * never applied <em>and</em> never retried; it is visible only as a row stuck in {@code RECEIVED}.
+ * Committing after the handler instead would trade this for double-application, which is worse for
+ * a payment, so the window is accepted deliberately. Closing it needs a sweeper that re-opens rows
+ * left {@code RECEIVED} past a threshold — that belongs to the reconciliation job (ETP-5048), not
+ * to this store. The narrower lost-write variant is noted on {@link #markFailed}.
  */
 public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
   private static final Logger log = LogManager.getLogger();
@@ -70,11 +79,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
   private static final int EVENT_TYPE_WIDTH = 120;
   private static final int REQUEST_ID_WIDTH = 64;
   private static final int REASON_WIDTH = 255;
-  private static final int SUMMARY_WIDTH = 2000;
-
-  /** The only {@code data.object} keys that may reach {@code PAYLOAD_SUMMARY}. */
-  private static final List<String> SUMMARY_KEYS = Arrays.asList("id", "customer",
-      "subscription", "livemode", "payment_status", "amount_total", "currency", "mode");
+  private static final int SUMMARY_WIDTH = WebhookPayloadSummary.MAX_LENGTH;
 
   /**
    * Id-only claim, kept for the {@link CheckoutWebhookProcessor.EventStore} contract.
@@ -98,7 +103,9 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
    *       row means a previous delivery failed and this one re-claims it: {@code true}.
    *   <li>Otherwise the row is {@code RECEIVED}, {@code APPLIED} or {@code IGNORED} — a genuine
    *       duplicate. {@code DUPLICATE_COUNT} is incremented and {@code LAST_DUPLICATE_AT} set:
-   *       {@code false}.
+   *       {@code false}. If that update matches <em>no</em> row the premise was wrong — the insert
+   *       failed on something other than the event-id unique constraint — and the original failure
+   *       is rethrown rather than reported as a duplicate.
    * </ol>
    *
    * <p>Every step commits on its own, and step 2 is atomic without a row lock because the
@@ -129,14 +136,15 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
     OBContext.setAdminMode(true);
     try {
-      if (insertReceived(id, eventType, requestId, summary, now)) {
+      RuntimeException insertFailure = insertReceived(id, eventType, requestId, summary, now);
+      if (insertFailure == null) {
         return true;
       }
       if (reclaimFailed(id, now)) {
         log.info("Billing event '{}' re-claimed after a failed delivery", id);
         return true;
       }
-      recordDuplicate(id, now);
+      recordDuplicate(id, now, insertFailure);
       return false;
     } finally {
       OBContext.restorePreviousMode();
@@ -180,69 +188,30 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
   }
 
   /**
-   * Builds the allow-listed summary that may be stored alongside a claim.
+   * Builds the allow-listed summary that may be stored in {@code PAYLOAD_SUMMARY}.
    *
-   * <p>Keeps {@code data.object.{id, customer, subscription, livemode, payment_status,
-   * amount_total, currency, mode}} and {@code data.object.metadata.request_id}, nothing else. A
-   * value that is itself an object (an expanded {@code customer}) contributes only its {@code id};
-   * arrays are dropped. The raw body, card data, {@code payment_method_details} and anything not
-   * named above never reach the column. The result is abbreviated to the column width, so a
-   * pathological input can produce a truncated, non-parseable summary — it is an operator aid,
-   * not a data source.
+   * <p>A thin delegate to {@link WebhookPayloadSummary#summarize}, which owns the policy: the
+   * allow-list is a pure JSON function shared with {@link CheckoutWebhookProcessor} and must not
+   * depend on this store. Kept here because the column it guards is this store's, and because the
+   * specs that pin what may never be written read more honestly next to it.
    *
    * @param event parsed provider event
    * @return compact JSON text, or null when nothing allow-listed is present
    */
   public static String summarize(JSONObject event) {
-    if (event == null) {
-      return null;
-    }
-    JSONObject data = event.optJSONObject("data");
-    JSONObject object = data == null ? null : data.optJSONObject("object");
-    if (object == null) {
-      return null;
-    }
-    try {
-      JSONObject summary = new JSONObject();
-      for (String key : SUMMARY_KEYS) {
-        Object value = scalarOrId(object.opt(key));
-        if (value != null) {
-          summary.put(key, value);
-        }
-      }
-      JSONObject metadata = object.optJSONObject("metadata");
-      String requestId = metadata == null ? null
-          : StringUtils.trimToNull(metadata.optString("request_id", ""));
-      if (requestId != null) {
-        summary.put("metadata", new JSONObject().put("request_id", requestId));
-      }
-      return summary.length() == 0 ? null
-          : StringUtils.abbreviate(summary.toString(), SUMMARY_WIDTH);
-    } catch (JSONException e) {
-      log.warn("Could not summarize a billing event payload", e);
-      return null;
-    }
+    return WebhookPayloadSummary.summarize(event);
   }
 
   /**
-   * Reduces an allow-listed value to something safe to store: a scalar as-is, an object as its
-   * {@code id}, anything else (arrays, null, JSON null) as nothing.
+   * Step 1 of the claim.
+   *
+   * <p>Returns null when the row was inserted. A suspected unique violation on the event id is
+   * returned rather than swallowed, so that step 3 can rethrow it if the row it implies turns out
+   * not to exist; any other failure propagates immediately after the session is rolled back.
+   *
+   * @return null on success, or the failure that looked like a duplicate
    */
-  private static Object scalarOrId(Object value) {
-    if (value == null || JSONObject.NULL.equals(value) || value instanceof JSONArray) {
-      return null;
-    }
-    if (value instanceof JSONObject) {
-      return StringUtils.trimToNull(((JSONObject) value).optString("id", ""));
-    }
-    return value;
-  }
-
-  /**
-   * Step 1 of the claim. Returns false only for a unique violation on the event id; any other
-   * failure propagates after the session is rolled back.
-   */
-  private boolean insertReceived(String eventId, String eventType, String requestId,
+  private RuntimeException insertReceived(String eventId, String eventType, String requestId,
       String summary, Date now) {
     String correlation = StringUtils.abbreviate(StringUtils.trimToNull(requestId),
         REQUEST_ID_WIDTH);
@@ -264,11 +233,11 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
       event.setDuplicateCount(0L);
       OBDal.getInstance().save(event);
       flushAndCommit();
-      return true;
+      return null;
     } catch (RuntimeException e) {
       OBDal.getInstance().rollbackAndClose();
       if (isUniqueEventViolation(e)) {
-        return false;
+        return e;
       }
       throw e;
     }
@@ -294,8 +263,20 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
     return reclaimed == 1;
   }
 
-  /** Step 3 of the claim: counts the redelivery on the row that won. */
-  private void recordDuplicate(String eventId, Date now) {
+  /**
+   * Step 3 of the claim: counts the redelivery on the row that won.
+   *
+   * <p>Matching no row disproves the reason we are here. {@link #isUniqueEventViolation} accepts a
+   * {@link ConstraintViolationException} whose constraint name the driver did not report, which a
+   * violation of {@code ETGO_BILLEVT_CHKREQ_FK} or {@code ETGO_BILLEVT_RESULT_CHK} can also
+   * produce — and in those cases nothing was ever inserted. Returning {@code false} there would
+   * make the servlet answer 200 to an event that was never recorded and never applied, and the
+   * provider would never retry it. So the original failure is rethrown: the request fails, the
+   * provider retries, and the event survives.
+   *
+   * @param insertFailure the failure that was read as a duplicate, rethrown when no row matches
+   */
+  private void recordDuplicate(String eventId, Date now, RuntimeException insertFailure) {
     int counted = OBDal.getInstance()
         .getSession()
         .createQuery("update " + BillingEvent.ENTITY_NAME + " be"
@@ -308,9 +289,9 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
         .executeUpdate();
     flushAndCommit();
     if (counted == 0) {
-      // The insert hit the unique constraint a moment ago, so the row exists; reaching here means
-      // something deleted it in between. Not an error for the caller, but worth a trace.
-      log.warn("Billing event '{}' was a duplicate but its row could not be found", eventId);
+      log.error("Billing event '{}' looked like a duplicate but no row exists — the insert failed "
+          + "on something other than the event-id unique constraint", eventId, insertFailure);
+      throw insertFailure;
     }
   }
 
@@ -318,6 +299,14 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
    * Shared terminal-state write. {@code PROCESSED_AT} is first-write-wins via {@code coalesce} so
    * it keeps meaning "when the result was first decided"; the reason column is overwritten when
    * one is given and left alone otherwise.
+   *
+   * <p>Every result other than {@code APPLIED} carries an {@code eventResult <> 'APPLIED'} guard,
+   * which is what makes {@code APPLIED} genuinely terminal rather than merely intended to be. The
+   * reachable case is the servlet's own failure path: a redelivery of an already-applied event
+   * that throws while re-checking it would otherwise rewrite the row to {@code FAILED}, which in
+   * turn makes the next delivery re-claim it and apply the payment a second time.
+   * {@code markApplied} needs no guard — rewriting {@code APPLIED} over {@code APPLIED} changes
+   * nothing, and {@code coalesce} keeps the first timestamp.
    */
   private void updateResult(String eventId, String result, String reason) {
     String id = StringUtils.trimToNull(eventId);
@@ -329,6 +318,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
     try {
       String trimmedReason = StringUtils.abbreviate(StringUtils.trimToNull(reason), REASON_WIDTH);
       String setReason = trimmedReason == null ? "" : ", be.failureReason = :reason";
+      boolean guardApplied = !RESULT_APPLIED.equals(result);
       org.hibernate.query.Query<?> update = OBDal.getInstance()
           .getSession()
           .createQuery("update " + BillingEvent.ENTITY_NAME + " be"
@@ -336,17 +326,24 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
               + "       be.processedAt = coalesce(be.processedAt, :now),"
               + "       be.updated = :now"
               + setReason
-              + " where be.event = :eventId")
+              + " where be.event = :eventId"
+              + (guardApplied ? "   and be.eventResult <> :applied" : ""))
           .setParameter("result", result)
           .setParameter("now", new Date())
           .setParameter("eventId", id);
       if (trimmedReason != null) {
         update.setParameter("reason", trimmedReason);
       }
+      if (guardApplied) {
+        update.setParameter("applied", RESULT_APPLIED);
+      }
       int updated = update.executeUpdate();
       flushAndCommit();
       if (updated == 0) {
-        log.warn("No billing event row found for '{}' while marking it {}", id, result);
+        // Either there is no such row, or it is already APPLIED and the guard refused the write.
+        // Both are ordinary on a redelivery, and neither is actionable for the caller.
+        log.warn("No billing event row was updated for '{}' while marking it {} — the row is "
+            + "missing or already {}", id, result, RESULT_APPLIED);
       }
     } catch (RuntimeException e) {
       OBDal.getInstance().rollbackAndClose();
