@@ -713,7 +713,9 @@ public class ToolRegistry {
       stringProp("Field name (e.g. 'businessPartner') or DB column name (e.g. 'C_BPartner_ID') to get selector values for"));
     props.put(McpConstants.PARAM_FIELD,
         stringProp("Compatibility-only field name alias; use column for selector lookup"));
-    props.put(McpConstants.PARAM_QUERY, stringProp("Search query to filter selector values"));
+    props.put(McpConstants.PARAM_QUERY, stringProp(
+        "Optional search text, matched case-insensitively against the item label, whole or "
+            + "as a substring. Omit it to list unfiltered."));
     props.put(McpConstants.PARAM_RECORD_CONTEXT, objectProp(
         "Optional context from the current record to resolve dependent selectors. "
             + "For example: {\"businessPartner\": \"<id>\"} for partnerAddress, "
@@ -730,7 +732,9 @@ public class ToolRegistry {
             + "Pass recordContext when the selector depends on other field values "
             + "(e.g. partnerAddress requires businessPartner). "
             + "Pass parentContext for line selectors that depend on header values "
-            + "(e.g. tax requires orderDate/invoiceDate and priceList).",
+            + "(e.g. tax requires orderDate/invoiceDate and priceList). "
+            + "Returns {items:[{id,label}], totalCount, hasMore}, capped at 50 items with no "
+            + "paging: when hasMore is true, narrow with query.",
         buildObjectSchema(props,
           List.of("spec", McpConstants.PARAM_ENTITY, McpConstants.PARAM_COLUMN)));
   }
