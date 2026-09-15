@@ -45,6 +45,8 @@ public class CheckoutRequestStore {
   private static final Logger log = LogManager.getLogger();
 
   private static final String ZERO_ID = "0";
+  /** Name of the correlation-id parameter bound by every query keyed on {@code REQUEST_ID}. */
+  private static final String PARAM_REQUEST_ID = "requestId";
 
   static final String STATUS_CREATING = "CREATING";
   static final String STATUS_CREATED = "CREATED";
@@ -194,7 +196,7 @@ public class CheckoutRequestStore {
       }
       OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
           "as cr where cr.request = :requestId and lower(cr.accountEmail) = lower(:accountEmail)");
-      query.setNamedParameter("requestId", StringUtils.trimToEmpty(requestId));
+      query.setNamedParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId));
       query.setNamedParameter("accountEmail", StringUtils.trimToEmpty(accountEmail));
       query.setFilterOnReadableClients(false);
       query.setFilterOnReadableOrganization(false);
@@ -269,7 +271,7 @@ public class CheckoutRequestStore {
           .setParameter("provisioning", STATUS_PROVISIONING)
           .setParameter("paid", STATUS_PAID)
           .setParameter("now", new Date())
-          .setParameter("requestId", StringUtils.trimToEmpty(requestId))
+          .setParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId))
           .setParameter("accountEmail", StringUtils.trimToEmpty(accountEmail))
           .executeUpdate();
       flushAndCommit();
@@ -387,7 +389,7 @@ public class CheckoutRequestStore {
     }
     OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
         "as cr where cr.request = :requestId");
-    query.setNamedParameter("requestId", StringUtils.trimToEmpty(requestId));
+    query.setNamedParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId));
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     query.setMaxResult(1);

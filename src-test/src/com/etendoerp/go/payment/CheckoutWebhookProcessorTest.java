@@ -340,8 +340,9 @@ public class CheckoutWebhookProcessorTest {
 
   @Test
   public void theRichClaimPassesNullsWhenTheEventCarriesNoDataObject() throws Exception {
-    // A bare event (the fixture the other specs use) has no correlation and nothing to summarize;
-    // the store must receive null rather than an empty string or an empty object.
+    // A bare event carries no correlation and nothing that can be summarized. Both of those
+    // arguments must therefore reach the store as null, never as an empty string and never as an
+    // empty object.
     RichRecordingEventStore eventStore = new RichRecordingEventStore();
 
     processorFor(eventStore).accept(COMPLETED_EVENT, sign(COMPLETED_EVENT, TIMESTAMP, SECRET),
