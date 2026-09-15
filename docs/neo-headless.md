@@ -1146,10 +1146,29 @@ tenant scope: DB Extended derives client and organization from `OBContext`; Go m
 namespace to its AD table and requires the active role to have entity read access before searching.
 
 Alternatively, pass `targets=sales-invoice` to select an active configured search target. The
-valid keys are the `Search Key` values of the active `ETARC_VECTOR_SEARCH_TARGET` rows — **they are
-not spec names**, even where the two coincide. `NeoVectorSearchEndpoint.configuredTargetKeys()`
-returns them, and the MCP `neo_vector_search` tool publishes them as an `enum` on the `targets`
-parameter so an agent never has to guess one (IMP-41).
+valid keys are the `Search Key` values of the active `ETARC_VECTOR_SEARCH_TARGET` rows.
+`NeoVectorSearchEndpoint.configuredTargetKeys()` returns them, and the MCP `neo_vector_search` tool
+publishes them as an `enum` on the `targets` parameter so an agent never has to guess one (IMP-41).
+
+**A target key IS the name of the spec that owns it (ETP-5335).** That is a convention, not a
+coincidence, and it is what lets a caller act on a result: a match found in target `X` is read with
+`neo_get(spec:"X", entity:<X's primaryEntity>, id:<match.id>)`. The entity comes from
+`neo_discover` — `neo_get` requires it and does not default to the primary one — so the convention
+removes the guess about *which spec*, not the lookup of which entity. It matters because a match carries
+`target`, `namespace`, `id`, `score` and `fields` — and **no** pointer to where the record lives, so
+without the convention the target name is the only clue and the caller is left guessing a spec from
+it. Three of the four targets already followed it; `contact`/`business-partner` did not, and reading
+one of its matches meant a failed `neo_get` first (the spec is `contacts`), so it was renamed to
+match.
+
+The convention is declared twice and enforced in neither place, which is the standing risk:
+`ETARC_VECTOR_SEARCH_TARGET.SEARCH_KEY` is what the server and the MCP answer with, while
+`artifacts/<spec>/decisions.json → window.vectorSearch.target` is what the React SPA sends — the
+contract is bundled into the app, and `ETGO_SF_*` carries no vector column at all, so neither side
+can see the other's value. Keep the two equal to each other and to the spec name. A pipeline
+validator rule (F11) enforcing exactly that is the open follow-up; until it exists, a one-sided
+rename makes the SPA send a key the server does not know, and the SPA renders that as *no results*
+rather than as an error (`useVectorSearch.js` maps any non-`ok` response to an empty match list).
 
 On the MCP surface `targets` is **optional**: omitted, the router substitutes every target the
 current role can read (`NeoVectorSearchEndpoint.authorizedTargetKeys()`, which filters per key so

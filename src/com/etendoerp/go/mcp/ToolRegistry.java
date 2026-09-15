@@ -599,8 +599,11 @@ public class ToolRegistry {
         ? stringArrayProp("DB Extended search-target keys to query. No search target is configured "
             + "on this instance, so semantic search is unavailable here.")
         : stringEnumArrayProp("Optional. Which indexes to search. These are the only valid values — "
-            + "a key that is not listed here does not exist, however plausible it looks, and they "
-            + "are NOT spec names even where the two happen to coincide. Omit it to search every "
+            + "a key that is not listed here does not exist, however plausible it looks. Each one "
+            + "is the name of the spec that owns it, so a match found in target X is read with "
+            + "neo_get(spec:X, entity:<that spec's primaryEntity, from neo_discover>, "
+            + "id:<match.id>) — the match itself carries no pointer to where its record lives. "
+            + "Omit it to search every "
             + "index you have access to, which is the right choice when you do not already know "
             + "where the answer lives.", targetKeys));
     props.put("topK", numericProp(TYPE_INTEGER, "Maximum results (default 10, maximum 50)"));
