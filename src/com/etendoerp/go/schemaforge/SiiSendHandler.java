@@ -20,8 +20,10 @@ package com.etendoerp.go.schemaforge;
 import javax.inject.Named;
 
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.invoice.Invoice;
 
 /**
  * NeoHandler delegate for the legacy SII button on Sales Invoice.
@@ -31,6 +33,16 @@ import org.openbravo.dal.service.OBDal;
  * handler {@code org.openbravo.module.sii.process.MultiEnvioFactura}. NEO cannot
  * execute that client-side hook directly, so this handler invokes the underlying
  * server-side action handler with the same payload shape used by the classic UI.
+ *
+ * <p>ETP-5272: {@code MultiEnvioFactura} always sends communication type {@code A0}
+ * ("alta" / new registration). That is wrong for an invoice pending a registry-error
+ * correction ({@link Invoice#isAeatsiiErrorRegistral()} {@code = true}) — AEAT expects the
+ * correction/modification envelope, communication type {@code A1}. Whenever that flag is
+ * set, this handler routes to the classic "Modificar" action,
+ * {@code org.openbravo.module.sii.process.MultiInvoiceSIIModification}, regardless of the
+ * invoice's AEAT error code. Like {@code MultiEnvioFactura}, it extends
+ * {@code BaseActionHandler}, so it is invoked through the same
+ * {@link NeoProcessService#executeObuiappClass} bridge.
  */
 @Named("sii-send")
 public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
@@ -40,19 +52,53 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
   static final String ACTION_NAME_QUALIFIER = "aeatsiiSend";
   private static final String PROCESS_ID = "2ECF46DAAEEB486EAF79D3594D50DE5F";
   private static final String PROCESS_CLASS = "org.openbravo.module.sii.process.MultiEnvioFactura";
+  private static final String MODIFICATION_PROCESS_ID = "F5CCFE8DCAC04FBD9B4A217C6383032B";
+  private static final String MODIFICATION_PROCESS_CLASS =
+      "org.openbravo.module.sii.process.MultiInvoiceSIIModification";
 
   @Override
   protected NeoResponse executeAction(String recordId) throws Exception {
+    Invoice invoice = OBDal.getInstance().get(Invoice.class, recordId);
+
+    if (invoice != null && Boolean.TRUE.equals(invoice.isAeatsiiErrorRegistral())) {
+      return executeRegistralModification(recordId, invoice);
+    }
+
+    NeoResponse response = NeoProcessService.executeObuiappClass(PROCESS_CLASS, PROCESS_ID,
+        buildInvoiceSendParams(recordId, invoice));
+    return normalizeErrorShape(response);
+  }
+
+  /**
+   * Routes a registry-error resend to {@code MultiInvoiceSIIModification}, the classic module's
+   * "Modificar" action (communication type {@code A1}), whenever
+   * {@link Invoice#isAeatsiiErrorRegistral()} is {@code true} — regardless of the invoice's
+   * AEAT error code. Like {@code MultiEnvioFactura}, this is a real {@code BaseActionHandler},
+   * so it is invoked through the same {@link NeoProcessService#executeObuiappClass} bridge.
+   */
+  private static NeoResponse executeRegistralModification(String recordId, Invoice invoice)
+      throws Exception {
+    NeoResponse response = NeoProcessService.executeObuiappClass(MODIFICATION_PROCESS_CLASS,
+        MODIFICATION_PROCESS_ID, buildInvoiceSendParams(recordId, invoice));
+    return normalizeErrorShape(response);
+  }
+
+  /**
+   * Builds the payload shape both {@code MultiEnvioFactura} and
+   * {@code MultiInvoiceSIIModification} expect: a single-invoice {@code ids} array plus the
+   * invoice's organization id, alongside the generic {@code recordId}/{@code inpRecordId} keys
+   * {@link NeoProcessService#executeObuiappClass} forwards for record-context resolution.
+   */
+  private static JSONObject buildInvoiceSendParams(String recordId, Invoice invoice)
+      throws JSONException {
     JSONObject params = new JSONObject();
     params.put("recordId", recordId);
     params.put("inpRecordId", recordId);
-    params.put("orgid", resolveOrganizationId(recordId));
+    params.put("orgid", resolveOrganizationId(invoice));
     JSONArray ids = new JSONArray();
     ids.put(recordId);
     params.put("ids", ids);
-
-    NeoResponse response = NeoProcessService.executeObuiappClass(PROCESS_CLASS, PROCESS_ID, params);
-    return normalizeErrorShape(response);
+    return params;
   }
 
   /**
@@ -101,9 +147,7 @@ public class SiiSendHandler extends AbstractLegacyInvoiceActionHandler {
     return "SII send failed: " + e.getMessage();
   }
 
-  private String resolveOrganizationId(String invoiceId) {
-    org.openbravo.model.common.invoice.Invoice invoice =
-        OBDal.getInstance().get(org.openbravo.model.common.invoice.Invoice.class, invoiceId);
+  private static String resolveOrganizationId(Invoice invoice) {
     if (invoice == null || invoice.getOrganization() == null) {
       return null;
     }
