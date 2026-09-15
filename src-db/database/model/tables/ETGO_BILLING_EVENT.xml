@@ -77,6 +77,13 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="ETGO_CHECKOUT_REQUEST_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="ETGO_CHECKOUT_REQUEST" name="ETGO_BILLEVT_CHKREQ_FK">
+        <reference local="ETGO_CHECKOUT_REQUEST_ID" foreign="ETGO_CHECKOUT_REQUEST_ID"/>
+      </foreign-key>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_BILLEVT_CLIENT_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
@@ -89,6 +96,9 @@
       <foreign-key foreignTable="AD_USER" name="ETGO_BILLEVT_UPDATEDBY_FK">
         <reference local="UPDATEDBY" foreign="AD_USER_ID"/>
       </foreign-key>
+      <index name="ETGO_BILLEVT_CHKREQ_IX" unique="false">
+        <index-column name="ETGO_CHECKOUT_REQUEST_ID"/>
+      </index>
       <index name="ETGO_BILLEVT_REQUEST_IX" unique="false">
         <index-column name="REQUEST_ID"/>
       </index>
