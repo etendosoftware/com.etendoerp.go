@@ -86,12 +86,39 @@ public class ReturnToVendorShipmentLineHandler implements NeoHandler {
     }
   }
 
+  /**
+   * Strips the stock-derived {@code movementQuantity} the classic {@code SL_InOutLine_Product}
+   * callout echoes back on product selection — the same protection {@link GoodsReceiptLineHandler}
+   * (ETP-4671) and {@link GoodsShipmentLineHandler} (ETP-5062) already had (ETP-5336). The
+   * {@code product} strip in {@link #handle} does NOT cover this: the NEO CRUD callout cascade
+   * only runs on create, while this callout is dispatched by the React form on every product
+   * selection. See {@link NeoHandlerUtils#stripStockDerivedMovementQuantity}.
+   */
+  @Override
+  public NeoResponse afterCallout(NeoContext context) {
+    NeoHandlerUtils.stripStockDerivedMovementQuantity(context, log);
+    return null;
+  }
+
+  /**
+   * ETP-5336: the quantity sign flip runs on EVERY response that carries a line — a
+   * {@code POST}/{@code PUT}/{@code PATCH} echo included. Before this it was GET-only, so a
+   * PATCH answered with the stored NEGATIVE quantity and the frontend's optimistic row update
+   * showed it until the next refetch. The source-document enrichment below stays GET-only on
+   * purpose: it is a batch SQL lookup for the grid and must not add a query to every save.
+   * Returns {@code null} on a write so the original response (and its status code) is kept —
+   * the body is mutated in place, so the flip still reaches the client.
+   */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     try {
       NeoResponse previousResult = context.getPreviousResult();
-      JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
+      JSONArray dataArr = NeoHandlerUtils.extractResponseDataArray(context);
       if (dataArr == null || previousResult == null) {
+        return null;
+      }
+      ReturnLineQuantityPolicy.applyDisplaySignToRecords(dataArr, log);
+      if (!"GET".equals(context.getHttpMethod())) {
         return null;
       }
       JSONObject body = previousResult.getBody();
@@ -109,7 +136,6 @@ public class ReturnToVendorShipmentLineHandler implements NeoHandler {
             rec.put("productCode", ld.productCode);
           }
         }
-        ReturnLineQuantityPolicy.applyDisplaySignToRecord(rec, log);
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {
