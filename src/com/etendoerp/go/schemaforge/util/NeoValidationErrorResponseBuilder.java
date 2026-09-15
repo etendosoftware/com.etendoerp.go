@@ -58,6 +58,9 @@ public final class NeoValidationErrorResponseBuilder {
   }
 
   /**
+   * Translates and sanitizes the first {@code response.errors} entry into a structured 400
+   * {@link NeoResponse}, falling back to a generic message when the errors map is empty.
+   *
    * @param innerResponse the parsed {@code response} object from the JsonDataService body
    * @return the structured 400 response, or a generic fallback if the errors map is empty
    */
