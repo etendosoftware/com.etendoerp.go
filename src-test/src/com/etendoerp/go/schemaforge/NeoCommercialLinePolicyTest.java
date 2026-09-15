@@ -34,6 +34,7 @@ import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.common.uom.UOM;
@@ -869,5 +870,116 @@ public class NeoCommercialLinePolicyTest {
 
       assertEquals(PRODUCT_UOM_ID, body.getString("uOM"));
     }
+  }
+
+  // ── applyDerivedUomOnUpdate (ETP-5286, executeUpdate's PATCH call site) ───
+  //
+  // Bug: PATCHing a document line's `product` to one with a different UOM (e.g. Unidad ->
+  // Centimetro) returned 500 with AD message 20111 ("La unidad del producto en la ficha y la de
+  // la operación en curso son distintas"), even though the frontend's outgoing PATCH body DID
+  // contain the correct new `uOM`. Root cause: `uOM` is a "system"-visibility field, so
+  // NeoFieldFilter#filterWriteRequest strips it as read-only before the DAL write — the client's
+  // (correct) value never reached C_ORDERLINE_TRG, which still saw the OLD uOM.
+  //
+  // This resolves the entity from its DAL name (executeUpdate only has the name, not an Entity
+  // instance) and then delegates to injectProductDerivedUomIfMissing (already exercised above) —
+  // these tests cover only that extra resolution step, not the injection logic itself.
+
+  private static final String ORDER_LINE_ENTITY_NAME = "OrderLine";
+
+  /** Overrides even a stale/incorrect `uOM` already present in the body — not just fills it in. */
+  @Test
+  public void testApplyDerivedUomOnUpdate_productChanged_uomOverridden() throws Exception {
+    JSONObject filteredBody = new JSONObject()
+        .put("product", PRODUCT_ID)
+        .put("uOM", "STALE-OLD-UOM");
+
+    try (MockedStatic<ModelProvider> mpMock =
+             mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      ModelProvider mp = mock(ModelProvider.class);
+      mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+      Entity transactionalLineEntity = mockTransactionalLineEntity();
+      when(mp.getEntity(ORDER_LINE_ENTITY_NAME, false)).thenReturn(transactionalLineEntity);
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Product productWithUom = mockProductWithUom(PRODUCT_UOM_ID);
+      when(dal.get(Product.class, PRODUCT_ID)).thenReturn(productWithUom);
+
+      NeoCommercialLinePolicy.applyDerivedUomOnUpdate(filteredBody, ORDER_LINE_ENTITY_NAME);
+
+      assertEquals(PRODUCT_UOM_ID, filteredBody.getString("uOM"));
+    }
+  }
+
+  /** No `product` key in the body → left untouched, no DAL interaction at all. */
+  @Test
+  public void testApplyDerivedUomOnUpdate_productNotChanged_bodyUntouched() throws Exception {
+    JSONObject filteredBody = new JSONObject().put("description", "just a text edit");
+
+    try (MockedStatic<ModelProvider> mpMock =
+             mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      ModelProvider mp = mock(ModelProvider.class);
+      mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+      Entity transactionalLineEntity = mockTransactionalLineEntity();
+      when(mp.getEntity(ORDER_LINE_ENTITY_NAME, false)).thenReturn(transactionalLineEntity);
+
+      NeoCommercialLinePolicy.applyDerivedUomOnUpdate(filteredBody, ORDER_LINE_ENTITY_NAME);
+
+      obDal.verifyNoInteractions();
+    }
+
+    assertFalse(filteredBody.has("uOM"));
+    assertEquals("just a text edit", filteredBody.getString("description"));
+  }
+
+  /** Product resolves with no UOM configured — total contract: does not throw, no injection. */
+  @Test
+  public void testApplyDerivedUomOnUpdate_productHasNoUom_doesNotThrow() throws Exception {
+    JSONObject filteredBody = new JSONObject().put("product", PRODUCT_ID);
+
+    try (MockedStatic<ModelProvider> mpMock =
+             mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      ModelProvider mp = mock(ModelProvider.class);
+      mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+      Entity transactionalLineEntity = mockTransactionalLineEntity();
+      when(mp.getEntity(ORDER_LINE_ENTITY_NAME, false)).thenReturn(transactionalLineEntity);
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      Product productWithoutUom = mock(Product.class);
+      when(productWithoutUom.getUOM()).thenReturn(null);
+      when(dal.get(Product.class, PRODUCT_ID)).thenReturn(productWithoutUom);
+
+      NeoCommercialLinePolicy.applyDerivedUomOnUpdate(filteredBody, ORDER_LINE_ENTITY_NAME);
+    }
+
+    assertFalse(filteredBody.has("uOM"));
+  }
+
+  /** Product lookup throws — exception swallowed, never propagates (never rolls back the PATCH). */
+  @Test
+  public void testApplyDerivedUomOnUpdate_productLookupThrows_exceptionSwallowed() throws Exception {
+    JSONObject filteredBody = new JSONObject().put("product", PRODUCT_ID);
+
+    try (MockedStatic<ModelProvider> mpMock =
+             mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+      ModelProvider mp = mock(ModelProvider.class);
+      mpMock.when(ModelProvider::getInstance).thenReturn(mp);
+      Entity transactionalLineEntity = mockTransactionalLineEntity();
+      when(mp.getEntity(ORDER_LINE_ENTITY_NAME, false)).thenReturn(transactionalLineEntity);
+
+      OBDal dal = mock(OBDal.class);
+      obDal.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Product.class, PRODUCT_ID)).thenThrow(new RuntimeException("DAL boom"));
+
+      NeoCommercialLinePolicy.applyDerivedUomOnUpdate(filteredBody, ORDER_LINE_ENTITY_NAME);
+    }
+
+    assertFalse(filteredBody.has("uOM"));
   }
 }
