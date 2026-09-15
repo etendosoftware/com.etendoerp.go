@@ -1522,6 +1522,306 @@ public class AbstractInvoiceHeaderHandlerTest {
     assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
   }
 
+  // ── ETP-5334 — order-line-aware over-invoicing guard (split reception) ─────
+
+  /**
+   * Stubs the invoice-lines query of {@code validateLineQtyBeforeComplete} with a single row.
+   *
+   * @param orderLineId value of {@code c_invoiceline.c_orderline_id} ({@code null} = the invoice
+   *                    line does not come from an order)
+   */
+  private static void stubSingleLinkedInvoiceLine(OBDal dal, String inOutLineId, String qty,
+      String inOutId, String docNo, String orderLineId) throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(dal.getConnection()).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, false);
+    when(rs.getString(1)).thenReturn(inOutLineId);
+    when(rs.getBigDecimal(2)).thenReturn(new BigDecimal(qty));
+    when(rs.getString(3)).thenReturn(inOutId);
+    when(rs.getString(4)).thenReturn(docNo);
+    when(rs.getString(5)).thenReturn(orderLineId);
+  }
+
+  /**
+   * ETP-5334 — the bug. A purchase order line of 10 received across TWO partial receipts (4 + 6):
+   * the invoice line created from the order carries 10 but {@code InvoiceLineLinker} could only
+   * pin it to ONE receipt line (the 4). The per-inout-line pending (4) blocked completion
+   * forever; with the order-line aggregate (10) the invoice completes.
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_splitReceptionCoversOrderLine_returnsNull()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-split")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoInvoiceSupport> supportMock =
+             Mockito.mockStatic(NeoInvoiceSupport.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      stubSingleLinkedInvoiceLine(dal, "iol-4", "10", "inout-1", "R-2024-001", "ol-1");
+
+      // Per-inout-line pending is only 4 → would block. It must not decide for a split order line.
+      Map<String, BigDecimal> perLine = new HashMap<>();
+      perLine.put("iol-4", new BigDecimal("4"));
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLine(eq("inout-1"), eq(false)))
+          .thenReturn(perLine);
+      Map<String, BigDecimal> perOrderLine = new HashMap<>();
+      perOrderLine.put("ol-1", new BigDecimal("10"));  // 4 + 6 received, nothing invoiced yet
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerOrderLine(eq("inv-split")))
+          .thenReturn(perOrderLine);
+
+      // Returning null with a per-inout-line pending of 4 against a draft qty of 10 is only
+      // possible because the order-line aggregate decided instead.
+      assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
+    }
+  }
+
+  /**
+   * ETP-5334 control case — a single, full receipt. The order line has only one inout line, so
+   * {@code computePendingQtyPerOrderLine} returns nothing for it and the untouched
+   * per-inout-line path still decides. No behaviour change for the ordinary flow.
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_singleReceiptOrderLine_usesPerInoutLinePending()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-single")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoInvoiceSupport> supportMock =
+             Mockito.mockStatic(NeoInvoiceSupport.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      stubSingleLinkedInvoiceLine(dal, "iol-10", "10", "inout-9", "R-2024-009", "ol-9");
+
+      // Not split → absent from the order-line map → per-inout-line pending (10) applies.
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerOrderLine(eq("inv-single")))
+          .thenReturn(Collections.emptyMap());
+      Map<String, BigDecimal> perLine = new HashMap<>();
+      perLine.put("iol-10", new BigDecimal("10"));
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLine(eq("inout-9"), eq(false)))
+          .thenReturn(perLine);
+
+      assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
+      supportMock.verify(
+          () -> NeoInvoiceSupport.computePendingQtyPerLine(eq("inout-9"), eq(false)));
+    }
+  }
+
+  /**
+   * ETP-5334 — the guard must NOT become a no-op. When the order line's receipts are already
+   * invoiced by another completed invoice, the aggregate pending (4) is below the draft
+   * quantity (10) and completion is still blocked.
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_splitReceptionGenuineOverInvoicing_returns400()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-split-over")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoInvoiceSupport> supportMock =
+             Mockito.mockStatic(NeoInvoiceSupport.class);
+         MockedStatic<OBMessageUtils> msgMock =
+             Mockito.mockStatic(OBMessageUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      stubSingleLinkedInvoiceLine(dal, "iol-4", "10", "inout-1", "R-2024-001", "ol-1");
+
+      Map<String, BigDecimal> perOrderLine = new HashMap<>();
+      perOrderLine.put("ol-1", new BigDecimal("4"));  // 10 received, 6 already invoiced elsewhere
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerOrderLine(eq("inv-split-over")))
+          .thenReturn(perOrderLine);
+
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvoiceLineAlreadyInvoiced"))
+          .thenReturn("Document @docNo@ invoiced @invoiced@ pending @pending@");
+
+      NeoResponse result = AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx);
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      assertTrue(result.getBody().getString("message").contains("R-2024-001"));
+    }
+  }
+
+  /**
+   * ETP-5334 — Sales symmetry. {@code SalesInvoiceHeaderHandler} and
+   * {@code PurchaseInvoiceHeaderHandler} both call this same static guard, so a sales order line
+   * delivered in two partial shipments behaves exactly like the purchase case: the aggregate
+   * shipped quantity (10) covers the invoice line and completion proceeds.
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_splitShipmentSalesInvoice_returnsNull()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .specName("sales-invoice")
+        .entityName("header")
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("ar-inv-split")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoInvoiceSupport> supportMock =
+             Mockito.mockStatic(NeoInvoiceSupport.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      stubSingleLinkedInvoiceLine(dal, "sol-3", "10", "shipment-1", "ALB-2024-001", "sord-line-1");
+
+      Map<String, BigDecimal> perLine = new HashMap<>();
+      perLine.put("sol-3", new BigDecimal("3"));  // first partial shipment only
+      supportMock.when(
+          () -> NeoInvoiceSupport.computePendingQtyPerLine(eq("shipment-1"), eq(false)))
+          .thenReturn(perLine);
+      Map<String, BigDecimal> perOrderLine = new HashMap<>();
+      perOrderLine.put("sord-line-1", new BigDecimal("10"));  // 3 + 7 shipped
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerOrderLine(eq("ar-inv-split")))
+          .thenReturn(perOrderLine);
+
+      assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
+    }
+  }
+
+  /**
+   * ETP-5334 — an invoice line with no {@code c_orderline_id} (invoice created straight from a
+   * receipt, no purchase order) keeps the exact previous behaviour: the order-line aggregate is
+   * never even queried, and the per-inout-line pending still blocks over-invoicing.
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_lineWithoutOrderLine_skipsOrderLineAggregate()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-no-order")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoInvoiceSupport> supportMock =
+             Mockito.mockStatic(NeoInvoiceSupport.class);
+         MockedStatic<OBMessageUtils> msgMock =
+             Mockito.mockStatic(OBMessageUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      stubSingleLinkedInvoiceLine(dal, "iol-free", "8", "inout-free", "R-FREE", null);
+
+      Map<String, BigDecimal> perLine = new HashMap<>();
+      perLine.put("iol-free", new BigDecimal("2"));
+      supportMock.when(
+          () -> NeoInvoiceSupport.computePendingQtyPerLine(eq("inout-free"), eq(false)))
+          .thenReturn(perLine);
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvoiceLineAlreadyInvoiced"))
+          .thenReturn("Document @docNo@ invoiced @invoiced@ pending @pending@");
+
+      NeoResponse result = AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx);
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      supportMock.verify(() -> NeoInvoiceSupport.computePendingQtyPerOrderLine(anyString()),
+          Mockito.never());
+    }
+  }
+
+  /**
+   * ETP-5334 — two draft invoice lines on the SAME split order line are summed before the
+   * comparison (6 + 6 = 12 &gt; 10 pending), so neither line can consume the whole aggregate on
+   * its own. Without the sum each line would pass independently and the invoice would
+   * over-invoice by 2.
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_twoDraftLinesOnSameOrderLine_sumsBeforeComparing()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-two-lines")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoInvoiceSupport> supportMock =
+             Mockito.mockStatic(NeoInvoiceSupport.class);
+         MockedStatic<OBMessageUtils> msgMock =
+             Mockito.mockStatic(OBMessageUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, true, false);
+      when(rs.getString(1)).thenReturn("iol-a", "iol-b");
+      when(rs.getBigDecimal(2)).thenReturn(new BigDecimal("6"), new BigDecimal("6"));
+      when(rs.getString(3)).thenReturn("inout-a", "inout-b");
+      when(rs.getString(4)).thenReturn("R-A", "R-B");
+      when(rs.getString(5)).thenReturn("ol-1", "ol-1");
+
+      Map<String, BigDecimal> perOrderLine = new HashMap<>();
+      perOrderLine.put("ol-1", new BigDecimal("10"));
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerOrderLine(eq("inv-two-lines")))
+          .thenReturn(perOrderLine);
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvoiceLineAlreadyInvoiced"))
+          .thenReturn("Document @docNo@ invoiced @invoiced@ pending @pending@");
+
+      NeoResponse result = AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx);
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      assertTrue(result.getBody().getString("message").contains("invoiced 12"));
+    }
+  }
+
   /**
    * When the invoice lines SQL throws an unexpected exception the method catches it
    * and returns null (fail-open so completion is not blocked by a technical error).
