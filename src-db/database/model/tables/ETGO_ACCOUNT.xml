@@ -41,22 +41,6 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="AUTH_PROVIDER" primaryKey="false" required="false" type="VARCHAR" size="60" autoIncrement="false">
-        <default/>
-        <onCreateDefault/>
-      </column>
-      <column name="EXTERNAL_SUBJECT" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
-        <default/>
-        <onCreateDefault/>
-      </column>
-      <column name="EXTERNAL_EMAIL" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
-        <default/>
-        <onCreateDefault/>
-      </column>
-      <column name="LAST_SSO_LOGIN" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
-        <default/>
-        <onCreateDefault/>
-      </column>
       <column name="NAME" primaryKey="false" required="true" type="VARCHAR" size="255" autoIncrement="false">
         <default/>
         <onCreateDefault/>
@@ -78,6 +62,22 @@
         <onCreateDefault/>
       </column>
       <column name="PASSWORD_CHANGED" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AUTH_PROVIDER" primaryKey="false" required="false" type="VARCHAR" size="60" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EXTERNAL_SUBJECT" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="EXTERNAL_EMAIL" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="LAST_SSO_LOGIN" primaryKey="false" required="false" type="TIMESTAMP" size="7" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
