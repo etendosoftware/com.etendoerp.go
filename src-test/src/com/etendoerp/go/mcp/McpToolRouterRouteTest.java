@@ -1520,7 +1520,10 @@ class McpToolRouterRouteTest {
 
       assertFalse(result.has("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
-      assertEquals("# Finance docs\nbody text", text);
+      // ETP-5306: the docs body is returned verbatim, preceded by the record-reference note —
+      // the construction rule that replaced the per-row `$ref` field.
+      assertTrue(text.endsWith("# Finance docs\nbody text"));
+      assertTrue(text.startsWith(McpConstants.RECORD_REF_NOTE));
     }
 
     @Test

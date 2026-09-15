@@ -94,6 +94,24 @@ final class McpJsonSchema {
     return prop;
   }
 
+  /** A JSON-schema boolean property. */
+  static Map<String, Object> booleanProp(String description) {
+    Map<String, Object> prop = new LinkedHashMap<>();
+    prop.put("type", "boolean");
+    prop.put(McpConstants.KEY_DESCRIPTION, description);
+    return prop;
+  }
+
+  /** A JSON-schema array of objects, used for the {@code neo_feedback} verdict's nested lists. */
+  static Map<String, Object> objectArrayProp(String description, Map<String, Object> itemProps,
+      List<String> itemRequired) {
+    Map<String, Object> prop = new LinkedHashMap<>();
+    prop.put("type", "array");
+    prop.put(McpConstants.KEY_DESCRIPTION, description);
+    prop.put("items", buildObjectSchema(itemProps, itemRequired));
+    return prop;
+  }
+
   /** A JSON-schema array of strings, used for the IMP-2 {@code fields} projection whitelist. */
   static Map<String, Object> stringArrayProp(String description) {
     Map<String, Object> items = new LinkedHashMap<>();
