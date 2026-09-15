@@ -2,6 +2,9 @@
 package com.etendoerp.go.payment;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import java.nio.charset.StandardCharsets;
@@ -258,5 +261,199 @@ public class CheckoutWebhookProcessorTest {
             TIMESTAMP));
     assertEquals(1, eventStore.attempts.size());
     assertEquals("evt_5", eventStore.attempts.get(0));
+  }
+
+  // --- ETP-5045: the rich claim and evaluate() ---
+
+  /** One recorded rich claim: everything the processor handed to the store alongside the id. */
+  private static final class RichClaim {
+    private final String eventId;
+    private final String eventType;
+    private final String requestId;
+    private final String summary;
+
+    private RichClaim(String eventId, String eventType, String requestId, String summary) {
+      this.eventId = eventId;
+      this.eventType = eventType;
+      this.requestId = requestId;
+      this.summary = summary;
+    }
+  }
+
+  /**
+   * Records the rich claim the processor makes, so "what did the durable store receive" is
+   * assertable. The id-only form is still implemented (the interface requires it) but the
+   * processor must never fall back to it — {@link #idOnlyAttempts} pins that.
+   */
+  private static final class RichRecordingEventStore
+      implements CheckoutWebhookProcessor.EventStore {
+    private final Set<String> claimed = new HashSet<>();
+    private final List<RichClaim> claims = new ArrayList<>();
+    private final List<String> idOnlyAttempts = new ArrayList<>();
+
+    @Override
+    public boolean claim(String eventId) {
+      idOnlyAttempts.add(eventId);
+      return claimed.add(eventId);
+    }
+
+    @Override
+    public boolean claim(String eventId, String eventType, String requestId, String summary) {
+      claims.add(new RichClaim(eventId, eventType, requestId, summary));
+      return claimed.add(eventId);
+    }
+  }
+
+  private static final String RICH_EVENT = "{"
+      + "\"id\":\"evt_rich\",\"type\":\"  checkout.session.completed  \","
+      + "\"data\":{\"object\":{"
+      + "  \"id\":\"cs_rich\",\"customer\":\"cus_rich\",\"payment_status\":\"paid\","
+      + "  \"payment_method_details\":{\"card\":{\"last4\":\"4242\"}},"
+      + "  \"metadata\":{\"request_id\":\"  req_rich  \"}"
+      + "}}}";
+
+  @Test
+  public void theRichClaimCarriesTheTrimmedTypeTheCorrelationIdAndASafeSummary()
+      throws Exception {
+    // The durable store persists the audit columns in the same write as the claim, so what the
+    // processor hands over is what the operator later sees: the type (trimmed, like the id), the
+    // correlation id from data.object.metadata, and the allow-listed summary — never the body.
+    RichRecordingEventStore eventStore = new RichRecordingEventStore();
+
+    assertEquals(CheckoutWebhookProcessor.Result.ACCEPTED, processorFor(eventStore)
+        .accept(RICH_EVENT, sign(RICH_EVENT, TIMESTAMP, SECRET), SECRET, TIMESTAMP));
+
+    assertEquals(1, eventStore.claims.size());
+    RichClaim claim = eventStore.claims.get(0);
+    assertEquals("evt_rich", claim.eventId);
+    assertEquals("the event type is trimmed like the id", "checkout.session.completed",
+        claim.eventType);
+    assertEquals("the correlation id is read from data.object.metadata and trimmed", "req_rich",
+        claim.requestId);
+    assertNotNull("a payload with a data.object yields a summary", claim.summary);
+    assertTrue(claim.summary.contains("cs_rich"));
+    assertFalse("card data must never be handed to the store: " + claim.summary,
+        claim.summary.contains("card") || claim.summary.contains("4242"));
+    assertTrue("the processor must use the rich form, never fall back to the id-only one",
+        eventStore.idOnlyAttempts.isEmpty());
+  }
+
+  @Test
+  public void theRichClaimPassesNullsWhenTheEventCarriesNoDataObject() throws Exception {
+    // A bare event (the fixture the other specs use) has no correlation and nothing to summarize;
+    // the store must receive null rather than an empty string or an empty object.
+    RichRecordingEventStore eventStore = new RichRecordingEventStore();
+
+    processorFor(eventStore).accept(COMPLETED_EVENT, sign(COMPLETED_EVENT, TIMESTAMP, SECRET),
+        SECRET, TIMESTAMP);
+
+    assertEquals(1, eventStore.claims.size());
+    RichClaim claim = eventStore.claims.get(0);
+    assertEquals("evt_1", claim.eventId);
+    assertEquals("checkout.session.completed", claim.eventType);
+    assertNull(claim.requestId);
+    assertNull(claim.summary);
+  }
+
+  @Test
+  public void evaluateExposesTheEventOnlyOnceItWasVerifiedAndParsed() throws Exception {
+    // The servlet acts on evaluate().event() instead of parsing the body a second time. It may
+    // only ever see a payload whose signature verified and whose shape was usable: ACCEPTED and
+    // DUPLICATE (the caller still needs the id to answer Stripe). A refused delivery exposes
+    // nothing, so nothing unverified can leak into the handler by accident.
+    RichRecordingEventStore eventStore = new RichRecordingEventStore();
+    CheckoutWebhookProcessor processor = processorFor(eventStore);
+    String signature = sign(RICH_EVENT, TIMESTAMP, SECRET);
+
+    CheckoutWebhookProcessor.Acceptance accepted = processor.evaluate(RICH_EVENT, signature,
+        SECRET, TIMESTAMP);
+    assertEquals(CheckoutWebhookProcessor.Result.ACCEPTED, accepted.result());
+    assertEquals("evt_rich", accepted.eventId());
+    assertNotNull(accepted.event());
+    assertEquals("cs_rich", accepted.event().getJSONObject("data").getJSONObject("object")
+        .getString("id"));
+
+    CheckoutWebhookProcessor.Acceptance duplicate = processor.evaluate(RICH_EVENT, signature,
+        SECRET, TIMESTAMP);
+    assertEquals(CheckoutWebhookProcessor.Result.DUPLICATE, duplicate.result());
+    assertEquals("a duplicate still names the id it was dismissed under", "evt_rich",
+        duplicate.eventId());
+    assertNotNull(duplicate.event());
+
+    CheckoutWebhookProcessor.Acceptance badSignature = processor.evaluate(RICH_EVENT,
+        "t=" + TIMESTAMP + ",v1=deadbeef", SECRET, TIMESTAMP);
+    assertEquals(CheckoutWebhookProcessor.Result.INVALID_SIGNATURE, badSignature.result());
+    assertNull("an unverified payload is never parsed", badSignature.eventId());
+    assertNull(badSignature.event());
+
+    String noType = "{\"id\":\"evt_no_type\"}";
+    CheckoutWebhookProcessor.Acceptance badPayload = processor.evaluate(noType,
+        sign(noType, TIMESTAMP, SECRET), SECRET, TIMESTAMP);
+    assertEquals(CheckoutWebhookProcessor.Result.INVALID_PAYLOAD, badPayload.result());
+    assertNull("an unusable payload has nothing a caller should act on", badPayload.eventId());
+    assertNull(badPayload.event());
+
+    String notJson = "not json at all";
+    CheckoutWebhookProcessor.Acceptance notParsable = processor.evaluate(notJson,
+        sign(notJson, TIMESTAMP, SECRET), SECRET, TIMESTAMP);
+    assertEquals(CheckoutWebhookProcessor.Result.INVALID_PAYLOAD, notParsable.result());
+    assertNull(notParsable.eventId());
+    assertNull(notParsable.event());
+  }
+
+  @Test
+  public void acceptAndEvaluateAgreeOnEveryFixture() throws Exception {
+    // accept() is evaluate().result() by construction; this pins that no fixture — valid, replayed,
+    // forged, tampered, stale, malformed — can make the two paths disagree, so the servlet's move
+    // from accept() to evaluate() changed nothing about which deliveries get through.
+    String validSignature = sign(COMPLETED_EVENT, TIMESTAMP, SECRET);
+    String other = "{\"id\":\"evt_2\",\"type\":\"checkout.session.completed\"}";
+    String noId = "{\"type\":\"checkout.session.completed\"}";
+    String noType = "{\"id\":\"evt_4\"}";
+    String notJson = "not json at all";
+    String padded = "{\"id\":\"  evt_5  \",\"type\":\"checkout.session.completed\"}";
+
+    // Each fixture is {payload, signature, nowSeconds}; the sequence is replayed against two
+    // independent stores so the claim state evolves identically on both paths.
+    Object[][] deliveries = new Object[][] {
+        { COMPLETED_EVENT, validSignature, TIMESTAMP },
+        { COMPLETED_EVENT, validSignature, TIMESTAMP },
+        { other, sign(other, TIMESTAMP, SECRET), TIMESTAMP },
+        { RICH_EVENT, sign(RICH_EVENT, TIMESTAMP, SECRET), TIMESTAMP },
+        { RICH_EVENT, sign(RICH_EVENT, TIMESTAMP, SECRET), TIMESTAMP },
+        { COMPLETED_EVENT, "t=" + TIMESTAMP + ",v1=deadbeef", TIMESTAMP },
+        { COMPLETED_EVENT.replace("evt_1", "evt_forged"), validSignature, TIMESTAMP },
+        { COMPLETED_EVENT, validSignature, TIMESTAMP + TOLERANCE + 1 },
+        { COMPLETED_EVENT, sign(COMPLETED_EVENT, TIMESTAMP, "whsec_someone_elses"), TIMESTAMP },
+        { noId, sign(noId, TIMESTAMP, SECRET), TIMESTAMP },
+        { noType, sign(noType, TIMESTAMP, SECRET), TIMESTAMP },
+        { notJson, sign(notJson, TIMESTAMP, SECRET), TIMESTAMP },
+        { padded, sign(padded, TIMESTAMP, SECRET), TIMESTAMP },
+        { padded, sign(padded, TIMESTAMP, SECRET), TIMESTAMP },
+    };
+
+    CheckoutWebhookProcessor viaAccept = processorFor(new RichRecordingEventStore());
+    CheckoutWebhookProcessor viaEvaluate = processorFor(new RichRecordingEventStore());
+    Set<CheckoutWebhookProcessor.Result> seen = new HashSet<>();
+    for (int i = 0; i < deliveries.length; i++) {
+      String payload = (String) deliveries[i][0];
+      String signature = (String) deliveries[i][1];
+      long now = (Long) deliveries[i][2];
+
+      CheckoutWebhookProcessor.Result accepted = viaAccept.accept(payload, signature, SECRET, now);
+      CheckoutWebhookProcessor.Acceptance evaluated = viaEvaluate.evaluate(payload, signature,
+          SECRET, now);
+
+      assertEquals("delivery " + i + " must be judged the same by accept() and evaluate()",
+          accepted, evaluated.result());
+      boolean verified = accepted == CheckoutWebhookProcessor.Result.ACCEPTED
+          || accepted == CheckoutWebhookProcessor.Result.DUPLICATE;
+      assertEquals("delivery " + i + ": the event is exposed exactly when it was verified",
+          verified, evaluated.event() != null);
+      assertEquals("delivery " + i + ": the id is exposed exactly when it was verified",
+          verified, evaluated.eventId() != null);
+      seen.add(accepted);
+    }
+    assertEquals("the fixture set must exercise every outcome", 4, seen.size());
   }
 }
