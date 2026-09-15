@@ -759,15 +759,19 @@ public class BillingEventStoreIntegrationTest extends OBBaseTest {
     String eventId = newEventId();
     assertTrue(store.claim(eventId, COMPLETED, null, null));
     store.markIgnored(eventId, "unknown checkout request");
-    Timestamp decidedAt = rawTimestamp(eventId, "PROCESSED_AT");
-    assertNotNull("Sanity: markIgnored must have stamped PROCESSED_AT", decidedAt);
+    assertNotNull("Sanity: markIgnored must have stamped PROCESSED_AT",
+        rawTimestamp(eventId, "PROCESSED_AT"));
 
+    // Same sentinel as the APPLIED spec, and for the same reason: comparing two values that are
+    // both "roughly now" would let this assertion pass whenever the two writes happen to land in
+    // the same millisecond. An expected value that "now" can never equal removes the timing.
+    forceEventTimestamp(eventId, "PROCESSED_AT", DISTANT_PAST);
     store.markFailed(eventId, "the retry could not be applied either");
 
     assertEquals("IGNORED is not locked — a later delivery may still fail it", FAILED,
         rawResult(eventId));
     assertEquals("the retry could not be applied either", rawColumn(eventId, "FAILURE_REASON"));
-    assertEquals("PROCESSED_AT still records when the result was first decided", decidedAt,
+    assertEquals("PROCESSED_AT still records when the result was first decided", DISTANT_PAST,
         rawTimestamp(eventId, "PROCESSED_AT"));
 
     assertTrue("And the row is re-claimable again, which is why it is not locked",
