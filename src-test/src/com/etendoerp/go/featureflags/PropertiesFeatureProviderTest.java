@@ -50,6 +50,13 @@ class PropertiesFeatureProviderTest {
   private static final String FLAG = "sample-flag";
   private static final String FLAG_PROPERTY = PropertiesFeatureProvider.PROPERTY_PREFIX + FLAG;
 
+  /**
+   * ConfigCat SDK key property name (ETP-5267). Reused directly from {@link GoFeatureFlags}
+   * instead of duplicated as a literal, so this suite cannot silently drift from the real
+   * property name it guards.
+   */
+  private static final String CONFIGCAT_SDK_KEY_PROPERTY = GoFeatureFlags.CONFIGCAT_SDK_KEY_PROPERTY;
+
   private final PropertiesFeatureProvider provider = new PropertiesFeatureProvider();
 
   private MockedStatic<OBPropertiesProvider> propertiesMock;
@@ -78,6 +85,7 @@ class PropertiesFeatureProviderTest {
       propertiesMock.close();
     }
     System.clearProperty(FLAG_PROPERTY);
+    System.clearProperty(CONFIGCAT_SDK_KEY_PROPERTY);
     GoFeatureFlags.reset();
   }
 
@@ -172,5 +180,79 @@ class PropertiesFeatureProviderTest {
     GoFeatureFlags.reset();
     assertFalse(GoFeatureFlags.isEnabled("no-such-flag",
         FeatureFlagContext.forAccount("user@example.com")));
+  }
+
+  // --- ConfigCat SDK key guard (ETP-5267) ---
+  //
+  // GoFeatureFlags#createProvider() picks the control plane from the ConfigCat SDK key: absent
+  // or blank ⇒ the local PropertiesFeatureProvider arm exercised above; set ⇒ ConfigCatProvider.
+  // An absent, blank or wrong key must resolve every flag to `false`, never `true` — this is the
+  // exact ETP-4966 failure shape (a control plane that cannot be read as "on" must never be
+  // indistinguishable from "on"). `mockOpenbravoProperties()` already isolates the ConfigCat key
+  // from a real Openbravo.properties/gradle.properties entry (it mocks OBPropertiesProvider to
+  // empty for every property lookup, not just the flag's own); `clearOverrides()` now also clears
+  // the JVM system property so no test here can leak into a sibling. Not isolated: the
+  // ETGO_CONFIGCAT_SDK_KEY environment-variable fallback in ConfigPropertyReader. This suite has
+  // no env-var-stubbing utility (no system-stubs/system-lambda dependency is on the classpath),
+  // and JVM system properties always win over it here, so every case below sets the system
+  // property explicitly rather than relying on "unset" for the blank/wrong cases. Only the
+  // "absent" case is exposed to that gap — on a machine that literally exports
+  // ETGO_CONFIGCAT_SDK_KEY, that one test would take the ConfigCat arm instead of the local one.
+
+  /**
+   * No SDK key anywhere ⇒ {@link GoFeatureFlags#createProvider()} takes the local-configuration
+   * arm, where an unconfigured flag is {@code false}.
+   */
+  @Test
+  void anAbsentConfigCatSdkKeyResolvesFlagsToFalseThroughTheEntryPoint() {
+    System.clearProperty(CONFIGCAT_SDK_KEY_PROPERTY);
+    GoFeatureFlags.reset();
+    assertFalse(GoFeatureFlags.isEnabled(FLAG, FeatureFlagContext.forAccount("user@example.com")));
+  }
+
+  /**
+   * A blank/whitespace-only key must collapse to "absent", exactly like the case above: it is
+   * {@code StringUtils.trimToNull} in {@link GoFeatureFlags#createProvider()} that makes this
+   * true, turning any blank string into {@code null} before the {@code null} check that decides
+   * between the two arms. Because that collapse happens first, {@link
+   * dev.openfeature.contrib.providers.configcat.ConfigCatProvider} is never constructed and
+   * ConfigCat is never attempted — the local arm is a pure in-process property lookup, so a
+   * {@code false} result here is also proof of that.
+   */
+  @ParameterizedTest
+  @ValueSource(strings = { "", "   ", "\t\t" })
+  void aBlankConfigCatSdkKeyFallsBackToLocalConfigurationAndResolvesFalse(String blankKey) {
+    System.setProperty(CONFIGCAT_SDK_KEY_PROPERTY, blankKey);
+    GoFeatureFlags.reset();
+    assertFalse(GoFeatureFlags.isEnabled(FLAG, FeatureFlagContext.forAccount("user@example.com")));
+  }
+
+  /**
+   * A syntactically wrong key must still resolve every flag to {@code false} — and this
+   * assertion is hermetic, not merely hoped to be. Verified both by disassembling the actual
+   * {@code configcat-java-client} jar this module ships and by running this exact test against
+   * it: {@code com.configcat.ConfigCatClient#isValidKey} requires the key to split on {@code "/"}
+   * into either two 22-character segments or the three-part {@code
+   * configcat-sdk-1/<22 chars>/<22 chars>} form. None of the keys below satisfy that shape, so
+   * {@code ConfigCatClient.get(String, Consumer)} throws {@code IllegalArgumentException} (e.g.
+   * {@code "SDK Key 'wrong/lengths' is invalid."}) as a pure string check — before it ever opens a
+   * connection or starts a polling thread. That exception propagates up through {@code
+   * ConfigCatProvider#initialize} and {@code OpenFeatureAPI#setProviderAndWait}, straight into
+   * {@link GoFeatureFlags#install()}'s own {@code catch (Exception e)} (confirmed via the actual
+   * "Could not install the feature-flag provider" log line, not assumed): the client this method
+   * memoizes is {@code null}, and {@link GoFeatureFlags#isEnabled(String, FeatureFlagContext)}'s
+   * {@code if (client == null) return false;} guard is what answers here — OpenFeature's own
+   * per-evaluation defaulting is never even reached. No live ConfigCat project, no network
+   * reachability and no bounded wait are exercised — this only proves the guard, not ConfigCat's
+   * own error handling once a connection is actually attempted with a key that merely doesn't
+   * exist. That is a real, deliberate scope limit: this suite has no ConfigCat sandbox and must
+   * not depend on one.
+   */
+  @ParameterizedTest
+  @ValueSource(strings = { "not-a-real-configcat-sdk-key", "too/many/slashes/in-here", "wrong/lengths" })
+  void aSyntacticallyInvalidConfigCatSdkKeyStillResolvesFlagsToFalseWithoutNetworkAccess(String bogusKey) {
+    System.setProperty(CONFIGCAT_SDK_KEY_PROPERTY, bogusKey);
+    GoFeatureFlags.reset();
+    assertFalse(GoFeatureFlags.isEnabled(FLAG, FeatureFlagContext.forAccount("user@example.com")));
   }
 }
