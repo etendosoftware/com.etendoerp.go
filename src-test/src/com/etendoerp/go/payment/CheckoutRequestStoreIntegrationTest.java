@@ -97,6 +97,12 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
 
   private static final String ENVIRONMENT = "ETP-5045 Integration Environment";
 
+  /**
+   * An instant no write by the code under test can ever produce, so a "first-write-wins" column
+   * forced to it is either still it or was overwritten — with no clock resolution in between.
+   */
+  private static final Timestamp DISTANT_PAST = Timestamp.valueOf("2020-01-01 00:00:00");
+
   private final CheckoutRequestStore store = new CheckoutRequestStore();
 
   /**
@@ -337,13 +343,13 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     String requestId = createPaidRequest(accountId, email);
 
     assertTrue(store.claimForProvisioning(requestId, email));
-    Timestamp firstProvisioningAt = rawTimestamp(requestId, "PROVISIONING_AT");
     assertNotNull("Sanity: the first claim must have stamped PROVISIONING_AT",
-        firstProvisioningAt);
+        rawTimestamp(requestId, "PROVISIONING_AT"));
 
-    // Guarantees the second claim's own "now" is a different instant, so the assertion below is
-    // about coalesce() and not about two writes landing in the same millisecond.
-    Thread.sleep(10);
+    // The stamp is moved to an instant no later write could ever produce, so the assertion below
+    // is about coalesce() and not about two writes landing in the same millisecond. A sleep would
+    // only make those two instants likely to differ; this makes them certain to.
+    forceTimestamp(requestId, "PROVISIONING_AT", DISTANT_PAST);
     forceStatus(requestId, STATUS_PAID);
 
     assertTrue("A request pushed back to PAID must be claimable again",
@@ -351,7 +357,7 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
 
     assertEquals("The retry count is the value that moves", 2L, rawAttempts(requestId));
     assertEquals("PROVISIONING_AT is first-write-wins via coalesce — a retry must not reset the "
-        + "clock the staleness thresholds are measured against", firstProvisioningAt,
+        + "clock the staleness thresholds are measured against", DISTANT_PAST,
         rawTimestamp(requestId, "PROVISIONING_AT"));
   }
 
@@ -407,16 +413,16 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     String accountId = createAccount(email);
     String requestId = createPaidRequest(accountId, email);
 
-    Timestamp firstPaidAt = rawTimestamp(requestId, "PAID_AT");
-    assertNotNull("Sanity: the first payment must have stamped PAID_AT", firstPaidAt);
+    assertNotNull("Sanity: the first payment must have stamped PAID_AT",
+        rawTimestamp(requestId, "PAID_AT"));
 
-    // Same reason as in the retry test: makes the assertion about the guard, not about clock
-    // resolution.
-    Thread.sleep(10);
+    // Same device as in the retry test: an expected value "now" can never coincide with makes the
+    // assertion about the guard, not about clock resolution.
+    forceTimestamp(requestId, "PAID_AT", DISTANT_PAST);
     store.recordPaid(requestId, "cus_" + requestId, "sub_" + requestId);
 
     assertEquals("A redelivered webhook must leave PAID_AT at the moment the payment was "
-        + "actually confirmed", firstPaidAt, rawTimestamp(requestId, "PAID_AT"));
+        + "actually confirmed", DISTANT_PAST, rawTimestamp(requestId, "PAID_AT"));
     assertEquals("A redelivery must not change the status either", STATUS_PAID,
         rawStatus(requestId));
   }
@@ -620,6 +626,35 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
               + "WHERE REQUEST_ID = :requestId");
       query.setParameter("requestId", requestId);
       return query.uniqueResult();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Backdates one committed timestamp column, so a first-write-wins assertion has an expected
+   * value that "now" can never coincide with. Commits and closes the session for the same reason
+   * {@link #forceStatus} does: the next store call must load the forced value rather than the
+   * entity this session still holds.
+   *
+   * @param requestId correlation id
+   * @param column a timestamp column name; always a literal from this class
+   * @param value the instant to force
+   */
+  @SuppressWarnings("rawtypes")
+  private void forceTimestamp(String requestId, String column, Timestamp value) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      NativeQuery update = OBDal.getInstance()
+          .getSession()
+          .createNativeQuery("UPDATE ETGO_CHECKOUT_REQUEST SET " + column + " = :value "
+              + "WHERE REQUEST_ID = :requestId");
+      update.setParameter("value", value);
+      update.setParameter("requestId", requestId);
+      update.executeUpdate();
+      OBDal.getInstance().flush();
+      OBDal.getInstance().commitAndClose();
     } finally {
       OBContext.restorePreviousMode();
     }

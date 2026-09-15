@@ -1966,16 +1966,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     boolean paidUpgrade = paywallOutcome == PaywallOutcome.PAID;
 
-    // Claimed before the stream opens, for the same reason the paywall is: a refusal must answer
-    // with plain JSON and leave nothing half-built. The claim is a conditional update, so of two
-    // concurrent calls for one payment exactly one proceeds — that is the reload-during-
-    // provisioning case, where the ?checkout=success URL stays live for the whole slow run.
-    if (paidUpgrade
-        && !checkoutRequestStore.claimForProvisioning(onboardingRequest.paymentToken,
-            accountEmail)) {
-      writeError(response, HttpServletResponse.SC_CONFLICT, "PROVISIONING_ALREADY_IN_PROGRESS",
-          "This environment is already being created",
-          "This environment is already being created. Please wait for it to finish.");
+    if (rejectWhenProvisioningAlreadyClaimed(paidUpgrade, onboardingRequest, accountEmail,
+        response)) {
       return;
     }
 
@@ -2047,26 +2039,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
 
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
-      // Only after the tenant itself commits. Best-effort in the same spirit as markProductive
-      // above: a tenant may commit with its checkout row unclosed rather than have provisioning
-      // rolled back over bookkeeping, and DERIVED_STATUS surfaces the gap as STALLED either way.
-      if (paidUpgrade) {
-        try {
-          checkoutRequestStore.recordProvisioned(onboardingRequest.paymentToken, clientId);
-        } catch (RuntimeException e) {
-          log.error("Environment '{}' (client {}) was provisioned but its checkout request could "
-              + "not be closed", onboardingRequest.clientName, clientId, e);
-        }
-      }
-      // Activate the bank statement-sync schedule now that its row is committed and therefore
-      // visible to the scheduler's own DB connection. Best-effort: internally swallows failures
-      // and the SCH row is still picked up on the next scheduler initialization.
-      onboardingBankConnectionSyncService.activateSchedule(clientId);
-      Account account = findAccountForCommittedOnboarding(token, accountEmail);
-      clearOnboardingDraftBestEffort(account);
-      String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
-      sendAuthEmailBestEffort("environment-ready",
-          () -> authEmailSender.sendEnvironmentReady(account, clientId, normalizedLanguage));
+      completeCommittedOnboarding(token, accountEmail, onboardingRequest, clientId, paidUpgrade);
 
       sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
       sendProgress(writer, "finalize", "done", "Environment ready");
@@ -2081,29 +2054,124 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sendFinalResult(writer, false, "Onboarding failed: " + e.getMessage());
       failureReason = e.getMessage();
     } finally {
-      // Annotation only, and deliberately never a status change: the row stays where provisioning
-      // left it so DERIVED_STATUS reports STALLED, rather than being marked terminal by a path
-      // that may itself be failing. recordFailureReason swallows its own errors for the same
-      // reason — a failed annotation must not turn one problem into two.
-      if (paidUpgrade && !provisioningCompleted) {
-        checkoutRequestStore.recordFailureReason(onboardingRequest.paymentToken,
-            failureReason != null ? failureReason : "Provisioning did not complete");
-      }
+      recordProvisioningFailureReason(paidUpgrade, provisioningCompleted, onboardingRequest,
+          failureReason);
       // Stop the keepalive before the final flush so no heartbeat races the result line.
       heartbeat.shutdownNow();
       OBContext.restorePreviousMode();
       writer.flush();
-      // PrintWriter swallows IOExceptions (broken pipe): when CloudFront or any proxy
-      // hits its response timeout it silently drops the client mid-stream while the
-      // backend keeps running to completion (and commits). checkError() is the only
-      // way to detect it. Surface it explicitly so it stops being invisible in the logs.
-      if (writer.checkError()) {
-        log.warn("Onboarding stream to client was lost before the result line was delivered "
-            + "(likely a CloudFront/proxy response timeout). The environment may have been "
-            + "created successfully server-side, but the UI will report a false failure. "
-            + "accountEmail={}", maskEmail(accountEmail));
+      warnWhenOnboardingStreamWasLost(writer, accountEmail);
+    }
+  }
+
+  /**
+   * Claims the paid request for provisioning, refusing the call when another already holds it.
+   *
+   * <p>Claimed before the NDJSON stream opens, for the same reason the paywall is: a refusal must
+   * answer with plain JSON and leave nothing half-built. The claim is a conditional update, so of
+   * two concurrent calls for one payment exactly one proceeds — that is the
+   * reload-during-provisioning case, where the {@code ?checkout=success} URL stays live for the
+   * whole slow run. A free environment claims nothing and is never refused here.
+   *
+   * @param paidUpgrade whether this environment was bought rather than free
+   * @param onboardingRequest the parsed onboarding request
+   * @param accountEmail authenticated account email
+   * @param response response the refusal is written to
+   * @return true when the request was refused and the caller must stop
+   */
+  private boolean rejectWhenProvisioningAlreadyClaimed(boolean paidUpgrade,
+      OnboardingRequestData onboardingRequest, String accountEmail, HttpServletResponse response)
+      throws IOException {
+    if (!paidUpgrade
+        || checkoutRequestStore.claimForProvisioning(onboardingRequest.paymentToken,
+            accountEmail)) {
+      return false;
+    }
+    writeError(response, HttpServletResponse.SC_CONFLICT, "PROVISIONING_ALREADY_IN_PROGRESS",
+        "This environment is already being created",
+        "This environment is already being created. Please wait for it to finish.");
+    return true;
+  }
+
+  /**
+   * Logs an onboarding stream that was dropped before its result line reached the browser.
+   *
+   * <p>{@link PrintWriter} swallows {@code IOException} (broken pipe): when CloudFront or any
+   * proxy hits its response timeout it silently drops the client mid-stream while the backend
+   * keeps running to completion (and commits). {@code checkError()} is the only way to detect it.
+   * Surfaced explicitly so it stops being invisible in the logs.
+   *
+   * @param writer the NDJSON stream writer, already flushed
+   * @param accountEmail authenticated account email, masked before it is logged
+   */
+  private void warnWhenOnboardingStreamWasLost(PrintWriter writer, String accountEmail) {
+    if (writer.checkError()) {
+      log.warn("Onboarding stream to client was lost before the result line was delivered "
+          + "(likely a CloudFront/proxy response timeout). The environment may have been "
+          + "created successfully server-side, but the UI will report a false failure. "
+          + "accountEmail={}", maskEmail(accountEmail));
+    }
+  }
+
+  /**
+   * Bookkeeping that may only run once the tenant itself has committed.
+   *
+   * <p>Extracted from {@code handleOnboarding} to keep that method readable; the order of these
+   * steps is load-bearing and unchanged. Everything here is best-effort in the same spirit as
+   * {@link #applyPaidUpgradeSideEffects}: a tenant may commit with its checkout row unclosed
+   * rather than have provisioning rolled back over bookkeeping, and {@code DERIVED_STATUS}
+   * surfaces the gap as {@code STALLED} either way. Anything that does throw still reaches the
+   * caller's catch exactly as before.
+   *
+   * @param token bearer token of the onboarding request
+   * @param accountEmail authenticated account email
+   * @param onboardingRequest the parsed onboarding request
+   * @param clientId {@code AD_CLIENT_ID} of the environment just provisioned
+   * @param paidUpgrade whether this environment was bought rather than free
+   */
+  private void completeCommittedOnboarding(String token, String accountEmail,
+      OnboardingRequestData onboardingRequest, String clientId, boolean paidUpgrade) {
+    if (paidUpgrade) {
+      try {
+        checkoutRequestStore.recordProvisioned(onboardingRequest.paymentToken, clientId);
+      } catch (RuntimeException e) {
+        log.error("Environment '{}' (client {}) was provisioned but its checkout request could "
+            + "not be closed", onboardingRequest.clientName, clientId, e);
       }
     }
+    // Activate the bank statement-sync schedule now that its row is committed and therefore
+    // visible to the scheduler's own DB connection. Best-effort: internally swallows failures
+    // and the SCH row is still picked up on the next scheduler initialization.
+    onboardingBankConnectionSyncService.activateSchedule(clientId);
+    Account account = findAccountForCommittedOnboarding(token, accountEmail);
+    clearOnboardingDraftBestEffort(account);
+    String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
+    sendAuthEmailBestEffort("environment-ready",
+        () -> authEmailSender.sendEnvironmentReady(account, clientId, normalizedLanguage));
+  }
+
+  /**
+   * Annotates a paid checkout request that did not finish provisioning.
+   *
+   * <p>Annotation only, and deliberately never a status change: the row stays where provisioning
+   * left it so {@code DERIVED_STATUS} reports {@code STALLED}, rather than being marked terminal
+   * by a path that may itself be failing. {@code recordFailureReason} swallows its own errors for
+   * the same reason — a failed annotation must not turn one problem into two. Called from the
+   * onboarding {@code finally}, so it runs on every exit including the graceful ones that return
+   * after writing a result line.
+   *
+   * @param paidUpgrade whether this environment was bought rather than free
+   * @param provisioningCompleted whether provisioning reached its final result line
+   * @param onboardingRequest the parsed onboarding request
+   * @param failureReason the exception message when one was caught, otherwise null
+   */
+  private void recordProvisioningFailureReason(boolean paidUpgrade, boolean provisioningCompleted,
+      OnboardingRequestData onboardingRequest, String failureReason) {
+    if (!paidUpgrade || provisioningCompleted) {
+      return;
+    }
+    checkoutRequestStore.recordFailureReason(onboardingRequest.paymentToken,
+        failureReason != null ? failureReason : "Provisioning did not complete");
   }
 
   /**

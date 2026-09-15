@@ -81,6 +81,12 @@ public class BillingEventStoreIntegrationTest extends OBBaseTest {
    */
   private static final String TRIGGER_MARKER = "evt_etp5045trg_";
 
+  /**
+   * An instant no write by the code under test can ever produce, so a "first-write-wins" column
+   * forced to it is either still it or was overwritten — with no clock resolution in between.
+   */
+  private static final Timestamp DISTANT_PAST = Timestamp.valueOf("2020-01-01 00:00:00");
+
   private static final String TRIGGER_NAME = "etp5045_fake_violation_trg";
   private static final String TRIGGER_FUNCTION = "etp5045_fake_violation";
 
@@ -390,23 +396,24 @@ public class BillingEventStoreIntegrationTest extends OBBaseTest {
     assertTrue(store.claim(eventId, COMPLETED, null, null));
 
     store.markApplied(eventId);
-    Timestamp firstProcessedAt = rawTimestamp(eventId, "PROCESSED_AT");
     assertNotNull("Sanity: the first markApplied must have stamped PROCESSED_AT",
-        firstProcessedAt);
+        rawTimestamp(eventId, "PROCESSED_AT"));
     assertEquals(APPLIED, rawResult(eventId));
 
-    // Guarantees the second call's own "now" is a different instant, so the assertion is about
-    // coalesce() and not about two writes landing in the same millisecond.
-    Thread.sleep(10);
+    // The decision timestamp is moved to an instant no later write could ever produce. That makes
+    // "coalesce kept the first value" distinguishable from "both writes landed in the same
+    // millisecond" without depending on the clock at all — a sleep would only make the two
+    // instants likely to differ, this makes them certain to.
+    forceEventTimestamp(eventId, "PROCESSED_AT", DISTANT_PAST);
     store.markApplied(eventId);
 
-    assertEquals("PROCESSED_AT is first-write-wins", firstProcessedAt,
+    assertEquals("PROCESSED_AT is first-write-wins", DISTANT_PAST,
         rawTimestamp(eventId, "PROCESSED_AT"));
 
     assertFalse("An APPLIED event must never be claimable again",
         store.claim(eventId, COMPLETED, null, null));
     assertEquals("A late delivery must not disturb the result", APPLIED, rawResult(eventId));
-    assertEquals(firstProcessedAt, rawTimestamp(eventId, "PROCESSED_AT"));
+    assertEquals(DISTANT_PAST, rawTimestamp(eventId, "PROCESSED_AT"));
     assertEquals(1L, rawDuplicateCount(eventId));
   }
 
@@ -909,6 +916,33 @@ public class BillingEventStoreIntegrationTest extends OBBaseTest {
               + "WHERE REQUEST_ID = :requestId");
       query.setParameter("requestId", requestId);
       return (String) query.uniqueResult();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Backdates one committed timestamp column, so a first-write-wins assertion has an expected
+   * value that "now" can never coincide with.
+   *
+   * @param eventId provider event id
+   * @param column a timestamp column name; always a literal from this class
+   * @param value the instant to force
+   */
+  @SuppressWarnings("rawtypes")
+  private void forceEventTimestamp(String eventId, String column, Timestamp value) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      NativeQuery update = OBDal.getInstance()
+          .getSession()
+          .createNativeQuery("UPDATE ETGO_BILLING_EVENT SET " + column + " = :value "
+              + "WHERE EVENT_ID = :eventId");
+      update.setParameter("value", value);
+      update.setParameter("eventId", eventId);
+      update.executeUpdate();
+      OBDal.getInstance().flush();
+      OBDal.getInstance().commitAndClose();
     } finally {
       OBContext.restorePreviousMode();
     }

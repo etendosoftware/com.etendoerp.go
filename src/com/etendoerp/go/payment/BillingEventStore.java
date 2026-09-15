@@ -79,6 +79,16 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
   private static final int EVENT_TYPE_WIDTH = 120;
   private static final int REQUEST_ID_WIDTH = 64;
   private static final int REASON_WIDTH = 255;
+  /**
+   * Opening clause shared by every bulk update in this class. The entity is named by
+   * {@link BillingEvent#ENTITY_NAME} rather than the Java simple name, which Etendo does not
+   * register and which therefore throws at runtime — see the note on
+   * {@link CheckoutRequestStore#claimForProvisioning}.
+   */
+  private static final String UPDATE_BILLING_EVENT =
+      "update " + BillingEvent.ENTITY_NAME + " be";
+  /** Name of the event-id parameter bound by every one of those updates. */
+  private static final String PARAM_EVENT_ID = "eventId";
   private static final int SUMMARY_WIDTH = WebhookPayloadSummary.MAX_LENGTH;
 
   /**
@@ -247,7 +257,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
   private boolean reclaimFailed(String eventId, Date now) {
     int reclaimed = OBDal.getInstance()
         .getSession()
-        .createQuery("update " + BillingEvent.ENTITY_NAME + " be"
+        .createQuery(UPDATE_BILLING_EVENT
             + "   set be.eventResult = :received,"
             + "       be.processedAt = null,"
             + "       be.failureReason = null,"
@@ -257,7 +267,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
         .setParameter("received", RESULT_RECEIVED)
         .setParameter("failed", RESULT_FAILED)
         .setParameter("now", now)
-        .setParameter("eventId", eventId)
+        .setParameter(PARAM_EVENT_ID, eventId)
         .executeUpdate();
     flushAndCommit();
     return reclaimed == 1;
@@ -279,13 +289,13 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
   private void recordDuplicate(String eventId, Date now, RuntimeException insertFailure) {
     int counted = OBDal.getInstance()
         .getSession()
-        .createQuery("update " + BillingEvent.ENTITY_NAME + " be"
+        .createQuery(UPDATE_BILLING_EVENT
             + "   set be.duplicateCount = be.duplicateCount + 1,"
             + "       be.lastDuplicateAt = :now,"
             + "       be.updated = :now"
             + " where be.event = :eventId")
         .setParameter("now", now)
-        .setParameter("eventId", eventId)
+        .setParameter(PARAM_EVENT_ID, eventId)
         .executeUpdate();
     flushAndCommit();
     if (counted == 0) {
@@ -321,7 +331,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
       boolean guardApplied = !RESULT_APPLIED.equals(result);
       org.hibernate.query.Query<?> update = OBDal.getInstance()
           .getSession()
-          .createQuery("update " + BillingEvent.ENTITY_NAME + " be"
+          .createQuery(UPDATE_BILLING_EVENT
               + "   set be.eventResult = :result,"
               + "       be.processedAt = coalesce(be.processedAt, :now),"
               + "       be.updated = :now"
@@ -330,7 +340,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
               + (guardApplied ? "   and be.eventResult <> :applied" : ""))
           .setParameter("result", result)
           .setParameter("now", new Date())
-          .setParameter("eventId", id);
+          .setParameter(PARAM_EVENT_ID, id);
       if (trimmedReason != null) {
         update.setParameter("reason", trimmedReason);
       }

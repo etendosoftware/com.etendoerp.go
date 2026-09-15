@@ -57,6 +57,8 @@ public class TenantPaywallService {
   @FunctionalInterface
   public interface PaymentConfirmation {
     /**
+     * Returns whether a confirmed payment backs this request, account and environment name.
+     *
      * @param requestId the checkout request id offered as a payment token
      * @param accountEmail authenticated account email
      * @param clientName requested environment name, when available
