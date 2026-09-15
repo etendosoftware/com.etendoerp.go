@@ -133,6 +133,11 @@ public class McpToolRouter {
     try {
       OBContext.setAdminMode();
       try {
+        // IMP-40: refuse an argument the tool does not declare, instead of dropping it in silence.
+        // Checked here, once, for every tool that has a fixed argument set — a per-handler check
+        // is a check somebody forgets to add to the next handler.
+        rejectUnknownArguments(toolName, arguments);
+
         // Resolve spec name from tool name or arguments
         String specName = ToolRegistry.resolveSpecName(toolName, arguments);
         authorizeSpecAccess(specName, resolveAccessMethod(toolName));
@@ -202,6 +207,16 @@ public class McpToolRouter {
     String query = arguments == null ? null : arguments.optString(McpConstants.PARAM_QUERY, null);
     String targets = McpArgumentUtils.joinStringArray(
         arguments == null ? null : arguments.optJSONArray("targets"));
+    if (StringUtils.isBlank(targets)) {
+      // IMP-41: `targets` is optional, and omitting it means "search everywhere I may read".
+      // The MCP surface exposes no `namespaces` alternative, so demanding a target up front asked
+      // the agent for the one thing a natural-language question does not come with.
+      List<String> allowed = NeoVectorSearchEndpoint.authorizedTargetKeys();
+      if (allowed != null && allowed.isEmpty()) {
+        return wrapAsErrorContent(buildNoSearchableTargetsBody());
+      }
+      targets = allowed == null ? null : String.join(",", allowed);
+    }
     NeoResponse response = new NeoVectorSearchEndpoint().handle(query, null, targets,
         McpArgumentUtils.optionalString(arguments, "topK"),
         McpArgumentUtils.optionalString(arguments, "minScore"),
@@ -209,6 +224,32 @@ public class McpToolRouter {
     // ETP-5306: the JSONObject overloads, so the body is sanitised before it is rendered.
     JSONObject body = response.getBody();
     return response.getHttpStatus() >= 400 ? wrapAsErrorContent(body) : wrapAsTextContent(body);
+  }
+
+  /**
+   * The refusal for a role that can read no search target at all (IMP-41).
+   *
+   * <p>Said plainly and with a next step, because the alternative is worse than useless: an empty
+   * target list would reach the endpoint as "no targets and no namespaces" and come back as a
+   * generic 400 about a missing parameter, sending the agent to re-send the same call with
+   * invented target names.</p>
+   *
+   * @return the error envelope
+   */
+  private static JSONObject buildNoSearchableTargetsBody() {
+    try {
+      JSONObject envelope = new JSONObject();
+      envelope.put(McpConstants.KEY_STATUS, McpConstants.STATUS_FORBIDDEN);
+      envelope.put(McpConstants.KEY_ERROR, "no_searchable_vector_targets");
+      envelope.put(McpConstants.KEY_DETAIL, "Semantic search is configured on this instance, but "
+          + "your role cannot read any of its indexes.");
+      envelope.put(McpConstants.KEY_TOOL, McpConstants.TOOL_NEO_VECTOR_SEARCH);
+      envelope.put(McpConstants.KEY_HINT, "Do not retry with other target names — none would work. "
+          + "Use neo_list or neo_selectors to find the record instead.");
+      return envelope;
+    } catch (JSONException e) {
+      throw new McpToolException("Error building MCP error content", e);
+    }
   }
 
   // ── docs (Context7 documentation lookup) ──────────────────────────────
@@ -353,10 +394,20 @@ public class McpToolRouter {
     int offset = args.optInt("offset", 0);
     String orderBy = args.optString("orderBy", null);
     JSONObject filters = args.optJSONObject("filters");
+    String parentId = McpArgumentUtils.optionalString(args, McpConstants.PARAM_PARENT_ID);
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
+
+    // IMP-40: a child entity is readable only through its parent. The gate itself is not new —
+    // McpParentScope has carried VERB_LIST since it was written, and neo_discover advertises
+    // "parentRequiredFor":["list","get",...] on 89 entities — but nothing ever enforced it here,
+    // and neo_list had no parentId argument to satisfy it with. So an agent that asked for one
+    // order's lines got EVERY order's lines, with nothing in the response to say the scope had
+    // been dropped: a confident, wrong answer that reads exactly like a correct one. Worse than a
+    // refusal, because the caller then acts on rows belonging to records it never asked about.
+    filters = scopeListToParent(specName, entityName, sfEntity, parentId, filters);
 
     String dalEntityName = adTab.getTable().getName();
     DefaultJsonDataService jsonService = DefaultJsonDataService.getInstance();
@@ -471,6 +522,76 @@ public class McpToolRouter {
   // ── neo_create ────────────────────────────────────────────────────────
 
   /**
+   * Refuses any top-level argument the tool does not declare (IMP-40).
+   *
+   * <p>Only tools with a fixed argument set are guarded; {@link ToolRegistry#declaredArgumentNames}
+   * returns {@code null} for the rest (process and report tools, whose parameters come from the AD
+   * process definition) and they are left alone rather than guessed at.</p>
+   *
+   * <p>The first unknown name is reported rather than all of them: the caller has to correct the
+   * call either way, and naming one keeps the message short enough to act on.</p>
+   *
+   * @param toolName  the tool being called
+   * @param arguments the arguments as received, may be {@code null}
+   */
+  private static void rejectUnknownArguments(String toolName, JSONObject arguments) {
+    if (arguments == null) {
+      return;
+    }
+    java.util.Set<String> declared = ToolRegistry.declaredArgumentNames(toolName);
+    if (declared == null) {
+      return;
+    }
+    Iterator<String> keys = arguments.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      if (!declared.contains(key)) {
+        throw McpRoutingException.unknownArgument(key, toolName,
+            new java.util.ArrayList<>(declared));
+      }
+    }
+  }
+
+  /**
+   * Applies the parent gate to a list call and returns the filters to run with (IMP-40).
+   *
+   * <p>Three outcomes. For an entity that is not a gated child, the filters pass through
+   * untouched. For a gated child with no {@code parentId}, the call is refused with the same
+   * {@code parent_required} envelope {@code neo_defaults} already uses — one wording, one copy.
+   * For a gated child with a {@code parentId}, the parent field is added to the filters, so the
+   * scope is enforced by the query rather than trusted.</p>
+   *
+   * <p>An explicit filter on the parent field is left alone: it is the pre-existing way to do
+   * this, it says the same thing, and breaking it would be a regression for no gain.</p>
+   *
+   * @param specName   the spec being listed
+   * @param entityName the entity being listed
+   * @param sfEntity   the resolved SchemaForge entity
+   * @param parentId   the parent id supplied by the caller, may be blank
+   * @param filters    the caller's filters, may be {@code null}
+   * @return the filters to apply, possibly a new object carrying the parent scope
+   * @throws JSONException if the filters cannot be extended
+   */
+  private JSONObject scopeListToParent(String specName, String entityName, SFEntity sfEntity,
+      String parentId, JSONObject filters) throws JSONException {
+    McpParentScope.Scope scope = McpParentScope.forEntity(sfEntity);
+    if (!scope.requiresParentFor(McpParentSection.VERB_LIST)) {
+      return filters;
+    }
+    String parentField = scope.getParentField();
+    if (filters != null && filters.has(parentField) && !filters.isNull(parentField)) {
+      return filters;
+    }
+    if (StringUtils.isBlank(parentId)) {
+      throw McpRoutingException.parentRequired(specName, entityName,
+          scope.getParentEntity(), parentField);
+    }
+    JSONObject scoped = filters == null ? new JSONObject() : new JSONObject(filters.toString());
+    scoped.put(parentField, parentId);
+    return scoped;
+  }
+
+  /**
    * Create a new record.
    */
   private JSONObject handleCreate(String specName, JSONObject args) throws Exception {
@@ -478,6 +599,19 @@ public class McpToolRouter {
 
     String entityName = args.getString(McpConstants.PARAM_ENTITY);
     JSONObject fields = args.getJSONObject(McpConstants.PARAM_FIELDS);
+
+    // IMP-40: accept parentId as a top-level argument, the way every other parent-aware tool
+    // takes it. It used to be read only out of `fields`, so an agent that followed the shape
+    // neo_defaults/neo_list/neo_get taught it had its parent link silently dropped — and then
+    // got a 422 for parent-derived fields it was never told to send. Copied into `fields`
+    // rather than handled separately so there stays exactly ONE downstream reader of it (the
+    // resolveParentFK block below); the top-level argument wins, because it is the declared one.
+    if (args.has(McpConstants.PARAM_PARENT_ID) && !args.isNull(McpConstants.PARAM_PARENT_ID)) {
+      String topLevelParentId = args.getString(McpConstants.PARAM_PARENT_ID);
+      if (StringUtils.isNotBlank(topLevelParentId)) {
+        fields.put(McpConstants.PARAM_PARENT_ID, topLevelParentId);
+      }
+    }
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);

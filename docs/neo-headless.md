@@ -1145,7 +1145,38 @@ comma-separated selection of active, compatible DB Extended sources. The browser
 tenant scope: DB Extended derives client and organization from `OBContext`; Go maps every requested
 namespace to its AD table and requires the active role to have entity read access before searching.
 
-Alternatively, pass `targets=sales-invoice` to select an active configured search target.
+Alternatively, pass `targets=sales-invoice` to select an active configured search target. The
+valid keys are the `Search Key` values of the active `ETARC_VECTOR_SEARCH_TARGET` rows — **they are
+not spec names**, even where the two coincide. `NeoVectorSearchEndpoint.configuredTargetKeys()`
+returns them, and the MCP `neo_vector_search` tool publishes them as an `enum` on the `targets`
+parameter so an agent never has to guess one (IMP-41).
+
+On the MCP surface `targets` is **optional**: omitted, the router substitutes every target the
+current role can read (`NeoVectorSearchEndpoint.authorizedTargetKeys()`, which filters per key so
+one unreadable index does not deny the whole search). That is the semantic-search equivalent of a
+global search box, and it is the right call when the caller does not already know which index holds
+the answer — which, for a natural-language question, is the normal case. A role that can read no
+index at all gets `no_searchable_vector_targets` with an explicit "do not retry" hint, rather than
+the bare 400 about a missing parameter that an empty target list would otherwise produce. The REST
+endpoint keeps its own contract unchanged: `query` plus either `targets` or `namespaces`.
+
+A requested key that is not in that set returns **`422 unknown_vector_target`**, not `403`. The body
+carries `unknownTargets` and `available` (capped at 20) so the caller can correct itself from the
+response alone:
+
+```json
+{ "error": { "status": 422, "code": "unknown_vector_target",
+             "message": "Unknown vector search target(s): sales-order. Retry with one of the keys in 'available'.",
+             "unknownTargets": ["sales-order"],
+             "available": ["contact", "product", "purchase-invoice", "sales-invoice"] } }
+```
+
+When DB Extended is not installed or not wired, the endpoint returns **`503`** and says so — again
+not `403`. Before IMP-41 all three conditions — module absent, key absent, role denied — returned
+the same `403 "Access denied to vector target"`, so a caller that had merely misspelled a key read
+it as a permission wall and stopped. Only a role that genuinely cannot read the target's source
+entity still gets `403`.
+
 Authorization resolves sources, targets, and included Schema Forge entities through OBDal.
 Metadata reads use `OBContext.setAdminMode(true)`, preserving client/organization filtering
 and allowing shared system-client configuration. The previous mode is restored in a
@@ -1155,9 +1186,10 @@ another client must remain denied. A matching window must be active and exposed 
 
 `query` and `namespaces` are required. `topK` defaults to `10` and is limited to `1..50`.
 `metadataFilter` is optional JSONB containment input for DB Extended. The response is its portable
-`{ namespaces, matches }` payload. Invalid request data returns `400`, unauthorized sources return
-`403`, controlled DB Extended capability/source failures return `422`, and provider failures return
-a sanitized `500`. Only `GET` is supported.
+`{ namespaces, matches }` payload. Invalid request data returns `400`, unauthorized sources and
+unauthorized targets return `403`, an unknown target key returns `422 unknown_vector_target`,
+controlled DB Extended capability/source failures return `422`, a missing DB Extended wiring returns
+`503`, and provider failures return a sanitized `500`. Only `GET` is supported.
 
 Schema Forge configures its consumer through the Vite contract
 `VITE_VECTOR_SEARCH_NAMESPACES`; leaving it empty disables semantic matches while normal page search

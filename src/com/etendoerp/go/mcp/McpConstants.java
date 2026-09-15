@@ -121,6 +121,8 @@ final class McpConstants {
    * made {@code neo_list} on a child entity return every row in the table.</p>
    */
   static final String ERROR_UNKNOWN_FILTER_FIELD = "unknown_filter_field";
+  /** Machine-detectable code for a top-level argument the tool does not declare (IMP-40). */
+  static final String ERROR_UNKNOWN_ARGUMENT = "unknown_argument";
   /**
    * Machine-detectable error code for a call on a child entity that did not name its parent
    * (ETP-5184). In Etendo a child record is only ever browsed inside one parent record — there is
@@ -135,6 +137,8 @@ final class McpConstants {
   static final int MAX_AVAILABLE_NAMES = 20;
   /** HTTP-style status for a not-found result (IMP-5). */
   static final int STATUS_NOT_FOUND = 404;
+  /** HTTP-style status for a refusal the caller cannot fix by rewriting the request (IMP-41). */
+  static final int STATUS_FORBIDDEN = 403;
   /** HTTP-style status for a validation failure on a write (IMP-5). */
   static final int STATUS_UNPROCESSABLE = 422;
   /**

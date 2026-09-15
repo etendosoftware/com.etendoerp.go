@@ -112,6 +112,30 @@ final class McpJsonSchema {
     return prop;
   }
 
+  /**
+   * A JSON-schema array whose items are constrained to {@code values}.
+   *
+   * <p>The array counterpart of {@link #enumProp}: where a scalar parameter with a closed set of
+   * legal values gets an {@code enum}, a list-valued one gets the same {@code enum} on its
+   * {@code items}. IMP-41 — {@code neo_vector_search.targets} was a free string array, so the only
+   * way to learn a legal key was to guess one and read the refusal. A model that can only pick from
+   * the list cannot misspell the key at all.</p>
+   *
+   * @param description the parameter description
+   * @param values      the legal item values; must not be empty, or the parameter is unsatisfiable
+   * @return the array schema
+   */
+  static Map<String, Object> stringEnumArrayProp(String description, List<String> values) {
+    Map<String, Object> items = new LinkedHashMap<>();
+    items.put("type", McpConstants.TYPE_STRING);
+    items.put("enum", values);
+    Map<String, Object> prop = new LinkedHashMap<>();
+    prop.put("type", "array");
+    prop.put(McpConstants.KEY_DESCRIPTION, description);
+    prop.put("items", items);
+    return prop;
+  }
+
   /** A JSON-schema array of strings, used for the IMP-2 {@code fields} projection whitelist. */
   static Map<String, Object> stringArrayProp(String description) {
     Map<String, Object> items = new LinkedHashMap<>();

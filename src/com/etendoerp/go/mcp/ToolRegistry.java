@@ -25,6 +25,7 @@ import static com.etendoerp.go.mcp.McpJsonSchema.numericProp;
 import static com.etendoerp.go.mcp.McpJsonSchema.objectArrayProp;
 import static com.etendoerp.go.mcp.McpJsonSchema.objectProp;
 import static com.etendoerp.go.mcp.McpJsonSchema.stringArrayProp;
+import static com.etendoerp.go.mcp.McpJsonSchema.stringEnumArrayProp;
 import static com.etendoerp.go.mcp.McpJsonSchema.stringProp;
 
 import java.util.ArrayList;
@@ -42,6 +43,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Process;
 
+import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -567,23 +569,89 @@ public class ToolRegistry {
 
   /** Build the read-only DB Extended semantic-search tool. */
   McpToolDefinition buildVectorSearchTool() {
+    return buildVectorSearchTool(NeoVectorSearchEndpoint.configuredTargetKeys());
+  }
+
+  /**
+   * IMP-41: {@code targets} carries the configured keys as an enum instead of being a free string
+   * array. Nothing on the MCP surface used to name a single legal key — not the input schema, not
+   * {@code neo_discover} — so guessing was the only strategy available, and a wrong guess came back
+   * as {@code 403 "Access denied"}, which reads as "not for you" rather than "not that name".
+   *
+   * <p>An empty catalogue deliberately keeps the free-form array: an empty {@code enum} makes the
+   * parameter impossible to satisfy, which would turn "nothing is configured" into a tool no model
+   * can call at all. The endpoint answers that case honestly on its own.</p>
+   *
+   * @param targetKeys the configured search-target keys; {@code null} or empty leaves the
+   *                   parameter free-form
+   * @return the tool definition
+   */
+  McpToolDefinition buildVectorSearchTool(List<String> targetKeys) {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put(McpConstants.PARAM_QUERY,
         stringProp("Natural-language search query"));
-    props.put("targets", stringArrayProp(
-        "DB Extended search-target keys to query"));
+    props.put("targets", targetKeys == null || targetKeys.isEmpty()
+        ? stringArrayProp("DB Extended search-target keys to query. No search target is configured "
+            + "on this instance, so semantic search is unavailable here.")
+        : stringEnumArrayProp("Optional. Which indexes to search. These are the only valid values — "
+            + "a key that is not listed here does not exist, however plausible it looks, and they "
+            + "are NOT spec names even where the two happen to coincide. Omit it to search every "
+            + "index you have access to, which is the right choice when you do not already know "
+            + "where the answer lives.", targetKeys));
     props.put("topK", numericProp(TYPE_INTEGER, "Maximum results (default 10, maximum 50)"));
     props.put("minScore", numericProp("number", "Minimum similarity score from 0 to 1 (default 0.60)"));
     props.put("maxScore", numericProp("number", "Maximum similarity score from 0 to 1 (default 1.0)"));
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_VECTOR_SEARCH,
         "Search indexed business records by semantic similarity using DB Extended. "
-            + "Targets are authorized against their physical source entity for the current role. "
-            + "Scores are ranking signals, not confidence probabilities.",
-        buildObjectSchema(props, List.of(McpConstants.PARAM_QUERY, "targets")));
+            + "Only 'query' is required: with no 'targets' it searches every index the current role "
+            + "can read. Targets are authorized against their physical source entity for the "
+            + "current role. Scores are ranking signals, not confidence probabilities.",
+        buildObjectSchema(props, List.of(McpConstants.PARAM_QUERY)));
   }
 
   // ── CRUD tools (registered once with spec enum) ───────────────────────
+
+  /**
+   * The argument names a fixed-shape tool declares, for the unknown-argument guard (IMP-40).
+   *
+   * <p>Derived from the very builders that produce the published schema, never from a
+   * hand-maintained list: a second copy of an argument set is how the guard and the contract drift
+   * apart, and a guard that disagrees with the schema is worse than none — it would refuse calls
+   * the tool documents.</p>
+   *
+   * <p>The spec enum is irrelevant here (only the property KEYS are read), so the builders are
+   * invoked with an empty spec list. Tools whose argument set is spec-dependent — the process and
+   * report tools, whose parameters come from the AD process definition — are deliberately absent
+   * and are therefore not guarded.</p>
+   *
+   * @param toolName the tool being called
+   * @return the declared argument names, or {@code null} when this tool is not guarded
+   */
+  static Set<String> declaredArgumentNames(String toolName) {
+    ToolRegistry registry = new ToolRegistry();
+    McpToolDefinition definition;
+    switch (toolName) {
+      case "neo_list": definition = registry.buildListTool(List.of()); break;
+      case "neo_get": definition = registry.buildGetTool(List.of()); break;
+      case "neo_create": definition = registry.buildCreateTool(List.of()); break;
+      case "neo_update": definition = registry.buildUpdateTool(List.of()); break;
+      case "neo_delete": definition = registry.buildDeleteTool(List.of()); break;
+      case "neo_selectors": definition = registry.buildSelectorsTool(List.of()); break;
+      case "neo_defaults": definition = registry.buildDefaultsTool(List.of()); break;
+      case "neo_schema": definition = registry.buildSchemaTool(List.of()); break;
+      default: return null;
+    }
+    Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
+    if (!(props instanceof Map)) {
+      return null;
+    }
+    Set<String> names = new java.util.LinkedHashSet<>();
+    for (Object key : ((Map<?, ?>) props).keySet()) {
+      names.add(String.valueOf(key));
+    }
+    return names;
+  }
 
   private McpToolDefinition buildListTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
@@ -597,6 +665,15 @@ public class ToolRegistry {
             + "(3) named business filter {\"status\": \"<name>\"} — the spec's own hand-authored "
             + "statuses (e.g. \"pending\", \"partial\", \"completed\"). Call neo_schema to see the "
             + "named filters available for a given spec; an unknown name returns the valid list."));
+    // IMP-40: neo_discover already advertises "parentRequiredFor":["list",...] on every child
+    // entity, and until now this tool had no argument that could satisfy it — so the only way to
+    // scope a list to one parent was a filter on a field name the agent had to work out itself.
+    props.put(McpConstants.PARAM_PARENT_ID, stringProp(
+        "Parent record ID — REQUIRED for a child/line entity (e.g. the order ID when listing that "
+            + "order's lines). A child's records are read through their parent: there is no global "
+            + "list of them. Omit it on a child entity and the call is refused, naming the parent "
+            + "entity to fetch first. Not needed for a spec's top-level entity, and equivalent to "
+            + "filtering on the parent field yourself."));
     props.put("limit", numericProp(TYPE_INTEGER, "Maximum number of records to return (default 100)"));
     props.put("offset", numericProp(TYPE_INTEGER, "Number of records to skip for pagination"));
     props.put("orderBy", stringProp("Column name to sort by, prefix with '-' for descending"));
@@ -648,10 +725,27 @@ public class ToolRegistry {
     props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
     props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
     props.put(McpConstants.PARAM_FIELDS, objectProp("Field values for the new record"));
+    // IMP-40: parentId was accepted ONLY inside `fields` and was declared nowhere. Every other
+    // parent-aware tool (neo_defaults, neo_list, neo_get) takes it as a top-level argument and
+    // says so at length, so an agent learns that shape from three tools and applies it to this
+    // one — where it was silently discarded. Nothing errored: the parent link simply never
+    // arrived, so parent-derived values (a line's order date, its price-list version, its running
+    // line number) could not resolve, and the create was refused for "missing" fields the server
+    // was supposed to derive. Declared here so the contract is uniform; `fields.parentId` still
+    // works, and this argument wins when both are present.
+    props.put(McpConstants.PARAM_PARENT_ID, stringProp(
+        "Parent record ID — REQUIRED when creating a child/line record (e.g. the order ID when "
+            + "creating an order line). It links the new record to its parent AND is what lets the "
+            + "server derive the parent-dependent values for you (the line's date, its price-list "
+            + "version, its line number). Omit it on a child entity and those values cannot be "
+            + "resolved, so the create is refused for fields you were never asked to supply. "
+            + "Not needed for a spec's top-level entity."));
 
     return new McpToolDefinition(
         "neo_create",
         "Create a new record in a NEO Headless API spec. "
+            + "Creating a child/line record? Pass parentId with the parent's id — without it the "
+            + "server cannot derive the values it inherits from the parent. "
             + "Recommended: call neo_defaults first to get the initial/base set of field values "
             + "for this record type, then build the fields object by overriding only the values "
             + "the user actually wants to change on top of that base — instead of asking the "

@@ -235,6 +235,32 @@ class McpRoutingException extends OBException {
    * @param available the recognized operator keys
    * @return the exception to throw
    */
+  /**
+   * A tool call carried a top-level argument the tool does not declare (IMP-40).
+   *
+   * <p>Such an argument used to be dropped in silence, and on a read tool that is the dangerous
+   * direction: an argument the caller believed was narrowing the result — a {@code parentId} on
+   * {@code neo_list}, say — simply vanished, and the unnarrowed answer came back looking exactly
+   * like a correct one. A caller cannot detect that from the response, so it acts on rows it never
+   * asked for. Refusing costs one retry; the silence cost correctness.</p>
+   *
+   * @param argument  the argument name that is not declared
+   * @param toolName  the tool it was sent to
+   * @param available the argument names the tool does declare
+   * @return the exception to throw
+   */
+  static McpRoutingException unknownArgument(String argument, String toolName,
+      List<String> available) {
+    return new McpRoutingException(
+        "Unknown argument '" + argument + "' for tool '" + toolName + "'",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_UNKNOWN_ARGUMENT, argument,
+        available == null ? List.of() : available,
+        "This argument was ignored, not applied — if you meant it to narrow or change the result, "
+            + "the result you would have got is not the one you asked for. Retry using only the "
+            + "names in 'available'.",
+        McpConstants.SEE_ALSO_READING);
+  }
+
   static McpRoutingException unknownFilterOperator(String key, String operator,
       List<String> available) {
     return new McpRoutingException(
