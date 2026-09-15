@@ -16,7 +16,6 @@
  */
 package com.etendoerp.go.schemaforge;
 
-import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 
@@ -26,7 +25,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.openbravo.dal.service.OBDal;
 
 /**
  * NeoHandler for the Return to Vendor Shipment line entity.
@@ -63,28 +61,25 @@ public class ReturnToVendorShipmentLineHandler implements NeoHandler {
             e.getMessage(), e);
       }
     }
-    // Negate movementQuantity on write so the frontend always works with positive values.
-    // V- documents store negative quantities in the DB; the UI (like Etendo Classic) shows positive.
+    // ETP-5313: the stored-negative / exposed-positive rule now lives in ONE place, shared with
+    // ReturnMaterialReceiptLineHandler — see ReturnLineQuantityPolicy for why the DB sign is
+    // forced on us by core M_INOUT_POST / M_INOUT_TRG_PROV.
     String method = context.getHttpMethod();
     if (("PUT".equals(method) || "PATCH".equals(method) || "POST".equals(method))
         && context.getRequestBody() != null) {
-      negateMovQtyIfNeeded(context.getRequestBody(), method);
+      applyStoredSignAndStripProduct(context.getRequestBody(), method);
     }
     return null;
   }
 
-  private void negateMovQtyIfNeeded(JSONObject body, String method) {
+  private void applyStoredSignAndStripProduct(JSONObject body, String method) {
     if (body.has(FIELD_MOVEMENT_QUANTITY)) {
-      try {
-        BigDecimal qty = new BigDecimal(body.get(FIELD_MOVEMENT_QUANTITY).toString());
-        if (qty.compareTo(BigDecimal.ZERO) > 0) {
-          body.put(FIELD_MOVEMENT_QUANTITY, qty.negate());
-        }
-      } catch (Exception e) {
-        log.warn("Could not negate movementQuantity: {}", e.getMessage());
-      }
-      // Remove product from PATCH/PUT body so SL_InOutLine_Product callout does not fire
-      // and overwrite the user-supplied movementQuantity with the on-hand stock value.
+      ReturnLineQuantityPolicy.applyStoredSignToWriteBody(body, log);
+      // Keeps the product of an existing RTV line immutable: a return line mirrors its source
+      // line, so an update that also carries a quantity must not repoint it at another product.
+      // NOTE: this is NOT what protects the quantity from SL_InOutLine_Product — the NEO CRUD
+      // callout cascade only runs on create (NeoCrudHandler#executePostCreate), never on
+      // PUT/PATCH.
       if (!"POST".equals(method)) {
         body.remove("product");
       }
@@ -114,29 +109,12 @@ public class ReturnToVendorShipmentLineHandler implements NeoHandler {
             rec.put("productCode", ld.productCode);
           }
         }
-        flipMovQtySignIfNegative(rec);
+        ReturnLineQuantityPolicy.applyDisplaySignToRecord(rec, log);
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error enriching return-to-vendor-shipment lines", e);
       return context.getPreviousResult();
-    }
-  }
-
-  // Return positive movementQuantity to the frontend (V- docs store negative in DB).
-  // Etendo Classic displays the absolute value; we match that behaviour here.
-  private void flipMovQtySignIfNegative(JSONObject rec) {
-    Object mvObj = rec.opt(FIELD_MOVEMENT_QUANTITY);
-    if (mvObj == null) {
-      return;
-    }
-    try {
-      BigDecimal mv = new BigDecimal(mvObj.toString());
-      if (mv.compareTo(BigDecimal.ZERO) < 0) {
-        rec.put(FIELD_MOVEMENT_QUANTITY, mv.negate());
-      }
-    } catch (Exception e) {
-      log.warn("Could not flip movementQuantity sign: {}", e.getMessage());
     }
   }
 

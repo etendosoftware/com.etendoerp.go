@@ -16,7 +16,6 @@
  */
 package com.etendoerp.go.schemaforge;
 
-import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 
@@ -26,7 +25,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.openbravo.dal.service.OBDal;
 
 /**
  * Post-hook for the Return Material Receipt line entity.
@@ -43,6 +41,11 @@ import org.openbravo.dal.service.OBDal;
  * This class implements {@link NeoHandler} directly rather than extending {@link
  * AbstractInOutLineHandler} — same shape as {@link ReturnToVendorShipmentLineHandler} — so the
  * locator default is applied directly here via the shared helper instead of inheriting it.
+ *
+ * <p>Write/read quantity sign (ETP-5313): {@code movementQuantity} is persisted NEGATIVE and
+ * echoed back POSITIVE, exactly like {@link ReturnToVendorShipmentLineHandler}. Both delegate to
+ * {@link ReturnLineQuantityPolicy}, which documents why core {@code M_INOUT_POST} leaves no other
+ * option. Before this, a completed sales return DECREASED stock instead of restoring it.
  */
 @Named("returnMaterialReceiptLineHandler")
 public class ReturnMaterialReceiptLineHandler implements NeoHandler {
@@ -51,7 +54,10 @@ public class ReturnMaterialReceiptLineHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    if (context != null && NeoEndpointType.CRUD.equals(context.getEndpointType())
+    if (context == null) {
+      return null;
+    }
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
         && "POST".equalsIgnoreCase(context.getHttpMethod())) {
       try {
         NeoHandlerUtils.injectDefaultLocatorIfMissing(context.getRequestBody(), log);
@@ -59,6 +65,10 @@ public class ReturnMaterialReceiptLineHandler implements NeoHandler {
         log.warn("[ReturnMaterialReceiptLineHandler] Could not default storageBin: {}",
             e.getMessage(), e);
       }
+    }
+    String method = context.getHttpMethod();
+    if ("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)) {
+      ReturnLineQuantityPolicy.applyStoredSignToWriteBody(context.getRequestBody(), log);
     }
     return null;
   }
@@ -86,6 +96,7 @@ public class ReturnMaterialReceiptLineHandler implements NeoHandler {
             rec.put("productCode", ld.productCode);
           }
         }
+        ReturnLineQuantityPolicy.applyDisplaySignToRecord(rec, log);
       }
       return NeoResponse.ok(body);
     } catch (Exception e) {
