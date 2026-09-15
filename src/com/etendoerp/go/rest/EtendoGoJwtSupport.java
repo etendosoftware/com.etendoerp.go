@@ -23,6 +23,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -43,6 +45,7 @@ import com.etendoerp.go.schemaforge.data.Account;
 /** Shared JWT and environment-role helpers used by the Etendo Go servlet. */
 public final class EtendoGoJwtSupport {
 
+  private static final Logger log = LogManager.getLogger(EtendoGoJwtSupport.class);
   private static final String STAR_ORG_VALUE = "*";
   private static final String SYSTEM_ORG_ID = "0";
   private static final String SQL_FIND_ROLE_LIST_BY_USER =
@@ -105,6 +108,10 @@ public final class EtendoGoJwtSupport {
         // No roles at all -> nothing to attach effectiveRoleNames to; skip resolving it.
         return buildRoleListData(rows, null, Collections.emptyList());
       }
+      // resolveDefaultRoleId and resolveEffectiveRoleNames each independently OBDal.get() the
+      // same User by userId (the latter indirectly, inside getAppliedTemplateRoleIds). This is
+      // intentional/known: Hibernate's session-level identity cache dedups the second get() for
+      // the same PK, so there is no extra round-trip to short-circuit here.
       String defaultRoleId = resolveDefaultRoleId(userId);
       List<String> effectiveRoleNames = resolveEffectiveRoleNames(userId);
       return buildRoleListData(rows, defaultRoleId, effectiveRoleNames);
@@ -150,6 +157,12 @@ public final class EtendoGoJwtSupport {
       String name = namesById.get(templateRoleId);
       if (name != null) {
         names.add(name);
+      } else {
+        // ETP-4604-style anomaly: a template role id with no matching (active) Role row —
+        // deleted or renamed out from under AD_Role_Inheritance. Log it instead of silently
+        // shrinking the effectiveRoleNames array.
+        log.warn("Template role id {} for user {} has no matching Role name; skipping it in "
+            + "effectiveRoleNames", templateRoleId, userId);
       }
     }
     return names;
