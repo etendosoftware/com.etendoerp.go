@@ -319,18 +319,11 @@ public class NeoDefaultsService {
     if (resolved != null) {
       return resolved;
     }
-    // ETP-5277 (review hardening, W1): this is a THIRD call site into the combo first-option
-    // fallback, reached from the Pass-3 hidden-mandatory-defaults resolver — not the two sites
-    // already guarded in resolveFieldDefault/applyDefaultWithComboFallback above. It is inert
-    // today only because NeoHiddenMandatoryDefaultsResolver.shouldResolveColumn requires
-    // column.isMandatory()==true and the 4 excluded AD_User columns are all ismandatory='N' in
-    // the current DB — a coincidence of data, not a structural guarantee. Excluding them here
-    // too closes that landmine: if any of the 4 columns is ever made mandatory (or the deny-list
-    // is extended to a mandatory column), this path must still come back null/absent instead of
-    // reopening the cross-tenant first-row-of-the-table leak this ticket fixed.
-    if (isUserSessionFallbackExcludedColumn(column)) {
-      return null;
-    }
+    // ETP-5277: the per-call-site deny-list check that used to live here (review hardening, W1)
+    // is now redundant — resolveFirstComboOption itself refuses to resolve any
+    // isUserSessionFallbackExcludedColumn column unconditionally, so this call is already covered
+    // regardless of whether NeoHiddenMandatoryDefaultsResolver's mandatory-only gating changes in
+    // the future. The primitive-level guard is the authority; see its javadoc there.
     return resolveFirstComboOption(column, ctx);
   }
 
@@ -342,12 +335,12 @@ public class NeoDefaultsService {
     // first row of the ENTIRE table across every tenant. Confirmed live: with only the
     // session-fallback guarded (not this one), defaultClient came back as an unrelated client
     // from a different tenant entirely ("aaa"), which is a worse leak than the session-derived
-    // value this ticket set out to fix, not a fix. Columns excluded from the session/prefs
-    // fallback above must therefore also be excluded here, so they come back genuinely
-    // null/absent — matching the "no default configured" contract this guard promises —
-    // instead of silently swapping one wrong value for a different, cross-tenant one.
-    if (resolvedValue == null && !Boolean.TRUE.equals(sfField.isReadOnly())
-        && !isUserSessionFallbackExcludedColumn(adColumn)) {
+    // value this ticket set out to fix, not a fix. The deny-list check that used to sit in this
+    // condition is now redundant: resolveFirstComboOption refuses excluded columns
+    // unconditionally at the primitive level, so an excluded column always comes back
+    // null/absent here too — matching the "no default configured" contract this guard promises
+    // — instead of silently swapping one wrong value for a different, cross-tenant one.
+    if (resolvedValue == null && !Boolean.TRUE.equals(sfField.isReadOnly())) {
       resolvedValue = resolveFirstComboOption(adColumn, ctx);
     }
     if (resolvedValue != null) {
@@ -790,12 +783,13 @@ public class NeoDefaultsService {
       // method (NeoDefaultsEndpoint's /defaults bootstrap, NeoBackgroundDefaultsService, and
       // NeoMandatoryDefaultsService's create-time mandatory-column injection) only ever run for
       // a NEW record — there is no "existing record" call path into resolveFieldDefault — so
-      // skipping the fallback here cannot affect editing an existing user. Scoped narrowly by
-      // table + exact column name so every OTHER caller of resolveFromPrefsOrDocType (any other
-      // entity/column relying on this same generic mechanism) is completely unaffected.
-      if (isUserSessionFallbackExcludedColumn(adColumn)) {
-        return null;
-      }
+      // skipping the fallback here cannot affect editing an existing user.
+      //
+      // (Architectural consolidation, same ticket): the deny-list check itself now lives inside
+      // resolveFromPrefsOrDocType, not here — this call site no longer needs its own guard, it
+      // simply delegates and the primitive refuses excluded columns unconditionally. Kept as a
+      // plain unconditional call (not removed) because resolveFieldDefault is still the one real
+      // caller today; the guard just isn't duplicated at this call site anymore.
       return resolveFromPrefsOrDocType(adColumn, request.vars, request.conn, request.windowId,
           dbColumnName, request.ctx);
     }
@@ -1122,6 +1116,15 @@ public class NeoDefaultsService {
    */
   private static Object resolveFromPrefsOrDocType(Column adColumn, VariablesSecureApp vars,
       DalConnectionProvider conn, String windowId, String dbColumnName, NeoContext ctx) {
+    // ETP-5277 (architectural consolidation): guarded here too, not only at the single current
+    // call site (resolveFieldDefault) — this is the other shared low-level primitive besides
+    // resolveFirstComboOption that can leak a session-derived value (via Utility.getPreference's
+    // documented "no AD_Preference row configured" fallback to the caller's own session state).
+    // Keeping the check inside the primitive itself means a future second caller is protected
+    // automatically, the same reasoning applied to resolveFirstComboOption above.
+    if (isUserSessionFallbackExcludedColumn(adColumn)) {
+      return null;
+    }
     String colUpper = dbColumnName.toUpperCase();
     if (colUpper.endsWith("_ID") && colUpper.contains("DOCTYPE")) {
       return DocTypeResolver.resolveDefaultDocTypeId(adColumn, ctx);
@@ -1378,6 +1381,17 @@ public class NeoDefaultsService {
   }
 
   static Object resolveFirstComboOption(Column col, NeoContext ctx) {
+    // ETP-5277 (architectural consolidation): the exclusion now lives HERE, at the shared
+    // primitive every combo first-option caller eventually reaches — resolveOrFirstComboOption,
+    // applyDefaultWithComboFallback, and NeoMandatoryDefaultsService#tryInjectFirstFromLookup (the
+    // "5th path", found unguarded during the previous hardening pass because it calls this method
+    // directly, bypassing resolveOrFirstComboOption's now-redundant guard entirely) are all
+    // protected by construction, with no per-call-site check to remember or forget. Any FUTURE
+    // caller of this method — the whole reason to guard it here instead of at each call site —
+    // is covered the same way, automatically.
+    if (isUserSessionFallbackExcludedColumn(col)) {
+      return null;
+    }
     try {
       String baseRefId = NeoSelectorService.getBaseReferenceId(col);
       if (!isFICComboReference(baseRefId)) {

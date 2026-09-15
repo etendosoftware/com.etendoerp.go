@@ -582,6 +582,14 @@ public class NeoMandatoryDefaultsService {
    * ETP-3894: tryInjectFallbackFkDefault's replacement — only fires for combo-style references
    * (TableDir/Table/List), matching legitimate FIC parity, via {@code
    * NeoDefaultsService#resolveFirstComboOption}.
+   *
+   * <p>ETP-5277: this was the "5th path" found unguarded during review hardening — it calls
+   * {@code resolveFirstComboOption} directly, bypassing {@code resolveOrFirstComboOption}'s
+   * call-site guard entirely, so the W1 fix (guarding that one call site) did not cover this
+   * one. Now covered without any change needed here: the exclusion moved INTO {@code
+   * resolveFirstComboOption} itself, so this call site — and any other, current or future — is
+   * protected by construction. See {@code NeoDefaultsService#resolveFirstComboOption}'s javadoc
+   * for the authoritative guard.</p>
    */
   private static boolean tryInjectFirstFromLookup(JSONObject body, Entity dalEntity,
       String propName, Column col, NeoContext ctx) {
