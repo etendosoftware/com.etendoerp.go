@@ -29,12 +29,12 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.SessionHandler;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.order.Order;
-import org.openbravo.model.common.order.OrderLine;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.service.db.DalConnectionProvider;
 
@@ -76,9 +76,17 @@ public class CreateGoodsReceiptHandler implements NeoHandler {
               "Purchase order not found: " + recordId);
         }
 
+        // ETP-5276: validate BEFORE creating/persisting anything. Doing this after
+        // OBDal.save(receipt) left an empty, orphaned receipt behind whenever the
+        // order had zero pending lines (Hibernate flushes the managed header on
+        // commit regardless of the 400 this method returns).
+        InOutLineFromOrderFactory.PendingLinesResult result =
+            InOutLineFromOrderFactory.resolvePendingLinesAndLocator(order,
+                "No pending lines to receive in this purchase order", this::findDefaultLocator);
+
         ShipmentInOut receipt = createReceiptHeader(order);
         OBDal.getInstance().save(receipt);
-        createReceiptLines(receipt, order);
+        createReceiptLines(receipt, result.getPendingLines(), result.getLocator());
         OBDal.getInstance().flush();
         ensureDocumentNo(receipt);
 
@@ -97,9 +105,11 @@ public class CreateGoodsReceiptHandler implements NeoHandler {
         OBContext.restorePreviousMode();
       }
     } catch (OBException e) {
+      SessionHandler.getInstance().rollback();
       log.warn("Error creating goods receipt from order {}: {}", recordId, e.getMessage());
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {
+      SessionHandler.getInstance().rollback();
       log.error("Error creating goods receipt from order {}: {}", recordId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while creating the goods receipt");
@@ -157,39 +167,14 @@ public class CreateGoodsReceiptHandler implements NeoHandler {
         "V+");
   }
 
-  protected void createReceiptLines(ShipmentInOut receipt, Order order) {
-    Locator defaultLocator = resolveDefaultLocatorOrFail(order);
-
+  protected void createReceiptLines(ShipmentInOut receipt,
+      List<InOutLineFromOrderFactory.PendingOrderLine> pendingLines, Locator defaultLocator) {
     long lineNo = 10;
-    int addedLines = 0;
-    for (OrderLine orderLine : order.getOrderLineList()) {
-      java.math.BigDecimal pendingQty = InOutLineFromOrderFactory.pendingQuantityFor(orderLine);
-      if (pendingQty == null) {
-        continue;
-      }
-      InOutLineFromOrderFactory.createAndLinkLine(receipt, orderLine, defaultLocator, lineNo, pendingQty);
+    for (InOutLineFromOrderFactory.PendingOrderLine pendingLine : pendingLines) {
+      InOutLineFromOrderFactory.createAndLinkLine(receipt, pendingLine.getOrderLine(),
+          defaultLocator, lineNo, pendingLine.getPendingQty());
       lineNo += 10;
-      addedLines++;
     }
-    if (addedLines == 0) {
-      throw new OBException("No pending lines to receive in this purchase order");
-    }
-  }
-
-  /**
-   * Returns the locator for the order's warehouse, or throws when none is
-   * configured. Kept here (rather than in the shared factory) because the
-   * underlying {@link #findDefaultLocator(Order)} is a per-handler hook that
-   * tests override to bypass the criteria query.
-   */
-  private Locator resolveDefaultLocatorOrFail(Order order) {
-    Locator defaultLocator = findDefaultLocator(order);
-    if (defaultLocator == null) {
-      String warehouseName = order.getWarehouse() != null
-          ? order.getWarehouse().getName() : "unknown";
-      throw new OBException("No storage locator found for warehouse: " + warehouseName);
-    }
-    return defaultLocator;
   }
 
   private DocumentType findReceiptDocType(Order order) {

@@ -34,6 +34,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 
+import com.etendoerp.go.schemaforge.webhooks.SFAcctProcessMonitor;
 import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
@@ -427,6 +428,35 @@ public class NeoPseudoSpecDispatcherTest {
     assertTrue(handled);
     verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
         eq("Resendinvitation endpoint only supports GET"));
+    verify(goWebhookBridge, never()).handle(any(), any());
+  }
+
+  // -------------------------------------------------------------------------
+  // acctprocessmonitor (ETP-5269) — status/history read plus ?Action=trigger
+  // -------------------------------------------------------------------------
+
+  @Test
+  public void acctProcessMonitorGetDispatchesThroughBridgeWithSFAcctProcessMonitor()
+      throws Exception {
+    NeoResponse payload = NeoResponse.ok(new JSONObject());
+    when(goWebhookBridge.handle(eq(request), any(BaseWebhookService.class))).thenReturn(payload);
+
+    boolean handled = dispatcher.handle(pathInfo("acctprocessmonitor"), "GET", request, response);
+
+    assertTrue(handled);
+    ArgumentCaptor<BaseWebhookService> webhookCaptor = ArgumentCaptor.forClass(BaseWebhookService.class);
+    verify(goWebhookBridge).handle(eq(request), webhookCaptor.capture());
+    assertTrue(webhookCaptor.getValue() instanceof SFAcctProcessMonitor);
+    verify(servlet).writeResponse(response, payload);
+  }
+
+  @Test
+  public void acctProcessMonitorRejectsNonGetMethod() throws Exception {
+    boolean handled = dispatcher.handle(pathInfo("acctprocessmonitor"), "POST", request, response);
+
+    assertTrue(handled);
+    verify(servlet).sendError(eq(response), eq(HttpServletResponse.SC_METHOD_NOT_ALLOWED),
+        eq("Acctprocessmonitor endpoint only supports GET"));
     verify(goWebhookBridge, never()).handle(any(), any());
   }
 }

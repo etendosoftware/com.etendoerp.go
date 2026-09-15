@@ -106,7 +106,7 @@ public class SalesInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler impl
     if (paymentMethodSelector != null) {
       return paymentMethodSelector;
     }
-    NeoHandlerUtils.mirrorAccountingDate(context, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(context, "invoiceDate", "accountingDate");
     captureOriginInvoice(context);
     NeoResponse siiAuthError = captureAndValidateSiiAuthorization(context);
     if (siiAuthError != null) {
