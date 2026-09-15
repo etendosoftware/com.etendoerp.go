@@ -21,10 +21,19 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
+import org.mockito.MockedStatic;
+import org.mockito.Mockito;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.invoice.Invoice;
 
 /**
  * Unit tests for {@link SiiSendHandler}.
@@ -131,5 +140,145 @@ public class SiiSendHandlerTest {
   @Test
   public void testNormalizeErrorShapeReturnsNullUnchanged() {
     assertNull(SiiSendHandler.normalizeErrorShape(null));
+  }
+
+  // ── executeAction() routing — ETP-5272 ─────────────────────────────────────
+  //
+  // executeAction routes to MultiInvoiceSIIModification (registry-error resend, A1)
+  // whenever Invoice#isAeatsiiErrorRegistral() is true — regardless of the invoice's
+  // AEAT error code (the code check was removed: only two branches exist now). With the
+  // registral flag unset (or the invoice not found), the existing MultiEnvioFactura path
+  // (A0) is untouched.
+
+  @Test
+  public void testExecuteActionRoutesToModificationWhenRegistralFlagTrueWithCode3000() throws Exception {
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.isAeatsiiErrorRegistral()).thenReturn(Boolean.TRUE);
+    when(invoice.getAeatsiiErrorCode()).thenReturn("3000");
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("org-1");
+    when(invoice.getOrganization()).thenReturn(org);
+
+    NeoResponse expected = NeoResponse.ok(new JSONObject().put("sent", true));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "inv-registral-3000")).thenReturn(invoice);
+      processMock.when(() -> NeoProcessService.executeObuiappClass(
+              eq("org.openbravo.module.sii.process.MultiInvoiceSIIModification"),
+              eq("F5CCFE8DCAC04FBD9B4A217C6383032B"),
+              any(JSONObject.class)))
+          .thenReturn(expected);
+
+      NeoResponse result = handler.executeAction("inv-registral-3000");
+
+      assertEquals(expected, result);
+      processMock.verify(() -> NeoProcessService.executeObuiappClass(
+          eq("org.openbravo.module.sii.process.MultiInvoiceSIIModification"),
+          eq("F5CCFE8DCAC04FBD9B4A217C6383032B"),
+          any(JSONObject.class)));
+    }
+  }
+
+  @Test
+  public void testExecuteActionRoutesToModificationWhenRegistralFlagTrueWithOtherOrNullCode()
+      throws Exception {
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.isAeatsiiErrorRegistral()).thenReturn(Boolean.TRUE);
+    when(invoice.getAeatsiiErrorCode()).thenReturn(null);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("org-1");
+    when(invoice.getOrganization()).thenReturn(org);
+
+    NeoResponse expected = NeoResponse.ok(new JSONObject().put("sent", true));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "inv-registral-null-code")).thenReturn(invoice);
+      processMock.when(() -> NeoProcessService.executeObuiappClass(any(), any(), any()))
+          .thenReturn(expected);
+
+      NeoResponse result = handler.executeAction("inv-registral-null-code");
+
+      assertEquals(expected, result);
+      processMock.verify(() -> NeoProcessService.executeObuiappClass(
+          eq("org.openbravo.module.sii.process.MultiInvoiceSIIModification"),
+          eq("F5CCFE8DCAC04FBD9B4A217C6383032B"),
+          any(JSONObject.class)));
+    }
+  }
+
+  @Test
+  public void testExecuteActionRoutesToMultiEnvioFacturaWhenFlagNotSet() throws Exception {
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.isAeatsiiErrorRegistral()).thenReturn(Boolean.FALSE);
+    Organization org = mock(Organization.class);
+    when(org.getId()).thenReturn("org-1");
+    when(invoice.getOrganization()).thenReturn(org);
+
+    NeoResponse expected = NeoResponse.ok(new JSONObject().put("sent", true));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "inv-normal")).thenReturn(invoice);
+      processMock.when(() -> NeoProcessService.executeObuiappClass(
+              eq("org.openbravo.module.sii.process.MultiEnvioFactura"),
+              eq("2ECF46DAAEEB486EAF79D3594D50DE5F"),
+              any(JSONObject.class)))
+          .thenReturn(expected);
+
+      NeoResponse result = handler.executeAction("inv-normal");
+
+      assertEquals(expected, result);
+      processMock.verify(() -> NeoProcessService.executeObuiappClass(
+          eq("org.openbravo.module.sii.process.MultiEnvioFactura"),
+          eq("2ECF46DAAEEB486EAF79D3594D50DE5F"),
+          any(JSONObject.class)));
+    }
+  }
+
+  @Test
+  public void testExecuteActionRoutesToMultiEnvioFacturaWhenFlagIsNull() throws Exception {
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.isAeatsiiErrorRegistral()).thenReturn(null);
+
+    NeoResponse expected = NeoResponse.ok(new JSONObject().put("sent", true));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "inv-null-flag")).thenReturn(invoice);
+      processMock.when(() -> NeoProcessService.executeObuiappClass(any(), any(), any()))
+          .thenReturn(expected);
+
+      NeoResponse result = handler.executeAction("inv-null-flag");
+
+      assertEquals(expected, result);
+    }
+  }
+
+  @Test
+  public void testExecuteActionRoutesToMultiEnvioFacturaWhenInvoiceNotFound() throws Exception {
+    NeoResponse expected = NeoResponse.ok(new JSONObject().put("sent", true));
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoProcessService> processMock = Mockito.mockStatic(NeoProcessService.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(Invoice.class, "inv-missing")).thenReturn(null);
+      processMock.when(() -> NeoProcessService.executeObuiappClass(any(), any(), any()))
+          .thenReturn(expected);
+
+      NeoResponse result = handler.executeAction("inv-missing");
+
+      assertEquals(expected, result);
+    }
   }
 }

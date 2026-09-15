@@ -61,7 +61,7 @@ import org.openbravo.test.purchaseOrder.PurchaseOrderUtils;
  * {@code org.openbravo.*} core stock logic — so the fix belongs here.
  *
  * <p>This test exercises the actual production method under test,
- * {@link CreateGoodsReceiptHandler#createReceiptLines(ShipmentInOut, Order)},
+ * {@link CreateGoodsReceiptHandler#createReceiptLines(ShipmentInOut, List, Locator)},
  * against a REAL, persisted {@link Order} + {@link OrderLine}s and a REAL
  * {@link ShipmentInOut} header — not mocks — because the risk here is a real
  * DB-side effect of a real conversion routine (order lines → M_InOut /
@@ -148,7 +148,9 @@ public class CreateGoodsReceiptHandlerNegativeQuantityIntegrationTest extends OB
     // ── Run the ACTUAL production conversion routine under test ─────────────────────
     TestableHandler handler = new TestableHandler();
     handler.locatorToReturn = locator;
-    handler.createReceiptLines(receipt, order);
+    List<InOutLineFromOrderFactory.PendingOrderLine> pendingLines =
+        InOutLineFromOrderFactory.collectPendingLines(order);
+    handler.createReceiptLines(receipt, pendingLines, handler.locatorToReturn);
 
     OBDal.getInstance().flush();
     OBDal.getInstance().refresh(receipt);
