@@ -268,6 +268,32 @@ class EtendoGoJwtSupportTest {
     }
 
     @Test
+    @DisplayName("ETP-5329: skips a template role id with no matching active Role instead of "
+        + "throwing, keeping the remaining resolved names")
+    void skipsUnresolvedTemplateRoleId() throws JSONException {
+      mockRoleListQuery(Collections.singletonList(
+          new Object[]{ "role-1", "Personal - user", null, null }));
+      mockUserDefaultRole("role-1");
+
+      try (MockedConstruction<UserRoleCompositionService> composition = mockConstruction(
+          UserRoleCompositionService.class, (mock, ctx) ->
+              when(mock.getAppliedTemplateRoleIds("user-id"))
+                  .thenReturn(Arrays.asList("tpl-finance", "tpl-deleted")))) {
+        // "tpl-deleted" has no matching active Role row (deleted/renamed out from under
+        // AD_Role_Inheritance) -> fetchRoleNames simply omits it from namesById.
+        mockRoleNameLookup(new Object[]{ "tpl-finance", "Finance" });
+
+        EtendoGoJwtSupport.RoleListData data = EtendoGoJwtSupport.loadRoleListData("user-id");
+
+        JSONObject role1 = data.getRoleArray().getJSONObject(0);
+        assertTrue(role1.has("effectiveRoleNames"));
+        JSONArray names = role1.getJSONArray("effectiveRoleNames");
+        assertEquals(1, names.length());
+        assertEquals("Finance", names.getString(0));
+      }
+    }
+
+    @Test
     @DisplayName("wraps native SQL failures in OBException")
     void wrapsSqlFailures() {
       when(obDal.getSession()).thenReturn(session);
