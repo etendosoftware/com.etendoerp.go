@@ -192,14 +192,13 @@ final class McpHookExecutor {
    * live in {@code NeoResponse.error} itself.</p>
    */
   static JSONObject neoResponseToMcpResult(NeoResponse neoResponse) throws JSONException {
+    // ETP-5306: both branches hand over the JSONObject, so the reserved-key sanitisation in the
+    // content wrappers covers every NeoResponse-carrying path funnelled through here — a handler's
+    // body is produced by the same core serialiser that puts `$ref` on a row.
     if (neoResponse.getHttpStatus() >= 400) {
-      String errorText = McpToolRouterSupport
-          .toMcpHandlerError(neoResponse.getBody(), neoResponse.getHttpStatus()).toString(2);
-      return McpToolRouter.wrapAsErrorContent(errorText);
+      return McpToolRouter.wrapAsErrorContent(McpToolRouterSupport
+          .toMcpHandlerError(neoResponse.getBody(), neoResponse.getHttpStatus()));
     }
-    String text = neoResponse.getBody() != null
-        ? neoResponse.getBody().toString(2)
-        : "{}";
-    return McpToolRouter.wrapAsTextContent(text);
+    return McpToolRouter.wrapAsTextContent(neoResponse.getBody());
   }
 }
