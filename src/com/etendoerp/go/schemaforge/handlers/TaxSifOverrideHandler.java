@@ -60,7 +60,7 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * <h3>PUT/PATCH — redirect to {@code etsg_tax_sif_config} (D4)</h3>
  * <p>When the request body carries any of the 8 fields, this handler strips them out of the
  * body, upserts them into {@code etsg_tax_sif_config} keyed by
- * {@code (c_tax_id, AD_GET_ORG_LE_BU(currentOrg, 'LE'))} (the legal entity of the ACTING
+ * {@code (c_tax_id, AD_GET_ORG_LE_BU(writeOrg, 'LE'))} (the legal entity of the ACTING
  * organization, not the raw org itself — matching the read-side precedence join, see below),
  * and lets the (possibly now-empty) remainder of the body flow through to the default CRUD for
  * {@code c_tax} itself. Only the columns actually present in the request are written to
@@ -68,6 +68,19 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * send. POST (create) is deliberately NOT intercepted: a brand-new {@code c_tax} row has no id
  * yet to key the override table on, and in practice these fields are only edited once a tax
  * already exists.
+ *
+ * <p><b>ETP-5229 — {@code writeOrg} is NOT always the session org.</b> When the SIF modal is
+ * opened from an invoice/order LINE context, the frontend sends the invoice's own
+ * {@code AD_Org_ID} as the {@code sifContextOrgId} query param, and {@code writeOrg} becomes
+ * THAT organization instead of {@code obContext.getCurrentOrganization()}. This closes a real
+ * bug: the user's currently-active session org can legitimately differ from the org of the
+ * invoice they are editing (e.g. navigating a multi-org tree), and the read side
+ * ({@code InvoiceLineTaxSifSelectorPolicy#querySifColumns}) always resolves the legal entity
+ * from the INVOICE's own org, never the session's. Without {@code sifContextOrgId}, a save
+ * could persist under one legal entity while the badge-read query looked it up under another —
+ * upsert succeeds, badge never clears, no error anywhere. See
+ * {@link #resolveWriteOrganizationId} for the full precedence and the standalone Tax-window
+ * fallback that keeps working unchanged when the param is absent.
  *
  * <h3>GET afterHandle — effective value (D5)</h3>
  * <p>Overwrites the 8 properties on every row of a {@code tax} GET response (single or list)
@@ -96,6 +109,21 @@ public class TaxSifOverrideHandler implements NeoHandler {
   private static final String TAX_ENTITY_NAME = "tax";
   private static final String FIELD_ID = "id";
   private static final String PARAM_ORG_ID = "orgId";
+
+  // ETP-5229: optional query param the frontend sends when the SIF modal is opened from an
+  // invoice/order LINE context (e.g. TaxSifModal.jsx), carrying that document's OWN
+  // AD_Org_ID — the exact organization InvoiceLineTaxSifSelectorPolicy#querySifColumns
+  // resolves the legal entity from on the READ side (via SelectorContextResolver, which reads
+  // the invoice/order's own `organization` property, NOT the caller's session org). When
+  // present, both the write (upsertOverride) and the immediate read-back
+  // (buildOverrideOnlyResponse) key off THIS organization instead of the session's currently
+  // active one, so an override saved while the user's session org differs from the invoice's
+  // own org lands under the SAME legal entity the badge-read path looks it up under.
+  //
+  // Absent (the standalone Tax window's own PATCH flow has no invoice in scope), the handler
+  // falls back to the pre-ETP-5229 behavior: `obContext.getCurrentOrganization()`. Both
+  // behaviors are intentional and permanent, not a transition — see resolveWriteOrganizationId.
+  private static final String PARAM_SIF_CONTEXT_ORG_ID = "sifContextOrgId";
 
   // JSON field name (camelCase, as exposed on the `tax` entity contract) -> DB column, shared by
   // both c_tax and etsg_tax_sif_config (same column name on both tables). Confirmed against
@@ -142,9 +170,12 @@ public class TaxSifOverrideHandler implements NeoHandler {
         // Nothing SIF-related in this request — fall through unchanged.
         return null;
       }
+      // ETP-5229: resolve ONCE and reuse for both the write and the immediate read-back below,
+      // so a request carrying sifContextOrgId is fully self-consistent end to end.
+      String writeOrganizationId = resolveWriteOrganizationId(context, obContext);
       OBContext.setAdminMode(true);
       try {
-        upsertOverride(taxId, overrideValues, obContext);
+        upsertOverride(taxId, overrideValues, obContext, writeOrganizationId);
       } finally {
         OBContext.restorePreviousMode();
       }
@@ -152,7 +183,7 @@ public class TaxSifOverrideHandler implements NeoHandler {
         // Remaining fields still need the default CRUD to persist them onto c_tax.
         return null;
       }
-      return buildOverrideOnlyResponse(taxId, context);
+      return buildOverrideOnlyResponse(taxId, writeOrganizationId);
     } catch (Exception e) {
       log.error("TaxSifOverrideHandler.handle error for tax {}", taxId, e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
@@ -207,11 +238,52 @@ public class TaxSifOverrideHandler implements NeoHandler {
   }
 
   private static String resolveContextOrganizationId(NeoContext context) {
+    String sifContextOrgId = resolveSifContextOrgIdParam(context);
+    if (sifContextOrgId != null) {
+      return sifContextOrgId;
+    }
     OBContext obContext = context.getObContext() != null ? context.getObContext() : OBContext.getOBContext();
     if (obContext == null || obContext.getCurrentOrganization() == null) {
       return null;
     }
     return obContext.getCurrentOrganization().getId();
+  }
+
+  /**
+   * ETP-5229: resolves the organization to key the SIF override write (and its immediate
+   * read-back) on. Prefers the {@code sifContextOrgId} query param — sent by the frontend when
+   * the SIF modal is opened from an invoice/order LINE context, carrying that document's own
+   * {@code AD_Org_ID} — over the caller's session organization.
+   *
+   * <p>Two coexisting behaviors, both permanent:
+   * <ul>
+   *   <li><b>Invoice-line-initiated override</b> ({@code sifContextOrgId} present): keys off the
+   *       INVOICE's own org, matching {@code InvoiceLineTaxSifSelectorPolicy#querySifColumns}'s
+   *       read-side resolution (via {@code SelectorContextResolver}, which reads the invoice's
+   *       own {@code organization} property). This is what fixes the badge-never-clears bug:
+   *       write and read now agree on which legal entity the override belongs to, even when the
+   *       user's currently-active session org differs from the invoice's own org.</li>
+   *   <li><b>Standalone Tax-window override</b> (no {@code sifContextOrgId} — the Tax admin
+   *       window's own PATCH flow has no invoice in scope): falls back to
+   *       {@code obContext.getCurrentOrganization()}, exactly the pre-ETP-5229 behavior. This
+   *       keeps working unmodified for the case this handler was originally built for.</li>
+   * </ul>
+   *
+   * @return the organization id to resolve the legal entity from; never null (falls back to the
+   *     session organization's id, which the {@code obContext == null} early-return in
+   *     {@link #handle} already guarantees is present)
+   */
+  private static String resolveWriteOrganizationId(NeoContext context, OBContext obContext) {
+    String sifContextOrgId = resolveSifContextOrgIdParam(context);
+    return sifContextOrgId != null ? sifContextOrgId : obContext.getCurrentOrganization().getId();
+  }
+
+  private static String resolveSifContextOrgIdParam(NeoContext context) {
+    Map<String, String> queryParams = context.getQueryParams();
+    if (queryParams == null) {
+      return null;
+    }
+    return StringUtils.trimToNull(queryParams.get(PARAM_SIF_CONTEXT_ORG_ID));
   }
 
   private static Map<String, String> extractAndStripOverrideFields(JSONObject body) throws JSONException {
@@ -228,7 +300,8 @@ public class TaxSifOverrideHandler implements NeoHandler {
 
   /**
    * Upserts the given SIF value fields into {@code etsg_tax_sif_config}, keyed by
-   * {@code (c_tax_id, AD_GET_ORG_LE_BU(currentOrg, 'LE'))}. Only the columns present in {@code
+   * {@code (c_tax_id, AD_GET_ORG_LE_BU(writeOrganizationId, 'LE'))}. Only the columns present
+   * in {@code
    * values} are written on both INSERT and the ON CONFLICT UPDATE — a sibling column not sent
    * in this request is never touched, whether the row is being created or already exists.
    *
@@ -241,16 +314,20 @@ public class TaxSifOverrideHandler implements NeoHandler {
    * effect, with no error anywhere. Failing fast here is deliberate: a visible PATCH failure is
    * preferable to a silently orphaned row.
    *
+   * @param writeOrganizationId the organization to resolve the legal entity from — either the
+   *     invoice/order's own org (ETP-5229, when {@code sifContextOrgId} was sent) or the
+   *     caller's session org (standalone Tax-window flow); see
+   *     {@link #resolveWriteOrganizationId}
    * @throws OBException if the legal entity organization cannot be resolved for {@code
-   *                      obContext}'s current organization
+   *                      writeOrganizationId}
    */
-  private static void upsertOverride(String taxId, Map<String, String> values, OBContext obContext) {
+  private static void upsertOverride(String taxId, Map<String, String> values, OBContext obContext,
+      String writeOrganizationId) {
     Session session = OBDal.getInstance().getSession();
-    String currentOrgId = obContext.getCurrentOrganization().getId();
-    String leOrgId = resolveLegalEntityOrgId(session, currentOrgId);
+    String leOrgId = resolveLegalEntityOrgId(session, writeOrganizationId);
     if (StringUtils.isBlank(leOrgId)) {
       throw new OBException(
-          "Unable to resolve the legal entity organization for organization " + currentOrgId
+          "Unable to resolve the legal entity organization for organization " + writeOrganizationId
               + " — cannot save the SIF override for tax " + taxId
               + " (AD_GET_ORG_LE_BU returned no result)");
     }
@@ -332,9 +409,8 @@ public class TaxSifOverrideHandler implements NeoHandler {
    *       instead of silently omitting them.</li>
    * </ul>
    */
-  private static NeoResponse buildOverrideOnlyResponse(String taxId, NeoContext context)
+  private static NeoResponse buildOverrideOnlyResponse(String taxId, String organizationId)
       throws JSONException {
-    String organizationId = resolveContextOrganizationId(context);
     Map<String, Map<String, String>> effectiveByTaxId =
         queryEffectiveValues(Collections.singletonList(taxId), organizationId);
     Map<String, String> effective = effectiveByTaxId.getOrDefault(taxId, Collections.emptyMap());
