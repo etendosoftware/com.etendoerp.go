@@ -30,6 +30,7 @@ import java.util.Comparator;
 import java.util.Date;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -446,17 +447,45 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    *
    * <p>Signature, payload and idempotency are decided by {@link CheckoutWebhookProcessor} over the
    * durable {@link BillingEventStore}, so a redelivery after a restart is answered as a duplicate.
-   * The wire contract: invalid signature and unusable payload are 400 (the provider does not
-   * retry those); a duplicate is 200 {@code {"received":true}} without touching anything; an
-   * accepted event is applied and marked, and a failure while applying it is a 500 with the row
-   * marked {@code FAILED} — the provider retries, and that retry re-claims the row.
+   * The wire contract:
+   *
+   * <ul>
+   *   <li>invalid signature → 400 {@code INVALID_CHECKOUT_SIGNATURE}, and unusable payload → 400
+   *       {@code INVALID_CHECKOUT_PAYLOAD}. The provider does not retry either, which is correct:
+   *       neither can succeed on a second attempt.
+   *   <li>duplicate → 200 {@code {"received":true}} with nothing applied.
+   *   <li>accepted → the event is applied and its row marked {@code APPLIED} or {@code IGNORED}.
+   * </ul>
+   *
+   * <p><b>Two deliberate changes from the pre-ETP-5045 contract</b>, both chosen so that no event
+   * can be acknowledged without being recorded:
+   *
+   * <ol>
+   *   <li>A payment-type event whose {@code data.object} is missing used to be a 400
+   *       {@code INVALID_CHECKOUT_PAYLOAD}; it is now 200 with the row marked {@code IGNORED}. The
+   *       claim has already committed by that point, so answering 400 would have left a recorded
+   *       event the provider stops retrying, with no explanation on the row.
+   *   <li>A {@link RuntimeException} while applying the event used to escape to the container as
+   *       an HTML 500; it is now a structured 500 {@code CHECKOUT_WEBHOOK_FAILED} with the row
+   *       marked {@code FAILED}. The status is what makes the provider retry, and the
+   *       {@code FAILED} row is what makes that retry re-claim rather than dismiss it.
+   * </ol>
    */
   private void handleCheckoutWebhook(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     String payload = readRawBody(request);
     String signature = request.getHeader("Stripe-Signature");
-    CheckoutWebhookProcessor.Acceptance acceptance = checkoutWebhookProcessor.evaluate(payload,
-        signature, CheckoutConfiguration.webhookSecret(), Instant.now().getEpochSecond());
+    CheckoutWebhookProcessor.Acceptance acceptance;
+    try {
+      acceptance = checkoutWebhookProcessor.evaluate(payload, signature,
+          CheckoutConfiguration.webhookSecret(), Instant.now().getEpochSecond());
+    } catch (RuntimeException e) {
+      // The claim itself failed, so nothing was recorded and there is no row to annotate. A 500
+      // is the only honest answer: it makes the provider redeliver an event we did not keep.
+      log.error("Checkout webhook event could not be claimed", e);
+      writeWebhookFailed(response);
+      return;
+    }
     switch (acceptance.result()) {
       case INVALID_SIGNATURE:
         writeError(response, HttpServletResponse.SC_BAD_REQUEST, "INVALID_CHECKOUT_SIGNATURE",
@@ -477,13 +506,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       applyCheckoutEvent(eventId, type, acceptance.event());
     } catch (RuntimeException e) {
-      // Only the id and type are logged: the payload may carry customer data the audit row
-      // deliberately does not keep either.
+      // The full exception goes to the log; the audit column gets the class name and a fixed
+      // phrase only. A provider message can quote payload fragments, and FAILURE_REASON is
+      // required to stay operationally safe (no customer or card data) — see BillingEventStore.
       log.error("Checkout webhook event '{}' ({}) could not be applied", eventId, type, e);
-      billingEventStore.markFailed(eventId, e.getClass().getSimpleName() + ": " + e.getMessage());
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "CHECKOUT_WEBHOOK_FAILED", "Checkout webhook event could not be applied",
-          "Checkout webhook event could not be applied");
+      billingEventStore.markFailed(eventId,
+          "Handler failed while applying the event: " + e.getClass().getName());
+      writeWebhookFailed(response);
       return;
     }
     writeWebhookReceived(response);
@@ -493,7 +522,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Applies one claimed event and records the outcome on its {@code ETGO_BILLING_EVENT} row.
    *
    * <p>Only the two payment-confirmation event types act; everything else is acknowledged and
-   * marked {@code IGNORED} with the reason, so the audit row says why nothing happened.
+   * marked {@code IGNORED} with the reason, so the audit row says why nothing happened. An event
+   * whose correlation id names no checkout request is {@code IGNORED} too rather than
+   * {@code APPLIED}: nothing was recorded, and a row claiming otherwise would be a lie in the one
+   * place an operator goes to find out.
    */
   private void applyCheckoutEvent(String eventId, String type, JSONObject event) {
     if (!CHECKOUT_PAID_EVENT_TYPES.contains(type)) {
@@ -512,19 +544,34 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // The customer and subscription ids are read here and nowhere else: this is the only event
     // that carries them alongside the correlation id, and every later subscription or invoice
     // event arrives keyed by the subscription rather than by the request.
-    checkoutRequestStore.recordPaid(requestId, object.optString("customer", ""),
+    boolean recorded = checkoutRequestStore.recordPaid(requestId, object.optString("customer", ""),
         object.optString("subscription", ""));
+    if (!recorded) {
+      billingEventStore.markIgnored(eventId, "unknown checkout request");
+      return;
+    }
     billingEventStore.markApplied(eventId);
     log.info("Checkout webhook event '{}' ({}) applied", eventId, type);
   }
 
-  /** Acknowledges a webhook delivery the way the provider expects: 200 {@code {"received":true}}. */
+  /**
+   * Acknowledges a webhook delivery the way the provider expects: 200 {@code {"received":true}}.
+   *
+   * <p>Built through the map constructor rather than {@code put}, which declares a
+   * {@link JSONException} that a one-key literal cannot raise — there is no failure here to
+   * handle, so there is no handler.
+   */
   private void writeWebhookReceived(HttpServletResponse response) throws IOException {
-    try {
-      writeResponse(response, HttpServletResponse.SC_OK, new JSONObject().put("received", true));
-    } catch (JSONException e) {
-      throw new IllegalStateException("Could not build the webhook acknowledgement", e);
-    }
+    writeResponse(response, HttpServletResponse.SC_OK, new JSONObject(Map.of("received", true)));
+  }
+
+  /**
+   * Refuses a webhook delivery with a structured 500, which is what makes the provider retry it.
+   */
+  private void writeWebhookFailed(HttpServletResponse response) throws IOException {
+    writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "CHECKOUT_WEBHOOK_FAILED",
+        "Checkout webhook event could not be applied",
+        "Checkout webhook event could not be applied");
   }
 
   // --- Endpoint handlers ---

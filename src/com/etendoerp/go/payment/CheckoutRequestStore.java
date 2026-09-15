@@ -133,11 +133,18 @@ public class CheckoutRequestStore {
    * {@code checkout.session.async_payment_succeeded} arriving after provisioning already ran,
    * leaves the status and {@code PAID_AT} untouched.
    *
+   * <p>Returns whether the correlation id named a request at all. An event that references a
+   * request this instance never issued is not an error here — it is ordinary in a shared Stripe
+   * test account — but the caller must be able to tell it apart from a payment actually recorded,
+   * or it would mark the event applied while nothing was.
+   *
    * @param requestId correlation id read from {@code metadata[request_id]}
    * @param stripeCustomerId {@code cus_...}, or null in payment mode
    * @param stripeSubscriptionId {@code sub_...}, or null in payment mode
+   * @return true when the request was found and the payment recorded on it
    */
-  public void recordPaid(String requestId, String stripeCustomerId, String stripeSubscriptionId) {
+  public boolean recordPaid(String requestId, String stripeCustomerId,
+      String stripeSubscriptionId) {
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
     OBContext.setAdminMode(true);
     try {
@@ -145,7 +152,7 @@ public class CheckoutRequestStore {
       if (request == null) {
         log.error("No checkout request found for '{}' while recording a confirmed payment",
             requestId);
-        return;
+        return false;
       }
       // Captured regardless of the status transition: these are the join keys every future
       // subscription and invoice event arrives on, and only this event carries them.
@@ -160,6 +167,7 @@ public class CheckoutRequestStore {
       }
       OBDal.getInstance().save(request);
       flushAndCommit();
+      return true;
     } finally {
       OBContext.restorePreviousMode();
     }

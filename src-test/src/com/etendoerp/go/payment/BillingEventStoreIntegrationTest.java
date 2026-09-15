@@ -74,6 +74,15 @@ public class BillingEventStoreIntegrationTest extends OBBaseTest {
   private static final String EVENT_MARKER = "evt_etp5045it_";
   /** Prefix on every fixture request id and account e-mail. */
   private static final String REQUEST_MARKER = "etp5045-bev-";
+  /**
+   * Prefix the synthetic-failure trigger fires on. Deliberately narrower than
+   * {@link #EVENT_MARKER} so the trigger cannot affect any other spec, and impossible for a real
+   * provider event id — but still inside the {@code evt_etp5045} family the cleanup deletes.
+   */
+  private static final String TRIGGER_MARKER = "evt_etp5045trg_";
+
+  private static final String TRIGGER_NAME = "etp5045_fake_violation_trg";
+  private static final String TRIGGER_FUNCTION = "etp5045_fake_violation";
 
   private static final String ZERO = "0";
 
@@ -96,6 +105,9 @@ public class BillingEventStoreIntegrationTest extends OBBaseTest {
   @After
   public void cleanUp() {
     try {
+      // Unconditional: the trigger only exists during one spec, but a spec that died between
+      // creating and dropping it must not leave it behind on a shared database.
+      dropFakeViolationTrigger();
       deleteCommittedFixtures();
     } finally {
       OBDal.getInstance().rollbackAndClose();
@@ -601,6 +613,162 @@ public class BillingEventStoreIntegrationTest extends OBBaseTest {
   }
 
   // ---------------------------------------------------------------------------------------------
+  // Group 7 — an insert failure that is not a duplicate must never be reported as one
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Alex's S1, and the reason {@code insertReceived} hands its failure to {@code recordDuplicate}
+   * instead of swallowing it.
+   *
+   * <p>{@link BillingEventStore#isUniqueEventViolation} deliberately accepts a
+   * {@code ConstraintViolationException} whose constraint name the driver did not report, because
+   * Hibernate does not always extract one. But {@code ETGO_BILLEVT_CHKREQ_FK} and
+   * {@code ETGO_BILLEVT_RESULT_CHK} can produce that same nameless shape, and in those cases
+   * <em>nothing was inserted</em>. The old code answered {@code false} — "duplicate" — so the
+   * servlet returned 200, the provider never retried, and a real payment event was lost with no
+   * row anywhere to show for it. The claim must fail loudly instead.
+   *
+   * <p><b>How the failure is provoked.</b> There is no input to {@code claim} that reaches a
+   * non-unique constraint on this table: {@code EVENT_RESULT} is always written as
+   * {@code RECEIVED}, the checkout-request FK is resolved from a live query (so it is either a
+   * real row or null), and client and organization are both {@code 0}. Rather than weaken
+   * production visibility or reach in with reflection, the database is made to produce the exact
+   * failure shape: a trigger scoped to a marker no other spec and no real event uses, raising
+   * {@code unique_violation} with no constraint name. The claim then travels the real path —
+   * insert fails, {@code reclaimFailed} matches nothing, {@code recordDuplicate} matches
+   * nothing — and the assertion is on what the store does at the end of it.
+   */
+  @Test
+  public void testAnInsertFailureThatIsNotADuplicateIsRethrownAndLeavesNoRow() {
+    String eventId = TRIGGER_MARKER + UUID.randomUUID().toString().replace("-", "");
+    createFakeViolationTrigger();
+    try {
+      RuntimeException thrown = null;
+      try {
+        store.claim(eventId, COMPLETED, null, null);
+      } catch (RuntimeException e) {
+        thrown = e;
+      }
+
+      assertNotNull("A failure that inserted no row must not be reported as a duplicate — the "
+          + "servlet would answer 200 and the provider would never retry the event", thrown);
+      assertTrue("Sanity: the provoked failure must be one isUniqueEventViolation accepts, "
+          + "otherwise this spec would be pinning the wrong branch",
+          BillingEventStore.isUniqueEventViolation(thrown));
+      assertEquals("The claim failed, so there must be no row at all", 0L, rawCount(eventId));
+    } finally {
+      dropFakeViolationTrigger();
+    }
+
+    // The failed claim must not have left the session or the store unusable: the very next
+    // delivery, of an unrelated event, still claims normally.
+    String healthy = newEventId();
+    assertTrue("A failed claim must not wedge the store", store.claim(healthy, COMPLETED, null,
+        null));
+    assertEquals(RECEIVED, rawResult(healthy));
+  }
+
+  /**
+   * The same rule reached without any test scaffolding at all, through the one input that can
+   * still break the insert: {@code EVENT_ID} is {@code VARCHAR(255)} and the claim does not
+   * abbreviate it, unlike every other column it writes.
+   *
+   * <p>This failure is not a constraint violation, so it propagates straight out of the insert
+   * rather than through {@code recordDuplicate}. Both routes must reach the same place: an
+   * exception, and no row. A silent {@code false} here would be the same lost event.
+   */
+  @Test
+  public void testAnEventIdTooLongForTheColumnFailsRatherThanLookingLikeADuplicate() {
+    StringBuilder overlong = new StringBuilder(EVENT_MARKER);
+    while (overlong.length() <= 255) {
+      overlong.append('x');
+    }
+    String eventId = overlong.toString();
+
+    RuntimeException thrown = null;
+    try {
+      store.claim(eventId, COMPLETED, null, null);
+    } catch (RuntimeException e) {
+      thrown = e;
+    }
+
+    assertNotNull("An event id the column cannot hold must fail the claim", thrown);
+    assertFalse("It is not a unique violation, so it must propagate directly from the insert",
+        BillingEventStore.isUniqueEventViolation(thrown));
+    assertEquals("Nothing may have been inserted", 0L, rawCount(eventId));
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Group 8 — APPLIED is terminal; IGNORED is terminal by intent only
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * Alex's S2. {@code APPLIED} records that a payment was actually applied, so no later write may
+   * move a row out of it. The reachable case is the servlet's own failure path: a redelivery of an
+   * already-applied event that throws while re-checking it would mark the row {@code FAILED},
+   * and a {@code FAILED} row is re-claimable — so the next delivery would apply the payment a
+   * second time. The {@code eventResult <> 'APPLIED'} guard is what closes that loop.
+   */
+  @Test
+  public void testAppliedIsTerminalAgainstALaterFailureOrIgnore() {
+    String eventId = newEventId();
+    assertTrue(store.claim(eventId, COMPLETED, null, null));
+    store.markApplied(eventId);
+    Timestamp appliedAt = rawTimestamp(eventId, "PROCESSED_AT");
+    assertNotNull("Sanity: markApplied must have stamped PROCESSED_AT", appliedAt);
+
+    store.markFailed(eventId, "a later redelivery threw");
+
+    assertEquals("An applied payment must never be rewritten to FAILED — a FAILED row is "
+        + "re-claimable, which would apply the payment twice", APPLIED, rawResult(eventId));
+    assertNull("The refused write must not have annotated the row",
+        rawColumn(eventId, "FAILURE_REASON"));
+    assertEquals(appliedAt, rawTimestamp(eventId, "PROCESSED_AT"));
+
+    store.markIgnored(eventId, "a later redelivery decided to ignore it");
+
+    assertEquals("An applied payment must never be rewritten to IGNORED either", APPLIED,
+        rawResult(eventId));
+    assertNull(rawColumn(eventId, "FAILURE_REASON"));
+    assertEquals(appliedAt, rawTimestamp(eventId, "PROCESSED_AT"));
+
+    assertFalse("And it must still be undelivered-proof", store.claim(eventId, COMPLETED, null,
+        null));
+    assertEquals(APPLIED, rawResult(eventId));
+  }
+
+  /**
+   * The deliberate asymmetry, stated as the Javadoc states it: {@code IGNORED} is terminal by
+   * intent but <em>not</em> locked, because a later delivery of the same id may legitimately carry
+   * the correlation the ignored one lacked — an event ignored as "unknown checkout request" is
+   * exactly that case. So a later {@code markFailed} does overwrite it, and the row becomes
+   * re-claimable, which is the whole point of not locking it.
+   *
+   * <p>{@code PROCESSED_AT} still does not move: it keeps meaning "when the result was first
+   * decided".
+   */
+  @Test
+  public void testIgnoredIsNotLockedTheWayAppliedIs() {
+    String eventId = newEventId();
+    assertTrue(store.claim(eventId, COMPLETED, null, null));
+    store.markIgnored(eventId, "unknown checkout request");
+    Timestamp decidedAt = rawTimestamp(eventId, "PROCESSED_AT");
+    assertNotNull("Sanity: markIgnored must have stamped PROCESSED_AT", decidedAt);
+
+    store.markFailed(eventId, "the retry could not be applied either");
+
+    assertEquals("IGNORED is not locked — a later delivery may still fail it", FAILED,
+        rawResult(eventId));
+    assertEquals("the retry could not be applied either", rawColumn(eventId, "FAILURE_REASON"));
+    assertEquals("PROCESSED_AT still records when the result was first decided", decidedAt,
+        rawTimestamp(eventId, "PROCESSED_AT"));
+
+    assertTrue("And the row is re-claimable again, which is why it is not locked",
+        store.claim(eventId, COMPLETED, null, null));
+    assertEquals(RECEIVED, rawResult(eventId));
+  }
+
+  // ---------------------------------------------------------------------------------------------
   // Fixtures
   // ---------------------------------------------------------------------------------------------
 
@@ -747,6 +915,51 @@ public class BillingEventStoreIntegrationTest extends OBBaseTest {
   }
 
   /**
+   * Installs a trigger that makes an insert of a {@link #TRIGGER_MARKER} event id fail with
+   * {@code unique_violation} and <em>no constraint name</em> — the shape
+   * {@link BillingEventStore#isUniqueEventViolation} accepts permissively, and which a violation
+   * of {@code ETGO_BILLEVT_CHKREQ_FK} or {@code ETGO_BILLEVT_RESULT_CHK} can also produce.
+   *
+   * <p>Scoped by a {@code WHEN} clause to the marker, so live traffic and every other spec insert
+   * normally while it exists. Dropped by the spec's own {@code finally} and again in
+   * {@link #cleanUp()}.
+   */
+  private void createFakeViolationTrigger() {
+    dropFakeViolationTrigger();
+    executeDdl("CREATE FUNCTION " + TRIGGER_FUNCTION + "() RETURNS trigger AS $$ "
+        + "BEGIN RAISE EXCEPTION 'ETP-5045 synthetic constraint failure' "
+        + "USING ERRCODE = 'unique_violation'; END; $$ LANGUAGE plpgsql");
+    executeDdl("CREATE TRIGGER " + TRIGGER_NAME + " BEFORE INSERT ON ETGO_BILLING_EVENT "
+        + "FOR EACH ROW WHEN (NEW.EVENT_ID LIKE '" + TRIGGER_MARKER + "%') "
+        + "EXECUTE PROCEDURE " + TRIGGER_FUNCTION + "()");
+  }
+
+  /** Removes the synthetic-failure trigger. Safe to call when it was never created. */
+  private void dropFakeViolationTrigger() {
+    executeDdl("DROP TRIGGER IF EXISTS " + TRIGGER_NAME + " ON ETGO_BILLING_EVENT");
+    executeDdl("DROP FUNCTION IF EXISTS " + TRIGGER_FUNCTION + "()");
+  }
+
+  /**
+   * Runs one DDL statement on its own committed transaction.
+   *
+   * @param ddl a statement literal from this class, never test input
+   */
+  @SuppressWarnings("rawtypes")
+  private void executeDdl(String ddl) {
+    OBContext.setOBContext(ZERO, ZERO, ZERO, ZERO);
+    OBContext.setAdminMode(true);
+    try {
+      NativeQuery statement = OBDal.getInstance().getSession().createNativeQuery(ddl);
+      statement.executeUpdate();
+      OBDal.getInstance().flush();
+      OBDal.getInstance().commitAndClose();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
    * Removes everything this class committed, by marker rather than by collected id so rows left
    * behind by a test that died mid-way are cleaned up too. Events go first (they carry the FK to
    * the request), then requests (FK to the account), then accounts.
@@ -759,7 +972,9 @@ public class BillingEventStoreIntegrationTest extends OBBaseTest {
       NativeQuery deleteEvents = OBDal.getInstance()
           .getSession()
           .createNativeQuery("DELETE FROM ETGO_BILLING_EVENT WHERE EVENT_ID LIKE :marker");
-      deleteEvents.setParameter("marker", EVENT_MARKER + "%");
+      // Covers both EVENT_MARKER and TRIGGER_MARKER: the trigger spec expects no row, but a
+      // regression that inserted one must not leave it behind for the next run to trip over.
+      deleteEvents.setParameter("marker", "evt_etp5045%");
       deleteEvents.executeUpdate();
 
       NativeQuery deleteRequests = OBDal.getInstance()

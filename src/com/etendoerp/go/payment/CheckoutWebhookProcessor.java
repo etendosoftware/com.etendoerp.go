@@ -34,8 +34,8 @@ public class CheckoutWebhookProcessor {
      * @param eventId provider event identifier, already trimmed and non-blank
      * @param eventType provider event type, e.g. {@code checkout.session.completed}
      * @param requestId the {@code metadata.request_id} correlation, or null when absent
-     * @param summary allow-listed payload summary (see {@link BillingEventStore#summarize}),
-     *     or null
+     * @param summary allow-listed payload summary (see
+     *     {@link WebhookPayloadSummary#summarize}), or null
      * @return true when the event was newly claimed
      */
     default boolean claim(String eventId, String eventType, String requestId, String summary) {
@@ -139,7 +139,7 @@ public class CheckoutWebhookProcessor {
       return Acceptance.refused(Result.INVALID_PAYLOAD);
     }
     boolean claimed = eventStore.claim(id, event.optString("type", "").trim(),
-        correlationRequestId(event), BillingEventStore.summarize(event));
+        correlationRequestId(event), WebhookPayloadSummary.summarize(event));
     return new Acceptance(claimed ? Result.ACCEPTED : Result.DUPLICATE, id, event);
   }
 
