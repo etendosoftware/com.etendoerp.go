@@ -192,7 +192,8 @@ final class McpWriteRequestSupport {
           throw McpRoutingException.fieldNotAllowed(key, entityName,
               McpQuerySupport.filterablePropertyNames(sfEntity, dalEntity));
         }
-        if (gate.readOnlyRejectable.contains(mappedKey)) {
+        if (gate.readOnlyRejectable.contains(mappedKey)
+            || gate.rejectsDefaultOverride(mappedKey, value)) {
           throw McpRoutingException.readOnlyField(key, entityName);
         }
       } else if (!McpConstants.PARAM_PARENT_ID.equals(key)) {

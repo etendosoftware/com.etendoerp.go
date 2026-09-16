@@ -2142,9 +2142,19 @@ what read-only means.
   ambiguity does not exist:** the field mapping runs on the caller's own `fields` argument and
   `McpHookExecutor.runPreHook` fires further down `handleCreate`, on the body the mapping returns.
   Every key at the gate is the caller's by construction.
-- **Kept: the configured-AD-default exemption.** The platform fills that column, and `neo_defaults`
-  actively invites an agent to send resolved values back in `fields` (the subject of IMP-45), so a
-  default echoed into a write is a shape the recommended sequence produces rather than a mistake.
+- **Kept, but narrowed to the echo it exists for: the configured-AD-default exemption.** The
+  platform fills that column, and `neo_defaults` actively invites an agent to send resolved values
+  back in `fields` (the subject of IMP-45), so a default echoed into a write is a shape the
+  recommended sequence produces rather than a mistake. **It now covers the echo and nothing else:
+  a value equal to the column's literal default passes, a different one is refused.** As first
+  shipped it exempted any value at all, and a re-probe of IMP-30's 2026-08-13 body found the hole
+  still open — `documentStatus` carries the AD default `'DR'`, so `neo_create` accepted
+  `documentStatus: "CO"` and created a **completed order with zero lines and a grand total of 0**,
+  a state Etendo cannot otherwise reach. `grandTotalAmount`, which has no default, was correctly
+  refused in the same probe. A default that is an *expression* — `@#AD_Org_ID@`, `@SQL=…`,
+  `now()` — cannot be compared against what the caller sent, so those columns keep the blanket
+  exemption: narrowing one we cannot evaluate would refuse legitimate echoes with no way for the
+  caller to tell why.
 
 **Why the exemption mattered enough to measure.** 79 of the 128 writable entities declare a
 qualifier, and 783 curated read-only fields behind them are AD-updatable — keeping it would have

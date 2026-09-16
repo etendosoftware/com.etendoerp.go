@@ -196,10 +196,33 @@ final class McpQuerySupport {
     final java.util.Set<String> excluded;
     /** Property names the spec exposes as read-only and no one else could be supplying (IMP-48). */
     final java.util.Set<String> readOnlyRejectable;
+    /**
+     * IMP-30 (second half): read-only properties exempted because their AD column carries a
+     * literal configured default, mapped to that default. The exemption exists so an agent that
+     * echoes back what {@code neo_defaults} handed it is not refused for following the documented
+     * sequence — so it should cover the echo and nothing else. It used to cover any value at all,
+     * which is how {@code documentStatus} (default {@code 'DR'}) still accepted {@code "CO"} and
+     * created a completed order with no lines, the exact state IMP-30's 2026-08-13 probe reached.
+     * A value equal to the default is an echo; a different one is an override of a field the
+     * surface publishes as read-only.
+     */
+    final java.util.Map<String, String> readOnlyDefaults;
 
-    private WriteGate(java.util.Set<String> excluded, java.util.Set<String> readOnlyRejectable) {
+    private WriteGate(java.util.Set<String> excluded, java.util.Set<String> readOnlyRejectable,
+        java.util.Map<String, String> readOnlyDefaults) {
       this.excluded = excluded;
       this.readOnlyRejectable = readOnlyRejectable;
+      this.readOnlyDefaults = readOnlyDefaults;
+    }
+
+    /**
+     * @param property the mapped DAL property name
+     * @param value    the value the caller sent for it
+     * @return {@code true} when this write must be refused as a read-only override
+     */
+    boolean rejectsDefaultOverride(String property, Object value) {
+      String configured = readOnlyDefaults.get(property);
+      return configured != null && !configured.equals(String.valueOf(value));
     }
   }
 
@@ -243,8 +266,9 @@ final class McpQuerySupport {
   static WriteGate writeGate(SFEntity sfEntity, Entity dalEntity) {
     java.util.Set<String> excluded = new java.util.HashSet<>();
     java.util.Set<String> readOnly = new java.util.HashSet<>();
+    java.util.Map<String, String> readOnlyDefaults = new java.util.HashMap<>();
     if (sfEntity == null) {
-      return new WriteGate(excluded, readOnly);
+      return new WriteGate(excluded, readOnly, readOnlyDefaults);
     }
     for (SFField sfField : activeFields(sfEntity)) {
       Column col = sfField.getADColumn();
@@ -261,11 +285,16 @@ final class McpQuerySupport {
       McpFieldView view = McpFieldView.of(sfField);
       if (!view.isIncluded()) {
         excluded.add(prop.getName());
-      } else if (view.isReadOnly() && !hasConfiguredDefault(col)) {
-        readOnly.add(prop.getName());
+      } else if (view.isReadOnly()) {
+        String literalDefault = literalDefault(col);
+        if (literalDefault == null) {
+          readOnly.add(prop.getName());
+        } else {
+          readOnlyDefaults.put(prop.getName(), literalDefault);
+        }
       }
     }
-    return new WriteGate(excluded, readOnly);
+    return new WriteGate(excluded, readOnly, readOnlyDefaults);
   }
 
   /**
@@ -274,6 +303,29 @@ final class McpQuerySupport {
    */
   private static boolean hasConfiguredDefault(Column adColumn) {
     return adColumn != null && StringUtils.isNotBlank(adColumn.getDefaultValue());
+  }
+
+  /**
+   * The column's AD default when it is a plain literal a caller could echo back, else {@code null}.
+   *
+   * <p>An Etendo default is only sometimes a value: {@code @#AD_Org_ID@} and {@code @SQL=…} are
+   * session/context expressions and {@code now()} is evaluated per request, so none of them can be
+   * compared against what the caller sent. Those columns keep the blanket exemption they have had
+   * since IMP-48 — narrowing an exemption we cannot evaluate would refuse legitimate echoes with
+   * no way for the caller to tell why.</p>
+   *
+   * @param adColumn the AD column
+   * @return the literal default, or {@code null} when there is none or it is an expression
+   */
+  private static String literalDefault(Column adColumn) {
+    if (!hasConfiguredDefault(adColumn)) {
+      return null;
+    }
+    String value = adColumn.getDefaultValue().trim();
+    if (value.startsWith("@") || value.contains("(")) {
+      return null;
+    }
+    return value;
   }
 
   /**
