@@ -101,6 +101,12 @@ public final class UsageQueryComposer {
   /**
    * Appends the restriction as a subquery membership test, which is what keeps a paren
    * breakout from reaching the outer where-clause. A blank restriction appends nothing.
+   *
+   * <p><b>This is the only place the restriction is ever formatted into a query, and the
+   * containment guarantee depends on it staying that way.</b> It always calls
+   * {@link #validateFragment(String)} and always wraps the fragment in the subquery. A second
+   * composition site that skipped either would silently void the guarantee without any test
+   * failing, because every existing test exercises this method.
    */
   private static void appendRestriction(StringBuilder hql, String entityName,
       String restriction) {

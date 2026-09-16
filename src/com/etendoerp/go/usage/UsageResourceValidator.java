@@ -20,6 +20,11 @@ package com.etendoerp.go.usage;
 import java.util.Date;
 
 import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+import org.hibernate.query.Query;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
@@ -40,12 +45,78 @@ import com.etendoerp.go.schemaforge.data.BillingResource;
  */
 public final class UsageResourceValidator {
 
+  private static final Logger log = LogManager.getLogger(UsageResourceValidator.class);
+
+  /**
+   * How long the save-time probe may run. A fragment that cannot count a single day within
+   * this is far too expensive to run nightly across every tenant, so timing out is the
+   * correct answer rather than a limitation.
+   */
+  private static final int PROBE_TIMEOUT_SECONDS = 10;
+
   /** Declarative HQL: count rows of an entity, by a date property, with a restriction. */
   public static final String MODE_DECLARATIVE = "D";
   /** Named strategy: resolve a {@link UsageResourceCounter} by CDI qualifier. */
   public static final String MODE_STRATEGY = "S";
 
   private UsageResourceValidator() {
+  }
+
+  /**
+   * Validates the row and, for a declarative resource, runs the composed query once over a
+   * bounded window to record what it costs.
+   *
+   * <p>The probe is what turns "this fragment would table-scan every tenant nightly" into
+   * something visible at configuration time. A fragment that cannot even parse also fails
+   * here rather than at 02:00.
+   *
+   * <p><b>The returned stamp is the authoritative result, not the setters this method also
+   * calls.</b> When the caller is a persistence observer, Hibernate has already snapshotted
+   * the row's state by the time the event fires, so a plain setter is silently discarded and
+   * the columns persist as null — see {@link BillingResourceEventHandler}, which writes the
+   * stamp through {@code event.setCurrentState} instead. The setters remain for callers
+   * outside a flush, such as a backfill re-validating the catalog.
+   *
+   * @return when the row was validated, and how long the probe took for a declarative row
+   */
+  public static ProbeStamp validateAndProbe(BillingResource resource) {
+    validate(resource);
+    if (!MODE_DECLARATIVE.equals(resource.getCountingMode())) {
+      Date validatedAt = new Date();
+      resource.setLastValidated(validatedAt);
+      return new ProbeStamp(validatedAt, null);
+    }
+    OBContext.setAdminMode(false);
+    try {
+      String hql = UsageQueryComposer.composeGroupedCount(resource.getCountedEntity(),
+          resource.getDateProperty(), resource.getHQLRestriction());
+      Date today = UsageDayRange.startOfDay(new Date());
+      long startedAt = System.currentTimeMillis();
+      Query<Object[]> query = OBDal.getInstance().getSession().createQuery(hql, Object[].class);
+      query.setParameter(UsageQueryComposer.PARAM_DAY_START,
+          UsageDayRange.minusDays(today, 1));
+      query.setParameter(UsageQueryComposer.PARAM_DAY_END, today);
+      // No setMaxResults: timing the first group would measure neither the nightly cost nor
+      // the same query plan, and this number exists precisely to predict the nightly cost.
+      // Bounded instead, so a catastrophically expensive fragment is REJECTED here rather
+      // than hanging the save it is being validated by — which would be the worst case of
+      // exactly the problem the probe is meant to surface.
+      query.setTimeout(PROBE_TIMEOUT_SECONDS);
+      query.list();
+      long elapsed = System.currentTimeMillis() - startedAt;
+      Date validatedAt = new Date();
+      resource.setLastValidated(validatedAt);
+      resource.setLastValidationMs(elapsed);
+      log.debug("Resource '{}' probe took {} ms", resource.getSearchKey(), elapsed);
+      return new ProbeStamp(validatedAt, elapsed);
+    } catch (RuntimeException e) {
+      throw new IllegalArgumentException("The counting query for this resource could not be"
+          + " executed, or took longer than " + PROBE_TIMEOUT_SECONDS + "s to count a single"
+          + " day, which is too expensive to schedule nightly across every tenant: "
+          + e.getMessage(), e);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /**
@@ -156,6 +227,32 @@ public final class UsageResourceValidator {
       throw new IllegalArgumentException("Date Property '" + dateProperty + "' on entity '"
           + entityName + "' holds " + (type == null ? "an unknown type" : type.getSimpleName())
           + ", not a date; counting buckets by it would be meaningless");
+    }
+  }
+
+  /**
+   * What a save-time validation established: when it ran, and — for a declarative row — how
+   * many milliseconds its counting query took over a single day.
+   *
+   * <p>Returned rather than only written onto the entity because the observer that calls this
+   * runs inside a flush, where a plain setter does not survive.
+   */
+  public static final class ProbeStamp {
+    private final Date validatedAt;
+    private final Long elapsedMs;
+
+    ProbeStamp(Date validatedAt, Long elapsedMs) {
+      this.validatedAt = validatedAt;
+      this.elapsedMs = elapsedMs;
+    }
+
+    public Date getValidatedAt() {
+      return validatedAt;
+    }
+
+    /** @return the probe duration, or {@code null} for a strategy row, which is not probed */
+    public Long getElapsedMs() {
+      return elapsedMs;
     }
   }
 }

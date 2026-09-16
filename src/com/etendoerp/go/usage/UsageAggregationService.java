@@ -19,7 +19,11 @@ package com.etendoerp.go.usage;
 
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -57,6 +61,9 @@ public class UsageAggregationService {
   private static final String SYSTEM_CLIENT = "0";
   private static final String ORG_ZERO = "0";
 
+  /** Per-run cache: without it this is one preference read per tenant, resource and day. */
+  private final Map<String, Integer> settlingWindowCache = new HashMap<>();
+
   /**
    * Recomputes every day still inside the settling window, ending with today.
    *
@@ -68,7 +75,7 @@ public class UsageAggregationService {
     Date from = UsageDayRange.minusDays(today, window);
     log.info("Usage aggregation over the settling window: {} .. {} ({} day(s))", from, today,
         window + 1);
-    return run(from, today);
+    return run(from, today, false);
   }
 
   /**
@@ -80,6 +87,31 @@ public class UsageAggregationService {
    * @param toDay inclusive last day
    */
   public UsageAggregationResult run(Date fromDay, Date toDay) {
+    // An explicit range is a backfill: a deliberate recomputation, so it may rewrite a day
+    // that is already final. The scheduled run never may.
+    return run(fromDay, toDay, true);
+  }
+
+  /**
+   * @param rewriteFinalDays true only for an explicit backfill. The scheduled run passes
+   *     false so that a day which has left its tenant's settling window is never rewritten —
+   *     "once final, it never changes" is the one normative invariant of the design, and the
+   *     run iterates the LARGEST window configured anywhere, so it necessarily revisits days
+   *     that are already final for a tenant with a shorter window.
+   */
+  public UsageAggregationResult run(Date fromDay, Date toDay, boolean rewriteFinalDays) {
+    // Admin mode belongs here rather than only in the process: this reads across every
+    // tenant, and a future caller (a NEO handler, a data-fix, the report) that forgot it
+    // would silently under-count rather than fail.
+    OBContext.setAdminMode(false);
+    try {
+      return aggregate(fromDay, toDay, rewriteFinalDays);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private UsageAggregationResult aggregate(Date fromDay, Date toDay, boolean rewriteFinalDays) {
     UsageAggregationResult result = new UsageAggregationResult();
     // Ids, not entities: each resource-day commits, which closes the session and would detach
     // any entity held across the loop. The resource is re-read fresh inside each unit.
@@ -107,7 +139,7 @@ public class UsageAggregationService {
             continue;
           }
           result.addResource();
-          int rows = recomputeDay(resource, day, today);
+          int rows = recomputeDay(resource, day, today, rewriteFinalDays);
           OBDal.getInstance().commitAndClose();
           result.addRows(rows);
         } catch (Exception e) {
@@ -130,16 +162,83 @@ public class UsageAggregationService {
    *
    * @return how many usage rows were written
    */
-  private int recomputeDay(BillingResource resource, Date day, Date today) {
+  private int recomputeDay(BillingResource resource, Date day, Date today,
+      boolean rewriteFinalDays) {
     List<DailyCount> counts = count(resource, day);
+    Set<String> countedTenants = new HashSet<>();
+    int written = 0;
+
     for (DailyCount count : counts) {
+      countedTenants.add(count.getClientId());
       // Finality is per tenant: the window is a preference and a tenant may override it, so
       // the same day can still be open for one tenant and final for another.
       boolean settled = UsageDayRange.isFinal(day, today,
-          UsageSettings.getSettlingWindowDays(count.getClientId()));
-      upsert(resource, count, settled);
+          settlingWindowFor(count.getClientId()));
+      if (writeRow(resource, count, settled, rewriteFinalDays)) {
+        written++;
+      }
     }
-    return counts.size();
+
+    // A tenant that dropped to zero produces no group at all, so without this its previous
+    // non-zero value would stand forever and the day would not in fact have been recomputed
+    // "from scratch". Absence of a row means zero only until a row exists.
+    written += zeroOutTenantsThatNoLongerCount(resource, day, today, countedTenants,
+        rewriteFinalDays);
+    return written;
+  }
+
+  /**
+   * Writes one row unless the stored day is already final and this is not a backfill.
+   *
+   * @return whether a row was actually written
+   */
+  private boolean writeRow(BillingResource resource, DailyCount count, boolean settled,
+      boolean rewriteFinalDays) {
+    UsageDaily row = find(resource, count.getClientId(), count.getDay());
+    if (isFrozen(row, rewriteFinalDays)) {
+      return false;
+    }
+    upsert(resource, count, settled, row);
+    return true;
+  }
+
+  /**
+   * Sets to zero any stored row for this resource and day whose tenant the recount no longer
+   * reports. A final row is left alone outside a backfill, exactly as a counted one is.
+   *
+   * @return how many rows were zeroed
+   */
+  private int zeroOutTenantsThatNoLongerCount(BillingResource resource, Date day, Date today,
+      Set<String> countedTenants, boolean rewriteFinalDays) {
+    int zeroed = 0;
+    for (UsageDaily stored : storedRows(resource, UsageDayRange.startOfDay(day))) {
+      String clientId = stored.getMeasuredClient().getId();
+      if (countedTenants.contains(clientId) || isFrozen(stored, rewriteFinalDays)) {
+        continue;
+      }
+      if (stored.getQuantity() != null && stored.getQuantity() == 0L) {
+        continue;
+      }
+      boolean settled = UsageDayRange.isFinal(day, today, settlingWindowFor(clientId));
+      upsert(resource, new DailyCount(clientId, UsageDayRange.startOfDay(day), 0L), settled,
+          stored);
+      zeroed++;
+    }
+    return zeroed;
+  }
+
+  /** A day that has left its tenant's settling window may only be rewritten by a backfill. */
+  private boolean isFrozen(UsageDaily row, boolean rewriteFinalDays) {
+    return row != null && Boolean.TRUE.equals(row.isSettled()) && !rewriteFinalDays;
+  }
+
+  /**
+   * The settling window for a tenant, cached for the duration of the run. Without the cache
+   * this is one preference lookup per tenant per resource per day.
+   */
+  private int settlingWindowFor(String clientId) {
+    return settlingWindowCache.computeIfAbsent(clientId,
+        UsageSettings::getSettlingWindowDays);
   }
 
   private List<DailyCount> count(BillingResource resource, Date day) {
@@ -174,8 +273,9 @@ public class UsageAggregationService {
    * Replaces the stored value for (tenant, resource, day), or inserts it when absent. The
    * unique key makes this the whole of the idempotency story.
    */
-  private void upsert(BillingResource resource, DailyCount count, boolean settled) {
-    UsageDaily row = find(resource, count);
+  private void upsert(BillingResource resource, DailyCount count, boolean settled,
+      UsageDaily existing) {
+    UsageDaily row = existing;
     if (row == null) {
       row = OBProvider.getInstance().get(UsageDaily.class);
       row.setNewOBObject(true);
@@ -191,12 +291,11 @@ public class UsageAggregationService {
     OBDal.getInstance().save(row);
   }
 
-  private UsageDaily find(BillingResource resource, DailyCount count) {
+  private UsageDaily find(BillingResource resource, String clientId, Date day) {
     OBCriteria<UsageDaily> criteria = OBDal.getInstance().createCriteria(UsageDaily.class);
     criteria.add(Restrictions.eq(UsageDaily.PROPERTY_BILLINGRESOURCE, resource));
-    criteria.add(Restrictions.eq(UsageDaily.PROPERTY_USAGEDAY, count.getDay()));
-    criteria.add(
-        Restrictions.eq(UsageDaily.PROPERTY_MEASUREDCLIENT + ".id", count.getClientId()));
+    criteria.add(Restrictions.eq(UsageDaily.PROPERTY_USAGEDAY, day));
+    criteria.add(Restrictions.eq(UsageDaily.PROPERTY_MEASUREDCLIENT + ".id", clientId));
     // These rows are System-owned data about other tenants, so the readable-client and
     // readable-organisation filters must be off or the lookup misses the existing row and
     // the insert then violates the unique key.
@@ -204,6 +303,16 @@ public class UsageAggregationService {
     criteria.setFilterOnReadableOrganization(false);
     criteria.setMaxResults(1);
     return (UsageDaily) criteria.uniqueResult();
+  }
+
+  /** Every stored row for a resource on a day, across tenants. */
+  private List<UsageDaily> storedRows(BillingResource resource, Date day) {
+    OBCriteria<UsageDaily> criteria = OBDal.getInstance().createCriteria(UsageDaily.class);
+    criteria.add(Restrictions.eq(UsageDaily.PROPERTY_BILLINGRESOURCE, resource));
+    criteria.add(Restrictions.eq(UsageDaily.PROPERTY_USAGEDAY, day));
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    return criteria.list();
   }
 
   private List<String> activeResourceIds() {
