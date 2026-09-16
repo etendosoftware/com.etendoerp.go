@@ -138,7 +138,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   // --- SQL constants ---
 
   private static final String SQL_FIND_CLIENT =
-      "SELECT etgo_oauth2_client_id, client_secret_hash, scopes, redirect_uris, ad_client_id, ad_user_id, ad_role_id "
+      "SELECT etgo_oauth2_client_id, client_secret_hash, scopes, redirect_uris, ad_client_id, ad_org_id, ad_user_id, ad_role_id "
       + "FROM etgo_oauth2_client WHERE client_identifier = ? AND isactive = 'Y'";
 
   private static final String SQL_INSERT_TOKEN =
@@ -147,7 +147,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       + "created, createdby, updated, updatedby, "
       + "etgo_oauth2_client_id, access_token_hash, refresh_token_hash, scopes, expires_at, "
       + "validity_seconds, is_revoked) "
-      + "VALUES (get_uuid(), ?, '0', 'Y', now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, 'N')";
+      + "VALUES (get_uuid(), ?, ?, 'Y', now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, 'N')";
 
   private static final String SQL_FIND_BY_REFRESH_TOKEN =
       "SELECT t.etgo_oauth2_token_id, t.etgo_oauth2_client_id, t.scopes, t.is_revoked, t.validity_seconds, "
@@ -169,7 +169,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       + "(etgo_oauth2_client_id, ad_client_id, ad_org_id, isactive, "
       + "created, createdby, updated, updatedby, "
       + "name, client_identifier, client_secret_hash, ad_user_id, ad_role_id, scopes, redirect_uris, ad_module_id) "
-      + "VALUES (?, '0', '0', ?, now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, ?, '0')";
+      + "VALUES (?, ?, ?, ?, now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, ?, '0')";
 
   private static final String SQL_UPDATE_CLIENT =
       "UPDATE etgo_oauth2_client SET name = ?, scopes = ?, redirect_uris = ?, ad_user_id = ?, ad_role_id = ?, "
@@ -501,22 +501,26 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String clientIdentifier = OAuth2Utils.generateClientId();
       String plainSecret = OAuth2Utils.generateSecureToken();
       String secretHash = OAuth2Utils.hashSecret(plainSecret);
+      String adClientId = requiredClaim(jwt, "client");
+      String adOrgId = requiredClaim(jwt, "organization");
 
       Connection conn = OBDal.getInstance().getConnection();
       String generatedId = SequenceIdData.getUUID();
 
       try (PreparedStatement ps = conn.prepareStatement(SQL_INSERT_CLIENT)) {
         ps.setString(1, generatedId);             // etgo_oauth2_client_id
-        ps.setString(2, isActive ? "Y" : "N");   // isactive
-        ps.setString(3, adminUserId);             // createdby
-        ps.setString(4, adminUserId);             // updatedby
-        ps.setString(5, name.trim());             // name
-        ps.setString(6, clientIdentifier);        // client_identifier
-        ps.setString(7, secretHash);              // client_secret_hash
-        ps.setString(8, adUserId.trim());         // ad_user_id
-        ps.setString(9, adRoleId.trim());         // ad_role_id
-        ps.setString(10, scopes.trim());          // scopes
-        ps.setString(11, redirectUrisJson);       // redirect_uris
+        ps.setString(2, adClientId);               // ad_client_id
+        ps.setString(3, adOrgId);                  // ad_org_id
+        ps.setString(4, isActive ? "Y" : "N");   // isactive
+        ps.setString(5, adminUserId);             // createdby
+        ps.setString(6, adminUserId);             // updatedby
+        ps.setString(7, name.trim());             // name
+        ps.setString(8, clientIdentifier);        // client_identifier
+        ps.setString(9, secretHash);              // client_secret_hash
+        ps.setString(10, adUserId.trim());        // ad_user_id
+        ps.setString(11, adRoleId.trim());        // ad_role_id
+        ps.setString(12, scopes.trim());          // scopes
+        ps.setString(13, redirectUrisJson);       // redirect_uris
         ps.executeUpdate();
       }
 
@@ -1462,6 +1466,15 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
   // --- Data access helpers ---
 
+  private String requiredClaim(DecodedJWT jwt, String claimName) throws AuthException {
+    String value = jwt.getClaim(claimName).asString();
+    if (value == null || value.trim().isEmpty()) {
+      throw new AuthException(HttpServletResponse.SC_BAD_REQUEST,
+          "Authenticated token is missing required claim: " + claimName);
+    }
+    return value.trim();
+  }
+
   /**
    * Look up an active OAuth2 client by client_identifier using raw JDBC.
    *
@@ -1482,6 +1495,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
         client.scopes = rs.getString(FIELD_SCOPES);
         client.redirectUrisJson = rs.getString(FIELD_REDIRECT_URIS);
         client.adClientId = rs.getString("ad_client_id");
+        client.adOrgId = rs.getString("ad_org_id");
         client.adUserId = rs.getString(FIELD_DB_AD_USER_ID);
         client.adRoleId = rs.getString(FIELD_DB_AD_ROLE_ID);
         return client;
@@ -1530,18 +1544,19 @@ public class OAuth2Servlet extends HttpBaseServlet {
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(SQL_INSERT_TOKEN)) {
       ps.setString(1, client.adClientId);    // ad_client_id
-      ps.setString(2, client.adUserId);      // createdby
-      ps.setString(3, client.adUserId);      // updatedby
-      ps.setString(4, client.id);            // etgo_oauth2_client_id
-      ps.setString(5, tokenHash);            // access_token_hash
-      ps.setString(6, refreshTokenHash);     // refresh_token_hash
-      ps.setString(7, scopes);               // scopes
+      ps.setString(2, client.adOrgId);       // ad_org_id
+      ps.setString(3, client.adUserId);      // createdby
+      ps.setString(4, client.adUserId);      // updatedby
+      ps.setString(5, client.id);            // etgo_oauth2_client_id
+      ps.setString(6, tokenHash);            // access_token_hash
+      ps.setString(7, refreshTokenHash);     // refresh_token_hash
+      ps.setString(8, scopes);               // scopes
       if (expiresAt == null) {
-        ps.setNull(8, Types.TIMESTAMP);       // expires_at (no expiration)
+        ps.setNull(9, Types.TIMESTAMP);       // expires_at (no expiration)
       } else {
-        ps.setTimestamp(8, expiresAt);        // expires_at
+        ps.setTimestamp(9, expiresAt);        // expires_at
       }
-      ps.setLong(9, validitySeconds);         // validity_seconds
+      ps.setLong(10, validitySeconds);        // validity_seconds
       ps.executeUpdate();
     }
   }
@@ -1609,6 +1624,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     String scopes;
     String redirectUrisJson;
     String adClientId;
+    String adOrgId;
     String adUserId;
     String adRoleId;
   }

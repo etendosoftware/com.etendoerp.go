@@ -2059,6 +2059,12 @@ public class OAuth2ServletTest {
     when(roleClaim.asString()).thenReturn(roleId);
     when(jwt.getClaim("user")).thenReturn(userClaim);
     when(jwt.getClaim("role")).thenReturn(roleClaim);
+    Claim clientClaim = mock(Claim.class);
+    when(clientClaim.asString()).thenReturn("client-1");
+    Claim organizationClaim = mock(Claim.class);
+    when(organizationClaim.asString()).thenReturn("org-1");
+    when(jwt.getClaim("client")).thenReturn(clientClaim);
+    when(jwt.getClaim("organization")).thenReturn(organizationClaim);
     return jwt;
   }
 
