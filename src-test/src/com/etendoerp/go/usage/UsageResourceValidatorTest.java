@@ -19,6 +19,7 @@ package com.etendoerp.go.usage;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -33,6 +34,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.util.Date;
 
@@ -42,6 +44,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.hibernate.QueryTimeoutException;
 import org.hibernate.Session;
 import org.hibernate.query.Query;
 import org.mockito.MockedStatic;
@@ -529,26 +532,102 @@ class UsageResourceValidatorTest {
     }
 
     /**
-     * A query that validates but cannot execute — a property the composer accepts yet Hibernate
-     * rejects, say — aborts the save. Storing it would leave a catalog row that looks configured
-     * and fails every night thereafter.
+     * THE REGRESSION TEST for a defect found in live testing: a user typed {@code e.osted = 'Y'}
+     * — a typo, the {@code p} missing — and was told the query "could not be executed, or took
+     * longer than 10s ... which is too expensive to schedule nightly". A typo reported as a
+     * performance problem, so whoever reads it goes looking for an index that would not have
+     * helped. The cause was one {@code catch (RuntimeException)} around both the compile and the
+     * execution, which flattened two unrelated failures into one sentence.
+     *
+     * <p>So the assertion that matters here is the NEGATIVE one: a fragment that cannot parse must
+     * name the entity and the offending property and must say nothing whatsoever about cost or
+     * timing. A test that merely checked "some explanatory message came back" would have passed
+     * against the defect, which is exactly why one did.
+     *
+     * <p>The failure is stubbed WRAPPED, because that is the shape Hibernate actually throws:
+     * only the innermost cause names the property, so the message is worthless unless the
+     * validator walks to the bottom of the chain.
      */
     @Test
-    void aProbeThatFailsAbortsTheSaveWithAnExplanatoryMessage() {
+    void aFragmentThatCannotCompileIsReportedAsATypoNotAsACostProblem() {
       try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class);
           MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
           MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
         givenTheEntityHasADateProperty(modelProvider);
-        givenAProbeThatThrows(obDalStatic, new IllegalStateException("could not resolve property"));
+        givenAProbeThatFailsToCompile(obDalStatic, new IllegalStateException("wrapper",
+            new IllegalStateException("could not resolve property: osted of: Invoice")));
 
         IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class,
             () -> UsageResourceValidator.validateAndProbe(declarativeRow()));
 
         assertAll(
-            () -> assertTrue(thrown.getMessage().contains("could not be executed"),
+            () -> assertTrue(
+                thrown.getMessage().contains("HQL Restriction is not valid for entity '" + ENTITY),
                 thrown.getMessage()),
-            () -> assertTrue(thrown.getMessage().contains("could not resolve property"),
-                "the underlying cause must survive: " + thrown.getMessage()));
+            () -> assertTrue(thrown.getMessage().contains("could not resolve property: osted"),
+                "the innermost cause names the property, so it must survive: "
+                    + thrown.getMessage()),
+            () -> assertFalse(thrown.getMessage().contains("too expensive"),
+                "a typo must not be reported as a performance problem: " + thrown.getMessage()),
+            () -> assertFalse(thrown.getMessage().contains("longer than"),
+                "nor as a timeout: " + thrown.getMessage()));
+      }
+    }
+
+    /**
+     * The cost guard doing its job, and the only failure that may talk about expense: the fragment
+     * parsed, so it is valid — it is simply too slow to run nightly across every tenant. The
+     * message has to point at the remedy that actually applies here (narrow it, or index the date
+     * property), which is precisely the advice that was wasted when a typo received it.
+     */
+    @Test
+    void aProbeThatTimesOutIsReportedAsACostProblem() {
+      try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class);
+          MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+          MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+        givenTheEntityHasADateProperty(modelProvider);
+        givenAProbeThatFailsWhenRun(obDalStatic, new QueryTimeoutException("statement timeout",
+            new SQLException("canceling statement due to statement timeout"), "select ..."));
+
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class,
+            () -> UsageResourceValidator.validateAndProbe(declarativeRow()));
+
+        assertAll(
+            () -> assertTrue(thrown.getMessage().contains("too expensive"), thrown.getMessage()),
+            () -> assertTrue(thrown.getMessage().contains("add an index"),
+                "the remedy must be the one that fits a timeout: " + thrown.getMessage()),
+            () -> assertFalse(thrown.getMessage().contains("HQL Restriction is not valid"),
+                "a valid but slow fragment must not be called invalid: " + thrown.getMessage()));
+      }
+    }
+
+    /**
+     * The third path, and the reason it exists: something that compiles and then fails at
+     * execution for a reason that is neither a typo nor the cost guard — a permission, a missing
+     * column, a dead connection. Folding it into either of the other two messages would send the
+     * reader after the wrong cause, which is the same mistake in a different direction. The save
+     * still aborts: storing the row would leave a catalog entry that looks configured and fails
+     * every night thereafter.
+     */
+    @Test
+    void aProbeThatFailsToRunForAnyOtherReasonSaysSoWithoutBlamingTheFragment() {
+      try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class);
+          MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+          MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+        givenTheEntityHasADateProperty(modelProvider);
+        givenAProbeThatFailsWhenRun(obDalStatic, new IllegalStateException("wrapper",
+            new IllegalStateException("connection is closed")));
+
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class,
+            () -> UsageResourceValidator.validateAndProbe(declarativeRow()));
+
+        assertAll(
+            () -> assertTrue(thrown.getMessage().contains("compiled but could not be run"),
+                thrown.getMessage()),
+            () -> assertTrue(thrown.getMessage().contains("connection is closed"),
+                "the underlying cause must survive: " + thrown.getMessage()),
+            () -> assertFalse(thrown.getMessage().contains("too expensive"),
+                "and it is not the cost guard: " + thrown.getMessage()));
       }
     }
 
@@ -559,7 +638,7 @@ class UsageResourceValidatorTest {
           MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
           MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
         givenTheEntityHasADateProperty(modelProvider);
-        givenAProbeThatThrows(obDalStatic, new IllegalStateException("boom"));
+        givenAProbeThatFailsToCompile(obDalStatic, new IllegalStateException("boom"));
 
         assertThrows(IllegalArgumentException.class,
             () -> UsageResourceValidator.validateAndProbe(declarativeRow()));
@@ -586,12 +665,35 @@ class UsageResourceValidatorTest {
       when(query.list()).thenReturn(java.util.Collections.emptyList());
     }
 
-    private void givenAProbeThatThrows(MockedStatic<OBDal> obDalStatic, RuntimeException failure) {
+    /**
+     * A probe that blows up while COMPILING, at {@code createQuery}. Split from
+     * {@link #givenAProbeThatFailsWhenRun} because compiling and running are now different code
+     * paths reporting different things; a fixture that could only fail at one of them would let
+     * the other go untested, which is how the two were flattened into one message to begin with.
+     */
+    private void givenAProbeThatFailsToCompile(MockedStatic<OBDal> obDalStatic,
+        RuntimeException failure) {
       OBDal obDal = mock(OBDal.class);
       Session session = mock(Session.class);
       obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
       when(obDal.getSession()).thenReturn(session);
       when(session.createQuery(anyString(), eq(Object[].class))).thenThrow(failure);
+    }
+
+    /** A probe that compiles cleanly and then blows up while EXECUTING, at {@code list()}. */
+    @SuppressWarnings("unchecked")
+    private void givenAProbeThatFailsWhenRun(MockedStatic<OBDal> obDalStatic,
+        RuntimeException failure) {
+      OBDal obDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      Query<Object[]> query = mock(Query.class);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.getSession()).thenReturn(session);
+      when(session.createQuery(anyString(), eq(Object[].class))).thenReturn(query);
+      when(query.setParameter(anyString(), any())).thenReturn(query);
+      when(query.setMaxResults(anyInt())).thenReturn(query);
+      when(query.setTimeout(anyInt())).thenReturn(query);
+      when(query.list()).thenThrow(failure);
     }
   }
 

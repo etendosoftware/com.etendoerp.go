@@ -213,6 +213,69 @@ class UsageAggregationServiceTest {
     return stored;
   }
 
+  /**
+   * A stored row that {@code find(...)} answers for the FIRST day the run scans and for no other:
+   * every later day finds nothing and takes the insert path instead.
+   *
+   * <p>Necessary because the criteria mock cannot discriminate on the day it was asked about, so
+   * a row stubbed the ordinary way is "stored on every day of the scan" and the same mock records
+   * what the run did on today as well. Pinning it to one day is what lets a test assert what the
+   * sealing pass did NOT do to a row — otherwise today's ordinary upsert of the same mock would
+   * mask it.
+   */
+  private UsageDaily givenStoredRowForTheFirstDayScannedOnly(boolean settled, long quantity) {
+    UsageDaily stored = storedRow(MEASURED_CLIENT_ID, settled, quantity);
+    when(usageCriteria.uniqueResult()).thenReturn(stored).thenReturn(null);
+    return stored;
+  }
+
+  /**
+   * The zero-out sweep's counterpart to {@link #givenStoredRowForTheFirstDayScannedOnly}: a row
+   * for a tenant the recount no longer reports, visible only on the first day scanned.
+   */
+  private UsageDaily givenDroppedTenantRowForTheFirstDayScannedOnly(boolean settled,
+      long quantity) {
+    UsageDaily stored = storedRow(OTHER_CLIENT_ID, settled, quantity);
+    when(usageCriteria.list()).thenReturn(Arrays.asList(stored)).thenReturn(new ArrayList<>());
+    return stored;
+  }
+
+  /**
+   * Overrides the fixture's blanket five-day window for one tenant. The blanket stub is what made
+   * a zero MAXIMUM window misleading: the scan shrinks, but the tenant's own window — the only
+   * one {@code isFinal} consults — stays at five, so no scanned day is final for it.
+   */
+  private void givenTheWindowFor(String clientId, int days) {
+    usageSettings.when(() -> UsageSettings.getSettlingWindowDays(clientId)).thenReturn(days);
+  }
+
+  /**
+   * A strategy resource whose counter reports BOTH tenants, and only on one given day. Scoping
+   * the counts to a single day keeps assertions about that day's rows clear of the other days the
+   * scheduled scan necessarily also walks.
+   */
+  private void givenAResourceCountingBothTenantsOnlyOn(String id, Date countedDay) {
+    BillingResource resource = mock(BillingResource.class);
+    when(resource.getId()).thenReturn(id);
+    when(resource.getSearchKey()).thenReturn(id);
+    when(resource.getCountingMode()).thenReturn(UsageResourceValidator.MODE_STRATEGY);
+    when(resource.getStrategyQualifier()).thenReturn(QUALIFIER);
+    when(obDal.get(BillingResource.class, id)).thenReturn(resource);
+
+    Date counted = UsageDayRange.startOfDay(countedDay);
+    UsageResourceCounter counter = request -> counted
+        .equals(UsageDayRange.startOfDay(request.getFrom()))
+            ? Arrays.asList(new DailyCount(MEASURED_CLIENT_ID, request.getFrom(), COUNTED),
+                new DailyCount(OTHER_CLIENT_ID, request.getFrom(), COUNTED))
+            : new ArrayList<>();
+    counterLookup.when(() -> UsageCounterLookup.byQualifier(QUALIFIER)).thenReturn(counter);
+  }
+
+  /** The day the scheduled run seals when the maximum window is zero: the day before today. */
+  private static Date theSealingDayOfAZeroWindow() {
+    return UsageDayRange.minusDays(UsageDayRange.startOfDay(new Date()), 1);
+  }
+
   private UsageDaily storedRow(String clientId, boolean settled, long quantity) {
     UsageDaily stored = mock(UsageDaily.class);
     Client measured = mock(Client.class);
@@ -399,25 +462,39 @@ class UsageAggregationServiceTest {
      * counts every tenant in one grouped query per day and so cannot use a per-tenant range.
      * Using the system window instead would leave a longer-windowed tenant's older days flagged
      * unsettled yet never recomputed.
+     *
+     * <p>It reaches ONE DAY FURTHER BACK than the window, and that extra day is load-bearing
+     * rather than slack. A day only becomes final once it is OUTSIDE the window — {@code isFinal}
+     * is {@code day < today - window} — so the oldest day of the window itself is still open. A
+     * scan that stopped at {@code today - window} would therefore leave every day to be stamped
+     * final on the day AFTER it dropped out of range, by which time nothing revisited it ever
+     * again and {@code IS_SETTLED} stayed 'N' forever. The extra day is the sealing pass.
      */
     @Test
-    void coversTheMaximumWindowPlusToday() {
+    void coversTheMaximumWindowPlusTodayPlusTheSealingDay() {
       givenCatalog(HEALTHY_ID);
       givenAHealthyResource(HEALTHY_ID);
       usageSettings.when(UsageSettings::getMaxSettlingWindowDays).thenReturn(3);
 
       UsageAggregationResult result = new UsageAggregationService().runForSettlingWindow();
 
-      assertEquals(4, result.getDaysProcessed(), "today plus the three days behind it");
+      assertEquals(5, result.getDaysProcessed(),
+          "today, the three days of the window behind it, and the sealing day behind those");
     }
 
+    /**
+     * A zero window means "only today is ever open", which still leaves a day to seal: the day
+     * behind today went final the moment today began. So the smallest possible scheduled scan is
+     * two days, not one — today and its sealing pass.
+     */
     @Test
-    void aZeroWindowStillProcessesToday() {
+    void aZeroWindowStillProcessesTodayAndTheDayItHasToSeal() {
       givenCatalog(HEALTHY_ID);
       givenAHealthyResource(HEALTHY_ID);
       usageSettings.when(UsageSettings::getMaxSettlingWindowDays).thenReturn(0);
 
-      assertEquals(1, new UsageAggregationService().runForSettlingWindow().getDaysProcessed());
+      assertEquals(2, new UsageAggregationService().runForSettlingWindow().getDaysProcessed(),
+          "today plus the one day behind it, which is already final and only needs stamping");
     }
   }
 
@@ -578,17 +655,29 @@ class UsageAggregationServiceTest {
           () -> assertEquals(1, result.getRowsWritten()));
     }
 
-    /** An unsettled row is still open, so the scheduled run updates it as usual. */
+    /**
+     * An unsettled row on a day that is STILL OPEN is recomputed and rewritten as usual — the
+     * freeze and the seal both apply only once the day has left the tenant's window.
+     *
+     * <p>The tenant's own window is stubbed here, not just the maximum. The maximum only sets how
+     * far back the scan reaches; {@code isFinal} consults the tenant's own window, so leaving it
+     * at the fixture's blanket five days would make every scanned day open and the test would be
+     * asserting nothing about the boundary it names. With both at zero the scan is exactly one
+     * open day (today) and one sealing day behind it, so a single recompute is the whole of what
+     * this test claims.
+     */
     @Test
     void theScheduledRunStillRewritesARowThatIsNotYetSettled() {
       givenCatalog(HEALTHY_ID);
       givenAHealthyResource(HEALTHY_ID);
       usageSettings.when(UsageSettings::getMaxSettlingWindowDays).thenReturn(0);
+      givenTheWindowFor(MEASURED_CLIENT_ID, 0);
       UsageDaily stored = givenStoredRowForCountedTenant(false, 99L);
 
       new UsageAggregationService().runForSettlingWindow();
 
-      verify(stored).setQuantity(COUNTED);
+      assertAll(() -> verify(stored, times(1)).setQuantity(COUNTED),
+          () -> verify(stored).setSettled(false));
     }
 
     /** The flag is explicit on the three-argument form, so both entry points are pinned. */
@@ -692,6 +781,164 @@ class UsageAggregationServiceTest {
 
       assertAll(() -> verify(stored).setQuantity(COUNTED),
           () -> verify(stored, never()).setQuantity(0L));
+    }
+  }
+
+  /**
+   * THE REGRESSION SUITE for the defect that shipped: {@code IS_SETTLED} never became 'Y' on the
+   * scheduled path.
+   *
+   * <p>{@code runForSettlingWindow()} scanned {@code [today - W, today]} inclusive, while a day is
+   * final only once {@code day < today - W}. The oldest day ever scanned was therefore still open,
+   * and a day became final exactly one day after it dropped out of the scan — at which point
+   * nothing revisited it, ever. Every row the nightly job wrote stayed unsettled forever. It
+   * accidentally looked right for a tenant whose own window was SHORTER than the maximum across
+   * tenants, because the maximum widens the scan while finality uses the tenant's own window; with
+   * no preference rows at all — the default — nothing was ever sealed.
+   *
+   * <p>Why nothing caught it: the only test that asserted {@code setSettled(true)} drove
+   * {@code run(from, to)} with an explicit out-of-window day, which is the BACKFILL path. The
+   * scheduled path was never driven end to end against the settled flag, so the test was written
+   * from the same reasoning as the code and shared its blind spot. Every test below therefore goes
+   * through {@code runForSettlingWindow()} and nothing else.
+   */
+  @Nested
+  @DisplayName("the sealing pass: a day that leaves the window is stamped final")
+  class TheSealingPass {
+
+    /**
+     * THE REGRESSION TEST. A day that has crossed the boundary ends up settled, driven through the
+     * scheduled entry point. This is the assertion whose absence let the defect ship.
+     */
+    @Test
+    void aDayThatHasLeftTheWindowIsStampedFinalByTheScheduledRun() {
+      givenCatalog(HEALTHY_ID);
+      givenAHealthyResource(HEALTHY_ID);
+      usageSettings.when(UsageSettings::getMaxSettlingWindowDays).thenReturn(0);
+      givenTheWindowFor(MEASURED_CLIENT_ID, 0);
+      UsageDaily sealed = givenStoredRowForTheFirstDayScannedOnly(false, 99L);
+
+      UsageAggregationResult result = new UsageAggregationService().runForSettlingWindow();
+
+      assertAll(() -> verify(sealed).setSettled(true),
+          () -> verify(obDal).save(sealed),
+          () -> assertEquals(2, result.getRowsWritten(),
+              "the sealed row plus today's, which is still open and inserted normally"));
+    }
+
+    /**
+     * THE LOAD-BEARING ONE. Sealing STAMPS, it does not recompute. The settling window exists so
+     * that a figure reported while the day was open is the figure that stands; a sealing pass that
+     * recomputed would let the number move at the exact moment the day was declared closed, which
+     * is worse than never sealing at all — the value would change silently and irrevocably, since
+     * nothing revisits a final day afterwards.
+     */
+    @Test
+    void theSealingPassDoesNotTouchTheStoredQuantity() {
+      givenCatalog(HEALTHY_ID);
+      givenAHealthyResource(HEALTHY_ID);
+      usageSettings.when(UsageSettings::getMaxSettlingWindowDays).thenReturn(0);
+      givenTheWindowFor(MEASURED_CLIENT_ID, 0);
+      UsageDaily sealed = givenStoredRowForTheFirstDayScannedOnly(false, 99L);
+
+      new UsageAggregationService().runForSettlingWindow();
+
+      assertAll(() -> verify(sealed, never()).setQuantity(any()),
+          () -> verify(sealed, never()).setComputedAt(any()),
+          () -> verify(sealed).setSettled(true));
+    }
+
+    /**
+     * The night after: a row that is already settled is not stamped again, not recomputed, and not
+     * even saved. Re-saving it would be harmless to the value but would bump COMPUTED_AT on every
+     * run forever, so a table of long-closed days would look freshly recomputed every morning.
+     */
+    @Test
+    void aRowThatIsAlreadySettledIsLeftCompletelyAloneOnALaterScheduledRun() {
+      givenCatalog(HEALTHY_ID);
+      givenAHealthyResource(HEALTHY_ID);
+      usageSettings.when(UsageSettings::getMaxSettlingWindowDays).thenReturn(0);
+      givenTheWindowFor(MEASURED_CLIENT_ID, 0);
+      UsageDaily alreadySealed = givenStoredRowForTheFirstDayScannedOnly(true, 99L);
+
+      UsageAggregationResult result = new UsageAggregationService().runForSettlingWindow();
+
+      assertAll(() -> verify(obDal, never()).save(alreadySealed),
+          () -> verify(alreadySealed, never()).setSettled(any()),
+          () -> verify(alreadySealed, never()).setQuantity(any()),
+          () -> assertEquals(1, result.getRowsWritten(), "only today's row"));
+    }
+
+    /**
+     * The zero-out sweep obeys the seal too. A tenant that stopped counting on a day that has now
+     * gone final must be STAMPED, not revised down to zero: zeroing there would be a downward
+     * revision of a closed day, which is precisely what B2 forbids and what B3 would otherwise
+     * reintroduce through the back door.
+     */
+    @Test
+    void aTenantThatDroppedToZeroOnAFinalDayIsSealedRatherThanZeroed() {
+      givenCatalog(HEALTHY_ID);
+      givenAHealthyResource(HEALTHY_ID);
+      usageSettings.when(UsageSettings::getMaxSettlingWindowDays).thenReturn(0);
+      givenTheWindowFor(OTHER_CLIENT_ID, 0);
+      UsageDaily dropped = givenDroppedTenantRowForTheFirstDayScannedOnly(false, 5L);
+
+      new UsageAggregationService().runForSettlingWindow();
+
+      assertAll(() -> verify(dropped).setSettled(true),
+          () -> verify(obDal).save(dropped),
+          () -> verify(dropped, never()).setQuantity(any()));
+    }
+
+    /**
+     * The ordering subtlety, and the case an implementation gets wrong by accident: the sweep
+     * skips a row whose quantity is already zero, because rewriting it would bump COMPUTED_AT for
+     * nothing. If that guard ran BEFORE the seal check, a tenant that had already been zeroed
+     * would be skipped on the sealing pass too and its day would stay unsettled forever — the
+     * original defect, surviving in one corner. The seal check therefore has to come first, and a
+     * row that is already at zero still gets stamped.
+     */
+    @Test
+    void aDroppedTenantRowAlreadyAtZeroIsStillStampedOnTheSealingPass() {
+      givenCatalog(HEALTHY_ID);
+      givenAHealthyResource(HEALTHY_ID);
+      usageSettings.when(UsageSettings::getMaxSettlingWindowDays).thenReturn(0);
+      givenTheWindowFor(OTHER_CLIENT_ID, 0);
+      UsageDaily alreadyZero = givenDroppedTenantRowForTheFirstDayScannedOnly(false, 0L);
+
+      new UsageAggregationService().runForSettlingWindow();
+
+      assertAll(() -> verify(alreadyZero).setSettled(true),
+          () -> verify(obDal).save(alreadyZero),
+          () -> verify(alreadyZero, never()).setQuantity(any()));
+    }
+
+    /**
+     * Finality is per tenant, and the sealing pass has to honour that or it becomes a blunt
+     * instrument: one scan, one day, two tenants, two different answers. Tenant A's window has
+     * elapsed, so its row is sealed with its value untouched; tenant B's has not, so its row is
+     * recomputed and written unsettled exactly as before. A sealing pass that stamped by DAY
+     * rather than by tenant would close B's day early — and nothing would ever reopen it.
+     */
+    @Test
+    void theSameDayIsSealedForAShortWindowTenantAndStillOpenForALongWindowOne() {
+      givenCatalog(HEALTHY_ID);
+      Date boundaryDay = theSealingDayOfAZeroWindow();
+      givenAResourceCountingBothTenantsOnlyOn(HEALTHY_ID, boundaryDay);
+      usageSettings.when(UsageSettings::getMaxSettlingWindowDays).thenReturn(0);
+      givenTheWindowFor(MEASURED_CLIENT_ID, 0);
+      givenTheWindowFor(OTHER_CLIENT_ID, 5);
+      UsageDaily shortWindowRow = storedRow(MEASURED_CLIENT_ID, false, 99L);
+      UsageDaily longWindowRow = storedRow(OTHER_CLIENT_ID, false, 99L);
+      // The counts are emitted in this order, so find(...) answers them in this order.
+      when(usageCriteria.uniqueResult()).thenReturn(shortWindowRow).thenReturn(longWindowRow);
+
+      new UsageAggregationService().runForSettlingWindow();
+
+      assertAll(() -> verify(shortWindowRow).setSettled(true),
+          () -> verify(shortWindowRow, never()).setQuantity(any()),
+          () -> verify(longWindowRow).setQuantity(COUNTED),
+          () -> verify(longWindowRow).setSettled(false));
     }
   }
 }

@@ -98,9 +98,9 @@ public final class UsageSettings {
    * per-tenant range. If it iterated only the system window while some tenant were configured
    * longer, that tenant's older days would be flagged unsettled — correctly, by its own
    * window — yet never recomputed again, freezing a value that was still supposed to change.
-   * Taking the maximum costs extra days for everyone and is the safe direction: recomputing a
-   * day that is already final for a tenant is a no-op, because {@link UsageDayRange#isFinal}
-   * is evaluated per tenant when the row is written.
+   * Taking the maximum costs extra days for everyone and is the safe direction: a day that is
+   * already final for a tenant is sealed rather than recomputed, because
+   * {@link UsageDayRange#isFinal} is evaluated per tenant when the row is written.
    */
   public static int getMaxSettlingWindowDays() {
     int max = getSettlingWindowDays();

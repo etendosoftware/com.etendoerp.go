@@ -72,9 +72,14 @@ public class UsageAggregationService {
   public UsageAggregationResult runForSettlingWindow() {
     int window = UsageSettings.getMaxSettlingWindowDays();
     Date today = UsageDayRange.startOfDay(new Date());
-    Date from = UsageDayRange.minusDays(today, window);
-    log.info("Usage aggregation over the settling window: {} .. {} ({} day(s))", from, today,
-        window + 1);
+    // One day further back than the window, because a day only becomes final once it is
+    // OUTSIDE the window: isFinal is `day < today - window`, so the oldest day of the window
+    // itself is still open. Without this extra day nothing would ever revisit a day after it
+    // became final, and IS_SETTLED would stay 'N' on every row forever. That extra day is a
+    // sealing pass -- it stamps the day final without recomputing it.
+    Date from = UsageDayRange.minusDays(today, window + 1);
+    log.info("Usage aggregation over the settling window: {} .. {} ({} day(s), the oldest"
+        + " being the sealing pass)", from, today, window + 2);
     return run(from, today, false);
   }
 
@@ -190,6 +195,12 @@ public class UsageAggregationService {
   /**
    * Writes one row unless the stored day is already final and this is not a backfill.
    *
+   * <p>A day that has just left the tenant's window is <b>sealed, not recomputed</b>: the
+   * stored value is stamped final and left exactly as it is. Recomputing it here would let
+   * the number move after the day was already reported as closed, which is the one thing the
+   * settling window exists to prevent. A day with no stored row has nothing to protect, so it
+   * is computed and written final in one go.
+   *
    * @return whether a row was actually written
    */
   private boolean writeRow(BillingResource resource, DailyCount count, boolean settled,
@@ -198,7 +209,22 @@ public class UsageAggregationService {
     if (isFrozen(row, rewriteFinalDays)) {
       return false;
     }
+    if (settled && row != null && !rewriteFinalDays) {
+      return seal(row);
+    }
     upsert(resource, count, settled, row);
+    return true;
+  }
+
+  /**
+   * Stamps a stored row final without touching its value, so the number reported while the
+   * day was still open is the number that stands.
+   *
+   * @return always true; the row was written
+   */
+  private boolean seal(UsageDaily row) {
+    row.setSettled(true);
+    OBDal.getInstance().save(row);
     return true;
   }
 
@@ -210,21 +236,28 @@ public class UsageAggregationService {
    */
   private int zeroOutTenantsThatNoLongerCount(BillingResource resource, Date day, Date today,
       Set<String> countedTenants, boolean rewriteFinalDays) {
-    int zeroed = 0;
+    int written = 0;
     for (UsageDaily stored : storedRows(resource, UsageDayRange.startOfDay(day))) {
       String clientId = stored.getMeasuredClient().getId();
       if (countedTenants.contains(clientId) || isFrozen(stored, rewriteFinalDays)) {
         continue;
       }
+      boolean settled = UsageDayRange.isFinal(day, today, settlingWindowFor(clientId));
+      if (settled && !rewriteFinalDays) {
+        // The sealing pass reaches tenants that stopped counting too. Zeroing here would
+        // revise a day downward after it closed -- checked before the zero-quantity guard
+        // below, so a row that is already zero still gets stamped.
+        written += seal(stored) ? 1 : 0;
+        continue;
+      }
       if (stored.getQuantity() != null && stored.getQuantity() == 0L) {
         continue;
       }
-      boolean settled = UsageDayRange.isFinal(day, today, settlingWindowFor(clientId));
       upsert(resource, new DailyCount(clientId, UsageDayRange.startOfDay(day), 0L), settled,
           stored);
-      zeroed++;
+      written++;
     }
-    return zeroed;
+    return written;
   }
 
   /** A day that has left its tenant's settling window may only be rewritten by a backfill. */

@@ -22,6 +22,7 @@ import java.util.Date;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.hibernate.QueryTimeoutException;
 import org.hibernate.query.Query;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -90,9 +91,8 @@ public final class UsageResourceValidator {
     try {
       String hql = UsageQueryComposer.composeGroupedCount(resource.getCountedEntity(),
           resource.getDateProperty(), resource.getHQLRestriction());
+      Query<Object[]> query = compile(resource, hql);
       Date today = UsageDayRange.startOfDay(new Date());
-      long startedAt = System.currentTimeMillis();
-      Query<Object[]> query = OBDal.getInstance().getSession().createQuery(hql, Object[].class);
       query.setParameter(UsageQueryComposer.PARAM_DAY_START,
           UsageDayRange.minusDays(today, 1));
       query.setParameter(UsageQueryComposer.PARAM_DAY_END, today);
@@ -102,21 +102,70 @@ public final class UsageResourceValidator {
       // than hanging the save it is being validated by — which would be the worst case of
       // exactly the problem the probe is meant to surface.
       query.setTimeout(PROBE_TIMEOUT_SECONDS);
-      query.list();
-      long elapsed = System.currentTimeMillis() - startedAt;
+      long elapsed = execute(query);
       Date validatedAt = new Date();
       resource.setLastValidated(validatedAt);
       resource.setLastValidationMs(elapsed);
       log.debug("Resource '{}' probe took {} ms", resource.getSearchKey(), elapsed);
       return new ProbeStamp(validatedAt, elapsed);
-    } catch (RuntimeException e) {
-      throw new IllegalArgumentException("The counting query for this resource could not be"
-          + " executed, or took longer than " + PROBE_TIMEOUT_SECONDS + "s to count a single"
-          + " day, which is too expensive to schedule nightly across every tenant: "
-          + e.getMessage(), e);
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Compiles the composed query, reporting a fragment that cannot parse as what it is.
+   *
+   * <p>Kept separate from {@link #execute} because the two failures have nothing to do with
+   * each other and lead the reader somewhere different: this one means "the fragment is
+   * wrong, here is the property that does not exist", while a timeout means "the fragment is
+   * valid but too expensive". Reporting a typo as a performance problem sends whoever is
+   * fixing it looking for an index.
+   */
+  private static Query<Object[]> compile(BillingResource resource, String hql) {
+    try {
+      return OBDal.getInstance().getSession().createQuery(hql, Object[].class);
+    } catch (RuntimeException e) {
+      throw new IllegalArgumentException("The HQL Restriction is not valid for entity '"
+          + resource.getCountedEntity() + "': " + rootCauseMessage(e)
+          + ". Use DAL property names with the alias 'e', for example"
+          + " \"e.salesTransaction = true\". The composed query was: " + hql, e);
+    }
+  }
+
+  /**
+   * Runs the probe once and returns how long it took.
+   *
+   * @throws IllegalArgumentException if it exceeds {@link #PROBE_TIMEOUT_SECONDS}, which is
+   *     the cost guard doing its job, or fails for any other reason at execution time
+   */
+  private static long execute(Query<Object[]> query) {
+    long startedAt = System.currentTimeMillis();
+    try {
+      query.list();
+    } catch (QueryTimeoutException e) {
+      throw new IllegalArgumentException("The counting query took longer than "
+          + PROBE_TIMEOUT_SECONDS + "s to count a single day, which is too expensive to"
+          + " schedule nightly across every tenant. Narrow the restriction, or add an index"
+          + " on the date property it filters.", e);
+    } catch (RuntimeException e) {
+      throw new IllegalArgumentException("The counting query compiled but could not be run: "
+          + rootCauseMessage(e), e);
+    }
+    return System.currentTimeMillis() - startedAt;
+  }
+
+  /**
+   * The deepest message in the chain. Hibernate wraps a parse failure several layers deep and
+   * only the innermost one names the offending property, which is the whole point of the
+   * message.
+   */
+  private static String rootCauseMessage(Throwable error) {
+    Throwable cause = error;
+    while (cause.getCause() != null && cause.getCause() != cause) {
+      cause = cause.getCause();
+    }
+    return cause.getMessage();
   }
 
   /**
