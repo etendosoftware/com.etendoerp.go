@@ -150,8 +150,13 @@ public class TaxReportHandler implements NeoHandler {
   }
 
   @Override
+  public boolean isAccessibleForCurrentRole() {
+    return NeoAccessHelper.hasProcessAccess(TAX_REPORT_PROCESS_ID);
+  }
+
+  @Override
   public NeoResponse handle(NeoContext context) {
-    if (!NeoAccessHelper.hasProcessAccess(TAX_REPORT_PROCESS_ID)) {
+    if (!isAccessibleForCurrentRole()) {
       return NeoResponse.error(403, "Access denied");
     }
     if ("GET".equals(context.getHttpMethod())) {

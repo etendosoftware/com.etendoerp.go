@@ -4596,3 +4596,51 @@ REST does not report: its client is the SPA, which never sends these fields.
 
 **Update is in scope too.** An update that changed `organization` would relocate an existing
 record into another tenant — the same hole from the other direction.
+
+#### 4.12.16 The report catalogue answers the same question the execution does
+
+A report the role cannot run is no longer offered. `neo_discover` and the publication of the
+`generate_*` tool now resolve through the same rule that refuses the call, so the catalogue
+stops advertising what it will then deny.
+
+**What it looked like before.** Under a role holding no grant for it, `neo_discover` listed
+`tax-report` with `callable: true` and the `generate_tax_report` tool was published — and calling
+it answered `403`. Two surfaces asked the permissive shared gate (§4.12.15's fail-open, which a
+type-`R` spec with no linked process and no `AD_TAB_ID` falls through to), while the third asked
+the handler, which owns the real rule.
+
+**How they were joined.** `NeoHandler` gained an optional declaration:
+
+```java
+default boolean isAccessibleForCurrentRole() {
+  return true;
+}
+```
+
+The report handlers override it with the grant they already enforced, and
+`NeoAccessHelper.hasReportSpecAccess` consults it after the constituent-window tier. A handler
+that does not override answers `true`, so nothing that worked before changes.
+
+The declaration is deliberately coarser than the execution check where the two can differ: the
+aging report answers "may this role use it at all" (either the receivables or the payables
+grant), because a role granted one side must still see the report; the exact side-specific grant
+is enforced where the report runs and the requested side is known.
+
+**A role refusal is `403`, not `500`.** `authorizeSpecAccess` raises a `SecurityException`, which
+used to reach the router's generic handler and surface as `500 server_error`. A permanent
+authorization decision dressed as a server failure makes a client with a retry-on-5xx rule loop
+forever. Both refusal types are now mapped: `SecurityException` and Openbravo's own
+`OBSecurityException`, which does **not** extend it and therefore needs its own clause.
+
+```json
+{
+  "status": 403,
+  "error": "forbidden",
+  "detail": "Access denied to spec 'inventory-stock-report' for current role",
+  "hint": "Your role does not have access to this. The answer is the same every time, so do not retry: …"
+}
+```
+
+**The fail-open itself is not closed by this.** A report handler that declares nothing still
+passes. See `schema_forge docs/plans/2026-09-16-report-spec-access-fail-open.md` for the
+remaining work, including the guardrail test that would make the omission fail the build.

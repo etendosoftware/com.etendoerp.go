@@ -35,6 +35,7 @@ import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
@@ -225,7 +226,42 @@ public final class NeoAccessHelper {
     if (process != null) {
       return hasProcessAccess(process.getId());
     }
-    return hasAccessToConstituentWindows(spec, httpMethod);
+    if (!hasAccessToConstituentWindows(spec, httpMethod)) {
+      return false;
+    }
+    return handlerDeclaredAccess(spec);
+  }
+
+  /**
+   * Asks the spec's own report handler whether the current role may use it.
+   *
+   * <p>This is the tier that makes the catalogue and the execution agree. A report whose grant
+   * lives somewhere {@link #hasAccessToConstituentWindows} cannot evaluate — a classic
+   * {@code AD_Process}, an OBUIAPP process definition, or a tab-less window — reaches that check
+   * with nothing to compare against, and it answers permissively. Before this method, that meant
+   * {@code neo_discover} and the report-tool publication advertised reports the handler then
+   * refused with a 403 when they were called.</p>
+   *
+   * <p>A handler that does not override {@link NeoHandler#isAccessibleForCurrentRole} answers
+   * {@code true}, so nothing that worked before changes. What the tier buys is that a report
+   * which DOES own a rule now states it once, and all three call sites resolve through it.</p>
+   *
+   * @param spec the report spec
+   * @return the handler's answer, or {@code true} when the spec has no handler to ask
+   */
+  private static boolean handlerDeclaredAccess(SFSpec spec) {
+    try {
+      String qualifier = NeoReportCallability.resolveReportHandlerQualifier(spec);
+      if (qualifier == null || qualifier.isBlank()) {
+        return true;
+      }
+      NeoHandler handler = NeoHandlerLookup.byQualifierQuietly(qualifier);
+      return handler == null || handler.isAccessibleForCurrentRole();
+    } catch (Exception e) {
+      log.debug("Could not ask the handler of spec {} for its access rule: {}",
+          spec.getName(), e.getMessage());
+      return true;
+    }
   }
 
   /**

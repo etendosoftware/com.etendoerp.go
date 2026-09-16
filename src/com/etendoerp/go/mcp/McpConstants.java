@@ -110,6 +110,9 @@ final class McpConstants {
   static final String ERROR_SERVER = "server_error";
   /** Machine-detectable error code for a write on an entity whose method flag is off (IMP-15). */
   static final String ERROR_METHOD_NOT_ALLOWED = "method_not_allowed";
+
+  /** A role-level refusal. Permanent for this role: re-sending the same call cannot succeed. */
+  static final String ERROR_FORBIDDEN = "forbidden";
   /**
    * Machine-detectable error code for a filter key that resolves to no property on the entity
    * (ETP-5184). Distinct from {@link #ERROR_VALIDATION} because the fix is specific and known:

@@ -204,10 +204,46 @@ public class McpToolRouter {
       // including the self-correcting `available` list (evidence B20).
       log.warn("MCP tool '{}' addressed something that does not exist: {}", toolName, e.getMessage());
       return wrapAsErrorContent(buildRoutingErrorBody(e, toolName));
+    } catch (SecurityException e) {
+      // An authorization refusal is a permanent answer for this role, not a server failure. It
+      // used to fall into the generic handler below and surface as 500 server_error, whose own
+      // hint invites no retry but whose status class does: a client with a retry-on-5xx rule
+      // loops forever on a decision that will never change.
+      log.warn("MCP tool '{}' refused for the current role: {}", toolName, e.getMessage());
+      return wrapAsErrorContent(buildForbiddenErrorBody(toolName, e.getMessage()));
+    } catch (org.openbravo.base.exception.OBSecurityException e) {
+      // Openbravo's own refusal does NOT extend SecurityException, so without this clause it
+      // reached the generic handler and answered 500 for the same kind of decision.
+      log.warn("MCP tool '{}' refused by the platform for the current role: {}",
+          toolName, e.getMessage());
+      return wrapAsErrorContent(buildForbiddenErrorBody(toolName, e.getMessage()));
     } catch (Exception e) {
       log.error("Error routing MCP tool '{}'", toolName, e);
       return wrapAsErrorContent(buildUnexpectedErrorBody(toolName, e));
     }
+  }
+
+  /**
+   * Envelope for a role-level refusal.
+   *
+   * @param toolName the tool that was refused
+   * @param detail   the refusal message, which names the spec
+   * @return a 403 body telling the agent the refusal is permanent for this role
+   */
+  private static JSONObject buildForbiddenErrorBody(String toolName, String detail) {
+    JSONObject body = new JSONObject();
+    try {
+      body.put(McpConstants.KEY_STATUS, McpConstants.STATUS_FORBIDDEN);
+      body.put(McpConstants.KEY_ERROR, McpConstants.ERROR_FORBIDDEN);
+      body.put(McpConstants.KEY_DETAIL, detail);
+      body.put("tool", toolName);
+      body.put(McpConstants.KEY_HINT, "Your role does not have access to this. The answer is the "
+          + "same every time, so do not retry: ask for the grant, or use neo_discover to see what "
+          + "this role may reach.");
+    } catch (JSONException ignored) {
+      // An envelope that cannot be built must not replace the refusal with a server error.
+    }
+    return body;
   }
 
   /** Route semantic search through the same authenticated DB Extended contract as REST. */

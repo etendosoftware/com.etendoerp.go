@@ -83,8 +83,13 @@ public class InventoryStockReportHandler implements NeoHandler {
   }
 
   @Override
+  public boolean isAccessibleForCurrentRole() {
+    return NeoAccessHelper.hasWindowAccess(INVENTORY_STOCK_REPORT_WINDOW_ID);
+  }
+
+  @Override
   public NeoResponse handle(NeoContext context) {
-    if (!NeoAccessHelper.hasWindowAccess(INVENTORY_STOCK_REPORT_WINDOW_ID)) {
+    if (!isAccessibleForCurrentRole()) {
       return NeoResponse.error(403, "Access denied");
     }
 
