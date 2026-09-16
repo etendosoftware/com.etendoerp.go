@@ -373,9 +373,10 @@ public final class NeoAccessHelper {
       // The de-duplication key must never be null: ConcurrentHashMap refuses one, and a spec with
       // no name is exactly the kind of degenerate record this reporting exists to notice. Falling
       // back to the id, then to a placeholder, keeps such a spec countable instead of fatal.
-      String specName = spec.getName();
-      String reportKey = specName != null ? specName
-          : (spec.getId() != null ? "id:" + spec.getId() : "(unnamed spec)");
+      String reportKey = spec.getName();
+      if (reportKey == null) {
+        reportKey = spec.getId() == null ? "(unnamed spec)" : "id:" + spec.getId();
+      }
       Role role = resolveCurrentRole();
       String roleName = role == null ? "(no role)" : role.getName();
       if (UNANCHORED_SPECS_REPORTED.add(reportKey)) {
