@@ -35,6 +35,7 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.service.json.JsonConstants;
 
+import com.etendoerp.go.schemaforge.NeoServerOwnedFields;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
@@ -161,6 +162,19 @@ final class McpWriteRequestSupport {
    */
   static JSONObject mapFieldsToDalProperties(JSONObject fields, Tab adTab, SFEntity sfEntity,
       Set<String> unknown) throws JSONException {
+    return mapFieldsToDalProperties(fields, adTab, sfEntity, unknown, new JSONObject());
+  }
+
+  /**
+   * As {@link #mapFieldsToDalProperties(JSONObject, Tab, SFEntity, Set)}, also collecting the
+   * server-owned fields the caller sent whose value was not its own session's.
+   *
+   * @param serverOwned collects the discarded tenant fields worth reporting; never {@code null}
+   * @return the body with DAL property names, and without any server-owned key
+   * @throws JSONException if the body cannot be read
+   */
+  static JSONObject mapFieldsToDalProperties(JSONObject fields, Tab adTab, SFEntity sfEntity,
+      Set<String> unknown, JSONObject serverOwned) throws JSONException {
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableId(adTab.getTable().getId());
     McpQuerySupport.WriteGate gate = McpQuerySupport.writeGate(sfEntity, dalEntity);
@@ -182,6 +196,15 @@ final class McpWriteRequestSupport {
         if (prop != null) {
           mappedKey = prop.getName();
         }
+      }
+
+      // Tenant ownership outranks curation: client and organization are resolved from the
+      // session on every write, so the caller's value is dropped here and never reaches the
+      // body. Neither column has an ETGO_SF_FIELD row, so both gates below would let it
+      // through - which is how a create could land in another tenant and answer 200 OK.
+      if (NeoServerOwnedFields.isServerOwned(mappedKey)) {
+        NeoServerOwnedFields.recordIfDifferent(serverOwned, mappedKey, value);
+        continue;
       }
 
       // IMP-39 / IMP-48: two gates, two answers. An unresolved key still passes through
@@ -269,6 +292,33 @@ final class McpWriteRequestSupport {
     } catch (JSONException ignored) {
       // Same reasoning as reportUnknownFields: the record is written and correct as far as the
       // caller asked; losing a diagnostic must never turn a successful create into a failure.
+    }
+  }
+
+  /**
+   * Reports the server-owned fields this write discarded, when the value differed from the
+   * session's own.
+   *
+   * <p>The write is not refused. {@code client} and {@code organization} are resolved from the
+   * session whatever the caller sent, so the record is always created in the caller's own
+   * tenant; what this adds is the caller being told, instead of finding out from a 404 on the
+   * record it believes it just created somewhere else.</p>
+   *
+   * @param body the response body, modified in place
+   * @param serverOwned the report built by {@link NeoServerOwnedFields}; empty means silence
+   */
+  static void reportServerOwnedFields(JSONObject body, JSONObject serverOwned) {
+    if (body == null || serverOwned == null || serverOwned.length() == 0) {
+      return;
+    }
+    try {
+      body.put("serverOwnedFields", serverOwned);
+      body.put("serverOwnedFieldsHint", "These fields are owned by the server and were resolved "
+          + "from your session, not from the values you sent. They identify the tenant you are "
+          + "working in and cannot be chosen per request. Read them back from the record; do not "
+          + "send them.");
+    } catch (JSONException ignored) {
+      // Reporting is best-effort: a write that succeeded is never failed by its own report.
     }
   }
 

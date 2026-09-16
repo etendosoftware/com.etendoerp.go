@@ -645,8 +645,11 @@ public class McpToolRouter {
     // accepted — only an explicit exclusion is refused.
     // IMP-18: the keys this write did not recognise, reported on the way out rather than dropped.
     java.util.Set<String> unknownWriteFields = new java.util.TreeSet<>();
+    // client/organization are resolved from the session, never from the payload. The report is
+    // empty unless the caller sent a different tenant than its own.
+    JSONObject serverOwnedFields = new JSONObject();
     JSONObject filteredBody = McpWriteRequestSupport.mapFieldsToDalProperties(fields, adTab,
-        sfEntity, unknownWriteFields);
+        sfEntity, unknownWriteFields, serverOwnedFields);
 
     // Hoisted so both FK-by-name resolution (IMP-4, below) and the sentinel/coercion passes
     // further down share one DAL entity lookup.
@@ -808,6 +811,7 @@ public class McpToolRouter {
     // caller's value stood and a callout had derived a different one. Create only — an update
     // carries no defaults invitation, and there is no cascade of this shape behind it.
     McpWriteRequestSupport.reportSupersededDefaults(flat, ctx.getSupersededDefaults());
+    McpWriteRequestSupport.reportServerOwnedFields(flat, serverOwnedFields);
     return wrapAsTextContent(flat);
   }
 
@@ -847,8 +851,11 @@ public class McpToolRouter {
     // agree about which fields exist.
     // IMP-18: same reporting as handleCreate - a misspelt key is named, not swallowed.
     java.util.Set<String> unknownWriteFields = new java.util.TreeSet<>();
+    // Same tenant rule as handleCreate. An update that moved client/organization would relocate
+    // an existing record into another tenant, which is the same hole from the other direction.
+    JSONObject serverOwnedFields = new JSONObject();
     JSONObject filteredBody = McpWriteRequestSupport.mapFieldsToDalProperties(fields, adTab,
-        sfEntity, unknownWriteFields);
+        sfEntity, unknownWriteFields, serverOwnedFields);
 
     // Unlike handleCreate this path never runs injectMandatoryDefaults (see the IMP-16 note
     // further down), so every key filteredBody carries at this point is the caller's own — this
@@ -935,6 +942,7 @@ public class McpToolRouter {
     // CRUD path a handler was written against; only the body handed to the agent is flattened.
     JSONObject flat = McpToolRouterSupport.flattenCoreResponse(responseJson);
     McpWriteRequestSupport.reportUnknownFields(flat, unknownWriteFields);
+    McpWriteRequestSupport.reportServerOwnedFields(flat, serverOwnedFields);
     return wrapAsTextContent(flat);
   }
 

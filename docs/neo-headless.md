@@ -4544,3 +4544,55 @@ is exercised entirely through `UserRoleCompositionServiceOverlapIntegrationTest`
 **Callout endpoints.** Etendo callouts (field-change triggers) are not exposed through the API. A callout endpoint would allow clients to request server-side field recalculations when a field value changes.
 
 **Custom HQL selectors.** OBUISEL selectors with `isCustomQuery = true` are fully supported. The `executeCustomHqlQuery()` method handles custom HQL with org filtering, validation rules, search across searchable properties, and pagination.
+
+#### 4.12.15 `client` and `organization` are resolved from the session, never from the payload
+
+**The tenant a record belongs to is not a per-request choice.** `client` and `organization` are
+resolved from the caller's session on every write, on both verbs and on both the MCP and REST
+paths. A value supplied by the caller is discarded — never compared, never honoured.
+
+Etendo GO positions an account in one specific organization of one client, so selecting a
+different one is not a business act a caller can perform. It is either a client bug or an
+attempt to write into another tenant.
+
+**What this closes.** A `neo_create` carrying `organization` set to another org returned
+`200 OK`, and the record was then invisible to the session that created it (`404` on re-read):
+the write had landed in the other tenant. Neither column has an `ETGO_SF_FIELD` row, and the
+two write paths answered that absence in opposite ways:
+
+- **REST is a whitelist.** `NeoFieldFilter.filterCreateRequest` ends in
+  `filterBody(body, includedFields)`, built only from curated rows, so an uncurated key was
+  stripped. REST was safe **by accident, not by design** — curating `AD_Org_ID` as an included
+  field would have exposed it, and an inactive filter returns the body untouched.
+- **The MCP write gate is two deny-sets**, built from those same rows. `organization` resolves
+  to a real DAL property, so it was never "unknown"; it matched neither deny-set, passed both
+  gates, and reached `jsonService.add` with the caller's value intact.
+
+The policy is therefore stated once, in `NeoServerOwnedFields`, and both write paths call it.
+Implementing it separately on each side is how the same defect survived in two files after being
+closed (IMP-39).
+
+**Reading is unchanged.** Both fields stay in `neo_get`, `neo_list` and `neo_schema` responses.
+They are information the caller legitimately needs; only the write side changes.
+
+**The write is not refused.** The record is always created in the caller's own tenant, so there
+is nothing to fail. What the MCP path adds is telling the caller, when — and only when — the
+value it sent was not its own:
+
+```json
+{
+  "serverOwnedFields": {
+    "organization": { "sent": "1B8...E2", "session": "0F3...A9" }
+  },
+  "serverOwnedFieldsHint": "These fields are owned by the server and were resolved from your session, not from the values you sent. ..."
+}
+```
+
+Echoing back the value a read response handed you is silent, because nothing was taken from
+you. Sending a different tenant is reported, rather than discovered later from a `404` on the
+record you believe you just created — the failure shape §4.12.14 exists to avoid.
+
+REST does not report: its client is the SPA, which never sends these fields.
+
+**Update is in scope too.** An update that changed `organization` would relocate an existing
+record into another tenant — the same hole from the other direction.
