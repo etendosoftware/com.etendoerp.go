@@ -132,6 +132,16 @@ final class McpConstants {
    * response cannot be used to probe which columns the underlying AD table really has.</p>
    */
   static final String ERROR_FIELD_NOT_ALLOWED = "field_not_allowed";
+
+  /**
+   * A write carried a value for a field the spec exposes as read-only (IMP-48).
+   *
+   * <p>Distinct from {@link #ERROR_FIELD_NOT_ALLOWED} on purpose, and the distinction leaks
+   * nothing: {@code neo_schema} already publishes this field with {@code readOnly: true}, so
+   * naming the reason tells the caller only what it was told before it wrote. The other code
+   * covers a field the surface never named, where saying more would be saying too much.</p>
+   */
+  static final String ERROR_READ_ONLY_FIELD = "read_only_field";
   /**
    * Machine-detectable error code for a call on a child entity that did not name its parent
    * (ETP-5184). In Etendo a child record is only ever browsed inside one parent record — there is

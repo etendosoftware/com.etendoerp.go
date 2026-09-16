@@ -2089,6 +2089,81 @@ disagreement this section exists to end, reintroduced by the fix for it.
 
 ---
 
+#### 4.12.11 A read-only field is refused on write, on both verbs (ETP-5335, IMP-48)
+
+**`neo_create` and `neo_update` reject a value sent for a field the spec publishes as
+`readOnly: true`.** Until this change the MCP write path had no read-only gate of any kind.
+
+##### The gap
+
+The rejection existed, and its reasoning was already written down — `NeoFieldFilter
+.filterCreateRequest` has thrown `ReadOnlyFieldRejectedException` since **IMP-28 clause 2**:
+
+> *"before this exception existed, such a field was silently dropped from the body — the request
+> returned 200 and the caller's value was discarded without any indication. An agent that had just
+> been told that this field is read-only should never send it in the first place; if it does anyway,
+> the honest response is a rejection, not a silent no-op."*
+
+`McpToolRouter` builds a `NeoFieldFilter` on all four CRUD routes — and calls it only for
+`filterGetResponse` and `applyProjection`, both read-side. `filterCreateRequest` appears nowhere in
+the `mcp` package. So the protection was built for REST and the MCP was outside it.
+
+##### What decided the outcome instead
+
+AD's `isUpdatable`, alone. On `sales-order/header`, of the seven curated read-only fields:
+
+| Field | Column | AD `isUpdatable` |
+|---|---|---|
+| `grandTotalAmount` | `GrandTotal` | N |
+| `documentStatus` | `DocStatus` | N |
+| `deliveryStatus` | `DeliveryStatus` | N |
+| `summedLineAmount` | `TotalLines` | N |
+| `processed` | `Processed` | N |
+| **`documentNo`** | `DocumentNo` | **Y** |
+| **`invoiceStatus`** | `InvoiceStatus` | **Y** |
+
+Five were barred by the platform. Two were not — so an agent told `readOnly: true` by `neo_schema`
+could rewrite an order's document number through `neo_update`, and nothing in the MCP said no.
+
+##### The rule
+
+A read-only field is rejected on **both** `neo_create` and `neo_update`. A field is read-only or it
+is not; which verb is asking does not change the answer, and `NeoFieldFilter`'s own javadoc already
+says there is no separate update-side set to consult.
+
+**The exemptions are copied from `rejectableOnCreateFields`, not reinvented** — the MCP is adopting
+a rule the REST path already enforces, and two drifting definitions of "read-only" would be worse
+than the gap. A read-only field is rejectable only when nobody else could legitimately be supplying
+it:
+
+- **the entity declares a `Java_Qualifier`** — its `NeoHandler` pre-hook may inject the value
+  (`InventoryLineHandler` sets `bookQuantity`), so the whole entity is exempt;
+- **the AD column carries a configured default** — the platform fills it.
+
+Read-only-ness resolves through `McpFieldView`, so `MCP_CONFIG → fields.readOnly: false` reclaims a
+field for writing exactly as `fields.included` reclaims an excluded one (§4.12.6).
+
+##### The refusal names the reason, unlike §4.12.10's
+
+```
+422 read_only_field
+"Field 'documentNo' is read-only on entity 'header' and cannot be written"
+hint: "Remove it from 'fields' and retry. neo_schema reports this field with readOnly:true;
+       the server maintains its value."
+```
+
+This leaks nothing. `neo_schema` publishes the field carrying `readOnly: true`, so the refusal
+repeats what the caller was already told. The opaque wording of `field_not_allowed` is for a field
+the surface never named, where saying more would be saying too much.
+
+##### Server-injected values are unaffected
+
+The injectors (`McpBillToInjector`, `McpLinePriceInjector`, the mandatory-defaults pass) run
+*downstream* of the field mapping, on the body it returns. A derived read-only value the server
+fills for itself never passes through this gate — only a value the caller sent does.
+
+---
+
 ### 4.13 Image Fields and Image Upload (ETP-5184)
 
 An `Image BLOB` column (`AD_Reference_ID = 4AA6C3BE9D3B4D84A3B80489505A23E5`) is an FK to

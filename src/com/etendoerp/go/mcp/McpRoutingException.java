@@ -276,6 +276,36 @@ class McpRoutingException extends OBException {
    * @param available  the field names this entity does expose; need not be pre-sorted or truncated
    * @return the exception to throw
    */
+  /**
+   * A write carried a value for a field the spec exposes as read-only (IMP-48).
+   *
+   * <p>The MCP write path had no read-only gate at all. {@code NeoFieldFilter.filterCreateRequest}
+   * has rejected these since IMP-28 — its javadoc argues the case: <em>"an agent that had just been
+   * told that this field is read-only should never send it in the first place; if it does anyway,
+   * the honest response is a rejection, not a silent no-op"</em> — but {@code McpToolRouter} builds
+   * a {@code NeoFieldFilter} only to project GET responses and never calls it on a write. So the
+   * protection existed and the MCP was outside it, and whether a caller's value was dropped or
+   * persisted was decided by AD's {@code isUpdatable} alone: on {@code sales-order/header} five of
+   * the seven curated read-only fields are barred by AD, while {@code DocumentNo} and
+   * {@code InvoiceStatus} are not.</p>
+   *
+   * <p>Unlike {@link #fieldNotAllowed}, this names the reason. That costs nothing: the field is
+   * published by {@code neo_schema} carrying {@code readOnly: true}, so the refusal repeats what
+   * the caller was already told rather than revealing anything the surface hid.</p>
+   *
+   * @param field      the field name the caller tried to write
+   * @param entityName the entity the write was aimed at
+   * @return the exception to throw
+   */
+  static McpRoutingException readOnlyField(String field, String entityName) {
+    return new McpRoutingException(
+        "Field '" + field + "' is read-only on entity '" + entityName + "' and cannot be written",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_READ_ONLY_FIELD, field, List.of(),
+        "Remove it from 'fields' and retry. neo_schema reports this field with readOnly:true; the "
+            + "server maintains its value.",
+        McpConstants.SEE_ALSO_WRITING);
+  }
+
   static McpRoutingException fieldNotAllowed(String field, String entityName,
       List<String> available) {
     List<String> names = available == null ? List.of() : available;

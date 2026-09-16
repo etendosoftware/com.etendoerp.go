@@ -19,6 +19,7 @@ package com.etendoerp.go.mcp;
 
 import java.util.Optional;
 
+import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -179,24 +180,87 @@ final class McpQuerySupport {
    * @return the excluded property names, possibly empty, never {@code null}
    */
   static java.util.Set<String> excludedPropertyNames(SFEntity sfEntity, Entity dalEntity) {
-    java.util.Set<String> excluded = new java.util.HashSet<>();
-    if (sfEntity == null) {
-      return excluded;
+    return writeGate(sfEntity, dalEntity).excluded;
+  }
+
+  /**
+   * The two sets a write must clear, built in one pass over the entity's curated rows.
+   *
+   * <p>They are disjoint by construction: {@link #excluded} is what the spec does not expose at
+   * all, {@link #readOnlyRejectable} is what it exposes and marks unwritable. A field cannot be
+   * both, and the two refusals say different things on purpose — see
+   * {@link McpRoutingException#fieldNotAllowed} and {@link McpRoutingException#readOnlyField}.</p>
+   */
+  static final class WriteGate {
+    /** Property names the spec excludes from the agent surface (IMP-39). */
+    final java.util.Set<String> excluded;
+    /** Property names the spec exposes as read-only and no one else could be supplying (IMP-48). */
+    final java.util.Set<String> readOnlyRejectable;
+
+    private WriteGate(java.util.Set<String> excluded, java.util.Set<String> readOnlyRejectable) {
+      this.excluded = excluded;
+      this.readOnlyRejectable = readOnlyRejectable;
     }
+  }
+
+  /**
+   * Build the write gate for an entity.
+   *
+   * <p><b>The read-only set mirrors {@code NeoFieldFilter}'s {@code rejectableOnCreateFields}
+   * predicate deliberately, exemptions included</b> (IMP-28 clause 2), because the MCP is adopting
+   * a rule the REST path already enforces and two drifting definitions of "read-only" would be
+   * worse than the gap being closed. A read-only field is rejectable only when nobody else could
+   * legitimately be the one supplying it:</p>
+   * <ul>
+   *   <li><b>The entity declares a {@code Java_Qualifier}</b> — its {@code NeoHandler} pre-hook may
+   *       inject the value itself ({@code InventoryLineHandler} sets {@code bookQuantity}), so the
+   *       whole entity is exempt.</li>
+   *   <li><b>The AD column carries a configured default</b> — the platform fills it.</li>
+   * </ul>
+   *
+   * <p>Read-only-ness is resolved through {@link McpFieldView}, so a {@code MCP_CONFIG}
+   * {@code fields.readOnly: false} override reclaims a field for writing exactly the way
+   * {@code fields.included} reclaims an excluded one.</p>
+   *
+   * @param sfEntity  the SchemaForge entity; {@code null} yields two empty sets
+   * @param dalEntity the DAL entity, for mapping columns to property names
+   * @return the gate, never {@code null}
+   */
+  static WriteGate writeGate(SFEntity sfEntity, Entity dalEntity) {
+    java.util.Set<String> excluded = new java.util.HashSet<>();
+    java.util.Set<String> readOnly = new java.util.HashSet<>();
+    if (sfEntity == null) {
+      return new WriteGate(excluded, readOnly);
+    }
+    boolean entityHasHandler = StringUtils.isNotBlank(sfEntity.getJavaQualifier());
     for (SFField sfField : activeFields(sfEntity)) {
       Column col = sfField.getADColumn();
-      // Through McpFieldView, never a Restrictions.eq on ISINCLUDED: the MCP_CONFIG
-      // fields.included override is invisible to a criteria, and a reader that ignored it would
-      // drift from neo_schema - which is the disagreement IMP-39 exists to end.
-      if (col == null || McpFieldView.of(sfField).isIncluded()) {
+      if (col == null) {
         continue;
       }
       Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
-      if (prop != null) {
+      if (prop == null) {
+        continue;
+      }
+      // Through McpFieldView, never a Restrictions.eq on ISINCLUDED/ISREADONLY: the MCP_CONFIG
+      // overrides are invisible to a criteria, and a reader that ignored them would drift from
+      // neo_schema - which is the disagreement IMP-39 exists to end.
+      McpFieldView view = McpFieldView.of(sfField);
+      if (!view.isIncluded()) {
         excluded.add(prop.getName());
+      } else if (view.isReadOnly() && !entityHasHandler && !hasConfiguredDefault(col)) {
+        readOnly.add(prop.getName());
       }
     }
-    return excluded;
+    return new WriteGate(excluded, readOnly);
+  }
+
+  /**
+   * @param adColumn the AD column
+   * @return whether AD itself fills this column, which exempts it from the read-only rejection
+   */
+  private static boolean hasConfiguredDefault(Column adColumn) {
+    return adColumn != null && StringUtils.isNotBlank(adColumn.getDefaultValue());
   }
 
   /**
