@@ -643,8 +643,10 @@ public class McpToolRouter {
     // column "not just SF-configured ones", which is what let a curated-out field be written and
     // filtered while neo_get denied it existed. A column with no ETGO_SF_FIELD row is still
     // accepted — only an explicit exclusion is refused.
+    // IMP-18: the keys this write did not recognise, reported on the way out rather than dropped.
+    java.util.Set<String> unknownWriteFields = new java.util.TreeSet<>();
     JSONObject filteredBody = McpWriteRequestSupport.mapFieldsToDalProperties(fields, adTab,
-        sfEntity);
+        sfEntity, unknownWriteFields);
 
     // Hoisted so both FK-by-name resolution (IMP-4, below) and the sentinel/coercion passes
     // further down share one DAL entity lookup.
@@ -801,6 +803,7 @@ public class McpToolRouter {
     // ETP-5200: the id only exists in the response here, so it is read back from the flat body.
     McpRecordUrls.addRecordUrl(flat, specName, null,
         McpToolRouterSupport.isPrimaryTab(adTab));
+    McpWriteRequestSupport.reportUnknownFields(flat, unknownWriteFields);
     return wrapAsTextContent(flat);
   }
 
@@ -838,8 +841,10 @@ public class McpToolRouter {
 
     // IMP-39: same exclusion gate as handleCreate — the write verbs and the read projection must
     // agree about which fields exist.
+    // IMP-18: same reporting as handleCreate - a misspelt key is named, not swallowed.
+    java.util.Set<String> unknownWriteFields = new java.util.TreeSet<>();
     JSONObject filteredBody = McpWriteRequestSupport.mapFieldsToDalProperties(fields, adTab,
-        sfEntity);
+        sfEntity, unknownWriteFields);
 
     // Unlike handleCreate this path never runs injectMandatoryDefaults (see the IMP-16 note
     // further down), so every key filteredBody carries at this point is the caller's own — this
@@ -924,8 +929,9 @@ public class McpToolRouter {
 
     // IMP-5 clause (iii): the post-hook still sees core's wrapped body, for parity with the REST
     // CRUD path a handler was written against; only the body handed to the agent is flattened.
-    return wrapAsTextContent(
-        McpToolRouterSupport.flattenCoreResponse(responseJson));
+    JSONObject flat = McpToolRouterSupport.flattenCoreResponse(responseJson);
+    McpWriteRequestSupport.reportUnknownFields(flat, unknownWriteFields);
+    return wrapAsTextContent(flat);
   }
 
   // ── neo_delete ────────────────────────────────────────────────────────

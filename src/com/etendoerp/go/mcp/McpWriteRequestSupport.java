@@ -132,6 +132,35 @@ final class McpWriteRequestSupport {
    */
   static JSONObject mapFieldsToDalProperties(JSONObject fields, Tab adTab, SFEntity sfEntity)
       throws JSONException {
+    return mapFieldsToDalProperties(fields, adTab, sfEntity, new java.util.TreeSet<>());
+  }
+
+  /**
+   * As {@link #mapFieldsToDalProperties(JSONObject, Tab, SFEntity)}, also collecting the keys that
+   * matched no field of the entity.
+   *
+   * <p><b>IMP-18 — the write verbs report, they do not refuse.</b> {@code neo_schema},
+   * {@code neo_list} and {@code neo_get} have answered an unrecognised name with
+   * {@code unknownFields} since 2026-08-10; the write verbs dropped it in silence, so a create
+   * carrying a misspelt field returned 201 and no later read could contradict it. The obvious
+   * symmetry with the two gates above — refuse it — was measured and rejected: of the 73 handler
+   * qualifiers reachable by an MCP write, at least eight read request keys that are <b>not AD
+   * columns anywhere in the instance</b> ({@code formState}, {@code lines}, {@code shipmentId},
+   * {@code receiptId}, {@code fieldValues}, {@code includeZeroStock}, {@code destinationAccountId},
+   * {@code paymentRemoval} …). Those keys travel through exactly this branch today. Unlike an
+   * excluded or read-only field, "unknown" here is not a set anything declares, so a refusal could
+   * not tell a caller's typo from a handler's own protocol — and the reporting is what will produce
+   * the inventory a refusal would need.</p>
+   *
+   * @param fields   the caller's field map
+   * @param adTab    the tab whose table the fields belong to
+   * @param sfEntity the SchemaForge entity; {@code null} skips the two gates
+   * @param unknown  collects, in order, the keys that matched no property; never {@code null}
+   * @return the body keyed by DAL property name
+   * @throws JSONException if the body cannot be read
+   */
+  static JSONObject mapFieldsToDalProperties(JSONObject fields, Tab adTab, SFEntity sfEntity,
+      Set<String> unknown) throws JSONException {
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableId(adTab.getTable().getId());
     McpQuerySupport.WriteGate gate = McpQuerySupport.writeGate(sfEntity, dalEntity);
@@ -166,10 +195,42 @@ final class McpWriteRequestSupport {
         if (gate.readOnlyRejectable.contains(mappedKey)) {
           throw McpRoutingException.readOnlyField(key, entityName);
         }
+      } else if (!McpConstants.PARAM_PARENT_ID.equals(key)) {
+        // parentId is a declared argument of the write tools, not a stray key - see resolveParentFK.
+        unknown.add(key);
       }
       mapped.put(mappedKey, value);
     }
     return mapped;
+  }
+
+  /**
+   * Attach the keys a write did not recognise to the body handed back to the agent (IMP-18).
+   *
+   * <p>Mirrors the {@code unknownFields} array {@code neo_list}, {@code neo_get} and
+   * {@code neo_schema} already return, so the same word means the same thing on every tool. The
+   * accompanying hint is worded to be <b>true even when a {@code NeoHandler} consumed the key</b>:
+   * it says the name was not mapped to a field of this entity and no field of the record holds the
+   * value, which is exactly what happened in both cases. Claiming the key was ignored would be a
+   * lie on the eight-odd entities whose handlers read their own request keys.</p>
+   *
+   * @param body    the flattened response body handed to the agent, mutated in place
+   * @param unknown the unrecognised keys, in the order collected
+   */
+  static void reportUnknownFields(JSONObject body, Set<String> unknown) {
+    if (body == null || unknown == null || unknown.isEmpty()) {
+      return;
+    }
+    try {
+      body.put(McpFieldProjection.KEY_UNKNOWN_FIELDS, new JSONArray(unknown));
+      body.put("unknownFieldsHint", "These names were not mapped to a field of this entity, and "
+          + "no field of the record holds their value. Call neo_schema with view:\"create\" for "
+          + "the names this entity accepts.");
+    } catch (JSONException ignored) {
+      // Reporting is an aid, never the answer. The write already succeeded; a body that cannot
+      // carry the warning is still a valid result, and failing the call over it would be a worse
+      // outcome than the silence IMP-18 exists to end. Nothing to recover, nothing to report.
+    }
   }
 
   /**

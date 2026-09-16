@@ -733,6 +733,13 @@ public class ToolRegistry {
   }
 
   private McpToolDefinition buildCreateTool(List<String> specNames) {
+    // IMP-18: the write verbs used to drop an unrecognised key in silence, so a create carrying a
+    // misspelt field returned 201 and no later read could contradict it. They now name it in
+    // `unknownFields`, the way neo_schema/neo_list/neo_get already did - and the description says
+    // so, because a warning nobody is told to look for is only marginally better than silence.
+    String unknownFieldsNote = "A name this entity does not recognise comes back in "
+        + "\"unknownFields\" on the response - check it if a value you sent is not on the record, "
+        + "because the write still succeeds without it. ";
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
     props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
@@ -765,12 +772,20 @@ public class ToolRegistry {
             + "(document number, dates, prices, etc.). "
             + "Dates must be ISO-8601: 'YYYY-MM-DD' for date fields and "
             + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported. "
+            + unknownFieldsNote
             + McpConstants.RECORD_URL_NOTE,
         buildObjectSchema(props,
           List.of("spec", McpConstants.PARAM_ENTITY, McpConstants.PARAM_FIELDS)));
   }
 
   private McpToolDefinition buildUpdateTool(List<String> specNames) {
+    // IMP-18: the write verbs used to drop an unrecognised key in silence, so a create carrying a
+    // misspelt field returned 201 and no later read could contradict it. They now name it in
+    // `unknownFields`, the way neo_schema/neo_list/neo_get already did - and the description says
+    // so, because a warning nobody is told to look for is only marginally better than silence.
+    String unknownFieldsNote = "A name this entity does not recognise comes back in "
+        + "\"unknownFields\" on the response - check it if a value you sent is not on the record, "
+        + "because the write still succeeds without it. ";
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
     props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
@@ -793,7 +808,8 @@ public class ToolRegistry {
             + "error 'stale_record' means the record changed since that read — re-read it, reapply "
             + "your changes and retry; re-sending the same payload will fail identically. "
             + "Dates must be ISO-8601: 'YYYY-MM-DD' for date fields and "
-            + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported.",
+            + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported. "
+            + unknownFieldsNote,
         buildObjectSchema(props,
           List.of("spec", McpConstants.PARAM_ENTITY, "id", McpConstants.PARAM_FIELDS,
             McpConstants.PARAM_UPDATED)));

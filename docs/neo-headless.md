@@ -2176,6 +2176,62 @@ fills for itself never passes through this gate — only a value the caller sent
 
 ---
 
+#### 4.12.12 The write verbs report an unrecognised field instead of swallowing it (ETP-5335, IMP-18)
+
+**`neo_create` and `neo_update` return `unknownFields` for any key they could not map**, the same
+array `neo_schema`, `neo_list` and `neo_get` have returned since 2026-08-10.
+
+Before this, a body carrying a field that does not exist was created with `201`, no warning, and the
+value was never persisted — so no later read could contradict the success.
+
+```
+neo_create(sales-order/header, fields:{ reference:"X", … })
+→ 201 { …, "unknownFields": ["reference"],
+        "unknownFieldsHint": "These names were not mapped to a field of this entity, and no
+                              field of the record holds their value. Call neo_schema with
+                              view:\"create\" for the names this entity accepts." }
+```
+
+##### Why this reports rather than refuses, unlike §4.12.10 and §4.12.11
+
+The symmetry is tempting and it was measured and rejected. Of the **73 handler qualifiers reachable
+by an MCP write**, at least eight read request keys that are **not AD columns anywhere in the
+instance** — verified against `AD_COLUMN`, zero active rows for each:
+
+| Handler | Keys of its own |
+|---|---|
+| `InventoryLineHandler` | `formState`, `value` |
+| `ReturnMaterialReceiptHeaderHandler` | `lines`, `shipmentId` |
+| `ReturnToVendorShipmentHeaderHandler` | `lines`, `receiptId` |
+| `FinancialAccountTransactionsHandler` | `sourceAccountId`, `destinationAccountId`, `paymentRemoval`, `bankFee`, `transferDate` |
+| `GeneralLedgerConfigurationHandler` | `dimensions`, `general`, `generalAccounts` |
+| `GlJournalHeaderHandler` | `fieldValues`, `docAction` |
+| `InventoryStockReportHandler` | `includeZeroStock`, `M_Product_Category_ID` |
+| `MarkSubsanationHandler` | `isSubsanation` |
+
+Those keys travel through the exact branch a refusal would close. **This is the difference from the
+other two gates:** an excluded field and a read-only field are declared sets — `ETGO_SF_FIELD` says
+so, and the server can point at the row. "Unknown" is not a declared set, so a refusal could not
+tell a caller's typo from a handler's own protocol, and would break at least eight entities.
+
+The reporting is also the instrument that would make a refusal safe later: `unknownFields` in
+production is what produces the inventory of keys actually in use, which is the thing nobody has
+today. Refuse-by-declaration is the eventual shape; it needs that inventory first.
+
+##### The hint is worded to stay true when a handler did consume the key
+
+It says the name was not mapped to a field of this entity and no field of the record holds the
+value. Both halves are true whether the key was a typo or a handler's protocol. Saying the key was
+*ignored* would be a lie on the entities above, and a contract that lies in a knowable case is worse
+than one that says less.
+
+##### Not covered
+
+`parentId` is excluded from the report — it is a declared argument of both write tools, consumed by
+`resolveParentFK`, and naming it would make the warning noise on every child-record write.
+
+---
+
 ### 4.13 Image Fields and Image Upload (ETP-5184)
 
 An `Image BLOB` column (`AD_Reference_ID = 4AA6C3BE9D3B4D84A3B80489505A23E5`) is an FK to
