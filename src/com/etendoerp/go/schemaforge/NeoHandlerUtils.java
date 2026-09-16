@@ -439,6 +439,12 @@ final class NeoHandlerUtils {
    * fill-if-absent default like {@link #injectReturnDocType}. Table/window-agnostic: no field
    * names are hardcoded here, callers supply them.
    *
+   * <p>ETP-5273: {@code accountingDate} is independent and user-editable again, so this raw
+   * unconditional mirror must no longer run on every write. Callers now go through
+   * {@link #mirrorAccountingDateOnCreate}, which only mirrors on a create where the client did
+   * not supply the target field itself. This method is kept as the low-level primitive (used by
+   * that gated entry point) and for any future non-accountingDate mirroring need.
+   *
    * @param body        the request body to mutate in place; may be {@code null}
    * @param sourceField the field whose value is copied; no-op if absent from {@code body}
    * @param targetField the field overwritten with {@code sourceField}'s value
@@ -478,18 +484,55 @@ final class NeoHandlerUtils {
   }
 
   /**
-   * Mirrors {@code sourceField} into {@code targetField} on a CRUD write request — the shared
-   * body behind each header handler's {@code mirrorAccountingDate} (ETP-4531). Extracted out of
-   * {@code AbstractInvoiceHeaderHandler} to keep that class under the Sonar method-count limit
-   * (S1448); {@code AbstractOrderHeaderHandler} keeps its own copy.
+   * Mirrors {@code sourceField} into {@code targetField} on a CRUD {@code POST} (create) request
+   * — but ONLY when the client did not already supply an explicit, non-blank {@code targetField}
+   * — the shared body behind every header handler's {@code mirrorAccountingDate} pre-hook.
+   *
+   * <p>ETP-5273 (re-revert of ETP-4531): {@code accountingDate} is independent and user-editable
+   * again, so the mirror can no longer run unconditionally on every write (that would clobber a
+   * value the user deliberately typed on the very next PUT/PATCH of any other field). This method
+   * narrows the mirror to exactly the ticket's stated "default on creation" behavior (CA: "Al
+   * crear un documento, la Fecha Contable toma el mismo valor que la Fecha del documento."):
+   * <ul>
+   *   <li>{@code POST} (create) — mirrors {@code sourceField} into {@code targetField} ONLY when
+   *       {@code targetField} is absent or blank in the request body. A client that already sends
+   *       an explicit {@code accountingDate} on create (e.g. a document built by
+   *       {@code NeoCommercialDocumentFactory}, which sets both dates explicitly) is respected
+   *       as-is.</li>
+   *   <li>{@code PUT}/{@code PATCH} (update) — no-op, always. The forward sync FROM the
+   *       document's own date (CP-1: "Fecha documento cambia -> Fecha Contable se actualiza") is
+   *       instead handled entirely by the classic Etendo callout
+   *       {@code SifInvoiceOperationDateCallout} (registered on {@code C_Invoice.DateInvoiced},
+   *       extending {@code SE_Invoice_AccountingDate}) executed server-side by
+   *       {@link NeoCalloutService}. Nothing gates that cascade: it is one-way by construction,
+   *       because the callout registered on {@code DateAcct} is {@code SE_Invoice_TaxDate}, which
+   *       writes {@code Taxdate} and never {@code DateInvoiced} (CP-2).</li>
+   * </ul>
+   *
+   * <p>ETP-5273 applies ONLY to sales and purchase invoices, so only
+   * {@code SalesInvoiceHeaderHandler} and {@code PurchaseInvoiceHeaderHandler} call this. Orders,
+   * receipts and shipments keep the unified-date design — {@code accountingDate} stays hidden
+   * there and must follow the document date on EVERY write, so they still use the unconditional
+   * {@link #mirrorFieldValue} through their own {@code mirrorAccountingDate(NeoContext)} wrapper.
+   * Do not migrate them to this method without first making their accounting date visible.
    *
    * @param context     the current NeoContext
    * @param sourceField the visible date field whose value is copied
-   * @param targetField the hidden field overwritten with {@code sourceField}'s value
+   * @param targetField the accounting-date field defaulted from {@code sourceField}
    */
-  static void mirrorAccountingDate(NeoContext context, String sourceField, String targetField) {
-    if (NeoEndpointType.CRUD.equals(context.getEndpointType()) && isWriteMethod(context.getHttpMethod())) {
-      mirrorFieldValue(context.getRequestBody(), sourceField, targetField);
+  static void mirrorAccountingDateOnCreate(NeoContext context, String sourceField, String targetField) {
+    if (!NeoEndpointType.CRUD.equals(context.getEndpointType()) || !"POST".equals(context.getHttpMethod())) {
+      return;
+    }
+    JSONObject body = context.getRequestBody();
+    if (body == null) {
+      return;
+    }
+    Object existing = body.opt(targetField);
+    boolean hasExplicitValue = existing != null && !JSONObject.NULL.equals(existing)
+        && StringUtils.isNotBlank(String.valueOf(existing));
+    if (!hasExplicitValue) {
+      mirrorFieldValue(body, sourceField, targetField);
     }
   }
 

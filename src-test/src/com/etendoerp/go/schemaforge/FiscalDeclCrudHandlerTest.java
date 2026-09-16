@@ -1401,6 +1401,95 @@ public class FiscalDeclCrudHandlerTest {
     verify(resp).setStatus(HttpServletResponse.SC_CREATED);
   }
 
+  // ── handleDeclPost (draft-status guard, ETP-5272) ───────────────────
+
+  /**
+   * An existing DRAFT declaration for the same natural key must block creation of a new one:
+   * {@code hasDraftDeclaration} short-circuits {@code handleDeclPost} with a 409 BEFORE
+   * {@link FiscalDeclCrudHandler#resolveNextDeclSeq} ever runs, and no new row is created —
+   * the core ETP-5272 gate ("complete or delete the draft before starting another one").
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleDeclPostExistingDraftDeclarationReturns409AndDoesNotCreate()
+      throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getReader()).thenReturn(new BufferedReader(
+        new StringReader("{\"model\":\"303\",\"year\":2026,\"period\":\"1T\"}")));
+
+    BaseOBObject draftDecl = mock(BaseOBObject.class);
+    when(draftDecl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("draft");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+      when(query.list()).thenReturn(Collections.singletonList(draftDecl));
+
+      handler.handleDeclarations("POST", req, resp);
+
+      verify(obDal, never()).save(any());
+      verify(obDal, never()).commitAndClose();
+    }
+    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT), anyString());
+    verify(resp, never()).setStatus(HttpServletResponse.SC_CREATED);
+  }
+
+  /**
+   * Regression: existing declarations for the same natural key that are ALL non-draft (e.g. one
+   * {@code ready}, one {@code submitted} — the corrective/rectificativa case, ETP-5187) must NOT
+   * be blocked by the ETP-5272 guard. Creation succeeds and still routes through the
+   * pre-existing, untouched {@link FiscalDeclCrudHandler#resolveNextDeclSeq} to get the next free
+   * ordinal — confirms the new guard is additive and does not alter resolveNextDeclSeq's
+   * long-established contract.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleDeclPostAllExistingNonDraftSucceedsAndRoutesToNextSeq() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getReader()).thenReturn(new BufferedReader(
+        new StringReader("{\"model\":\"303\",\"year\":2026,\"period\":\"1T\"}")));
+
+    BaseOBObject ready = mock(BaseOBObject.class);
+    when(ready.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("ready");
+    when(ready.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(0L);
+    BaseOBObject submitted = mock(BaseOBObject.class);
+    when(submitted.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+    when(submitted.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(1L);
+    BaseOBObject thirdDecl = mock(BaseOBObject.class);
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+      when(query.list()).thenReturn(Arrays.asList(ready, submitted));
+
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL)).thenReturn(thirdDecl);
+
+      handler.handleDeclarations("POST", req, resp);
+
+      verify(thirdDecl).set(eq(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ), eq(2L));
+      verify(obDal).save(thirdDecl);
+      verify(obDal).commitAndClose();
+    }
+    verify(resp).setStatus(HttpServletResponse.SC_CREATED);
+  }
+
   // ── handleDeclDelete (draft-only guard, ETP-5187) ───────────────────
 
   /** Deleting a {@code draft} declaration succeeds: the row is removed and committed. */
