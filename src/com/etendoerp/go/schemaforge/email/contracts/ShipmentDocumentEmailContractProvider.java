@@ -20,20 +20,23 @@ package com.etendoerp.go.schemaforge.email.contracts;
 import com.etendoerp.go.schemaforge.email.EmailContract;
 import com.etendoerp.go.schemaforge.email.EmailContractProvider;
 
+import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
 
 import javax.enterprise.context.ApplicationScoped;
 
 /**
- * Provides sales shipment (goods shipment) email contracts.
+ * Provides sales-side {@code M_InOut} email contracts: goods shipment (outbound) and, since
+ * ETP-5124, Return Material Receipt (inbound sales return).
  */
 @ApplicationScoped
 public final class ShipmentDocumentEmailContractProvider implements EmailContractProvider {
 
   @Override
   public Collection<EmailContract> getContracts() {
-    return Collections.singletonList(
-        new GoodsShipmentSendEmailContract(new DalShipmentEmailDocumentResolver()));
+    return Arrays.asList(
+        new GoodsShipmentSendEmailContract(new DalShipmentEmailDocumentResolver()),
+        new ReturnMaterialReceiptSendEmailContract(
+            new DalReturnMaterialReceiptEmailDocumentResolver()));
   }
 }

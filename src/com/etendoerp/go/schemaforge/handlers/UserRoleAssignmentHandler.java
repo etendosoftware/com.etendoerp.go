@@ -32,6 +32,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -218,6 +219,11 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   private static final String FIELD_EMAIL = "email";
   private static final String FIELD_INVITATION_STATUS = "invitationStatus";
   private static final String FIELD_IS_OWNER = "isOwner";
+  /** ETP-5277: fields patched onto the create response by {@link #patchUserDefaultsOntoRow}. */
+  private static final String FIELD_DEFAULT_ROLE = "defaultRole";
+  private static final String FIELD_DEFAULT_CLIENT = "defaultClient";
+  private static final String FIELD_DEFAULT_ORGANIZATION = "defaultOrganization";
+  private static final String FIELD_DEFAULT_WAREHOUSE = "defaultWarehouse";
   /** Keys of the {@code JSONObject} returned by {@code CompanyInvitationService} (ETP-4830). */
   private static final String FIELD_ERROR = "error";
   private static final String FIELD_MESSAGE = "message";
@@ -750,7 +756,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
         // MUST run before the invitation is created, so no other role ever gets a chance to land
         // on this user first. Best-effort (see the method's own javadoc): a failure here is
         // logged and swallowed, it never blocks the invitation that follows.
-        ensurePersonalRoleForNewlyCreatedUser(userId, email, clientId);
+        ensurePersonalRoleForNewlyCreatedUser(userId, email, clientId, data);
         invitationResult = new CompanyInvitationService().createInvitationForNewlyCreatedUser(
             obContext, email.toLowerCase(), null, null);
         // ETP-4830 pending-invite-pill fix: attach invitationStatus onto THIS SAME create
@@ -814,14 +820,32 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * every failure path is logged at WARN with enough context (userId/email/clientId) to diagnose
    * without a DB query, never silently swallowed.</p>
    *
+   * <p>ETP-5277: {@code createFreshPersonalRole} above (via {@code
+   * PersonalRoleAccessProvisioningService#applyUserDefaults}) also recomputes {@code
+   * defaultClient}/{@code defaultOrganization}/{@code defaultWarehouse} on {@code user} from the
+   * real client/organization/first-active-warehouse, and this method itself sets {@code
+   * defaultRole} to the personal role right below — but none of that was ever reflected back into
+   * the create response's {@code data} row, which was built from the request payload BEFORE these
+   * writes ran. {@code NeoDefaultsService}'s create-defaults bootstrap can leak the CREATING
+   * admin's own session-derived role/client/org/warehouse into that payload (no {@code
+   * AD_Preference} configured for these 4 columns), so the create response briefly echoed back the
+   * wrong user's values until a follow-up GET. {@link #patchUserDefaultsOntoRow} closes that gap by
+   * re-reading the 4 fields off {@code user} once they are final, mirroring how {@link
+   * #attachInvitationStatusToRowSafely} patches {@code invitationStatus} onto this same {@code
+   * data} reference.</p>
+   *
    * @param userId the newly-created user's {@code AD_User_ID}, read from the create response's
    *     {@code data[0].id} by the caller — {@code null} (missing from the response) is logged and
    *     treated as a no-op, since there is nothing to look up
    * @param email the newly-created user's email — used only for logging context
    * @param clientId the current client id — used only for logging context
+   * @param data the create response's {@code data[0]} row (see {@link #inviteNewlyCreatedUser}) —
+   *     patched in place with the final {@code defaultRole}/{@code defaultClient}/{@code
+   *     defaultOrganization}/{@code defaultWarehouse} once this method's own writes succeed;
+   *     {@code null} is tolerated (no-op patch, everything else still runs)
    */
   private void ensurePersonalRoleForNewlyCreatedUser(String userId, String email,
-      String clientId) {
+      String clientId, JSONObject data) {
     if (userId == null) {
       log.warn("UserRoleAssignmentHandler.ensurePersonalRoleForNewlyCreatedUser: no 'id' entry "
               + "in the create response for email={} clientId={} — personal role not created",
@@ -844,11 +868,79 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       log.info("UserRoleAssignmentHandler.ensurePersonalRoleForNewlyCreatedUser: assigned "
               + "personal role {} to newly-created user {} (email={} clientId={})",
           personalRole.getId(), userId, email, clientId);
+      patchUserDefaultsOntoRowSafely(data, user, userId, email, clientId);
     } catch (Exception e) {
       log.warn("UserRoleAssignmentHandler.ensurePersonalRoleForNewlyCreatedUser error for user "
               + "{} email={} clientId={}: {}",
           userId, email, clientId, e.getMessage(), e);
     }
+  }
+
+  /**
+   * ETP-5277: best-effort wrapper around {@link #patchUserDefaultsOntoRow} — isolated in its own
+   * try/catch, same reasoning as {@link #attachInvitationStatusToRowSafely}: the {@code AD_User}
+   * write above (personal role + {@code applyUserDefaults}) has already succeeded by the time this
+   * runs, so a JSON failure here must be logged as its own thing rather than folded into the
+   * caller's generic {@code catch}, which would misleadingly read as "personal role not created".
+   */
+  private void patchUserDefaultsOntoRowSafely(JSONObject data, User user, String userId,
+      String email, String clientId) {
+    try {
+      patchUserDefaultsOntoRow(data, user);
+    } catch (Exception e) {
+      log.warn("UserRoleAssignmentHandler.ensurePersonalRoleForNewlyCreatedUser: failed to patch "
+              + "default-* fields onto the create response for user={} email={} clientId={}: {}",
+          userId, email, clientId, e.getMessage(), e);
+    }
+  }
+
+  /**
+   * ETP-5277: writes the FINAL, already-persisted {@code defaultRole}/{@code defaultClient}/
+   * {@code defaultOrganization}/{@code defaultWarehouse} (plus their {@code $_identifier}
+   * companions) from {@code user} onto the create response's {@code data} row — see {@link
+   * #ensurePersonalRoleForNewlyCreatedUser}'s javadoc for why this is needed.
+   *
+   * <p>Identifier companions use {@link BaseOBObject#getIdentifier()}, the same convention {@code
+   * NeoDefaultsService#tryInjectIdentifier} and core's {@code DefaultJsonDataService} already use
+   * for every other FK field's {@code $_identifier} value — deliberately not a hand-rolled
+   * per-entity {@code getName()}/hardcoded map (see {@code artifacts/user/decisions.json}'s own
+   * {@code defaultRole} entry in the functional repo, which documents that exact mistake already
+   * made and fixed once, 2026-07-27: a static value→name map only works for the tenant it was
+   * built from).</p>
+   *
+   * <p>Any of the 4 references being {@code null} on {@code user} (e.g. {@code defaultWarehouse}
+   * when the client has no active warehouse yet) is tolerated: that field is simply omitted from
+   * the patch, left exactly as the create payload already had it — never forced to {@code
+   * JSONObject.NULL}, since a merely-absent field and an explicitly-null one are handled
+   * differently by the frontend's defaults-merge.</p>
+   *
+   * @param data the create response row to patch in place; a no-op if {@code null}
+   * @param user the newly-created user, re-read after {@code createFreshPersonalRole}/{@code
+   *     setDefaultRole}/{@code flush} so every getter below reflects the persisted final state
+   */
+  private void patchUserDefaultsOntoRow(JSONObject data, User user) throws JSONException {
+    if (data == null || user == null) {
+      return;
+    }
+    putDefaultFieldWithIdentifier(data, FIELD_DEFAULT_ROLE, user.getDefaultRole());
+    putDefaultFieldWithIdentifier(data, FIELD_DEFAULT_CLIENT, user.getDefaultClient());
+    putDefaultFieldWithIdentifier(data, FIELD_DEFAULT_ORGANIZATION, user.getDefaultOrganization());
+    putDefaultFieldWithIdentifier(data, FIELD_DEFAULT_WAREHOUSE, user.getDefaultWarehouse());
+  }
+
+  /**
+   * Writes {@code propertyName} (the referenced record's id) and {@code propertyName$_identifier}
+   * (its display label, via {@link BaseOBObject#getIdentifier()}) onto {@code data} — skipped
+   * entirely when {@code reference} is {@code null} (see {@link #patchUserDefaultsOntoRow}'s
+   * javadoc on why that case is left untouched rather than nulled).
+   */
+  private static void putDefaultFieldWithIdentifier(JSONObject data, String propertyName,
+      BaseOBObject reference) throws JSONException {
+    if (reference == null) {
+      return;
+    }
+    data.put(propertyName, reference.getId());
+    data.put(propertyName + "$" + JsonConstants.IDENTIFIER, reference.getIdentifier());
   }
 
   /**
