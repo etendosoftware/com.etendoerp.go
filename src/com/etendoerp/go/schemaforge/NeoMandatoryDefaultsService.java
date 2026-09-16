@@ -358,6 +358,17 @@ public class NeoMandatoryDefaultsService {
    */
   private static boolean tryInjectFromSession(JSONObject body, Entity dalEntity, String propName,
       Column col, MandatoryDefaultContext mCtx, Property prop) {
+    // ETP-5277 (review hardening, W2): this path reads session vars directly
+    // (#ColumnName/ColumnName), bypassing resolveFieldDefault/Utility.getPreference entirely —
+    // and therefore bypassing NeoDefaultsService's own session-fallback exclusion for AD_User's
+    // Default_Ad_Role_ID/Default_Ad_Client_ID/Default_Ad_Org_ID/Default_M_Warehouse_ID. It is
+    // dormant today only because core seeds session vars as #AD_Role_ID/#AD_Client_ID/
+    // #AD_Org_ID/#M_Warehouse_ID, never as #Default_Ad_Role_ID etc. — a naming coincidence, not
+    // a structural guarantee. Reusing the same deny-list here (instead of a second copy) closes
+    // this off regardless of what core's session-var seeding does today or in the future.
+    if (NeoDefaultsService.isUserSessionFallbackExcludedColumn(col)) {
+      return false;
+    }
     try {
       String dbColName = col.getDBColumnName();
       VariablesSecureApp vars = mCtx.vars;
@@ -571,6 +582,14 @@ public class NeoMandatoryDefaultsService {
    * ETP-3894: tryInjectFallbackFkDefault's replacement — only fires for combo-style references
    * (TableDir/Table/List), matching legitimate FIC parity, via {@code
    * NeoDefaultsService#resolveFirstComboOption}.
+   *
+   * <p>ETP-5277: this was the "5th path" found unguarded during review hardening — it calls
+   * {@code resolveFirstComboOption} directly, bypassing {@code resolveOrFirstComboOption}'s
+   * call-site guard entirely, so the W1 fix (guarding that one call site) did not cover this
+   * one. Now covered without any change needed here: the exclusion moved INTO {@code
+   * resolveFirstComboOption} itself, so this call site — and any other, current or future — is
+   * protected by construction. See {@code NeoDefaultsService#resolveFirstComboOption}'s javadoc
+   * for the authoritative guard.</p>
    */
   private static boolean tryInjectFirstFromLookup(JSONObject body, Entity dalEntity,
       String propName, Column col, NeoContext ctx) {

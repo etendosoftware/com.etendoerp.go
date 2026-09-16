@@ -62,6 +62,7 @@ import com.etendoerp.go.schemaforge.util.NeoLocatorIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
+import com.etendoerp.go.schemaforge.util.NeoValidationErrorResponseBuilder;
 
 /**
  * Handles all CRUD operations for NEO window entity endpoints.
@@ -794,7 +795,10 @@ class NeoCrudHandler {
             NeoListReferenceError.enrich(translated))));
     }
     if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
+      // ETP-5323: delegated to NeoValidationErrorResponseBuilder (kept out of this class to stay
+      // under SonarQube's method-count limit, java:S1448) — see its javadoc for the full
+      // RPCREQUEST_STATUS_VALIDATION_ERROR body shape and rationale.
+      return NeoValidationErrorResponseBuilder.build(innerResponse);
     }
     return null;
   }
@@ -1005,6 +1009,9 @@ class NeoCrudHandler {
     // its own timestamp on save.
     Object updatedBeforeFilter = rawBody != null ? rawBody.opt(FIELD_UPDATED) : null;
     JSONObject filteredBody = fieldFilter.filterWriteRequest(rawBody);
+    // ETP-5286: on a PATCH that changes `product` on a transactional document line, re-derive
+    // `uOM` from the NEW product. See applyDerivedUomOnUpdate's own javadoc for the why.
+    NeoCommercialLinePolicy.applyDerivedUomOnUpdate(filteredBody, dalEntityName);
     // Inject lineNetAmount when absent from filteredBody (stripped by readOnly filter).
     // The frontend sends invoicedQuantity and unitPrice as editable fields, so both are
     // available here to compute the correct net amount even for products where SL_Invoice_Amt

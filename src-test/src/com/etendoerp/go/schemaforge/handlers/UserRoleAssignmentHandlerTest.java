@@ -54,6 +54,7 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.enterprise.Warehouse;
 
 import com.etendoerp.go.rest.CompanyInvitationService;
 import com.etendoerp.go.rest.EtendoGoJwtSupport;
@@ -2654,6 +2655,212 @@ public class UserRoleAssignmentHandlerTest {
       when(obDal.get(User.class, USER_ID)).thenThrow(new RuntimeException("DB unavailable"));
 
       assertNull(handler.afterHandle(ctx));
+      obCtxMock.verify(OBContext::restorePreviousMode, times(1));
+    }
+  }
+
+  // ─── afterHandle: ETP-5277 patchUserDefaultsOntoRow (defaultRole/Client/Organization/
+  // Warehouse patched onto the create response after ensurePersonalRoleForNewlyCreatedUser) ────
+
+  /**
+   * ETP-5277: the create response must carry the FINAL, already-persisted values for all 4
+   * fields (plus their {@code $_identifier} companions) — not whatever the incoming create
+   * payload/response happened to carry before {@code ensurePersonalRoleForNewlyCreatedUser} ran.
+   * The row is seeded here with the exact shape of the leak the ticket reported (the creating
+   * admin's own session-derived role/client/org/warehouse already present on the row) to prove
+   * the patch OVERWRITES them with the real values read back off {@code user}, rather than
+   * merely filling in absent fields.
+   */
+  @Test
+  public void ensurePersonalRoleForNewlyCreatedUserPatchesAllFourDefaultFieldsWithFinalValues()
+      throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "leaked@example.com", "Leaked User");
+    JSONObject recordJson = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    // Simulate the ETP-5277 leak: the create response briefly carries the CREATING admin's own
+    // session-derived values for all 4 fields before this patch runs.
+    recordJson.put("defaultRole", "LEAKED-ADMIN-ROLE-ID");
+    recordJson.put("defaultClient", "LEAKED-ADMIN-CLIENT-ID");
+    recordJson.put("defaultOrganization", "LEAKED-ADMIN-ORG-ID");
+    recordJson.put("defaultWarehouse", "LEAKED-ADMIN-WAREHOUSE-ID");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    User createdUser = mock(User.class);
+    Role personalRole = mock(Role.class);
+    when(personalRole.getId()).thenReturn("personal-role-1");
+    when(personalRole.getIdentifier()).thenReturn("Personal Role");
+    Client finalClient = mock(Client.class);
+    when(finalClient.getId()).thenReturn("client-final-1");
+    when(finalClient.getIdentifier()).thenReturn("Final Client");
+    Organization finalOrg = mock(Organization.class);
+    when(finalOrg.getId()).thenReturn("org-final-1");
+    when(finalOrg.getIdentifier()).thenReturn("Final Org");
+    Warehouse finalWarehouse = mock(Warehouse.class);
+    when(finalWarehouse.getId()).thenReturn("wh-final-1");
+    when(finalWarehouse.getIdentifier()).thenReturn("Final Warehouse");
+    when(createdUser.getDefaultRole()).thenReturn(personalRole);
+    when(createdUser.getDefaultClient()).thenReturn(finalClient);
+    when(createdUser.getDefaultOrganization()).thenReturn(finalOrg);
+    when(createdUser.getDefaultWarehouse()).thenReturn(finalWarehouse);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedConstruction<UserRoleCompositionService> compositionServiceMock =
+            mockConstruction(UserRoleCompositionService.class, (m, constructionCtx) ->
+                when(m.createFreshPersonalRole(createdUser)).thenReturn(personalRole));
+        MockedStatic<UserRoleSyncSupport> syncMock = mockStatic(UserRoleSyncSupport.class);
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenReturn(createdUser);
+
+      assertNull(handler.afterHandle(ctx));
+
+      JSONObject patchedRow =
+          body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("personal-role-1", patchedRow.getString("defaultRole"));
+      assertEquals("Personal Role", patchedRow.getString("defaultRole$_identifier"));
+      assertEquals("client-final-1", patchedRow.getString("defaultClient"));
+      assertEquals("Final Client", patchedRow.getString("defaultClient$_identifier"));
+      assertEquals("org-final-1", patchedRow.getString("defaultOrganization"));
+      assertEquals("Final Org", patchedRow.getString("defaultOrganization$_identifier"));
+      assertEquals("wh-final-1", patchedRow.getString("defaultWarehouse"));
+      assertEquals("Final Warehouse", patchedRow.getString("defaultWarehouse$_identifier"));
+    }
+  }
+
+  /**
+   * ETP-5277 edge case: a newly-created user with no active warehouse yet resolved (a
+   * legitimately null {@code defaultWarehouse}) must have that field OMITTED from the patched
+   * row entirely — never forced to {@code JSONObject.NULL} — since the frontend's defaults-merge
+   * treats "absent" and "explicitly null" differently (see {@code patchUserDefaultsOntoRow}'s own
+   * javadoc). The other 3 fields must still be patched normally, proving this is a per-field skip,
+   * not an all-or-nothing abort.
+   */
+  @Test
+  public void ensurePersonalRoleForNewlyCreatedUserOmitsNullDefaultReferenceInsteadOfWritingJsonNull()
+      throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "no-warehouse@example.com",
+        "No Warehouse");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    User createdUser = mock(User.class);
+    Role personalRole = mock(Role.class);
+    when(personalRole.getId()).thenReturn("personal-role-2");
+    when(personalRole.getIdentifier()).thenReturn("Personal Role 2");
+    Client finalClient = mock(Client.class);
+    when(finalClient.getId()).thenReturn("client-final-2");
+    when(finalClient.getIdentifier()).thenReturn("Final Client 2");
+    Organization finalOrg = mock(Organization.class);
+    when(finalOrg.getId()).thenReturn("org-final-2");
+    when(finalOrg.getIdentifier()).thenReturn("Final Org 2");
+    when(createdUser.getDefaultRole()).thenReturn(personalRole);
+    when(createdUser.getDefaultClient()).thenReturn(finalClient);
+    when(createdUser.getDefaultOrganization()).thenReturn(finalOrg);
+    // No active warehouse resolved yet — the legitimately-null case this test targets.
+    when(createdUser.getDefaultWarehouse()).thenReturn(null);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedConstruction<UserRoleCompositionService> compositionServiceMock =
+            mockConstruction(UserRoleCompositionService.class, (m, constructionCtx) ->
+                when(m.createFreshPersonalRole(createdUser)).thenReturn(personalRole));
+        MockedStatic<UserRoleSyncSupport> syncMock = mockStatic(UserRoleSyncSupport.class);
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenReturn(createdUser);
+
+      assertNull(handler.afterHandle(ctx));
+
+      JSONObject patchedRow =
+          body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertEquals("personal-role-2", patchedRow.getString("defaultRole"));
+      assertEquals("client-final-2", patchedRow.getString("defaultClient"));
+      assertEquals("org-final-2", patchedRow.getString("defaultOrganization"));
+      assertFalse("A null defaultWarehouse reference must be omitted entirely, never written as "
+          + "JSONObject.NULL", patchedRow.has("defaultWarehouse"));
+      assertFalse(patchedRow.has("defaultWarehouse$_identifier"));
+    }
+  }
+
+  /**
+   * ETP-5277 best-effort contract: a failure while patching the 4 default-* fields onto the
+   * create response (isolated in {@code patchUserDefaultsOntoRowSafely}, mirroring {@code
+   * attachInvitationStatusToRowSafely}'s own established pattern) must be logged and swallowed —
+   * it must NEVER prevent the personal-role assignment itself (already fully persisted by the
+   * time the patch runs) from completing, nor block the invitation that follows. Simulated here
+   * by making the re-read {@code user.getDefaultRole()} reference blow up on {@code getId()} —
+   * distinct from the {@code personalRole} local variable used for the role assignment itself,
+   * so only the PATCH step is exercised, not the earlier role-composition step.
+   */
+  @Test
+  public void ensurePersonalRoleForNewlyCreatedUserSwallowsRowPatchFailureAndStillCompletesRoleAssignment()
+      throws Exception {
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    JSONObject body = buildCreatedRecordResponseBody(USER_ID, "patch-fails@example.com",
+        "Patch Fails");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    User createdUser = mock(User.class);
+    Role personalRole = mock(Role.class);
+    when(personalRole.getId()).thenReturn("personal-role-ok");
+    // The row-patch step re-reads user.getDefaultRole() independently of the local `personalRole`
+    // variable used for the actual assignment below — stubbing THIS to blow up isolates the
+    // failure to patchUserDefaultsOntoRow without touching the role-composition/sync steps.
+    Role brokenRoleReadBack = mock(Role.class);
+    when(brokenRoleReadBack.getId()).thenThrow(new RuntimeException("identifier lookup blew up"));
+    when(createdUser.getDefaultRole()).thenReturn(brokenRoleReadBack);
+
+    try (MockedStatic<OBContext> obCtxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+        MockedConstruction<UserRoleCompositionService> compositionServiceMock =
+            mockConstruction(UserRoleCompositionService.class, (m, constructionCtx) ->
+                when(m.createFreshPersonalRole(createdUser)).thenReturn(personalRole));
+        MockedStatic<UserRoleSyncSupport> syncMock = mockStatic(UserRoleSyncSupport.class);
+        MockedConstruction<CompanyInvitationService> invitationServiceMock =
+            mockConstruction(CompanyInvitationService.class)) {
+      obCtxMock.when(() -> OBContext.setAdminMode(true)).then(inv -> null);
+      obCtxMock.when(OBContext::restorePreviousMode).then(inv -> null);
+      OBDal obDal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(User.class, USER_ID)).thenReturn(createdUser);
+
+      assertNull(handler.afterHandle(ctx));
+
+      // The personal-role assignment itself must have completed in full, despite the row-patch
+      // failure that happens right after it.
+      verify(createdUser).setDefaultRole(personalRole);
+      verify(obDal).save(createdUser);
+      verify(obDal).flush();
+      syncMock.verify(
+          () -> UserRoleSyncSupport.syncSingleActiveUserRole(createdUser, personalRole));
+      // The invitation (the next step after ensurePersonalRoleForNewlyCreatedUser returns) must
+      // still have been attempted — the failure must not propagate and abort the caller.
+      assertEquals(1, invitationServiceMock.constructed().size());
+      // The row must not carry a partial/garbage write from the failed patch attempt.
+      JSONObject patchedRow =
+          body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+      assertFalse(patchedRow.has("defaultRole"));
       obCtxMock.verify(OBContext::restorePreviousMode, times(1));
     }
   }
