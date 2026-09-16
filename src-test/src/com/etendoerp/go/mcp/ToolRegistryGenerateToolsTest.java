@@ -1767,10 +1767,16 @@ class ToolRegistryGenerateToolsTest {
         assertFalse(names.contains("neo_create"));
         assertFalse(names.contains("neo_update"));
         assertFalse(names.contains("neo_delete"));
-        // neo_batch has no spec enum to narrow (its ops name their spec inline) and
-        // neo_action is not gated by the method flags, so both stay registered.
-        assertTrue(names.contains("neo_batch"));
+        // neo_action is not gated by the method flags, so it stays registered.
         assertTrue(names.contains("neo_action"));
+        // ETP-5335: neo_batch used to stay registered here too — it has no spec enum to narrow,
+        // since its operations name their spec inline. It is now published only while
+        // BATCH_TOOL_ENABLED is on, because it was a second create implementation that had
+        // drifted from neo_create in both directions. The assertion follows the flag rather than
+        // hardcoding today's value, so flipping it back on does not fail a test that was never
+        // about the flag.
+        assertEquals(McpConstants.BATCH_TOOL_ENABLED, names.contains("neo_batch"),
+            "neo_batch must be published exactly while its flag is on");
       }
     }
   }

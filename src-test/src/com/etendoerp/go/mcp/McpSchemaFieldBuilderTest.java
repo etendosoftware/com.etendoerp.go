@@ -639,46 +639,117 @@ class McpSchemaFieldBuilderTest {
 
   // ─── shouldIncludeSchemaColumn ──────────────────────────────────────
 
+  /**
+   * Rewritten for IMP-39 (ETP-5335): the predicate gained a third argument and a third question.
+   *
+   * <p>It used to answer "is this column active and not an audit column". It now also asks whether
+   * the spec exposes it — {@code neo_schema} stopped naming a field the write verbs and the filter
+   * path refuse, which is the three-way agreement IMP-39 exists to produce. The two exemptions it
+   * carries are the reason this is a predicate and not a set lookup, and both are asserted below
+   * because each was a measured decision: a button is always published (IMP-21 — an excluded action
+   * stays in the catalogue carrying {@code invokable:false}), and an uncurated column is published
+   * too, because absence of curation is not a decision (1043 such columns in a typical
+   * instance).</p>
+   */
   @Nested
   @DisplayName("shouldIncludeSchemaColumn")
   class ShouldIncludeSchemaColumn {
 
+    private static final Class<?>[] SIGNATURE = {
+        org.openbravo.model.ad.datamodel.Column.class, java.util.Set.class,
+        McpSchemaFieldBuilder.FieldMetadata.class };
+
+    private McpSchemaFieldBuilder.FieldMetadata metadata(String... excludedColumnIds) {
+      return new McpSchemaFieldBuilder.FieldMetadata(new HashMap<>(), new HashMap<>(),
+          new HashMap<>(), java.util.Set.of(excludedColumnIds));
+    }
+
+    private org.openbravo.model.ad.datamodel.Column column(String id, String dbName,
+        boolean active, String referenceId) {
+      org.openbravo.model.ad.datamodel.Column col =
+          mock(org.openbravo.model.ad.datamodel.Column.class);
+      when(col.getId()).thenReturn(id);
+      when(col.getDBColumnName()).thenReturn(dbName);
+      when(col.isActive()).thenReturn(active);
+      if (referenceId != null) {
+        org.openbravo.model.ad.domain.Reference reference =
+            mock(org.openbravo.model.ad.domain.Reference.class);
+        when(reference.getId()).thenReturn(referenceId);
+        when(col.getReference()).thenReturn(reference);
+      }
+      return col;
+    }
+
+    private boolean include(org.openbravo.model.ad.datamodel.Column col,
+        java.util.Set<String> systemCols, McpSchemaFieldBuilder.FieldMetadata fieldMetadata)
+        throws Exception {
+      return (boolean) invokeStatic("shouldIncludeSchemaColumn", SIGNATURE, col, systemCols,
+          fieldMetadata);
+    }
+
     @Test
     void activeNonSystemColumnIsIncluded() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.isActive()).thenReturn(true);
-      when(col.getDBColumnName()).thenReturn("Name");
-
-      java.util.Set<String> systemCols = java.util.Set.of("AD_CLIENT_ID", "AD_ORG_ID");
-      boolean result = (boolean) invokeStatic("shouldIncludeSchemaColumn",
-          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class, java.util.Set.class },
-          col, systemCols);
-      assertTrue(result);
+      assertTrue(include(column("col-1", "Name", true, null),
+          java.util.Set.of("AD_CLIENT_ID", "AD_ORG_ID"), metadata()));
     }
 
     @Test
     void inactiveColumnIsExcluded() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.isActive()).thenReturn(false);
-      when(col.getDBColumnName()).thenReturn("Name");
-
-      boolean result = (boolean) invokeStatic("shouldIncludeSchemaColumn",
-          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class, java.util.Set.class },
-          col, java.util.Set.of());
-      assertFalse(result);
+      assertFalse(include(column("col-1", "Name", false, null), java.util.Set.of(), metadata()));
     }
 
     @Test
     void systemColumnIsExcluded() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.isActive()).thenReturn(true);
-      when(col.getDBColumnName()).thenReturn("ad_client_id");
+      assertFalse(include(column("col-1", "ad_client_id", true, null),
+          java.util.Set.of("AD_CLIENT_ID", "AD_ORG_ID"), metadata()));
+    }
 
-      java.util.Set<String> systemCols = java.util.Set.of("AD_CLIENT_ID", "AD_ORG_ID");
-      boolean result = (boolean) invokeStatic("shouldIncludeSchemaColumn",
-          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class, java.util.Set.class },
-          col, systemCols);
-      assertFalse(result);
+    /**
+     * IMP-39. Before this, {@code neo_schema} named a field that {@code neo_create} now refuses
+     * with {@code field_not_allowed} and that {@code neo_list} refuses as a filter key — an agent
+     * was told a field existed by one tool and denied it by three.
+     */
+    @Test
+    @DisplayName("a column the spec excluded is not published")
+    void excludedColumnIsNotPublished() throws Exception {
+      assertFalse(include(column("col-excluded", "POReference", true, null),
+          java.util.Set.of(), metadata("col-excluded")));
+    }
+
+    /**
+     * <b>Absence of curation is not a decision.</b> A column with no {@code ETGO_SF_FIELD} row —
+     * one added to AD after the last {@code push-to-neo}, or any column of a handler-backed entity
+     * that has no field rows at all — must stay on the surface.
+     */
+    @Test
+    @DisplayName("a column with no ETGO_SF_FIELD row is still published")
+    void uncuratedColumnIsStillPublished() throws Exception {
+      assertTrue(include(column("col-uncurated", "Description", true, null),
+          java.util.Set.of(), metadata("some-other-column")));
+    }
+
+    /**
+     * IMP-21, settled the other way on measured evidence: an excluded action stays in the
+     * catalogue carrying {@code invokable:false} and a machine-readable {@code notInvokableReason},
+     * because knowing an action exists but is out of scope is useful, while being told it is
+     * callable when it is not is not. Dropping buttons here would silently revert that.
+     */
+    @Test
+    @DisplayName("a button column is published even when the spec excludes it")
+    void buttonColumnsSurviveExclusion() throws Exception {
+      assertTrue(include(column("col-button", "DocAction", true, "28"),
+          java.util.Set.of(), metadata("col-button")),
+          "an excluded action must remain visible as invokable:false, not vanish");
+    }
+
+    /** An inactive or audit column loses whatever the exemptions would have granted it. */
+    @Test
+    @DisplayName("the active/system checks still come first, buttons included")
+    void theStructuralChecksOutrankTheExemptions() throws Exception {
+      assertFalse(include(column("col-button", "DocAction", false, "28"),
+          java.util.Set.of(), metadata()));
+      assertFalse(include(column("col-button", "ad_org_id", true, "28"),
+          java.util.Set.of("AD_ORG_ID"), metadata()));
     }
   }
 

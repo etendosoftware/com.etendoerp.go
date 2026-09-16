@@ -62,15 +62,36 @@ class McpFieldsSectionTest {
   @DisplayName("declaration")
   class Declaration {
 
+    /**
+     * Updated for IMP-39 (ETP-5335): {@code included} joined the documented keys. It is the one
+     * that moves <b>inclusion</b> rather than classification — it can reclaim a field the shared
+     * curation excluded, or exclude one it exposes, for the MCP alone — and it is what
+     * {@code McpQuerySupport.writeGate} and {@code filterablePropertyNames} now resolve through
+     * {@code McpFieldView} instead of through a criteria.
+     */
     @Test
-    @DisplayName("declares the four documented keys and replace semantics")
+    @DisplayName("declares the five documented keys and replace semantics")
     void declaresKeys() {
       McpConfigSection section = McpFieldsSection.declaration();
       assertEquals(McpFieldsSection.NAME, section.getName());
       assertEquals("fields", section.getName());
       assertEquals(McpConfigSection.Merge.REPLACE, section.getMerge());
-      assertEquals(Set.of("visibility", "readOnly", "businessCritical", "reason"),
+      assertEquals(Set.of("visibility", "included", "readOnly", "businessCritical", "reason"),
           section.getAllowedKeys());
+    }
+
+    /**
+     * {@code included} is not a synonym of {@code visibility:"discarded"} and must be spelled as
+     * its own key: roughly half the {@code ISINCLUDED = 'N'} rows in a typical instance carry no
+     * {@code VISIBILITY} string at all, so the two axes genuinely differ.
+     */
+    @Test
+    @DisplayName("included is a first-class key, not an alias of visibility")
+    void includedIsItsOwnKey() {
+      Set<String> allowed = McpFieldsSection.declaration().getAllowedKeys();
+      assertTrue(allowed.contains(McpFieldsSection.KEY_INCLUDED));
+      assertFalse(allowed.contains("isIncluded"));
+      assertFalse(allowed.contains("include"));
     }
 
     @Test
