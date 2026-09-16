@@ -154,6 +154,11 @@ class McpResourceProviderTest {
     Reference reference = mock(Reference.class);
 
     when(field.getADColumn()).thenReturn(column);
+    // Inclusion used to be filtered by the criteria — which these tests mock, so it never
+    // filtered anything here and the fixture could leave the flag unstubbed. buildFieldsArray now
+    // resolves it through McpFieldView, so an unstubbed Boolean (null, hence not included) would
+    // drop every field and every assertion below would be about an empty array.
+    when(field.isIncluded()).thenReturn(true);
     when(field.isReadOnly()).thenReturn(readOnly);
     when(field.getDefaultValue()).thenReturn(defaultValue);
 
@@ -684,6 +689,92 @@ class McpResourceProviderTest {
       assertEquals("Order Line", fieldObj.getString("label"));
       assertEquals("id", fieldObj.getString("type"));
       assertTrue(fieldObj.getBoolean("required"));
+    }
+
+    /**
+     * Inclusion is still enforced — it just moved out of the criteria and into
+     * {@link McpFieldView}.
+     *
+     * <p>The criteria used to carry the filter, and every test in this class mocks the criteria,
+     * so nothing here ever exercised it: an excluded field would have been listed. Now the filter
+     * is Java the test actually runs.</p>
+     */
+    @Test
+    @DisplayName("an excluded field is omitted from the fields array")
+    void excludedFieldIsOmitted() throws Exception {
+      McpConfigSections.resetForTests();
+      McpConfigCache.invalidateAll();
+
+      SFSpec spec = buildSpec("s1", "excl-spec", "W", "Excluded Spec");
+      when(spec.getADWindow()).thenReturn(null);
+
+      SFEntity entity = buildEntity("e1", "Entity1", true);
+      SFField included = buildField("DocumentNo", "Document No", "10", false, false, null);
+      SFField excluded = buildField("CreatedBy", "Created By", "10", false, false, null);
+      when(excluded.isIncluded()).thenReturn(false);
+
+      routerSupportMock.when(() -> McpToolRouterSupport.findActiveSpecByName("excl-spec"))
+          .thenReturn(spec);
+      routerSupportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W")).thenReturn(true);
+      routerSupportMock.when(() -> McpToolRouterSupport.listIncludedEntities("s1"))
+          .thenReturn(Collections.singletonList(entity));
+      routerSupportMock.when(() -> McpToolRouterSupport.buildMethodsArray(entity))
+          .thenReturn(new JSONArray().put("GET"));
+
+      mockFieldCriteria(List.of(included, excluded));
+
+      JSONObject result = provider.readResource("neo://specs/excl-spec");
+
+      JSONArray fields = result.getJSONArray("entities").getJSONObject(0).getJSONArray("fields");
+      assertEquals(1, fields.length(), "the excluded row must not reach the resource listing");
+      assertEquals("DocumentNo", fields.getJSONObject(0).getString("name"));
+    }
+
+    /**
+     * The reason the filter had to move: an {@code MCP_CONFIG} {@code fields.included} override
+     * lives in a JSON column no criteria joins, so this listing answered on the pre-override value
+     * while {@code neo_schema} answered on the override.
+     *
+     * <p><b>The exclusion direction on purpose.</b> The reclaim direction cannot be asserted here
+     * and it would be a mute test if it were: the criteria is mocked, so its rows reach the loop
+     * whatever the criteria asked for, and a reclaimed field would be listed by the broken code
+     * too. Only the override <i>removing</i> a row the criteria handed over distinguishes the two
+     * implementations. The reclaim direction is covered where it can bite — at the
+     * {@link McpFieldView} seam and in {@code ToolRegistryGenerateToolsTest}.</p>
+     */
+    @Test
+    @DisplayName("an MCP_CONFIG override that excludes a listed field is honoured")
+    void overrideExclusionIsHonoured() throws Exception {
+      McpConfigSections.resetForTests();
+      McpConfigCache.invalidateAll();
+
+      SFSpec spec = buildSpec("s1", "ovr-spec", "W", "Override Spec");
+      when(spec.getADWindow()).thenReturn(null);
+
+      SFEntity entity = buildEntity("e1", "Entity1", true);
+      when(entity.get(SFEntity.PROPERTY_MCPCONFIG)).thenReturn(
+          "{\"fields\":{\"included\":false,\"reason\":\"resource listing fixture\"}}");
+
+      // The row includes it — so the criteria handed it over, and only the override can drop it.
+      SFField field = buildField("M_Product_ID", "Product", "30", false, false, null);
+      when(field.getId()).thenReturn("overridden-field-1");
+      when(field.getETGOSFEntity()).thenReturn(entity);
+
+      routerSupportMock.when(() -> McpToolRouterSupport.findActiveSpecByName("ovr-spec"))
+          .thenReturn(spec);
+      routerSupportMock.when(() -> McpToolRouterSupport.hasSpecAccess(spec, "W")).thenReturn(true);
+      routerSupportMock.when(() -> McpToolRouterSupport.listIncludedEntities("s1"))
+          .thenReturn(Collections.singletonList(entity));
+      routerSupportMock.when(() -> McpToolRouterSupport.buildMethodsArray(entity))
+          .thenReturn(new JSONArray().put("GET"));
+
+      mockFieldCriteria(Collections.singletonList(field));
+
+      JSONObject result = provider.readResource("neo://specs/ovr-spec");
+
+      JSONArray fields = result.getJSONArray("entities").getJSONObject(0).getJSONArray("fields");
+      assertEquals(0, fields.length(),
+          "the override excludes the field, and a criteria on ISINCLUDED could never have known");
     }
 
     /**

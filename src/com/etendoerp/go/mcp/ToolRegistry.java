@@ -1218,11 +1218,15 @@ public class ToolRegistry {
         OBCriteria<SFField> fieldCriteria = OBDal.getInstance().createCriteria(SFField.class);
         fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entity.getId()));
         fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
-        fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
         List<SFField> fields = fieldCriteria.list();
 
         for (SFField field : fields) {
-          if (field.getADColumn() != null) {
+          // Field inclusion goes through McpFieldView, never a criteria: the MCP_CONFIG
+          // fields.included override lives in JSON the database does not join, so a restriction
+          // here would advertise a different parameter set than neo_schema reports. The entity
+          // restriction above stays a criteria on purpose - MCP_CONFIG overrides field inclusion
+          // only, so there is nothing for a resolver to add at the entity level.
+          if (field.getADColumn() != null && McpFieldView.of(field).isIncluded()) {
             String fieldName = field.getADColumn().getDBColumnName();
             String label = field.getADColumn().getName();
             paramProps.put(fieldName, stringProp(label));
