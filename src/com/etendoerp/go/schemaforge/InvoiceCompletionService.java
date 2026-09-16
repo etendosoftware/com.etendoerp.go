@@ -178,8 +178,12 @@ final class InvoiceCompletionService {
   }
 
   /**
-   * Reads the human-readable message out of a completion response, falling back to a generic text
-   * when the body is missing or unreadable (never lets the reporting path mask the real failure).
+   * Reads the human-readable message out of a completion response.
+   *
+   * <p>Has to check both shapes: {@code NeoProcessService.translateClassicResult} puts the
+   * business message at the top level, while {@code NeoResponse.error(int, String)} nests it under
+   * {@code error.message}. Reading only the first would silently drop the reason on exactly the
+   * failures worth diagnosing — the blank-id rejection and every infrastructure error.
    */
   private static String extractMessage(NeoResponse response) {
     JSONObject body = response.getBody();
@@ -187,6 +191,13 @@ final class InvoiceCompletionService {
       String message = body.optString("message", null);
       if (StringUtils.isNotBlank(message)) {
         return message;
+      }
+      JSONObject error = body.optJSONObject("error");
+      if (error != null) {
+        String nested = error.optString("message", null);
+        if (StringUtils.isNotBlank(nested)) {
+          return nested;
+        }
       }
     }
     return "Invoice completion failed";
