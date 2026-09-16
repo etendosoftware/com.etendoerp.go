@@ -58,9 +58,11 @@ public class OAuth2Filter implements Filter {
   private static final String TOKEN_LOOKUP_SQL =
       "SELECT t.etgo_oauth2_token_id, t.scopes AS token_scopes, t.expires_at, t.is_revoked, "
           + "c.ad_user_id, c.ad_role_id, c.scopes AS client_scopes, c.isactive AS client_active, "
-          + "c.ad_client_id AS etendo_client_id, t.ad_org_id AS etendo_org_id "
+          + "COALESCE(o.ad_client_id, c.ad_client_id) AS etendo_client_id, "
+          + "t.ad_org_id AS etendo_org_id "
           + "FROM etgo_oauth2_token t "
           + "JOIN etgo_oauth2_client c ON t.etgo_oauth2_client_id = c.etgo_oauth2_client_id "
+          + "LEFT JOIN ad_org o ON t.ad_org_id = o.ad_org_id "
           + "WHERE t.access_token_hash = ?";
 
   // Request attribute keys for downstream consumption

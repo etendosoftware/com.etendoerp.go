@@ -112,6 +112,23 @@ class NeoOpenAPIEndpointTest {
     }
   }
 
+  @Test
+  @DisplayName("Registers the public API key lifecycle contract")
+  void registersPublicApiKeyPaths() throws Exception {
+    OpenAPI openAPI = new OpenAPI();
+    openAPI.setPaths(new Paths());
+    invokePrivate(endpoint, "addPublicApiKeyPaths", new Class<?>[] { OpenAPI.class }, openAPI);
+
+    assertNotNull(openAPI.getPaths().get("/oauth2/api-keys").getGet());
+    assertNotNull(openAPI.getPaths().get("/oauth2/api-keys").getPost());
+    assertNotNull(openAPI.getPaths().get("/oauth2/api-keys/{id}").getPut());
+    assertNotNull(openAPI.getPaths().get("/oauth2/api-keys/{id}").getDelete());
+    assertNotNull(openAPI.getPaths().get("/oauth2/api-keys/{id}/rotate").getPost());
+    assertNotNull(openAPI.getPaths().get("/oauth2/api-keys/{id}/revoke-tokens").getPost());
+    assertTrue(openAPI.getPaths().get("/oauth2/api-keys/{id}/rotate").getPost()
+        .getDescription().contains("once"));
+  }
+
   // -------------------------------------------------------------------------
   // add() integration — process spec paths
   // -------------------------------------------------------------------------
