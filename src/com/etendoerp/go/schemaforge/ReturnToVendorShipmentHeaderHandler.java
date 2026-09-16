@@ -71,6 +71,8 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
   private static final String ACTION_AVAILABLE_RECEIPTS = "availableReceipts";
   private static final String ACTION_AVAILABLE_LINES = "availableReceiptLines";
   private static final String ACTION_CREATE_RETURN_INVOICE = "createReturnInvoice";
+  /** ETP-5381: lists the confirmed invoices this return document can rectify. */
+  private static final String ACTION_RECTIFIABLE_INVOICES = "rectifiableInvoices";
   private static final String ACTION_DOCUMENT_ACTION = "documentAction";
 
   @Override
@@ -102,6 +104,9 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
     }
     if (ACTION_CREATE_RETURN_INVOICE.equals(action) && "POST".equals(method)) {
       return handleCreateReturnInvoice(context);
+    }
+    if (ACTION_RECTIFIABLE_INVOICES.equals(action) && "POST".equals(method)) {
+      return handleRectifiableInvoices(context);
     }
     if (ACTION_DOCUMENT_ACTION.equals(action) && "POST".equals(method)) {
       NeoHandlerUtils.reanchorLinesToHeaderWarehouse(context.getRecordId(), log);
@@ -275,6 +280,33 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
   // Action: createReturnInvoice  (Reversed Purchase Invoice — API + isReturn)
   // ---------------------------------------------------------------------------
 
+  /**
+   * ETP-5381: returns the confirmed invoices this return shipment can rectify, so the UI can make
+   * the user pick one before the rectificative invoice is created and confirmed. Mirror of the
+   * sales-side handler.
+   */
+  private NeoResponse handleRectifiableInvoices(NeoContext context) {
+    String returnId = context.getRecordId();
+    if (returnId == null || returnId.isBlank()) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Record ID is required");
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        return ReturnShipmentUtils.buildRectifiableInvoicesResponse(returnId);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (OBException e) {
+      log.warn("Could not list rectifiable invoices for shipment {}: {}", returnId, e.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+    } catch (Exception e) {
+      log.error("Error listing rectifiable invoices for shipment {}: {}", returnId, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "An internal error occurred while listing the invoices available to rectify");
+    }
+  }
+
   private NeoResponse handleCreateReturnInvoice(NeoContext context) {
     String returnId = context.getRecordId();
     if (returnId == null || returnId.isBlank()) {
@@ -290,6 +322,11 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
         if (!"CO".equals(returnDoc.getDocumentStatus())) {
           return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
               "Return shipment must be completed before creating a return invoice");
+        }
+
+        // ETP-5381 (guard P5): reject a second rectificative invoice before writing anything.
+        if (ReturnShipmentUtils.hasNonVoidedReturnInvoice(returnId)) {
+          throw new AlreadyInvoicedException(ReturnShipmentUtils.ERR_RETURN_ALREADY_INVOICED);
         }
 
         List<ShipmentInOutLine> lines = returnDoc.getMaterialMgmtShipmentInOutLineList()
@@ -308,15 +345,25 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
               "No rectificative invoice document type found for this organization");
         }
 
+        // ETP-5381: resolve WHICH invoices are being rectified before creating anything. Without
+        // the C_Invoice_Reverse link the rectificative invoice cannot be confirmed, so failing
+        // here leaves no stuck draft behind.
+        List<String> rectifiedIds = ReturnShipmentUtils.resolveRectifiedInvoiceIds(
+            context.getRequestBody(), returnId);
+
         Invoice sourceInvoice = ReturnShipmentUtils.findSourceInvoice(lines);
         Invoice invoice = ReturnShipmentUtils.buildReturnInvoiceHeader(returnDoc, docType, sourceInvoice, false);
         OBDal.getInstance().save(invoice);
         OBDal.getInstance().flush();
-        return ReturnShipmentUtils.finalizeReturnInvoice(invoice, lines, createDraftInvoiceHandler);
+        return ReturnShipmentUtils.finalizeReturnInvoice(invoice, lines, createDraftInvoiceHandler,
+            rectifiedIds, context.getObContext());
 
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (AlreadyInvoicedException e) {
+      log.warn("Rejected duplicate return invoice for shipment {}: {}", returnId, e.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, e.getMessage());
     } catch (OBException e) {
       log.warn("Return invoice creation rejected for shipment {}: {}", returnId, e.getMessage());
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
