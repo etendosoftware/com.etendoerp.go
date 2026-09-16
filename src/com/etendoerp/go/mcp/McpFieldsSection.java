@@ -34,6 +34,7 @@ import org.codehaus.jettison.json.JSONObject;
  * {
  *   "fields": {
  *     "visibility":       "editable",
+ *     "included":         true,
  *     "readOnly":         false,
  *     "businessCritical": true,
  *     "reason":           "C_Location's ETGO_SF_FIELD rows carry no visibility ..."
@@ -94,6 +95,7 @@ final class McpFieldsSection {
   static final String NAME = "fields";
 
   static final String KEY_VISIBILITY = "visibility";
+  static final String KEY_INCLUDED = "included";
   static final String KEY_READ_ONLY = "readOnly";
   static final String KEY_BUSINESS_CRITICAL = "businessCritical";
   static final String KEY_REASON = "reason";
@@ -110,10 +112,10 @@ final class McpFieldsSection {
 
   /** The keys that must hold a JSON boolean when present. */
   private static final List<String> BOOLEAN_KEYS =
-      List.of(KEY_READ_ONLY, KEY_BUSINESS_CRITICAL);
+      List.of(KEY_INCLUDED, KEY_READ_ONLY, KEY_BUSINESS_CRITICAL);
 
   private static final Set<String> ALLOWED_KEYS =
-      Set.of(KEY_VISIBILITY, KEY_READ_ONLY, KEY_BUSINESS_CRITICAL, KEY_REASON);
+      Set.of(KEY_VISIBILITY, KEY_INCLUDED, KEY_READ_ONLY, KEY_BUSINESS_CRITICAL, KEY_REASON);
 
   private McpFieldsSection() {
   }
@@ -142,8 +144,8 @@ final class McpFieldsSection {
     List<String> problems = new ArrayList<>();
     if (body.length() == 0) {
       problems.add("the '" + NAME + "' section is empty - remove it, or set at least one of "
-          + KEY_VISIBILITY + "/" + KEY_READ_ONLY + "/" + KEY_BUSINESS_CRITICAL + " plus "
-          + KEY_REASON);
+          + KEY_VISIBILITY + "/" + KEY_INCLUDED + "/" + KEY_READ_ONLY + "/" + KEY_BUSINESS_CRITICAL
+          + " plus " + KEY_REASON);
       return problems;
     }
     validateVisibility(body, problems);
@@ -231,6 +233,37 @@ final class McpFieldsSection {
    */
   static String visibility(JSONObject body) {
     return body == null ? null : StringUtils.trimToNull(body.optString(KEY_VISIBILITY, null));
+  }
+
+  /**
+   * The declared inclusion flag — whether the MCP surface carries this field at all.
+   *
+   * <p><b>This is the escape hatch for IMP-39's exclusion gate</b> (see §4.12.10 of
+   * {@code neo-headless.md}). Since that change a field whose {@code ETGO_SF_FIELD} row says
+   * {@code ISINCLUDED = 'N'} is absent from {@code neo_schema} and refused by {@code neo_list} as a
+   * filter and by {@code neo_create}/{@code neo_update} as a value. That is the right default —
+   * {@code discarded} is a decision about the product surface, and the agent surface should not
+   * quietly contradict it — but the two surfaces are not the same surface, and there are real
+   * cases where a field a person never needs to see is one an agent legitimately needs to carry.
+   * Setting {@code included: true} here restores it for the MCP and <b>for the MCP only</b>: the
+   * REST and React layers read {@code ISINCLUDED} off the row and never see this section.</p>
+   *
+   * <p>It works in both directions. {@code included: false} removes a field from the agent surface
+   * that the shared curation still exposes, without touching what the UI shows.</p>
+   *
+   * <p><b>It widens what is offered, never what is allowed</b> — the same boundary as
+   * {@code visibility} above. Reclaiming a field does not make a write succeed that the DAL, AD's
+   * own {@code isUpdatable}, or the caller's role would refuse; it makes the agent able to attempt
+   * it and be refused by the authority that owns that answer. And {@code reason} is mandatory, so
+   * every reclamation says on its own row why the shared curation was wrong for agent use.</p>
+   *
+   * @param body the section body, may be {@code null}
+   * @return {@link Boolean#TRUE}/{@link Boolean#FALSE} as configured, or
+   *         {@link Optional#empty()} when the key is absent — which leaves the {@code SFField}
+   *         row's own flag standing
+   */
+  static Optional<Boolean> included(JSONObject body) {
+    return booleanAt(body, KEY_INCLUDED);
   }
 
   /**

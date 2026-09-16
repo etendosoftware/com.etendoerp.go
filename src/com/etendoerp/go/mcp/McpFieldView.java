@@ -112,6 +112,10 @@ final class McpFieldView {
     // standing. Same three outcomes as the previous explicit null checks.
     readOnly = McpFieldsSection.readOnly(fields).orElse(readOnly);
     businessCritical = McpFieldsSection.businessCritical(fields).orElse(businessCritical);
+    // IMP-39: the override may now reclaim a field the shared curation excluded, or exclude one it
+    // exposes - for the MCP alone. Same merge rule as the flags above: an unstated key leaves the
+    // SFField row's own value standing.
+    included = McpFieldsSection.included(fields).orElse(included);
     return new McpFieldView(visibility, readOnly, businessCritical, included);
   }
 
@@ -126,6 +130,33 @@ final class McpFieldView {
    */
   String getVisibility() {
     return visibility;
+  }
+
+  /**
+   * Whether the spec exposes this field at all — the {@code ETGO_SF_FIELD.ISINCLUDED} flag, which
+   * {@code push-to-neo.js} writes {@code N} for the {@code discarded} visibility decision.
+   *
+   * <p>Distinct from {@link #isEditable()} on purpose: {@code readOnly} and {@code system} fields
+   * are included and not editable, while a {@code discarded} field is not included at all. The
+   * question this answers is "does this field exist as far as the agent surface is concerned",
+   * which gates whether {@code neo_schema} may name it and whether a write or a filter may carry
+   * it — not whether a value may be assigned to it.</p>
+   *
+   * <p><b>Read it through this class, never off the row.</b> Two independent reasons, and each one
+   * alone is enough. Roughly half the {@code ISINCLUDED = 'N'} rows in a typical instance carry no
+   * {@code VISIBILITY} string at all, because {@code push-to-neo.js} maps the decision to the
+   * booleans and leaves the column {@code NULL} — so code comparing the visibility string to
+   * {@code "discarded"} sees only part of the excluded set. And the {@code MCP_CONFIG}
+   * {@code fields.included} override can reclaim a field the shared curation excluded, or exclude
+   * one it exposes; a reader that queries {@code ISINCLUDED} in its own criteria silently ignores
+   * that override and drifts away from every other reader, which is the exact failure IMP-39 was.
+   * {@code McpFieldViewSingleResolverCallSiteTest} fails the build if a reader stops going through
+   * here.</p>
+   *
+   * @return {@code true} when the field is part of the spec's surface
+   */
+  boolean isIncluded() {
+    return included;
   }
 
   /**
@@ -163,13 +194,12 @@ final class McpFieldView {
    * <p><b>Scope.</b> The one consumer of this is {@link McpQuerySupport#editablePropertyNames},
    * read by {@code McpToolRouter} for {@link McpDefaultsView#apply} — the {@code neo_defaults}
    * grouped/minimal split between {@code confirm} and {@code systemManaged}. It is purely
-   * presentational and gates no write. The create path does not consult {@code isIncluded} at all
-   * ({@code mapFieldsToDalProperties} takes only the tab and maps names to DAL properties), so an
-   * {@code ISINCLUDED = 'N'} column such as {@code C_Location.RegionName} stays writable through
-   * {@code neo_create} either way.</p>
+   * presentational and gates no write; {@link #isIncluded()} is what gates the write, since
+   * IMP-39.</p>
    *
-   * @return {@code true} when the field is included in the spec, is not read-only, and is either
-   *         curated {@code editable} or carries no curated visibility at all
+   * @return {@code true} when the field is included (after any {@code MCP_CONFIG} override), is
+   *         not read-only, and is either curated {@code editable} or carries no curated visibility
+   *         at all
    */
   boolean isEditable() {
     if (!included || readOnly) {

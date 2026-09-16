@@ -79,6 +79,10 @@ final class McpQuerySupport {
       return null;
     }
 
+    // IMP-39: resolved once per request, not once per key - it costs one query, and the previous
+    // contract was that the happy path pays nothing for the failure path's `available` list.
+    java.util.Set<String> excluded = excludedPropertyNames(sfEntity, dalEntity);
+
     StringBuilder where = new StringBuilder();
     java.util.Iterator<String> keys = filters.keys();
     while (keys.hasNext()) {
@@ -89,9 +93,9 @@ final class McpQuerySupport {
         continue;
       }
       if (value instanceof JSONObject) {
-        appendOperatorConditions(where, dalEntity, sfEntity, key, (JSONObject) value);
+        appendOperatorConditions(where, dalEntity, sfEntity, excluded, key, (JSONObject) value);
       } else {
-        appendEqualityCondition(where, dalEntity, sfEntity, key, value);
+        appendEqualityCondition(where, dalEntity, sfEntity, excluded, key, value);
       }
     }
     return where.length() > 0 ? where.toString() : null;
@@ -109,22 +113,103 @@ final class McpQuerySupport {
    *
    * @param dalEntity the DAL entity the filter is aimed at
    * @param sfEntity  the SchemaForge entity, used to list the filterable names on the failure path
+   * @param excluded  the property names the spec excluded, resolved once per request by
+   *                  {@link #excludedPropertyNames}
    * @param key       the filter key as the caller spelled it
    * @return the resolved property, never {@code null}
    * @throws McpRoutingException 422 {@code unknown_filter_field}, naming the keys that would work
    */
-  private static Property resolveFilterProperty(Entity dalEntity, SFEntity sfEntity, String key) {
-    Property byColumn = dalEntity.getPropertyByColumnName(key, false);
-    if (byColumn != null) {
-      return byColumn;
+  private static Property resolveFilterProperty(Entity dalEntity, SFEntity sfEntity,
+      java.util.Set<String> excluded, String key) {
+    Property resolved = dalEntity.getPropertyByColumnName(key, false);
+    if (resolved == null) {
+      try {
+        resolved = dalEntity.getProperty(key);
+      } catch (Exception ignored) {
+        throw unknownFilterField(key, dalEntity, sfEntity);
+      }
     }
-    try {
-      return dalEntity.getProperty(key);
-    } catch (Exception ignored) {
-      throw McpRoutingException.unknownFilterField(key,
-          sfEntity == null ? dalEntity.getName() : sfEntity.getName(),
-          filterablePropertyNames(sfEntity, dalEntity));
+    // IMP-39: resolving against the DAL model is not the same question as "may this be filtered".
+    // It used to be the only check, so a field the spec excluded filtered perfectly well while the
+    // `available` list below - which has always been scoped to the included rows - did not name it
+    // and neo_get did not project it. The set that is enforced and the set that is advertised must
+    // be one set.
+    if (excluded.contains(resolved.getName())) {
+      throw unknownFilterField(key, dalEntity, sfEntity);
     }
+    return resolved;
+  }
+
+  /**
+   * The one refusal for a filter key that may not be used, whatever the reason.
+   *
+   * <p><b>Deliberately identical for a name that does not exist and a name the spec excludes.</b>
+   * Two distinguishable answers would let any caller enumerate the columns of the underlying AD
+   * table by probing keys and reading which refusal came back — the response itself would confirm
+   * the existence of every field the spec was curated to hide. The wording says the key is not
+   * available on this entity and stops there: it neither asserts nor denies that a column of that
+   * name exists. What the caller is entitled to know is in {@code available}, which lists exactly
+   * the fields this entity does expose.</p>
+   *
+   * @param key       the filter key as the caller spelled it
+   * @param dalEntity the DAL entity, for mapping columns to property names
+   * @param sfEntity  the SchemaForge entity, or {@code null}
+   * @return the exception to throw
+   */
+  private static McpRoutingException unknownFilterField(String key, Entity dalEntity,
+      SFEntity sfEntity) {
+    return McpRoutingException.unknownFilterField(key,
+        sfEntity == null ? dalEntity.getName() : sfEntity.getName(),
+        filterablePropertyNames(sfEntity, dalEntity));
+  }
+
+  /**
+   * The property names the spec deliberately excluded from this entity's surface — the one set
+   * both the filter path and the write path refuse, so the two cannot drift apart.
+   *
+   * <p><b>Excluded, not "not included".</b> Only a {@code ETGO_SF_FIELD} row that exists and says
+   * {@code ISINCLUDED = 'N'} bars a filter. A column with no row at all is uncurated, and absence
+   * of curation is not a decision to hide it — there are over a thousand such columns across the
+   * curated entities of a typical instance, and a handler-backed entity (dashboards, reports,
+   * reconciliation views) has no field rows whatsoever, so an "included-only" allowlist would
+   * reject every filter those entities were ever sent.</p>
+   *
+   * @param sfEntity  the SchemaForge entity, or {@code null} when none is in play
+   * @param dalEntity the DAL entity, for mapping columns to property names
+   * @return the excluded property names, possibly empty, never {@code null}
+   */
+  static java.util.Set<String> excludedPropertyNames(SFEntity sfEntity, Entity dalEntity) {
+    java.util.Set<String> excluded = new java.util.HashSet<>();
+    if (sfEntity == null) {
+      return excluded;
+    }
+    for (SFField sfField : activeFields(sfEntity)) {
+      Column col = sfField.getADColumn();
+      // Through McpFieldView, never a Restrictions.eq on ISINCLUDED: the MCP_CONFIG
+      // fields.included override is invisible to a criteria, and a reader that ignored it would
+      // drift from neo_schema - which is the disagreement IMP-39 exists to end.
+      if (col == null || McpFieldView.of(sfField).isIncluded()) {
+        continue;
+      }
+      Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
+      if (prop != null) {
+        excluded.add(prop.getName());
+      }
+    }
+    return excluded;
+  }
+
+  /**
+   * Every active {@code SFField} row of an entity, in one query.
+   *
+   * @param sfEntity the SchemaForge entity
+   * @return the rows, possibly empty
+   */
+  private static java.util.List<SFField> activeFields(SFEntity sfEntity) {
+    OBCriteria<SFField> crit = OBDal.getInstance().createCriteria(SFField.class);
+    crit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
+    crit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
+    return crit.list();
   }
 
   /**
@@ -141,7 +226,7 @@ final class McpQuerySupport {
    * @param dalEntity the DAL entity, for mapping columns to property names
    * @return the sorted filterable names, possibly empty, never {@code null}
    */
-  private static java.util.List<String> filterablePropertyNames(SFEntity sfEntity,
+  static java.util.List<String> filterablePropertyNames(SFEntity sfEntity,
       Entity dalEntity) {
     java.util.SortedSet<String> names = new java.util.TreeSet<>();
     if (sfEntity == null) {
@@ -150,13 +235,11 @@ final class McpQuerySupport {
       }
       return new java.util.ArrayList<>(names);
     }
-    OBCriteria<SFField> crit = OBDal.getInstance().createCriteria(SFField.class);
-    crit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
-    crit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
-    crit.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
-    for (SFField sfField : crit.list()) {
+    for (SFField sfField : activeFields(sfEntity)) {
       Column col = sfField.getADColumn();
-      if (col == null) {
+      // Same resolver as the exclusion set above, so what is advertised and what is enforced
+      // cannot disagree - including when MCP_CONFIG reclaims a field.
+      if (col == null || !McpFieldView.of(sfField).isIncluded()) {
         continue;
       }
       Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
@@ -169,8 +252,8 @@ final class McpQuerySupport {
 
   /** Append {@code e.prop = value} (or {@code e.prop.id = 'value'} for a FK), type-aware. */
   private static void appendEqualityCondition(StringBuilder where, Entity dalEntity,
-      SFEntity sfEntity, String key, Object value) {
-    Property prop = resolveFilterProperty(dalEntity, sfEntity, key);
+      SFEntity sfEntity, java.util.Set<String> excluded, String key, Object value) {
+    Property prop = resolveFilterProperty(dalEntity, sfEntity, excluded, key);
     appendAnd(where);
     if (!prop.isPrimitive()) {
       where.append("e.").append(prop.getName()).append(".id=")
@@ -183,8 +266,9 @@ final class McpQuerySupport {
 
   /** Append one HQL comparison per range operator found in {@code operators}. */
   private static void appendOperatorConditions(StringBuilder where, Entity dalEntity,
-      SFEntity sfEntity, String key, JSONObject operators) throws JSONException {
-    Property prop = resolveFilterProperty(dalEntity, sfEntity, key);
+      SFEntity sfEntity, java.util.Set<String> excluded, String key,
+      JSONObject operators) throws JSONException {
+    Property prop = resolveFilterProperty(dalEntity, sfEntity, excluded, key);
     Class<?> type = prop.isPrimitive() ? prop.getPrimitiveObjectType() : String.class;
     java.util.Iterator<String> ops = operators.keys();
     while (ops.hasNext()) {

@@ -639,10 +639,12 @@ public class McpToolRouter {
 
     Map<String, String> params = McpWriteRequestSupport.buildBaseParams(adTab, dalEntityName);
 
-    // MCP: accept all valid table columns from AI agents, not just SF-configured ones.
-    // filterWriteRequest strips fields not in ETGO_SF_FIELD writableFields, which is
-    // too restrictive for MCP where AI agents need to set any valid column.
-    JSONObject filteredBody = McpWriteRequestSupport.mapFieldsToDalProperties(fields, adTab);
+    // IMP-39: the spec's exclusions are honoured here. This used to accept every valid table
+    // column "not just SF-configured ones", which is what let a curated-out field be written and
+    // filtered while neo_get denied it existed. A column with no ETGO_SF_FIELD row is still
+    // accepted — only an explicit exclusion is refused.
+    JSONObject filteredBody = McpWriteRequestSupport.mapFieldsToDalProperties(fields, adTab,
+        sfEntity);
 
     // Hoisted so both FK-by-name resolution (IMP-4, below) and the sentinel/coercion passes
     // further down share one DAL entity lookup.
@@ -834,8 +836,10 @@ public class McpToolRouter {
 
     Map<String, String> params = McpWriteRequestSupport.buildBaseParams(adTab, dalEntityName);
 
-    // MCP: accept all valid table columns from AI agents
-    JSONObject filteredBody = McpWriteRequestSupport.mapFieldsToDalProperties(fields, adTab);
+    // IMP-39: same exclusion gate as handleCreate — the write verbs and the read projection must
+    // agree about which fields exist.
+    JSONObject filteredBody = McpWriteRequestSupport.mapFieldsToDalProperties(fields, adTab,
+        sfEntity);
 
     // Unlike handleCreate this path never runs injectMandatoryDefaults (see the IMP-16 note
     // further down), so every key filteredBody carries at this point is the caller's own — this
@@ -1153,8 +1157,7 @@ public class McpToolRouter {
     Map<String, String> requiredWhenByField =
         McpSchemaFieldBuilder.loadPreconditionRequirements(sfEntity);
     JSONArray fieldsArray = McpSchemaFieldBuilder.buildSchemaFieldsArray(adTab, dalEntity,
-        fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
-        fieldMetadata.readOnlyByColumnId, promptByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
+        fieldMetadata, promptByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
     McpSchemaFieldBuilder.applyPreconditionRequirements(fieldsArray, requiredWhenByField);
     // IMP-1: overlay clean, localized labels + one-line descriptions from AD_Field so the agent
     // sees "SII Description" instead of the raw AD_Column name "EM_Aeatsii_Descripcion_Sii".

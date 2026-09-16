@@ -89,8 +89,41 @@ final class McpWriteRequestSupport {
    */
   static JSONObject mapFieldsToDalProperties(JSONObject fields, Tab adTab)
       throws JSONException {
+    return mapFieldsToDalProperties(fields, adTab, null);
+  }
+
+  /**
+   * Maps the caller's field names onto DAL properties, refusing any the spec excludes.
+   *
+   * <p><b>IMP-39 — this reverses a deliberate earlier decision, and the reversal is the point.</b>
+   * Both write call sites carried the comment <em>"MCP: accept all valid table columns from AI
+   * agents, not just SF-configured ones. filterWriteRequest strips fields not in ETGO_SF_FIELD
+   * writableFields, which is too restrictive for MCP where AI agents need to set any valid
+   * column."</em> The cost of that openness was measured: {@code orderReference}, curated out of
+   * the sales-order window, could be written and filtered while {@code neo_get} refused to project
+   * it — so an agent could set a value, be told 200, and never read it back. The three tools now
+   * answer the same question the same way.</p>
+   *
+   * <p><b>What it does not do.</b> A key that resolves to no property at all still passes through
+   * untouched: that is <b>IMP-18</b> (an unknown field accepted in silence on write) and it is not
+   * fixed here. The set this refuses is only the one the spec explicitly excluded — a field with
+   * no {@code ETGO_SF_FIELD} row is uncurated, and absence of curation is not a decision. Nor does
+   * it touch the server's own injected keys: the injectors run downstream of this mapping, on the
+   * body it returns.</p>
+   *
+   * @param fields   the caller's field map
+   * @param adTab    the tab whose table the fields belong to
+   * @param sfEntity the SchemaForge entity; {@code null} skips the check, which is what the
+   *                 two-argument overload preserves for callers that have no spec in hand
+   * @return the body keyed by DAL property name
+   * @throws JSONException          if the body cannot be read
+   * @throws McpRoutingException    422 {@code field_not_allowed} naming what may be sent instead
+   */
+  static JSONObject mapFieldsToDalProperties(JSONObject fields, Tab adTab, SFEntity sfEntity)
+      throws JSONException {
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableId(adTab.getTable().getId());
+    Set<String> excluded = McpQuerySupport.excludedPropertyNames(sfEntity, dalEntity);
     JSONObject mapped = new JSONObject();
 
     Iterator<String> keys = fields.keys();
@@ -111,7 +144,13 @@ final class McpWriteRequestSupport {
         }
       }
 
-      // Pass through unknown keys (parentId, etc.)
+      // IMP-39: refuse only what the spec excluded. An unresolved key still passes through
+      // (parentId and friends travel this way, and IMP-18 owns the unknown-key case).
+      if (prop != null && excluded.contains(mappedKey)) {
+        throw McpRoutingException.fieldNotAllowed(key,
+            sfEntity == null ? dalEntity.getName() : sfEntity.getName(),
+            McpQuerySupport.filterablePropertyNames(sfEntity, dalEntity));
+      }
       mapped.put(mappedKey, value);
     }
     return mapped;

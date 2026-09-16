@@ -214,7 +214,13 @@ class McpRoutingException extends OBException {
       names = names.subList(0, McpConstants.MAX_AVAILABLE_NAMES);
     }
     return new McpRoutingException(
-        "Unknown filter field '" + key + "' on entity '" + entityName + "'",
+        // IMP-39: deliberately says "not available", never "unknown". The same refusal answers a
+        // name that does not exist and a name the spec excludes, because two distinguishable
+        // answers would let a caller enumerate the underlying AD table by probing keys and reading
+        // which refusal came back. The message neither asserts nor denies that such a column
+        // exists; 'available' says what this entity does expose, which is what the caller is
+        // entitled to know.
+        "Field '" + key + "' is not available for filtering on entity '" + entityName + "'",
         McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_UNKNOWN_FILTER_FIELD, key, names,
         truncated
             ? "Retry with one of the names in 'available'. That list is truncated — call "
@@ -249,6 +255,44 @@ class McpRoutingException extends OBException {
    * @param available the argument names the tool does declare
    * @return the exception to throw
    */
+  /**
+   * A write carried a field the spec does not expose on this entity (IMP-39).
+   *
+   * <p>The write path used to map the caller's keys straight onto the DAL model and pass anything
+   * it could not map through untouched, with an explicit comment saying the MCP deliberately
+   * accepts "all valid table columns from AI agents, not just SF-configured ones". That is what
+   * let {@code orderReference} — curated out of the sales-order window — be written and filtered
+   * while {@code neo_get} denied it existed: three tools, three answers, and a caller that sets a
+   * value, receives 200, and can never read it back.</p>
+   *
+   * <p><b>The wording is the security property.</b> It says the field is not allowed here and
+   * stops. It does not say the field exists, does not say it was curated out, and does not say it
+   * is unknown — because a caller able to tell those apart could enumerate the columns of the
+   * underlying AD table by sending keys and reading which refusal came back. {@code available}
+   * carries what this entity does expose, which is the only part the caller is entitled to.</p>
+   *
+   * @param field      the field name that is not allowed
+   * @param entityName the entity the write was aimed at
+   * @param available  the field names this entity does expose; need not be pre-sorted or truncated
+   * @return the exception to throw
+   */
+  static McpRoutingException fieldNotAllowed(String field, String entityName,
+      List<String> available) {
+    List<String> names = available == null ? List.of() : available;
+    boolean truncated = names.size() > McpConstants.MAX_AVAILABLE_NAMES;
+    if (truncated) {
+      names = names.subList(0, McpConstants.MAX_AVAILABLE_NAMES);
+    }
+    return new McpRoutingException(
+        "Field '" + field + "' is not allowed on entity '" + entityName + "'",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_FIELD_NOT_ALLOWED, field, names,
+        truncated
+            ? "Send only fields listed in 'available'. That list is truncated — call neo_schema "
+                + "with view:\"create\" for this entity to see every field you may send."
+            : "Send only fields listed in 'available'.",
+        McpConstants.SEE_ALSO_WRITING);
+  }
+
   static McpRoutingException unknownArgument(String argument, String toolName,
       List<String> available) {
     return new McpRoutingException(

@@ -123,6 +123,15 @@ final class McpConstants {
   static final String ERROR_UNKNOWN_FILTER_FIELD = "unknown_filter_field";
   /** Machine-detectable code for a top-level argument the tool does not declare (IMP-40). */
   static final String ERROR_UNKNOWN_ARGUMENT = "unknown_argument";
+
+  /**
+   * A write carried a field the spec does not expose on this entity (IMP-39).
+   *
+   * <p>Named for what the caller may do, not for what exists: a field curated out of a window and
+   * a field that was never a column of its table get this same code and the same message, so the
+   * response cannot be used to probe which columns the underlying AD table really has.</p>
+   */
+  static final String ERROR_FIELD_NOT_ALLOWED = "field_not_allowed";
   /**
    * Machine-detectable error code for a call on a child entity that did not name its parent
    * (ETP-5184). In Etendo a child record is only ever browsed inside one parent record — there is

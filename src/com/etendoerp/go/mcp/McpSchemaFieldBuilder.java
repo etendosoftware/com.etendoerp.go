@@ -172,6 +172,7 @@ final class McpSchemaFieldBuilder {
     Map<String, String> visibilityByColumnId = new HashMap<>();
     Map<String, Boolean> businessCriticalByColumnId = new HashMap<>();
     Map<String, Boolean> readOnlyByColumnId = new HashMap<>();
+    java.util.Set<String> excludedColumnIds = new java.util.HashSet<>();
     OBCriteria<SFField> fieldCrit = OBDal.getInstance().createCriteria(SFField.class);
     fieldCrit.add(Restrictions.eq(
         SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
@@ -192,21 +193,55 @@ final class McpSchemaFieldBuilder {
       }
       businessCriticalByColumnId.put(colId, view.isBusinessCritical());
       readOnlyByColumnId.put(colId, view.isReadOnly());
+      // IMP-39: the fields the spec deliberately excluded. Resolved through the same view as every
+      // other curated signal, so an ISINCLUDED='N' row whose VISIBILITY is NULL is caught too -
+      // roughly half the excluded rows in a typical instance are in exactly that state.
+      if (!view.isIncluded()) {
+        excludedColumnIds.add(colId);
+      }
     }
-    return new FieldMetadata(visibilityByColumnId, businessCriticalByColumnId, readOnlyByColumnId);
+    return new FieldMetadata(visibilityByColumnId, businessCriticalByColumnId, readOnlyByColumnId,
+        excludedColumnIds);
   }
 
   static final class FieldMetadata {
     final Map<String, String> visibilityByColumnId;
     final Map<String, Boolean> businessCriticalByColumnId;
     final Map<String, Boolean> readOnlyByColumnId;
+    /**
+     * AD_Column ids the spec deliberately excluded — a {@code ETGO_SF_FIELD} row that exists and
+     * carries {@code ISINCLUDED = 'N'}.
+     *
+     * <p><b>Excluded, not "not included".</b> The distinction is the whole design: a column with
+     * no {@code ETGO_SF_FIELD} row at all is <em>uncurated</em>, and absence of curation is not a
+     * decision to hide — the same principle {@code addInvokability} already applies to buttons.
+     * There are 1043 such columns across the curated entities of a typical instance (a column
+     * added to AD after the last {@code push-to-neo}, a table the spec never walked in full), and
+     * treating that silence as exclusion would remove them from the surface on no one's authority.
+     * It also makes the handler-backed entities — dashboards, reports, reconciliation views, which
+     * have no field rows whatsoever — fall out correctly with no special case: nothing is
+     * excluded, so nothing changes for them.</p>
+     */
+    final java.util.Set<String> excludedColumnIds;
 
     FieldMetadata(Map<String, String> visibilityByColumnId,
         Map<String, Boolean> businessCriticalByColumnId,
-        Map<String, Boolean> readOnlyByColumnId) {
+        Map<String, Boolean> readOnlyByColumnId,
+        java.util.Set<String> excludedColumnIds) {
       this.visibilityByColumnId = visibilityByColumnId;
       this.businessCriticalByColumnId = businessCriticalByColumnId;
       this.readOnlyByColumnId = readOnlyByColumnId;
+      this.excludedColumnIds = excludedColumnIds;
+    }
+
+    /**
+     * Whether {@code col} may be named on the agent surface of this entity.
+     *
+     * @param col the AD column
+     * @return {@code false} only when the spec carries a row for it saying it is excluded
+     */
+    boolean exposes(Column col) {
+      return !excludedColumnIds.contains((String) col.getId());
     }
   }
 
@@ -441,18 +476,72 @@ final class McpSchemaFieldBuilder {
       Map<String, String> visibilityByColumnId, Map<String, Boolean> businessCriticalByColumnId,
       Map<String, Boolean> readOnlyByColumnId, Map<String, String> promptByColumnId,
       java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs) throws JSONException {
+    return buildSchemaFieldsArray(adTab, dalEntity,
+        new FieldMetadata(visibilityByColumnId, businessCriticalByColumnId, readOnlyByColumnId,
+            java.util.Set.of()),
+        promptByColumnId, systemColumns, selectorRefs);
+  }
+
+  /**
+   * Builds the {@code neo_schema} field array for an entity, naming only the fields the spec
+   * exposes.
+   *
+   * <p><b>IMP-39 — {@code discarded} now means absent, not annotated.</b> This loop used to walk
+   * every active AD column of the table and hang the curated {@code visibility} on the result, so
+   * a field the spec had excluded was still published, merely labelled. That is what let the three
+   * write/read/filter tools disagree about whether {@code orderReference} exists, and it is a
+   * quarter of the surface: on a typical instance 1162 of 4659 curated fields across 150 exposed
+   * entities carry {@code ISINCLUDED = 'N'}.</p>
+   *
+   * <p><b>Two exemptions, both deliberate.</b> A column with no {@code ETGO_SF_FIELD} row is
+   * published, because absence of curation is not a decision to exclude — see
+   * {@link FieldMetadata#excludedColumnIds}. And a
+   * {@code type:"button"} column is always published, because <b>IMP-21</b> settled that question
+   * the other way on measured evidence: an excluded action stays in the catalogue carrying
+   * {@code invokable:false} and a machine-readable {@code notInvokableReason}, since knowing an
+   * action exists but is out of scope is useful, where being told it is callable when it is not is
+   * not. Removing buttons here would silently revert that.</p>
+   *
+   * @param adTab         the tab whose table supplies the columns
+   * @param dalEntity     the DAL entity, for property-name resolution; may be {@code null}
+   * @param fieldMetadata the curated field metadata, including which columns the spec exposes
+   * @param promptByColumnId  agent prompts keyed by AD_Column id
+   * @param systemColumns system/audit columns never published
+   * @param selectorRefs  AD_Reference ids treated as selectors
+   * @return the field array
+   * @throws JSONException if the array cannot be assembled
+   */
+  static JSONArray buildSchemaFieldsArray(Tab adTab, Entity dalEntity,
+      FieldMetadata fieldMetadata, Map<String, String> promptByColumnId,
+      java.util.Set<String> systemColumns, java.util.Set<String> selectorRefs)
+      throws JSONException {
     JSONArray fieldsArray = new JSONArray();
     for (Column col : adTab.getTable().getADColumnList()) {
-      if (shouldIncludeSchemaColumn(col, systemColumns)) {
-        fieldsArray.put(buildSchemaField(col, adTab, dalEntity, visibilityByColumnId,
-            businessCriticalByColumnId, readOnlyByColumnId, promptByColumnId, selectorRefs));
+      if (shouldIncludeSchemaColumn(col, systemColumns, fieldMetadata)) {
+        fieldsArray.put(buildSchemaField(col, adTab, dalEntity,
+            fieldMetadata.visibilityByColumnId, fieldMetadata.businessCriticalByColumnId,
+            fieldMetadata.readOnlyByColumnId, promptByColumnId, selectorRefs));
       }
     }
     return fieldsArray;
   }
 
-  private static boolean shouldIncludeSchemaColumn(Column col, java.util.Set<String> systemColumns) {
-    return col.isActive() && !systemColumns.contains(col.getDBColumnName().toUpperCase());
+  private static boolean shouldIncludeSchemaColumn(Column col, java.util.Set<String> systemColumns,
+      FieldMetadata fieldMetadata) {
+    if (!col.isActive() || systemColumns.contains(col.getDBColumnName().toUpperCase())) {
+      return false;
+    }
+    return isButtonColumn(col) || fieldMetadata.exposes(col);
+  }
+
+  /**
+   * @param col the AD column
+   * @return whether the column is a button, i.e. an action rather than a value — see IMP-21 in
+   *         {@link #buildSchemaFieldsArray(Tab, Entity, FieldMetadata, Map, java.util.Set, java.util.Set)}
+   */
+  private static boolean isButtonColumn(Column col) {
+    String refId = col.getReference() != null ? (String) col.getReference().getId() : null;
+    return TYPE_BUTTON.equals(mapColumnType(refId));
   }
 
   private static JSONObject buildSchemaField(Column col, Tab adTab, Entity dalEntity,

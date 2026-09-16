@@ -1715,7 +1715,7 @@ metadata.
 | Section | Level | Purpose |
 |---|---|---|
 | `parent` | entity | How a child entity identifies its parent, and for which verbs the parent key is required (`field`, `entity`, `optionalFor`, `mode`, `reason`). See §6. |
-| `fields` | spec / entity / field | Reclassifies the MCP's view of field curation — `visibility`, `readOnly`, `businessCritical`, `reason`. |
+| `fields` | spec / entity / field | Reclassifies the MCP's view of field curation — `visibility`, `included`, `readOnly`, `businessCritical`, `reason`. |
 
 ##### The `fields` section
 
@@ -1723,6 +1723,7 @@ metadata.
 {
   "fields": {
     "visibility": "editable",
+    "included": true,
     "readOnly": false,
     "businessCritical": true,
     "reason": "why the shared curation is wrong for agent use"
@@ -1732,6 +1733,15 @@ metadata.
 
 - `visibility` — one of `editable`, `readOnly`, `system`, `discarded`. An unknown value is a
   validation error.
+- `included` — **the escape hatch for the exclusion gate of §4.12.10.** Since that change, a field
+  whose `ETGO_SF_FIELD` row says `ISINCLUDED = 'N'` is absent from `neo_schema` and refused by
+  `neo_list` and the write verbs. `included: true` reclaims it for the MCP and for the MCP only —
+  the REST and React layers read the row and never see this section. `included: false` does the
+  reverse: it removes from the agent surface a field the shared curation still exposes, without
+  touching what the UI shows. The default is right (`discarded` is a decision about the product
+  surface, and the agent surface should not quietly contradict it), but the two surfaces are not the
+  same surface, and a field a person never needs to see can be one an agent legitimately needs to
+  carry. Like `visibility`, it widens what is *offered*, never what is *allowed*.
 - `readOnly`, `businessCritical` — JSON booleans, unquoted. An absent key is *not* a configured
   `false`: it leaves the `ETGO_SF_FIELD` value standing.
 - `reason` — **mandatory** whenever the section is present, and non-blank. Every row of this section
@@ -1761,14 +1771,22 @@ gap. It was not taken here because that column is read by the REST and React lay
 backfill changes the shared contract for every existing consumer. The override is the deliberately
 low-risk path: MCP-only, blast radius of one entity. Only `bpLocation` carries it today.
 
-**One resolver, three readers.** `McpFieldView.of(SFField)` applies the resolved section and is the
-single source of `visibility` / `readOnly` / `businessCritical` / `isEditable` for all three places
+**One resolver, every reader.** `McpFieldView.of(SFField)` applies the resolved section and is the
+single source of `visibility` / `included` / `readOnly` / `businessCritical` / `isEditable` for the
+places
 that previously derived them independently — `McpSchemaFieldBuilder.loadFieldMetadata`
 (`neo_schema`), `McpQuerySupport.editablePropertyNames` (`neo_selectors`, which computed its own
 `isIncluded && !isReadOnly`) and `McpResourceProvider`. Without it an override honoured by only the
 first reader would have `neo_schema` and `neo_selectors` contradicting each other about the same
 field. A field that neither the row nor the override classifies still reports **no** `visibility`
 key, exactly as before.
+
+`included` is under the same rule and it matters more than the others: the exclusion gate of
+§4.12.10 is enforced by `neo_schema`, by `neo_list`'s filter resolution and by the write verbs, so a
+reader that queried `ISINCLUDED` in its own criteria would honour the override in one place and
+ignore it in the other two — reproducing exactly the three-way disagreement §4.12.10 exists to end.
+`McpQuerySupport.excludedPropertyNames` and `filterablePropertyNames` therefore load the rows and
+resolve through `McpFieldView`, never through a `Restrictions.eq` on the column.
 
 ##### Entity-level `AGENT_PROMPT` — a sibling column, not an `MCP_CONFIG` section
 
@@ -1970,6 +1988,104 @@ working variant by retrying.
 keeps serving its callers (the OCR purchase-invoice ingest), so `BatchService` stays live.
 `handleBatch` and the MCP-side pre-pass are kept as they are — flipping the flag to `true` restores
 the tool with nothing else to change.
+
+---
+
+#### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
+
+**A field the spec excludes is absent from `neo_schema`, refused by `neo_list` as a filter, and
+refused by `neo_create` / `neo_update` as a value.** Before this, only the read projection honoured
+the decision, and the three tools disagreed with one another about whether the same field existed.
+
+##### The defect
+
+`orderReference` (`C_Order.POReference`) is curated `visibility:"discarded"` on `sales-order/header`.
+Measured against a live instance:
+
+| Call | Answer |
+|---|---|
+| `neo_update(fields:{orderReference:"X"})` | `200`, value persisted |
+| `neo_get(id:…)` | field absent from the record |
+| `neo_list(filters:{orderReference:"X"})` | `200`, `totalRows: 1` |
+
+So an agent could set a value, be told the write succeeded, and then have no way to read it back —
+every read said empty while the database said otherwise. The same shape as a silent write failure,
+except the write actually worked.
+
+##### The cause, which was one cause and not three
+
+The MCP surface was built **from the AD table** and used the curated spec only as decoration. Only
+the read projection was built from the spec.
+
+- `McpSchemaFieldBuilder.buildSchemaFieldsArray` walked every active AD column and hung the curated
+  `visibility` on the result — it never filtered.
+- `McpQuerySupport.resolveFilterProperty` accepted any key that resolved against the **DAL model**,
+  while the `available` list it offered on refusal was scoped to the spec's **included rows**. The
+  set advertised and the set enforced were two different sets.
+- `McpWriteRequestSupport.mapFieldsToDalProperties` mapped names onto DAL properties and passed the
+  rest through, under an explicit comment stating that the MCP accepts *"all valid table columns
+  from AI agents, not just SF-configured ones"*.
+
+##### The rule now
+
+**Only an explicit exclusion excludes.** A field is refused when its `ETGO_SF_FIELD` row exists and
+carries `ISINCLUDED = 'N'` — which is what `push-to-neo.js` writes for the `discarded` decision.
+Read it through `McpFieldView.isIncluded()`, never off the row's `VISIBILITY` string: roughly half
+the excluded rows carry `ISINCLUDED = 'N'` with a **`NULL` visibility**, because the pipeline maps
+the decision to the booleans and leaves the string empty.
+
+**A column with no row at all is uncurated and stays exposed.** Absence of curation is not a
+decision — the same principle `addInvokability` already applies to buttons. There are ~1043 such
+columns across the curated entities of a typical instance (a column added to AD since the last
+`push-to-neo`, a table the spec never walked in full), and treating that silence as exclusion would
+remove them on nobody's authority. It also makes the ~21 handler-backed entities (dashboards,
+reports, reconciliation views), which have no field rows whatsoever, fall out correctly with no
+special case.
+
+**Buttons are exempt.** `IMP-21` settled that question the other way on measured evidence: an
+excluded action stays in the catalogue carrying `invokable:false` and a machine-readable
+`notInvokableReason`, because knowing an action exists but is out of scope is useful where being
+told it is callable when it is not is not. Filtering buttons here would silently revert it.
+
+##### The refusal says as little as possible
+
+Both refusals are deliberately **indistinguishable from the answer for a name that does not exist**:
+
+```
+neo_list   → 422 unknown_filter_field
+             "Field 'X' is not available for filtering on entity 'Y'"  + available[]
+neo_create → 422 field_not_allowed
+             "Field 'X' is not allowed on entity 'Y'"                  + available[]
+```
+
+Neither asserts nor denies that a column of that name exists. Two distinguishable answers would let
+any caller enumerate the columns of the underlying AD table by probing keys and reading which
+refusal came back — the response itself would confirm the existence of every field the spec was
+curated to hide. `available` carries what the entity does expose, which is the only part the caller
+is entitled to.
+
+##### The override
+
+The rule is a default, not a wall. `MCP_CONFIG → fields.included` (§4.12.6) reclaims an excluded
+field for the agent surface, or removes an exposed one, **for the MCP alone** — the REST and React
+layers read `ISINCLUDED` off the row and never see the section. It carries a mandatory `reason`, so
+every reclamation states on its own row why the shared curation was wrong for agent use, and like
+every other key in that section it widens what is *offered*, never what is *allowed*: a field
+reclaimed here still has to get past the DAL, AD's own `isUpdatable` and the caller's role.
+
+This is why the exclusion set is read through `McpFieldView` in all three paths rather than through a
+`Restrictions.eq` on `ISINCLUDED`. A criteria cannot see the override, so a reader using one would
+honour it in `neo_schema` and ignore it in `neo_list` and the write verbs — the same three-way
+disagreement this section exists to end, reintroduced by the fix for it.
+
+##### Scope and what is not fixed
+
+- **MCP only.** The REST layer keeps its own `NeoFieldFilter` and is untouched.
+- **`IMP-18` is not fixed here.** A key that resolves to no property at all still passes through the
+  write path in silence. The set refused here is only the explicitly excluded one.
+- **Injected values are unaffected.** The server's own injectors (`McpBillToInjector`,
+  `McpLinePriceInjector`, the mandatory-defaults pass) run *downstream* of the mapping, on the body
+  it returns, so they can still populate an excluded column when the platform requires it.
 
 ---
 
