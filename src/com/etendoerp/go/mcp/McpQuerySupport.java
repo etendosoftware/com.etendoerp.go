@@ -272,10 +272,10 @@ final class McpQuerySupport {
     }
     for (SFField sfField : activeFields(sfEntity)) {
       Column col = sfField.getADColumn();
-      if (col == null) {
-        continue;
-      }
-      Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
+      // A row with no column, and a column the DAL does not map, are the same non-answer here:
+      // there is no property to put in either set.
+      Property prop = col == null ? null
+          : dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
       if (prop == null) {
         continue;
       }

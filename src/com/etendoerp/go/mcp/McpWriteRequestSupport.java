@@ -184,19 +184,8 @@ final class McpWriteRequestSupport {
     while (keys.hasNext()) {
       String key = keys.next();
       Object value = fields.get(key);
-      String mappedKey = key;
-
-      // Try as DAL property name first
-      Property prop = dalEntity.getProperty(key, false);
-      if (prop != null) {
-        mappedKey = key;
-      } else {
-        // Try as DB column name
-        prop = dalEntity.getPropertyByColumnName(key, false);
-        if (prop != null) {
-          mappedKey = prop.getName();
-        }
-      }
+      Property prop = resolveProperty(dalEntity, key);
+      String mappedKey = mappedKeyFor(dalEntity, key, prop);
 
       // Tenant ownership outranks curation: client and organization are resolved from the
       // session on every write, so the caller's value is dropped here and never reaches the
@@ -207,25 +196,80 @@ final class McpWriteRequestSupport {
         continue;
       }
 
-      // IMP-39 / IMP-48: two gates, two answers. An unresolved key still passes through
-      // (parentId and friends travel this way, and IMP-18 owns the unknown-key case).
-      if (prop != null) {
-        String entityName = sfEntity == null ? dalEntity.getName() : sfEntity.getName();
-        if (gate.excluded.contains(mappedKey)) {
-          throw McpRoutingException.fieldNotAllowed(key, entityName,
-              McpQuerySupport.filterablePropertyNames(sfEntity, dalEntity));
-        }
-        if (gate.readOnlyRejectable.contains(mappedKey)
-            || gate.rejectsDefaultOverride(mappedKey, value)) {
-          throw McpRoutingException.readOnlyField(key, entityName);
-        }
-      } else if (!McpConstants.PARAM_PARENT_ID.equals(key)) {
-        // parentId is a declared argument of the write tools, not a stray key - see resolveParentFK.
-        unknown.add(key);
-      }
+      applyWriteGates(prop, gate, key, mappedKey, value, sfEntity, dalEntity, unknown);
       mapped.put(mappedKey, value);
     }
     return mapped;
+  }
+
+  /**
+   * The DAL property a caller's key names: its property name first, its DB column name second.
+   *
+   * @param dalEntity the entity being written to
+   * @param key       the caller's own key
+   * @return the resolved property, or {@code null} when the key names neither
+   */
+  private static Property resolveProperty(Entity dalEntity, String key) {
+    Property byPropertyName = dalEntity.getProperty(key, false);
+    return byPropertyName != null ? byPropertyName
+        : dalEntity.getPropertyByColumnName(key, false);
+  }
+
+  /**
+   * The key the caller's value travels under from here on.
+   *
+   * <p>The caller's own key when it already named a property, or when it resolved to nothing at
+   * all - an unresolved key is passed through untouched, which is how {@code parentId} and the
+   * handler-read keys reach their handlers. The property name only when the caller named a DB
+   * column, since that is the one case where the two spellings differ.</p>
+   *
+   * @param dalEntity the entity being written to
+   * @param key       the caller's own key
+   * @param prop      the property {@link #resolveProperty} found, may be {@code null}
+   * @return the key to write under
+   */
+  private static String mappedKeyFor(Entity dalEntity, String key, Property prop) {
+    if (prop == null || dalEntity.getProperty(key, false) != null) {
+      return key;
+    }
+    return prop.getName();
+  }
+
+  /**
+   * Apply the two curation gates to one key, or record it as unrecognised.
+   *
+   * <p>IMP-39 / IMP-48: two gates, two answers. An unresolved key still passes through - parentId
+   * and friends travel this way, and IMP-18 owns the unknown-key case, which reports rather than
+   * refuses.</p>
+   *
+   * @param prop       the resolved property, or {@code null} when the key named none
+   * @param gate       the entity's write gate
+   * @param key        the caller's own key, used in the refusal so it reads back what it sent
+   * @param mappedKey  the key the gates are keyed by
+   * @param value      the value sent, needed to tell a default echo from an override
+   * @param sfEntity   the SchemaForge entity, may be {@code null}
+   * @param dalEntity  the DAL entity being written to
+   * @param unknown    collects keys that resolved to nothing
+   * @throws McpRoutingException when the field is excluded or read-only
+   */
+  private static void applyWriteGates(Property prop, McpQuerySupport.WriteGate gate, String key,
+      String mappedKey, Object value, SFEntity sfEntity, Entity dalEntity, Set<String> unknown) {
+    if (prop == null) {
+      // parentId is a declared argument of the write tools, not a stray key - see resolveParentFK.
+      if (!McpConstants.PARAM_PARENT_ID.equals(key)) {
+        unknown.add(key);
+      }
+      return;
+    }
+    String entityName = sfEntity == null ? dalEntity.getName() : sfEntity.getName();
+    if (gate.excluded.contains(mappedKey)) {
+      throw McpRoutingException.fieldNotAllowed(key, entityName,
+          McpQuerySupport.filterablePropertyNames(sfEntity, dalEntity));
+    }
+    if (gate.readOnlyRejectable.contains(mappedKey)
+        || gate.rejectsDefaultOverride(mappedKey, value)) {
+      throw McpRoutingException.readOnlyField(key, entityName);
+    }
   }
 
   /**

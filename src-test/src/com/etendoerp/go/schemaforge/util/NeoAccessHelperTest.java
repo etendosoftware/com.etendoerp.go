@@ -787,7 +787,7 @@ public class NeoAccessHelperTest {
     SFSpec spec = reportSpec("spec-report-handler-silent");
     givenSpecEntities(Collections.singletonList(reportEntity("someUiHandler")));
 
-    NeoHandler undeclaring = context -> null;
+    NeoHandler undeclaring = neoContext -> null;
 
     try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
       lookupMock.when(() -> NeoHandlerLookup.byQualifierQuietly("someUiHandler"))

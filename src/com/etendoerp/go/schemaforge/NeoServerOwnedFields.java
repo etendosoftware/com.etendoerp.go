@@ -68,6 +68,8 @@ public final class NeoServerOwnedFields {
   }
 
   /**
+   * Whether the server, not the caller, decides this property's value on every write.
+   *
    * @param propertyName a DAL property name
    * @return whether the server owns this property on write
    */
@@ -76,6 +78,8 @@ public final class NeoServerOwnedFields {
   }
 
   /**
+   * Whether the server owns this DAL property, for callers that already resolved one.
+   *
    * @param prop a DAL property, may be {@code null}
    * @return whether the server owns this property on write
    */
@@ -134,6 +138,8 @@ public final class NeoServerOwnedFields {
    * not. On update they must simply not change.</p>
    *
    * @param body the request body, modified in place; {@code null} is tolerated
+   * @param dalEntity the DAL entity the body is being written to, used to resolve a raw key to
+   *     the property it names
    * @return a report keyed by property name, each entry holding the {@code sent} and
    *     {@code session} values, or an empty object when nothing differed
    */

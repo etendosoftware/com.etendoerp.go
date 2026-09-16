@@ -46,6 +46,9 @@ class McpRoutingException extends OBException {
   /** Repeated by three factories; Sonar java:S1192 and one place to reword it. */
   private static final String RETRY_WITH_AVAILABLE = "Retry with one of the names in 'available'.";
 
+  /** Opens every message that names the offending field, so the three read the same way. */
+  private static final String FIELD_PREFIX = "Field '";
+
   private final int status;
   private final String errorCode;
   private final String field;
@@ -220,7 +223,7 @@ class McpRoutingException extends OBException {
         // which refusal came back. The message neither asserts nor denies that such a column
         // exists; 'available' says what this entity does expose, which is what the caller is
         // entitled to know.
-        "Field '" + key + "' is not available for filtering on entity '" + entityName + "'",
+        FIELD_PREFIX + key + "' is not available for filtering on entity '" + entityName + "'",
         McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_UNKNOWN_FILTER_FIELD, key, names,
         truncated
             ? "Retry with one of the names in 'available'. That list is truncated — call "
@@ -300,7 +303,7 @@ class McpRoutingException extends OBException {
    */
   static McpRoutingException readOnlyField(String field, String entityName) {
     return new McpRoutingException(
-        "Field '" + field + "' is read-only on entity '" + entityName + "' and cannot be written",
+        FIELD_PREFIX + field + "' is read-only on entity '" + entityName + "' and cannot be written",
         McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_READ_ONLY_FIELD, field, List.of(),
         "Remove it from 'fields' and retry. neo_schema reports this field with readOnly:true; the "
             + "server maintains its value.",
@@ -315,7 +318,7 @@ class McpRoutingException extends OBException {
       names = names.subList(0, McpConstants.MAX_AVAILABLE_NAMES);
     }
     return new McpRoutingException(
-        "Field '" + field + "' is not allowed on entity '" + entityName + "'",
+        FIELD_PREFIX + field + "' is not allowed on entity '" + entityName + "'",
         McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_FIELD_NOT_ALLOWED, field, names,
         truncated
             ? "Send only fields listed in 'available'. That list is truncated — call neo_schema "
