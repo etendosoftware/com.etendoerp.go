@@ -310,9 +310,24 @@ final class McpQuerySupport {
    *
    * <p>An Etendo default is only sometimes a value: {@code @#AD_Org_ID@} and {@code @SQL=…} are
    * session/context expressions and {@code now()} is evaluated per request, so none of them can be
-   * compared against what the caller sent. Those columns keep the blanket exemption they have had
-   * since IMP-48 — narrowing an exemption we cannot evaluate would refuse legitimate echoes with
-   * no way for the caller to tell why.</p>
+   * compared against what the caller sent.</p>
+   *
+   * <p>Returning {@code null} for those puts the property in the gate's strict {@code readOnly}
+   * set, so sending the column is <b>refused</b> rather than echo-exempted. That is deliberate:
+   * the echo exemption exists to forgive a caller that read the schema and sent the value back
+   * unchanged, and it can only forgive what it can verify. With an expression there is nothing to
+   * compare against, so accepting would not be forgiving a known-harmless echo — it would be
+   * waving through an unexamined value. A refusal costs the caller a 422 it can act on; the other
+   * side of the mistake is silent.</p>
+   *
+   * <p><b>Corrected 2026-09-16 (ETP-5335).</b> This paragraph previously claimed those columns
+   * "keep the blanket exemption they have had since IMP-48" and warned that narrowing it would
+   * refuse legitimate echoes. The code has always done the opposite of what that described, and
+   * the code is the behaviour we want; the text was wrong, not the branch. The strongest evidence
+   * is {@code @#AD_Org_ID@} itself: it was the default behind the cross-tenant write reported in
+   * the 2026-09-16 security review, and the conclusion there was that those columns are resolved
+   * from the session and never from the payload — see {@code NeoServerOwnedFields}, which now
+   * strips {@code client} and {@code organization} before a write ever reaches this gate.</p>
    *
    * @param adColumn the AD column
    * @return the literal default, or {@code null} when there is none or it is an expression
