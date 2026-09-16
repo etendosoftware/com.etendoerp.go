@@ -850,7 +850,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     int revoked = 0;
     OBQuery<OAuth2Token> query = OBDal.getInstance().createQuery(OAuth2Token.class,
         "as token where token.oAuth2Client.id = :clientId and token.revoked = false");
-    query.setNamedParameter("clientId", client.getId());
+    query.setNamedParameter(FIELD_CLIENT_ID, client.getId());
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     for (OAuth2Token token : query.list()) {
