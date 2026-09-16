@@ -79,12 +79,10 @@ class NeoCrudHandlerDocumentNoRepreviewTest {
   private static final String NEW_DOC_TYPE = "DOCTYPE_RECTIFICATIVE";
   private static final String NEW_PREVIEW = "<REC-1000008>";
 
-  private NeoCrudHandler handler;
   private OBContext obContext;
 
   @BeforeEach
   void setUp() {
-    handler = new NeoCrudHandler(mock(NeoServlet.class));
     obContext = mock(OBContext.class);
   }
 
@@ -94,15 +92,16 @@ class NeoCrudHandlerDocumentNoRepreviewTest {
 
   private void invokeRegenerate(JSONObject body, NeoContext context, String dalEntityName,
       boolean clientSentDocumentNo) throws Exception {
-    Method method = NeoCrudHandler.class.getDeclaredMethod("regenerateDocumentNoOnDocTypeChange",
+    Method method = DocumentNoRepreviewHelper.class.getDeclaredMethod(
+        "regenerateDocumentNoOnDocTypeChange",
         JSONObject.class, NeoContext.class, String.class, boolean.class);
     method.setAccessible(true);
-    method.invoke(handler, body, context, dalEntityName, clientSentDocumentNo);
+    method.invoke(null, body, context, dalEntityName, clientSentDocumentNo);
   }
 
   private static boolean invokeIsDraftRecord(BaseOBObject stored, Entity dalEntity)
       throws Exception {
-    Method method = NeoCrudHandler.class.getDeclaredMethod("isDraftRecord",
+    Method method = DocumentNoRepreviewHelper.class.getDeclaredMethod("isDraftRecord",
         BaseOBObject.class, Entity.class);
     method.setAccessible(true);
     return (boolean) method.invoke(null, stored, dalEntity);
@@ -110,21 +109,22 @@ class NeoCrudHandlerDocumentNoRepreviewTest {
 
   private static String invokeResolveStoredId(BaseOBObject stored, Property prop)
       throws Exception {
-    Method method = NeoCrudHandler.class.getDeclaredMethod("resolveStoredId",
+    Method method = DocumentNoRepreviewHelper.class.getDeclaredMethod("resolveStoredId",
         BaseOBObject.class, Property.class);
     method.setAccessible(true);
     return (String) method.invoke(null, stored, prop);
   }
 
   private static boolean invokeIsSequencePlaceholder(String value) throws Exception {
-    Method method = NeoCrudHandler.class.getDeclaredMethod("isSequencePlaceholder", String.class);
+    Method method =
+        DocumentNoRepreviewHelper.class.getDeclaredMethod("isSequencePlaceholder", String.class);
     method.setAccessible(true);
     return (boolean) method.invoke(null, value);
   }
 
   private static boolean invokeHasClientAuthoredDocumentNo(JSONObject rawBody) throws Exception {
-    Method method = NeoCrudHandler.class.getDeclaredMethod("hasClientAuthoredDocumentNo",
-        JSONObject.class);
+    Method method = DocumentNoRepreviewHelper.class.getDeclaredMethod(
+        "hasClientAuthoredDocumentNo", JSONObject.class);
     method.setAccessible(true);
     return (boolean) method.invoke(null, rawBody);
   }
