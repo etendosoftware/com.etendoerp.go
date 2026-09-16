@@ -234,6 +234,44 @@ final class McpWriteRequestSupport {
   }
 
   /**
+   * Attach the callout-vs-caller divergences a create left behind (IMP-45).
+   *
+   * <p>{@code neo_defaults} tells an agent to use its result as the starting point for
+   * {@code neo_create}, and {@code neo_create} repeats the advice. Follow it literally and every
+   * value handed over becomes a value the caller sent, which ETP-4784 protects from being
+   * recomputed by a callout that knows the record's real context. The measured case:
+   * {@code neo_defaults(sales-order/header)} answers {@code paymentTerms: "30 Días"} with no
+   * business partner in sight, and the partner chosen a moment later implies {@code "Inmediato"} —
+   * an agent that echoed the default has pinned the wrong one, and the 201 says nothing.</p>
+   *
+   * <p>The value the caller sent still wins. Overriding it would be worse: on this path the server
+   * cannot tell an echoed default from a value a human deliberately chose, and silently replacing
+   * the second is a harder failure than reporting the first. So this reports, as IMP-18 does for
+   * unrecognised names — the write succeeded, and now the caller can see what its own value
+   * displaced.</p>
+   *
+   * @param body       the flattened response body handed to the agent, mutated in place
+   * @param superseded field → {sent, callout}, or {@code null}/empty when nothing diverged
+   */
+  static void reportSupersededDefaults(JSONObject body, JSONObject superseded) {
+    if (body == null || superseded == null || superseded.length() == 0) {
+      return;
+    }
+    try {
+      body.put("supersededDefaults", superseded);
+      body.put("supersededDefaultsHint", "For each field listed, the value you sent was kept and a "
+          + "callout had resolved a different one from this record's own context (the business "
+          + "partner's configuration, for one). That is correct if the value was chosen "
+          + "deliberately. If you copied it from neo_defaults, it was a generic default resolved "
+          + "before this record had a business partner: omit that field and let the server resolve "
+          + "it, or send the value under \"callout\" instead.");
+    } catch (JSONException ignored) {
+      // Same reasoning as reportUnknownFields: the record is written and correct as far as the
+      // caller asked; losing a diagnostic must never turn a successful create into a failure.
+    }
+  }
+
+  /**
    * Validate that all mandatory columns have a value in the body before insert.
    * Returns a JSONArray of missing fields using the same structure as neo_schema
    * (name, column, type, hasSelector) so the model knows exactly what to provide.
@@ -601,8 +639,8 @@ final class McpWriteRequestSupport {
     } else {
       envelope.put(McpConstants.KEY_DETAIL, "Field validation rejected the request, and named no "
           + "field");
-      envelope.put(McpConstants.KEY_HINT, "Call neo_schema for this entity to check the type and "
-          + "allowed values of every field sent.");
+      envelope.put(McpConstants.KEY_HINT, "Call neo_schema with view:\"create\" for this entity "
+          + "to check the type and allowed values of every field sent.");
     }
     envelope.put(McpConstants.KEY_SEE_ALSO, seeAlso);
     return envelope;

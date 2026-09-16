@@ -66,6 +66,14 @@ final class McpSchemaCreateView {
   /** The {@code view} parameter itself is declared by {@link McpActionsView#PARAM_VIEW}. */
   static final String PARAM_FIELDS = "fields";
   static final String VIEW_CREATE = "create";
+  /**
+   * IMP-44: the full field dump, now reachable only by asking for it. It used to be what the
+   * caller got for omitting {@code view} — 39.5 kB on {@code sales-order/header} against 5.4 kB
+   * for {@link #VIEW_CREATE}, with a hint at the bottom of the response advising the cheaper
+   * view. That advice has also been in the tool's own description since 2026-08-06, and three
+   * independent blind agents still paid the full toll first, so the wording was not the lever.
+   */
+  static final String VIEW_FULL = "full";
 
   private static final String KEY_NAME = "name";
   private static final String KEY_REQUIRED = "required";
@@ -103,8 +111,8 @@ final class McpSchemaCreateView {
       + "is the authoritative field for why (editable/readOnly/system/discarded), 'readOnly' agrees "
       + "with it and is a shorthand of the same signal, so trust either one alone. Do not send an "
       + "omitted field to neo_create. If the value you need lives on a field that was omitted for "
-      + "this reason, that value may still be writable elsewhere: call neo_schema again without "
-      + "view:\"create\" (or on a sibling entity of this spec) to see the full field list and each "
+      + "this reason, that value may still be writable elsewhere: call neo_schema again with "
+      + "view:\"full\" (or on a sibling entity of this spec) to see the full field list and each "
       + "field's visibility — do not assume the value is unreachable just because this view left it "
       + "out. When you do, check that field's writableVia: if present, it names the exact spec/entity "
       + "(e.g. product/price for a computed sale or purchase price) where the value is actually set, "
@@ -114,7 +122,7 @@ final class McpSchemaCreateView {
       + "Every field here is editable and writable, so visibility/readOnly/userRequired are omitted — "
       + "the group already says it. Default values are omitted too: call neo_defaults to get the "
       + "values the server will fill in, already resolved. For the full descriptor of any field "
-      + "listed here, call neo_schema again with fields:[\"<name>\"].";
+      + "listed here, call neo_schema again with view:\"full\" and fields:[\"<name>\"].";
 
   /**
    * Appended to {@link #CREATE_HINT} when the entity is a child/line tab ({@code tabLevel > 0}),
@@ -143,6 +151,11 @@ final class McpSchemaCreateView {
   /** @return {@code true} when {@code view} requests the create-shaped projection. */
   static boolean isCreateView(String view) {
     return VIEW_CREATE.equalsIgnoreCase(view);
+  }
+
+  /** @return {@code true} when {@code view} requests the full field dump. */
+  static boolean isFullView(String view) {
+    return VIEW_FULL.equalsIgnoreCase(view);
   }
 
   private static final String KEY_SERVER_DEFAULTED = "serverDefaulted";

@@ -41,6 +41,13 @@ public class NeoContext {
   private final SFEntity sfEntity;
   private final OBContext obContext;
   private NeoResponse previousResult;
+  /**
+   * IMP-45: set by the create-path callout cascade when a callout resolved a different value for
+   * a field the caller had sent, and was held back by ETP-4784's protected-fields rule. Mutable
+   * and off the builder on purpose — it is produced deep inside the create, after the context was
+   * built, and it is a diagnostic: nothing downstream branches on it.
+   */
+  private JSONObject supersededDefaults;
   private final NeoEndpointType endpointType;
   private final String fieldName;
 
@@ -101,6 +108,21 @@ public class NeoContext {
 
   public void setPreviousResult(NeoResponse previousResult) {
     this.previousResult = previousResult;
+  }
+
+  /**
+   * @return the IMP-45 callout-vs-caller divergences recorded during this create, or {@code null}
+   *     when the cascade recorded none
+   */
+  public JSONObject getSupersededDefaults() {
+    return supersededDefaults;
+  }
+
+  /**
+   * @param supersededDefaults the divergences recorded by the create-path callout cascade
+   */
+  public void setSupersededDefaults(JSONObject supersededDefaults) {
+    this.supersededDefaults = supersededDefaults;
   }
 
   public NeoEndpointType getEndpointType() {

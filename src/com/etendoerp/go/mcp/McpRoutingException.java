@@ -224,7 +224,8 @@ class McpRoutingException extends OBException {
         McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_UNKNOWN_FILTER_FIELD, key, names,
         truncated
             ? "Retry with one of the names in 'available'. That list is truncated — call "
-                + "neo_schema for this entity to see every filterable field."
+                + "neo_schema with view:\"full\" for this entity to see every filterable "
+                + "field."
             : RETRY_WITH_AVAILABLE,
         McpConstants.SEE_ALSO_READING);
   }
@@ -321,6 +322,38 @@ class McpRoutingException extends OBException {
                 + "with view:\"create\" for this entity to see every field you may send."
             : "Send only fields listed in 'available'.",
         McpConstants.SEE_ALSO_WRITING);
+  }
+
+  /**
+   * IMP-44: {@code neo_schema} requires an explicit {@code view}. The default used to be the full
+   * field dump — 39.5 kB on {@code sales-order/header} against 5.4 kB for {@code view:"create"} —
+   * and the caller learned of the cheaper projection from a hint at the bottom of the response it
+   * had already paid for. The tool description has recommended {@code view:"create"} since
+   * 2026-08-06 and three independent blind agents still took the full route, so the projection is
+   * now a decision the caller states rather than one it inherits.
+   *
+   * <p>The same refusal covers an unrecognised value. {@code view:"summary"} is a real view on
+   * neo_list and neo_get and was silently ignored here, returning the full dump to a caller that
+   * had explicitly asked for less.</p>
+   *
+   * @param supplied the value the caller sent, or {@code null}/blank when the argument was absent
+   * @return the exception to throw
+   */
+  static McpRoutingException schemaViewRequired(String supplied) {
+    boolean absent = supplied == null || supplied.trim().isEmpty();
+    return new McpRoutingException(
+        absent
+            ? "neo_schema requires a 'view'"
+            : "Unknown view '" + supplied + "' for neo_schema",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VIEW_REQUIRED,
+        McpActionsView.PARAM_VIEW,
+        List.of(McpSchemaCreateView.VIEW_CREATE, McpSchemaCreateView.VIEW_FULL,
+            McpActionsView.VIEW_ACTIONS),
+        "Pick one: view:\"create\" before neo_create/neo_update (only the fields you may send, "
+            + "split required/optional — the smallest and the one you want most of the time); "
+            + "view:\"actions\" for the callable buttons/processes; view:\"full\" for every "
+            + "field including read-only and system ones, which is several times larger.",
+        McpConstants.SEE_ALSO_READING);
   }
 
   static McpRoutingException unknownArgument(String argument, String toolName,

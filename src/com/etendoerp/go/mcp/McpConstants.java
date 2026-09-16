@@ -125,6 +125,16 @@ final class McpConstants {
   static final String ERROR_UNKNOWN_ARGUMENT = "unknown_argument";
 
   /**
+   * IMP-44: {@code neo_schema} was called without a {@code view}, or with a value that is not one
+   * of its three projections. Distinct from {@link #ERROR_VALIDATION} because the request is
+   * well-formed and the fix is a single named argument — and because the silent case it replaces
+   * was worse than an error: an unrecognised view (e.g. {@code "summary"}, which belongs to
+   * neo_list/neo_get, not here) used to fall through to the full dump, so the caller paid the
+   * largest response in the tool for asking for the smallest.
+   */
+  static final String ERROR_VIEW_REQUIRED = "view_required";
+
+  /**
    * A write carried a field the spec does not expose on this entity (IMP-39).
    *
    * <p>Named for what the caller may do, not for what exists: a field curated out of a window and

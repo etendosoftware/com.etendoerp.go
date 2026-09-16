@@ -2232,6 +2232,95 @@ than one that says less.
 
 ---
 
+#### 4.12.13 `neo_schema` requires an explicit `view` (ETP-5335, IMP-44)
+
+**`view` is a required argument of `neo_schema`,** with three values and no default:
+
+| `view` | What it returns | Size on `sales-order/header` |
+|---|---|---|
+| `"create"` | only the fields you may send, split required/optional | **5.4 kB** |
+| `"actions"` | only the callable buttons/processes | small |
+| `"full"` | every field, read-only and system ones included | **39.5 kB** |
+
+Before this, omitting `view` returned the full dump, and the response carried a hint at the bottom
+advising `view:"create"` instead — correct advice delivered after the bill was paid.
+
+##### Why the argument and not more wording
+
+The tool's own description has recommended `view:"create"` since **2026-08-06** (`6cc522f5`). On
+2026-09-15 three independent blind agents each called `neo_schema` with no `view`, paid the full
+dump, read the hint, and then called it again with `view:"create"`. One of them reported it
+unprompted, mid-task, while doing something else:
+
+> *"Buen hint, pero llega después de haberme cobrado los 47 KB. Debería estar en la descripción de
+> la tool, no en la respuesta."*
+
+It already was. So the default was the lever, not the prose: a projection nobody chooses is a
+projection everybody inherits.
+
+##### The same check closes a silent case
+
+`view:"summary"` is a real view on `neo_list` and `neo_get`. On `neo_schema` it was not recognised
+and fell through to the full dump — measured at the same 39 514 bytes as no `view` at all, so a
+caller asking for the *smallest* response received the *largest* one, with nothing to indicate the
+argument had been ignored. An unrecognised value now raises the same `422 view_required` as an
+absent one, listing the three that exist.
+
+```
+neo_schema(sales-order/header)                 → 422 view_required
+neo_schema(sales-order/header, view:"summary") → 422 view_required  (available: create, full, actions)
+neo_schema(sales-order/header, view:"create")  → 5.4 kB
+neo_schema(sales-order/header, view:"full")    → 39.5 kB
+```
+
+`fields:[…]` still narrows the dump, and now says so: it applies under `view:"full"` and is ignored
+by the two views that already define their own projection.
+
+---
+
+#### 4.12.14 `neo_create` reports a default your own value displaced (ETP-5335, IMP-45)
+
+**When a callout resolved a different value for a field the caller sent, the create returns
+`supersededDefaults`.** The caller's value still wins — nothing about which value is persisted has
+changed.
+
+```
+neo_defaults(sales-order/header)   → { paymentTerms: "…", paymentTerms$_identifier: "30 Días", … }
+neo_create(sales-order/header, fields:{ businessPartner:"…", paymentTerms:"…30 Días id…" })
+→ 201 { …, "supersededDefaults": { "paymentTerms": { "sent": "<30 Días id>",
+                                                     "callout": "<Inmediato id>" } },
+        "supersededDefaultsHint": "…" }
+```
+
+##### The trap this makes visible
+
+Both `neo_defaults` and `neo_create` tell an agent to call `neo_defaults` first and build on its
+result. `neo_defaults` resolves with **no business partner and no record context** — on
+`sales-order/header` it answers `paymentTerms: "30 Días"` from a generic default. The partner chosen
+a moment later implies `"Inmediato"`, and `SE_Order_BPartner` would resolve it during the create.
+
+But ETP-4784 protects a field the caller sent from being recomputed by a callout, deliberately and
+correctly: on the REST path that value came from a form a person filled in. An agent that followed
+the recommended sequence and echoed the whole defaults block back has, by that same rule, pinned a
+generic value over the partner-derived one — and the `201` says nothing.
+
+##### Why it reports rather than corrects
+
+The server cannot tell an echoed default from a value the user genuinely chose; both arrive as a
+key in `fields`. Silently overriding the second is a harder failure than reporting the first, so
+this follows §4.12.12: the write succeeds, and the divergence is named. The wording of both tools
+now asks for deliberate values rather than a blanket echo, and points at this key.
+
+##### Where it comes from
+
+`NeoDefaultsCascadeHelper.mergeCalloutUpdates` records the divergence at the exact point where
+`shouldKeepExistingValue` holds a callout back, so there are no false positives — a callout
+re-proposing the value already on the record records nothing, and `$_identifier` companion keys are
+skipped. It travels on `NeoContext.supersededDefaults`. **The REST path never reads it**: there the
+protected value came from a person, and there is nothing to warn about.
+
+---
+
 ### 4.13 Image Fields and Image Upload (ETP-5184)
 
 An `Image BLOB` column (`AD_Reference_ID = 4AA6C3BE9D3B4D84A3B80489505A23E5`) is an FK to

@@ -804,6 +804,10 @@ public class McpToolRouter {
     McpRecordUrls.addRecordUrl(flat, specName, null,
         McpToolRouterSupport.isPrimaryTab(adTab));
     McpWriteRequestSupport.reportUnknownFields(flat, unknownWriteFields);
+    // IMP-45: `ctx` is the context the callout cascade ran under, so it carries any field where the
+    // caller's value stood and a callout had derived a different one. Create only — an update
+    // carries no defaults invitation, and there is no cascade of this shape behind it.
+    McpWriteRequestSupport.reportSupersededDefaults(flat, ctx.getSupersededDefaults());
     return wrapAsTextContent(flat);
   }
 
@@ -1198,6 +1202,18 @@ public class McpToolRouter {
               serverDefaultedNames(specName, entityName, adTab, sfEntity), isChildEntity,
               entityAgentPrompt));
     }
+    // IMP-44: everything below is the full dump, and reaching it now requires having asked for
+    // it. Omitting `view` used to land here — 39.5 kB on sales-order/header against 5.4 kB for
+    // view:"create" — with the advice to use the cheaper projection delivered as a hint at the
+    // bottom of the response the caller had already paid for. That advice has also been in this
+    // tool's description since 2026-08-06 and three independent blind agents still took the full
+    // route first, which is why the fix is the argument rather than more wording. The same check
+    // catches an unrecognised value: view:"summary" is real on neo_list/neo_get and used to fall
+    // through to here, answering a request for less with the largest response in the tool.
+    if (!McpSchemaCreateView.isFullView(view)) {
+      throw McpRoutingException.schemaViewRequired(view);
+    }
+
     // IMP-12: fields:[…] — an explicit whitelist, for an agent that already knows what it wants.
     // Unmatched names are echoed back rather than dropped in silence (cf. IMP-18).
     Set<String> requestedFields = McpFieldProjection.parseFields(
@@ -1284,7 +1300,8 @@ public class McpToolRouter {
         + "Fields with readOnly=true cannot be set by you: this covers auto-generated "
         + "identifiers (DocumentNo, IDs) as well as values derived/maintained elsewhere. "
         + "When such a field carries a writableVia pointer, it names the spec/entity where "
-        + "the value is actually writable — call neo_schema there instead of giving up. "
+        + "the value is actually writable — call neo_schema with view:\"create\" there instead "
+        + "of giving up. "
         + "Use neo_selectors for FK fields with hasSelector=true. "
         + "Fields with businessCritical=true carry core business data (amounts, categories, "
         + "key dates) — you MUST confirm these values with the user before creating or "

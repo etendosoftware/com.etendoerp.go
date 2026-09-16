@@ -675,8 +675,9 @@ public class ToolRegistry {
             + "(2) range operators {\"column\": {\"gt\"|\"gte\"|\"lt\"|\"lte\": value}} or "
             + "{\"column\": {\"between\": [from, to]}} (dates as \"YYYY-MM-DD\"); "
             + "(3) named business filter {\"status\": \"<name>\"} — the spec's own hand-authored "
-            + "statuses (e.g. \"pending\", \"partial\", \"completed\"). Call neo_schema to see the "
-            + "named filters available for a given spec; an unknown name returns the valid list."));
+            + "statuses (e.g. \"pending\", \"partial\", \"completed\"). Call neo_schema with "
+            + "view:\"full\" to see the named filters available for a given spec; an unknown name "
+            + "returns the valid list."));
     // IMP-40: neo_discover already advertises "parentRequiredFor":["list",...] on every child
     // entity, and until now this tool had no argument that could satisfy it — so the only way to
     // scope a list to one parent was a filter on a field name the agent had to work out itself.
@@ -769,7 +770,12 @@ public class ToolRegistry {
             + "for this record type, then build the fields object by overriding only the values "
             + "the user actually wants to change on top of that base — instead of asking the "
             + "user for every field or guessing values that already have a sensible default "
-            + "(document number, dates, prices, etc.). "
+            + "(document number, dates, prices, etc.). Send back only what the user chose or what "
+            + "you need on the record: a value you send is deliberate, and it is protected from "
+            + "the callouts that would otherwise derive it from this record's real context — a "
+            + "generic default echoed back can pin the wrong one (neo_defaults resolves before "
+            + "there is a business partner). Any field where that happened comes back in "
+            + "\"supersededDefaults\" with the value the callout had resolved. "
             + "Dates must be ISO-8601: 'YYYY-MM-DD' for date fields and "
             + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported. "
             + unknownFieldsNote
@@ -899,9 +905,16 @@ public class ToolRegistry {
             + "what it needs to satisfy a NOT-NULL column or a computed value (sequence numbers, "
             + "dates, currency, ...) — an optional field this call resolved (a price list, payment "
             + "terms, a financial account, ...) is NOT copied into the record unless you send it "
-            + "explicitly in fields, even though it showed a value here. Copy across every field "
+            + "explicitly in fields, even though it showed a value here. Copy across the fields "
             + "from this result you want on the record; do not assume omitting one lets neo_create "
-            + "fill it in the same way. When entity is a child/line tab (not the spec's top-level "
+            + "fill it in the same way. BUT these values are resolved with no business partner and "
+            + "no record context, so a value here can be superseded the moment you choose one: on "
+            + "sales-order/header this call answers paymentTerms \"30 Días\" and the partner you "
+            + "pick may imply \"Inmediato\". A value you send is treated as deliberate and is "
+            + "protected from the callout that would have corrected it, so re-send a value from "
+            + "here only when the user actually chose it — not as a blanket echo. neo_create "
+            + "reports anything your value displaced in \"supersededDefaults\"; read it. "
+            + "When entity is a child/line tab (not the spec's top-level "
             + "entity), pass parentId with the parent record's id — omitting it does not resolve "
             + "parent-dependent fields (a storage bin scoped to the parent's warehouse, a "
             + "price-list version, a running line number); they are silently absent rather than "
@@ -1005,30 +1018,42 @@ public class ToolRegistry {
     props.put("spec", enumProp("Spec name (use neo_discover to find available specs)", specNames));
     props.put(McpConstants.PARAM_ENTITY,
       stringProp("Entity name within the spec (e.g. 'Header', 'Lines')"));
+    // IMP-44: REQUIRED, and "full" is now a value you ask for rather than what you get for not
+    // choosing. The full dump is 39.5 kB on sales-order/header against 5.4 kB for "create", and
+    // the caller used to be told about the cheaper projection by a hint at the bottom of the
+    // response it had already paid for. Recommending "create" here is not new — that wording has
+    // shipped since 2026-08-06 and three independent blind agents still took the full route, so
+    // the lever is the argument, not more prose.
     props.put(McpActionsView.PARAM_VIEW, enumProp(
-        "Optional response shape. Omit for the full field dump (default, unchanged) — but note it "
-            + "can exceed 60 kB on compliance-heavy windows and may not fit your context. "
-            + "\"create\" returns ONLY the fields you may send to neo_create, split into "
-            + "required/optional — this is what you want before a create. "
-            + "\"actions\" returns only the buttons/processes ({name, label, action, processName, "
-            + "processId, ...}) — use it when you only need to know what can be triggered on this "
+        "REQUIRED — which projection you want. \"create\": ONLY the fields you may send to "
+            + "neo_create/neo_update, split into required/optional. This is the one you want "
+            + "before a write, and it is by far the smallest (~5 kB on sales-order/header). "
+            + "\"actions\": only the buttons/processes ({name, label, action, processName, "
+            + "processId, ...}) — use it when you need to know what can be triggered on this "
             + "entity, not every column. Fire only the ones carrying invokeVia:\"neo_action\"; the "
             + "rest report invokable:false plus a notInvokableReason, and \"invokableCount\" next "
-            + "to \"actionCount\" tells you the split up front.",
-        List.of(McpSchemaCreateView.VIEW_CREATE, McpActionsView.VIEW_ACTIONS)));
+            + "to \"actionCount\" tells you the split up front. \"full\": every field, including "
+            + "read-only and system ones — ~40 kB on sales-order/header and more on "
+            + "compliance-heavy windows, where it may not fit your context. Ask for it when you "
+            + "are reading, filtering or projecting, not when you are about to write.",
+        List.of(McpSchemaCreateView.VIEW_CREATE, McpActionsView.VIEW_ACTIONS,
+            McpSchemaCreateView.VIEW_FULL)));
     props.put(McpSchemaCreateView.PARAM_FIELDS, stringArrayProp(
         "Optional whitelist of field names to describe (e.g. [\"businessPartner\",\"invoiceDate\"]). "
             + "Returns only those descriptors instead of all of them. Names that match nothing come "
-            + "back in \"unknownFields\" — check it if a field you expected is missing. Ignored when "
-            + "\"view\" is set."));
+            + "back in \"unknownFields\" — check it if a field you expected is missing. Applies to "
+            + "view:\"full\" only; ignored under view:\"create\" and view:\"actions\", which "
+            + "already define their own projection."));
 
     return new McpToolDefinition(
         "neo_schema",
         "Get the field schema for an entity: field names, types, required flag, "
             + "read-only flag, default values, visibility (editable/readOnly/system/discarded), "
             + "and which fields have FK selectors. Call this BEFORE neo_create to know which "
-            + "fields exist and which are required — and prefer view:\"create\", which returns "
-            + "only the fields you may send, already split into required/optional. Only fields "
+            + "fields exist and which are required. \"view\" is REQUIRED and decides the size of "
+            + "the answer: use view:\"create\" before a write — only the fields you may send, "
+            + "already split into required/optional, and several times smaller than the full "
+            + "dump. Only fields "
             + "with userRequired=true need to be provided: a field that is mandatory but that the "
             + "server can already resolve a value for — from an AD default, a session preference, "
             + "the business partner's configuration, or a callout — is filled by the server, so it "
@@ -1038,8 +1063,10 @@ public class ToolRegistry {
             + "from elsewhere; view:\"create\" cross-checks against the real defaults and is the "
             + "authoritative answer to \"must I ask the user for this?\". System fields are "
             + "auto-derived by Etendo callouts. Pass view:\"actions\" for the callable "
-            + "buttons/processes instead.",
-        buildObjectSchema(props, List.of("spec", "entity")));
+            + "buttons/processes instead, and view:\"full\" when you are reading or filtering "
+            + "and genuinely need every column.",
+        buildObjectSchema(props,
+            List.of("spec", "entity", McpActionsView.PARAM_VIEW)));
   }
 
   // ── Action tool ────────────────────────────────────────────────────────
@@ -1058,7 +1085,8 @@ public class ToolRegistry {
     return new McpToolDefinition(
         "neo_action",
         "Fire a type:button action on a record and return the process result. "
-            + "Call neo_schema first: each button field carries 'action' (the name to pass "
+            + "Call neo_schema with view:\"actions\" first: each button field carries 'action' "
+            + "(the name to pass "
             + "here), and list-backed buttons also carry 'actionValues' (the values it "
             + "accepts, e.g. CO=Book / VO=Void / RE=Reactivate for documentAction) and "
             + "'actionParameter' (the key to put the chosen value under in 'parameters'). "
