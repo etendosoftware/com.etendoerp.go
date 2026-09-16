@@ -48,6 +48,7 @@ import com.etendoerp.go.schemaforge.email.contracts.GoodsShipmentSendEmailContra
 import com.etendoerp.go.schemaforge.email.contracts.PurchaseOrderSendEmailContract;
 import com.etendoerp.go.schemaforge.email.contracts.ReturnMaterialReceiptSendEmailContract;
 import com.etendoerp.go.schemaforge.email.contracts.ReturnToVendorSendEmailContract;
+import com.etendoerp.go.schemaforge.email.contracts.ReturnToVendorShipmentSendEmailContract;
 import com.etendoerp.go.schemaforge.email.contracts.SalesInvoiceSendEmailContract;
 import com.etendoerp.go.schemaforge.email.contracts.SalesOrderSendEmailContract;
 import com.etendoerp.go.schemaforge.email.contracts.SalesQuotationSendEmailContract;
@@ -91,7 +92,7 @@ public class InitialEmailContractsTest {
 
   @Test
   public void everyDocumentSendContractLogsReadableHistoryUnderItsOwnSpec() {
-    // The seven windows whose send button an operator can press. The recipients are the tenant's
+    // The eight windows whose send button an operator can press. The recipients are the tenant's
     // own business partners and the copy is the tenant's own, so the readable table is the right
     // trade — and the document's window is where the history has to show up.
     EmailDocumentRecordResolver resolver = recordId -> Optional.empty();
@@ -108,6 +109,11 @@ public class InitialEmailContractsTest {
     // convention exactly, so no naming-mismatch comment is needed here.
     assertLogsHistoryUnderSpec(new ReturnMaterialReceiptSendEmailContract(resolver),
         "return-material-receipt");
+    // ETP-5124: this is the contract that fixes ETP-4717's naming mismatch — unlike
+    // return-to-vendor-send, whose derived spec resolves no window, this one's derived spec
+    // (return-to-vendor-shipment) IS the actual window name.
+    assertLogsHistoryUnderSpec(new ReturnToVendorShipmentSendEmailContract(resolver),
+        "return-to-vendor-shipment");
   }
 
   @Test

@@ -3611,7 +3611,7 @@ eight audit call sites funnel through — writes the history row immediately BEF
 `EmailSafetyStore#recordAudit`, so both land in the same transaction (the DAL safety store ends a
 successful send with `SessionHandler.commitAndStart()`). The gate is declarative:
 `EmailContract#logsSendHistory()` defaults to `false` and is overridden `true` once, in
-`DefaultDocumentSendEmailContract`, so the six document-send contracts opt in automatically while
+`DefaultDocumentSendEmailContract`, so the eight document-send contracts opt in automatically while
 the account/auth family (invitation, reset password, login alert, organization joined) stays out.
 There is no contract-name list anywhere.
 
