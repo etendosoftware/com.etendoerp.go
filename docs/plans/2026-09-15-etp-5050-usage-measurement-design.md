@@ -86,6 +86,17 @@ re-bucket an invoice into a different day and shift counts between days already 
 is stated here rather than left to be discovered. No counter or metric is built for it in
 this task.
 
+### Lengthening the window is not retroactive
+
+Finality is recorded on the row (`IS_SETTLED`), not recomputed from the current preference. So
+shortening a tenant's window is self-correcting, but **lengthening it does not reopen days that
+were already flagged final** — the scheduled run will never revisit them, and only an explicit
+backfill will.
+
+This follows from "once final, it never changes" rather than contradicting it, but it does mean
+the preference does not retroactively control days already decided. Operators changing a window
+upward should expect to backfill if they want the older days recomputed.
+
 ### Configuration
 
 An operator knob, not per-tenant, so it uses the module's existing precedence helper rather
@@ -247,6 +258,13 @@ in order: unbalanced parentheses; `;`; `--` or `/*`; unknown entity name; unknow
 property; then composes and executes the query once. Elapsed milliseconds are recorded in
 `LAST_VALIDATION_MS`, so a fragment that would table-scan every tenant nightly is visible
 before it is scheduled.
+
+The probe counts one whole day and is bounded by a 10-second query timeout. It deliberately
+does not limit the result set: timing only the first group would measure neither the nightly
+cost nor the same query plan, and this number exists to predict the nightly cost. The timeout
+is what makes that safe — a fragment too expensive to count a single day is rejected outright
+instead of hanging the save that is validating it, which would be the worst case of exactly
+the problem the probe exists to surface.
 
 *Note:* this observer sits on a **System configuration table**, not a business table. It
 does not contradict §2 — that rule is about tenant saves.
