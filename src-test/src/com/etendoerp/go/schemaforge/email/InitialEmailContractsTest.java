@@ -150,7 +150,7 @@ public class InitialEmailContractsTest {
     assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
     assertEquals("https://app.example.test/reset?token=abc123",
         adapter.getLastRequest().getData().getString("link"));
-    assertEquals("Restablece tu contraseña de Etendo Go",
+    assertEquals("Restablece tu contraseña de Etendo",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
         .contains("https://app.example.test/reset?token=abc123"));
@@ -175,7 +175,7 @@ public class InitialEmailContractsTest {
         adapter.getLastRequest().getData().getString("link"));
     // ETP-5003 — a command with no language now falls back to Spanish, the product's default,
     // instead of English.
-    assertEquals("Bienvenido a Etendo Go",
+    assertEquals("Bienvenido a Etendo",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
         .contains("https://app.example.test/welcome"));
@@ -195,7 +195,7 @@ public class InitialEmailContractsTest {
 
     assertSent(response);
     assertEquals("es_ES", adapter.getLastRequest().getData().getString("language"));
-    assertEquals("Bienvenido a Etendo Go",
+    assertEquals("Bienvenido a Etendo",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
         .contains("Tu cuenta de Etendo Go fue creada correctamente"));
@@ -236,7 +236,7 @@ public class InitialEmailContractsTest {
     assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
     assertEquals("https://app.example.test/dashboard",
         adapter.getLastRequest().getData().getString("link"));
-    assertEquals("Tu entorno de Etendo Go está listo",
+    assertEquals("Tu entorno de Etendo está listo",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
         .contains("https://app.example.test/dashboard"));
@@ -280,7 +280,7 @@ public class InitialEmailContractsTest {
 
     assertSent(response);
     assertEquals("es_ES", adapter.getLastRequest().getData().getString("language"));
-    assertEquals("Tu entorno de Etendo Go está listo",
+    assertEquals("Tu entorno de Etendo está listo",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
         .contains("Haz clic en el siguiente botón para acceder a tu panel"));
@@ -303,7 +303,7 @@ public class InitialEmailContractsTest {
     assertEquals("Lucas", adapter.getLastRequest().getData().getString("name"));
     assertEquals("2026-05-29T10:00:00Z",
         adapter.getLastRequest().getData().getString("date"));
-    assertEquals("Tu contraseña de Etendo Go fue modificada",
+    assertEquals("Tu contraseña de Etendo fue modificada",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
         .contains("contacta a soporte"));
@@ -324,7 +324,7 @@ public class InitialEmailContractsTest {
 
     assertSent(response);
     assertEquals("es_ES", adapter.getLastRequest().getData().getString("language"));
-    assertEquals("Tu contraseña de Etendo Go fue modificada",
+    assertEquals("Tu contraseña de Etendo fue modificada",
         adapter.getLastRequest().getData().getString("subject"));
     assertTrue(adapter.getLastRequest().getData().getString("body")
         .contains("contacta a soporte"));
