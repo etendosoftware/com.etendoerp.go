@@ -56,6 +56,8 @@ final class McpToolResponses {
     try {
       JSONObject envelope = e.toEnvelope();
       envelope.put(McpConstants.KEY_TOOL, toolName);
+      // B3: the moment an agent is stuck is the moment its feedback is worth most.
+      envelope.put(McpConstants.KEY_FEEDBACK, McpConstants.FEEDBACK_INVITATION);
       return envelope.toString(2);
     } catch (JSONException jsonEx) {
       log.error("Could not build routing error envelope for '{}'", toolName, jsonEx);
@@ -84,6 +86,8 @@ final class McpToolResponses {
       envelope.put(McpConstants.KEY_TOOL, toolName);
       envelope.put(McpConstants.KEY_HINT, "This is a server-side failure, not a bad request — "
           + "re-sending the same call with corrected values will not help.");
+      // B3: a server fault the agent cannot fix is exactly what we want reported.
+      envelope.put(McpConstants.KEY_FEEDBACK, McpConstants.FEEDBACK_INVITATION);
       return envelope.toString(2);
     } catch (JSONException jsonEx) {
       log.error("Could not build error envelope for '{}'", toolName, jsonEx);
@@ -98,7 +102,7 @@ final class McpToolResponses {
    */
   static JSONObject imageToolResult(JSONObject body) throws JSONException {
     boolean failed = body.has(McpConstants.KEY_ERROR);
-    return failed ? McpToolRouter.wrapAsErrorContent(body.toString(2))
-        : McpToolRouter.wrapAsTextContent(body.toString(2));
+    return failed ? McpToolRouter.wrapAsErrorContent(body)
+        : McpToolRouter.wrapAsTextContent(body);
   }
 }
