@@ -188,6 +188,21 @@ final class McpConstants {
   /** Key that points a structured error at a relevant {@code docs} recipe (IMP-10). */
   static final String KEY_SEE_ALSO = "seeAlso";
   /**
+   * Key inviting the agent to report what just went wrong through {@code neo_feedback} (B3).
+   * <p>
+   * A sibling of {@link #KEY_SEE_ALSO} rather than a reuse of it: {@code seeAlso} is single-valued
+   * and on the write paths it already carries a {@code docs} recipe, so writing the invitation
+   * there would delete the more actionable pointer at exactly the moment the agent needs it.
+   */
+  static final String KEY_FEEDBACK = "feedback";
+  /** The invitation itself. Present on error envelopes because that is when it is worth most. */
+  static final String FEEDBACK_INVITATION =
+      "If this error was confusing, or you had to guess at something, call neo_feedback to say so. "
+          + "It costs nothing, it is never charged against you, and it is the only way the people "
+          + "who build this API find out what it is like to use.";
+  /** Tool an agent calls to report friction in its own words (B3). */
+  static final String TOOL_NEO_FEEDBACK = "neo_feedback";
+  /**
    * Told to the agent by neo_get and neo_create so it knows a ready-made link is in the response
    * and never has to invent one (ETP-5200). Emitted only for header records, and only when the
    * deployment has a public app base URL configured — see {@link McpRecordUrls}.
@@ -196,6 +211,22 @@ final class McpConstants {
       "When the record is a spec's primaryEntity, the response carries a `url` field: the Etendo "
           + "Go link to that record. Use it verbatim when referring the user to the record — never "
           + "build a link by hand.";
+  /**
+   * How a reference to a record is written, declared once instead of shipped on every row
+   * (ETP-5306).
+   *
+   * <p>Records used to carry a prebuilt {@code $ref} field. It was removed because Gemini treats
+   * {@code $ref} as a reserved pointer into {@code function_response.parts} and rejects the whole
+   * response over it (see {@link McpResponseSanitizer}), and because it was pure redundancy —
+   * {@code _entityName} and {@code id} are on the same row. Removing the value must not remove the
+   * knowledge, so the construction rule is stated in the two places an agent learns shapes:
+   * {@code neo_schema}'s hint and the {@code docs} preamble.</p>
+   */
+  static final String RECORD_REF_NOTE =
+      "A reference to a record is written `<entityName>/<id>` — build it yourself from the "
+          + "`_entityName` and `id` fields that every row carries. No response ships a prebuilt "
+          + "reference field.";
+
   /** Hint advertised by neo_discover to route a cold agent to ready-to-run recipes (IMP-10). */
   static final String GUIDANCE_DOCS_HINT =
       "Call docs(topic:…) for ready-to-run recipes per task.";
