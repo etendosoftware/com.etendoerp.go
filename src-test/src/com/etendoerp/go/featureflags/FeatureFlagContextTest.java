@@ -18,7 +18,6 @@
 package com.etendoerp.go.featureflags;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -44,15 +43,19 @@ class FeatureFlagContextTest {
   void targetsOnTheAccountEmail() {
     FeatureFlagContext context = FeatureFlagContext.forAccount("user@example.com");
     assertEquals("user@example.com", context.getTargetingKey());
-    assertEquals("user@example.com",
-        context.getAttributes().get(FeatureFlagContext.ATTRIBUTE_EMAIL));
-    assertEquals(1, context.getAttributes().size(),
-        "forAccount contributes the email attribute and nothing else");
+    // forAccount() publishes the email as BOTH the targeting key and the Email attribute — see
+    // FeatureFlagContext.ATTRIBUTE_EMAIL for why the duplication is load-bearing (ETP-4966).
+    assertEquals(Map.of(FeatureFlagContext.ATTRIBUTE_EMAIL, "user@example.com"),
+        context.getAttributes());
   }
 
   /**
    * The blank case is the one that matters: a context with neither the key nor the attribute must
    * never read as an empty-string identity a rule could match.
+   *
+   * <p>Kept through the develop merge that rewrote this class to whole-map assertions:
+   * {@code aBlankAccountLeavesNoTargetingKey} covers the targeting key for the same inputs, and
+   * nothing else covers the attribute map, which is the half a rule would match on.</p>
    */
   @Test
   void aBlankAccountCarriesNoEmailAttributeEither() {
@@ -72,9 +75,9 @@ class FeatureFlagContextTest {
     FeatureFlagContext base = FeatureFlagContext.forAccount("user@example.com");
     FeatureFlagContext scoped = base.with(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, "CLIENT1");
 
-    // The original keeps exactly what forAccount gave it — the email attribute, and no clientId.
-    assertFalse(base.getAttributes().containsKey(FeatureFlagContext.ATTRIBUTE_CLIENT_ID));
-    assertEquals(1, base.getAttributes().size());
+    // base still carries exactly what forAccount() gave it: it never gained clientId.
+    assertEquals(Map.of(FeatureFlagContext.ATTRIBUTE_EMAIL, "user@example.com"),
+        base.getAttributes());
     assertEquals("CLIENT1", scoped.getAttributes().get(FeatureFlagContext.ATTRIBUTE_CLIENT_ID));
     assertEquals("user@example.com",
         scoped.getAttributes().get(FeatureFlagContext.ATTRIBUTE_EMAIL),
@@ -89,8 +92,7 @@ class FeatureFlagContextTest {
         .with(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, "  ")
         .with(null, "CLIENT1")
         .with("   ", "CLIENT1");
-
-    // Every blank call was a no-op, so what remains is exactly what forAccount contributed.
+    // Only the Email attribute survives: none of the four blank with() calls added anything.
     assertEquals(Map.of(FeatureFlagContext.ATTRIBUTE_EMAIL, "user@example.com"),
         context.getAttributes());
   }
