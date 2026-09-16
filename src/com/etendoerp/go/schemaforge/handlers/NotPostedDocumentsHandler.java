@@ -257,9 +257,26 @@ public class NotPostedDocumentsHandler implements NeoHandler {
     return true;
   }
 
+  /**
+   * The same OBUIAPP process grant {@link #handle} already enforces, declared so the shared gate
+   * can ask for it.
+   *
+   * <p>This spec has no {@code AD_Window}, no linked {@code AD_Process} and no {@code AD_TAB_ID}
+   * on its entity, so {@code NeoAccessHelper} has nothing to evaluate and falls through to its
+   * permissive default. The refusal below was therefore invisible to the catalogue: the spec was
+   * listed for roles the execution then answered {@code 403}. Declaring it changes what is
+   * advertised, not who is allowed - the rule is the same one, asked one step earlier.</p>
+   *
+   * @return whether the current role holds the Not Posted Documents process grant
+   */
+  @Override
+  public boolean isAccessibleForCurrentRole() {
+    return NeoAccessHelper.hasObuiappProcessAccess(NOT_POSTED_DOCUMENTS_PROCESS_ID);
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
-    if (!NeoAccessHelper.hasObuiappProcessAccess(NOT_POSTED_DOCUMENTS_PROCESS_ID)) {
+    if (!isAccessibleForCurrentRole()) {
       return NeoResponse.error(403, "Access denied");
     }
     try {
