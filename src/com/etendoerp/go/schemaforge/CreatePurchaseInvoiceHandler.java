@@ -70,6 +70,11 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
   private static final String SPEC_PURCHASE_ORDER = "purchase-order";
   private static final String SPEC_GOODS_RECEIPT = "goods-receipt";
   private static final String FIELD_ORDERED_QUANTITY = "orderedQuantity";
+  // ETP-5381 — duplicate-invoice guard. English literal on purpose: localized by
+  // tools/app-shell/src/lib/backendErrors.js, the convention used by every other invoice-flow
+  // message in this module. Surfaced as 409, not 400 (see AlreadyInvoicedException).
+  private static final String ERR_RECEIPT_ALREADY_INVOICED =
+      "This goods receipt has already been fully invoiced.";
 
   @Inject
   InvoiceFromOrderSupport invoiceFromOrderSupport;
@@ -107,9 +112,18 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
         OBDal.getInstance().getSession().refresh(invoice);
         ensureDocumentNo(invoice);
 
+        // ETP-5381: create and confirm atomically — see CreateDraftInvoiceHandler.handleCreate for
+        // the full rationale. The id is captured before the call because ProcessInvoiceUtil commits
+        // and closes the session, leaving `invoice` detached.
+        String invoiceId = invoice.getId();
+        InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, context.getObContext());
+        Invoice completed = OBDal.getInstance().get(Invoice.class, invoiceId);
+
         JSONObject data = new JSONObject();
-        data.put("id", invoice.getId());
-        data.put("documentNo", invoice.getDocumentNo());
+        data.put("id", invoiceId);
+        data.put("documentNo", completed.getDocumentNo());
+        // Not sent before this ticket; the frontend needs it to render the resulting status.
+        data.put("documentStatus", completed.getDocumentStatus());
 
         JSONObject responseData = new JSONObject();
         responseData.put("data", data);
@@ -121,20 +135,32 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       } finally {
         OBContext.restorePreviousMode();
       }
+    } catch (AlreadyInvoicedException e) {
+      log.warn("Rejected duplicate purchase invoice for {}: {}", recordId, e.getMessage());
+      return errorResponse(HttpServletResponse.SC_CONFLICT, e.getMessage());
     } catch (OBException e) {
       log.warn("Error creating purchase invoice from order {}: {}", recordId, e.getMessage());
-      try {
-        JSONObject body = new JSONObject();
-        body.put("status", "error");
-        body.put("message", e.getMessage());
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
-      } catch (Exception jsonEx) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
-      }
+      return errorResponse(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {
       log.error("Error creating purchase invoice from order {}: {}", recordId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while creating the purchase invoice");
+    }
+  }
+
+  /**
+   * Builds the {@code {status, message}} error body every frontend caller of this action reads as
+   * {@code err.response.message}, falling back to a plain-text response if the JSON cannot be
+   * assembled.
+   */
+  private NeoResponse errorResponse(int status, String message) {
+    try {
+      JSONObject body = new JSONObject();
+      body.put("status", "error");
+      body.put("message", message);
+      return NeoResponse.error(status, body);
+    } catch (Exception jsonEx) {
+      return NeoResponse.error(status, message);
     }
   }
 
@@ -397,6 +423,20 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     }
 
     Map<String, BigDecimal> qtyOverrides = parseLineOverrides(body);
+    // ETP-5381 (guards P3a + P3b): when the caller sends no explicit line quantities — which is
+    // what the UI always does, it posts only priceListId — seed them from the receipt's pending
+    // quantities. Without this, resolveReceiptLineQty falls back to the FULL movementQuantity and
+    // the same receipt can be invoiced over and over; the javadoc of that method already promised
+    // this map came from computePendingQtyPerLine, it was simply never wired up.
+    // An empty result means there is genuinely nothing left, which is a duplicate request (409),
+    // not an empty receipt. The throwing variant is used so a DB failure surfaces as such instead
+    // of being mistaken for "fully invoiced".
+    if (qtyOverrides.isEmpty()) {
+      qtyOverrides = NeoInvoiceSupport.computePendingQtyPerLineOrThrow(receiptId, true);
+      if (qtyOverrides.isEmpty()) {
+        throw new AlreadyInvoicedException(ERR_RECEIPT_ALREADY_INVOICED);
+      }
+    }
 
     Order linkedOrder = receipt.getSalesOrder();
     if (linkedOrder == null) {
