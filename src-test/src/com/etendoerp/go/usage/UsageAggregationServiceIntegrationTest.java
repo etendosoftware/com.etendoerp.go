@@ -22,6 +22,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import java.util.ArrayList;
 import java.util.Calendar;
@@ -36,6 +37,7 @@ import org.junit.Test;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.base.weld.test.WeldBaseTest;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.core.TriggerHandler;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.User;
@@ -330,16 +332,73 @@ public class UsageAggregationServiceIntegrationTest extends WeldBaseTest {
    * Recording nothing is indistinguishable from genuinely zero usage, and would under-bill
    * silently and indefinitely. The run as a whole still completes — one broken resource must not
    * stop the others — so the failure is visible in the result summary.
+   *
+   * <p><b>Why the fixture disables triggers, and why that is not cheating.</b> Since ETP-5050's
+   * save-time observer landed, this row can no longer be CREATED through a normal save — the
+   * observer rejects it, which is the feature working. But the STATE is still reachable in
+   * production, by a sequence the observer cannot police: a row is saved while its counter is
+   * deployed, and a later release removes or renames that counter. Nothing re-validates existing
+   * catalog rows at deploy time, so the row survives pointing at a qualifier that no longer
+   * exists. Disabling triggers reproduces exactly that — a row that entered the table without
+   * this observer seeing it — rather than dodging validation for convenience. The boundary is
+   * pinned by {@link #anUndeployedQualifierCannotBeSavedThroughTheNormalPath()} immediately
+   * below, so the bypass cannot quietly become the only path this behaviour is tested through.
    */
   @Test
   public void aResourceNamingAnUndeployedCounterIsReportedAsAFailureAndDoesNotRecordZero() {
-    BillingResource resource = givenStrategyResource("STRAT_MISSING", "no-such-counter-deployed");
+    BillingResource resource =
+        givenStrategyResourceBypassingValidation("STRAT_MISSING", "no-such-counter-deployed");
 
     UsageAggregationResult result = new UsageAggregationService().run(theDay, theDay);
 
     assertTrue("a missing counter must be reported, never silently counted as zero",
         result.getResourcesFailed() > 0);
     assertNull(findRow(resource, TEST_CLIENT_ID, theDay));
+  }
+
+  /**
+   * The other side of the same coin, and the reason the bypass above is honest: through the
+   * NORMAL path the observer refuses the row outright. Without this test the bypass would be
+   * indistinguishable from a test quietly routing around validation it found inconvenient.
+   */
+  @Test
+  public void anUndeployedQualifierCannotBeSavedThroughTheNormalPath() {
+    assertSaveRejected("no-such-counter-deployed",
+        () -> givenStrategyResource("STRAT_REJECTED", "no-such-counter-deployed"));
+  }
+
+  /**
+   * A well-formed declarative row saves, and the observer stamps what its counting query cost.
+   * {@code LAST_VALIDATION_MS} is what makes a fragment that would table-scan every tenant
+   * nightly visible at configuration time rather than at 02:00.
+   */
+  @Test
+  public void savingADeclarativeResourceRecordsItsProbedCost() {
+    BillingResource resource = givenDeclarativeResource("DECL_PROBED", restrictionForFixture());
+
+    assertNotNull("the observer must stamp when the row was validated",
+        resource.getLastValidated());
+    assertNotNull("and how long its counting query took", resource.getLastValidationMs());
+  }
+
+  /** A fragment that could escape its subquery is refused at save, not at 02:00. */
+  @Test
+  public void aMalformedFragmentCannotBeSaved() {
+    assertSaveRejected("parentheses",
+        () -> givenDeclarativeResource("DECL_BAD_FRAGMENT", "1=1) or (1=1"));
+  }
+
+  /** An entity name that is not in the runtime model is refused at save. */
+  @Test
+  public void anUnknownCountedEntityCannotBeSaved() {
+    assertSaveRejected("C_Invoice", () -> {
+      BillingResource resource = newResource("DECL_BAD_ENTITY");
+      resource.setCountingMode(UsageResourceValidator.MODE_DECLARATIVE);
+      resource.setCountedEntity("C_Invoice");
+      resource.setDateProperty(DATE_PROPERTY);
+      OBDal.getInstance().save(resource);
+      OBDal.getInstance().flush();
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -499,6 +558,51 @@ public class UsageAggregationServiceIntegrationTest extends WeldBaseTest {
         findRow(resource, TEST_CLIENT_ID, today).isSettled());
   }
 
+  /**
+   * Asserts that a save is refused by the observer, and refused FOR THE RIGHT REASON.
+   *
+   * <p>Two things this deliberately does not do. It does not pin the exception type: the observer
+   * throws {@code IllegalArgumentException}, but it throws it from inside a Hibernate flush, and
+   * the DAL is entitled to surface that wrapped. Naming the type would make the test fail when
+   * the wrapper changes, which is not the behaviour anyone cares about. It therefore accepts any
+   * {@link RuntimeException} and searches the whole cause chain for the text.
+   *
+   * <p>And it does not accept a bare "something was thrown". A save can fail for many boring
+   * reasons — a missing mandatory column, a unique-key clash — and every one of them would let a
+   * type-only assertion pass while the observer did nothing at all. That is exactly the failure
+   * mode that hid here once: the observer silently stopped firing and the tests reported
+   * "nothing happened". Requiring the message to name the offending value is what distinguishes
+   * "rejected by validation" from "failed for some other reason".
+   *
+   * @param expectedText something only the right rejection would mention — the bad qualifier, the
+   *     bad entity name, the word the fragment check uses
+   */
+  private void assertSaveRejected(String expectedText, Runnable save) {
+    try {
+      save.run();
+      fail("the save-time observer must reject this row; expected a failure mentioning '"
+          + expectedText + "' but the save succeeded");
+    } catch (RuntimeException thrown) {
+      String chain = messageChainOf(thrown);
+      assertTrue("the save failed, but not for the expected reason — expected a message naming '"
+          + expectedText + "', got: " + chain, chain.contains(expectedText));
+    } finally {
+      OBDal.getInstance().rollbackAndClose();
+    }
+  }
+
+  /** Every message down the cause chain, so a wrapped rejection is still recognisable. */
+  private static String messageChainOf(Throwable thrown) {
+    StringBuilder chain = new StringBuilder();
+    for (Throwable t = thrown; t != null && chain.length() < 8000; t = t.getCause()) {
+      chain.append(t.getClass().getSimpleName()).append(": ").append(t.getMessage()).append(" | ");
+      if (t.getCause() == t) {
+        break;
+      }
+    }
+    return chain.toString();
+  }
+
   // -------------------------------------------------------------------------
   // fixture helpers
   // -------------------------------------------------------------------------
@@ -561,6 +665,20 @@ public class UsageAggregationServiceIntegrationTest extends WeldBaseTest {
     OBDal.getInstance().save(resource);
     OBDal.getInstance().flush();
     return resource;
+  }
+
+  /**
+   * Inserts a strategy row without the save-time observer running, modelling a row that entered
+   * the catalog before its counter was removed. See the test that uses it for why this is a
+   * faithful reproduction rather than a bypass of convenience.
+   */
+  private BillingResource givenStrategyResourceBypassingValidation(String key, String qualifier) {
+    TriggerHandler.getInstance().disable();
+    try {
+      return givenStrategyResource(key, qualifier);
+    } finally {
+      TriggerHandler.getInstance().enable();
+    }
   }
 
   private BillingResource givenStrategyResource(String key, String qualifier) {

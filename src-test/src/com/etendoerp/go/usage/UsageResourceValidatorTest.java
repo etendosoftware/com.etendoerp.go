@@ -21,11 +21,15 @@ import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
@@ -38,10 +42,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.hibernate.Session;
+import org.hibernate.query.Query;
 import org.mockito.MockedStatic;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.data.BillingResource;
 
@@ -420,6 +428,173 @@ class UsageResourceValidatorTest {
       }
     }
   }
+
+  /**
+   * Specs for {@link UsageResourceValidator#validateAndProbe(BillingResource)}, the entry point
+   * the save-time observer calls (acceptance criterion #6).
+   *
+   * <p>Validation existing as a callable method was never the gap — the gap Alex found is that
+   * nothing CALLED it, so every rejection below was reachable only by a nightly job. These tests
+   * pin the wired entry point specifically: each of the three malformed rows must be refused
+   * BEFORE any query runs, which is also what makes them testable without a database.
+   *
+   * <p>The probe itself (timing the composed query) is the one part that needs a session, so it
+   * is exercised with a stubbed one — enough to pin that a successful probe records its cost and
+   * that a failing probe aborts the save rather than storing a resource that cannot run.
+   */
+  @Nested
+  @DisplayName("validateAndProbe — the save-time entry point")
+  class ValidateAndProbe {
+
+    @Test
+    void refusesAnUnknownEntityWithoutRunningAnyQuery() {
+      try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class);
+          MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+        givenNoEntityIsFound(modelProvider);
+        BillingResource row = resource(UsageResourceValidator.MODE_DECLARATIVE);
+        when(row.getCountedEntity()).thenReturn("C_Invoice");
+        when(row.getDateProperty()).thenReturn(DATE_PROPERTY);
+
+        assertThrows(IllegalArgumentException.class,
+            () -> UsageResourceValidator.validateAndProbe(row));
+        obDal.verifyNoInteractions();
+      }
+    }
+
+    @Test
+    void refusesAMalformedFragmentWithoutRunningAnyQuery() {
+      try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class);
+          MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+        givenTheEntityHasADateProperty(modelProvider);
+        BillingResource row = declarativeRow();
+        when(row.getHQLRestriction()).thenReturn("1=1) or (1=1");
+
+        assertThrows(IllegalArgumentException.class,
+            () -> UsageResourceValidator.validateAndProbe(row));
+        obDal.verifyNoInteractions();
+      }
+    }
+
+    @Test
+    void refusesAnUndeployedQualifierWithoutRunningAnyQuery() {
+      try (MockedStatic<UsageCounterLookup> lookup = mockStatic(UsageCounterLookup.class);
+          MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+        lookup.when(() -> UsageCounterLookup.isDeployed(anyString())).thenReturn(false);
+        lookup.when(UsageCounterLookup::deployedQualifiers).thenReturn("(none deployed)");
+
+        assertThrows(IllegalArgumentException.class,
+            () -> UsageResourceValidator.validateAndProbe(strategyRow()));
+        obDal.verifyNoInteractions();
+      }
+    }
+
+    /**
+     * A strategy resource has no composed query to time, so it is stamped as validated and the
+     * probe is skipped entirely — timing nothing would record a meaningless zero.
+     */
+    @Test
+    void aStrategyRowIsStampedButNotProbed() {
+      try (MockedStatic<UsageCounterLookup> lookup = mockStatic(UsageCounterLookup.class);
+          MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
+        lookup.when(() -> UsageCounterLookup.isDeployed(QUALIFIER)).thenReturn(true);
+        BillingResource row = strategyRow();
+
+        UsageResourceValidator.validateAndProbe(row);
+
+        verify(row).setLastValidated(any(Date.class));
+        verify(row, never()).setLastValidationMs(any());
+        obDal.verifyNoInteractions();
+      }
+    }
+
+    /**
+     * A well-formed declarative row is probed and its cost recorded. {@code LAST_VALIDATION_MS} is
+     * what makes a fragment that would table-scan every tenant nightly visible at configuration
+     * time rather than at 02:00, so the stamp is the feature, not bookkeeping.
+     */
+    @Test
+    void aDeclarativeRowIsProbedAndItsCostRecorded() {
+      try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class);
+          MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+          MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+        givenTheEntityHasADateProperty(modelProvider);
+        givenAProbeThatSucceeds(obDalStatic);
+        BillingResource row = declarativeRow();
+
+        UsageResourceValidator.validateAndProbe(row);
+
+        verify(row).setLastValidated(any(Date.class));
+        verify(row).setLastValidationMs(any(Long.class));
+      }
+    }
+
+    /**
+     * A query that validates but cannot execute — a property the composer accepts yet Hibernate
+     * rejects, say — aborts the save. Storing it would leave a catalog row that looks configured
+     * and fails every night thereafter.
+     */
+    @Test
+    void aProbeThatFailsAbortsTheSaveWithAnExplanatoryMessage() {
+      try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class);
+          MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+          MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+        givenTheEntityHasADateProperty(modelProvider);
+        givenAProbeThatThrows(obDalStatic, new IllegalStateException("could not resolve property"));
+
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class,
+            () -> UsageResourceValidator.validateAndProbe(declarativeRow()));
+
+        assertAll(
+            () -> assertTrue(thrown.getMessage().contains("could not be executed"),
+                thrown.getMessage()),
+            () -> assertTrue(thrown.getMessage().contains("could not resolve property"),
+                "the underlying cause must survive: " + thrown.getMessage()));
+      }
+    }
+
+    /** Admin mode is restored even when the probe blows up. */
+    @Test
+    void adminModeIsRestoredAfterAFailedProbe() {
+      try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class);
+          MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+          MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+        givenTheEntityHasADateProperty(modelProvider);
+        givenAProbeThatThrows(obDalStatic, new IllegalStateException("boom"));
+
+        assertThrows(IllegalArgumentException.class,
+            () -> UsageResourceValidator.validateAndProbe(declarativeRow()));
+
+        obContext.verify(OBContext::restorePreviousMode);
+      }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void givenAProbeThatSucceeds(MockedStatic<OBDal> obDalStatic) {
+      OBDal obDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      Query<Object[]> query = mock(Query.class);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.getSession()).thenReturn(session);
+      when(session.createQuery(anyString(), eq(Object[].class))).thenReturn(query);
+      when(query.setParameter(anyString(), any())).thenReturn(query);
+      // setMaxResults and setTimeout are both stubbed to chain whether or not the probe currently
+      // calls them, so this fixture survives the pending change that drops the LIMIT (it times
+      // "first group", not the nightly cost) and adds a timeout (so a pathological fragment is
+      // rejected rather than hanging the user's save).
+      when(query.setMaxResults(anyInt())).thenReturn(query);
+      when(query.setTimeout(anyInt())).thenReturn(query);
+      when(query.list()).thenReturn(java.util.Collections.emptyList());
+    }
+
+    private void givenAProbeThatThrows(MockedStatic<OBDal> obDalStatic, RuntimeException failure) {
+      OBDal obDal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.getSession()).thenReturn(session);
+      when(session.createQuery(anyString(), eq(Object[].class))).thenThrow(failure);
+    }
+  }
+
 
   /** Types a date property must never hold; each would bucket usage by something meaningless. */
   static java.util.stream.Stream<Class<?>> nonDateTypes() {

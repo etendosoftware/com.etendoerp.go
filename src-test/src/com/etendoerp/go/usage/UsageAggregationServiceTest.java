@@ -45,6 +45,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
@@ -89,7 +90,10 @@ class UsageAggregationServiceTest {
   private static final String QUALIFIER = "healthy-counter";
   private static final String MEASURED_CLIENT_ID = "A1B2C3D4E5F60718293A4B5C6D7E8F90";
   private static final long COUNTED = 17L;
+  /** A second tenant, used for the row that stops counting. */
+  private static final String OTHER_CLIENT_ID = "0FEDCBA98765432100FEDCBA98765432";
 
+  private MockedStatic<OBContext> obContext;
   private MockedStatic<OBDal> obDalStatic;
   private MockedStatic<OBProvider> obProviderStatic;
   private MockedStatic<UsageSettings> usageSettings;
@@ -97,6 +101,7 @@ class UsageAggregationServiceTest {
 
   private OBDal obDal;
   private UsageDaily writtenRow;
+  private OBCriteria<UsageDaily> usageCriteria;
 
   private static Date day() {
     Calendar cal = Calendar.getInstance();
@@ -107,6 +112,9 @@ class UsageAggregationServiceTest {
 
   @BeforeEach
   void setUp() {
+    // run() now enters admin mode itself (it reads across every tenant), so OBContext has to be
+    // stubbed or the static call finds no thread-bound context.
+    obContext = mockStatic(OBContext.class);
     obDalStatic = mockStatic(OBDal.class);
     obProviderStatic = mockStatic(OBProvider.class);
     usageSettings = mockStatic(UsageSettings.class);
@@ -130,6 +138,7 @@ class UsageAggregationServiceTest {
   @AfterEach
   void tearDown() {
     counterLookup.close();
+    obContext.close();
     usageSettings.close();
     obProviderStatic.close();
     obDalStatic.close();
@@ -177,9 +186,41 @@ class UsageAggregationServiceTest {
 
   @SuppressWarnings("unchecked")
   private void givenNoExistingUsageRow() {
-    OBCriteria<UsageDaily> criteria = mock(OBCriteria.class);
-    when(obDal.createCriteria(UsageDaily.class)).thenReturn(criteria);
-    when(criteria.uniqueResult()).thenReturn(null);
+    usageCriteria = mock(OBCriteria.class);
+    when(obDal.createCriteria(UsageDaily.class)).thenReturn(usageCriteria);
+    when(usageCriteria.uniqueResult()).thenReturn(null);
+  }
+
+  /**
+   * A row already stored for the measured tenant on the counted day. {@code find(...)} reads it
+   * through {@code uniqueResult()}; the zero-out sweep reads the same criteria through
+   * {@code list()}, so both are stubbed to agree.
+   */
+  private UsageDaily givenStoredRowForCountedTenant(boolean settled, long quantity) {
+    UsageDaily stored = storedRow(MEASURED_CLIENT_ID, settled, quantity);
+    when(usageCriteria.uniqueResult()).thenReturn(stored);
+    when(usageCriteria.list()).thenReturn(Arrays.asList(stored));
+    return stored;
+  }
+
+  /**
+   * A row stored for a tenant the recount does NOT report — the tenant that dropped to zero.
+   * {@code find(...)} still answers null, because the counted tenant has no row of its own.
+   */
+  private UsageDaily givenStoredRowForATenantThatNoLongerCounts(boolean settled, long quantity) {
+    UsageDaily stored = storedRow(OTHER_CLIENT_ID, settled, quantity);
+    when(usageCriteria.list()).thenReturn(Arrays.asList(stored));
+    return stored;
+  }
+
+  private UsageDaily storedRow(String clientId, boolean settled, long quantity) {
+    UsageDaily stored = mock(UsageDaily.class);
+    Client measured = mock(Client.class);
+    when(measured.getId()).thenReturn(clientId);
+    when(stored.getMeasuredClient()).thenReturn(measured);
+    when(stored.isSettled()).thenReturn(settled);
+    when(stored.getQuantity()).thenReturn(quantity);
+    return stored;
   }
 
   @Nested
@@ -483,6 +524,174 @@ class UsageAggregationServiceTest {
       String summary = new UsageAggregationService().run(day(), day()).toString();
 
       assertTrue(summary.contains("1 day(s)") && summary.contains("1 usage row(s)"), summary);
+    }
+  }
+
+  @Nested
+  @DisplayName("a final day is never rewritten by the scheduled run (B2)")
+  class FinalDaysAreFrozen {
+
+    /**
+     * THE REGRESSION TEST for acceptance criterion #4, which had no test at all.
+     *
+     * <p>"Once a day is final it never changes" is the one normative invariant of the design: a
+     * figure that has been reported to a customer must not silently move afterwards. The scheduled
+     * run cannot simply avoid final days, because it iterates the LARGEST settling window
+     * configured anywhere and therefore necessarily revisits days that are already final for a
+     * tenant with a shorter window. So the guard has to be at the row: a stored row flagged
+     * settled is left exactly as it is.
+     *
+     * <p>Before the fix both entry points shared one code path, so the invariant could not even be
+     * expressed — which is why no test caught it.
+     */
+    @Test
+    void theScheduledRunLeavesAnAlreadySettledRowAlone() {
+      givenCatalog(HEALTHY_ID);
+      givenAHealthyResource(HEALTHY_ID);
+      usageSettings.when(UsageSettings::getMaxSettlingWindowDays).thenReturn(0);
+      UsageDaily stored = givenStoredRowForCountedTenant(true, 99L);
+
+      UsageAggregationResult result = new UsageAggregationService().runForSettlingWindow();
+
+      assertAll(() -> verify(obDal, never()).save(stored),
+          () -> verify(stored, never()).setQuantity(any()),
+          () -> assertEquals(0, result.getRowsWritten(),
+              "a row that was skipped must not be reported as written"));
+    }
+
+    /**
+     * The other half, and the half that makes the first one meaningful: a backfill is a DELIBERATE
+     * recomputation, so it may rewrite a final day. Without this, "never rewrite" could be
+     * satisfied by never writing at all, and shadow mode — reviewing a past month before anyone is
+     * billed — would be impossible.
+     */
+    @Test
+    void anExplicitBackfillDoesRewriteAnAlreadySettledRow() {
+      givenCatalog(HEALTHY_ID);
+      givenAHealthyResource(HEALTHY_ID);
+      UsageDaily stored = givenStoredRowForCountedTenant(true, 99L);
+
+      UsageAggregationResult result = new UsageAggregationService().run(day(), day());
+
+      assertAll(() -> verify(obDal).save(stored),
+          () -> verify(stored).setQuantity(COUNTED),
+          () -> assertEquals(1, result.getRowsWritten()));
+    }
+
+    /** An unsettled row is still open, so the scheduled run updates it as usual. */
+    @Test
+    void theScheduledRunStillRewritesARowThatIsNotYetSettled() {
+      givenCatalog(HEALTHY_ID);
+      givenAHealthyResource(HEALTHY_ID);
+      usageSettings.when(UsageSettings::getMaxSettlingWindowDays).thenReturn(0);
+      UsageDaily stored = givenStoredRowForCountedTenant(false, 99L);
+
+      new UsageAggregationService().runForSettlingWindow();
+
+      verify(stored).setQuantity(COUNTED);
+    }
+
+    /** The flag is explicit on the three-argument form, so both entry points are pinned. */
+    @Test
+    void theRewriteFlagIsWhatDecides() {
+      givenCatalog(HEALTHY_ID);
+      givenAHealthyResource(HEALTHY_ID);
+      UsageDaily stored = givenStoredRowForCountedTenant(true, 99L);
+
+      new UsageAggregationService().run(day(), day(), false);
+      verify(obDal, never()).save(stored);
+
+      new UsageAggregationService().run(day(), day(), true);
+      verify(obDal).save(stored);
+    }
+  }
+
+  @Nested
+  @DisplayName("a tenant that stops counting is zeroed, not left stale (B3)")
+  class TenantsThatDropToZero {
+
+    /**
+     * THE REGRESSION TEST for B3. The counting query groups by tenant and only emits groups with
+     * rows, so a tenant whose documents were all voided produces NO group — and the upsert loop,
+     * which only walks the returned counts, never touched its row. Its last non-zero value stood
+     * forever, so the claim that each day is "recomputed from scratch" was false for exactly the
+     * case that costs a customer money: usage that went away but kept being billed.
+     *
+     * <p>Absence of a row means zero only until a row exists. Once one does, it has to be set.
+     */
+    @Test
+    void aStoredRowForATenantTheRecountNoLongerReportsIsSetToZero() {
+      givenCatalog(HEALTHY_ID);
+      givenAHealthyResource(HEALTHY_ID);
+      UsageDaily stale = givenStoredRowForATenantThatNoLongerCounts(false, 5L);
+
+      UsageAggregationResult result = new UsageAggregationService().run(day(), day());
+
+      assertAll(() -> verify(stale).setQuantity(0L),
+          () -> verify(obDal).save(stale),
+          () -> assertEquals(2, result.getRowsWritten(),
+              "the counted tenant's row plus the zeroed one"));
+    }
+
+    /**
+     * Zeroing obeys the same freeze as counting. A tenant that dropped to zero on a day that is
+     * already final must NOT have that day rewritten — otherwise B3 would quietly reintroduce the
+     * very revision B2 forbids, which is the kind of interaction that only shows up when both
+     * rules are exercised together.
+     */
+    @Test
+    void aFrozenStaleRowIsLeftAloneByTheScheduledRun() {
+      givenCatalog(HEALTHY_ID);
+      givenAHealthyResource(HEALTHY_ID);
+      usageSettings.when(UsageSettings::getMaxSettlingWindowDays).thenReturn(0);
+      UsageDaily stale = givenStoredRowForATenantThatNoLongerCounts(true, 5L);
+
+      new UsageAggregationService().runForSettlingWindow();
+
+      assertAll(() -> verify(stale, never()).setQuantity(any()),
+          () -> verify(obDal, never()).save(stale));
+    }
+
+    /** But a backfill may zero a final day, symmetrically with the counted case. */
+    @Test
+    void aBackfillDoesZeroAFrozenStaleRow() {
+      givenCatalog(HEALTHY_ID);
+      givenAHealthyResource(HEALTHY_ID);
+      UsageDaily stale = givenStoredRowForATenantThatNoLongerCounts(true, 5L);
+
+      new UsageAggregationService().run(day(), day());
+
+      verify(stale).setQuantity(0L);
+    }
+
+    /**
+     * A row already at zero is left untouched. Rewriting it would be harmless to the value but
+     * would bump COMPUTED_AT on every nightly run forever, turning a quiet table into one whose
+     * rows all look freshly recomputed — and hiding which days actually changed.
+     */
+    @Test
+    void aRowAlreadyAtZeroIsNotRewritten() {
+      givenCatalog(HEALTHY_ID);
+      givenAHealthyResource(HEALTHY_ID);
+      UsageDaily alreadyZero = givenStoredRowForATenantThatNoLongerCounts(false, 0L);
+
+      UsageAggregationResult result = new UsageAggregationService().run(day(), day());
+
+      assertAll(() -> verify(obDal, never()).save(alreadyZero),
+          () -> assertEquals(1, result.getRowsWritten(), "only the counted tenant's row"));
+    }
+
+    /** A tenant the recount DID report is updated normally, not zeroed by the sweep. */
+    @Test
+    void aTenantThatStillCountsIsNotZeroed() {
+      givenCatalog(HEALTHY_ID);
+      givenAHealthyResource(HEALTHY_ID);
+      UsageDaily stored = givenStoredRowForCountedTenant(false, 5L);
+
+      new UsageAggregationService().run(day(), day());
+
+      assertAll(() -> verify(stored).setQuantity(COUNTED),
+          () -> verify(stored, never()).setQuantity(0L));
     }
   }
 }
