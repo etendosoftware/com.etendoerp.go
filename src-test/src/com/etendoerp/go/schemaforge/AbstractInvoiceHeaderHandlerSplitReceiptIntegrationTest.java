@@ -288,6 +288,10 @@ public class AbstractInvoiceHeaderHandlerSplitReceiptIntegrationTest extends Wel
     ShipmentInOut receipt = NeoCommercialDocumentFactory.createShipmentReceiptHeader(
         order, docType, false, "V+");
     receipt.setDocumentAction(DOCUMENT_ACTION_COMPLETE);
+    // Explicit documentNo, same as createOrder()/createDraftApInvoice() below — without it,
+    // DocumentNoHandlerLegacy tries to auto-assign one via RequestContext.getVariablesSecureApp(),
+    // which throws "No request object set" outside a real HTTP request (JUnit has none).
+    receipt.setDocumentNo("ETP5334MMR" + label + "-" + System.currentTimeMillis());
     OBDal.getInstance().save(receipt);
     OBDal.getInstance().flush();
 
