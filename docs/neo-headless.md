@@ -2131,14 +2131,26 @@ A read-only field is rejected on **both** `neo_create` and `neo_update`. A field
 is not; which verb is asking does not change the answer, and `NeoFieldFilter`'s own javadoc already
 says there is no separate update-side set to consult.
 
-**The exemptions are copied from `rejectableOnCreateFields`, not reinvented** — the MCP is adopting
-a rule the REST path already enforces, and two drifting definitions of "read-only" would be worse
-than the gap. A read-only field is rejectable only when nobody else could legitimately be supplying
-it:
+**The predicate is `rejectableOnCreateFields` (IMP-28 clause 2), but one of its two exemptions is
+deliberately not carried over** — and the reason is structural, not a difference of opinion about
+what read-only means.
 
-- **the entity declares a `Java_Qualifier`** — its `NeoHandler` pre-hook may inject the value
-  (`InventoryLineHandler` sets `bookQuantity`), so the whole entity is exempt;
-- **the AD column carries a configured default** — the platform fills it.
+- **Dropped: the entity-wide `Java_Qualifier` exemption.** On REST, `filterCreateRequest` runs
+  *after* `handleWithHooks` has already invoked the entity's `NeoHandler` pre-hook, so it cannot
+  tell a value the handler injected (`InventoryLineHandler` sets `bookQuantity`) from one the client
+  sent — exempting the whole entity is the only safe answer available to it. **On the MCP path that
+  ambiguity does not exist:** the field mapping runs on the caller's own `fields` argument and
+  `McpHookExecutor.runPreHook` fires further down `handleCreate`, on the body the mapping returns.
+  Every key at the gate is the caller's by construction.
+- **Kept: the configured-AD-default exemption.** The platform fills that column, and `neo_defaults`
+  actively invites an agent to send resolved values back in `fields` (the subject of IMP-45), so a
+  default echoed into a write is a shape the recommended sequence produces rather than a mistake.
+
+**Why the exemption mattered enough to measure.** 79 of the 128 writable entities declare a
+qualifier, and 783 curated read-only fields behind them are AD-updatable — keeping it would have
+left the rejection firing on under two fifths of the surface. The first implementation did keep it,
+and a live probe caught it: `neo_update` on `sales-order/header`, whose qualifier is
+`salesOrderHeaderHandler`, accepted `documentNo` and answered 200.
 
 Read-only-ness resolves through `McpFieldView`, so `MCP_CONFIG → fields.readOnly: false` reclaims a
 field for writing exactly as `fields.included` reclaims an excluded one (§4.12.6).

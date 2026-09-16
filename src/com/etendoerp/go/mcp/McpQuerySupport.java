@@ -206,16 +206,30 @@ final class McpQuerySupport {
   /**
    * Build the write gate for an entity.
    *
-   * <p><b>The read-only set mirrors {@code NeoFieldFilter}'s {@code rejectableOnCreateFields}
-   * predicate deliberately, exemptions included</b> (IMP-28 clause 2), because the MCP is adopting
-   * a rule the REST path already enforces and two drifting definitions of "read-only" would be
-   * worse than the gap being closed. A read-only field is rejectable only when nobody else could
-   * legitimately be the one supplying it:</p>
+   * <p><b>The read-only predicate is {@code NeoFieldFilter}'s {@code rejectableOnCreateFields}
+   * (IMP-28 clause 2); one of its two exemptions is deliberately <em>not</em> carried over, and the
+   * reason is structural rather than a difference of opinion about what read-only means.</b></p>
+   *
    * <ul>
-   *   <li><b>The entity declares a {@code Java_Qualifier}</b> — its {@code NeoHandler} pre-hook may
-   *       inject the value itself ({@code InventoryLineHandler} sets {@code bookQuantity}), so the
-   *       whole entity is exempt.</li>
-   *   <li><b>The AD column carries a configured default</b> — the platform fills it.</li>
+   *   <li><b>Dropped: the entity-wide {@code Java_Qualifier} exemption.</b> On the REST path
+   *       {@code filterCreateRequest} runs <em>after</em> {@code NeoServletSupport.handleWithHooks}
+   *       has already invoked the entity's {@code NeoHandler} pre-hook, so by the time it inspects
+   *       the body it cannot tell a value the handler injected ({@code InventoryLineHandler} sets
+   *       {@code bookQuantity}) from one the client sent — and exempting the whole entity is the
+   *       only safe answer available to it. <b>On the MCP path that ambiguity does not exist:</b>
+   *       this mapping runs on the caller's own {@code fields} argument, and
+   *       {@code McpHookExecutor.runPreHook} fires further down {@code handleCreate}, on the body
+   *       this returns. Every key here is the caller's by construction. Keeping the exemption would
+   *       have cost most of the gate — <b>79 of the 128 writable entities declare a qualifier, and
+   *       783 curated read-only fields behind them are AD-updatable</b>, so the rejection would
+   *       have fired on under two fifths of the surface. It was kept in the first implementation
+   *       and a live probe caught it: {@code neo_update} on {@code sales-order/header}, whose
+   *       qualifier is {@code salesOrderHeaderHandler}, accepted {@code documentNo} and answered
+   *       200.</li>
+   *   <li><b>Kept: the configured-AD-default exemption.</b> The platform fills that column, and an
+   *       agent following {@code neo_defaults} is actively invited to send resolved values back in
+   *       {@code fields} (the subject of IMP-45), so a default echoed into a write is a shape the
+   *       recommended sequence produces rather than a mistake.</li>
    * </ul>
    *
    * <p>Read-only-ness is resolved through {@link McpFieldView}, so a {@code MCP_CONFIG}
@@ -232,7 +246,6 @@ final class McpQuerySupport {
     if (sfEntity == null) {
       return new WriteGate(excluded, readOnly);
     }
-    boolean entityHasHandler = StringUtils.isNotBlank(sfEntity.getJavaQualifier());
     for (SFField sfField : activeFields(sfEntity)) {
       Column col = sfField.getADColumn();
       if (col == null) {
@@ -248,7 +261,7 @@ final class McpQuerySupport {
       McpFieldView view = McpFieldView.of(sfField);
       if (!view.isIncluded()) {
         excluded.add(prop.getName());
-      } else if (view.isReadOnly() && !entityHasHandler && !hasConfiguredDefault(col)) {
+      } else if (view.isReadOnly() && !hasConfiguredDefault(col)) {
         readOnly.add(prop.getName());
       }
     }
