@@ -369,19 +369,31 @@ public final class NeoAccessHelper {
    * @param shape      a short description of why there was nothing to evaluate
    */
   private static void reportUnanchoredAccess(SFSpec spec, String httpMethod, String shape) {
-    String specName = spec.getName();
-    Role role = resolveCurrentRole();
-    String roleName = role == null ? "(no role)" : role.getName();
-    if (UNANCHORED_SPECS_REPORTED.add(specName)) {
-      log.warn(
-          "Access to spec '{}' was granted by the permissive fallback, not by a rule ({}). "
-              + "Method {}, first seen for role '{}'. Nothing denies this spec today; it is "
-              + "reported so the fallback can be closed against real usage rather than a guess. "
-              + "See schema_forge docs/plans/2026-09-16-report-spec-access-fail-open.md",
-          specName, shape, httpMethod, roleName);
-    } else {
-      log.debug("Permissive fallback allowed spec '{}' ({}) for role '{}', method {}",
-          specName, shape, roleName, httpMethod);
+    try {
+      // The de-duplication key must never be null: ConcurrentHashMap refuses one, and a spec with
+      // no name is exactly the kind of degenerate record this reporting exists to notice. Falling
+      // back to the id, then to a placeholder, keeps such a spec countable instead of fatal.
+      String specName = spec.getName();
+      String reportKey = specName != null ? specName
+          : (spec.getId() != null ? "id:" + spec.getId() : "(unnamed spec)");
+      Role role = resolveCurrentRole();
+      String roleName = role == null ? "(no role)" : role.getName();
+      if (UNANCHORED_SPECS_REPORTED.add(reportKey)) {
+        log.warn(
+            "Access to spec '{}' was granted by the permissive fallback, not by a rule ({}). "
+                + "Method {}, first seen for role '{}'. Nothing denies this spec today; it is "
+                + "reported so the fallback can be closed against real usage rather than a guess. "
+                + "See schema_forge docs/plans/2026-09-16-report-spec-access-fail-open.md",
+            reportKey, shape, httpMethod, roleName);
+      } else {
+        log.debug("Permissive fallback allowed spec '{}' ({}) for role '{}', method {}",
+            reportKey, shape, roleName, httpMethod);
+      }
+    } catch (Exception e) {
+      // Observation must not change the answer. The caller has already decided to allow, and a
+      // failure to write that down cannot be allowed to turn the allow into an error - which is
+      // precisely what a null spec name did here before this guard existed.
+      log.debug("Could not report the permissive fallback for a spec: {}", e.getMessage());
     }
   }
 
