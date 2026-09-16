@@ -17,26 +17,35 @@
 
 package com.etendoerp.go.rest;
 
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
+import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.roles.UserRoleCompositionService;
 import com.etendoerp.go.schemaforge.data.Account;
 
 /** Shared JWT and environment-role helpers used by the Etendo Go servlet. */
 public final class EtendoGoJwtSupport {
 
+  private static final Logger log = LogManager.getLogger(EtendoGoJwtSupport.class);
   private static final String STAR_ORG_VALUE = "*";
   private static final String SYSTEM_ORG_ID = "0";
   private static final String SQL_FIND_ROLE_LIST_BY_USER =
@@ -77,13 +86,35 @@ public final class EtendoGoJwtSupport {
    * {@link RoleListData}, resolving the same {@code AD_Role}/{@code AD_Role_OrgAccess} rows
    * {@code EtendoGoJwtServlet}'s login flow already builds for the {@code roleList} it returns.
    *
+   * <p>ETP-5329 — the entry whose {@code id} matches {@code userId}'s actual personal/default
+   * role (see {@link User#getDefaultRole()}) also carries {@code effectiveRoleNames}: the names
+   * of the template roles composed into that personal role via {@code AD_Role_Inheritance}
+   * (resolved through {@link UserRoleCompositionService#getAppliedTemplateRoleIds(String)}), in
+   * the same order the service returns them. This is attached ONLY to the matching entry, never
+   * to every {@code roleList} row unconditionally — the rare pre-existing multi-{@code
+   * AD_User_Roles}-row anomaly (ETP-4604) means a non-default entry could otherwise be shown with
+   * a composed-template list that does not actually apply to it. Resolution runs only after the
+   * role rows have loaded successfully — there is no reason to resolve template names when the
+   * underlying role query already failed.
+   *
    * @param userId the {@code AD_User_ID} whose roles are being resolved
    * @return the resolved role list, never {@code null}
    * @throws JSONException if the underlying role/organization JSON cannot be built
    */
   public static RoleListData loadRoleListData(String userId) throws JSONException {
     try {
-      return buildRoleListData(loadRoleRows(userId));
+      List<Object[]> rows = loadRoleRows(userId);
+      if (rows.isEmpty()) {
+        // No roles at all -> nothing to attach effectiveRoleNames to; skip resolving it.
+        return buildRoleListData(rows, null, Collections.emptyList());
+      }
+      // resolveDefaultRoleId and resolveEffectiveRoleNames each independently OBDal.get() the
+      // same User by userId (the latter indirectly, inside getAppliedTemplateRoleIds). This is
+      // intentional/known: Hibernate's session-level identity cache dedups the second get() for
+      // the same PK, so there is no extra round-trip to short-circuit here.
+      String defaultRoleId = resolveDefaultRoleId(userId);
+      List<String> effectiveRoleNames = resolveEffectiveRoleNames(userId);
+      return buildRoleListData(rows, defaultRoleId, effectiveRoleNames);
     } catch (OBException e) {
       throw e;
     } catch (RuntimeException e) {
@@ -100,14 +131,71 @@ public final class EtendoGoJwtSupport {
     return query.list();
   }
 
-  private static RoleListData buildRoleListData(List<Object[]> rows) throws JSONException {
+  private static String resolveDefaultRoleId(String userId) {
+    User user = OBDal.getInstance().get(User.class, userId);
+    if (user == null || user.getDefaultRole() == null) {
+      return null;
+    }
+    return user.getDefaultRole().getId();
+  }
+
+  /**
+   * ETP-5329 — the template role names currently composed into {@code userId}'s personal role,
+   * in {@code AD_Role_Inheritance.Seqno} order. Empty when the user has no personal role yet or
+   * no templates applied ({@link UserRoleCompositionService#getAppliedTemplateRoleIds(String)}
+   * documents both as returning an empty list, never {@code null}).
+   */
+  private static List<String> resolveEffectiveRoleNames(String userId) {
+    List<String> templateRoleIds = new UserRoleCompositionService()
+        .getAppliedTemplateRoleIds(userId);
+    if (templateRoleIds.isEmpty()) {
+      return Collections.emptyList();
+    }
+    Map<String, String> namesById = fetchRoleNames(templateRoleIds);
+    List<String> names = new ArrayList<>();
+    for (String templateRoleId : templateRoleIds) {
+      String name = namesById.get(templateRoleId);
+      if (name != null) {
+        names.add(name);
+      } else {
+        // ETP-4604-style anomaly: a template role id with no matching (active) Role row —
+        // deleted or renamed out from under AD_Role_Inheritance. Log it instead of silently
+        // shrinking the effectiveRoleNames array.
+        log.warn("Template role id {} for user {} has no matching Role name; skipping it in "
+            + "effectiveRoleNames", templateRoleId, userId);
+      }
+    }
+    return names;
+  }
+
+  /**
+   * Bulk-fetches role names for {@code roleIds} in one query — mirrors the batching pattern in
+   * {@code UserRoleCompositionService#fetchCandidateDefaultRoles}.
+   */
+  @SuppressWarnings("unchecked")
+  private static Map<String, String> fetchRoleNames(List<String> roleIds) {
+    OBCriteria<Role> criteria = OBDal.getInstance().createCriteria(Role.class);
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    criteria.add(Restrictions.in(Role.PROPERTY_ID, roleIds));
+    Map<String, String> namesById = new LinkedHashMap<>();
+    for (Role role : (List<Role>) criteria.list()) {
+      namesById.put(role.getId(), role.getName());
+    }
+    return namesById;
+  }
+
+  private static RoleListData buildRoleListData(List<Object[]> rows, String defaultRoleId,
+      List<String> effectiveRoleNames) throws JSONException {
     String firstRoleId = null;
     Map<String, JSONObject> rolesById = new LinkedHashMap<>();
     for (Object[] row : rows) {
       String roleId = stringValue(row[0]);
       JSONObject roleObj = rolesById.get(roleId);
       if (roleObj == null) {
-        roleObj = buildRoleJson(roleId, stringValue(row[1]));
+        boolean isDefaultRole = roleId != null && roleId.equals(defaultRoleId);
+        roleObj = buildRoleJson(roleId, stringValue(row[1]),
+            isDefaultRole ? effectiveRoleNames : null);
         rolesById.put(roleId, roleObj);
         if (firstRoleId == null) {
           firstRoleId = roleId;
@@ -188,11 +276,15 @@ public final class EtendoGoJwtSupport {
     return query.uniqueResult() != null;
   }
 
-  private static JSONObject buildRoleJson(String roleId, String roleName) throws JSONException {
+  private static JSONObject buildRoleJson(String roleId, String roleName,
+      List<String> effectiveRoleNames) throws JSONException {
     JSONObject roleObj = new JSONObject();
     roleObj.put("id", roleId);
     roleObj.put("name", roleName);
     roleObj.put("orgList", new JSONArray());
+    if (effectiveRoleNames != null && !effectiveRoleNames.isEmpty()) {
+      roleObj.put("effectiveRoleNames", new JSONArray(effectiveRoleNames));
+    }
     return roleObj;
   }
 
