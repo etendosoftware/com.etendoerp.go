@@ -2279,7 +2279,7 @@ Core Etendo's accounting engine (`AcctServer`) doesn't always say *which* entity
   3. **Both addendum message templates were reworded for clarity.** The old parenthesized form — `"(Missing account setup on BP Group: @missingAccounts@)"` / `"(Missing account setup on Product: @missingAccounts@)"` — read ambiguously, since `@missingAccounts@` could be misread as naming the BP Group/Product itself rather than its missing account labels. Both `AD_MESSAGE` (`ETGO_InvalidAccountMissingBpGroupAccounts`, `ETGO_InvalidAccountMissingProductAccounts`) entries were reworded to plain sentences: `"Please review the BP Group's accounting setup: @missingAccounts@."` / `"Please review the Product's accounting setup: @missingAccounts@."` (Spanish: `"Revise la configuración contable del Grupo de Terceros: @missingAccounts@."` / `"Revise la configuración contable del Producto: @missingAccounts@."`).
 - **Spanish translations added for all four message keys in the chain (ETP-5175, same increment).** `src-db/database/sourcedata/AD_MESSAGE_TRL.xml` — a new file, this table had no rows for this catalog before — now carries `es_ES` rows for the two reworded ETP-5175 addendum keys above **and** for the two pre-existing ETP-4706 baseline keys (`ETGO_InvalidAccountBpAndGroup` → `"(Contacto: @bpName@, Grupo de Terceros: @bpGroup@)"`, `ETGO_InvalidAccountBpOnly` → `"(Contacto: @bpName@)"`), which predate ETP-5175 but were found untranslated during the same live-testing session. All four rows are `ISTRANSLATED='Y'` real translations, not placeholders.
   - **Hand-authored, not machine-exported — flag for whoever runs a clean `export.database` next.** The canonical DB-first flow (SQL `UPDATE`/`INSERT` the rows, then `./gradlew export.database` to regenerate sourcedata) was attempted, but `export.database` fails in this checkout on a **pre-existing, unrelated** issue: `ETGO_EMAIL_SEND_LOG.STATUS` has a `FieldLength`/actual-column drift left over from ETP-5069 (`AD_Column` says 60, the model XML and the live DB column both say 40). Not fixed here (out of scope). `AD_MESSAGE_TRL.xml` was therefore hand-authored to match the table model and the existing `AD_MESSAGE.xml`'s `<!--ID-->`-comment format; the four rows were verified present and correct in the live local DB via direct `psql` queries. Whoever next gets a clean `export.database` run on this module should diff the machine-generated `AD_MESSAGE_TRL.xml` against this hand-authored one to confirm they match — the export format could differ in some detail (whitespace, `MSGTIP` handling) that couldn't be verified without a working export.
-  - **Reject-cycle lesson worth documenting.** The first pass at the Spanish translations for the two ETP-4706 baseline keys dropped the enclosing parentheses that the English `AD_MESSAGE` text has (`"Contacto: @bpName@"` instead of `"(Contacto: @bpName@)"`), producing a run-on sentence once the ETP-5175 addendum sentence got appended after it — reintroducing, in Spanish only, the exact ambiguity problem this whole feature exists to solve. Fixed in commit `71aeb484` (restored parentheses on both rows, live DB synced via targeted `UPDATE`s). The bug is now guarded by a new XML-level test, `AccountErrorMessageTrlSampleDataTest` (`src-test/src/com/etendoerp/go/schemaforge/handlers/AccountErrorMessageTrlSampleDataTest.java`, added in `5487573b`, same direct-XML-parsing pattern as `BpGroupAcctSampleDataTest`), which parses `AD_MESSAGE_TRL.xml` itself and asserts both `MSGTEXT` values stay wrapped in parentheses — verified to fail against the pre-fix XML and pass against the corrected one. This is worth calling out precisely because the *original* pinning regression test for this message chain (`DocumentPostingServiceTest#postComposesExactSpanishMessageForBpGroupAndProductScenario`) mocks `OBMessageUtils.messageBD(...)` with hardcoded Java strings and never reads the XML at all — it could not have caught this regression, and was deliberately left as-is (its own javadoc already flags the gap for a future update) rather than patched over.
+  - **Reject-cycle lesson worth documenting.** The first pass at the Spanish translations for the two ETP-4706 baseline keys dropped the enclosing parentheses that the English `AD_MESSAGE` text has (`"Contacto: @bpName@"` instead of `"(Contacto: @bpName@)"`), producing a run-on sentence once the ETP-5175 addendum sentence got appended after it — reintroducing, in Spanish only, the exact ambiguity problem this whole feature exists to solve. Fixed in commit `71aeb484` (restored parentheses on both rows, live DB synced via targeted `UPDATE`s). The bug was briefly guarded by an XML-level test, `AccountErrorMessageTrlSampleDataTest` (added in `5487573b`, same direct-XML-parsing pattern as `BpGroupAcctSampleDataTest`), which parsed `AD_MESSAGE_TRL.xml` itself and asserted both `MSGTEXT` values stayed wrapped in parentheses — verified to fail against the pre-fix XML and pass against the corrected one. **Deleted in ETP-5377**, however: `AD_MESSAGE_TRL.xml` is not exported by `./gradlew export.database` for this module and gets removed by every export run, so the test broke — through no fault of the developer — on any normal `export.database` workflow. The DB rows themselves remain correct (verified live in the DB); this was a test-design flaw, not a data regression. This is worth calling out precisely because the *original* pinning regression test for this message chain (`DocumentPostingServiceTest#postComposesExactSpanishMessageForBpGroupAndProductScenario`) mocks `OBMessageUtils.messageBD(...)` with hardcoded Java strings and never reads the XML at all — it could not have caught this regression, and remains the only (partial) automated coverage for this area after the ETP-5377 deletion.
   - **Final example strings**, illustrating labels, wording, and translation together on the same repro scenario (Business Partner "Blanquiceleste S.A.", BP Group "Proveedora", missing `Invoice Price Variance` on the product):
     - EN: `"Account could not be found. (Business Partner: Blanquiceleste S.A., BP Group: Proveedora) Please review the Product's accounting setup: Invoice Price Variance."`
     - ES: `"No se pudo encontrar la cuenta. (Contacto: Blanquiceleste S.A., Grupo de Terceros: Proveedora) Revise la configuración contable del Producto: Desviación Pr. Factura."`
@@ -4004,7 +4004,12 @@ check above), the response carries a `session` object alongside the token:
     "clientId": "...",
     "selectedRoleId": "...",
     "selectedOrgId": "...",
-    "roleList": [{ "id": "...", "name": "...", "orgList": [{ "id": "...", "name": "..." }] }]
+    "roleList": [{
+      "id": "...",
+      "name": "...",
+      "orgList": [{ "id": "...", "name": "..." }],
+      "effectiveRoleNames": ["Finance", "Sales"]
+    }]
   }
 }
 ```
@@ -4018,6 +4023,21 @@ can never disagree with what the JWT actually contains. `roleList` reuses
 helper/query already used to build the equivalent list at login. This activates the richer
 validation `schema_forge_core`'s `reconcileSessionRefresh` already implements client-side (see
 `docs/auth-session-refresh.md` in that repo) instead of its "legacy" token-swap-only fallback.
+
+**`effectiveRoleNames` (ETP-5329).** The names of the template roles composed (via
+`AD_Role_Inheritance`) into the user's personal role, resolved through
+`UserRoleCompositionService#getAppliedTemplateRoleIds(String)`, in `Seqno` order — this is what
+the topbar should display instead of the auto-generated `"Personal – <username>"` role name. It
+appears ONLY on the `roleList` entry whose `id` equals the user's actual default/personal role
+(`AD_User.Default_Ad_Role_ID`), never on every entry: a rare pre-existing anomaly (ETP-4604) can
+leave a user with more than one active `AD_User_Roles` row, and attaching the composed-template
+list to a non-default entry would misrepresent a role it doesn't actually apply to. The key is
+omitted entirely when the default role has no composed templates (e.g. right after
+`ensurePersonalRole`, before any `assignTemplateRoles` call) — frontends should fall back to the
+role's own `name` in that case. A template role id with no matching (active) `Role` row — deleted
+or renamed out from under `AD_Role_Inheritance`, an ETP-4604-style anomaly — is silently skipped
+(logged as a `warn`, not thrown), so `effectiveRoleNames.length` can be smaller than the number of
+composed template roles; the array is never padded or nulled out for a single unresolved entry.
 
 The `currentRole == null` case is UNCHANGED: the response stays the bare
 `{"token": "<new signed JWT>"}`, no `session` key, so the frontend's legacy fallback still
