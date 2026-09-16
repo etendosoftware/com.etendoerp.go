@@ -3857,7 +3857,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private Role resolveRequestedRole(EtendoGoJwtSupport.RoleListData roleListData,
       String requestedRoleId, String requestedOrgId, HttpServletResponse response)
       throws IOException, JSONException {
-    String roleId = requestedRoleId.isEmpty() ? roleListData.firstRoleId : requestedRoleId;
+    String roleId = requestedRoleId.isEmpty() ? roleListData.getFirstRoleId() : requestedRoleId;
     JSONObject selectedRole = findRole(roleListData.getRoleArray(), roleId);
     if (roleId == null || selectedRole == null) {
       writeError(response, HttpServletResponse.SC_FORBIDDEN,
@@ -3977,7 +3977,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (sessionRecord.getUserId() == null) {
       return new JSONArray();
     }
-    return EtendoGoJwtSupport.loadRoleListData(sessionRecord.getUserId()).roleArray;
+    return EtendoGoJwtSupport.loadRoleListData(sessionRecord.getUserId()).getRoleArray();
   }
 
   /**

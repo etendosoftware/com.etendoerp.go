@@ -305,8 +305,8 @@ public class GoSessionEndpointsTest {
     when(account.getName()).thenReturn("User");
 
     CapturedResponse resp = new CapturedResponse();
-    EtendoGoJwtSupport.RoleListData roleListData = new EtendoGoJwtSupport.RoleListData();
-    roleListData.roleArray = new JSONArray().put(new JSONObject().put("id", "R1"));
+    EtendoGoJwtSupport.RoleListData roleListData = new EtendoGoJwtSupport.RoleListData(
+        null, new JSONArray().put(new JSONObject().put("id", "R1")));
 
     try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
         MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class);
@@ -393,11 +393,11 @@ public class GoSessionEndpointsTest {
     Account account = mock(Account.class);
     when(account.getEmail()).thenReturn(EMAIL);
 
-    EtendoGoJwtSupport.RoleListData roleListData = new EtendoGoJwtSupport.RoleListData();
-    roleListData.firstRoleId = "R1";
-    roleListData.roleArray = new JSONArray().put(new JSONObject()
-        .put("id", "R1")
-        .put("orgList", new JSONArray().put(new JSONObject().put("id", "O1"))));
+    EtendoGoJwtSupport.RoleListData roleListData = new EtendoGoJwtSupport.RoleListData(
+        "R1",
+        new JSONArray().put(new JSONObject()
+            .put("id", "R1")
+            .put("orgList", new JSONArray().put(new JSONObject().put("id", "O1")))));
 
     User user = mock(User.class);
     Role role = mock(Role.class);
