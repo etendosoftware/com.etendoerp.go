@@ -144,6 +144,13 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
   private static final String WILDCARD_SCOPE = "neo:*";
   private static final String PATH_API_KEYS = "/api-keys";
+  private static final String PATH_API_KEY_ITEM = PATH_API_KEYS + "/[^/]+/?";
+  private static final String MESSAGE_API_KEY_NOT_FOUND = "API key not found";
+  private static final String FIELD_CLIENT_SECRET = "clientSecret";
+  private static final String FIELD_DELETED = "deleted";
+  private static final String FIELD_USER_ID = "userId";
+  private static final String FIELD_ROLE_ID = "roleId";
+  private static final String FIELD_ORG_ID = "orgId";
   private static final String FIELD_CAPABILITIES = "capabilities";
   private static final String FIELD_TOKENS_REVOKED = "tokensRevoked";
 
@@ -259,7 +266,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     String path = request.getPathInfo();
     if (PATH_API_KEYS.equals(path) || (PATH_API_KEYS + "/").equals(path)) {
       handleListPublicApiKeys(request, response);
-    } else if (path != null && path.matches("/api-keys/[^/]+/?")) {
+    } else if (path != null && path.matches(PATH_API_KEY_ITEM)) {
       handleGetPublicApiKey(request, response, extractPathSegment(path, 2));
     } else if ("/clients".equals(path) || "/clients/".equals(path)) {
       handleListClients(request, response);
@@ -278,14 +285,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
   @Override
   public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
+    if (handlePublicApiKeyPost(path, request, response)) {
+      return;
+    }
     if (path == null || "/token".equals(path) || "/token/".equals(path)) {
       handleTokenRequest(request, response);
-    } else if (PATH_API_KEYS.equals(path) || (PATH_API_KEYS + "/").equals(path)) {
-      handleCreatePublicApiKey(request, response);
-    } else if (path != null && path.matches("/api-keys/[^/]+/rotate/?")) {
-      handleRotatePublicApiKey(request, response, extractPathSegment(path, 2));
-    } else if (path != null && path.matches("/api-keys/[^/]+/revoke-tokens/?")) {
-      handleRevokePublicApiKeyTokens(request, response, extractPathSegment(path, 2));
     } else if ("/clients".equals(path) || "/clients/".equals(path)) {
       handleCreateClient(request, response);
     } else if ("/revoke".equals(path) || "/revoke/".equals(path)) {
@@ -302,6 +306,23 @@ public class OAuth2Servlet extends HttpBaseServlet {
     }
   }
 
+  private boolean handlePublicApiKeyPost(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (PATH_API_KEYS.equals(path) || (PATH_API_KEYS + "/").equals(path)) {
+      handleCreatePublicApiKey(request, response);
+      return true;
+    }
+    if (path != null && path.matches(PATH_API_KEYS + "/[^/]+/rotate/?")) {
+      handleRotatePublicApiKey(request, response, extractPathSegment(path, 2));
+      return true;
+    }
+    if (path != null && path.matches(PATH_API_KEYS + "/[^/]+/revoke-tokens/?")) {
+      handleRevokePublicApiKeyTokens(request, response, extractPathSegment(path, 2));
+      return true;
+    }
+    return false;
+  }
+
   @Override
   public void doPut(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
@@ -310,10 +331,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       return;
     }
 
-    if (path.matches("/api-keys/[^/]+/?")) {
+    if (path.matches(PATH_API_KEY_ITEM)) {
       handleUpdatePublicApiKey(request, response, extractPathSegment(path, 2));
-    } else if (path.matches("/api-keys/[^/]+/rotate/?")
-        || path.matches("/api-keys/[^/]+/revoke-tokens/?")) {
+    } else if (path.matches(PATH_API_KEYS + "/[^/]+/rotate/?")
+        || path.matches(PATH_API_KEYS + "/[^/]+/revoke-tokens/?")) {
       writeError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED, ERROR_INVALID_REQUEST,
           "Use POST for this API-key action");
     } else
@@ -334,7 +355,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   @Override
   public void doDelete(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
-    if (path != null && path.matches("/api-keys/[^/]+/?")) {
+    if (path != null && path.matches(PATH_API_KEY_ITEM)) {
       handleDeletePublicApiKey(request, response, extractPathSegment(path, 2));
     } else if (path != null && path.matches("/clients/[^/]+/?")) {
       String clientId = extractPathSegment(path, 2);
@@ -480,7 +501,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
-    } catch (SQLException | JSONException e) {
+    } catch (JSONException e) {
       log.error("Error listing public API keys", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
           MESSAGE_INTERNAL_SERVER_ERROR);
@@ -495,7 +516,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       PublicApiKeyContext context = requirePublicApiKeyContext(request);
       JSONObject key = findOwnedPublicApiKey(id, context);
       if (key == null) {
-        writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND, "API key not found");
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND, MESSAGE_API_KEY_NOT_FOUND);
         return;
       }
       writeJsonResponse(response, HttpServletResponse.SC_OK, key);
@@ -557,7 +578,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
         OBDal.getInstance().flush();
         JSONObject result = publicApiKeyJson(client.getId(), name, clientIdentifier,
             PublicApiKeyPolicy.toStoredScopes(capabilities), true);
-        result.put("clientSecret", plainSecret);
+        result.put(FIELD_CLIENT_SECRET, plainSecret);
         writeJsonResponse(response, HttpServletResponse.SC_CREATED, result);
         auditPublicApiKeyEvent("created", client.getId(), context);
       }
@@ -580,7 +601,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       PublicApiKeyContext context = requirePublicApiKeyContext(request);
       JSONObject existing = findOwnedPublicApiKey(id, context);
       if (existing == null) {
-        writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND, "API key not found");
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND, MESSAGE_API_KEY_NOT_FOUND);
         return;
       }
       JSONObject body = parseJsonBody(request);
@@ -625,7 +646,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       OAuth2Client client = findOwnedPublicApiKeyEntity(id, context);
       if (client == null) {
         JSONObject result = new JSONObject();
-        result.put("deleted", false);
+        result.put(FIELD_DELETED, false);
         result.put(FIELD_ID, id);
         writeJsonResponse(response, HttpServletResponse.SC_OK, result);
         return;
@@ -634,10 +655,10 @@ public class OAuth2Servlet extends HttpBaseServlet {
       OBDal.getInstance().remove(client);
       OBDal.getInstance().flush();
       JSONObject result = new JSONObject();
-      result.put("deleted", true);
+      result.put(FIELD_DELETED, true);
       result.put(FIELD_ID, id);
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
-      auditPublicApiKeyEvent("deleted", id, context);
+      auditPublicApiKeyEvent(FIELD_DELETED, id, context);
     } catch (AuthException e) {
       writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
     } catch (SQLException | JSONException e) {
@@ -655,7 +676,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       PublicApiKeyContext context = requirePublicApiKeyContext(request);
       JSONObject existing = findOwnedPublicApiKey(id, context);
       if (existing == null) {
-        writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND, "API key not found");
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND, MESSAGE_API_KEY_NOT_FOUND);
         return;
       }
       String plainSecret = OAuth2Utils.generateSecureToken();
@@ -667,7 +688,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       JSONObject result = publicApiKeyJson(id, existing.getString("name"),
           existing.getString(FIELD_CLIENT_ID), existing.optString(FIELD_SCOPES, ""),
           existing.getBoolean(FIELD_IS_ACTIVE));
-      result.put("clientSecret", plainSecret);
+      result.put(FIELD_CLIENT_SECRET, plainSecret);
       result.put(FIELD_TOKENS_REVOKED, revoked);
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
       auditPublicApiKeyEvent("rotated", id, context);
@@ -687,7 +708,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     try {
       PublicApiKeyContext context = requirePublicApiKeyContext(request);
       if (findOwnedPublicApiKey(id, context) == null) {
-        writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND, "API key not found");
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND, MESSAGE_API_KEY_NOT_FOUND);
         return;
       }
       OAuth2Client client = findOwnedPublicApiKeyEntity(id, context);
@@ -742,8 +763,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     return PublicApiKeyPolicy.normalizeCapabilities(requested);
   }
 
-  private void validatePublicCapabilities(PublicApiKeyContext context, Set<String> capabilities)
-      throws SQLException {
+  private void validatePublicCapabilities(PublicApiKeyContext context, Set<String> capabilities) {
     if (capabilities.contains(PublicApiKeyPolicy.CAPABILITY_WRITE)
         && !hasWritableWindowAccess(context.roleId, context.clientId, context.orgId)) {
       throw new PublicApiKeyPolicy.InvalidCapabilityException(
@@ -756,14 +776,14 @@ public class OAuth2Servlet extends HttpBaseServlet {
     }
   }
 
-  private List<OAuth2Client> ownedPublicApiKeys(PublicApiKeyContext context) throws SQLException {
+  private List<OAuth2Client> ownedPublicApiKeys(PublicApiKeyContext context) {
     OBQuery<OAuth2Client> query = OBDal.getInstance().createQuery(OAuth2Client.class,
         "as client where client.scopes like :ownerOrganizationMarker "
             + "and client.userContact.id = :userId and client.scopes like :publicKeyMarker "
             + "order by client.name, client.id");
     query.setNamedParameter("ownerOrganizationMarker",
         "%" + PublicApiKeyPolicy.ownerOrganizationMarker(context.orgId) + "%");
-    query.setNamedParameter("userId", context.userId);
+    query.setNamedParameter(FIELD_USER_ID, context.userId);
     query.setNamedParameter("publicKeyMarker", "%" + PublicApiKeyPolicy.PUBLIC_KEY_SCOPE_MARKER + "%");
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
@@ -779,7 +799,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     query.setNamedParameter("id", id);
     query.setNamedParameter("ownerOrganizationMarker",
         "%" + PublicApiKeyPolicy.ownerOrganizationMarker(context.orgId) + "%");
-    query.setNamedParameter("userId", context.userId);
+    query.setNamedParameter(FIELD_USER_ID, context.userId);
     query.setNamedParameter("publicKeyMarker", "%" + PublicApiKeyPolicy.PUBLIC_KEY_SCOPE_MARKER + "%");
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
@@ -818,7 +838,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void removeTokensForClient(OAuth2Client client) {
     OBQuery<OAuth2Token> query = OBDal.getInstance().createQuery(OAuth2Token.class,
         "as token where token.oAuth2Client.id = :clientId");
-    query.setNamedParameter("clientId", client.getId());
+    query.setNamedParameter(FIELD_CLIENT_ID, client.getId());
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     for (OAuth2Token token : query.list()) {
@@ -849,9 +869,9 @@ public class OAuth2Servlet extends HttpBaseServlet {
             + "and access.editableField = true and (access.client.id = :clientId "
             + "or access.client.id = '0') and (access.organization.id = :orgId "
             + "or access.organization.id = '0')");
-    query.setNamedParameter("roleId", roleId);
+    query.setNamedParameter(FIELD_ROLE_ID, roleId);
     query.setNamedParameter("clientId", clientId);
-    query.setNamedParameter("orgId", orgId);
+    query.setNamedParameter(FIELD_ORG_ID, orgId);
     query.setMaxResult(1);
     return !query.list().isEmpty();
   }
@@ -861,9 +881,9 @@ public class OAuth2Servlet extends HttpBaseServlet {
         "as access where access.role.id = :roleId and access.active = true "
             + "and (access.client.id = :clientId or access.client.id = '0') "
             + "and (access.organization.id = :orgId or access.organization.id = '0')");
-    query.setNamedParameter("roleId", roleId);
+    query.setNamedParameter(FIELD_ROLE_ID, roleId);
     query.setNamedParameter("clientId", clientId);
-    query.setNamedParameter("orgId", orgId);
+    query.setNamedParameter(FIELD_ORG_ID, orgId);
     query.setMaxResult(1);
     return !query.list().isEmpty();
   }
@@ -975,7 +995,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       result.put(FIELD_ID, generatedId);
       result.put("name", name.trim());
       result.put(FIELD_CLIENT_ID, clientIdentifier);
-      result.put("clientSecret", plainSecret);
+        result.put(FIELD_CLIENT_SECRET, plainSecret);
       result.put(FIELD_AD_USER_ID, adUserId.trim());
       result.put(FIELD_AD_ROLE_ID, adRoleId.trim());
       result.put(FIELD_SCOPES, scopes.trim());
@@ -1096,7 +1116,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       }
 
       JSONObject result = new JSONObject();
-      result.put("deleted", true);
+      result.put(FIELD_DELETED, true);
       result.put(FIELD_ID, id);
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
       log.info("OAuth2 client deleted: {}", id);
@@ -1164,7 +1184,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       JSONObject result = new JSONObject();
       result.put(FIELD_ID, id);
       result.put(FIELD_CLIENT_ID, existing.getString(FIELD_CLIENT_ID));
-      result.put("clientSecret", plainSecret);
+      result.put(FIELD_CLIENT_SECRET, plainSecret);
       result.put("tokensRevoked", revokeTokens);
 
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
@@ -1873,35 +1893,21 @@ public class OAuth2Servlet extends HttpBaseServlet {
     Role role = OBDal.getInstance().get(Role.class, roleId);
     Client client = OBDal.getInstance().get(Client.class, clientId);
     Organization organization = OBDal.getInstance().get(Organization.class, orgId);
-    if (user == null || !Boolean.TRUE.equals(user.isActive()) || role == null
-        || !Boolean.TRUE.equals(role.isActive()) || client == null
-        || !Boolean.TRUE.equals(client.isActive()) || organization == null
-        || !Boolean.TRUE.equals(organization.isActive())) {
+    if (!hasActiveSession(user, role, client, organization)) {
       throw new AuthException(HttpServletResponse.SC_FORBIDDEN, "Active session context required");
     }
-    if (role.getClient() != null && !"0".equals(role.getClient().getId())
-        && !clientId.equals(role.getClient().getId())) {
+    if (!roleBelongsToClient(role, clientId)) {
       throw new AuthException(HttpServletResponse.SC_FORBIDDEN, "Active role is not available in this tenant");
     }
 
     OBQuery<UserRoles> assignments = OBDal.getInstance().createQuery(UserRoles.class,
         "as assignment where assignment.userContact.id = :userId "
             + "and assignment.role.id = :roleId and assignment.active = true");
-    assignments.setNamedParameter("userId", userId);
-    assignments.setNamedParameter("roleId", roleId);
+    assignments.setNamedParameter(FIELD_USER_ID, userId);
+    assignments.setNamedParameter(FIELD_ROLE_ID, roleId);
     assignments.setFilterOnReadableClients(false);
     assignments.setFilterOnReadableOrganization(false);
-    boolean assigned = false;
-    for (UserRoles assignment : assignments.list()) {
-      String assignmentClientId = assignment.getClient() == null ? null : assignment.getClient().getId();
-      String assignmentOrgId = assignment.getOrganization() == null ? null : assignment.getOrganization().getId();
-      if ((clientId.equals(assignmentClientId) || "0".equals(assignmentClientId))
-          && (orgId.equals(assignmentOrgId) || "0".equals(assignmentOrgId))) {
-        assigned = true;
-        break;
-      }
-    }
-    if (!assigned) {
+    if (!hasActiveRoleAssignment(assignments, clientId, orgId)) {
       throw new AuthException(HttpServletResponse.SC_FORBIDDEN, "Active role is not available in this tenant");
     }
 
@@ -1911,12 +1917,37 @@ public class OAuth2Servlet extends HttpBaseServlet {
     return new PublicApiKeyContext(userId, roleId, clientId, orgId);
   }
 
+  private boolean hasActiveSession(User user, Role role, Client client, Organization organization) {
+    return user != null && Boolean.TRUE.equals(user.isActive()) && role != null
+        && Boolean.TRUE.equals(role.isActive()) && client != null
+        && Boolean.TRUE.equals(client.isActive()) && organization != null
+        && Boolean.TRUE.equals(organization.isActive());
+  }
+
+  private boolean roleBelongsToClient(Role role, String clientId) {
+    return role.getClient() == null || "0".equals(role.getClient().getId())
+        || clientId.equals(role.getClient().getId());
+  }
+
+  private boolean hasActiveRoleAssignment(OBQuery<UserRoles> assignments, String clientId,
+      String orgId) {
+    for (UserRoles assignment : assignments.list()) {
+      String assignmentClientId = assignment.getClient() == null ? null : assignment.getClient().getId();
+      String assignmentOrgId = assignment.getOrganization() == null ? null : assignment.getOrganization().getId();
+      if ((clientId.equals(assignmentClientId) || "0".equals(assignmentClientId))
+          && (orgId.equals(assignmentOrgId) || "0".equals(assignmentOrgId))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private boolean roleHasOrganization(String roleId, String orgId) {
     OBQuery<RoleOrganization> query = OBDal.getInstance().createQuery(RoleOrganization.class,
         "as access where access.role.id = :roleId and access.active = true "
             + "and (access.organization.id = :orgId or access.organization.id = '0')");
-    query.setNamedParameter("roleId", roleId);
-    query.setNamedParameter("orgId", orgId);
+    query.setNamedParameter(FIELD_ROLE_ID, roleId);
+    query.setNamedParameter(FIELD_ORG_ID, orgId);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     query.setMaxResult(1);

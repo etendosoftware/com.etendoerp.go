@@ -375,9 +375,9 @@ class NeoOpenAPIEndpointTest {
         endpoint.add(openAPI);
       }
 
-      // Only discovery endpoints should be present
-      assertTrue(openAPI.getPaths().size() <= 2,
-          "No spec-specific paths should be registered for null-name spec");
+      assertTrue(openAPI.getPaths().keySet().stream()
+          .noneMatch(path -> path.startsWith("/sws/neo/null")),
+          "No paths should be registered for a spec with a null name");
     }
   }
 

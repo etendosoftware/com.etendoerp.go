@@ -29,6 +29,7 @@ import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.common.ConfigPropertyReader;
 import com.etendoerp.openapi.model.OpenAPIEndpoint;
 
 import io.swagger.v3.oas.models.OpenAPI;
@@ -61,6 +62,9 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
 
   private static final String TAG_NAME = "EtendoGo";
   private static final String BASE_PATH = "/sws/neo/";
+  private static final String PUBLIC_API_KEYS_PATH_PROPERTY = "etgo.public.api.keys.path";
+  private static final String PUBLIC_API_KEYS_PATH_ENV = "ETGO_PUBLIC_API_KEYS_PATH";
+  private static final String DEFAULT_PUBLIC_API_KEYS_PATH = "/oauth2/api-keys";
 
   /** HTTP 401 response description. */
   private static final String MSG_UNAUTHORIZED = "Unauthorized";
@@ -725,7 +729,8 @@ public class NeoOpenAPIEndpoint implements OpenAPIEndpoint {
 
   /** Add the authenticated self-service OAuth2 public API key contract. */
   private void addPublicApiKeyPaths(OpenAPI openAPI) {
-    final String basePath = "/oauth2/api-keys";
+    final String basePath = ConfigPropertyReader.readConfigValue(PUBLIC_API_KEYS_PATH_PROPERTY,
+        PUBLIC_API_KEYS_PATH_ENV, DEFAULT_PUBLIC_API_KEYS_PATH);
     final String itemPath = basePath + "/{id}";
     final String rotatePath = itemPath + "/rotate";
     final String revokePath = itemPath + "/revoke-tokens";
