@@ -110,8 +110,11 @@ public class FinancialAccountBankConnectionHandlerConnectTest {
       stubObContext(obContext);
       stubOrigin(requestContext, ORIGIN);
       utils.when(() -> BankIntegrationUtils.getPsd2ApiKey(any())).thenReturn(API_KEY);
+      // ETP-5344: the sandbox decision is now made here and passed down. With
+      // PSD2_ShowFakeProviders unstubbed (i.e. disabled) the handler must ask for real banks only.
+      // The full pref × plan matrix lives in FinancialAccountBankConnectionHandlerSandboxTest.
       utils.when(() -> BankIntegrationUtils.createSaltEdgeConnection(eq(API_KEY),
-          eq(ORIGIN + CALLBACK), isNull())).thenReturn(CONNECT_URL);
+          eq(ORIGIN + CALLBACK), isNull(), eq(false))).thenReturn(CONNECT_URL);
 
       NeoResponse response = handler.handle(postContext(ACTION_CONNECT, body));
 
@@ -140,7 +143,7 @@ public class FinancialAccountBankConnectionHandlerConnectTest {
       stubOrigin(requestContext, ORIGIN);
       utils.when(() -> BankIntegrationUtils.getPsd2ApiKey(any())).thenReturn(API_KEY);
       utils.when(() -> BankIntegrationUtils.createSaltEdgeConnection(eq(API_KEY),
-          eq(ORIGIN + CALLBACK), eq(provider))).thenReturn(CONNECT_URL);
+          eq(ORIGIN + CALLBACK), eq(provider), eq(false))).thenReturn(CONNECT_URL);
 
       NeoResponse response = handler.handle(postContext(ACTION_CONNECT, body));
 
@@ -161,7 +164,7 @@ public class FinancialAccountBankConnectionHandlerConnectTest {
       stubOrigin(requestContext, ORIGIN + "/");
       utils.when(() -> BankIntegrationUtils.getPsd2ApiKey(any())).thenReturn(API_KEY);
       utils.when(() -> BankIntegrationUtils.createSaltEdgeConnection(eq(API_KEY),
-          eq(ORIGIN + CALLBACK), isNull())).thenReturn(CONNECT_URL);
+          eq(ORIGIN + CALLBACK), isNull(), eq(false))).thenReturn(CONNECT_URL);
 
       assertEquals(200, handler.handle(postContext(ACTION_CONNECT, body)).getHttpStatus());
     }
