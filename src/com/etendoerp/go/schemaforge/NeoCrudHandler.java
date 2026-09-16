@@ -1009,6 +1009,9 @@ class NeoCrudHandler {
     // its own timestamp on save.
     Object updatedBeforeFilter = rawBody != null ? rawBody.opt(FIELD_UPDATED) : null;
     JSONObject filteredBody = fieldFilter.filterWriteRequest(rawBody);
+    // ETP-5286: on a PATCH that changes `product` on a transactional document line, re-derive
+    // `uOM` from the NEW product. See applyDerivedUomOnUpdate's own javadoc for the why.
+    NeoCommercialLinePolicy.applyDerivedUomOnUpdate(filteredBody, dalEntityName);
     // Inject lineNetAmount when absent from filteredBody (stripped by readOnly filter).
     // The frontend sends invoicedQuantity and unitPrice as editable fields, so both are
     // available here to compute the correct net amount even for products where SL_Invoice_Amt
