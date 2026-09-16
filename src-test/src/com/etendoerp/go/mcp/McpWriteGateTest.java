@@ -38,6 +38,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -46,11 +48,14 @@ import org.mockito.quality.Strictness;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
+import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
@@ -219,6 +224,13 @@ class McpWriteGateTest {
 
   private JSONObject write(JSONObject body, SFEntity sfEntity) throws Exception {
     return McpWriteRequestSupport.mapFieldsToDalProperties(body, adTab, sfEntity, new TreeSet<>());
+  }
+
+  /** The same write, keeping the server-owned report the five-argument overload builds. */
+  private JSONObject write(JSONObject body, SFEntity sfEntity, JSONObject serverOwned)
+      throws Exception {
+    return McpWriteRequestSupport.mapFieldsToDalProperties(body, adTab, sfEntity, new TreeSet<>(),
+        serverOwned);
   }
 
   // ── excluded fields (IMP-39) ──────────────────────────────────────────
@@ -465,10 +477,15 @@ class McpWriteGateTest {
     }
 
     /**
-     * A read-only column whose AD default is a context expression ({@code @#AD_Org_ID@}) or a
+     * A read-only column whose AD default is a context expression ({@code @#AD_User_ID@}) or a
      * function ({@code now()}) is refused outright: {@code literalDefault} returns {@code null}
      * for both, and {@code writeGate}'s {@code null} branch is the one that adds the property to
      * {@code readOnlyRejectable}.
+     *
+     * <p>The fixture deliberately avoids {@code AD_Org_ID}, which this test used to be written
+     * against. {@code organization} is now discarded by {@code NeoServerOwnedFields} <em>before</em>
+     * either gate runs, so it can no longer stand in for an ordinary read-only column here — the
+     * discard is pinned in {@code ServerOwnedFields#readOnlyDoesNotTurnIntoARefusal} instead.</p>
      *
      * <p><b>This pins what the code does, and it is NOT what the code says it does.</b>
      * {@code literalDefault}'s own javadoc states that these columns <em>"keep the blanket
@@ -484,13 +501,13 @@ class McpWriteGateTest {
     @DisplayName("a non-literal AD default does NOT exempt today, contradicting literalDefault's "
         + "own javadoc")
     void expressionDefaultsAreRefusedToday() throws Exception {
-      declareProperty("organization", "AD_Org_ID");
+      declareProperty("businessPartner", "C_BPartner_ID");
       declareProperty("orderDate", "DateOrdered");
-      curate("AD_Org_ID", Boolean.TRUE, Boolean.TRUE, "@#AD_Org_ID@", null);
+      curate("C_BPartner_ID", Boolean.TRUE, Boolean.TRUE, "@#AD_User_ID@", null);
       curate("DateOrdered", Boolean.TRUE, Boolean.TRUE, "now()", null);
       SFEntity sfEntity = specEntity();
 
-      for (String field : List.of("organization", "orderDate")) {
+      for (String field : List.of("businessPartner", "orderDate")) {
         McpRoutingException thrown = assertThrows(McpRoutingException.class,
             () -> write(fields(field, "anything"), sfEntity),
             field + " is now exempt again — if that was deliberate, this test and"
@@ -509,16 +526,16 @@ class McpWriteGateTest {
     @DisplayName("only a literal default exempts; a configured one no longer does by itself")
     void onlyLiteralDefaultsExempt() throws Exception {
       declareProperty("documentStatus", "DocStatus");
-      declareProperty("organization", "AD_Org_ID");
+      declareProperty("businessPartner", "C_BPartner_ID");
       curate("DocStatus", Boolean.TRUE, Boolean.TRUE, "DR", null);
-      curate("AD_Org_ID", Boolean.TRUE, Boolean.TRUE, "@#AD_Org_ID@", null);
+      curate("C_BPartner_ID", Boolean.TRUE, Boolean.TRUE, "@#AD_User_ID@", null);
       SFEntity sfEntity = specEntity();
 
       assertEquals("DR",
           write(fields("documentStatus", "DR"), sfEntity).getString("documentStatus"),
           "a literal default may still be echoed back");
       assertThrows(McpRoutingException.class,
-          () -> write(fields("organization", "ORG-7"), sfEntity),
+          () -> write(fields("businessPartner", "BP-7"), sfEntity),
           "an expression default may not, which is the behaviour change IMP-30 brought with it");
     }
 
@@ -720,6 +737,255 @@ class McpWriteGateTest {
       JSONObject response = new JSONObject();
       McpWriteRequestSupport.reportUnknownFields(response, null);
       assertEquals(0, response.length());
+    }
+  }
+
+  // ── tenant ownership ──────────────────────────────────────────────────
+
+  /**
+   * {@code client} and {@code organization} are resolved from the session on every write.
+   *
+   * <p><b>The defect.</b> A {@code neo_create} carrying another org's {@code organization}
+   * answered {@code 200 OK} and the record was then invisible to the session that created it — a
+   * {@code 404} on the id the response had just returned, because the row went into the other
+   * tenant. Neither column has an {@code ETGO_SF_FIELD} row, and both gates above are built
+   * entirely out of those rows, so the key matched neither deny-set and reached
+   * {@code jsonService.add} untouched. Curation could not have caught this: the gates read
+   * <em>decisions</em>, and nobody had made one about a column nobody curates.</p>
+   *
+   * <p>The rule therefore runs <b>before</b> both gates and discards rather than refuses — which
+   * is asserted here, because a 422 would be a behaviour change for every client that echoes a
+   * record back, and silence-plus-report is what was chosen instead.</p>
+   */
+  @Nested
+  @DisplayName("client and organization never reach the body")
+  class ServerOwnedFields {
+
+    /** Declare the two tenant columns the way the real DAL model maps them. */
+    private void declareTenantProperties() {
+      declareProperty("organization", "AD_Org_ID");
+      declareProperty("client", "AD_Client_ID");
+    }
+
+    /**
+     * Per spelling, each in a body of its own. A single body asserting "none of the four
+     * survived" would pass while three are handled and the fourth is carried out by one of the
+     * others; and the crossed-wires bug (a fallback sending {@code ad_client_id} to
+     * {@code organization}) is invisible unless each key is judged alone.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = { "organization", "client", "AD_Org_ID", "AD_Client_ID" })
+    @DisplayName("every spelling is discarded before it can reach the DAL")
+    void everySpellingIsDiscarded(String key) throws Exception {
+      declareTenantProperties();
+
+      JSONObject mapped = write(fields(key, "SOMEONE-ELSE"), specEntity());
+
+      assertEquals(0, mapped.length(),
+          key + " reached the mapped body — this is the cross-tenant write, spelled " + key);
+    }
+
+    /**
+     * <b>Pins what the code does, which is NOT what the policy's key map intends.</b> On the MCP
+     * path the check is {@code isServerOwned(mappedKey)}, and {@code mappedKey} is only rewritten
+     * when the DAL resolves the key — an {@code $_identifier} companion resolves to no property,
+     * so it keeps its own spelling, is not server-owned, and travels into the mapped body (and
+     * into {@code unknownFields}). {@code NeoServerOwnedFields.isServerOwnedKey} — which the REST
+     * path uses — does list an identifier variant, so the two write paths disagree about this
+     * key. Reported, not fixed; see also the suffix finding in
+     * {@code NeoServerOwnedFieldsTest#theRealIdentifierCompanionIsNotRecognised}.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = { "organization$_identifier", "organization_identifier",
+        "client$_identifier", "client_identifier" })
+    @DisplayName("an identifier companion is NOT discarded on the MCP path today")
+    void identifierCompanionsSurviveOnTheMcpPath(String key) throws Exception {
+      declareTenantProperties();
+
+      JSONObject mapped = write(fields(key, "SOMEONE-ELSE"), specEntity());
+
+      assertTrue(mapped.has(key),
+          "if this starts failing the MCP path learned the companion spellings — good; update"
+              + " this test to assert the discard and drop the finding");
+    }
+
+    /**
+     * Discarding is unconditional. The comparison decides only whether the caller is told — a
+     * rule that kept the value when it matched would still be reading tenant identity out of the
+     * payload, and would be probeable.
+     */
+    @Test
+    @DisplayName("a value equal to the session's is discarded just the same")
+    void anEchoIsDiscardedToo() throws Exception {
+      declareTenantProperties();
+      Client sessionClient = mock(Client.class);
+      when(sessionClient.getId()).thenReturn("CLIENT-SESSION");
+      Organization sessionOrg = mock(Organization.class);
+      when(sessionOrg.getId()).thenReturn("ORG-SESSION");
+      OBContext context = mock(OBContext.class);
+      when(context.getCurrentClient()).thenReturn(sessionClient);
+      when(context.getCurrentOrganization()).thenReturn(sessionOrg);
+
+      try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+        obContext.when(OBContext::getOBContext).thenReturn(context);
+        JSONObject serverOwned = new JSONObject();
+
+        JSONObject mapped = write(fields("organization", "ORG-SESSION"), specEntity(), serverOwned);
+
+        assertEquals(0, mapped.length(), "the session decides, so the echo is redundant, not kept");
+        assertEquals(0, serverOwned.length(),
+            "nothing was taken from the caller, so it is told nothing");
+      }
+    }
+
+    @Test
+    @DisplayName("a different tenant is reported with what was sent and where it really went")
+    void aDifferentTenantIsReported() throws Exception {
+      declareTenantProperties();
+      Organization sessionOrg = mock(Organization.class);
+      when(sessionOrg.getId()).thenReturn("ORG-SESSION");
+      OBContext context = mock(OBContext.class);
+      when(context.getCurrentOrganization()).thenReturn(sessionOrg);
+
+      try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
+        obContext.when(OBContext::getOBContext).thenReturn(context);
+        JSONObject serverOwned = new JSONObject();
+
+        write(fields("organization", "ORG-ELSEWHERE"), specEntity(), serverOwned);
+
+        assertEquals("ORG-ELSEWHERE",
+            serverOwned.getJSONObject("organization").getString("sent"));
+        assertEquals("ORG-SESSION",
+            serverOwned.getJSONObject("organization").getString("session"),
+            "the caller must learn where the record actually landed, not just that it was"
+                + " ignored — a 404 on its own id was the previous way to find out");
+      }
+    }
+
+    /**
+     * <b>The rule runs before both gates, and that ordering is the behaviour.</b> If it ran after,
+     * a curated-out or read-only tenant column would answer 422 instead of being discarded — a
+     * refusal for a key every client that echoes a record back would be sending.
+     */
+    @Test
+    @DisplayName("an excluded tenant column is discarded in silence, not refused")
+    void exclusionDoesNotTurnIntoARefusal() throws Exception {
+      declareTenantProperties();
+      curate("AD_Org_ID", Boolean.FALSE, Boolean.FALSE, null, null);
+
+      JSONObject mapped = write(fields("organization", "ORG-ELSEWHERE"), specEntity());
+
+      assertEquals(0, mapped.length(),
+          "discarded, and with no field_not_allowed thrown on the way");
+    }
+
+    @Test
+    @DisplayName("a read-only tenant column is discarded in silence, not refused")
+    void readOnlyDoesNotTurnIntoARefusal() throws Exception {
+      declareTenantProperties();
+      curate("AD_Org_ID", Boolean.TRUE, Boolean.TRUE, null, null);
+
+      JSONObject mapped = write(fields("organization", "ORG-ELSEWHERE"), specEntity());
+
+      assertEquals(0, mapped.length(),
+          "discarded, and with no read_only_field thrown on the way");
+    }
+
+    @Test
+    @DisplayName("ordinary fields around the tenant keys are untouched")
+    void theRestOfTheBodySurvives() throws Exception {
+      declareTenantProperties();
+      declareProperty("businessPartner", "C_BPartner_ID");
+      JSONObject body = new JSONObject();
+      body.put("C_BPartner_ID", "BP-1");
+      body.put("organization", "ORG-ELSEWHERE");
+
+      JSONObject mapped = write(body, specEntity());
+
+      assertEquals(1, mapped.length());
+      assertEquals("BP-1", mapped.getString("businessPartner"));
+    }
+
+    /**
+     * The four-argument overload is still the one several tests above call, and it must apply the
+     * same rule — an overload that skipped it would be a way back into the defect.
+     */
+    @Test
+    @DisplayName("the four-argument overload applies the rule too")
+    void theShorterOverloadStillApplies() throws Exception {
+      declareTenantProperties();
+      Set<String> unknown = new TreeSet<>();
+
+      JSONObject mapped = McpWriteRequestSupport.mapFieldsToDalProperties(
+          fields("organization", "ORG-ELSEWHERE"), adTab, specEntity(), unknown);
+
+      assertEquals(0, mapped.length());
+      assertTrue(unknown.isEmpty(),
+          "a discarded tenant key is not an unrecognised name — reporting it as one would send"
+              + " the caller looking for a typo");
+    }
+
+    @Test
+    @DisplayName("with no SchemaForge entity the rule still applies")
+    void theRuleIsNotGatedOnCuration() throws Exception {
+      declareTenantProperties();
+
+      assertEquals(0, write(fields("organization", "ORG-ELSEWHERE"), null).length(),
+          "tenant ownership is not a curation decision, so a spec-less write must not opt out");
+    }
+
+    // ── the report on the response ──────────────────────────────────────
+
+    @Test
+    @DisplayName("the response carries the report and a hint that says not to send them")
+    void theResponseCarriesTheReport() throws Exception {
+      JSONObject report = new JSONObject().put("organization",
+          new JSONObject().put("sent", "ORG-ELSEWHERE").put("session", "ORG-SESSION"));
+      JSONObject body = new JSONObject().put("id", "ord-1");
+
+      McpWriteRequestSupport.reportServerOwnedFields(body, report);
+
+      assertEquals("ORG-ELSEWHERE",
+          body.getJSONObject("serverOwnedFields").getJSONObject("organization").getString("sent"));
+      String hint = body.getString("serverOwnedFieldsHint").toLowerCase(Locale.ROOT);
+      assertTrue(hint.contains("session"), "the hint must say where the value came from");
+      assertTrue(hint.contains("do not send"), "and that the remedy is to stop sending them");
+      assertEquals("ord-1", body.getString("id"), "the record itself is untouched");
+    }
+
+    @Test
+    @DisplayName("a write that sent no tenant field carries no key at all")
+    void aCleanWriteCarriesNoKey() throws Exception {
+      JSONObject body = new JSONObject().put("id", "ord-1");
+
+      McpWriteRequestSupport.reportServerOwnedFields(body, new JSONObject());
+      McpWriteRequestSupport.reportServerOwnedFields(body, null);
+      McpWriteRequestSupport.reportServerOwnedFields(null, new JSONObject());
+
+      assertFalse(body.has("serverOwnedFields"));
+      assertFalse(body.has("serverOwnedFieldsHint"));
+      assertEquals(1, body.length());
+    }
+
+    /**
+     * Both verbs, at the call site. Nothing in a signature requires the five-argument overload —
+     * the four-argument one compiles and silently drops the report — and an update that moved
+     * {@code organization} would relocate an existing record, which is the same hole from the
+     * other direction.
+     */
+    @Test
+    @DisplayName("handleCreate and handleUpdate both collect and both report")
+    void bothVerbsCollectAndReport() {
+      String source = McpSourceScanner.read("com/etendoerp/go/mcp/McpToolRouter.java");
+      for (String verb : List.of("handleCreate", "handleUpdate")) {
+        String body = McpSourceScanner.methodBody(source, verb);
+        assertTrue(body.matches(
+            "(?s).*mapFieldsToDalProperties\\s*\\([^)]*serverOwnedFields[^)]*\\).*"),
+            verb + " does not pass a serverOwnedFields collector, so a caller that sent another"
+                + " tenant is told nothing — the 404-on-your-own-record failure again");
+        assertTrue(body.contains("reportServerOwnedFields"),
+            verb + " collects the report and never attaches it to the response");
+      }
     }
   }
 }
