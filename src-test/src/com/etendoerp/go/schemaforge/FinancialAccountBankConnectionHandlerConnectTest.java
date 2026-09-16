@@ -64,6 +64,7 @@ import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
+import com.etendoerp.psd2.bank.integration.utils.SaltEdgeConnectionBuilder;
 
 /**
  * Unit tests for the {@link FinancialAccountBankConnectionHandler} POST {@code connect}, {@code reconnect}
@@ -106,14 +107,16 @@ public class FinancialAccountBankConnectionHandlerConnectTest {
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<RequestContext> requestContext = mockStatic(RequestContext.class);
-        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class)) {
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<SaltEdgeConnectionBuilder> builder =
+            mockStatic(SaltEdgeConnectionBuilder.class)) {
       stubObContext(obContext);
       stubOrigin(requestContext, ORIGIN);
       utils.when(() -> BankIntegrationUtils.getPsd2ApiKey(any())).thenReturn(API_KEY);
       // ETP-5344: the sandbox decision is now made here and passed down. With
       // PSD2_ShowFakeProviders unstubbed (i.e. disabled) the handler must ask for real banks only.
       // The full pref × plan matrix lives in FinancialAccountBankConnectionHandlerSandboxTest.
-      utils.when(() -> BankIntegrationUtils.createSaltEdgeConnection(eq(API_KEY),
+      builder.when(() -> SaltEdgeConnectionBuilder.createSaltEdgeConnection(eq(API_KEY),
           eq(ORIGIN + CALLBACK), isNull(), eq(false))).thenReturn(CONNECT_URL);
 
       NeoResponse response = handler.handle(postContext(ACTION_CONNECT, body));
@@ -138,11 +141,13 @@ public class FinancialAccountBankConnectionHandlerConnectTest {
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<RequestContext> requestContext = mockStatic(RequestContext.class);
-        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class)) {
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<SaltEdgeConnectionBuilder> builder =
+            mockStatic(SaltEdgeConnectionBuilder.class)) {
       stubObContext(obContext);
       stubOrigin(requestContext, ORIGIN);
       utils.when(() -> BankIntegrationUtils.getPsd2ApiKey(any())).thenReturn(API_KEY);
-      utils.when(() -> BankIntegrationUtils.createSaltEdgeConnection(eq(API_KEY),
+      builder.when(() -> SaltEdgeConnectionBuilder.createSaltEdgeConnection(eq(API_KEY),
           eq(ORIGIN + CALLBACK), eq(provider), eq(false))).thenReturn(CONNECT_URL);
 
       NeoResponse response = handler.handle(postContext(ACTION_CONNECT, body));
@@ -159,11 +164,13 @@ public class FinancialAccountBankConnectionHandlerConnectTest {
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<RequestContext> requestContext = mockStatic(RequestContext.class);
-        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class)) {
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<SaltEdgeConnectionBuilder> builder =
+            mockStatic(SaltEdgeConnectionBuilder.class)) {
       stubObContext(obContext);
       stubOrigin(requestContext, ORIGIN + "/");
       utils.when(() -> BankIntegrationUtils.getPsd2ApiKey(any())).thenReturn(API_KEY);
-      utils.when(() -> BankIntegrationUtils.createSaltEdgeConnection(eq(API_KEY),
+      builder.when(() -> SaltEdgeConnectionBuilder.createSaltEdgeConnection(eq(API_KEY),
           eq(ORIGIN + CALLBACK), isNull(), eq(false))).thenReturn(CONNECT_URL);
 
       assertEquals(200, handler.handle(postContext(ACTION_CONNECT, body)).getHttpStatus());

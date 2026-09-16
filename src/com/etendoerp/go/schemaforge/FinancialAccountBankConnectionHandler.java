@@ -46,6 +46,7 @@ import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
+import com.etendoerp.psd2.bank.integration.utils.SaltEdgeConnectionBuilder;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper.LinkAccountData;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
@@ -506,7 +507,7 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
       }
     }
     // provider may be null (no bank remembered) → buildAndConnect shows the full provider picker.
-    String connectUrl = BankIntegrationUtils.createSaltEdgeConnection(apiKey, returnTo, provider,
+    String connectUrl = SaltEdgeConnectionBuilder.createSaltEdgeConnection(apiKey, returnTo, provider,
         includeSandboxProviders());
     JSONObject data = new JSONObject();
     data.put(KEY_CONNECT_URL, connectUrl);

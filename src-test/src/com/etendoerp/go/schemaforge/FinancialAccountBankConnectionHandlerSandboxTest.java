@@ -60,6 +60,7 @@ import org.openbravo.model.ad.domain.Preference;
 
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
+import com.etendoerp.psd2.bank.integration.utils.SaltEdgeConnectionBuilder;
 
 /**
  * Unit specs for the sandbox/fake bank gate of the {@code connect} action (ETP-5344).
@@ -197,13 +198,15 @@ public class FinancialAccountBankConnectionHandlerSandboxTest {
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<RequestContext> requestContext = mockStatic(RequestContext.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class);
-        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class)) {
+        MockedStatic<BankIntegrationUtils> utils = mockStatic(BankIntegrationUtils.class);
+        MockedStatic<SaltEdgeConnectionBuilder> builder =
+            mockStatic(SaltEdgeConnectionBuilder.class)) {
       stubObContext(obContext);
       stubOrigin(requestContext);
       extraSetup.accept(obDal);
       utils.when(() -> BankIntegrationUtils.getPsd2ApiKey(any())).thenReturn(API_KEY);
       utils.when(BankIntegrationUtils::isFakeProvidersEnabled).thenReturn(fakeProvidersEnabled);
-      utils.when(() -> BankIntegrationUtils.createSaltEdgeConnection(anyString(), anyString(),
+      builder.when(() -> SaltEdgeConnectionBuilder.createSaltEdgeConnection(anyString(), anyString(),
           any(), anyBoolean())).thenReturn(CONNECT_URL);
 
       NeoResponse response = target.handle(postContext(ACTION_CONNECT, new JSONObject()));
@@ -213,7 +216,7 @@ public class FinancialAccountBankConnectionHandlerSandboxTest {
           .getJSONObject("data").getString("connectUrl"));
 
       ArgumentCaptor<Boolean> includeSandboxes = ArgumentCaptor.forClass(Boolean.class);
-      utils.verify(() -> BankIntegrationUtils.createSaltEdgeConnection(eq(API_KEY),
+      builder.verify(() -> SaltEdgeConnectionBuilder.createSaltEdgeConnection(eq(API_KEY),
           eq(ORIGIN + CALLBACK), isNull(), includeSandboxes.capture()));
       return includeSandboxes.getValue();
     }
