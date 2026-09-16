@@ -78,6 +78,9 @@ final class McpAuthorizationService {
       case "docs":
       case McpConstants.TOOL_NEO_WIDGET:
       case McpConstants.TOOL_NEO_VECTOR_SEARCH:
+      // B3: read-tier on purpose. Reporting friction writes no business data, and gating it behind
+      // neo:write would silence exactly the read-only sessions most likely to get lost.
+      case McpConstants.TOOL_NEO_FEEDBACK:
         return SCOPE_READ;
       case "neo_create":
       case "neo_update":

@@ -278,6 +278,34 @@ public class DefaultDocumentSendEmailContractTest {
     assertTrue(body.contains(">26/08/2026</td>"));
   }
 
+  // ── ETP-5293: machine-readable reason code for messageEdits validation errors ──
+
+  @Test
+  public void invalidMessageEditsRejectionCarriesReasonCodeAndLimits() throws Exception {
+    // Neither subject nor message set -> REASON_MISSING_SUBJECT_OR_MESSAGE.
+    JSONObject commandBody = new JSONObject("{\"recordId\":\"" + RECORD_ID + "\"}");
+    commandBody.put("messageEdits", new JSONObject().put("subject", " ").put("message", "  "));
+
+    EmailDocumentRecordResolver resolver = recordId -> Optional.of(
+        new EmailDocumentRecord("Cliente", RECIPIENT_EMAIL, RECORD_ID, DOCUMENT_NUMBER, null,
+            DOWNLOAD_LINK, "client-1"));
+    DefaultDocumentSendEmailContract contract =
+        new DefaultDocumentSendEmailContract(CONTRACT_NAME, "Documento", resolver);
+
+    EmailContractResolution resolution = contract.resolve(
+        new EmailContractCommand(CONTRACT_NAME, commandBody),
+        EmailRecipientResolution.serverResolved(RECIPIENT_EMAIL));
+
+    assertFalse("expected a rejected resolution", resolution.isReady());
+    assertTrue("expected a non-null extra payload", resolution.getExtra() != null);
+    assertEquals(EmailMessageEdits.REASON_MISSING_SUBJECT_OR_MESSAGE,
+        resolution.getExtra().getString("reasonCode"));
+    assertEquals(EmailMessageEdits.MAX_SUBJECT_LENGTH,
+        resolution.getExtra().getInt("maxSubjectLength"));
+    assertEquals(EmailMessageEdits.MAX_MESSAGE_LENGTH,
+        resolution.getExtra().getInt("maxMessageLength"));
+  }
+
   // ── ETP-5069: readable per-document send history gate ───────────────────────
 
   @Test
