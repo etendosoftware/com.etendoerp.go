@@ -325,6 +325,27 @@ final class McpConstants {
   /** Tool name for the amortization plan generation tool. */
   static final String TOOL_GENERATE_AMORTIZATION_PLAN = "neo_generate_amortization_plan";
 
+  /**
+   * The eight CRUD tool names. Declared here, beside the other tool names, so the enum in the
+   * tool definitions, the CRUD test in {@code ToolRegistry} and the router's dispatch all read
+   * the same spelling from one place.
+   */
+  static final String TOOL_NEO_LIST = "neo_list";
+  /** @see #TOOL_NEO_LIST */
+  static final String TOOL_NEO_GET = "neo_get";
+  /** @see #TOOL_NEO_LIST */
+  static final String TOOL_NEO_CREATE = "neo_create";
+  /** @see #TOOL_NEO_LIST */
+  static final String TOOL_NEO_UPDATE = "neo_update";
+  /** @see #TOOL_NEO_LIST */
+  static final String TOOL_NEO_DELETE = "neo_delete";
+  /** @see #TOOL_NEO_LIST */
+  static final String TOOL_NEO_SELECTORS = "neo_selectors";
+  /** @see #TOOL_NEO_LIST */
+  static final String TOOL_NEO_DEFAULTS = "neo_defaults";
+  /** @see #TOOL_NEO_LIST */
+  static final String TOOL_NEO_SCHEMA = "neo_schema";
+
   /** Tool name for the business-widget enum tool (gap G4, ETP-4284). */
   static final String TOOL_NEO_WIDGET = "neo_widget";
   /** Global semantic vector-search tool backed by DB Extended. */

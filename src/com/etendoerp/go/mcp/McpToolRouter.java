@@ -168,7 +168,7 @@ public class McpToolRouter {
             // elsewhere would still reach the handler, and a silent success on a path we chose
             // not to maintain is worse than the refusal.
             if (!McpConstants.BATCH_TOOL_ENABLED) {
-              return wrapAsErrorContent(buildBatchDisabledError());
+              return wrapAsErrorContent(McpRouterErrorBodies.batchDisabled());
             }
             return handleBatch(arguments);
           case "neo_action":
@@ -210,40 +210,17 @@ public class McpToolRouter {
       // hint invites no retry but whose status class does: a client with a retry-on-5xx rule
       // loops forever on a decision that will never change.
       log.warn("MCP tool '{}' refused for the current role: {}", toolName, e.getMessage());
-      return wrapAsErrorContent(buildForbiddenErrorBody(toolName, e.getMessage()));
+      return wrapAsErrorContent(McpRouterErrorBodies.forbidden(toolName, e.getMessage()));
     } catch (org.openbravo.base.exception.OBSecurityException e) {
       // Openbravo's own refusal does NOT extend SecurityException, so without this clause it
       // reached the generic handler and answered 500 for the same kind of decision.
       log.warn("MCP tool '{}' refused by the platform for the current role: {}",
           toolName, e.getMessage());
-      return wrapAsErrorContent(buildForbiddenErrorBody(toolName, e.getMessage()));
+      return wrapAsErrorContent(McpRouterErrorBodies.forbidden(toolName, e.getMessage()));
     } catch (Exception e) {
       log.error("Error routing MCP tool '{}'", toolName, e);
       return wrapAsErrorContent(buildUnexpectedErrorBody(toolName, e));
     }
-  }
-
-  /**
-   * Envelope for a role-level refusal.
-   *
-   * @param toolName the tool that was refused
-   * @param detail   the refusal message, which names the spec
-   * @return a 403 body telling the agent the refusal is permanent for this role
-   */
-  private static JSONObject buildForbiddenErrorBody(String toolName, String detail) {
-    JSONObject body = new JSONObject();
-    try {
-      body.put(McpConstants.KEY_STATUS, McpConstants.STATUS_FORBIDDEN);
-      body.put(McpConstants.KEY_ERROR, McpConstants.ERROR_FORBIDDEN);
-      body.put(McpConstants.KEY_DETAIL, detail);
-      body.put("tool", toolName);
-      body.put(McpConstants.KEY_HINT, "Your role does not have access to this. The answer is the "
-          + "same every time, so do not retry: ask for the grant, or use neo_discover to see what "
-          + "this role may reach.");
-    } catch (JSONException ignored) {
-      // An envelope that cannot be built must not replace the refusal with a server error.
-    }
-    return body;
   }
 
   /** Route semantic search through the same authenticated DB Extended contract as REST. */
@@ -1221,7 +1198,7 @@ public class McpToolRouter {
     // IMP-28 clause 4: computed off the full field array, before any view/fields narrowing
     // below, so a caller passing fields:[...] does not skew what the entity as a whole
     // supports. See the "methods" section for why this gates POST/PUT.
-    boolean entityHasWritableField = hasAnyAgentSuppliableField(fieldsArray);
+    boolean entityHasWritableField = McpSchemaResponseHints.hasAnyAgentSuppliableField(fieldsArray);
 
     // One dispatch point for every projection, so the views cannot drift apart. All of them are
     // pure post-filters on the fully-decorated fieldsArray above — no extra DAL access. Omitting
@@ -1243,7 +1220,7 @@ public class McpToolRouter {
       boolean isChildEntity = parentScope.requiresParentFor(McpParentSection.VERB_CREATE);
       return wrapAsTextContent(McpSchemaCreateView
           .buildResponse(specName, entityName, fieldsArray,
-              serverDefaultedNames(specName, entityName, adTab, sfEntity), isChildEntity,
+              McpSchemaResponseHints.serverDefaultedNames(specName, entityName, adTab, sfEntity), isChildEntity,
               entityAgentPrompt));
     }
     // IMP-44: everything below is the full dump, and reaching it now requires having asked for
@@ -1332,7 +1309,7 @@ public class McpToolRouter {
     // getParentEntity() can be null even for a RESOLVED scope — the parent tab exists and the FK is
     // identified, but that tab is not an included entity of this spec, so there is no name the
     // agent could call. Say "the parent record" rather than the literal "null".
-    String parentHint = buildParentHint(parentScope);
+    String parentHint = McpSchemaResponseHints.parentHint(parentScope);
     entitySchema.put("hint", parentHint
         + "Call neo_schema with view:\"create\" to get only the fields you may send, already split "
         + "into required/optional — this full response is far larger than you need. "
@@ -1355,90 +1332,6 @@ public class McpToolRouter {
         + McpConstants.RECORD_REF_NOTE);
 
     return wrapAsTextContent(entitySchema);
-  }
-
-  /**
-   * Whether at least one descriptor in the array is one an agent may actually write —
-   * i.e. {@link McpSchemaFieldBuilder#isAgentSuppliable} — used by IMP-28 clause 4 to decide
-   * whether the entity's advertised {@code methods} may include POST/PUT.
-   *
-   * @param fieldsArray the full, undecorated field array (before any {@code view}/{@code fields}
-   *     narrowing) so a caller's whitelist request does not skew the entity-wide answer
-   */
-  /**
-   * The sentence {@code neo_schema}'s hint opens with for a child entity, or empty for a header.
-   *
-   * <p>Extracted from an inline nested ternary (java:S3358). {@code getParentEntity()} can be null
-   * even for a resolved child — the parent tab exists and the FK is identified, but that tab is not
-   * an included entity of this spec, so there is no name the agent could call. Say "the parent
-   * record" rather than the literal "null".</p>
-   *
-   * @param scope the entity's resolved parent scope
-   * @return the hint sentence, ending in a space, or {@code ""} when no parent key is required
-   */
-  private static String buildParentHint(McpParentScope.Scope scope) {
-    List<String> required = scope.requiredVerbs();
-    if (required.isEmpty()) {
-      return "";
-    }
-    String parent = scope.getParentEntity() == null ? "parent"
-        : "'" + scope.getParentEntity() + "'";
-    return "This is a child entity: pass parentId (the id of the " + parent + " record) on "
-        + String.join(", ", required)
-        + " — there is no global list of these records to read without it. ";
-  }
-
-  private static boolean hasAnyAgentSuppliableField(JSONArray fieldsArray) {
-    if (fieldsArray == null) {
-      return false;
-    }
-    for (int i = 0; i < fieldsArray.length(); i++) {
-      JSONObject field = fieldsArray.optJSONObject(i);
-      if (field != null && McpSchemaFieldBuilder.isAgentSuppliable(field)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /**
-   * Names {@code neo_defaults} already resolves a value for, so {@code view:"create"} can demote
-   * them out of {@code required} (IMP-12 §11.2).
-   *
-   * <p>The static {@code userRequired} rule can only see {@code AD_Column.DefaultValue}, which is an
-   * incomplete proxy for "the server will supply this": on {@code sales-invoice/header} four of the
-   * six fields it reports as required ({@code transactionDocument}, {@code paymentMethod},
-   * {@code paymentTerms}, {@code priceList}) carry no column default yet are resolved at runtime
-   * from session preferences, the business partner's configuration, or an AD callout. Asking the
-   * agent for them is asking the user for something Etendo already knows.</p>
-   *
-   * <p>This costs one defaults resolution, paid <b>only</b> when {@code view:"create"} is requested
-   * — the default response and {@code view:"actions"} are untouched. Resolution is best-effort: any
-   * failure falls back to the static rule (an over-reported {@code required} field is a worse
-   * answer, not a broken one), so a schema call never fails because of the cross-check.</p>
-   */
-  private static Set<String> serverDefaultedNames(String specName, String entityName, Tab adTab,
-      SFEntity sfEntity) {
-    try {
-      NeoContext ctx = NeoContext.builder()
-          .specName(specName)
-          .entityName(entityName)
-          .httpMethod(HTTP_METHOD_GET)
-          .adTab(adTab)
-          .sfEntity(sfEntity)
-          .obContext(OBContext.getOBContext())
-          .queryParams(new HashMap<>())
-          .build();
-      NeoResponse defaults = NeoDefaultsService.resolveDefaults(ctx, null);
-      if (defaults == null || defaults.getHttpStatus() >= 400) {
-        return Collections.emptySet();
-      }
-      return McpSchemaCreateView.resolvedDefaultNames(defaults.getBody());
-    } catch (Exception e) {
-      log.warn("neo_schema view:create could not resolve defaults for {}/{}; falling back to the "
-          + "AD_Column.DefaultValue rule", specName, entityName, e);
-      return Collections.emptySet();
-    }
   }
 
   static String mapColumnTypeStatic(String refId) {
@@ -1465,32 +1358,6 @@ public class McpToolRouter {
    * this method returns — the only remaining step is
    * {@code OBContext.restorePreviousMode()} in the {@code finally} block.</p>
    */
-  /**
-   * The refusal {@code neo_batch} answers with while {@link McpConstants#BATCH_TOOL_ENABLED} is off
-   * (ETP-5335).
-   *
-   * <p>Says three things, because an agent that only learns "no" retries. That the capability is
-   * switched off rather than missing or misspelled ({@code tool_disabled}, not
-   * {@code not_found}); what to do instead, in the agent's own terms — one {@code neo_create} per
-   * record, carrying the parent id forward by hand; and what it actually costs, so the agent does
-   * not assume the two are equivalent and silently leave half a document behind on a failure.
-   */
-  private JSONObject buildBatchDisabledError() throws JSONException {
-    JSONObject error = new JSONObject();
-    error.put(McpConstants.KEY_STATUS, McpConstants.STATUS_METHOD_NOT_ALLOWED);
-    error.put(McpConstants.KEY_ERROR, McpConstants.ERROR_TOOL_DISABLED);
-    error.put(McpConstants.KEY_DETAIL,
-        "neo_batch is disabled on this server. Create the records one at a time with neo_create "
-            + "instead: create the parent first, then pass its returned id as parentId on each "
-            + "child create.");
-    error.put("hint",
-        "These are not equivalent in one respect: a batch was applied as a unit, so a failure "
-            + "undid the whole set. Separate creates are not undone — if one fails, the records "
-            + "already created stay. Check what exists before retrying.");
-    error.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
-    return error;
-  }
-
   JSONObject handleBatch(JSONObject args) {
     if (args == null) {
       return wrapAsErrorContent("operations must be a non-empty array");

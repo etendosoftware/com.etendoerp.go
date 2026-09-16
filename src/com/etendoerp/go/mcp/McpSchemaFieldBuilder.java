@@ -74,7 +74,6 @@ final class McpSchemaFieldBuilder {
   static final String KEY_INVOKABLE = "invokable";
   static final String KEY_NOT_INVOKABLE_REASON = "notInvokableReason";
   /** AD column of the accounting trigger, present on every accountable document. */
-  private static final String COLUMN_POSTED = "Posted";
   private static final String EM_PREFIX = "EM_";
 
   static String mapColumnType(String refId) {
@@ -531,17 +530,7 @@ final class McpSchemaFieldBuilder {
     if (!col.isActive() || systemColumns.contains(col.getDBColumnName().toUpperCase())) {
       return false;
     }
-    return isButtonColumn(col) || fieldMetadata.exposes(col);
-  }
-
-  /**
-   * @param col the AD column
-   * @return whether the column is a button, i.e. an action rather than a value — see IMP-21 in
-   *         {@link #buildSchemaFieldsArray(Tab, Entity, FieldMetadata, Map, java.util.Set, java.util.Set)}
-   */
-  private static boolean isButtonColumn(Column col) {
-    String refId = col.getReference() != null ? (String) col.getReference().getId() : null;
-    return TYPE_BUTTON.equals(mapColumnType(refId));
+    return McpSchemaActionFields.isButtonColumn(col) || fieldMetadata.exposes(col);
   }
 
   private static JSONObject buildSchemaField(Column col, Tab adTab, Entity dalEntity,
@@ -593,7 +582,7 @@ final class McpSchemaFieldBuilder {
     addWritableVia(fieldObj, dalEntity, dbColName);
     if (isButton) {
       addButtonInfo(fieldObj, col, visibility, isHiddenButtonField(adTab, col));
-      isBusinessCritical = isBusinessCritical || isCriticalAction(fieldObj, dbColName);
+      isBusinessCritical = isBusinessCritical || McpSchemaActionFields.isCriticalAction(fieldObj, dbColName);
     }
     fieldObj.put("businessCritical", isBusinessCritical);
     return fieldObj;
@@ -629,7 +618,7 @@ final class McpSchemaFieldBuilder {
       boolean hiddenInTab) throws JSONException {
     fieldObj.put("triggerValue", "Y");
     fieldObj.put("action", col.getDBColumnName());
-    addActionValues(fieldObj, col);
+    McpSchemaActionFields.addActionValues(fieldObj, col);
     // Resolve process info — mirror NeoButtonActionHelper / NeoProcessService logic
     Process classicProcess = col.getProcess();
     org.openbravo.client.application.Process obuiappProcess = col.getOBUIAPPProcess();
@@ -649,37 +638,7 @@ final class McpSchemaFieldBuilder {
       fieldObj.put("processId", classicProcess.getId());
     }
     applyActionLabelFallback(fieldObj, col, processName);
-    addInvokability(fieldObj, visibility, processName != null, hiddenInTab);
-  }
-
-  /**
-   * Declares whether {@code neo_action} can actually run this button (IMP-21).
-   *
-   * <p>Three independent blockers, reported in the order an agent would care about. A curated
-   * {@code discarded} means the action was deliberately kept out of this window's agent surface.
-   * {@code hidden} means AD itself never shows the button in this tab, so it is not a user-facing
-   * action at all — see {@link #isHiddenButtonField}. A missing process means AD has nothing wired
-   * behind the column. An uncurated button (no {@code visibility} row at all) that AD does display
-   * and that has a process is treated as invokable — that is the pre-IMP-21 behaviour and the only
-   * safe default, since absence of curation is not a decision.</p>
-   */
-  private static void addInvokability(JSONObject fieldObj, String visibility, boolean hasProcess,
-      boolean hiddenInTab) throws JSONException {
-    String blocker = null;
-    if (VISIBILITY_DISCARDED.equals(visibility)) {
-      blocker = "discarded: this action is not part of the curated agent surface for this window";
-    } else if (hiddenInTab) {
-      blocker = "hidden: AD does not display this button in the tab, so it is an internal flag "
-          + "rather than a user-facing action";
-    } else if (!hasProcess) {
-      blocker = "no process: the AD button column has no process wired behind it";
-    }
-    if (blocker == null) {
-      fieldObj.put(KEY_INVOKE_VIA, "neo_action");
-      return;
-    }
-    fieldObj.put(KEY_INVOKABLE, false);
-    fieldObj.put(KEY_NOT_INVOKABLE_REASON, blocker);
+    McpSchemaActionFields.addInvokability(fieldObj, visibility, processName != null, hiddenInTab);
   }
 
   /**
@@ -770,68 +729,6 @@ final class McpSchemaFieldBuilder {
     String rest = moduleEnd < 0 ? name.substring(EM_PREFIX.length()) : name.substring(moduleEnd + 1);
     rest = rest.replace('_', ' ').trim();
     return rest.isEmpty() ? null : rest;
-  }
-
-  /**
-   * Derives {@code businessCritical} for an action that curation left unflagged (IMP-21).
-   *
-   * <p>{@code ETGO_SF_FIELD.isBusinessCritical} has no producer for buttons: it is {@code N} on
-   * every button column in the instance, so the flag was emitted {@code false} on all 22
-   * sales-invoice actions and never discriminated anywhere. {@code false} is not a neutral
-   * default — it reads as "nobody needs to think before firing this", which is the opposite of
-   * true for the two actions that change a document's legal and accounting state.</p>
-   *
-   * <p>Both signals below are structural properties of core AD, not per-window judgement (which
-   * belongs in {@code decisions.json} — see {@link #addActionValues}): a button bound to the
-   * shared {@code docAction} list drives the document state machine, and {@code Posted} is the
-   * accounting trigger present on every accountable document. Curation still wins — this only
-   * fills the gap, it never clears a flag someone set.</p>
-   */
-  private static boolean isCriticalAction(JSONObject fieldObj, String dbColName) {
-    return fieldObj.has(McpConstants.KEY_ACTION_PARAMETER)
-        || COLUMN_POSTED.equalsIgnoreCase(dbColName);
-  }
-
-  /**
-   * Emit the discrete values a list-backed button accepts, plus the parameter name they
-   * travel under (ETP-4285).
-   *
-   * <p>A button column whose {@code AD_Reference_Value_ID} points at a list reference (e.g.
-   * {@code C_Order.DocAction} → "Order_Document Action") has a closed value set. Without it an
-   * agent sees the button but cannot know that {@code CO} books the document, nor that the
-   * chosen value must be sent as {@code parameters.docAction}. Buttons with no reference value
-   * — most process buttons ({@code Processing}, {@code CopyFrom}, {@code Calculate_Promotions}
-   * …) — are left untouched.</p>
-   *
-   * <p>The emitted list is the full <em>active</em> AD list, which is deliberately broader than
-   * what is legal for a given document in a given state: AD does not model the state machine.
-   * Which value applies when is per-window judgement and travels in the field's
-   * {@code agentPrompt} (see {@code docs/decisions-reference.md}), not in this generic layer.</p>
-   *
-   * <p>Sorted by value because {@link NeoSelectorService#getListLabels} returns an unordered
-   * map — a stable schema is easier to diff, cache and assert on.</p>
-   *
-   * @param fieldObj the field object being built, mutated in place
-   * @param col      the button AD column
-   */
-  private static void addActionValues(JSONObject fieldObj, Column col) throws JSONException {
-    org.openbravo.model.ad.domain.Reference listRef = col.getReferenceSearchKey();
-    if (listRef == null) {
-      return;
-    }
-    Map<String, String> labels = NeoSelectorService.getListLabels((String) listRef.getId());
-    if (labels == null || labels.isEmpty()) {
-      return;
-    }
-    JSONArray values = new JSONArray();
-    for (String value : new TreeSet<>(labels.keySet())) {
-      JSONObject entry = new JSONObject();
-      entry.put("value", value);
-      entry.put("label", labels.get(value));
-      values.put(entry);
-    }
-    fieldObj.put(McpConstants.KEY_ACTION_VALUES, values);
-    fieldObj.put(McpConstants.KEY_ACTION_PARAMETER, McpConstants.PARAM_DOC_ACTION);
   }
 
   private static String resolvePropertyName(Entity dalEntity, String dbColName) {

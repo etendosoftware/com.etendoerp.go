@@ -339,14 +339,14 @@ public class ToolRegistry {
   public static boolean isCrudTool(String toolName) {
     switch (toolName) {
       case "neo_discover":
-      case "neo_list":
-      case "neo_get":
-      case "neo_create":
-      case "neo_update":
-      case "neo_delete":
-      case "neo_selectors":
-      case "neo_defaults":
-      case "neo_schema":
+      case McpConstants.TOOL_NEO_LIST:
+      case McpConstants.TOOL_NEO_GET:
+      case McpConstants.TOOL_NEO_CREATE:
+      case McpConstants.TOOL_NEO_UPDATE:
+      case McpConstants.TOOL_NEO_DELETE:
+      case McpConstants.TOOL_NEO_SELECTORS:
+      case McpConstants.TOOL_NEO_DEFAULTS:
+      case McpConstants.TOOL_NEO_SCHEMA:
       case "neo_batch":
       case "neo_action":
       case McpConstants.TOOL_NEO_WIDGET:
@@ -644,14 +644,14 @@ public class ToolRegistry {
     ToolRegistry registry = new ToolRegistry();
     McpToolDefinition definition;
     switch (toolName) {
-      case "neo_list": definition = registry.buildListTool(List.of()); break;
-      case "neo_get": definition = registry.buildGetTool(List.of()); break;
-      case "neo_create": definition = registry.buildCreateTool(List.of()); break;
-      case "neo_update": definition = registry.buildUpdateTool(List.of()); break;
-      case "neo_delete": definition = registry.buildDeleteTool(List.of()); break;
-      case "neo_selectors": definition = registry.buildSelectorsTool(List.of()); break;
-      case "neo_defaults": definition = registry.buildDefaultsTool(List.of()); break;
-      case "neo_schema": definition = registry.buildSchemaTool(List.of()); break;
+      case McpConstants.TOOL_NEO_LIST: definition = registry.buildListTool(List.of()); break;
+      case McpConstants.TOOL_NEO_GET: definition = registry.buildGetTool(List.of()); break;
+      case McpConstants.TOOL_NEO_CREATE: definition = registry.buildCreateTool(List.of()); break;
+      case McpConstants.TOOL_NEO_UPDATE: definition = registry.buildUpdateTool(List.of()); break;
+      case McpConstants.TOOL_NEO_DELETE: definition = registry.buildDeleteTool(List.of()); break;
+      case McpConstants.TOOL_NEO_SELECTORS: definition = registry.buildSelectorsTool(List.of()); break;
+      case McpConstants.TOOL_NEO_DEFAULTS: definition = registry.buildDefaultsTool(List.of()); break;
+      case McpConstants.TOOL_NEO_SCHEMA: definition = registry.buildSchemaTool(List.of()); break;
       default: return Optional.empty();
     }
     Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
@@ -702,7 +702,7 @@ public class ToolRegistry {
             + "full row.", List.of(McpFieldProjection.VIEW_SUMMARY)));
 
     return new McpToolDefinition(
-        "neo_list",
+        McpConstants.TOOL_NEO_LIST,
         "List records from a NEO Headless API spec. "
             + "Supports filtering (exact match, range operators, named document status), "
             + "pagination, sorting, and field projection (`fields` / view:\"summary\").",
@@ -726,7 +726,7 @@ public class ToolRegistry {
         List.of(McpFieldProjection.VIEW_SUMMARY)));
 
     return new McpToolDefinition(
-        "neo_get",
+        McpConstants.TOOL_NEO_GET,
         "Get a single record by ID from a NEO Headless API spec. Supports field projection "
             + "(`fields` / view:\"summary\"). "
             + McpConstants.RECORD_URL_NOTE,
@@ -762,7 +762,7 @@ public class ToolRegistry {
             + "Not needed for a spec's top-level entity."));
 
     return new McpToolDefinition(
-        "neo_create",
+        McpConstants.TOOL_NEO_CREATE,
         "Create a new record in a NEO Headless API spec. "
             + "Creating a child/line record? Pass parentId with the parent's id — without it the "
             + "server cannot derive the values it inherits from the parent. "
@@ -807,7 +807,7 @@ public class ToolRegistry {
             + "— do not reformat, round or invent it. If you do not have it, call neo_get first."));
 
     return new McpToolDefinition(
-        "neo_update",
+        McpConstants.TOOL_NEO_UPDATE,
         "Update an existing record in a NEO Headless API spec. "
             + "Read the record with neo_get first: its 'updated' value is a required argument and "
             + "guards against overwriting somebody else's concurrent edit. A 409 with "
@@ -828,7 +828,7 @@ public class ToolRegistry {
     props.put("id", stringProp("Record ID to delete"));
 
     return new McpToolDefinition(
-        "neo_delete",
+        McpConstants.TOOL_NEO_DELETE,
         "Delete a record from a NEO Headless API spec.",
           buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY, "id")));
   }
@@ -854,7 +854,7 @@ public class ToolRegistry {
             + "\"priceList\": \"<id>\"} when resolving line selectors."));
 
     return new McpToolDefinition(
-        "neo_selectors",
+        McpConstants.TOOL_NEO_SELECTORS,
         "Get foreign-key selector values for a column. "
             + "Use this to discover valid values for FK reference fields. "
             + "Pass recordContext when the selector depends on other field values "
@@ -896,7 +896,7 @@ public class ToolRegistry {
             McpDefaultsView.VIEW_MINIMAL)));
 
     return new McpToolDefinition(
-        "neo_defaults",
+        McpConstants.TOOL_NEO_DEFAULTS,
         "Get the initial/base set of field values for a new record — field types, which fields "
             + "are required vs optional, and computed/system defaults (document number, dates, "
             + "prices, etc.). Recommended: call this BEFORE neo_create, then use its result as "
@@ -1046,7 +1046,7 @@ public class ToolRegistry {
             + "already define their own projection."));
 
     return new McpToolDefinition(
-        "neo_schema",
+        McpConstants.TOOL_NEO_SCHEMA,
         "Get the field schema for an entity: field names, types, required flag, "
             + "read-only flag, default values, visibility (editable/readOnly/system/discarded), "
             + "and which fields have FK selectors. Call this BEFORE neo_create to know which "

@@ -45,6 +45,11 @@ final class McpJsonSchema {
   /** The JSON-schema {@code required} keyword, kept as one constant so it is not re-typed. */
   static final String KEY_REQUIRED = "required";
 
+  /** JSON Schema's array type, and the key that carries its element schema. */
+  private static final String TYPE_ARRAY = "array";
+  /** @see #TYPE_ARRAY */
+  private static final String KEY_ITEMS = "items";
+
   /** An {@code object} schema over {@code properties}; {@code required} is omitted when empty. */
   static Map<String, Object> buildObjectSchema(Map<String, Object> properties,
       List<String> required) {
@@ -106,9 +111,9 @@ final class McpJsonSchema {
   static Map<String, Object> objectArrayProp(String description, Map<String, Object> itemProps,
       List<String> itemRequired) {
     Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", "array");
+    prop.put("type", TYPE_ARRAY);
     prop.put(McpConstants.KEY_DESCRIPTION, description);
-    prop.put("items", buildObjectSchema(itemProps, itemRequired));
+    prop.put(KEY_ITEMS, buildObjectSchema(itemProps, itemRequired));
     return prop;
   }
 
@@ -130,9 +135,9 @@ final class McpJsonSchema {
     items.put("type", McpConstants.TYPE_STRING);
     items.put("enum", values);
     Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", "array");
+    prop.put("type", TYPE_ARRAY);
     prop.put(McpConstants.KEY_DESCRIPTION, description);
-    prop.put("items", items);
+    prop.put(KEY_ITEMS, items);
     return prop;
   }
 
@@ -141,9 +146,9 @@ final class McpJsonSchema {
     Map<String, Object> items = new LinkedHashMap<>();
     items.put("type", McpConstants.TYPE_STRING);
     Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", "array");
+    prop.put("type", TYPE_ARRAY);
     prop.put(McpConstants.KEY_DESCRIPTION, description);
-    prop.put("items", items);
+    prop.put(KEY_ITEMS, items);
     return prop;
   }
 }

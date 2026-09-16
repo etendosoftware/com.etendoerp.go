@@ -416,11 +416,10 @@ public class McpResourceProvider {
     JSONArray arr = new JSONArray();
     for (SFField field : fields) {
       Column column = field.getADColumn();
-      if (column == null) {
-        continue;
-      }
       McpFieldView view = McpFieldView.of(field);
-      if (!view.isIncluded()) {
+      // A row with no column and a row the effective curation excludes are the same non-answer:
+      // neither produces an entry. Kept as one guard so the loop has a single exit.
+      if (column == null || !view.isIncluded()) {
         continue;
       }
 

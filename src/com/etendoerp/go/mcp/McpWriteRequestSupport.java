@@ -196,7 +196,15 @@ final class McpWriteRequestSupport {
         continue;
       }
 
-      applyWriteGates(prop, gate, key, mappedKey, value, sfEntity, dalEntity, unknown);
+      if (prop == null) {
+        // parentId is a declared argument of the write tools, not a stray key - see
+        // resolveParentFK. Every other unresolved key is reported, not refused (IMP-18).
+        if (!McpConstants.PARAM_PARENT_ID.equals(key)) {
+          unknown.add(key);
+        }
+      } else {
+        applyWriteGates(gate, key, mappedKey, value, sfEntity, dalEntity);
+      }
       mapped.put(mappedKey, value);
     }
     return mapped;
@@ -236,31 +244,22 @@ final class McpWriteRequestSupport {
   }
 
   /**
-   * Apply the two curation gates to one key, or record it as unrecognised.
+   * Apply the two curation gates to one key that resolved to a property.
    *
-   * <p>IMP-39 / IMP-48: two gates, two answers. An unresolved key still passes through - parentId
-   * and friends travel this way, and IMP-18 owns the unknown-key case, which reports rather than
-   * refuses.</p>
+   * <p>IMP-39 / IMP-48: two gates, two answers. The unresolved case is not handled here - it is
+   * not a refusal but a report (IMP-18), and it stays at the call site so this method has one
+   * job and the caller keeps the parameter count honest.</p>
    *
-   * @param prop       the resolved property, or {@code null} when the key named none
    * @param gate       the entity's write gate
    * @param key        the caller's own key, used in the refusal so it reads back what it sent
    * @param mappedKey  the key the gates are keyed by
    * @param value      the value sent, needed to tell a default echo from an override
    * @param sfEntity   the SchemaForge entity, may be {@code null}
    * @param dalEntity  the DAL entity being written to
-   * @param unknown    collects keys that resolved to nothing
    * @throws McpRoutingException when the field is excluded or read-only
    */
-  private static void applyWriteGates(Property prop, McpQuerySupport.WriteGate gate, String key,
-      String mappedKey, Object value, SFEntity sfEntity, Entity dalEntity, Set<String> unknown) {
-    if (prop == null) {
-      // parentId is a declared argument of the write tools, not a stray key - see resolveParentFK.
-      if (!McpConstants.PARAM_PARENT_ID.equals(key)) {
-        unknown.add(key);
-      }
-      return;
-    }
+  private static void applyWriteGates(McpQuerySupport.WriteGate gate, String key,
+      String mappedKey, Object value, SFEntity sfEntity, Entity dalEntity) {
     String entityName = sfEntity == null ? dalEntity.getName() : sfEntity.getName();
     if (gate.excluded.contains(mappedKey)) {
       throw McpRoutingException.fieldNotAllowed(key, entityName,
