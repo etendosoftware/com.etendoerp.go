@@ -25,6 +25,7 @@ import java.util.Map;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
@@ -40,8 +41,11 @@ import org.openbravo.service.db.DalBaseProcess;
  * to run repeatedly. It writes only to {@code ETGO_USAGE_DAILY} and calls no external
  * service, which is why it is safe to run in a real environment on day one.
  *
- * <p>Parameters (both optional, both {@code yyyy-MM-dd}): {@code DateFrom}, {@code DateTo}.
- * Supplying one without the other is rejected rather than guessed at.
+ * <p>Parameters (both optional): {@code DateFrom}, {@code DateTo}. Supplying one without the
+ * other is rejected rather than guessed at. Either the instance's own display format (the
+ * {@code dateFormat.java} property, which is what the parameter window sends) or
+ * {@code yyyy-MM-dd} (what a scheduled request's JSON parameters naturally carry) is
+ * accepted.
  */
 public class UsageAggregationProcess extends DalBaseProcess {
 
@@ -124,8 +128,57 @@ public class UsageAggregationProcess extends DalBaseProcess {
     if (StringUtils.isBlank(text)) {
       return null;
     }
-    SimpleDateFormat format = new SimpleDateFormat(DATE_FORMAT);
-    format.setLenient(false);
-    return UsageDayRange.startOfDay(format.parse(text));
+    return UsageDayRange.startOfDay(parseDate(text, name));
+  }
+
+  /**
+   * Parses a date the user or a scheduled request supplied.
+   *
+   * <p>Tries the instance's configured display format first, because that is what the
+   * parameter window sends -- a Spanish instance sends {@code 08-09-2010}, and parsing that
+   * as {@code yyyy-MM-dd} fails outright. Then falls back to ISO, which is what a scheduled
+   * request's JSON parameters naturally carry and what this process's own documentation
+   * promises.
+   *
+   * <p>Both attempts are <b>strict</b>. {@code OBDateUtils.getDate} is not, and a lenient
+   * {@code dd-MM-yyyy} parse of {@code 2011-01-01} does not fail -- it silently rolls day
+   * 2011 forward into a date years away, so a backfill would quietly cover the wrong range.
+   * Strict parsing also removes any ambiguity between the two formats: a string that one
+   * accepts, the other rejects.
+   */
+  private Date parseDate(String text, String name) throws ParseException {
+    ParseException firstFailure = null;
+    for (String pattern : new String[] { configuredDateFormat(), DATE_FORMAT }) {
+      if (StringUtils.isBlank(pattern)) {
+        continue;
+      }
+      SimpleDateFormat format = new SimpleDateFormat(pattern);
+      format.setLenient(false);
+      try {
+        return format.parse(text);
+      } catch (ParseException e) {
+        if (firstFailure == null) {
+          firstFailure = e;
+        }
+      }
+    }
+    throw new ParseException(name + " '" + text + "' is not a date. Use the format shown in"
+        + " the window (" + configuredDateFormat() + ") or " + DATE_FORMAT + ".",
+        firstFailure == null ? 0 : firstFailure.getErrorOffset());
+  }
+
+  /**
+   * The instance's display date format, or null when the properties are not available -- in a
+   * unit test, say, where ISO alone is enough.
+   */
+  private String configuredDateFormat() {
+    try {
+      return OBPropertiesProvider.getInstance()
+          .getOpenbravoProperties()
+          .getProperty("dateFormat.java");
+    } catch (RuntimeException e) {
+      log.debug("No configured date format available, falling back to {}", DATE_FORMAT);
+      return null;
+    }
   }
 }
