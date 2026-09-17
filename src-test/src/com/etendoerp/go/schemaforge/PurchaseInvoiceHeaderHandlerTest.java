@@ -738,6 +738,64 @@ public class PurchaseInvoiceHeaderHandlerTest {
   }
 
   /**
+   * ETP-5334 — the AP handler path uses the ORDER-LINE aggregate when the order line was
+   * received across several receipts. Here the order line was received 4 + 6 but 6 was already
+   * invoiced by another completed invoice, so the aggregate pending (4) is below the draft
+   * quantity (10) and handle() must still return 400. Proves the guard did not become a no-op
+   * for split receptions on the purchase side.
+   */
+  @Test
+  public void handle_splitReceptionGenuineOverInvoicing_returns400() throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-split-blk")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoInvoiceSupport> supportMock =
+             Mockito.mockStatic(NeoInvoiceSupport.class);
+         MockedStatic<OBMessageUtils> msgMock =
+             Mockito.mockStatic(OBMessageUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+
+      when(rs.next()).thenReturn(true, false);
+      when(rs.getString(1)).thenReturn("iol-split");
+      when(rs.getBigDecimal(2)).thenReturn(new BigDecimal("10"));
+      when(rs.getString(3)).thenReturn("inout-split");
+      when(rs.getString(4)).thenReturn("R-SPLIT");
+      when(rs.getString(5)).thenReturn("ol-split");
+
+      Map<String, BigDecimal> perOrderLine = new HashMap<>();
+      perOrderLine.put("ol-split", new BigDecimal("4"));
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerOrderLine(
+          Mockito.eq("inv-split-blk"))).thenReturn(perOrderLine);
+
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvoiceLineAlreadyInvoiced"))
+          .thenReturn("Over-invoiced: @docNo@ qty @invoiced@ pending @pending@");
+
+      NeoResponse result = handler.handle(ctx);
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      assertTrue(result.getBody().getString("message").contains("pending 4"));
+    }
+  }
+
+  /**
    * When validateLineQtyBeforeComplete passes (no over-invoiced lines), handle() proceeds
    * to validateDocTypeLock. A PUT that attempts to change doc type on a saved invoice
    * must return 400 from validateDocTypeLock.

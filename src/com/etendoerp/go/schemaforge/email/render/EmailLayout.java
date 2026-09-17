@@ -43,7 +43,7 @@ import org.apache.commons.lang3.StringUtils;
 public final class EmailLayout {
 
   /** Pinned to production: an email is opened long after the environment that sent it may exist. */
-  static final String LOGO_URL = "https://go.etendo.cloud/favicon.png";
+  static final String LOGO_URL = "https://app.etendo.software/favicon.png";
 
   private static final String FONT_STACK =
       "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";

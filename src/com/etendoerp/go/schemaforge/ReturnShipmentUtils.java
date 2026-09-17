@@ -362,12 +362,18 @@ final class ReturnShipmentUtils {
    * spot where the locator rule can drift. Only the quantity handling stays here: this flow takes
    * a caller-computed {@code qty} and deliberately does NOT apply the proportional
    * order-UOM/order-quantity projection that {@code NeoReturnReceiptService}'s own wrapper does.
+   *
+   * <p>ETP-5313: {@code qty} is normalised through {@link ReturnLineQuantityPolicy} rather than
+   * taken at face value, so BOTH import-lines callers (sales
+   * {@code ReturnMaterialReceiptHeaderHandler}, purchase {@code ReturnToVendorShipmentHeaderHandler})
+   * can pass the user-facing POSITIVE quantity and get the same stored NEGATIVE sign. The
+   * normalisation is idempotent, so a caller that already negated is not flipped back.
    */
   static void buildAndSaveReturnLine(ShipmentInOut doc, ShipmentInOutLine sourceLine,
       long lineNo, BigDecimal qty) {
     ShipmentInOutLine retLine =
         NeoReturnReceiptService.createReturnLineShell(doc, sourceLine, lineNo);
-    retLine.setMovementQuantity(qty);
+    retLine.setMovementQuantity(ReturnLineQuantityPolicy.toStoredQuantity(qty));
     OBDal.getInstance().save(retLine);
   }
 
@@ -628,11 +634,14 @@ final class ReturnShipmentUtils {
     long lineNo = 10;
     for (ShipmentInOutLine retLine : lines) {
       // ETP-4737: the rectificative invoice line must always come out negative regardless of
-      // which sign convention the SOURCE return document uses for movementQuantity — Sales
-      // (RFC Receipt) stores it positive, but Purchases (RTV Shipment) already stores it
-      // negative, so a blind .negate() flipped Purchase-side rectificativas back to positive
-      // (e.g. REC-1000007). abs().negate() forces the correct sign either way without touching
-      // the return document's own movementQuantity/convention.
+      // which sign convention the SOURCE return document uses for movementQuantity. When this
+      // was written Sales (RFC Receipt) stored it positive while Purchases (RTV Shipment)
+      // already stored it negative, so a blind .negate() flipped Purchase-side rectificativas
+      // back to positive (e.g. REC-1000007). abs().negate() forces the correct sign either way
+      // without touching the return document's own movementQuantity.
+      // ETP-5313 aligned Sales onto the same stored-negative convention (see
+      // ReturnLineQuantityPolicy), so both sides now arrive negative — this stays sign-agnostic
+      // on purpose: it must keep working for documents created before that change.
       BigDecimal qty = retLine.getMovementQuantity() != null
           ? retLine.getMovementQuantity().abs().negate() : BigDecimal.ZERO;
       if (retLine.getProduct() == null || qty.compareTo(BigDecimal.ZERO) == 0) continue;

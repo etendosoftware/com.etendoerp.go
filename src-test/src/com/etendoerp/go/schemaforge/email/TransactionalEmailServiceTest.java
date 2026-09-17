@@ -857,6 +857,35 @@ public class TransactionalEmailServiceTest {
     assertEquals(1, safetyStore.getAuditRecords().size());
   }
 
+  @Test
+  public void malformedMessageEditsReachesResponseWithReasonCodeAndLimits() throws Exception {
+    // ETP-5293 — end-to-end: a real DefaultDocumentSendEmailContract rejects an unknown
+    // messageEdits key, and TransactionalEmailService must forward the reason code and both
+    // length limits into the response's data, not just the free-text message.
+    FakeProviderAdapter adapter = new FakeProviderAdapter(true,
+        new EmailProviderResponse(202, "{}"));
+    EmailDocumentRecordResolver resolver = recordId -> Optional.of(
+        new EmailDocumentRecord("Cliente", "customer@example.com", "ABC123", "INV/0001", null,
+            "https://example.test/download/ABC123", "client-1"));
+    DefaultDocumentSendEmailContract contract =
+        new DefaultDocumentSendEmailContract("message-edits-send", "Documento", resolver);
+    TransactionalEmailService service = service(contract, adapter);
+
+    JSONObject command = new JSONObject();
+    command.put(EmailContractCommandSupport.FIELD_RECORD_ID, "ABC123");
+    command.put("messageEdits", new JSONObject().put("bodyHtml", "<b>no</b>"));
+
+    NeoResponse response = service.send("message-edits-send", command);
+
+    JSONObject data = responseData(response);
+    assertEquals(400, response.getHttpStatus());
+    assertEquals(TransactionalEmailService.STATUS_VALIDATION_FAILED, data.getString("status"));
+    assertEquals(EmailMessageEdits.REASON_UNKNOWN_FIELD, data.getString("reasonCode"));
+    assertEquals(EmailMessageEdits.MAX_SUBJECT_LENGTH, data.getInt("maxSubjectLength"));
+    assertEquals(EmailMessageEdits.MAX_MESSAGE_LENGTH, data.getInt("maxMessageLength"));
+    assertFalse(adapter.wasSendCalled());
+  }
+
   private static JSONObject responseData(NeoResponse response) throws JSONException {
     assertNotNull("Response body should not be null", response.getBody());
     return response.getBody().getJSONObject("response").getJSONObject("data");
