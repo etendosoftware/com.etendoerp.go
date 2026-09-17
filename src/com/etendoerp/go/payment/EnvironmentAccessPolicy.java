@@ -12,6 +12,7 @@
 
 package com.etendoerp.go.payment;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 
@@ -33,7 +34,9 @@ public final class EnvironmentAccessPolicy {
     NONE,
     CURRENT,
     PAST_DUE,
-    EXPIRED
+    EXPIRED,
+    /** Explicit compatibility entitlement for historical productive environments. */
+    LEGACY_ENTITLEMENT
   }
 
   public enum Decision {
@@ -71,21 +74,27 @@ public final class EnvironmentAccessPolicy {
   public static final class Environment {
     private final EnvironmentType type;
     private final Instant trialStartedAt;
+    private final Instant renewalDueAt;
 
-    private Environment(EnvironmentType type, Instant trialStartedAt) {
+    private Environment(EnvironmentType type, Instant trialStartedAt, Instant renewalDueAt) {
       this.type = type;
       this.trialStartedAt = trialStartedAt;
+      this.renewalDueAt = renewalDueAt;
     }
 
     public static Environment demo(Instant trialStartedAt) {
       if (trialStartedAt == null) {
         throw new IllegalArgumentException("A demo requires a trial start timestamp");
       }
-      return new Environment(EnvironmentType.DEMO, trialStartedAt);
+      return new Environment(EnvironmentType.DEMO, trialStartedAt, null);
     }
 
     public static Environment productive() {
-      return new Environment(EnvironmentType.PRODUCTIVE, null);
+      return new Environment(EnvironmentType.PRODUCTIVE, null, null);
+    }
+
+    public static Environment productive(Instant renewalDueAt) {
+      return new Environment(EnvironmentType.PRODUCTIVE, null, renewalDueAt);
     }
 
     public EnvironmentType getType() {
@@ -94,6 +103,10 @@ public final class EnvironmentAccessPolicy {
 
     public Instant getTrialStartedAt() {
       return trialStartedAt;
+    }
+
+    public Instant getRenewalDueAt() {
+      return renewalDueAt;
     }
   }
 
@@ -115,7 +128,11 @@ public final class EnvironmentAccessPolicy {
     if (expiresAt == null || !now.isBefore(expiresAt)) {
       return 0;
     }
-    long seconds = now.until(expiresAt, java.time.temporal.ChronoUnit.SECONDS);
+    Duration remaining = Duration.between(now, expiresAt);
+    long seconds = remaining.getSeconds();
+    if (remaining.getNano() > 0) {
+      seconds++;
+    }
     return (seconds + (24 * 60 * 60L) - 1) / (24 * 60 * 60L);
   }
 
@@ -135,7 +152,16 @@ public final class EnvironmentAccessPolicy {
       Instant expiresAt = environment.trialStartedAt.plus(configuration.trialDays, ChronoUnit.DAYS);
       return now.isBefore(expiresAt) ? Decision.ALLOWED : Decision.DEMO_TRIAL_EXPIRED;
     }
-    return subscriptionStatus == SubscriptionStatus.CURRENT
-        ? Decision.ALLOWED : Decision.SUBSCRIPTION_REQUIRED;
+    if (subscriptionStatus == SubscriptionStatus.CURRENT
+        || subscriptionStatus == SubscriptionStatus.LEGACY_ENTITLEMENT) {
+      return Decision.ALLOWED;
+    }
+    if (subscriptionStatus == SubscriptionStatus.PAST_DUE
+        && environment.renewalDueAt != null
+        && now.isBefore(environment.renewalDueAt.plus(configuration.renewalGraceDays,
+            ChronoUnit.DAYS))) {
+      return Decision.ALLOWED;
+    }
+    return Decision.SUBSCRIPTION_REQUIRED;
   }
 }

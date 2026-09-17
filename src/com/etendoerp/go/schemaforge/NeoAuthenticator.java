@@ -18,6 +18,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.io.IOException;
+import java.time.Instant;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
@@ -31,6 +32,8 @@ import org.openbravo.dal.core.OBContext;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
+import com.etendoerp.go.payment.EnvironmentAccessPolicy;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -43,6 +46,8 @@ class NeoAuthenticator {
   private static final Logger log = LogManager.getLogger(NeoAuthenticator.class);
 
   private final NeoServlet servlet;
+  private final TenantEnvironmentLifecycleService environmentLifecycleService =
+      new TenantEnvironmentLifecycleService();
 
   NeoAuthenticator(NeoServlet servlet) {
     this.servlet = servlet;
@@ -58,6 +63,10 @@ class NeoAuthenticator {
     try {
       authenticateJwt(request);
       return true;
+    } catch (CommercialAccessException e) {
+      log.info("Commercial access denied for NEO request: {}", e.getMessage());
+      servlet.sendError(response, HttpServletResponse.SC_PAYMENT_REQUIRED, e.getMessage());
+      return false;
     } catch (OBException e) {
       // OBException messages are safe to expose (we control them)
       log.warn("Unauthorized NEO request: {}", e.getMessage());
@@ -108,7 +117,25 @@ class NeoAuthenticator {
     }
     OBContext.setOBContext(context);
     OBContext.setOBContextInSession(request, context);
+    enforceEnvironmentAccess(clientId);
     applyRequestLanguage(request);
+  }
+
+  private void enforceEnvironmentAccess(String clientId) throws CommercialAccessException {
+    EnvironmentAccessPolicy.Decision decision = environmentLifecycleService.evaluateAccess(
+        clientId, true, Instant.now());
+    if (decision == null || decision == EnvironmentAccessPolicy.Decision.ALLOWED) {
+      return;
+    }
+    throw new CommercialAccessException("Environment access is not available: " + decision.name());
+  }
+
+  private static final class CommercialAccessException extends Exception {
+    private static final long serialVersionUID = 1L;
+
+    CommercialAccessException(String message) {
+      super(message);
+    }
   }
 
   /**

@@ -50,6 +50,8 @@ public class EnvironmentAccessPolicyTest {
 
     assertEquals(15, policy.remainingTrialDays(demo, START, DEFAULTS));
     assertEquals(1, policy.remainingTrialDays(demo,
+        START.plusSeconds(15 * 24 * 60 * 60L).minusNanos(1), DEFAULTS));
+    assertEquals(1, policy.remainingTrialDays(demo,
         START.plusSeconds(14 * 24 * 60 * 60L + 1), DEFAULTS));
     assertEquals(0, policy.remainingTrialDays(demo,
         START.plusSeconds(15 * 24 * 60 * 60L), DEFAULTS));
@@ -77,6 +79,23 @@ public class EnvironmentAccessPolicyTest {
         SubscriptionStatus.PAST_DUE, START, DEFAULTS));
     assertEquals(Decision.SUBSCRIPTION_REQUIRED, policy.evaluate(Environment.productive(), true,
         SubscriptionStatus.NONE, START, DEFAULTS));
+  }
+
+  @Test
+  public void historicalProductiveEntitlementRemainsExplicitlyAllowed() {
+    assertEquals(Decision.ALLOWED, policy.evaluate(Environment.productive(), true,
+        SubscriptionStatus.LEGACY_ENTITLEMENT, START, DEFAULTS));
+  }
+
+  @Test
+  public void pastDueProductiveEnvironmentIsAllowedOnlyDuringGrace() {
+    Environment productive = Environment.productive(START);
+
+    assertEquals(Decision.ALLOWED, policy.evaluate(productive, true, SubscriptionStatus.PAST_DUE,
+        START.plusSeconds(15 * 24 * 60 * 60L - 1), DEFAULTS));
+    assertEquals(Decision.SUBSCRIPTION_REQUIRED,
+        policy.evaluate(productive, true, SubscriptionStatus.PAST_DUE,
+            START.plusSeconds(15 * 24 * 60 * 60L), DEFAULTS));
   }
 
   @Test(expected = IllegalArgumentException.class)

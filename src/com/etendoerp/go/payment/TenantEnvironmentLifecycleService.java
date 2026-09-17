@@ -13,6 +13,7 @@
 package com.etendoerp.go.payment;
 
 import java.time.Instant;
+import java.util.Locale;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -37,11 +38,16 @@ public class TenantEnvironmentLifecycleService {
 
   public static final String ENVIRONMENT_TYPE_ATTRIBUTE = "ETGO_EnvironmentType";
   public static final String DEMO_TRIAL_STARTED_ATTRIBUTE = "ETGO_DemoTrialStartedAt";
+  public static final String SUBSCRIPTION_STATUS_ATTRIBUTE = "ETGO_SubscriptionStatus";
+  public static final String SUBSCRIPTION_DUE_AT_ATTRIBUTE = "ETGO_SubscriptionDueAt";
   public static final String TYPE_DEMO = "DEMO";
   public static final String TYPE_PRODUCTIVE = "PRODUCTIVE";
   public static final int DEFAULT_TRIAL_DAYS = 15;
   public static final String TRIAL_DAYS_PROPERTY = "etendo.go.demo.trial.days";
   public static final String TRIAL_DAYS_ENV = "ETGO_DEMO_TRIAL_DAYS";
+  public static final String GRACE_DAYS_PROPERTY = "etendo.go.billing.grace.days";
+  public static final String GRACE_DAYS_ENV = "ETGO_BILLING_GRACE_DAYS";
+  public static final int DEFAULT_GRACE_DAYS = 15;
 
   private static final String PARAM_ATTRIBUTE = "attribute";
   private static final String PARAM_CLIENT_ID = "clientId";
@@ -90,6 +96,8 @@ public class TenantEnvironmentLifecycleService {
         return false;
       }
       setPreference(ENVIRONMENT_TYPE_ATTRIBUTE, TYPE_PRODUCTIVE, client);
+      setPreference(SUBSCRIPTION_STATUS_ATTRIBUTE,
+          EnvironmentAccessPolicy.SubscriptionStatus.CURRENT.name(), client);
       return true;
     } catch (RuntimeException e) {
       log.error("Could not initialize productive lifecycle for client {}", clientId, e);
@@ -106,14 +114,20 @@ public class TenantEnvironmentLifecycleService {
       String type = readPreference(ENVIRONMENT_TYPE_ATTRIBUTE, clientId);
       if (TYPE_PRODUCTIVE.equalsIgnoreCase(type)
           || TenantPlanService.PLAN_PRODUCTIVE.equals(tenantPlanService.resolvePlan(clientId))) {
-        return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, null);
+        String status = readPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, clientId);
+        EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus = parseSubscriptionStatus(
+            status, EnvironmentAccessPolicy.SubscriptionStatus.LEGACY_ENTITLEMENT);
+        Instant renewalDueAt = parseInstant(
+            readPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE, clientId));
+        return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, null,
+            subscriptionStatus, renewalDueAt);
       }
       String startedAt = readPreference(DEMO_TRIAL_STARTED_ATTRIBUTE, clientId);
       if (StringUtils.isBlank(startedAt)) {
         return null;
       }
       return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.DEMO,
-          Instant.parse(startedAt));
+          Instant.parse(startedAt), EnvironmentAccessPolicy.SubscriptionStatus.NONE, null);
     } catch (RuntimeException e) {
       log.warn("Could not resolve environment lifecycle for client {}", clientId, e);
       return null;
@@ -122,7 +136,72 @@ public class TenantEnvironmentLifecycleService {
 
   public EnvironmentAccessPolicy.Configuration configuration() {
     return new EnvironmentAccessPolicy.Configuration(
-        GoRuntimeProperties.readInt(TRIAL_DAYS_PROPERTY, TRIAL_DAYS_ENV, DEFAULT_TRIAL_DAYS), 0);
+        GoRuntimeProperties.readInt(TRIAL_DAYS_PROPERTY, TRIAL_DAYS_ENV, DEFAULT_TRIAL_DAYS),
+        GoRuntimeProperties.readInt(GRACE_DAYS_PROPERTY, GRACE_DAYS_ENV, DEFAULT_GRACE_DAYS));
+  }
+
+  /** Updates the local subscription projection; billing adapters supply the due date in UTC. */
+  public boolean updateSubscriptionStatus(String clientId,
+      EnvironmentAccessPolicy.SubscriptionStatus status, Instant renewalDueAt) {
+    if (StringUtils.isBlank(clientId) || status == null) {
+      return false;
+    }
+    try {
+      Client client = OBDal.getInstance().get(Client.class, clientId);
+      if (client == null) {
+        return false;
+      }
+      setPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, status.name(), client);
+      if (renewalDueAt != null) {
+        setPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE, renewalDueAt.toString(), client);
+      }
+      return true;
+    } catch (RuntimeException e) {
+      log.error("Could not update subscription projection for client {}", clientId, e);
+      return false;
+    }
+  }
+
+  /**
+   * Evaluates tenant access without contacting a payment provider. A null result means the tenant
+   * predates lifecycle metadata and must be handled by the controlled legacy transition flow.
+   */
+  public EnvironmentAccessPolicy.Decision evaluateAccess(String clientId, boolean activeMembership,
+      Instant now) {
+    EnvironmentSnapshot snapshot = resolve(clientId);
+    if (snapshot == null) {
+      return null;
+    }
+    EnvironmentAccessPolicy.Environment environment = snapshot.toPolicyEnvironment();
+    EnvironmentAccessPolicy.SubscriptionStatus subscription =
+        snapshot.getSubscriptionStatus();
+    return new EnvironmentAccessPolicy().evaluate(environment, activeMembership, subscription,
+        now, configuration());
+  }
+
+  private EnvironmentAccessPolicy.SubscriptionStatus parseSubscriptionStatus(String value,
+      EnvironmentAccessPolicy.SubscriptionStatus fallback) {
+    if (StringUtils.isBlank(value)) {
+      return fallback;
+    }
+    try {
+      return EnvironmentAccessPolicy.SubscriptionStatus.valueOf(value.toUpperCase(Locale.ROOT));
+    } catch (IllegalArgumentException e) {
+      log.warn("Ignoring unknown subscription status '{}'", value);
+      return fallback;
+    }
+  }
+
+  private Instant parseInstant(String value) {
+    if (StringUtils.isBlank(value)) {
+      return null;
+    }
+    try {
+      return Instant.parse(value);
+    } catch (RuntimeException e) {
+      log.warn("Ignoring invalid subscription due timestamp");
+      return null;
+    }
   }
 
   private void setPreference(String attribute, String value, Client client) {
@@ -146,10 +225,15 @@ public class TenantEnvironmentLifecycleService {
   public static final class EnvironmentSnapshot {
     private final EnvironmentAccessPolicy.EnvironmentType type;
     private final Instant trialStartedAt;
+    private final EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus;
+    private final Instant renewalDueAt;
 
-    EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType type, Instant trialStartedAt) {
+    EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType type, Instant trialStartedAt,
+        EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus, Instant renewalDueAt) {
       this.type = type;
       this.trialStartedAt = trialStartedAt;
+      this.subscriptionStatus = subscriptionStatus;
+      this.renewalDueAt = renewalDueAt;
     }
 
     public EnvironmentAccessPolicy.EnvironmentType getType() {
@@ -160,9 +244,17 @@ public class TenantEnvironmentLifecycleService {
       return trialStartedAt;
     }
 
+    public EnvironmentAccessPolicy.SubscriptionStatus getSubscriptionStatus() {
+      return subscriptionStatus;
+    }
+
+    public Instant getRenewalDueAt() {
+      return renewalDueAt;
+    }
+
     public EnvironmentAccessPolicy.Environment toPolicyEnvironment() {
       return type == EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE
-          ? EnvironmentAccessPolicy.Environment.productive()
+          ? EnvironmentAccessPolicy.Environment.productive(renewalDueAt)
           : EnvironmentAccessPolicy.Environment.demo(trialStartedAt);
     }
   }
