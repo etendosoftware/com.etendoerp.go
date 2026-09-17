@@ -190,6 +190,13 @@ provision) and `isProductive()` (does what it provisions become productive).
 Ownership is counted with `EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail`, which reuses the
 same username-match rule as `GET /sws/go/environments`.
 
+The hosted checkout entry point also requires a server-marked owner. `POST
+/sws/go/checkout/sessions` returns HTTP 403 with `BILLING_OWNER_REQUIRED` when the authenticated
+account only has invited memberships or has no owner record. The check reads `AD_User.EM_ETGO_Is_Owner`
+through `OwnerSupport`; an administrator role name or an email match is not sufficient. Invitation
+access remains independent because environment discovery and NEO entry continue to evaluate the
+destination membership separately.
+
 ### The plan is derived from the payment, not from the decision
 
 `isProductive()` is `true` when — and only when — the request was not refused **and** the payment

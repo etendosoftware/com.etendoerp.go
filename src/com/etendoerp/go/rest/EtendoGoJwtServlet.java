@@ -399,6 +399,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void handleCheckoutSession(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     runWithAuthenticatedAccount(request, response, "checkout-session", account -> {
+      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+      OBContext.setAdminMode(true);
+      boolean billingOwner;
+      try {
+        billingOwner = EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(account.getEmail());
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+      if (!billingOwner) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, "BILLING_OWNER_REQUIRED",
+            "Only the environment owner can manage billing",
+            "Only the environment owner can manage billing");
+        return;
+      }
       JSONObject body = readJsonBodyOrBadRequest(request, response);
       if (body == null) return;
       String clientName = body.optString(FIELD_CLIENT_NAME, "").trim();

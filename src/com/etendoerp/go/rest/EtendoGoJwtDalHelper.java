@@ -518,6 +518,16 @@ final class EtendoGoJwtDalHelper {
     return clientIds.size();
   }
 
+  /** Returns true only when the account has a server-marked owner in at least one environment. */
+  static boolean hasOwnedEnvironmentForAccountEmail(String accountEmail) {
+    for (User environmentUser : findEnvironmentUsersByAccountEmail(accountEmail)) {
+      if (OwnerSupport.isOwner(environmentUser.getId())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /**
    * Returns the account's only free tenant when it is unambiguous, for demo/productive linking.
    * Multiple free tenants are deliberately treated as unresolved rather than guessed.
