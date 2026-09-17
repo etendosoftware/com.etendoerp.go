@@ -2395,6 +2395,33 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 
   - **`ETGO_INVITATION_USER_FK` cascade delete (ETP-4830):** because this handler makes admin-created-user invitations part of the normal create flow, `ETGO_INVITATION` rows now exist for ordinary users, not just for ETP-4894's opt-in "invite an existing user" path. `ETGO_INVITATION.AD_USER_ID` originally referenced `AD_USER` with no `ON DELETE` behavior (`onDelete` omitted in `src-db/database/model/tables/ETGO_INVITATION.xml`, i.e. `NO ACTION`), so deleting an `AD_User` that had ever received an invitation failed with a 500 ("Este registro no puede ser eliminado ya que está relacionado con otros elementos existentes.") — a pre-existing ETP-4894 schema gap, only surfaced now that this handler makes invitation rows routine. Fixed by adding `onDelete="cascade"` to `ETGO_INVITATION_USER_FK`: deleting the `AD_User` now deletes its `ETGO_INVITATION` row(s) with it, since a dangling invitation for a user that no longer exists can never sensibly be accepted. The sibling `ETGO_INVITATION_CREATEDBY_FK`/`ETGO_INVITATION_UPDATEDBY_FK`/`ETGO_INVITATION_ACCOUNT_FK`/`ETGO_INVITATION_CLIENT_FK`/`ETGO_INVITATION_ORG_FK` constraints are intentionally left as `NO ACTION` — those reference the actor/tenant, not the invited user, and Etendo audit columns (`CREATEDBY`/`UPDATEDBY`) are never expected to be deleted out from under a row.
 
+**Real-world example — `AbstractOrderHeaderHandler`'s GET annotations (`hasLinkedDocuments`, plus `needsPrimaryDoc`/`needsInvoiceDoc`, ETP-5295):** the shared base of `SalesOrderHeaderHandler`, `PurchaseOrderHeaderHandler` and `SalesQuotationHeaderHandler` appends three computed booleans to **every** record of **every** order GET — list and single-record alike — so the React list view can make document-flow decisions per row without any extra round trip.
+
+  - `hasLinkedDocuments` (pre-existing) — is there *any* `C_Invoice` or `M_InOut` with this `C_Order_ID`. Single-record GETs use a `LIMIT 1` query, list GETs one batch `IN` query.
+  - `needsPrimaryDoc` / `needsInvoiceDoc` (ETP-5295) — "a shipment/receipt is still pending" and "an invoice is still pending". The names are deliberately **neutral across sales and purchase** ("primary doc" = goods shipment for a sales order, goods receipt for a purchase order — both `M_InOut`), so the one shared frontend hook that reads them (`useOrderWindow.jsx` in `etendo_schema_forge`) needs no per-window parameterization.
+
+  **Why they exist.** The row kebab menu's "Gestionar envío/factura" entry derived its visibility and label from the `DeliveryStatus`/`InvoiceStatus` percent columns, while the "Gestionar" button on the detail form derives the same decision from the real documents. The two disagreed — the kebab showed or hid the entry, and picked its label, wrongly. Making the kebab issue the form's three requests *per row* was not an option, so the form's derivation moved server-side.
+
+  **The formula** — a literal transcription of the detail form's (`artifacts/sales-order/custom/OrderCreateInvoice.jsx`, `artifacts/purchase-order/custom/PurchaseOrderActions.jsx`):
+
+  ```
+  qtyPending      = SUM(C_OrderLine.QtyOrdered) - SUM(C_OrderLine.QtyDelivered)
+  needsPrimaryDoc = qtyPending != 0 AND no linked M_InOut in DocStatus 'DR'
+
+  totalPending    = order GrandTotal - SUM(GrandTotal of LINKED invoices in DocStatus 'CO')
+  needsInvoiceDoc = totalPending != 0 AND no LINKED invoice in DocStatus 'DR'
+  ```
+
+  **"LINKED invoice" is the union of two paths, not `C_Invoice.C_Order_ID` alone.** The form reads its invoice list from the `listInvoices` action (`CreateDraftInvoiceHandler#handleList`), which runs two queries and merges them deduplicating by invoice id: (1) through the invoice lines — `C_InvoiceLine.C_OrderLine_ID → C_OrderLine.C_Order_ID`, covering invoices created from the classic Etendo UI and every partial-invoicing-by-lines flow — and (2) directly through `C_Invoice.C_Order_ID`, covering the edge case of an invoice created by our own action that has no lines yet. `batchFetchLinkedInvoiceTotals` reproduces exactly that with a single `UNION` subquery (the `UNION` *is* the dedup by `(order, invoice)`), aggregated by `(order, DocStatus)` in one pass. Note that `batchCheckLinkedDocuments`, which backs `hasLinkedDocuments`, covers only `C_Order_ID` — that is a narrower, separate concern and **is not the spec for linkage here**; using it would make the flags disagree with the form in precisely the partial-invoicing cases the ticket is about.
+
+  **Cost and shape.** Three batched queries per GET response, independent of page size — never one per row: ordered-vs-delivered quantity grouped by order, draft `M_InOut` by order, and the linked-invoice union above. Sales vs purchase (`IsSOTrx` `'Y'`/`'N'`) is parameterized off the existing `isSalesTransaction()` override, the same switch the callout price-list fallback already uses, so a subclass needs to know nothing about this annotation to be classified correctly. Comparisons are exact-decimal (`BigDecimal.compareTo`), not float subtraction. The order total is read from the JSON record rather than re-queried, so it is the same number the form sees — `applyTotalDiscountToRecord` has already adjusted `grandTotalAmount` for a draft carrying a not-yet-materialized total discount by the time this runs.
+
+  **Status-agnostic.** Both flags are annotated for every document status; the form only evaluates them once the order is completed and the kebab already gates its own entry on `status === 'CO'`, so the backend stays a pure function of the order's documents and never re-reads `documentStatus`.
+
+  **Degradation.** A DB failure annotates both flags `false` (entry hidden) rather than leaving them absent or defaulting to `true`: a spuriously hidden shortcut is recoverable from the detail form, a spuriously shown one sends the user into an empty "manage" modal. The parent GET is never failed.
+
+  **Known pre-existing defect, replicated deliberately.** When ONE invoice groups lines from SEVERAL orders, its FULL `GrandTotal` is counted against EACH of those orders, inflating the invoiced total so `needsInvoiceDoc` reads `false` too early. The form has exactly this bug today, and parity with the form is the whole point of the annotation — fixing it on one side only would replace one disagreement with another. Tracked separately; do not "fix" the backend without fixing the form in the same change.
+
 #### 5.3.1 Post-hook writes and the `updated` audit token (ETP-5255 / ETP-5262)
 
 See also the shorter, author-facing version of this rule in `docs/neo-headless-extensibility.md` §2.3a in the `schema_forge_core` repo.

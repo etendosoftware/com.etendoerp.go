@@ -39,8 +39,10 @@ import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
  * included in the completed document. Delegates to {@link TotalDiscountService} via the shared
  * helper in {@link AbstractOrderHeaderHandler}.
  *
- * <p>GET post-hook (hasLinkedDocuments annotation) is inherited from
- * {@link AbstractOrderHeaderHandler}.
+ * <p>GET post-hook (hasLinkedDocuments, plus the ETP-5295 needsPrimaryDoc/needsInvoiceDoc
+ * annotations) is inherited from {@link AbstractOrderHeaderHandler}. {@code isSalesTransaction()}
+ * returns {@code false} here, which is what makes those annotations look at goods RECEIPTS and
+ * PURCHASE invoices ({@code IsSOTrx = 'N'}).
  */
 @Named("purchaseOrderHeaderHandler")
 public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
