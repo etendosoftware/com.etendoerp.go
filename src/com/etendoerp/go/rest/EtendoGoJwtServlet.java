@@ -105,6 +105,9 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *   GET  /sws/go/me           — Get current account info (requires session token)
  *   GET  /sws/go/environments — List environments for the account (requires session token),
  *                               each carrying its plan ("free" | "productive")
+ *   GET  /sws/go/billing/overview — Account-level purchase projection (requires session token)
+ *   POST /sws/go/billing/purchases — Start a new owner-authorized purchase
+ *   GET  /sws/go/billing/purchases/{id} — Read one account-scoped purchase projection
  *   GET  /sws/go/login?userId=X — Get an Etendo JWT for an AD_User (requires session token + ownership)
  *
  * Auth model: session token in Authorization header ("Bearer <token>").
