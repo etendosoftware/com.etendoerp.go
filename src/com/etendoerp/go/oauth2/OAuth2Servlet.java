@@ -1276,6 +1276,15 @@ public class OAuth2Servlet extends HttpBaseServlet {
     return !query.list().isEmpty();
   }
 
+  private String requiredClaim(DecodedJWT jwt, String claimName) throws AuthException {
+    String value = jwt.getClaim(claimName).asString();
+    if (value == null || value.trim().isEmpty()) {
+      throw new AuthException(HttpServletResponse.SC_BAD_REQUEST,
+          "Authenticated token is missing required claim: " + claimName);
+    }
+    return value.trim();
+  }
+
   }
 
   // --- B4: Revoke and Introspect ---
@@ -2011,15 +2020,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
   }
 
   // --- Data access helpers ---
-
-  private String requiredClaim(DecodedJWT jwt, String claimName) throws AuthException {
-    String value = jwt.getClaim(claimName).asString();
-    if (value == null || value.trim().isEmpty()) {
-      throw new AuthException(HttpServletResponse.SC_BAD_REQUEST,
-          "Authenticated token is missing required claim: " + claimName);
-    }
-    return value.trim();
-  }
 
   /**
    * Look up an active OAuth2 client by client_identifier using raw JDBC.
