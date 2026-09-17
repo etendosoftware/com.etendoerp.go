@@ -101,7 +101,11 @@ public class UsageAggregationProcess extends DalBaseProcess {
       // Each resource-day commits on its own, so days completed before the failure are already
       // written. Saying so avoids reading this as "nothing happened"; every day is idempotent,
       // so re-running the same range is the fix.
-      fail(bundle, "Usage Aggregation Failed", e.getMessage()
+      // Guarded like the partial path: this carries third-party exception text -- Hibernate,
+      // CDI, OBDal -- which is the text MOST likely to contain an at-sign. Leaving it raw
+      // would mean a resource failing on four days renders safely while the same exception
+      // escaping the service blanks the popup.
+      fail(bundle, "Usage Aggregation Failed", UsageMessages.atSafe(e.getMessage())
           + " (days completed before the failure are already written; re-running the same"
           + " range is safe and will finish the rest)");
     } finally {
@@ -217,7 +221,7 @@ public class UsageAggregationProcess extends DalBaseProcess {
     }
     throw new ParseException(name + " '" + UsageMessages.atSafe(text)
         + "' is not a date. Accepted formats: "
-        + String.join(", ", accepted) + ".", 0);
+        + UsageMessages.atSafe(String.join(", ", accepted)) + ".", 0);
   }
 
   /**

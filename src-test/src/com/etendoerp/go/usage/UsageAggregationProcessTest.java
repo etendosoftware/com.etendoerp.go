@@ -638,6 +638,68 @@ class UsageAggregationProcessTest {
     }
 
     /**
+     * THE ASSERTION WE COULD NOT HOLD BEFORE, and can now.
+     *
+     * <p>Both dynamic halves of this message are values we do not own — the search key is typed
+     * into the catalog by an administrator, the reason is an exception message from anywhere —
+     * so until they were guarded, "the message contains no at-sign" was a promise the code could
+     * not keep and a test asserting it would have failed on a legitimate input rather than on a
+     * regression. Now that {@code UsageMessages.atSafe} guards both, the fixture can be
+     * adversarial: every dynamic slot is fed a value that genuinely carries an at-sign.
+     *
+     * <p>The substituted forms are asserted as well as the absence of the character, because the
+     * point is not to delete the operator's information. {@code BILLING(at)ACME} is still
+     * recognisably their resource; a message that had merely dropped the at-sign would name a
+     * resource called {@code BILLINGACME} that does not exist.
+     */
+    @Test
+    void atSignsInTheSearchKeyAndTheReasonAreNeutralisedRatherThanLost() throws Exception {
+      UsageAggregationResult withFailure = new UsageAggregationResult();
+      withFailure.addDay();
+      withFailure.addResource();
+      withFailure.addResource();
+      withFailure.addFailure("BILLING@ACME",
+          "No UsageResourceCounter deployed with @Named(\"active@users\")");
+
+      Outcome outcome = executeSettlingWindowReporting(withFailure);
+      String message = outcome.error.getMessage();
+
+      assertAll(
+          () -> assertFalse(message.contains("@"),
+              "an at-sign anywhere can blank the whole message: " + message),
+          () -> assertTrue(message.contains("BILLING(at)ACME"),
+              "the resource must still be identifiable: " + message),
+          () -> assertTrue(message.contains("(at)Named"),
+              "and so must the reason: " + message),
+          () -> assertFalse(message.contains("BILLINGACME"),
+              "stripping instead of replacing would name a resource that does not exist: "
+                  + message));
+    }
+
+    /**
+     * The same guard on the thrown message, which is a different string in the user's eyes: the
+     * interactive launcher renders {@code ex.getMessage()} through {@code Utility.translateError}
+     * — the very method that parses at-signs — so a guard applied only to the reported result
+     * would leave the thrown one exposed on the path that actually reaches the popup.
+     */
+    @Test
+    void theThrownMessageIsAtSafeToo() throws Exception {
+      UsageAggregationResult withFailure = new UsageAggregationResult();
+      withFailure.addDay();
+      withFailure.addResource();
+      withFailure.addResource();
+      withFailure.addFailure("BILLING@ACME", "boom @ 02:00");
+
+      Outcome outcome = executeSettlingWindowReporting(withFailure);
+
+      assertAll(() -> assertNotNull(outcome.thrown),
+          () -> assertFalse(outcome.thrown.getMessage().contains("@"),
+              outcome.thrown.getMessage()),
+          () -> assertTrue(outcome.thrown.getMessage().contains("BILLING(at)ACME"),
+              outcome.thrown.getMessage()));
+    }
+
+    /**
      * A failure must leave nothing half-written. The process owns the transaction boundary, so
      * the rollback is asserted rather than assumed.
      */
@@ -801,6 +863,27 @@ class UsageAggregationProcessTest {
               "and the ISO one: " + outcome.error.getMessage()),
           () -> assertTrue(outcome.error.getMessage().contains(text),
               "and the text it could not read: " + outcome.error.getMessage()));
+    }
+
+    /**
+     * The date text is free text the user types, so it is as exposed as any catalog field: a
+     * parameter of {@code 08@09@2010} used to quote the at-signs straight back into the popup
+     * that was supposed to explain the mistake. Replaced, not stripped — telling someone
+     * {@code 08092010} is not a date, when they typed something else entirely, explains nothing.
+     */
+    @Test
+    void anAtSignInTheDateTextIsNeutralisedRatherThanLost() throws Exception {
+      Outcome outcome = executeWithDisplayFormat(
+          params("DateFrom", "08@09@2010", "DateTo", "08@09@2010"), SPANISH_DISPLAY_FORMAT);
+      String message = outcome.error.getMessage();
+
+      assertAll(() -> assertEquals("Error", outcome.error.getType(), message),
+          () -> assertFalse(message.contains("@"),
+              "an at-sign here can blank the very message that explains the mistake: " + message),
+          () -> assertTrue(message.contains("08(at)09(at)2010"),
+              "the text they typed must stay recognisable: " + message),
+          () -> assertFalse(message.contains("08092010"),
+              "stripping would quote back something they never typed: " + message));
     }
 
     /**

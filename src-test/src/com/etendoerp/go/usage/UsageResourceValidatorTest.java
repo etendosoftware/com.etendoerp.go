@@ -156,6 +156,21 @@ class UsageResourceValidatorTest {
     when(query.list()).thenThrow(failure);
   }
 
+  /**
+   * Stubs the model so {@code entityName} resolves to an entity reporting that same name, with
+   * whatever property behaviour the caller adds. Needed because the at-sign specs have to drive
+   * the messages that quote the ENTITY name back, which the fixed-name helpers above cannot do.
+   */
+  private static void givenEntityNamed(String entityName,
+      MockedStatic<ModelProvider> modelProvider, java.util.function.Consumer<Entity> properties) {
+    ModelProvider provider = mock(ModelProvider.class);
+    Entity entity = mock(Entity.class);
+    modelProvider.when(ModelProvider::getInstance).thenReturn(provider);
+    when(provider.getEntity(eq(entityName), anyBoolean())).thenReturn(entity);
+    when(entity.getName()).thenReturn(entityName);
+    properties.accept(entity);
+  }
+
   private static void givenNoEntityIsFound(MockedStatic<ModelProvider> modelProvider) {
     ModelProvider provider = mock(ModelProvider.class);
     modelProvider.when(ModelProvider::getInstance).thenReturn(provider);
@@ -482,6 +497,20 @@ class UsageResourceValidatorTest {
    * <p>Pinned across ALL of them rather than only the one that broke: the trap is generic, the
    * next message someone adds is just as exposed, and the failure mode is silence rather than an
    * error anyone would chase back here.
+   *
+   * <p><b>Two kinds of test, both needed.</b> The {@code noMessage...ContainsAnAtSign} sweeps feed
+   * ordinary values and pin that our own FIXED WORDING stays clean — the regression where someone
+   * rewrites a message to mention {@code @Named} "properly". The {@code anAtSignIn...} tests feed
+   * every dynamic slot a value that genuinely CARRIES an at-sign, and so pin that the
+   * {@link UsageMessages#atSafe} guard is actually applied: interpolate a value raw and the
+   * assertion fails. An at-sign-free fixture cannot tell those two apart, which is why both exist.
+   * Every message with a dynamic slot is covered by the second kind; the rest have no interpolated
+   * value to feed.
+   *
+   * <p>Asserting the CALL instead (a mocked {@code UsageMessages} static) was considered and
+   * rejected: it would pin a helper NAME rather than the behaviour, and would break on an inlining
+   * that changed nothing a user can see. What reaches the screen is the contract; how it got there
+   * is not.
    */
   @Nested
   @DisplayName("no rejection message may contain an at-sign")
@@ -576,6 +605,203 @@ class UsageResourceValidatorTest {
         }
       });
     }
+
+    /**
+     * Everything an at-sign-bearing value owes the reader, asserted for each value fed in.
+     *
+     * <p>Three assertions, and the third is the one that makes this more than a re-run of
+     * {@code UsageMessagesTest}: the value must appear in its SUBSTITUTED form and must NOT appear
+     * stripped. A guard that deleted the character instead of replacing it would leave a message
+     * naming {@code FOOBAR} — a resource, entity or qualifier that does not exist — and send the
+     * reader after a value they never typed. The expected forms are computed here with plain
+     * string replacement rather than by calling the production helper, so the assertion cannot
+     * become tautological if that helper changes.
+     */
+    private void assertNeutralised(org.junit.jupiter.api.function.Executable rejection,
+        String what, String... rawValues) {
+      IllegalArgumentException thrown =
+          assertThrows(IllegalArgumentException.class, rejection, what + " must be rejected");
+      String message = thrown.getMessage();
+      assertAll(
+          () -> assertFalse(message.contains("@"),
+              what + " leaves an at-sign that can blank the whole message: " + message),
+          () -> assertAll(java.util.Arrays.stream(rawValues)
+              .map(raw -> (org.junit.jupiter.api.function.Executable) () -> assertAll(
+                  () -> assertTrue(message.contains(raw.replace("@", "(at)")),
+                      "'" + raw + "' must stay recognisable in " + what + ": " + message),
+                  () -> assertFalse(message.contains(raw.replace("@", "")),
+                      "'" + raw + "' was stripped rather than replaced in " + what + ", naming a"
+                          + " value that does not exist: " + message)))));
+    }
+
+    /**
+     * The mode-level messages. Only the unknown-mode one interpolates anything — the rest ("a
+     * billing resource is required", the blank-field and mutual-exclusion rules) are fixed wording
+     * with no dynamic slot to feed, and are covered by the sweeps above.
+     */
+    @Test
+    void anAtSignInTheCountingModeIsNeutralised() {
+      assertNeutralised(() -> UsageResourceValidator.validate(resource("MODE@X")),
+          "an unknown counting mode", "MODE@X");
+    }
+
+    /**
+     * The counted entity is free text an administrator types into the catalog, so it is exactly as
+     * exposed as the search key — a row naming {@code FOO@BAR} would have produced the blank popup
+     * this whole guard exists for.
+     */
+    @Test
+    void anAtSignInTheCountedEntityIsNeutralised() {
+      try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class)) {
+        givenNoEntityIsFound(modelProvider);
+        BillingResource row = resource(UsageResourceValidator.MODE_DECLARATIVE);
+        when(row.getCountedEntity()).thenReturn("FOO@BAR");
+        when(row.getDateProperty()).thenReturn(DATE_PROPERTY);
+
+        assertNeutralised(() -> UsageResourceValidator.validate(row),
+            "an entity that is not in the model", "FOO@BAR");
+      }
+    }
+
+    /**
+     * Both slots of the missing-property message at once: the property the user typed AND the
+     * entity name it is reported against. Guarding one and not the other would be the easy miss.
+     */
+    @Test
+    void anAtSignInTheDatePropertyOrItsEntityIsNeutralised() {
+      try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class)) {
+        givenEntityNamed("FOO@BAR", modelProvider, entity -> when(entity.hasProperty("date@x"))
+            .thenReturn(false));
+        BillingResource row = resource(UsageResourceValidator.MODE_DECLARATIVE);
+        when(row.getCountedEntity()).thenReturn("FOO@BAR");
+        when(row.getDateProperty()).thenReturn("date@x");
+
+        assertNeutralised(() -> UsageResourceValidator.validate(row),
+            "a date property that does not exist", "date@x", "FOO@BAR");
+      }
+    }
+
+    /** The property exists but is not a simple column: a third message, the same two slots. */
+    @Test
+    void anAtSignInTheNotASimpleColumnMessageIsNeutralised() {
+      try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class)) {
+        Property property = mock(Property.class);
+        when(property.isPrimitive()).thenReturn(false);
+        givenEntityNamed("FOO@BAR", modelProvider, entity -> {
+          when(entity.hasProperty("date@x")).thenReturn(true);
+          when(entity.getProperty(eq("date@x"), anyBoolean())).thenReturn(property);
+        });
+        BillingResource row = resource(UsageResourceValidator.MODE_DECLARATIVE);
+        when(row.getCountedEntity()).thenReturn("FOO@BAR");
+        when(row.getDateProperty()).thenReturn("date@x");
+
+        assertNeutralised(() -> UsageResourceValidator.validate(row),
+            "a property that is not a simple column", "date@x", "FOO@BAR");
+      }
+    }
+
+    /** And the fourth: the property is a column, but it does not hold a date. */
+    @Test
+    void anAtSignInTheNotADateMessageIsNeutralised() {
+      try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class)) {
+        Property property = mock(Property.class);
+        when(property.isPrimitive()).thenReturn(true);
+        when(property.getPrimitiveObjectType()).thenAnswer(invocation -> String.class);
+        givenEntityNamed("FOO@BAR", modelProvider, entity -> {
+          when(entity.hasProperty("date@x")).thenReturn(true);
+          when(entity.getProperty(eq("date@x"), anyBoolean())).thenReturn(property);
+        });
+        BillingResource row = resource(UsageResourceValidator.MODE_DECLARATIVE);
+        when(row.getCountedEntity()).thenReturn("FOO@BAR");
+        when(row.getDateProperty()).thenReturn("date@x");
+
+        assertNeutralised(() -> UsageResourceValidator.validate(row),
+            "a property that is not a date", "date@x", "FOO@BAR");
+      }
+    }
+
+    /**
+     * THE GUARD, exercised with values that genuinely carry at-signs.
+     *
+     * <p>The sweeps above prove our own fixed wording is clean. They cannot prove the guard is
+     * APPLIED, because an at-sign-free fixture produces an at-sign-free message either way. These
+     * do: every dynamic slot the message interpolates is fed a value containing an at-sign, so a
+     * message that interpolated it raw would fail here.
+     *
+     * <p>The substituted form is asserted alongside the absence, because deleting the operator's
+     * information is not a fix — a qualifier reported as {@code activeusers} when they typed
+     * {@code active@users} sends them looking for a typo they did not make.
+     */
+    @Test
+    void anAtSignInTheQualifierOrTheDeployedListIsNeutralisedRatherThanLost() {
+      try (MockedStatic<UsageCounterLookup> lookup = mockStatic(UsageCounterLookup.class)) {
+        lookup.when(() -> UsageCounterLookup.isDeployed(anyString())).thenReturn(false);
+        lookup.when(UsageCounterLookup::deployedQualifiers).thenReturn("active@users, stored@docs");
+
+        BillingResource row = resource(UsageResourceValidator.MODE_STRATEGY);
+        when(row.getStrategyQualifier()).thenReturn("billing@acme");
+
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class,
+            () -> UsageResourceValidator.validate(row));
+
+        assertAll(
+            () -> assertFalse(thrown.getMessage().contains("@"), thrown.getMessage()),
+            () -> assertTrue(thrown.getMessage().contains("billing(at)acme"),
+                "the qualifier they typed must still be recognisable: " + thrown.getMessage()),
+            () -> assertTrue(thrown.getMessage().contains("active(at)users"),
+                "and so must the deployed list: " + thrown.getMessage()),
+            () -> assertFalse(thrown.getMessage().contains("billingacme"),
+                "stripping would name a qualifier they never typed: " + thrown.getMessage()));
+      }
+    }
+
+    /**
+     * The compile message is the most exposed of all: it quotes the composed HQL back verbatim,
+     * so any at-sign a fragment carries — an email literal is the obvious one — travels with it,
+     * as does whatever Hibernate put in the root cause. All three of its dynamic parts are fed
+     * at-signs here.
+     */
+    @Test
+    void anAtSignInTheComposedHqlOrTheRootCauseIsNeutralised() {
+      try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class);
+          MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+          MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+        givenTheEntityHasADateProperty(modelProvider);
+        givenAProbeThatFailsToCompile(obDalStatic, new IllegalStateException("wrapper",
+            new IllegalStateException("could not resolve property: osted@Invoice")));
+        BillingResource row = declarativeRow();
+        when(row.getHQLRestriction()).thenReturn("e.description = 'billing@acme.com'");
+
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class,
+            () -> UsageResourceValidator.validateAndProbe(row));
+
+        assertAll(
+            () -> assertFalse(thrown.getMessage().contains("@"), thrown.getMessage()),
+            () -> assertTrue(thrown.getMessage().contains("billing(at)acme.com"),
+                "the fragment must still be quoted back readably: " + thrown.getMessage()),
+            () -> assertTrue(thrown.getMessage().contains("osted(at)Invoice"),
+                "and the root cause with it: " + thrown.getMessage()));
+      }
+    }
+
+    /** And the third probe path, whose root cause is guarded the same way. */
+    @Test
+    void anAtSignInAnExecutionFailureIsNeutralised() {
+      try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class);
+          MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+          MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+        givenTheEntityHasADateProperty(modelProvider);
+        givenAProbeThatFailsWhenRun(obDalStatic, new IllegalStateException("wrapper",
+            new IllegalStateException("connection to db@host refused")));
+
+        IllegalArgumentException thrown = assertThrows(IllegalArgumentException.class,
+            () -> UsageResourceValidator.validateAndProbe(declarativeRow()));
+
+        assertAll(() -> assertFalse(thrown.getMessage().contains("@"), thrown.getMessage()),
+            () -> assertTrue(thrown.getMessage().contains("db(at)host"), thrown.getMessage()));
+      }
+    }
+
 
     /**
      * The probe's three failures are on the same road to the user — the save-time observer wraps
