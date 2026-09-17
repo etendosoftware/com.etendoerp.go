@@ -18,7 +18,9 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.Mockito.mock;
@@ -429,6 +431,207 @@ class DocTypeResolverTest {
         DocTypeResolver.reapplyDocTypeFromTabFilter(body, adTab, ctx, Set.of("transactionDocument"));
         assertEquals(0, body.length()); // resolve fails silently (no OBContext), body unchanged
         // No exception = skip guard was bypassed as expected.
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // syncDocumentTypeToSubmittedTarget (ETP-5274)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Regression guard for ETP-5274: the user picks "Invoice" (doc-type target A), switches to
+   * "Rectificative invoice" (target B) and saves. Because the reapply was skipped (the user's
+   * choice is authoritative) {@code C_DocType_ID} kept the stale default A, and the DocumentNo was
+   * drawn from A's sequence. The effective doctype must follow the submitted target, the same
+   * invariant Classic keeps through the {@code SL_Invoice_Legacy} callout.
+   */
+  @Nested
+  @DisplayName("syncDocumentTypeToSubmittedTarget")
+  class SyncDocumentTypeToSubmittedTarget {
+
+    private static final String TABLE_ID = "TABLE_C_INVOICE";
+    private static final String TARGET = "transactionDocument";
+    private static final String EFFECTIVE = "documentType";
+
+    private Tab tabWithTable() {
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      when(adTab.getTable()).thenReturn(table);
+      when(table.getId()).thenReturn(TABLE_ID);
+      return adTab;
+    }
+
+    /** Registers a ModelProvider whose entity exposes the given doc-type property pair. */
+    private void stubEntity(MockedStatic<ModelProvider> mp, Property targetProp,
+        Property typeProp) {
+      ModelProvider instance = mock(ModelProvider.class);
+      Entity dalEntity = mock(Entity.class);
+      mp.when(ModelProvider::getInstance).thenReturn(instance);
+      when(instance.getEntityByTableId(TABLE_ID)).thenReturn(dalEntity);
+      when(dalEntity.getPropertyByColumnName("C_DocTypeTarget_ID")).thenReturn(targetProp);
+      when(dalEntity.getPropertyByColumnName("C_DocType_ID")).thenReturn(typeProp);
+    }
+
+    private Property prop(String name) {
+      Property p = mock(Property.class);
+      when(p.getName()).thenReturn(name);
+      return p;
+    }
+
+    @Test
+    @DisplayName("Copies the submitted target onto the effective doc-type property")
+    void copiesSubmittedTarget() throws Exception {
+      Tab adTab = tabWithTable();
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class)) {
+        stubEntity(mp, prop(TARGET), prop(EFFECTIVE));
+
+        JSONObject body = new JSONObject();
+        body.put(TARGET, "DOCTYPE_RECTIFICATIVE");
+
+        DocTypeResolver.syncDocumentTypeToSubmittedTarget(body, adTab);
+
+        assertEquals("DOCTYPE_RECTIFICATIVE", body.getString(EFFECTIVE));
+        // The user's own choice must stay untouched.
+        assertEquals("DOCTYPE_RECTIFICATIVE", body.getString(TARGET));
+      }
+    }
+
+    @Test
+    @DisplayName("Overwrites a stale effective doc-type already present in the body")
+    void overwritesStaleEffectiveDocType() throws Exception {
+      Tab adTab = tabWithTable();
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class)) {
+        stubEntity(mp, prop(TARGET), prop(EFFECTIVE));
+
+        JSONObject body = new JSONObject();
+        body.put(TARGET, "DOCTYPE_RECTIFICATIVE");
+        body.put(EFFECTIVE, "DOCTYPE_INVOICE"); // the stale default that caused ETP-5274
+
+        DocTypeResolver.syncDocumentTypeToSubmittedTarget(body, adTab);
+
+        assertEquals("DOCTYPE_RECTIFICATIVE", body.getString(EFFECTIVE));
+      }
+    }
+
+    @Test
+    @DisplayName("No-op when the body carries no target value")
+    void noOpWithoutSubmittedTarget() {
+      Tab adTab = tabWithTable();
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class)) {
+        stubEntity(mp, prop(TARGET), prop(EFFECTIVE));
+
+        JSONObject body = new JSONObject();
+        DocTypeResolver.syncDocumentTypeToSubmittedTarget(body, adTab);
+
+        assertFalse(body.has(EFFECTIVE));
+      }
+    }
+
+    @Test
+    @DisplayName("No-op when the submitted target is JSON null")
+    void noOpWithJsonNullTarget() throws Exception {
+      Tab adTab = tabWithTable();
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class)) {
+        stubEntity(mp, prop(TARGET), prop(EFFECTIVE));
+
+        JSONObject body = new JSONObject();
+        body.put(TARGET, JSONObject.NULL);
+        DocTypeResolver.syncDocumentTypeToSubmittedTarget(body, adTab);
+
+        assertFalse(body.has(EFFECTIVE));
+      }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "", " ", "   " })
+    @DisplayName("No-op when the submitted target is blank")
+    void noOpWithBlankTarget(String blank) throws Exception {
+      Tab adTab = tabWithTable();
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class)) {
+        stubEntity(mp, prop(TARGET), prop(EFFECTIVE));
+
+        JSONObject body = new JSONObject();
+        body.put(TARGET, blank);
+        DocTypeResolver.syncDocumentTypeToSubmittedTarget(body, adTab);
+
+        assertFalse(body.has(EFFECTIVE));
+      }
+    }
+
+    @Test
+    @DisplayName("No-op when the table has no doc-type target column")
+    void noOpWithoutTargetProperty() throws Exception {
+      Tab adTab = tabWithTable();
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class)) {
+        stubEntity(mp, null, prop(EFFECTIVE));
+
+        JSONObject body = new JSONObject();
+        body.put(TARGET, "DOCTYPE_RECTIFICATIVE");
+        DocTypeResolver.syncDocumentTypeToSubmittedTarget(body, adTab);
+
+        assertFalse(body.has(EFFECTIVE));
+      }
+    }
+
+    @Test
+    @DisplayName("No-op when the table has no effective doc-type column")
+    void noOpWithoutEffectiveProperty() throws Exception {
+      Tab adTab = tabWithTable();
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class)) {
+        stubEntity(mp, prop(TARGET), null);
+
+        JSONObject body = new JSONObject();
+        body.put(TARGET, "DOCTYPE_RECTIFICATIVE");
+        DocTypeResolver.syncDocumentTypeToSubmittedTarget(body, adTab);
+
+        assertFalse(body.has(EFFECTIVE));
+      }
+    }
+
+    @Test
+    @DisplayName("No-op when ModelProvider cannot resolve the entity")
+    void noOpWithUnknownEntity() throws Exception {
+      Tab adTab = tabWithTable();
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class)) {
+        ModelProvider instance = mock(ModelProvider.class);
+        mp.when(ModelProvider::getInstance).thenReturn(instance);
+        when(instance.getEntityByTableId(TABLE_ID)).thenReturn(null);
+
+        JSONObject body = new JSONObject();
+        body.put(TARGET, "DOCTYPE_RECTIFICATIVE");
+        DocTypeResolver.syncDocumentTypeToSubmittedTarget(body, adTab);
+
+        assertFalse(body.has(EFFECTIVE));
+      }
+    }
+
+    @Test
+    @DisplayName("Never throws on null body, null tab or a tab with no table")
+    void neverThrowsOnNullInputs() {
+      Tab tabWithoutTable = mock(Tab.class);
+      when(tabWithoutTable.getTable()).thenReturn(null);
+
+      assertDoesNotThrow(() -> {
+        DocTypeResolver.syncDocumentTypeToSubmittedTarget(null, mock(Tab.class));
+        DocTypeResolver.syncDocumentTypeToSubmittedTarget(new JSONObject(), null);
+        DocTypeResolver.syncDocumentTypeToSubmittedTarget(null, null);
+        DocTypeResolver.syncDocumentTypeToSubmittedTarget(new JSONObject(), tabWithoutTable);
+      });
+    }
+
+    @Test
+    @DisplayName("Swallows a ModelProvider failure instead of failing the write")
+    void swallowsModelProviderFailure() throws Exception {
+      Tab adTab = tabWithTable();
+      try (MockedStatic<ModelProvider> mp = Mockito.mockStatic(ModelProvider.class)) {
+        mp.when(ModelProvider::getInstance).thenThrow(new IllegalStateException("no model"));
+
+        JSONObject body = new JSONObject();
+        body.put(TARGET, "DOCTYPE_RECTIFICATIVE");
+
+        assertDoesNotThrow(() -> DocTypeResolver.syncDocumentTypeToSubmittedTarget(body, adTab));
+        assertFalse(body.has(EFFECTIVE));
       }
     }
   }

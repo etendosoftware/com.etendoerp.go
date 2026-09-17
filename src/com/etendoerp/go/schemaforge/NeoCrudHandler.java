@@ -40,6 +40,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -47,6 +48,7 @@ import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
+import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
@@ -1008,7 +1010,24 @@ class NeoCrudHandler {
     // its read, never data we persist: core reads it, compares it, and overwrites the column with
     // its own timestamp on save.
     Object updatedBeforeFilter = rawBody != null ? rawBody.opt(FIELD_UPDATED) : null;
+    // Same capture-before-filter reason: DocumentNo is read-only for the client, so the filter
+    // strips it and we could no longer tell "the caller sent a number" from "it never sent one".
+    // regenerateDocumentNoOnDocTypeChange must not overwrite a number the caller authored itself.
+    boolean clientSentDocumentNo = DocumentNoRepreviewHelper.hasClientAuthoredDocumentNo(rawBody);
     JSONObject filteredBody = fieldFilter.filterWriteRequest(rawBody);
+    // Keep C_DocType_ID in sync with the doc-type target the client just submitted. The create
+    // path does this through DocTypeResolver.reapplyDocTypeFromTabFilter; without it here,
+    // changing the document type of an already-saved draft leaves the effective doctype stale and
+    // the document number is generated from the wrong sequence. Runs after filtering because the
+    // helper addresses the body by DAL property name.
+    DocTypeResolver.syncDocumentTypeToSubmittedTarget(filteredBody, context.getAdTab());
+    // Syncing the effective doctype is not enough for an already-saved draft: its DocumentNo was
+    // taken from the OLD doctype's sequence and stays persisted, so a credit note would keep an
+    // invoice number. Replicates the classic SL_Invoice_Legacy callout — on a doc-type change the
+    // draft gets the new sequence's <currentnext> PLACEHOLDER (angle brackets, sequence not
+    // consumed); the real number is materialized on completion.
+    DocumentNoRepreviewHelper.regenerateDocumentNoOnDocTypeChange(
+        filteredBody, context, dalEntityName, clientSentDocumentNo);
     // ETP-5286: on a PATCH that changes `product` on a transactional document line, re-derive
     // `uOM` from the NEW product. See applyDerivedUomOnUpdate's own javadoc for the why.
     NeoCommercialLinePolicy.applyDerivedUomOnUpdate(filteredBody, dalEntityName);

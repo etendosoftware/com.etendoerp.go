@@ -311,6 +311,38 @@ public class ReturnToVendorShipmentLineHandlerTest {
     }
   }
 
+  // ── afterHandle() — write-response sign flip, GET-only enrichment (ETP-5336) ──
+
+  /**
+   * ETP-5336's actual repro on THIS window: a PATCH echoing the updated RTV line must ALSO get
+   * the stored NEGATIVE quantity flipped to POSITIVE — before this fix it was GET-only, so the
+   * frontend's optimistic row update rendered the raw negative value until the next refetch.
+   * {@code afterHandle} returns {@code null} on a write (the flip is applied in place on the
+   * SAME JSONObject), and the GET-only source-document SQL enrichment must NOT run.
+   */
+  @Test
+  public void testAfterHandlePatchResponseFlipsSignInPlaceAndSkipsSourceEnrichment()
+      throws Exception {
+    JSONObject body = lineBody("line-patch", -8.0);
+    NeoResponse previous = NeoResponse.ok(body);
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+        .previousResult(previous)
+        .build();
+
+    NeoResponse result = HANDLER.afterHandle(ctx);
+
+    assertNull("a write response returns null — the mutation happens in place on "
+        + "previousResult, the caller keeps its own reference", result);
+    JSONObject rec = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    assertEquals("the stored NEGATIVE sign must flip to POSITIVE on a PATCH echo too, not "
+        + "just on GET", 8.0, rec.getDouble("movementQuantity"), 0.0001);
+    assertFalse("GET-only source-document enrichment must not run on a write response",
+        rec.has("orderQuantity"));
+    assertFalse("GET-only source-document enrichment must not run on a write response",
+        rec.has("productCode"));
+  }
+
   // ── afterHandle() — SQL enrichment: DB returns rows ───────────────────────
 
   /**
