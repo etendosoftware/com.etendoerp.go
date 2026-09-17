@@ -30,12 +30,20 @@ public final class DailyCount {
   private final Date day;
   private final long quantity;
 
+  /**
+   * Creates one counted value for a tenant on a day.
+   *
+   * @param clientId the tenant this count belongs to
+   * @param day the day counted; defensively copied
+   * @param quantity the counted value
+   */
   public DailyCount(String clientId, Date day, long quantity) {
     this.clientId = Objects.requireNonNull(clientId, "clientId");
     this.day = new Date(Objects.requireNonNull(day, "day").getTime());
     this.quantity = quantity;
   }
 
+  /** @return the tenant this count belongs to */
   public String getClientId() {
     return clientId;
   }

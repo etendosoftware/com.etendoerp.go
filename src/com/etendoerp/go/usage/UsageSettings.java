@@ -70,6 +70,7 @@ public final class UsageSettings {
    * then to the default.
    *
    * @param clientId the tenant whose usage rows are being flagged settled
+   * @return the settling window in days, falling back to the default when unset or unreadable
    */
   public static int getSettlingWindowDays(String clientId) {
     try {

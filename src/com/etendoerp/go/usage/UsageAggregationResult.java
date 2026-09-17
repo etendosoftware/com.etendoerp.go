@@ -35,18 +35,31 @@ public final class UsageAggregationResult {
    */
   private final Map<String, String> failures = new LinkedHashMap<>();
 
+  /** Records that one more day was processed. */
   public void addDay() {
     daysProcessed++;
   }
 
+  /** Records that one more resource-day was attempted. */
   public void addResource() {
     resourcesProcessed++;
   }
 
+  /**
+   * Adds the rows written by one resource-day to the run total.
+   *
+   * @param rows how many usage rows were written
+   */
   public void addRows(int rows) {
     rowsWritten += rows;
   }
 
+  /**
+   * Records a failed resource-day, keeping only the first reason per resource.
+   *
+   * @param searchKey search key of the failing resource; may be null
+   * @param reason the failure message; may be null
+   */
   public void addFailure(String searchKey, String reason) {
     resourcesFailed++;
     failures.putIfAbsent(searchKey == null ? "(unknown resource)" : searchKey,

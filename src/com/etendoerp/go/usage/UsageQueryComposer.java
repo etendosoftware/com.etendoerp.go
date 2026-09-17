@@ -48,6 +48,7 @@ public final class UsageQueryComposer {
   public static final String PARAM_CLIENT_ID = "clientId";
 
   private static final String ALIAS_OUTER = "outer_";
+  private static final String AND = " and ";
   private static final String ALIAS_FRAGMENT = "e";
   private static final char QUOTE = '\'';
 
@@ -57,6 +58,9 @@ public final class UsageQueryComposer {
   /**
    * Counts one day across every tenant, grouped by client.
    *
+   * @param entityName the entity to count rows of
+   * @param dateProperty the date property that places a row on a day
+   * @param restriction optional HQL fragment narrowing the rows; validated before use
    * @return HQL selecting {@code (clientId, count)} rows; bind {@link #PARAM_DAY_START} and
    *     {@link #PARAM_DAY_END}
    */
@@ -77,6 +81,9 @@ public final class UsageQueryComposer {
    * Counts one day for a single tenant. Used by the single-tenant backfill and by the
    * save-time validation probe.
    *
+   * @param entityName the entity to count rows of
+   * @param dateProperty the date property that places a row on a day
+   * @param restriction optional HQL fragment narrowing the rows; validated before use
    * @return HQL selecting a single count; bind {@link #PARAM_CLIENT_ID},
    *     {@link #PARAM_DAY_START} and {@link #PARAM_DAY_END}
    */
@@ -88,14 +95,14 @@ public final class UsageQueryComposer {
     hql.append("select count(*)")
         .append(" from ").append(entityName).append(' ').append(ALIAS_OUTER)
         .append(" where ").append(ALIAS_OUTER).append(".client.id = :").append(PARAM_CLIENT_ID)
-        .append(" and ").append(dayBounds(dateProperty));
+        .append(AND).append(dayBounds(dateProperty));
     appendRestriction(hql, entityName, restriction);
     return hql.toString();
   }
 
   private static String dayBounds(String dateProperty) {
     return ALIAS_OUTER + '.' + dateProperty + " >= :" + PARAM_DAY_START
-        + " and " + ALIAS_OUTER + '.' + dateProperty + " < :" + PARAM_DAY_END;
+        + AND + ALIAS_OUTER + '.' + dateProperty + " < :" + PARAM_DAY_END;
   }
 
   /**
@@ -114,7 +121,7 @@ public final class UsageQueryComposer {
       return;
     }
     validateFragment(restriction);
-    hql.append(" and ").append(ALIAS_OUTER).append(".id in (select ")
+    hql.append(AND).append(ALIAS_OUTER).append(".id in (select ")
         .append(ALIAS_FRAGMENT).append(".id from ").append(entityName).append(' ')
         .append(ALIAS_FRAGMENT).append(" where ( ").append(restriction.trim()).append(" ))");
   }
@@ -136,6 +143,7 @@ public final class UsageQueryComposer {
    * An unterminated literal is rejected, since a dangling quote is itself a way to change
    * how the rest of the composed query parses.
    *
+   * @param restriction the HQL fragment to validate; blank is accepted and means no filter
    * @throws IllegalArgumentException if the fragment is unbalanced, carries a statement
    *     terminator or comment marker outside a literal, or leaves a literal unterminated
    */
@@ -147,39 +155,25 @@ public final class UsageQueryComposer {
     int depth = 0;
     boolean inLiteral = false;
 
-    for (int i = 0; i < fragment.length(); i++) {
+    int i = 0;
+    while (i < fragment.length()) {
       char c = fragment.charAt(i);
 
       if (inLiteral) {
         if (c == QUOTE) {
           // A doubled quote is an escaped quote and keeps us inside the literal.
-          if (i + 1 < fragment.length() && fragment.charAt(i + 1) == QUOTE) {
+          if (isEscapedQuote(fragment, i)) {
             i++;
           } else {
             inLiteral = false;
           }
         }
-        continue;
-      }
-
-      if (c == QUOTE) {
+      } else if (c == QUOTE) {
         inLiteral = true;
-      } else if (c == ';') {
-        throw new IllegalArgumentException(
-            "HQL restriction must not contain a statement terminator (;) outside a literal");
-      } else if (isCommentMarker(fragment, i)) {
-        throw new IllegalArgumentException(
-            "HQL restriction must not contain a comment marker (-- or /*) outside a literal");
-      } else if (c == '(') {
-        depth++;
-      } else if (c == ')') {
-        depth--;
-        if (depth < 0) {
-          throw new IllegalArgumentException("HQL restriction has unbalanced parentheses:"
-              + " closes more than it opens, which would escape the subquery it is composed"
-              + " into");
-        }
+      } else {
+        depth = scanOutsideLiteral(fragment, i, depth);
       }
+      i++;
     }
 
     if (inLiteral) {
@@ -190,6 +184,54 @@ public final class UsageQueryComposer {
       throw new IllegalArgumentException(
           "HQL restriction has unbalanced parentheses: leaves " + depth + " unclosed");
     }
+  }
+
+  /**
+   * Tells whether the quote at {@code i} is a doubled (escaped) quote rather than the end of
+   * the literal.
+   *
+   * @param fragment the trimmed restriction being validated
+   * @param i index of the quote character
+   * @return {@code true} when the next character is also a quote
+   */
+  private static boolean isEscapedQuote(String fragment, int i) {
+    return i + 1 < fragment.length() && fragment.charAt(i + 1) == QUOTE;
+  }
+
+  /**
+   * Inspects one character that sits outside a string literal, enforcing the structural
+   * guardrails: no statement terminator, no comment marker, and never closing more
+   * parentheses than were opened.
+   *
+   * @param fragment the trimmed restriction being validated
+   * @param i index of the character to inspect
+   * @param depth parenthesis depth before this character
+   * @return the parenthesis depth after this character
+   * @throws IllegalArgumentException on a statement terminator, a comment marker, or a close
+   *     that would escape the subquery the fragment is composed into
+   */
+  private static int scanOutsideLiteral(String fragment, int i, int depth) {
+    char c = fragment.charAt(i);
+    if (c == ';') {
+      throw new IllegalArgumentException(
+          "HQL restriction must not contain a statement terminator (;) outside a literal");
+    }
+    if (isCommentMarker(fragment, i)) {
+      throw new IllegalArgumentException(
+          "HQL restriction must not contain a comment marker (-- or /*) outside a literal");
+    }
+    if (c == '(') {
+      return depth + 1;
+    }
+    if (c == ')') {
+      if (depth == 0) {
+        throw new IllegalArgumentException("HQL restriction has unbalanced parentheses:"
+            + " closes more than it opens, which would escape the subquery it is composed"
+            + " into");
+      }
+      return depth - 1;
+    }
+    return depth;
   }
 
   private static boolean isCommentMarker(String fragment, int i) {

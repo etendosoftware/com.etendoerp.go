@@ -33,7 +33,12 @@ public final class UsageDayRange {
   private UsageDayRange() {
   }
 
-  /** @return the given instant truncated to local midnight */
+  /**
+   * Truncates an instant to local midnight.
+   *
+   * @param moment the instant to truncate
+   * @return the given instant truncated to local midnight
+   */
   public static Date startOfDay(Date moment) {
     Calendar cal = Calendar.getInstance();
     cal.setTime(moment);
@@ -44,7 +49,12 @@ public final class UsageDayRange {
     return cal.getTime();
   }
 
-  /** @return midnight of the day after the given day; the exclusive end of that day */
+  /**
+   * Advances to the following day.
+   *
+   * @param day the day to advance from
+   * @return midnight of the day after the given day; the exclusive end of that day
+   */
   public static Date nextDay(Date day) {
     Calendar cal = Calendar.getInstance();
     cal.setTime(startOfDay(day));
@@ -52,7 +62,13 @@ public final class UsageDayRange {
     return cal.getTime();
   }
 
-  /** @return the day {@code days} before the given day, truncated to midnight */
+  /**
+   * Steps back a whole number of calendar days.
+   *
+   * @param day the day to step back from
+   * @param days how many days to subtract
+   * @return the day {@code days} before the given day, truncated to midnight
+   */
   public static Date minusDays(Date day, int days) {
     Calendar cal = Calendar.getInstance();
     cal.setTime(startOfDay(day));
@@ -65,6 +81,11 @@ public final class UsageDayRange {
    *
    * <p>A day is final once strictly more than {@code settlingWindowDays} have elapsed since
    * it, measured in whole calendar days from {@code today}.
+   *
+   * @param day the day under test
+   * @param today start of the current day
+   * @param settlingWindowDays how many days a tenant's figures stay open
+   * @return true when the day has left the settling window
    */
   public static boolean isFinal(Date day, Date today, int settlingWindowDays) {
     return startOfDay(day).before(minusDays(today, settlingWindowDays));

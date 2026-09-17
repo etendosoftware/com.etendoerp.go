@@ -52,13 +52,17 @@ public class BillingResourceEventHandler extends EntityPersistenceEventObserver 
 
   private static Entity[] entities;
 
-  @Override
-  protected Entity[] getObservedEntities() {
+  private static Entity[] resolveEntities() {
     if (entities == null) {
       entities = new Entity[] {
           ModelProvider.getInstance().getEntity(BillingResource.ENTITY_NAME) };
     }
     return entities;
+  }
+
+  @Override
+  protected Entity[] getObservedEntities() {
+    return resolveEntities();
   }
 
   public void onNew(@Observes EntityNewEvent event) {

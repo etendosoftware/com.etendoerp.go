@@ -71,6 +71,9 @@ import org.openbravo.model.ad.system.Client;
  * {@code "five"} is worse than one that counts with the default window, so blank, non-numeric and
  * negative values are all specified to return {@link UsageSettings#DEFAULT_SETTLING_WINDOW_DAYS}.
  */
+// Test methods live in the @Nested inner classes below; S2187 only inspects
+// the outer class for @Test methods, hence the suppression.
+@SuppressWarnings("java:S2187")
 class UsageSettingsTest {
 
   private static final String CLIENT_ID = "A1B2C3D4E5F60718293A4B5C6D7E8F90";

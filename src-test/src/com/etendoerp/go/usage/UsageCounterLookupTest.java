@@ -70,6 +70,9 @@ import org.openbravo.base.weld.WeldUtils;
  * inherit the (non-{@code @Inherited}) {@code @Named}. The same trap regressed before in ETP-4244
  * for {@code NeoHandler}.
  */
+// Test methods live in the @Nested inner classes below; S2187 only inspects
+// the outer class for @Test methods, hence the suppression.
+@SuppressWarnings("java:S2187")
 class UsageCounterLookupTest {
 
   /** A real counter annotated exactly as a production implementer would annotate one. */

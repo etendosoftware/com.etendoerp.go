@@ -85,6 +85,9 @@ import org.openbravo.scheduling.ProcessBundle;
  * asked to review simply never computed. The lowercase case is therefore asserted explicitly, in
  * both the "which method was called" and the "with which bounds" senses.
  */
+// Test methods live in the @Nested inner classes below; S2187 only inspects
+// the outer class for @Test methods, hence the suppression.
+@SuppressWarnings("java:S2187")
 class UsageAggregationProcessTest {
 
   private static Date midnight(int year, int month, int dayOfMonth) {

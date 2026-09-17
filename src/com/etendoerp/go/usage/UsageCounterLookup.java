@@ -44,6 +44,8 @@ public final class UsageCounterLookup {
   }
 
   /**
+   * Resolves the deployed counter bean carrying the given CDI qualifier.
+   *
    * @param qualifier the {@code Strategy_Qualifier} to match; blank yields null
    * @return the matching counter, or null when none is deployed
    */
@@ -67,6 +69,7 @@ public final class UsageCounterLookup {
    * save-time validation so a typo in {@code Strategy_Qualifier} is caught when the catalog
    * row is saved rather than at 02:00 by a job that silently counts nothing.
    *
+   * @param qualifier the {@code Strategy_Qualifier} to look for
    * @return true when some deployed bean carries {@code @Named(qualifier)}
    */
   public static boolean isDeployed(String qualifier) {
@@ -82,7 +85,11 @@ public final class UsageCounterLookup {
     return false;
   }
 
-  /** @return every deployed qualifier, for an error message that lists the real options */
+  /**
+   * Lists the qualifiers actually deployed.
+   *
+   * @return every deployed qualifier, for an error message that lists the real options
+   */
   public static String deployedQualifiers() {
     try {
       BeanManager bm = WeldUtils.getStaticInstanceBeanManager();

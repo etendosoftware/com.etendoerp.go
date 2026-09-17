@@ -47,6 +47,9 @@ import org.junit.jupiter.params.provider.ValueSource;
  * {@code UsageAggregationProcessTest} with values that genuinely carry at-signs — a guard nobody
  * calls is not a guard.
  */
+// Test methods live in the @Nested inner classes below; S2187 only inspects
+// the outer class for @Test methods, hence the suppression.
+@SuppressWarnings("java:S2187")
 class UsageMessagesTest {
 
   @Nested

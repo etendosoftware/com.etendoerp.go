@@ -60,6 +60,9 @@ public final class UsageResourceValidator {
   /** Named strategy: resolve a {@link UsageResourceCounter} by CDI qualifier. */
   public static final String MODE_STRATEGY = "S";
 
+  /** Prefix shared by the Date Property validation messages. */
+  private static final String DATE_PROPERTY_PREFIX = "Date Property '";
+
   private UsageResourceValidator() {
   }
 
@@ -78,6 +81,7 @@ public final class UsageResourceValidator {
    * stamp through {@code event.setCurrentState} instead. The setters remain for callers
    * outside a flush, such as a backfill re-validating the catalog.
    *
+   * @param resource the catalog row to validate and probe
    * @return when the row was validated, and how long the probe took for a declarative row
    */
   public static ProbeStamp validateAndProbe(BillingResource resource) {
@@ -171,6 +175,8 @@ public final class UsageResourceValidator {
   }
 
   /**
+   * Validates a catalog row, rejecting anything that could not be counted safely.
+   *
    * @param resource the catalog row about to be saved
    * @throws IllegalArgumentException with a message naming the offending field
    */
@@ -267,7 +273,7 @@ public final class UsageResourceValidator {
 
   private static Property resolveDateProperty(Entity entity, String dateProperty) {
     if (!entity.hasProperty(dateProperty)) {
-      throw new IllegalArgumentException("Date Property '" + UsageMessages.atSafe(dateProperty)
+      throw new IllegalArgumentException(DATE_PROPERTY_PREFIX + UsageMessages.atSafe(dateProperty)
           + "' does not exist on entity '" + UsageMessages.atSafe(entity.getName()) + "'");
     }
     return entity.getProperty(dateProperty, false);
@@ -276,13 +282,13 @@ public final class UsageResourceValidator {
   private static void requireDateType(String entityName, String dateProperty,
       Property property) {
     if (property == null || !property.isPrimitive()) {
-      throw new IllegalArgumentException("Date Property '" + UsageMessages.atSafe(dateProperty)
+      throw new IllegalArgumentException(DATE_PROPERTY_PREFIX + UsageMessages.atSafe(dateProperty)
           + "' on entity '" + UsageMessages.atSafe(entityName)
           + "' is not a simple column, so it cannot be a counting date");
     }
     Class<?> type = property.getPrimitiveObjectType();
     if (type == null || !Date.class.isAssignableFrom(type)) {
-      throw new IllegalArgumentException("Date Property '" + UsageMessages.atSafe(dateProperty)
+      throw new IllegalArgumentException(DATE_PROPERTY_PREFIX + UsageMessages.atSafe(dateProperty)
           + "' on entity '" + UsageMessages.atSafe(entityName)
           + "' holds " + (type == null ? "an unknown type" : type.getSimpleName())
           + ", not a date; counting buckets by it would be meaningless");

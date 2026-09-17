@@ -79,7 +79,12 @@ public class UsageRunLedger {
     return runId;
   }
 
-  /** Records the range the run was asked for; the log is meaningless without it. */
+  /**
+   * Records the range the run was asked for; the log is meaningless without it.
+   *
+   * @param rangeFrom inclusive first day of the run
+   * @param rangeTo inclusive last day of the run
+   */
   public void covering(Date rangeFrom, Date rangeTo) {
     this.from = rangeFrom;
     this.to = rangeTo;
@@ -88,6 +93,8 @@ public class UsageRunLedger {
   /**
    * Records that one day was processed for one tenant of one resource.
    *
+   * @param resource the billing resource being counted
+   * @param clientId the tenant the day was counted for
    * @param rowsWritten usage rows actually written; zero is normal for a day that was already
    *     final, and the day still counts as processed
    */
@@ -101,6 +108,8 @@ public class UsageRunLedger {
   /**
    * Records that a resource failed for one day.
    *
+   * @param resource the failing billing resource; may be null when it could not be read
+   * @param resourceId id of the failing resource, used when the row itself is unavailable
    * @param reason kept only the first time: a resource failing on four days of a six-day window
    *     has one thing wrong with it, and the first failure is the one that explains it
    */

@@ -78,6 +78,9 @@ import com.etendoerp.go.schemaforge.data.BillingResource;
  * that only checks "the fields my mode needs are present", and each would mean the row does
  * something other than what its author configured.
  */
+// Test methods live in the @Nested inner classes below; S2187 only inspects
+// the outer class for @Test methods, hence the suppression.
+@SuppressWarnings("java:S2187")
 class UsageResourceValidatorTest {
 
   private static final String ENTITY = "Invoice";

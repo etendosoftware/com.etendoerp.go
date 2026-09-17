@@ -53,6 +53,9 @@ import org.junit.jupiter.params.provider.ValueSource;
  *       are covered here and kept distinguishable.</li>
  * </ul>
  */
+// Test methods live in the @Nested inner classes below; S2187 only inspects
+// the outer class for @Test methods, hence the suppression.
+@SuppressWarnings("java:S2187")
 class UsageQueryComposerTest {
 
   private static final String ENTITY = "Invoice";

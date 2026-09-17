@@ -97,6 +97,7 @@ public class UsageAggregationService {
    *
    * @param fromDay inclusive first day
    * @param toDay inclusive last day
+   * @return what the run did: days, resources, rows and failures
    */
   public UsageAggregationResult run(Date fromDay, Date toDay) {
     // An explicit range is a backfill: a deliberate recomputation, so it may rewrite a day
@@ -105,11 +106,16 @@ public class UsageAggregationService {
   }
 
   /**
+   * Recomputes an explicit inclusive day range, choosing whether final days may be rewritten.
+   *
+   * @param fromDay inclusive first day
+   * @param toDay inclusive last day
    * @param rewriteFinalDays true only for an explicit backfill. The scheduled run passes
    *     false so that a day which has left its tenant's settling window is never rewritten —
    *     "once final, it never changes" is the one normative invariant of the design, and the
    *     run iterates the LARGEST window configured anywhere, so it necessarily revisits days
    *     that are already final for a tenant with a shorter window.
+   * @return what the run did: days, resources, rows and failures
    */
   public UsageAggregationResult run(Date fromDay, Date toDay, boolean rewriteFinalDays) {
     // Admin mode belongs here rather than only in the process: this reads across every
@@ -141,30 +147,7 @@ public class UsageAggregationService {
     while (!day.after(last)) {
       result.addDay();
       for (String resourceId : resources) {
-        // Each resource-day is its own transaction. Without the commit, the rollback below
-        // would discard every day and resource the run had already written, because nothing
-        // else commits before DalBaseProcess finishes.
-        BillingResource resource = null;
-        try {
-          resource = OBDal.getInstance().get(BillingResource.class, resourceId);
-          if (resource == null) {
-            // Deactivated or deleted between the scan and its turn. Not a failure.
-            continue;
-          }
-          result.addResource();
-          int rows = recomputeDay(resource, day, today, rewriteFinalDays);
-          OBDal.getInstance().commitAndClose();
-          result.addRows(rows);
-        } catch (Exception e) {
-          result.addFailure(resource != null ? resource.getSearchKey() : resourceId,
-              e.getMessage());
-          ledger.resourceDayFailed(resource, resourceId, e.getMessage());
-          // The search key, not the id: when the failure is "this resource is misconfigured",
-          // the search key is what an operator can act on without a database lookup first.
-          log.error("Resource '{}' failed for day {}: {}",
-              resource != null ? resource.getSearchKey() : resourceId, day, e.getMessage(), e);
-          OBDal.getInstance().rollbackAndClose();
-        }
+        aggregateResourceDay(resourceId, day, today, rewriteFinalDays, result);
       }
       day = UsageDayRange.nextDay(day);
     }
@@ -174,6 +157,44 @@ public class UsageAggregationService {
     ledger.write();
     log.info("Usage aggregation finished. {}", result);
     return result;
+  }
+
+  /**
+   * Counts one resource for one day in its own transaction, recording either the rows written
+   * or the failure. Never propagates: one misconfigured resource must not abort the run.
+   *
+   * @param resourceId id of the billing resource to count
+   * @param day the day being recomputed
+   * @param today start of the current day, used to decide whether the day is still settling
+   * @param rewriteFinalDays whether days already sealed should be rewritten
+   * @param result run totals, updated in place
+   */
+  private void aggregateResourceDay(String resourceId, Date day, Date today,
+      boolean rewriteFinalDays, UsageAggregationResult result) {
+    // Each resource-day is its own transaction. Without the commit, the rollback below
+    // would discard every day and resource the run had already written, because nothing
+    // else commits before DalBaseProcess finishes.
+    BillingResource resource = null;
+    try {
+      resource = OBDal.getInstance().get(BillingResource.class, resourceId);
+      if (resource == null) {
+        // Deactivated or deleted between the scan and its turn. Not a failure.
+        return;
+      }
+      result.addResource();
+      int rows = recomputeDay(resource, day, today, rewriteFinalDays);
+      OBDal.getInstance().commitAndClose();
+      result.addRows(rows);
+    } catch (Exception e) {
+      result.addFailure(resource != null ? resource.getSearchKey() : resourceId,
+          e.getMessage());
+      ledger.resourceDayFailed(resource, resourceId, e.getMessage());
+      // The search key, not the id: when the failure is "this resource is misconfigured",
+      // the search key is what an operator can act on without a database lookup first.
+      log.error("Resource '{}' failed for day {}: {}",
+          resource != null ? resource.getSearchKey() : resourceId, day, e.getMessage(), e);
+      OBDal.getInstance().rollbackAndClose();
+    }
   }
 
   /**
@@ -257,26 +278,41 @@ public class UsageAggregationService {
       Set<String> countedTenants, boolean rewriteFinalDays) {
     int written = 0;
     for (UsageDaily stored : storedRows(resource, UsageDayRange.startOfDay(day))) {
-      String clientId = stored.getTenantClient().getId();
-      if (countedTenants.contains(clientId) || isFrozen(stored, rewriteFinalDays)) {
-        continue;
-      }
-      boolean settled = UsageDayRange.isFinal(day, today, settlingWindowFor(clientId));
-      if (settled && !rewriteFinalDays) {
-        // The sealing pass reaches tenants that stopped counting too. Zeroing here would
-        // revise a day downward after it closed -- checked before the zero-quantity guard
-        // below, so a row that is already zero still gets stamped.
-        written += seal(stored) ? 1 : 0;
-        continue;
-      }
-      if (stored.getQuantity() != null && stored.getQuantity() == 0L) {
-        continue;
-      }
-      upsert(resource, new DailyCount(clientId, UsageDayRange.startOfDay(day), 0L), settled,
-          stored);
-      written++;
+      written += zeroOutStoredRow(resource, stored, day, today, countedTenants, rewriteFinalDays);
     }
     return written;
+  }
+
+  /**
+   * Applies the zero-out decision to one stored row.
+   *
+   * @param resource the billing resource being recomputed
+   * @param stored the stored row under consideration
+   * @param day the day being recomputed
+   * @param today start of the current day, used to decide whether the day has settled
+   * @param countedTenants tenants the recount still reports
+   * @param rewriteFinalDays whether days already sealed may be rewritten
+   * @return 1 when the row was written or sealed, 0 when it was left untouched
+   */
+  private int zeroOutStoredRow(BillingResource resource, UsageDaily stored, Date day, Date today,
+      Set<String> countedTenants, boolean rewriteFinalDays) {
+    String clientId = stored.getTenantClient().getId();
+    if (countedTenants.contains(clientId) || isFrozen(stored, rewriteFinalDays)) {
+      return 0;
+    }
+    boolean settled = UsageDayRange.isFinal(day, today, settlingWindowFor(clientId));
+    if (settled && !rewriteFinalDays) {
+      // The sealing pass reaches tenants that stopped counting too. Zeroing here would
+      // revise a day downward after it closed -- checked before the zero-quantity guard
+      // below, so a row that is already zero still gets stamped.
+      return seal(stored) ? 1 : 0;
+    }
+    if (stored.getQuantity() != null && stored.getQuantity() == 0L) {
+      return 0;
+    }
+    upsert(resource, new DailyCount(clientId, UsageDayRange.startOfDay(day), 0L), settled,
+        stored);
+    return 1;
   }
 
   /** A day that has left its tenant's settling window may only be rewritten by a backfill. */

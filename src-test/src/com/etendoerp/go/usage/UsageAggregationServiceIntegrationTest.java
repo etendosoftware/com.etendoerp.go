@@ -193,9 +193,9 @@ public class UsageAggregationServiceIntegrationTest extends WeldBaseTest {
       // Exactly two restores, one per setAdminMode: the one opened at the top of this method,
       // and the one {@link #prepareDays()} opens and deliberately holds for the whole test.
       //
-      // NEVER unwind this with a loop on isInAdministratorMode(). That predicate is
-      // `stackTop.isAdminMode() || adminModeSet != null || isAdministrator`, and
-      // setSystemAdministratorContext() puts the context on role "0", which sets
+      // NEVER unwind this with a loop on isInAdministratorMode(). That predicate is true when
+      // the stack top is in admin mode, or the admin-mode flag is set, or the user is an
+      // administrator; and setSystemAdministratorContext() puts the context on role "0", which sets
       // isAdministrator = true permanently. So the predicate stays true no matter how many
       // times the stack is popped, and each extra pop hits OBContext's unbalanced-call branch,
       // which logs a warning with a freshly constructed exception. The loop never terminates:

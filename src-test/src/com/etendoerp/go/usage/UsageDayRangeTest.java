@@ -54,6 +54,9 @@ import org.junit.jupiter.params.provider.ValueSource;
  * a millisecond difference, so it still holds across a DST transition, where a calendar day is
  * not 24 hours.
  */
+// Test methods live in the @Nested inner classes below; S2187 only inspects
+// the outer class for @Test methods, hence the suppression.
+@SuppressWarnings("java:S2187")
 class UsageDayRangeTest {
 
   private static Date at(int year, int month, int dayOfMonth, int hour, int minute, int second,

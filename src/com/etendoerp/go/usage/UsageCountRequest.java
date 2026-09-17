@@ -36,6 +36,14 @@ public final class UsageCountRequest {
   private final Date to;
   private final String clientId;
 
+  /**
+   * Creates a request to count one resource over an inclusive day range.
+   *
+   * @param resource the billing resource to count
+   * @param from inclusive lower bound; defensively copied
+   * @param to inclusive upper bound; defensively copied
+   * @param clientId the tenant to count for, or null for every tenant
+   */
   public UsageCountRequest(BillingResource resource, Date from, Date to, String clientId) {
     this.resource = Objects.requireNonNull(resource, "resource");
     this.from = new Date(Objects.requireNonNull(from, "from").getTime());
