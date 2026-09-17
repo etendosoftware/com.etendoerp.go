@@ -18,8 +18,11 @@
 package com.etendoerp.go.usage;
 
 import java.text.ParseException;
+import java.text.ParsePosition;
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.List;
 import java.util.Map;
 
 import org.apache.commons.lang3.StringUtils;
@@ -147,24 +150,38 @@ public class UsageAggregationProcess extends DalBaseProcess {
    * accepts, the other rejects.
    */
   private Date parseDate(String text, String name) throws ParseException {
-    ParseException firstFailure = null;
-    for (String pattern : new String[] { configuredDateFormat(), DATE_FORMAT }) {
-      if (StringUtils.isBlank(pattern)) {
-        continue;
-      }
-      SimpleDateFormat format = new SimpleDateFormat(pattern);
-      format.setLenient(false);
-      try {
-        return format.parse(text);
-      } catch (ParseException e) {
-        if (firstFailure == null) {
-          firstFailure = e;
-        }
+    List<String> accepted = new ArrayList<>();
+    String configured = configuredDateFormat();
+    if (StringUtils.isNotBlank(configured)) {
+      accepted.add(configured);
+    }
+    accepted.add(DATE_FORMAT);
+
+    for (String pattern : accepted) {
+      Date parsed = parseFully(text, pattern);
+      if (parsed != null) {
+        return parsed;
       }
     }
-    throw new ParseException(name + " '" + text + "' is not a date. Use the format shown in"
-        + " the window (" + configuredDateFormat() + ") or " + DATE_FORMAT + ".",
-        firstFailure == null ? 0 : firstFailure.getErrorOffset());
+    throw new ParseException(name + " '" + text + "' is not a date. Accepted formats: "
+        + String.join(", ", accepted) + ".", 0);
+  }
+
+  /**
+   * Parses the WHOLE string, or answers null.
+   *
+   * <p>The whole string matters: {@code SimpleDateFormat.parse(String)} stops at the end of
+   * the pattern and ignores whatever follows, so {@code 2011-01-01xyz} would parse happily as
+   * 1 January 2011. Strictness governs field ranges, not trailing junk. For a backfill that
+   * means a typed range could be accepted while meaning something the user did not write, and
+   * a usage run that silently covers the wrong days is worse than one that refuses to start.
+   */
+  private Date parseFully(String text, String pattern) {
+    SimpleDateFormat format = new SimpleDateFormat(pattern);
+    format.setLenient(false);
+    ParsePosition position = new ParsePosition(0);
+    Date parsed = format.parse(text, position);
+    return parsed != null && position.getIndex() == text.length() ? parsed : null;
   }
 
   /**

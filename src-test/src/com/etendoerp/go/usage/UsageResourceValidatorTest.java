@@ -125,6 +125,37 @@ class UsageResourceValidatorTest {
     when(property.getPrimitiveObjectType()).thenAnswer(invocation -> type);
   }
 
+  /**
+   * A probe that blows up while COMPILING, at {@code createQuery}. Split from
+   * {@link #givenAProbeThatFailsWhenRun} because compiling and running are now different code
+   * paths reporting different things; a fixture that could only fail at one of them would let
+   * the other go untested, which is how the two were flattened into one message to begin with.
+   */
+  private static void givenAProbeThatFailsToCompile(MockedStatic<OBDal> obDalStatic,
+      RuntimeException failure) {
+    OBDal obDal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+    when(obDal.getSession()).thenReturn(session);
+    when(session.createQuery(anyString(), eq(Object[].class))).thenThrow(failure);
+  }
+
+  /** A probe that compiles cleanly and then blows up while EXECUTING, at {@code list()}. */
+  @SuppressWarnings("unchecked")
+  private static void givenAProbeThatFailsWhenRun(MockedStatic<OBDal> obDalStatic,
+      RuntimeException failure) {
+    OBDal obDal = mock(OBDal.class);
+    Session session = mock(Session.class);
+    Query<Object[]> query = mock(Query.class);
+    obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+    when(obDal.getSession()).thenReturn(session);
+    when(session.createQuery(anyString(), eq(Object[].class))).thenReturn(query);
+    when(query.setParameter(anyString(), any())).thenReturn(query);
+    when(query.setMaxResults(anyInt())).thenReturn(query);
+    when(query.setTimeout(anyInt())).thenReturn(query);
+    when(query.list()).thenThrow(failure);
+  }
+
   private static void givenNoEntityIsFound(MockedStatic<ModelProvider> modelProvider) {
     ModelProvider provider = mock(ModelProvider.class);
     modelProvider.when(ModelProvider::getInstance).thenReturn(provider);
@@ -545,6 +576,50 @@ class UsageResourceValidatorTest {
         }
       });
     }
+
+    /**
+     * The probe's three failures are on the same road to the user — the save-time observer wraps
+     * them in {@code OBException} exactly as it wraps the checks above — so they are exposed to
+     * the same trap, and the compile message is the most exposed of all: it quotes the composed
+     * HQL back verbatim, so any at-sign a fragment ever carries would travel with it.
+     */
+    @Test
+    void noMessageTheProbeCanProduceContainsAnAtSign() {
+      assertAll(() -> {
+        try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class);
+            MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+            MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+          givenTheEntityHasADateProperty(modelProvider);
+          givenAProbeThatFailsToCompile(obDalStatic, new IllegalStateException("wrapper",
+              new IllegalStateException("could not resolve property: osted of: Invoice")));
+          assertRejectedWithoutAnAtSign(
+              () -> UsageResourceValidator.validateAndProbe(declarativeRow()),
+              "a fragment that cannot compile");
+        }
+      }, () -> {
+        try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class);
+            MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+            MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+          givenTheEntityHasADateProperty(modelProvider);
+          givenAProbeThatFailsWhenRun(obDalStatic, new QueryTimeoutException("statement timeout",
+              new SQLException("canceling statement due to statement timeout"), "select ..."));
+          assertRejectedWithoutAnAtSign(
+              () -> UsageResourceValidator.validateAndProbe(declarativeRow()),
+              "a probe that times out");
+        }
+      }, () -> {
+        try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class);
+            MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
+            MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
+          givenTheEntityHasADateProperty(modelProvider);
+          givenAProbeThatFailsWhenRun(obDalStatic,
+              new IllegalStateException("wrapper", new IllegalStateException("connection closed")));
+          assertRejectedWithoutAnAtSign(
+              () -> UsageResourceValidator.validateAndProbe(declarativeRow()),
+              "a probe that fails to run");
+        }
+      });
+    }
   }
 
   /**
@@ -780,36 +855,6 @@ class UsageResourceValidatorTest {
       when(query.list()).thenReturn(java.util.Collections.emptyList());
     }
 
-    /**
-     * A probe that blows up while COMPILING, at {@code createQuery}. Split from
-     * {@link #givenAProbeThatFailsWhenRun} because compiling and running are now different code
-     * paths reporting different things; a fixture that could only fail at one of them would let
-     * the other go untested, which is how the two were flattened into one message to begin with.
-     */
-    private void givenAProbeThatFailsToCompile(MockedStatic<OBDal> obDalStatic,
-        RuntimeException failure) {
-      OBDal obDal = mock(OBDal.class);
-      Session session = mock(Session.class);
-      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
-      when(obDal.getSession()).thenReturn(session);
-      when(session.createQuery(anyString(), eq(Object[].class))).thenThrow(failure);
-    }
-
-    /** A probe that compiles cleanly and then blows up while EXECUTING, at {@code list()}. */
-    @SuppressWarnings("unchecked")
-    private void givenAProbeThatFailsWhenRun(MockedStatic<OBDal> obDalStatic,
-        RuntimeException failure) {
-      OBDal obDal = mock(OBDal.class);
-      Session session = mock(Session.class);
-      Query<Object[]> query = mock(Query.class);
-      obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
-      when(obDal.getSession()).thenReturn(session);
-      when(session.createQuery(anyString(), eq(Object[].class))).thenReturn(query);
-      when(query.setParameter(anyString(), any())).thenReturn(query);
-      when(query.setMaxResults(anyInt())).thenReturn(query);
-      when(query.setTimeout(anyInt())).thenReturn(query);
-      when(query.list()).thenThrow(failure);
-    }
   }
 
 

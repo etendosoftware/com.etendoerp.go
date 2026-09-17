@@ -19,6 +19,7 @@ package com.etendoerp.go.usage;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -28,20 +29,25 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.text.SimpleDateFormat;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Properties;
+import java.util.function.Consumer;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
+import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
@@ -83,8 +89,40 @@ class UsageAggregationProcessTest {
     return cal.getTime();
   }
 
-  /** Runs doExecute against stubbed platform statics and an intercepted service. */
+  /**
+   * Runs doExecute with NO display date format configured, which is the plain unit-test case:
+   * {@code configuredDateFormat()} finds no properties and returns null, so only ISO is accepted.
+   */
   private static Outcome execute(Map<String, Object> params) throws Exception {
+    return execute(params, properties -> {
+      // Left deliberately unstubbed: getInstance() then answers null, configuredDateFormat()
+      // catches the NPE and returns null. Stubbing the absence explicitly, rather than relying on
+      // whatever Openbravo.properties happens to be on the test classpath, is what keeps the ISO
+      // specs below deterministic on any developer machine.
+    });
+  }
+
+  /** Runs doExecute on an instance whose {@code dateFormat.java} is the given pattern. */
+  private static Outcome executeWithDisplayFormat(Map<String, Object> params, String pattern)
+      throws Exception {
+    return execute(params, properties -> {
+      OBPropertiesProvider provider = mock(OBPropertiesProvider.class);
+      Properties configured = new Properties();
+      configured.setProperty("dateFormat.java", pattern);
+      properties.when(OBPropertiesProvider::getInstance).thenReturn(provider);
+      when(provider.getOpenbravoProperties()).thenReturn(configured);
+    });
+  }
+
+  /** Runs doExecute on an instance whose properties cannot be read at all. */
+  private static Outcome executeWithoutProperties(Map<String, Object> params) throws Exception {
+    return execute(params, properties -> properties.when(OBPropertiesProvider::getInstance)
+        .thenThrow(new IllegalStateException("properties are not available")));
+  }
+
+  /** Runs doExecute against stubbed platform statics and an intercepted service. */
+  private static Outcome execute(Map<String, Object> params,
+      Consumer<MockedStatic<OBPropertiesProvider>> propertiesStub) throws Exception {
     ProcessBundle bundle = mock(ProcessBundle.class);
     when(bundle.getParams()).thenReturn(params);
 
@@ -93,12 +131,14 @@ class UsageAggregationProcessTest {
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBPropertiesProvider> properties = mockStatic(OBPropertiesProvider.class);
         MockedConstruction<UsageAggregationService> construction =
             mockConstruction(UsageAggregationService.class, (service, context) -> {
               when(service.runForSettlingWindow()).thenReturn(serviceResult);
               when(service.run(any(), any())).thenReturn(serviceResult);
             })) {
 
+      propertiesStub.accept(properties);
       obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
 
       new UsageAggregationProcess().doExecute(bundle);
@@ -411,6 +451,160 @@ class UsageAggregationProcessTest {
         obContext.verify(() -> OBContext.setAdminMode(false));
         obContext.verify(OBContext::restorePreviousMode);
       }
+    }
+  }
+
+  /**
+   * THE REGRESSION SUITE for a backfill that could not be launched from its own parameter window.
+   *
+   * <p>The window sends dates in the instance's display format ({@code dateFormat.java}; on the
+   * instance where this surfaced, {@code dd-MM-yyyy}), and the process parsed a hardcoded
+   * {@code yyyy-MM-dd}. So every launch from the UI died with {@code Unparseable date:
+   * "08-09-2010"} and shadow mode — reviewing a past month before anyone is billed, the whole
+   * reason the backfill exists — was unreachable by the only route an operator has.
+   *
+   * <p>Both accepted formats are asserted through the BOUNDS the service was asked to run over,
+   * never through "it did not throw". That is the only assertion that distinguishes a correct
+   * parse from a lenient one, and a lenient parse is the specific trap here: see
+   * {@link #theDisplayFormatAttemptIsStrictSoAnIsoDateIsNotRolledYearsForward}.
+   */
+  @Nested
+  @DisplayName("the date formats the window and a scheduled request send")
+  class DateFormats {
+
+    private static final String SPANISH_DISPLAY_FORMAT = "dd-MM-yyyy";
+
+    /**
+     * THE REGRESSION TEST. {@code 08-09-2010} in a {@code dd-MM-yyyy} instance is 8 September,
+     * and the bounds prove it: read as {@code MM-dd} it would be 9 August, and a test that only
+     * checked "the backfill ran" would accept either.
+     */
+    @Test
+    void aDisplayFormatDateIsParsedTheWayTheWindowMeantIt() throws Exception {
+      Outcome outcome = executeWithDisplayFormat(
+          params("DateFrom", "08-09-2010", "DateTo", "08-09-2010"), SPANISH_DISPLAY_FORMAT);
+
+      outcome.assertSucceeded();
+      verify(outcome.service).run(midnight(2010, 9, 8), midnight(2010, 9, 8));
+    }
+
+    /** A full display-format range, to pin that both parameters go through the same parse. */
+    @Test
+    void aDisplayFormatRangeBackfillsExactlyThatRange() throws Exception {
+      Outcome outcome = executeWithDisplayFormat(
+          params("DateFrom", "01-12-2011", "DateTo", "31-12-2011"), SPANISH_DISPLAY_FORMAT);
+
+      outcome.assertSucceeded();
+      verify(outcome.service).run(midnight(2011, 12, 1), midnight(2011, 12, 31));
+    }
+
+    /**
+     * The documented contract must survive the display format taking precedence: a scheduled
+     * request's JSON parameters carry ISO, and this class's javadoc promises ISO is accepted.
+     * Fixing the window by breaking the scheduler would simply move the outage.
+     */
+    @Test
+    void anIsoDateStillParsesWhenADisplayFormatIsConfigured() throws Exception {
+      Outcome outcome = executeWithDisplayFormat(
+          params("DateFrom", "2011-01-01", "DateTo", "2011-01-31"), SPANISH_DISPLAY_FORMAT);
+
+      outcome.assertSucceeded();
+      verify(outcome.service).run(midnight(2011, 1, 1), midnight(2011, 1, 31));
+    }
+
+    /**
+     * THE TRAP, and the reason {@code OBDateUtils.getDate} was not used. That helper parses
+     * leniently, and a lenient {@code dd-MM-yyyy} parse of {@code 2011-01-01} does NOT fail: it
+     * takes day 2011 and rolls it forward into a date years away. The backfill would then cover a
+     * range nobody asked for and report success — no exception, no warning, wrong data.
+     *
+     * <p>So the assertion is not "it parsed" but "it parsed to 1 January 2011 and specifically NOT
+     * to what a lenient parse would have produced". The lenient value is computed here rather than
+     * hardcoded, so the test states the property instead of a magic date, and would still be
+     * meaningful if the rolled-forward arithmetic were different from what anyone expected.
+     */
+    @Test
+    void theDisplayFormatAttemptIsStrictSoAnIsoDateIsNotRolledYearsForward() throws Exception {
+      SimpleDateFormat lenientDisplayFormat = new SimpleDateFormat(SPANISH_DISPLAY_FORMAT);
+      lenientDisplayFormat.setLenient(true);
+      Date whatALenientParseWouldGive =
+          UsageDayRange.startOfDay(lenientDisplayFormat.parse("2011-01-01"));
+
+      Outcome outcome = executeWithDisplayFormat(
+          params("DateFrom", "2011-01-01", "DateTo", "2011-01-31"), SPANISH_DISPLAY_FORMAT);
+
+      ArgumentCaptor<Date> from = ArgumentCaptor.forClass(Date.class);
+      ArgumentCaptor<Date> to = ArgumentCaptor.forClass(Date.class);
+      verify(outcome.service).run(from.capture(), to.capture());
+
+      assertAll(
+          () -> assertEquals(midnight(2011, 1, 1), from.getValue(),
+              "the ISO attempt must be the one that wins"),
+          () -> assertNotEquals(whatALenientParseWouldGive, from.getValue(),
+              "a lenient dd-MM-yyyy parse would silently backfill from "
+                  + whatALenientParseWouldGive + " and report success"));
+    }
+
+    /**
+     * A date that exists in neither format is rejected, and the message names BOTH accepted
+     * formats — the operator cannot otherwise tell which of the two the instance expects, and
+     * the whole defect was that the window's own format was not one of them.
+     *
+     * <p>{@code 31-02-2011} is the interesting member of the set: it matches the display format's
+     * SHAPE and is still impossible, so it is rejected only because the parse is strict.
+     */
+    @ParameterizedTest(name = "date = {0}")
+    @ValueSource(strings = { "2011-13-01", "31-02-2011", "garbage", "08/09/2010", "2011-01" })
+    void aDateInNeitherFormatIsRejectedAndTheMessageNamesBothFormats(String text)
+        throws Exception {
+      Outcome outcome = executeWithDisplayFormat(params("DateFrom", text, "DateTo", text),
+          SPANISH_DISPLAY_FORMAT);
+
+      assertAll(() -> assertEquals("Error", outcome.error.getType(), outcome.error.getMessage()),
+          () -> assertTrue(outcome.error.getMessage().contains(SPANISH_DISPLAY_FORMAT),
+              "names the window's format: " + outcome.error.getMessage()),
+          () -> assertTrue(outcome.error.getMessage().contains("yyyy-MM-dd"),
+              "and the ISO one: " + outcome.error.getMessage()),
+          () -> assertTrue(outcome.error.getMessage().contains(text),
+              "and the text it could not read: " + outcome.error.getMessage()));
+    }
+
+    /**
+     * The pairing rule is checked after parsing, so a valid display-format date supplied on its
+     * own must still be refused rather than parsed and then half-used. Confirms the existing
+     * behaviour survived the new parse path, on the path that had never been exercised with a
+     * display-format value.
+     */
+    @Test
+    void aDisplayFormatFromWithoutAToIsStillRejected() throws Exception {
+      Map<String, Object> params = new LinkedHashMap<>();
+      params.put("DateFrom", "08-09-2010");
+
+      executeWithDisplayFormat(params, SPANISH_DISPLAY_FORMAT).assertFailedWith("Supply both");
+    }
+
+    /**
+     * When the properties cannot be read at all — a unit test, an early-boot call — the
+     * configured format resolves to null and must simply be skipped, leaving ISO working. A null
+     * pattern handed to {@code SimpleDateFormat} would instead throw
+     * {@code NullPointerException}, turning a missing optional format into a failed backfill.
+     */
+    @Test
+    void isoStillParsesWhenThePropertiesAreUnavailable() throws Exception {
+      Outcome outcome =
+          executeWithoutProperties(params("DateFrom", "2011-01-01", "DateTo", "2011-01-31"));
+
+      outcome.assertSucceeded();
+      verify(outcome.service).run(midnight(2011, 1, 1), midnight(2011, 1, 31));
+    }
+
+    /** And a display-format date is then genuinely unreadable, rather than silently misread. */
+    @Test
+    void aDisplayFormatDateIsRejectedWhenThePropertiesAreUnavailable() throws Exception {
+      Outcome outcome =
+          executeWithoutProperties(params("DateFrom", "08-09-2010", "DateTo", "08-09-2010"));
+
+      assertEquals("Error", outcome.error.getType(), outcome.error.getMessage());
     }
   }
 }
