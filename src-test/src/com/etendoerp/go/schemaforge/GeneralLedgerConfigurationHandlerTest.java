@@ -308,7 +308,7 @@ class GeneralLedgerConfigurationHandlerTest {
     wireOrgWithLedger();
     wireLoadCriteria(List.of(
         dimension("dim-org", "Organizacion", true, true, "OO", 10L),
-        dimension("dim-prod", "Producto", true, false, "PR", 20L)));
+        dimension("dim-proj", "Proyecto", true, false, "PJ", 20L)));
 
     NeoResponse response = handler.handle(getCtx(ORG_ID));
 
@@ -586,11 +586,11 @@ class GeneralLedgerConfigurationHandlerTest {
   @DisplayName("POST deactivating a non-mandatory dimension succeeds and saves the row")
   void postDimensionNonMandatoryDeactivateSucceeds() throws Exception {
     wireOrgWithLedger();
-    AcctSchemaElement dim = dimension("dim-prod", "Producto", true, false, "PR", 20L);
+    AcctSchemaElement dim = dimension("dim-proj", "Proyecto", true, false, "PJ", 20L);
     wireLoadCriteria(List.of(dim));
 
     JSONObject body = new JSONObject().put("dimensions",
-        new JSONArray().put(new JSONObject().put("id", "dim-prod").put("active", false)));
+        new JSONArray().put(new JSONObject().put("id", "dim-proj").put("active", false)));
 
     NeoResponse response = handler.handle(postCtx(ORG_ID, body));
 
@@ -604,7 +604,7 @@ class GeneralLedgerConfigurationHandlerTest {
   @DisplayName("POST with unknown dimension id is silently skipped — response 200 and flush called")
   void postDimensionUnknownIdSkipped() throws Exception {
     wireOrgWithLedger();
-    wireLoadCriteria(List.of(dimension("dim-prod", "Producto", true, false, "PR", 20L)));
+    wireLoadCriteria(List.of(dimension("dim-proj", "Proyecto", true, false, "PJ", 20L)));
 
     JSONObject body = new JSONObject().put("dimensions",
         new JSONArray().put(new JSONObject().put("id", "does-not-exist").put("active", false)));
@@ -612,6 +612,64 @@ class GeneralLedgerConfigurationHandlerTest {
     NeoResponse response = handler.handle(postCtx(ORG_ID, body));
 
     assertEquals(200, response.getHttpStatus());
+    verify(obDal).flush();
+  }
+
+  // ── Group C2 — locked dimension types (ETP-4879: BP/PR always-on, never exposed) ──
+
+  @Test
+  @DisplayName("GET dimensions never includes BP or PR rows even when the underlying state carries them")
+  void getDimensionsExcludesLockedBusinessPartnerAndProductTypes() throws Exception {
+    wireOrgWithLedger();
+    wireLoadCriteria(List.of(
+        dimension("dim-bp", "Contacto", true, false, "BP", 10L),
+        dimension("dim-proj", "Proyecto", true, false, "PJ", 20L),
+        dimension("dim-pr", "Producto", true, false, "PR", 30L),
+        dimension("dim-cc", "Centro de coste", true, false, "CC", 40L)));
+
+    JSONObject row = aggregateRow(handler.handle(getCtx(ORG_ID)));
+
+    JSONArray dimensions = row.getJSONArray("dimensions");
+    assertEquals(2, dimensions.length(), "only the non-locked PJ/CC rows must be exposed");
+    assertEquals("dim-proj", dimensions.getJSONObject(0).getString("id"));
+    assertEquals("dim-cc", dimensions.getJSONObject(1).getString("id"));
+  }
+
+  @Test
+  @DisplayName("POST silently ignores an attempt to deactivate a locked BP dimension, regardless of mandatory")
+  void postDimensionChangeOnLockedBusinessPartnerTypeIsIgnored() throws Exception {
+    wireOrgWithLedger();
+    AcctSchemaElement bpDim = dimension("dim-bp", "Contacto", true, false, "BP", 10L);
+    wireLoadCriteria(List.of(bpDim));
+
+    JSONObject body = new JSONObject().put("dimensions",
+        new JSONArray().put(new JSONObject().put("id", "dim-bp").put("active", false)));
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(200, response.getHttpStatus());
+    // The type-based lock is unconditional — it must short-circuit before the mandatory guard is
+    // even reached, so no exception is thrown and no write happens, even though mandatory=false.
+    verify(bpDim, never()).setActive(anyBoolean());
+    verify(obDal, never()).save(bpDim);
+    verify(obDal).flush();
+  }
+
+  @Test
+  @DisplayName("POST silently ignores an attempt to activate a locked PR dimension, regardless of mandatory")
+  void postDimensionChangeOnLockedProductTypeIsIgnored() throws Exception {
+    wireOrgWithLedger();
+    AcctSchemaElement prDim = dimension("dim-pr", "Producto", false, false, "PR", 30L);
+    wireLoadCriteria(List.of(prDim));
+
+    JSONObject body = new JSONObject().put("dimensions",
+        new JSONArray().put(new JSONObject().put("id", "dim-pr").put("active", true)));
+
+    NeoResponse response = handler.handle(postCtx(ORG_ID, body));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(prDim, never()).setActive(anyBoolean());
+    verify(obDal, never()).save(prDim);
     verify(obDal).flush();
   }
 
@@ -734,10 +792,10 @@ class GeneralLedgerConfigurationHandlerTest {
   }
 
   @Test
-  @DisplayName("Dimension caption for optional PR type contains Opcional and Ventas y compras")
-  void dimensionCaptionOptionalPR() throws Exception {
+  @DisplayName("Dimension caption for optional MC type contains Opcional and Ventas y compras")
+  void dimensionCaptionOptionalMC() throws Exception {
     wireOrgWithLedger();
-    wireLoadCriteria(List.of(dimension("dim-pr", "Product", true, false, "PR", 10L)));
+    wireLoadCriteria(List.of(dimension("dim-mc", "Campana", true, false, "MC", 10L)));
 
     JSONObject row = aggregateRow(handler.handle(getCtx(ORG_ID)));
     String caption = row.getJSONArray("dimensions").getJSONObject(0).getString("caption");
@@ -902,11 +960,11 @@ class GeneralLedgerConfigurationHandlerTest {
   @DisplayName("Deactivating a non-mandatory dimension does not drop it from the very next reload")
   void deactivatedDimensionSurvivesReload() throws Exception {
     wireOrgWithLedger();
-    AcctSchemaElement dim = dimension("dim-prod", "Producto", true, false, "PR", 20L);
+    AcctSchemaElement dim = dimension("dim-proj", "Proyecto", true, false, "PJ", 20L);
     wireLoadCriteria(List.of(dim));
 
     JSONObject body = new JSONObject().put("dimensions",
-        new JSONArray().put(new JSONObject().put("id", "dim-prod").put("active", false)));
+        new JSONArray().put(new JSONObject().put("id", "dim-proj").put("active", false)));
 
     // Simulate the deactivation actually taking effect for the post-save reload.
     when(dim.isActive()).thenReturn(false);
@@ -919,7 +977,7 @@ class GeneralLedgerConfigurationHandlerTest {
     // in the refreshed aggregate row, not silently dropped.
     JSONArray dimensions = aggregateRow(response).getJSONArray("dimensions");
     assertEquals(1, dimensions.length());
-    assertEquals("dim-prod", dimensions.getJSONObject(0).getString("id"));
+    assertEquals("dim-proj", dimensions.getJSONObject(0).getString("id"));
     assertFalse(dimensions.getJSONObject(0).getBoolean("active"));
   }
 
