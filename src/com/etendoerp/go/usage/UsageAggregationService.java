@@ -63,6 +63,13 @@ public class UsageAggregationService {
 
   /** Per-run cache: without it this is one preference read per tenant, resource and day. */
   private final Map<String, Integer> settlingWindowCache = new HashMap<>();
+  /** Accumulates what this run did; written once at the end. See {@link UsageRunLedger}. */
+  private final UsageRunLedger ledger = new UsageRunLedger();
+
+  /** The id shared by every run-log row this run writes. */
+  public String getRunId() {
+    return ledger.getRunId();
+  }
 
   /**
    * Recomputes every day still inside the settling window, ending with today.
@@ -129,6 +136,7 @@ public class UsageAggregationService {
     Date day = UsageDayRange.startOfDay(fromDay);
     Date last = UsageDayRange.startOfDay(toDay);
     Date today = UsageDayRange.startOfDay(new Date());
+    ledger.covering(day, last);
 
     while (!day.after(last)) {
       result.addDay();
@@ -150,6 +158,7 @@ public class UsageAggregationService {
         } catch (Exception e) {
           result.addFailure(resource != null ? resource.getSearchKey() : resourceId,
               e.getMessage());
+          ledger.resourceDayFailed(resource, resourceId, e.getMessage());
           // The search key, not the id: when the failure is "this resource is misconfigured",
           // the search key is what an operator can act on without a database lookup first.
           log.error("Resource '{}' failed for day {}: {}",
@@ -159,6 +168,10 @@ public class UsageAggregationService {
       }
       day = UsageDayRange.nextDay(day);
     }
+    // After the day loop, so the log survives whatever happened inside it: each resource-day
+    // commits or rolls back on its own, and a row written inside a failing unit would be rolled
+    // back with it -- losing precisely the failure worth recording.
+    ledger.write();
     log.info("Usage aggregation finished. {}", result);
     return result;
   }
@@ -180,9 +193,14 @@ public class UsageAggregationService {
       // the same day can still be open for one tenant and final for another.
       boolean settled = UsageDayRange.isFinal(day, today,
           settlingWindowFor(count.getClientId()));
-      if (writeRow(resource, count, settled, rewriteFinalDays)) {
+      boolean wrote = writeRow(resource, count, settled, rewriteFinalDays);
+      if (wrote) {
         written++;
       }
+      // The day counts as processed for this tenant either way: a day left alone because it is
+      // already final was still looked at, and reporting it as not processed would read as a
+      // gap in coverage.
+      ledger.tenantDay(resource, count.getClientId(), wrote ? 1 : 0);
     }
 
     // A tenant that dropped to zero produces no group at all, so without this its previous
@@ -239,7 +257,7 @@ public class UsageAggregationService {
       Set<String> countedTenants, boolean rewriteFinalDays) {
     int written = 0;
     for (UsageDaily stored : storedRows(resource, UsageDayRange.startOfDay(day))) {
-      String clientId = stored.getMeasuredClient().getId();
+      String clientId = stored.getTenantClient().getId();
       if (countedTenants.contains(clientId) || isFrozen(stored, rewriteFinalDays)) {
         continue;
       }
@@ -315,7 +333,7 @@ public class UsageAggregationService {
       row.setNewOBObject(true);
       row.setClient(OBDal.getInstance().get(Client.class, SYSTEM_CLIENT));
       row.setOrganization(OBDal.getInstance().get(Organization.class, ORG_ZERO));
-      row.setMeasuredClient(OBDal.getInstance().get(Client.class, count.getClientId()));
+      row.setTenantClient(OBDal.getInstance().get(Client.class, count.getClientId()));
       row.setBillingResource(resource);
       row.setUsageDay(count.getDay());
     }
@@ -329,7 +347,7 @@ public class UsageAggregationService {
     OBCriteria<UsageDaily> criteria = OBDal.getInstance().createCriteria(UsageDaily.class);
     criteria.add(Restrictions.eq(UsageDaily.PROPERTY_BILLINGRESOURCE, resource));
     criteria.add(Restrictions.eq(UsageDaily.PROPERTY_USAGEDAY, day));
-    criteria.add(Restrictions.eq(UsageDaily.PROPERTY_MEASUREDCLIENT + ".id", clientId));
+    criteria.add(Restrictions.eq(UsageDaily.PROPERTY_TENANTCLIENT + ".id", clientId));
     // These rows are System-owned data about other tenants, so the readable-client and
     // readable-organisation filters must be off or the lookup misses the existing row and
     // the insert then violates the unique key.
