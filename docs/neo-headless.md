@@ -2395,6 +2395,81 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 
   - **`ETGO_INVITATION_USER_FK` cascade delete (ETP-4830):** because this handler makes admin-created-user invitations part of the normal create flow, `ETGO_INVITATION` rows now exist for ordinary users, not just for ETP-4894's opt-in "invite an existing user" path. `ETGO_INVITATION.AD_USER_ID` originally referenced `AD_USER` with no `ON DELETE` behavior (`onDelete` omitted in `src-db/database/model/tables/ETGO_INVITATION.xml`, i.e. `NO ACTION`), so deleting an `AD_User` that had ever received an invitation failed with a 500 ("Este registro no puede ser eliminado ya que está relacionado con otros elementos existentes.") — a pre-existing ETP-4894 schema gap, only surfaced now that this handler makes invitation rows routine. Fixed by adding `onDelete="cascade"` to `ETGO_INVITATION_USER_FK`: deleting the `AD_User` now deletes its `ETGO_INVITATION` row(s) with it, since a dangling invitation for a user that no longer exists can never sensibly be accepted. The sibling `ETGO_INVITATION_CREATEDBY_FK`/`ETGO_INVITATION_UPDATEDBY_FK`/`ETGO_INVITATION_ACCOUNT_FK`/`ETGO_INVITATION_CLIENT_FK`/`ETGO_INVITATION_ORG_FK` constraints are intentionally left as `NO ACTION` — those reference the actor/tenant, not the invited user, and Etendo audit columns (`CREATEDBY`/`UPDATEDBY`) are never expected to be deleted out from under a row.
 
+**Real-world example — `UserRoleAssignmentHandler`'s "Rol" advanced-filter query params (ETP-5188):** the Users window's list `GET` (record id absent) gained a THIRD pre-hook concern, `applyRoleFilter`, alongside the existing `excludeContactOnlyUsers` (ETP-5019) — both run unconditionally on every `user` list fetch, in `handle()`. The frontend's generic `criteria=` mechanism cannot express "filter by composed role" at all: it would build a dotted HQL property path through the `aDUserRolesList` one-to-many collection, which is invalid HQL and 500s (confirmed empirically). So the frontend's "Rol" advanced-filter field bypasses `criteria=` entirely for this one field and instead sends three DEDICATED query params on the same `user` list `GET`:
+
+| Query param | Meaning |
+|---|---|
+| `RoleIds=<id1>,<id2>,...` | Comma-separated `AD_Role_ID`s — the fixed system role templates and/or the caller's own client's admin role. |
+| `NoRole=true` | Users with no composed role at all (and not the admin). |
+| `RoleFilterNegate=true` | Negates the ENTIRE `RoleIds`/`NoRole` combination (wraps it in `not (...)`) — no new query semantics on top of the two params above. |
+
+Together these three primitives express the frontend's 4 advanced-filter operators (see
+`etendo_schema_forge`'s `docs/generated-custom-windows/user.md` → "Users list role filter" for the
+UI side):
+
+| Operator ("Rol" field) | Query params |
+|---|---|
+| Es | `RoleIds=` and/or `NoRole=true` |
+| No es | same, plus `RoleFilterNegate=true` |
+| Está vacío | `NoRole=true` alone |
+| No está vacío | `NoRole=true&RoleFilterNegate=true` |
+
+**Why two branches for a `RoleIds` match.** Since ETP-4906, a user's actual access is never a direct
+`Default_Ad_Role_ID` match against a template — it is expressed via that user's PERSONAL role, which
+COMPOSES 1+ templates through an active `AD_Role_Inheritance` row. The one exception is the
+client-admin "Admin" role, which `UserRoleCompositionService` never lets a personal role compose —
+it is always a DIRECT `Default_Ad_Role_ID` assignment (see §8d). `buildComposedOrDirectPredicate`
+covers both shapes with one OR:
+
+```
+(e.defaultRole.id in ('ID1','ID2')) or
+(exists (select 1 from ADRoleInheritance ri where ri.role = e.defaultRole and
+         ri.active = true and ri.inheritFrom.id in ('ID1','ID2')))
+```
+
+**The "Sin rol" (`NoRole=true`) predicate** additionally excludes the client-admin role — Admin is a
+real, direct role assignment, never "no role":
+
+```
+not exists (select 1 from ADRoleInheritance ri where ri.role = e.defaultRole and ri.active = true)
+and (e.defaultRole is null or e.defaultRole.id <> '<clientAdminRoleId>')
+```
+
+`<clientAdminRoleId>` is resolved per-request from the caller's own `OBContext.getCurrentClient()`
+(`resolveClientAdminRoleId`, the same `OBCriteria` shape `SFRolesOverview#resolveTenantRoles`
+already uses) and simply omitted from the predicate — never inlined as a literal `null` — when it
+cannot be resolved.
+
+**Injection mechanism and id sanitization.** Both predicates are injected as an HQL `_neoWhere`
+predicate (`NeoCrudHelper.NEO_WHERE_PARAM`, the exact same query-param mechanism
+`excludeContactOnlyUsers` already uses on this same list `GET`) — combined with any EXISTING
+`_neoWhere` predicate (from `excludeContactOnlyUsers` or elsewhere) via `and`, while `RoleIds` and
+`NoRole` combine with `or` BETWEEN themselves (two chips of the same multi-select filter, not two
+independent filters). `RoleFilterNegate`, when present, wraps that `or`-joined combination in one
+outer `not (...)` — applied AFTER the combination is built and BEFORE it is merged into any existing
+`_neoWhere` predicate.
+
+`NEO_WHERE_PARAM` has **no bind-parameter mechanism** — `NeoCrudHelper#buildWhereClause` splices the
+predicate string into the HQL text verbatim. Every `AD_Role_ID` inlined into the predicate is
+therefore validated against `^[A-Fa-f0-9]{32}$` (`sanitizeRoleIds`, Etendo AD ids are 32 hex chars,
+case-insensitive) before being spliced in — an entry that doesn't match is logged at WARN and
+silently dropped rather than reaching the HQL string unescaped, so one malformed id in `RoleIds`
+degrades the filter instead of 500ing the whole list. `RoleFilterNegate` itself carries no id/value
+and needs no sanitization — it only decides whether to prepend the literal `"not "` wrapper, and is
+parsed with the same strict `"true"`-only (case-insensitive), anything-else-is-absent convention
+`NoRole` already uses.
+
+**No-op contract.** `applyRoleFilter` returns immediately, touching nothing, when both `RoleIds` is
+empty/absent AND `NoRole` is absent — regardless of `RoleFilterNegate` (negating an empty/no-op
+filter would otherwise wrongly match every user). Every other `user` entity concern in this class
+(the invitation flow above, the write-path guards, `excludeContactOnlyUsers`) is unaffected — this
+is purely additive to the list `GET` path.
+
+*As of this writing, `applyRoleFilter`/`sanitizeRoleIds`/`buildComposedOrDirectPredicate`/
+`buildNoRolePredicate` have no dedicated unit test in `UserRoleAssignmentHandlerTest` — this feature
+was verified live/manually against `localhost:3100` instead (see `etendo_schema_forge`'s
+`docs/plans/2026-09-11-etp-5188-role-filter-open-questions.md`, "Live verification performed").*
+
 #### 5.3.1 Post-hook writes and the `updated` audit token (ETP-5255 / ETP-5262)
 
 See also the shorter, author-facing version of this rule in `docs/neo-headless-extensibility.md` §2.3a in the `schema_forge_core` repo.
