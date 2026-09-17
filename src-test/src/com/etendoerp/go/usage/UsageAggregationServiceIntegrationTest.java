@@ -47,6 +47,7 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.data.BillingResource;
 import com.etendoerp.go.schemaforge.data.UsageDaily;
+import com.etendoerp.go.schemaforge.data.UsageRunLog;
 
 /**
  * <b>REQUIRES A DATABASE AND A CDI CONTAINER.</b> This suite extends {@code WeldBaseTest}
@@ -157,12 +158,20 @@ public class UsageAggregationServiceIntegrationTest extends WeldBaseTest {
    * database on every run — and the extra users would then be counted by the NEXT run, making the
    * exact counts drift. Deletion is in dependency order: usage rows, then the resources they
    * point at, then the counted users, then the preferences.
+   *
+   * <p>Run-log rows go first, with the usage rows: {@code ETGO_USAGE_RUN_LOG} carries a foreign
+   * key to {@code ETGO_BILLING_RESOURCE}, so deleting a fixture resource while its log rows
+   * survive aborts the whole delete batch with a constraint violation — which fails the test that
+   * happened to run last AND leaves the fixture behind for every test after it.
    */
   @After
   public void cleanUp() {
     OBContext.setAdminMode(false);
     try {
       for (UsageDaily row : fixtureUsageRows()) {
+        OBDal.getInstance().remove(row);
+      }
+      for (UsageRunLog row : fixtureRunLogRows()) {
         OBDal.getInstance().remove(row);
       }
       OBDal.getInstance().flush();
@@ -207,6 +216,17 @@ public class UsageAggregationServiceIntegrationTest extends WeldBaseTest {
     // associated entity needs a join, and without one the criteria throws QueryException
     // ("could not resolve property") at list() time.
     criteria.createAlias(UsageDaily.PROPERTY_BILLINGRESOURCE, "resource");
+    criteria.add(
+        Restrictions.like("resource." + BillingResource.PROPERTY_SEARCHKEY, FIXTURE_PREFIX + "%"));
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
+    return criteria.list();
+  }
+
+  /** Run-log rows pointing at a fixture resource. Same alias rule as {@link #fixtureUsageRows}. */
+  private List<UsageRunLog> fixtureRunLogRows() {
+    OBCriteria<UsageRunLog> criteria = OBDal.getInstance().createCriteria(UsageRunLog.class);
+    criteria.createAlias(UsageRunLog.PROPERTY_BILLINGRESOURCE, "resource");
     criteria.add(
         Restrictions.like("resource." + BillingResource.PROPERTY_SEARCHKEY, FIXTURE_PREFIX + "%"));
     criteria.setFilterOnReadableClients(false);
@@ -745,7 +765,7 @@ public class UsageAggregationServiceIntegrationTest extends WeldBaseTest {
     OBCriteria<UsageDaily> criteria = OBDal.getInstance().createCriteria(UsageDaily.class);
     criteria.add(Restrictions.eq(UsageDaily.PROPERTY_BILLINGRESOURCE, resource));
     criteria.add(Restrictions.eq(UsageDaily.PROPERTY_USAGEDAY, UsageDayRange.startOfDay(day)));
-    criteria.add(Restrictions.eq(UsageDaily.PROPERTY_MEASUREDCLIENT + ".id", clientId));
+    criteria.add(Restrictions.eq(UsageDaily.PROPERTY_TENANTCLIENT + ".id", clientId));
     // These rows are System-owned data ABOUT other tenants; with the readable filters on, the
     // assertions would silently see nothing and a broken run would read as an empty one.
     criteria.setFilterOnReadableClients(false);

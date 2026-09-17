@@ -53,6 +53,7 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.data.BillingResource;
 import com.etendoerp.go.schemaforge.data.UsageDaily;
+import com.etendoerp.go.schemaforge.data.UsageRunLog;
 
 /**
  * Unit specs for the transaction boundary of {@link UsageAggregationService} (ETP-5050).
@@ -130,10 +131,26 @@ class UsageAggregationServiceTest {
     OBProvider provider = mock(OBProvider.class);
     obProviderStatic.when(OBProvider::getInstance).thenReturn(provider);
     when(provider.get(UsageDaily.class)).thenReturn(writtenRow);
+    // A fresh row per call, so the run-log rows the ledger writes can be told apart. Without
+    // this the ledger's write() dies on a null row, logs, rolls back and carries on -- by
+    // design, it must never fail a run -- and every commit/rollback count below would then be
+    // pinning that accident instead of the transaction boundary it is meant to pin.
+    when(provider.get(UsageRunLog.class)).thenAnswer(invocation -> mock(UsageRunLog.class));
     when(obDal.get(eq(Client.class), any())).thenReturn(mock(Client.class));
     when(obDal.get(eq(Organization.class), any())).thenReturn(mock(Organization.class));
     givenNoExistingUsageRow();
   }
+
+  /**
+   * How many times a run commits: one per successful resource-day, plus ONE for the run log.
+   *
+   * <p>The ledger accumulates in memory and writes after the day loop, in a transaction of its
+   * own — it has to, because a log row written inside a resource-day that later fails would be
+   * rolled back with it, losing exactly the failure worth recording. So every run that touched
+   * any resource ends with one extra commit, and the counts below say which is which rather than
+   * being relaxed into "at least once".
+   */
+  private static final int LEDGER_COMMIT = 1;
 
   @AfterEach
   void tearDown() {
@@ -280,7 +297,7 @@ class UsageAggregationServiceTest {
     UsageDaily stored = mock(UsageDaily.class);
     Client measured = mock(Client.class);
     when(measured.getId()).thenReturn(clientId);
-    when(stored.getMeasuredClient()).thenReturn(measured);
+    when(stored.getTenantClient()).thenReturn(measured);
     when(stored.isSettled()).thenReturn(settled);
     when(stored.getQuantity()).thenReturn(quantity);
     return stored;
@@ -307,7 +324,7 @@ class UsageAggregationServiceTest {
 
       assertAll(
           () -> verify(obDal).save(writtenRow),
-          () -> verify(obDal, times(1)).commitAndClose(),
+          () -> verify(obDal, times(1 + LEDGER_COMMIT)).commitAndClose(),
           () -> verify(obDal, times(1)).rollbackAndClose(),
           () -> assertEquals(1, result.getResourcesFailed(), "the failure is reported"),
           () -> assertEquals(1, result.getRowsWritten(),
@@ -342,7 +359,7 @@ class UsageAggregationServiceTest {
 
       UsageAggregationResult result = new UsageAggregationService().run(day(), day());
 
-      assertAll(() -> verify(obDal, times(1)).commitAndClose(),
+      assertAll(() -> verify(obDal, times(1 + LEDGER_COMMIT)).commitAndClose(),
           () -> verify(obDal, never()).rollbackAndClose(),
           () -> assertEquals(0, result.getResourcesFailed()),
           () -> assertEquals(1, result.getRowsWritten()));
@@ -364,7 +381,7 @@ class UsageAggregationServiceTest {
       UsageAggregationResult result = new UsageAggregationService().run(from, to);
 
       assertAll(() -> assertEquals(3, result.getDaysProcessed()),
-          () -> verify(obDal, times(3)).commitAndClose());
+          () -> verify(obDal, times(3 + LEDGER_COMMIT)).commitAndClose());
     }
 
     /**
@@ -381,7 +398,10 @@ class UsageAggregationServiceTest {
 
       assertAll(() -> assertEquals(0, result.getRowsWritten()),
           () -> assertEquals(1, result.getResourcesFailed()),
-          () -> verify(obDal, never()).commitAndClose());
+          // The failed unit itself commits nothing. The one commit is the ledger's, recording
+          // the failure -- which is the point of writing the log outside the day loop.
+          () -> verify(obDal, times(LEDGER_COMMIT)).commitAndClose(),
+          () -> verify(obDal, times(1)).rollbackAndClose());
     }
   }
 
@@ -405,7 +425,10 @@ class UsageAggregationServiceTest {
 
       new UsageAggregationService().run(from, to);
 
-      verify(obDal, times(2)).get(BillingResource.class, HEALTHY_ID);
+      // Twice for the two resource-days, plus once more when the ledger writes the log: it holds
+      // resource IDS across the run for the same reason the loop does -- a commit closes the
+      // session, so an entity kept from inside a unit would be detached by the time it is used.
+      verify(obDal, times(2 + 1)).get(BillingResource.class, HEALTHY_ID);
     }
 
     /**
@@ -429,7 +452,7 @@ class UsageAggregationServiceTest {
           () -> assertEquals(1, result.getResourcesProcessed(),
               "the vanished resource was never counted, so it is not reported as processed"),
           () -> assertEquals(1, result.getRowsWritten()),
-          () -> verify(obDal, times(1)).commitAndClose());
+          () -> verify(obDal, times(1 + LEDGER_COMMIT)).commitAndClose());
     }
   }
 
@@ -589,7 +612,9 @@ class UsageAggregationServiceTest {
 
       assertAll(() -> assertEquals(1, result.getResourcesFailed()),
           () -> assertEquals(0, result.getRowsWritten()),
-          () -> verify(obDal, never()).save(any()),
+          // The USAGE row specifically: the ledger does save a run-log row for this failure,
+          // and must, so a blanket never()-save would now be asserting the log away.
+          () -> verify(obDal, never()).save(writtenRow),
           () -> verify(obDal).rollbackAndClose());
     }
 
