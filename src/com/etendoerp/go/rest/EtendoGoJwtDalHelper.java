@@ -41,6 +41,7 @@ import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
@@ -75,6 +76,10 @@ final class EtendoGoJwtDalHelper {
   private static final String FIELD_TRIAL_STARTED_AT = "trialStartedAt";
   private static final String FIELD_TRIAL_EXPIRES_AT = "trialExpiresAt";
   private static final String FIELD_TRIAL_DAYS_REMAINING = "trialDaysRemaining";
+  private static final String FIELD_ACCESS_STATE = "accessState";
+  private static final String FIELD_SUBSCRIPTION_STATUS = "subscriptionStatus";
+  private static final String FIELD_RENEWAL_DUE_AT = "renewalDueAt";
+  private static final String FIELD_RELATIONSHIP = "relationship";
   private static final String PROPERTY_PASSWORD_CHANGED = Account.PROPERTY_PASSWORDCHANGED;
   private static final String PROPERTY_RESET_TOKEN_CONSUMED = Account.PROPERTY_RESETTOKENCONSUMED;
   private static final String PROPERTY_RESET_TOKEN_EXPIRES = Account.PROPERTY_RESETTOKENEXPIRES;
@@ -513,6 +518,21 @@ final class EtendoGoJwtDalHelper {
     return clientIds.size();
   }
 
+  /**
+   * Returns the account's only free tenant when it is unambiguous, for demo/productive linking.
+   * Multiple free tenants are deliberately treated as unresolved rather than guessed.
+   */
+  static String findOnlyFreeTenantIdByAccountEmail(String accountEmail) {
+    Set<String> freeClientIds = new HashSet<>();
+    for (User environmentUser : findEnvironmentUsersByAccountEmail(accountEmail)) {
+      String clientId = environmentUser.getClient().getId();
+      if (TenantPlanService.PLAN_FREE.equals(TENANT_PLAN_SERVICE.resolvePlan(clientId))) {
+        freeClientIds.add(clientId);
+      }
+    }
+    return freeClientIds.size() == 1 ? freeClientIds.iterator().next() : null;
+  }
+
   static JSONObject buildEnvironmentJson(Client client, Organization organization, User environmentUser)
       throws JSONException {
     JSONObject env = new JSONObject();
@@ -527,10 +547,20 @@ final class EtendoGoJwtDalHelper {
     // ignore the field keep working, and a tenant with no plan marker reads back as free.
     String plan = TENANT_PLAN_SERVICE.resolvePlan(client.getId());
     env.put(FIELD_PLAN, plan);
+    env.put(FIELD_RELATIONSHIP, OwnerSupport.isOwner(environmentUser.getId()) ? "OWNER" : "INVITED");
     TenantEnvironmentLifecycleService.EnvironmentSnapshot lifecycle =
         ENVIRONMENT_LIFECYCLE_SERVICE.resolve(client.getId());
     if (lifecycle != null) {
       env.put(FIELD_ENVIRONMENT_TYPE, lifecycle.getType().name());
+      env.put(FIELD_SUBSCRIPTION_STATUS, lifecycle.getSubscriptionStatus().name());
+      if (lifecycle.getRenewalDueAt() != null) {
+        env.put(FIELD_RENEWAL_DUE_AT, lifecycle.getRenewalDueAt().toString());
+      }
+      EnvironmentAccessPolicy.Decision access = ENVIRONMENT_LIFECYCLE_SERVICE
+          .evaluateAccess(client.getId(), true, Instant.now());
+      if (access != null) {
+        env.put(FIELD_ACCESS_STATE, access.name());
+      }
       if (lifecycle.getType() == EnvironmentAccessPolicy.EnvironmentType.DEMO) {
         Instant now = Instant.now();
         EnvironmentAccessPolicy policy = new EnvironmentAccessPolicy();

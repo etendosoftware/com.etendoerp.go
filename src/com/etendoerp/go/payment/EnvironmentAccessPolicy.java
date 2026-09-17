@@ -83,10 +83,14 @@ public final class EnvironmentAccessPolicy {
     }
 
     public static Environment demo(Instant trialStartedAt) {
+      return demo(trialStartedAt, null);
+    }
+
+    public static Environment demo(Instant trialStartedAt, Instant renewalDueAt) {
       if (trialStartedAt == null) {
         throw new IllegalArgumentException("A demo requires a trial start timestamp");
       }
-      return new Environment(EnvironmentType.DEMO, trialStartedAt, null);
+      return new Environment(EnvironmentType.DEMO, trialStartedAt, renewalDueAt);
     }
 
     public static Environment productive() {
@@ -147,6 +151,12 @@ public final class EnvironmentAccessPolicy {
     }
     if (environment.type == EnvironmentType.DEMO) {
       if (subscriptionStatus == SubscriptionStatus.CURRENT) {
+        return Decision.ALLOWED;
+      }
+      if (subscriptionStatus == SubscriptionStatus.PAST_DUE
+          && environment.renewalDueAt != null
+          && now.isBefore(environment.renewalDueAt.plus(configuration.renewalGraceDays,
+              ChronoUnit.DAYS))) {
         return Decision.ALLOWED;
       }
       Instant expiresAt = environment.trialStartedAt.plus(configuration.trialDays, ChronoUnit.DAYS);

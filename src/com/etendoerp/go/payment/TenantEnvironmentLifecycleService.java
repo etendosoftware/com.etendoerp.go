@@ -40,6 +40,8 @@ public class TenantEnvironmentLifecycleService {
   public static final String DEMO_TRIAL_STARTED_ATTRIBUTE = "ETGO_DemoTrialStartedAt";
   public static final String SUBSCRIPTION_STATUS_ATTRIBUTE = "ETGO_SubscriptionStatus";
   public static final String SUBSCRIPTION_DUE_AT_ATTRIBUTE = "ETGO_SubscriptionDueAt";
+  public static final String ASSOCIATED_DEMO_ATTRIBUTE = "ETGO_AssociatedDemoClientId";
+  public static final String ASSOCIATED_PRODUCTIVE_ATTRIBUTE = "ETGO_AssociatedProductiveClientId";
   public static final String TYPE_DEMO = "DEMO";
   public static final String TYPE_PRODUCTIVE = "PRODUCTIVE";
   public static final int DEFAULT_TRIAL_DAYS = 15;
@@ -126,8 +128,20 @@ public class TenantEnvironmentLifecycleService {
       if (StringUtils.isBlank(startedAt)) {
         return null;
       }
+      String associatedProductiveClientId = readPreference(ASSOCIATED_PRODUCTIVE_ATTRIBUTE, clientId);
+      EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus =
+          EnvironmentAccessPolicy.SubscriptionStatus.NONE;
+      Instant renewalDueAt = null;
+      if (StringUtils.isNotBlank(associatedProductiveClientId)) {
+        EnvironmentSnapshot productive = resolve(associatedProductiveClientId);
+        if (productive != null
+            && productive.getType() == EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE) {
+          subscriptionStatus = productive.getSubscriptionStatus();
+          renewalDueAt = productive.getRenewalDueAt();
+        }
+      }
       return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.DEMO,
-          Instant.parse(startedAt), EnvironmentAccessPolicy.SubscriptionStatus.NONE, null);
+          Instant.parse(startedAt), subscriptionStatus, renewalDueAt);
     } catch (RuntimeException e) {
       log.warn("Could not resolve environment lifecycle for client {}", clientId, e);
       return null;
@@ -158,6 +172,27 @@ public class TenantEnvironmentLifecycleService {
       return true;
     } catch (RuntimeException e) {
       log.error("Could not update subscription projection for client {}", clientId, e);
+      return false;
+    }
+  }
+
+  /** Associates one owned demo with one newly created productive environment. */
+  public boolean associateDemoWithProductive(String demoClientId, String productiveClientId) {
+    if (StringUtils.isBlank(demoClientId) || StringUtils.isBlank(productiveClientId)) {
+      return false;
+    }
+    try {
+      Client demo = OBDal.getInstance().get(Client.class, demoClientId);
+      Client productive = OBDal.getInstance().get(Client.class, productiveClientId);
+      if (demo == null || productive == null) {
+        return false;
+      }
+      setPreference(ASSOCIATED_PRODUCTIVE_ATTRIBUTE, productiveClientId, demo);
+      setPreference(ASSOCIATED_DEMO_ATTRIBUTE, demoClientId, productive);
+      return true;
+    } catch (RuntimeException e) {
+      log.error("Could not associate demo {} with productive {}", demoClientId, productiveClientId,
+          e);
       return false;
     }
   }
@@ -255,7 +290,7 @@ public class TenantEnvironmentLifecycleService {
     public EnvironmentAccessPolicy.Environment toPolicyEnvironment() {
       return type == EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE
           ? EnvironmentAccessPolicy.Environment.productive(renewalDueAt)
-          : EnvironmentAccessPolicy.Environment.demo(trialStartedAt);
+          : EnvironmentAccessPolicy.Environment.demo(trialStartedAt, renewalDueAt);
     }
   }
 }

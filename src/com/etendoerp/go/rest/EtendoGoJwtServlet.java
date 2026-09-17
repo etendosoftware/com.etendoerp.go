@@ -1787,6 +1787,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         log.error("Paid environment '{}' (client {}) could not be marked in the lifecycle "
             + "projection", clientName, clientId);
       }
+      String demoClientId = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail);
+      if (demoClientId != null && !tenantEnvironmentLifecycleService
+          .associateDemoWithProductive(demoClientId, clientId)) {
+        log.error("Paid environment '{}' (client {}) could not be associated with demo {}",
+            clientName, clientId, demoClientId);
+      }
       revertTestModeForProductiveTenantBestEffort(clientId);
     }
   }

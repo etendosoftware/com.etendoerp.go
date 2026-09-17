@@ -27,7 +27,7 @@ public class EnvironmentAccessPolicyTest {
 
   @Test
   public void demoIsAvailableUntilConfiguredTrialBoundary() {
-    Environment demo = Environment.demo(START);
+    Environment demo = Environment.demo(START, START);
 
     assertEquals(Decision.ALLOWED, policy.evaluate(demo, true, SubscriptionStatus.NONE,
         START.plusSeconds(15 * 24 * 60 * 60L - 1), DEFAULTS));
@@ -37,7 +37,7 @@ public class EnvironmentAccessPolicyTest {
 
   @Test
   public void trialLengthIsConfigurable() {
-    Environment demo = Environment.demo(START);
+    Environment demo = Environment.demo(START, START);
     Configuration sevenDays = new Configuration(7, 15);
 
     assertEquals(Decision.DEMO_TRIAL_EXPIRED, policy.evaluate(demo, true, SubscriptionStatus.NONE,
@@ -96,6 +96,18 @@ public class EnvironmentAccessPolicyTest {
     assertEquals(Decision.SUBSCRIPTION_REQUIRED,
         policy.evaluate(productive, true, SubscriptionStatus.PAST_DUE,
             START.plusSeconds(15 * 24 * 60 * 60L), DEFAULTS));
+  }
+
+  @Test
+  public void associatedDemoUsesTheSameRenewalGraceWindow() {
+    Environment demo = Environment.demo(START, START);
+
+    assertEquals(Decision.ALLOWED, policy.evaluate(demo, true, SubscriptionStatus.PAST_DUE,
+        START.plusSeconds(15 * 24 * 60 * 60L - 1),
+        new Configuration(1, 15)));
+    assertEquals(Decision.DEMO_TRIAL_EXPIRED, policy.evaluate(demo, true,
+        SubscriptionStatus.PAST_DUE, START.plusSeconds(30 * 24 * 60 * 60L),
+        new Configuration(1, 15)));
   }
 
   @Test(expected = IllegalArgumentException.class)
