@@ -53,7 +53,7 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="STATUS" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+      <column name="STATUS" primaryKey="false" required="true" type="VARCHAR" size="60" autoIncrement="false">
         <default><![CDATA[S]]></default>
         <onCreateDefault><![CDATA[S]]></onCreateDefault>
       </column>
