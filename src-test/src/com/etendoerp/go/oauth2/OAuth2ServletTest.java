@@ -104,6 +104,23 @@ public class OAuth2ServletTest {
   }
 
   @Test
+  public void doGetPublicApiKeysRequiresAuth() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("GET", "/api-keys");
+
+    try (MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {
+      swsMock.when(() -> SecureWebServicesUtils.decodeToken(anyString()))
+          .thenThrow(new RuntimeException("bad"));
+
+      servlet.doGet(req, resp.response);
+    }
+
+    JSONObject body = new JSONObject(resp.body());
+    assertEquals("access_denied", body.getString("error"));
+    assertFalse(body.has("apiKeys"));
+  }
+
+  @Test
   public void doGetClientsNonAdminRoleForbidden() throws Exception {
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = mockRequest("GET", "/clients");
@@ -2059,6 +2076,12 @@ public class OAuth2ServletTest {
     when(roleClaim.asString()).thenReturn(roleId);
     when(jwt.getClaim("user")).thenReturn(userClaim);
     when(jwt.getClaim("role")).thenReturn(roleClaim);
+    Claim clientClaim = mock(Claim.class);
+    when(clientClaim.asString()).thenReturn("client-1");
+    Claim organizationClaim = mock(Claim.class);
+    when(organizationClaim.asString()).thenReturn("org-1");
+    when(jwt.getClaim("client")).thenReturn(clientClaim);
+    when(jwt.getClaim("organization")).thenReturn(organizationClaim);
     return jwt;
   }
 

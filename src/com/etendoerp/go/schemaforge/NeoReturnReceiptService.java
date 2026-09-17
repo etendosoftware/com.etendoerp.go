@@ -218,14 +218,29 @@ final class NeoReturnReceiptService {
     return line;
   }
 
+  /**
+   * ETP-5313: {@code returnQty} arrives as the user-facing POSITIVE quantity and is stored
+   * NEGATIVE — see {@link ReturnLineQuantityPolicy} for why core {@code M_INOUT_POST} leaves no
+   * other option. {@code QuantityOrder} follows the same sign: {@code M_INOUT_POST} negates
+   * {@code v_QuantityOrder} on the very same condition it negates {@code v_Qty}, so leaving the
+   * order quantity positive would post an alternative-UOM movement in the opposite direction.
+   * Etendo Classic does the same — see {@code RMInOutPickEditLines}, which negates both the
+   * movement and the operative quantity.
+   */
   private static void buildAndSaveReturnLine(ShipmentInOut returnDoc, ShipmentInOutLine sourceLine,
       BigDecimal returnQty, long lineNo) {
     ShipmentInOutLine retLine = createReturnLineShell(returnDoc, sourceLine, lineNo);
-    retLine.setMovementQuantity(returnQty);
+    retLine.setMovementQuantity(ReturnLineQuantityPolicy.toStoredQuantity(returnQty));
     applyOrderUOM(retLine, sourceLine, returnQty);
     OBDal.getInstance().save(retLine);
   }
 
+  /**
+   * Projects the source line's order quantity proportionally onto the returned quantity. Both
+   * inputs are magnitudes (the source document's own positive quantities and the requested
+   * positive return quantity); the result is stored with the return sign, see
+   * {@link #buildAndSaveReturnLine}.
+   */
   private static void applyOrderUOM(ShipmentInOutLine retLine, ShipmentInOutLine sourceLine,
       BigDecimal returnQty) {
     ProductUOM productUOM = sourceLine.getOrderUOM() != null
@@ -241,7 +256,7 @@ final class NeoReturnReceiptService {
     BigDecimal proportionalOrderQty = sourceMovQty != null && sourceMovQty.compareTo(BigDecimal.ZERO) != 0
         ? sourceOrderQty.multiply(returnQty).divide(sourceMovQty, 10, java.math.RoundingMode.HALF_UP)
         : returnQty;
-    retLine.setOrderQuantity(proportionalOrderQty);
+    retLine.setOrderQuantity(ReturnLineQuantityPolicy.toStoredQuantity(proportionalOrderQty));
     retLine.setOrderUOM(productUOM);
   }
 

@@ -70,6 +70,28 @@ final class NeoHandlerUtils {
     if (!"GET".equals(context.getHttpMethod())) {
       return null;
     }
+    return extractResponseDataArray(context);
+  }
+
+  /**
+   * Same as {@link #extractGetDataArray} but for ANY HTTP method — including the record a
+   * {@code POST}/{@code PUT}/{@code PATCH} echoes back.
+   *
+   * <p>ETP-5336: an {@code afterHandle} that only fixes up GET responses leaves the write
+   * response carrying the raw persisted value, so the frontend's optimistic row update (see
+   * {@code DetailView.jsx}'s {@code buildInlineRowUpdateHandler}) renders it until the next full
+   * refetch. That is what made a Return to Vendor line flash its stored NEGATIVE quantity right
+   * after a PATCH. Enrichment that describes the record itself — a sign convention, an
+   * identifier label — belongs on every response that carries the record, not just on reads;
+   * enrichment that is genuinely read-only (an expensive aggregate, a list-only badge) stays on
+   * {@link #extractGetDataArray}.
+   *
+   * <p>Accepts both shapes the NEO envelope uses: {@code response.data} as an array (the CRUD
+   * service's own output, for every method) and as a single object (what the hand-built action
+   * responses produce), normalising the latter into a one-element array. Returns {@code null}
+   * when there is no previous result, no {@code response} wrapper, or an empty array.
+   */
+  static JSONArray extractResponseDataArray(NeoContext context) {
     NeoResponse prev = context.getPreviousResult();
     if (prev == null || prev.getBody() == null) {
       return null;
@@ -78,8 +100,15 @@ final class NeoHandlerUtils {
     if (responseWrapper == null) {
       return null;
     }
-    JSONArray dataArr = responseWrapper.optJSONArray("data");
-    return (dataArr == null || dataArr.length() == 0) ? null : dataArr;
+    Object data = responseWrapper.opt("data");
+    if (data instanceof JSONArray) {
+      JSONArray dataArr = (JSONArray) data;
+      return dataArr.length() == 0 ? null : dataArr;
+    }
+    if (data instanceof JSONObject) {
+      return new JSONArray().put(data);
+    }
+    return null;
   }
 
   /** Unpacked callout-response fields, as extracted by {@link #extractCalloutFields}. */
