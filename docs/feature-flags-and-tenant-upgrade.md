@@ -203,6 +203,12 @@ lifecycle read persists that instant per tenant as `ETGO_LegacyTransitionStarted
 trial duration then determines the deadline. With no activation instant configured, legacy tenants
 remain unresolved for a deliberate, reviewable rollout rather than receiving a guessed deadline.
 
+The account-level billing projection is available at `GET /sws/go/billing/overview`, and an
+individual purchase can be read at `GET /sws/go/billing/purchases/{purchaseId}`. Both responses are
+scoped to the authenticated account and expose only the local purchase status, environment name,
+and safe provisioning reference. They do not expose Stripe customer/session identifiers or create
+a second payment ledger.
+
 ### The plan is derived from the payment, not from the decision
 
 `isProductive()` is `true` when — and only when — the request was not refused **and** the payment

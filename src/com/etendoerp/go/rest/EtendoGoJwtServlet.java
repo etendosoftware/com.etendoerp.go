@@ -315,6 +315,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleGetOnboardingDraft(request, response);
     } else if (isPath(path, "/environments")) {
       handleEnvironments(request, response);
+    } else if (isPath(path, "/billing/overview")) {
+      handleBillingOverview(request, response);
+    } else if (path != null && path.startsWith("/billing/purchases/")) {
+      handleBillingPurchase(request, response);
     } else if (isPath(path, "/login")) {
       handleEnvironmentLogin(request, response);
     } else if (isPath(path, "/company-invitations/mine")) {
@@ -457,6 +461,67 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (paid) result.put(FIELD_CLIENT_NAME, checkoutRequest.getClientName());
       writeResponse(response, HttpServletResponse.SC_OK, result);
     });
+  }
+
+  /** Account-level billing overview; it remains available when every ERP environment is blocked. */
+  private void handleBillingOverview(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "billing-overview", account -> {
+      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+      OBContext.setAdminMode(true);
+      try {
+        JSONObject result = new JSONObject();
+        result.put(FIELD_ACCOUNT_EMAIL, account.getEmail());
+        result.put("canManageBilling",
+            EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(account.getEmail()));
+        org.codehaus.jettison.json.JSONArray purchases = new org.codehaus.jettison.json.JSONArray();
+        for (CheckoutRequest purchase : checkoutRequestStore.findForAccount(account.getEmail())) {
+          purchases.put(buildBillingPurchaseJson(purchase));
+        }
+        result.put("purchases", purchases);
+        writeResponse(response, HttpServletResponse.SC_OK, result);
+      } catch (JSONException e) {
+        log.error("JSON error building billing overview", e);
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    });
+  }
+
+  /** Returns one account-scoped purchase projection, with foreign IDs kept indistinguishable. */
+  private void handleBillingPurchase(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String prefix = "/billing/purchases/";
+    String purchaseId = request.getPathInfo().substring(prefix.length());
+    runWithAuthenticatedAccount(request, response, "billing-purchase", account -> {
+      CheckoutRequest purchase = checkoutRequestStore.find(purchaseId, account.getEmail());
+      if (purchase == null) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, "PURCHASE_NOT_FOUND",
+            "Purchase not found", "Purchase not found");
+        return;
+      }
+      try {
+        writeResponse(response, HttpServletResponse.SC_OK, buildBillingPurchaseJson(purchase));
+      } catch (JSONException e) {
+        log.error("JSON error building billing purchase", e);
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+      }
+    });
+  }
+
+  private JSONObject buildBillingPurchaseJson(CheckoutRequest purchase) throws JSONException {
+    JSONObject result = new JSONObject();
+    result.put("purchaseId", purchase.getRequest());
+    result.put(FIELD_STATUS, StringUtils.defaultString(purchase.getCheckoutRequestStatus(), "UNKNOWN"));
+    result.put(FIELD_CLIENT_NAME, StringUtils.defaultString(purchase.getClientName()));
+    if (purchase.getCreatedClient() != null) {
+      result.put("createdClientId", purchase.getCreatedClient().getId());
+    }
+    if (purchase.getFailureReason() != null) {
+      result.put("failureReason", purchase.getFailureReason());
+    }
+    return result;
   }
 
   /**

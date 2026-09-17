@@ -207,6 +207,26 @@ public class CheckoutRequestStore {
     }
   }
 
+  /** Lists recent purchase attempts for one account without exposing provider fields. */
+  public List<CheckoutRequest> findForAccount(String accountEmail) {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      if (StringUtils.isBlank(accountEmail)) {
+        return List.of();
+      }
+      OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
+          "as cr where lower(cr.accountEmail) = lower(:accountEmail) order by cr.creationDate desc");
+      query.setNamedParameter("accountEmail", StringUtils.trimToEmpty(accountEmail));
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setMaxResult(20);
+      return query.list();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
   /**
    * Returns whether a confirmed payment backs this request, account and environment name.
    *
