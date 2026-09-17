@@ -60,6 +60,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPaywallService;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.payment.HostedCheckoutService;
@@ -260,6 +261,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   OnboardingBankConnectionSyncService onboardingBankConnectionSyncService =
       new OnboardingBankConnectionSyncService();
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
+  TenantEnvironmentLifecycleService tenantEnvironmentLifecycleService =
+      new TenantEnvironmentLifecycleService();
   TenantPlanService tenantPlanService = new TenantPlanService();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
   CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
@@ -1780,6 +1783,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           + "'{}' and will read back as free", clientName, clientId,
           maskEmail(accountEmail), TenantPlanService.PLAN_PRODUCTIVE);
     } else {
+      if (!tenantEnvironmentLifecycleService.markProductive(clientId)) {
+        log.error("Paid environment '{}' (client {}) could not be marked in the lifecycle "
+            + "projection", clientName, clientId);
+      }
       revertTestModeForProductiveTenantBestEffort(clientId);
     }
   }
@@ -2038,6 +2045,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
+      if (!paidUpgrade && !tenantEnvironmentLifecycleService.markDemoReady(clientId, Instant.now())) {
+        throw new IllegalStateException("Could not initialize demo trial lifecycle");
+      }
+
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
       completeCommittedOnboarding(token, accountEmail, onboardingRequest, clientId, paidUpgrade);
 
@@ -2277,8 +2288,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       boolean ownsEnvironment = EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail(accountEmail) > 0;
       boolean resuming = isResumingOwnedTenant(onboardingRequest.clientName, accountEmail);
-      boolean convertingDemo = "convert-demo".equalsIgnoreCase(onboardingRequest.upgradeAction);
-      return tenantPaywallService.evaluate(ownsEnvironment, resuming, convertingDemo,
+      return tenantPaywallService.evaluate(ownsEnvironment, resuming, false,
           onboardingRequest.paymentToken, accountEmail, onboardingRequest.clientName);
     } finally {
       OBContext.restorePreviousMode();
@@ -2386,6 +2396,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.taxId = body.optString("fiscalIdValue", "").trim();
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
       data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
+      if ("convert-demo".equalsIgnoreCase(data.upgradeAction)) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+            "Demo environments cannot be converted; create a new productive environment");
+        return null;
+      }
       // ETP-4665: validate before the NDJSON stream opens. Past this point a length overflow
       // surfaces as a DAL ValidationException halfway through tenant creation, which rolls the
       // transaction back and reports the opaque "@CreateClientFailed@".

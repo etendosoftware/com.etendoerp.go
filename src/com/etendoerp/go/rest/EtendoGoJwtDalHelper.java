@@ -16,6 +16,7 @@
  */
 package com.etendoerp.go.rest;
 
+import java.time.Instant;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
@@ -36,6 +37,8 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.GoAccountResolver;
+import com.etendoerp.go.payment.EnvironmentAccessPolicy;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.auth0.jwt.interfaces.DecodedJWT;
@@ -68,6 +71,10 @@ final class EtendoGoJwtDalHelper {
   private static final String FIELD_ADMIN_USER = "adminUser";
   private static final String FIELD_ADMIN_USER_NAME = "adminUserName";
   private static final String FIELD_PLAN = "plan";
+  private static final String FIELD_ENVIRONMENT_TYPE = "environmentType";
+  private static final String FIELD_TRIAL_STARTED_AT = "trialStartedAt";
+  private static final String FIELD_TRIAL_EXPIRES_AT = "trialExpiresAt";
+  private static final String FIELD_TRIAL_DAYS_REMAINING = "trialDaysRemaining";
   private static final String PROPERTY_PASSWORD_CHANGED = Account.PROPERTY_PASSWORDCHANGED;
   private static final String PROPERTY_RESET_TOKEN_CONSUMED = Account.PROPERTY_RESETTOKENCONSUMED;
   private static final String PROPERTY_RESET_TOKEN_EXPIRES = Account.PROPERTY_RESETTOKENEXPIRES;
@@ -85,6 +92,8 @@ final class EtendoGoJwtDalHelper {
   // of those columns. The columns themselves stay as the migration fallback and are read only by
   // AccountIdentityDalHelper, through Account's own generated property names.
   private static final TenantPlanService TENANT_PLAN_SERVICE = new TenantPlanService();
+  private static final TenantEnvironmentLifecycleService ENVIRONMENT_LIFECYCLE_SERVICE =
+      new TenantEnvironmentLifecycleService();
   // ETP-4829: STATUS distinguishes an account that already owns a usable local password
   // ("active", the default for self-registration/SSO) from one an admin created on a user's
   // behalf, awaiting the ETP-4830 invite-email flow to set a password ("pending"). No login is
@@ -516,7 +525,24 @@ final class EtendoGoJwtDalHelper {
     env.put(FIELD_ADMIN_USER_NAME, environmentUser.getName());
     // Additive since ETP-4686 so the environment picker can badge the plan. Older clients that
     // ignore the field keep working, and a tenant with no plan marker reads back as free.
-    env.put(FIELD_PLAN, TENANT_PLAN_SERVICE.resolvePlan(client.getId()));
+    String plan = TENANT_PLAN_SERVICE.resolvePlan(client.getId());
+    env.put(FIELD_PLAN, plan);
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot lifecycle =
+        ENVIRONMENT_LIFECYCLE_SERVICE.resolve(client.getId());
+    if (lifecycle != null) {
+      env.put(FIELD_ENVIRONMENT_TYPE, lifecycle.getType().name());
+      if (lifecycle.getType() == EnvironmentAccessPolicy.EnvironmentType.DEMO) {
+        Instant now = Instant.now();
+        EnvironmentAccessPolicy policy = new EnvironmentAccessPolicy();
+        EnvironmentAccessPolicy.Configuration configuration =
+            ENVIRONMENT_LIFECYCLE_SERVICE.configuration();
+        EnvironmentAccessPolicy.Environment environment = lifecycle.toPolicyEnvironment();
+        env.put(FIELD_TRIAL_STARTED_AT, lifecycle.getTrialStartedAt().toString());
+        env.put(FIELD_TRIAL_EXPIRES_AT, policy.trialExpiresAt(environment, configuration).toString());
+        env.put(FIELD_TRIAL_DAYS_REMAINING,
+            policy.remainingTrialDays(environment, now, configuration));
+      }
+    }
     return env;
   }
 

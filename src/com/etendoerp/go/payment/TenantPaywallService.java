@@ -27,8 +27,8 @@ import org.apache.commons.lang3.StringUtils;
  *
  * <p>Rules, in order:
  * <ol>
- *   <li>Converting an existing environment to productive is a purchase, so it never takes a free
- *       path — it falls straight through to the payment check below.</li>
+ *   <li>In-place demo conversion is no longer supported. Paid onboarding always creates a new
+ *       productive environment.</li>
  *   <li>Account owns no environment yet → allowed. A first environment is always free.</li>
  *   <li>The request targets an environment the account already owns → allowed. That is a resume of a
  *       partially provisioned environment, not a new one, so it must not be charged again.</li>
@@ -77,7 +77,9 @@ public class TenantPaywallService {
     /** An additional tenant was requested without a payment token. */
     PAYMENT_REQUIRED,
     /** A payment token was supplied but no confirmed Stripe payment matches it. */
-    PAYMENT_DECLINED;
+    PAYMENT_DECLINED,
+    /** The former in-place demo conversion flow is no longer supported. */
+    CONVERSION_NOT_SUPPORTED;
 
     /**
      * @return {@code true} when provisioning must be refused
@@ -134,8 +136,7 @@ public class TenantPaywallService {
    * @param accountOwnsEnvironment whether the account already owns at least one environment
    * @param resumingOwnedEnvironment whether the requested name resolves to an environment this
    *     account already owns, which makes the request a resume rather than a new environment
-   * @param convertingToProductive whether the request converts an existing environment
-   *     ({@code upgradeAction=convert-demo}) rather than creating one
+   * @param convertingToProductive legacy indicator for the removed in-place conversion flow
    * @param paymentToken the server-generated Stripe checkout request id to correlate against
    *     {@link CheckoutRequestStore}
    * @param accountEmail authenticated account email used for payment correlation
@@ -144,6 +145,9 @@ public class TenantPaywallService {
    */
   public Outcome evaluate(boolean accountOwnsEnvironment, boolean resumingOwnedEnvironment,
       boolean convertingToProductive, String paymentToken, String accountEmail, String clientName) {
+    if (convertingToProductive) {
+      return new Outcome(Decision.CONVERSION_NOT_SUPPORTED, false);
+    }
     boolean confirmedPayment = paymentConfirmation.isPaidFor(paymentToken, accountEmail,
         clientName);
     Decision decision = decide(accountOwnsEnvironment, resumingOwnedEnvironment,
@@ -158,17 +162,17 @@ public class TenantPaywallService {
    *
    * @param accountOwnsEnvironment whether the account already owns at least one environment
    * @param resumingOwnedEnvironment whether this request resumes an owned environment
-   * @param convertingToProductive whether this request converts an existing environment
+   * @param convertingToProductive legacy indicator for the removed in-place conversion flow
    * @param paymentToken the payment token from the onboarding payload, if any
    * @param confirmedPayment whether the token correlates to a webhook-confirmed payment
    * @return the paywall decision
    */
   private static Decision decide(boolean accountOwnsEnvironment, boolean resumingOwnedEnvironment,
       boolean convertingToProductive, String paymentToken, boolean confirmedPayment) {
-    // Conversion is a paid state transition, so it deliberately skips both free paths: without
-    // this guard it would look like an ordinary resume of an environment the account owns and
-    // pass for free.
-    if (!convertingToProductive && (!accountOwnsEnvironment || resumingOwnedEnvironment)) {
+    if (convertingToProductive) {
+      return Decision.CONVERSION_NOT_SUPPORTED;
+    }
+    if (!accountOwnsEnvironment || resumingOwnedEnvironment) {
       return Decision.ALLOWED;
     }
     if (confirmedPayment) {
