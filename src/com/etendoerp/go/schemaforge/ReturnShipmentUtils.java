@@ -26,8 +26,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
@@ -666,12 +668,13 @@ final class ReturnShipmentUtils {
 
   /**
    * Resolves which invoices a rectificative invoice will rectify: the ones the caller explicitly
-   * picked, or — when the caller picked none — the newest candidate detected from the return lines.
+   * picked, or — when the caller picked none — the newest invoice auto-detected from the return
+   * lines.
    *
-   * <p>The fallback deliberately reads from {@link #fetchRectifiableInvoices} rather than from
-   * {@link #findSourceInvoice}: the latter accepts any non-voided invoice, including a draft, and
-   * a draft cannot be rectified. Taking the fallback from the same list the UI offers keeps the
-   * auto-detected choice and the user-visible choices from ever diverging.
+   * <p>The fallback reads from {@link #fetchAutoDetectedInvoices}, NOT from the broader selectable
+   * list: that list is every confirmed invoice of the flow, so falling back to its first entry
+   * would silently rectify an arbitrary unrelated invoice. Only the document chain
+   * (return line → original line → its invoice) is a safe automatic answer.
    *
    * <p>Never returns empty: a rectificative invoice with no rectified invoice cannot be confirmed,
    * so failing here — before anything is written — is strictly better than creating a document
@@ -689,9 +692,9 @@ final class ReturnShipmentUtils {
       }
     }
     if (ids.isEmpty()) {
-      List<JSONObject> candidates = fetchRectifiableInvoices(inOutId);
-      if (!candidates.isEmpty()) {
-        ids.add(candidates.get(0).optString("id"));
+      List<JSONObject> detected = fetchAutoDetectedInvoices(inOutId);
+      if (!detected.isEmpty()) {
+        ids.add(detected.get(0).optString("id"));
       }
     }
     if (ids.isEmpty()) {
@@ -709,17 +712,31 @@ final class ReturnShipmentUtils {
    * sides, only the document type differs, and that is resolved elsewhere.
    */
   static NeoResponse buildRectifiableInvoicesResponse(String inOutId) throws Exception {
-    List<JSONObject> candidates = fetchRectifiableInvoices(inOutId);
+    // The full selectable list, with the chain-detected ones flagged so the UI can float them to
+    // the top and preselect. The chain only limits the SUGGESTION, never the CHOICE: a return
+    // created standalone has no chain at all, and one covering two invoiced shipments needs both.
+    List<JSONObject> detected = fetchAutoDetectedInvoices(inOutId);
+    Set<String> detectedIds = new HashSet<>();
+    for (JSONObject inv : detected) {
+      detectedIds.add(inv.optString("id"));
+    }
+    List<JSONObject> selectable = fetchSelectableInvoices(inOutId);
     JSONArray arr = new JSONArray();
-    for (JSONObject inv : candidates) {
+    for (JSONObject inv : selectable) {
+      inv.put("suggested", detectedIds.contains(inv.optString("id")));
       arr.put(inv);
     }
     JSONObject data = new JSONObject();
     data.put("invoices", arr);
     data.put("hasReturnInvoice", hasNonVoidedReturnInvoice(inOutId));
-    // Same choice resolveRectifiedInvoiceIds would make on an empty selection, so what the modal
-    // preselects is exactly what the server would have picked on its own.
-    data.put("suggestedInvoiceId", candidates.isEmpty() ? null : candidates.get(0).optString("id"));
+    // Every chain-detected invoice is preselected, not just the newest: a return covering two
+    // shipments billed on two invoices must rectify BOTH, and making the user re-find the second
+    // one by hand is exactly the friction this list exists to remove.
+    JSONArray suggestedIds = new JSONArray();
+    for (JSONObject inv : detected) {
+      suggestedIds.put(inv.optString("id"));
+    }
+    data.put("suggestedInvoiceIds", suggestedIds);
     return wrapOkData(data);
   }
 
@@ -757,20 +774,23 @@ final class ReturnShipmentUtils {
   }
 
   /**
-   * Lists the confirmed invoices a return document can rectify, newest first.
-   *
-   * <p>Walks {@code M_InOutLine.Canceled_Inoutline_ID} back to the original shipment/receipt line
-   * and from there to the invoices that billed it — the same navigation
+   * Lists the invoices auto-detected from the return document's own chain: walks
+   * {@code M_InOutLine.Canceled_Inoutline_ID} back to the original shipment/receipt line and from
+   * there to the invoices that billed it — the same navigation
    * {@code SalesInvoiceHeaderHandler.enrichSourceInvoice} uses, only starting from the return
    * document instead of the invoice. There is no header-level link between a return and its
    * original document, so this has to go line by line.
+   *
+   * <p>These are only a <b>suggestion</b>. The chain exists just for returns created from a
+   * shipment that was itself invoiced; a hand-made return has none, and a return covering two
+   * shipments billed on two invoices has more than one. Never use this as the selectable list —
+   * see {@link #fetchSelectableInvoices}.
    *
    * <p>Only {@code CO} invoices qualify: a draft cannot be rectified, and a voided one has
    * nothing left to rectify.
    */
   @SuppressWarnings("java:S2077")
-  static List<JSONObject> fetchRectifiableInvoices(String inOutId) {
-    List<JSONObject> result = new ArrayList<>();
+  static List<JSONObject> fetchAutoDetectedInvoices(String inOutId) {
     String sql =
         "SELECT DISTINCT i.C_Invoice_ID, i.DocumentNo, i.DateInvoiced, i.GrandTotal, " +
         "  cur.ISO_Code, bp.Name " +
@@ -784,6 +804,46 @@ final class ReturnShipmentUtils {
         "  AND rl.Canceled_Inoutline_ID IS NOT NULL " +
         "  AND i.DocStatus = 'CO' " +
         "ORDER BY i.DateInvoiced DESC";
+    return runInvoiceQuery(sql, inOutId, "Could not load the invoices detected for this return");
+  }
+
+  /**
+   * Lists every invoice the user may pick to rectify: all confirmed invoices of the same flow
+   * (sales or purchase) as the return document, newest first.
+   *
+   * <p>Deliberately NOT restricted to the return document's own chain. A return can be created
+   * standalone — no order, no source invoice — and then the chain yields nothing even though
+   * rectifying is perfectly legitimate; and a return covering two shipments billed on two separate
+   * invoices has to be able to name both. The chain still drives the suggestion, but it must not
+   * limit the choice.
+   *
+   * <p>No business-partner filter, matching the picker in the rectificative-invoice window: the
+   * {@code C_Invoice_Reverse} trigger enforces same-BP only where it applies (Verifactu orgs
+   * permit cross-BP rectifications), and any rejection surfaces as a save error. Filtering here
+   * would hide rows the database would have accepted.
+   */
+  @SuppressWarnings("java:S2077")
+  static List<JSONObject> fetchSelectableInvoices(String inOutId) {
+    String sql =
+        "SELECT i.C_Invoice_ID, i.DocumentNo, i.DateInvoiced, i.GrandTotal, " +
+        "  cur.ISO_Code, bp.Name " +
+        "FROM C_Invoice i " +
+        "JOIN M_InOut ret ON ret.M_InOut_ID = ? " +
+        "LEFT JOIN C_Currency cur ON cur.C_Currency_ID = i.C_Currency_ID " +
+        "LEFT JOIN C_BPartner bp ON bp.C_BPartner_ID = i.C_BPartner_ID " +
+        "WHERE i.DocStatus = 'CO' " +
+        "  AND i.IsSOTrx = ret.IsSOTrx " +
+        "  AND i.AD_Client_ID = ret.AD_Client_ID " +
+        "  AND i.IsActive = 'Y' " +
+        "ORDER BY i.DateInvoiced DESC, i.DocumentNo DESC " +
+        "LIMIT 500";
+    return runInvoiceQuery(sql, inOutId, "Could not load the invoices available to rectify");
+  }
+
+  /** Shared execution + row mapping for the two invoice-candidate queries above. */
+  @SuppressWarnings("java:S2077")
+  private static List<JSONObject> runInvoiceQuery(String sql, String inOutId, String errorMessage) {
+    List<JSONObject> result = new ArrayList<>();
     // getConnection() inside the try — see hasNonVoidedReturnInvoice for why.
     try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
       ps.setString(1, inOutId);
@@ -802,7 +862,7 @@ final class ReturnShipmentUtils {
       }
     } catch (Exception e) {
       log.error("Error fetching rectifiable invoices for {}: {}", inOutId, e.getMessage(), e);
-      throw new OBException("Could not load the invoices available to rectify", e);
+      throw new OBException(errorMessage, e);
     }
     return result;
   }
