@@ -278,7 +278,14 @@ public class PurchaseOrderHeaderHandlerTest {
       when(conn.prepareStatement(anyString())).thenReturn(ps);
       ResultSet rs = mock(ResultSet.class);
       when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(true);
+      // ETP-5295 — `thenReturn(true)` alone would make this ResultSet report a row FOREVER.
+      // That was harmless while afterHandle() only called next() once (the LIMIT-1
+      // hasLinkedDocuments check), but it now issues three more batch queries afterwards
+      // (needsPrimaryDoc / needsInvoiceDoc), and those read with `while (rs.next())` — against
+      // an always-true cursor they never terminate and this test hangs instead of failing.
+      // One row for the hasLinkedDocuments check, then exhausted: this test is about that flag
+      // only, and an empty cursor is the right answer for the other three queries.
+      when(rs.next()).thenReturn(true, false);
 
       JSONObject body = singleRecordBody("po-1");
       NeoContext ctx = getCtxWithId("po-1");
