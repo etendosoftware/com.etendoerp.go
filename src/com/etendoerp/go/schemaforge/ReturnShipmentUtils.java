@@ -845,10 +845,19 @@ final class ReturnShipmentUtils {
    */
   @SuppressWarnings("java:S2077")
   static List<JSONObject> fetchSelectableInvoices(String inOutId) {
-    String[] readableOrgs = OBContext.getOBContext().getReadableOrganizations();
-    String orgPlaceholders = readableOrgs.length == 0
-        ? "''"
-        : String.join(",", Collections.nCopies(readableOrgs.length, "?"));
+    // No context means we are outside a request and have nothing to scope by, so the clause is
+    // dropped rather than guessed. A context WITH no readable organizations is a different case
+    // and stays fail-closed: an empty IN () matches nothing, which is the correct answer for a
+    // role that may read none.
+    OBContext obContext = OBContext.getOBContext();
+    String[] readableOrgs = obContext != null ? obContext.getReadableOrganizations() : null;
+    String orgFilter = "";
+    if (readableOrgs != null) {
+      String placeholders = readableOrgs.length == 0
+          ? "''"
+          : String.join(",", Collections.nCopies(readableOrgs.length, "?"));
+      orgFilter = "  AND i.AD_Org_ID IN (" + placeholders + ") ";
+    }
     String sql =
         "SELECT i.C_Invoice_ID, i.DocumentNo, i.DateInvoiced, i.GrandTotal, " +
         "  cur.ISO_Code, bp.Name " +
@@ -857,7 +866,7 @@ final class ReturnShipmentUtils {
         "LEFT JOIN C_Currency cur ON cur.C_Currency_ID = i.C_Currency_ID " +
         "LEFT JOIN C_BPartner bp ON bp.C_BPartner_ID = i.C_BPartner_ID " +
         "WHERE i.DocStatus = 'CO' " +
-        "  AND i.AD_Org_ID IN (" + orgPlaceholders + ") " +
+        orgFilter +
         "  AND i.IsSOTrx = ret.IsSOTrx " +
         "  AND i.AD_Client_ID = ret.AD_Client_ID " +
         "  AND i.IsActive = 'Y' " +
@@ -865,7 +874,9 @@ final class ReturnShipmentUtils {
         "LIMIT 500";
     List<String> params = new ArrayList<>();
     params.add(inOutId);
-    params.addAll(Arrays.asList(readableOrgs));
+    if (readableOrgs != null) {
+      params.addAll(Arrays.asList(readableOrgs));
+    }
     return runInvoiceQuery(sql, params, "selectable", "Could not load the invoices available to rectify");
   }
 

@@ -1182,10 +1182,10 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
   }
 
   /**
-   * The {@code rectifiableInvoices} action returns the candidate list, the id the server would
-   * have auto-picked, and whether this return document already has an invoice — the three pieces
-   * the modal needs to preselect a choice and to disable the button instead of letting the user
-   * walk into a 409.
+   * The {@code rectifiableInvoices} action returns the selectable candidate list with each
+   * chain-detected row flagged, the ids the server would have auto-picked, and whether this
+   * return document already has an invoice — the three pieces the modal needs to preselect a
+   * choice and to disable the button instead of letting the user walk into a 409.
    */
   @Test
   public void handleRectifiableInvoices_returnsCandidatesSuggestionAndHasReturnInvoiceFlag()
@@ -1194,7 +1194,8 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
          MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
-      stubReturnInvoiceQueries(dal, false, Arrays.asList("inv-new", "inv-old"));
+      stubReturnInvoiceQueries(dal, false, Arrays.asList("inv-new"),
+          Arrays.asList("inv-new", "inv-old"));
 
       NeoResponse result = handler.handle(NeoContext.builder()
           .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
@@ -1207,9 +1208,73 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
       assertEquals(2, invoices.length());
       assertEquals("inv-new", invoices.getJSONObject(0).getString("id"));
       assertEquals("inv-old", invoices.getJSONObject(1).getString("id"));
+      assertTrue("The chain-detected row must carry the preselection flag",
+          invoices.getJSONObject(0).getBoolean("suggested"));
+      assertFalse("A selectable row outside the chain is offered but not suggested",
+          invoices.getJSONObject(1).getBoolean("suggested"));
+      JSONArray suggested = data.getJSONArray("suggestedInvoiceIds");
       assertEquals("The suggestion must be the same candidate resolveRectifiedInvoiceIds picks",
-          "inv-new", data.getString("suggestedInvoiceId"));
+          1, suggested.length());
+      assertEquals("inv-new", suggested.getString(0));
       assertFalse(data.getBoolean("hasReturnInvoice"));
+    }
+  }
+
+  /**
+   * ETP-5381: a return-to-vendor shipment created by hand has no {@code Canceled_Inoutline_ID}
+   * chain, so nothing is auto-detected — but the action must still hand the modal every invoice
+   * the user may pick. Before the split this returned an empty list and blocked the user.
+   */
+  @Test
+  public void handleRectifiableInvoices_noChain_stillReturnsSelectableInvoices() throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, false, Collections.<String>emptyList(),
+          Arrays.asList("inv-a", "inv-b"));
+
+      NeoResponse result = handler.handle(NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("rectifiableInvoices").recordId("ret-1").build());
+
+      assertNotNull(result);
+      assertEquals(200, result.getHttpStatus());
+      JSONObject data = result.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals(2, data.getJSONArray("invoices").length());
+      assertEquals(0, data.getJSONArray("suggestedInvoiceIds").length());
+      assertFalse(data.getJSONArray("invoices").getJSONObject(0).getBoolean("suggested"));
+    }
+  }
+
+  /**
+   * ETP-5381: a return covering two shipments billed on two invoices preselects BOTH — the case
+   * the old singular {@code suggestedInvoiceId} could not express.
+   */
+  @Test
+  public void handleRectifiableInvoices_twoDetectedInvoices_suggestsBoth() throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, false, Arrays.asList("inv-new", "inv-old"),
+          Arrays.asList("inv-new", "inv-old", "inv-unrelated"));
+
+      NeoResponse result = handler.handle(NeoContext.builder()
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("rectifiableInvoices").recordId("ret-1").build());
+
+      assertNotNull(result);
+      JSONObject data = result.getBody().getJSONObject("response").getJSONObject("data");
+      JSONArray suggested = data.getJSONArray("suggestedInvoiceIds");
+      assertEquals(2, suggested.length());
+      assertEquals("inv-new", suggested.getString(0));
+      assertEquals("inv-old", suggested.getString(1));
+      JSONArray invoices = data.getJSONArray("invoices");
+      assertEquals(3, invoices.length());
+      assertTrue(invoices.getJSONObject(0).getBoolean("suggested"));
+      assertTrue(invoices.getJSONObject(1).getBoolean("suggested"));
+      assertFalse(invoices.getJSONObject(2).getBoolean("suggested"));
     }
   }
 

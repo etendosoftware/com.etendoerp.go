@@ -113,13 +113,6 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       "No Price List could be resolved for this invoice: select a tariff or configure "
           + "a default Price List for the Business Partner";
   private static final String KEY_RESPONSE = "response";
-  // ETP-5381 — duplicate-invoice guards. English literals on purpose: they are localized by
-  // tools/app-shell/src/lib/backendErrors.js, the convention used by every other invoice-flow
-  // message in this module. Surfaced as 409, not 400 (see AlreadyInvoicedException).
-  private static final String ERR_SHIPMENT_ALREADY_INVOICED =
-      "This shipment has already been fully invoiced.";
-  private static final String ERR_QUOTATION_ALREADY_INVOICED =
-      "An invoice has already been generated for this quotation.";
 
   /**
    * Custom DocStatus key marking a quotation as "Closed - Invoice Created".
@@ -199,11 +192,9 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         if (SPEC_SALES_ORDER.equals(specName)) {
           invoice = createFromOrder(recordId, lineOverrides, null);
         } else if (SPEC_SALES_QUOTATION.equals(specName)) {
-          assertQuotationNotInvoiced(recordId);
           invoice = createFromOrder(recordId, lineOverrides, null);
         } else if (SPEC_GOODS_SHIPMENT.equals(specName)) {
           List<String> shipmentIds = parseShipmentIds(body, recordId);
-          assertShipmentsHavePending(shipmentIds);
           String priceListId = body != null ? body.optString(PARAM_PRICE_LIST_ID, null) : null;
           invoice = createFromShipments(shipmentIds, lineOverrides, priceListId);
         } else {
@@ -230,8 +221,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
         Invoice completed = OBDal.getInstance().get(Invoice.class, invoiceId);
 
         // After completion, not before: ETGO_CI must mean "a CONFIRMED invoice exists for this
-        // quotation", which is the invariant assertQuotationNotInvoiced relies on. Writing it
-        // first would mark the quotation even when the completion is rolled back.
+        // quotation". Writing it first would mark the quotation even when the completion is
+        // rolled back, leaving it closed with nothing to show for it.
         if (SPEC_SALES_QUOTATION.equals(specName)) {
           markQuotationAsInvoiceCreated(recordId);
         }
@@ -251,9 +242,6 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       } finally {
         OBContext.restorePreviousMode();
       }
-    } catch (AlreadyInvoicedException e) {
-      log.warn("Rejected duplicate invoice from {}: {}", specName, e.getMessage());
-      return errorResponse(HttpServletResponse.SC_CONFLICT, e.getMessage());
     } catch (OBException e) {
       log.warn("Error creating draft invoice from {}: {}", specName, e.getMessage());
       return errorResponse(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
@@ -277,21 +265,6 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       return NeoResponse.error(status, body);
     } catch (Exception jsonEx) {
       return NeoResponse.error(status, message);
-    }
-  }
-
-  /**
-   * ETP-5381 (guard P6): rejects a second invoice for a quotation already closed as
-   * "Invoice Created".
-   *
-   * <p>The pending-quantity guard would also stop it, but with a message ("no lines to invoice")
-   * that tells the user nothing about what actually happened. This runs before any write, so a
-   * duplicate request leaves no trace.
-   */
-  protected void assertQuotationNotInvoiced(String quotationId) {
-    Order quotation = OBDal.getInstance().get(Order.class, quotationId);
-    if (quotation != null && StringUtils.equals(STATUS_INVOICE_CREATED, quotation.getDocumentStatus())) {
-      throw new AlreadyInvoicedException(ERR_QUOTATION_ALREADY_INVOICED);
     }
   }
 
@@ -894,36 +867,6 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
     OBDal.getInstance().flush();
     addShipmentLinesToInvoice(invoice, shipments, lineOverrides);
     return invoice;
-  }
-
-  /**
-   * ETP-5381 (guard P2): rejects invoicing a shipment that has nothing left to invoice.
-   *
-   * <p>Closes the hole that made the ticket's scenario reproducible from the UI alone. The
-   * single-shipment-with-linked-order branch of {@link #createFromShipments} delegates to
-   * {@link #createFromOrder}, and {@code capShipmentLineOverrides} returns the override map
-   * untouched when it is empty — which it always is, because the frontend sends only
-   * {@code priceListId} for that flow. Nothing downstream then looked at what the shipment still
-   * had pending.
-   *
-   * <p>Uses the draft-aware variant on purpose: invoices created before this ticket are still in
-   * draft and must count, or they would be silently invoiced twice. And the throwing variant, so
-   * a DB failure surfaces as a 500 instead of being mistaken for "nothing pending" and reported
-   * to the user as a bogus "already invoiced".
-   *
-   * <p>In the multi-shipment (bulk) case, one shipment with something left to invoice is enough:
-   * the per-line cap in {@code addShipmentLinesToInvoice} drops the exhausted ones.
-   */
-  protected void assertShipmentsHavePending(List<String> shipmentIds) {
-    if (shipmentIds == null || shipmentIds.isEmpty()) {
-      return;
-    }
-    for (String shipmentId : shipmentIds) {
-      if (!NeoInvoiceSupport.computePendingQtyPerLineOrThrow(shipmentId, true).isEmpty()) {
-        return;
-      }
-    }
-    throw new AlreadyInvoicedException(ERR_SHIPMENT_ALREADY_INVOICED);
   }
 
   /**

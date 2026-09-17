@@ -1467,43 +1467,6 @@ public class CreatePurchaseInvoiceHandlerTest {
   }
 
   /**
-   * ETP-5381 — a receipt with nothing left to invoice is a duplicate request, not an empty
-   * document: it must surface as a 409 so the frontend can say "you already did this" without
-   * parsing message text, and nothing may be created.
-   */
-  @Test
-  public void handle_goodsReceiptAlreadyFullyInvoiced_returns409() throws JSONException {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
-        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
-        MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class)) {
-
-      obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
-      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
-
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-      when(dal.get(eq(ShipmentInOut.class), eq("receipt-done"))).thenReturn(mock(ShipmentInOut.class));
-
-      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLineOrThrow(eq("receipt-done"), eq(true)))
-          .thenReturn(Collections.emptyMap());
-
-      NeoResponse response = new CreatePurchaseInvoiceHandler().handle(NeoContext.builder()
-          .endpointType(NeoEndpointType.ACTION)
-          .httpMethod("POST")
-          .fieldName("createPurchaseInvoice")
-          .specName("goods-receipt")
-          .recordId("receipt-done")
-          .build());
-
-      assertNotNull(response);
-      assertEquals(409, response.getHttpStatus());
-      assertEquals("This goods receipt has already been fully invoiced.",
-          response.getBody().getString("message"));
-      verify(dal, never()).flush();
-    }
-  }
-
-  /**
    * ETP-5381 — the response now carries {@code documentStatus}. It was not sent before this
    * ticket (only {@code id} and {@code documentNo}), and the frontend needs it to render the
    * resulting state of a document that is created already confirmed.

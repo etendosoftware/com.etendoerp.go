@@ -31,6 +31,7 @@ import com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.CompletionMocks
 
 import java.math.BigDecimal;
 import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -1287,9 +1288,9 @@ public class ReturnShipmentUtilsTest {
   }
 
   /**
-   * With no explicit selection the fallback takes the FIRST candidate — the same one
-   * {@code buildRectifiableInvoicesResponse} reports as {@code suggestedInvoiceId}, so what the
-   * modal preselects and what the server would pick on its own can never diverge.
+   * With no explicit selection the fallback takes the FIRST AUTO-DETECTED candidate — the same
+   * one {@code buildRectifiableInvoicesResponse} reports first in {@code suggestedInvoiceIds}, so
+   * what the modal preselects and what the server would pick on its own can never diverge.
    */
   @Test
   public void resolveRectifiedInvoiceIds_noSelection_fallsBackToFirstCandidate() throws Exception {
@@ -1341,12 +1342,66 @@ public class ReturnShipmentUtilsTest {
     }
   }
 
+  /**
+   * The single worst failure this feature can produce: rectifying an invoice that has nothing to
+   * do with the return. The selectable list is every confirmed invoice of the flow, so if the
+   * fallback ever read from it the server would quietly pick a stranger's invoice whenever the
+   * caller sent no selection. With no chain the only correct answer is to refuse.
+   */
+  @Test
+  public void resolveRectifiedInvoiceIds_noChain_refusesInsteadOfPickingFromTheSelectableList()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      // Nothing detected from the chain, but plenty of invoices the user COULD have picked.
+      stubReturnInvoiceQueries(dal, false, Collections.<String>emptyList(),
+          Arrays.asList("inv-stranger-a", "inv-stranger-b"));
+
+      try {
+        ReturnShipmentUtils.resolveRectifiedInvoiceIds(new JSONObject(), "ret-1");
+        fail("Without a chain the server must refuse, never pick an arbitrary invoice");
+      } catch (OBException e) {
+        assertEquals(ReturnShipmentUtils.ERR_RECTIFIED_INVOICE_REQUIRED, e.getMessage());
+        assertFalse("The error must not name a selectable invoice — that would mean it was chosen",
+            e.getMessage().contains("inv-stranger"));
+      }
+      verify(dal, never()).save(any());
+    }
+  }
+
+  /**
+   * An explicit multi-invoice selection is honoured in full: every id, in the order the caller
+   * sent them, minus repeats. A return covering two invoiced shipments rectifies BOTH, and
+   * dropping the tail would silently under-rectify.
+   */
+  @Test
+  public void resolveRectifiedInvoiceIds_multipleExplicitIds_keepsAllInOrderDeduplicated()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, false, Collections.singletonList("inv-auto"),
+          Arrays.asList("inv-auto", "inv-a", "inv-b", "inv-c"));
+
+      JSONObject body = new JSONObject().put(ReturnShipmentUtils.PARAM_ORIGIN_INVOICES,
+          new JSONArray().put("inv-c").put("inv-a").put("inv-c").put("inv-b").put("inv-a"));
+
+      assertEquals("Order is the caller's, repeats are collapsed to the first occurrence",
+          Arrays.asList("inv-c", "inv-a", "inv-b"),
+          ReturnShipmentUtils.resolveRectifiedInvoiceIds(body, "ret-1"));
+      assertFalse("An explicit selection must never be widened with the auto-detected one",
+          ReturnShipmentUtils.resolveRectifiedInvoiceIds(body, "ret-1").contains("inv-auto"));
+      verify(dal, never()).getConnection();
+    }
+  }
+
   // ── buildRectifiableInvoicesResponse ──────────────────────────────────────
 
   /**
-   * The action payload carries the candidates, the auto-detected suggestion and the
-   * already-invoiced flag. The suggestion must be the same id
-   * {@code resolveRectifiedInvoiceIds} falls back to.
+   * The action payload carries the selectable candidates (each flagged with whether the chain
+   * suggested it), every auto-detected suggestion and the already-invoiced flag. The suggestions
+   * must be the same ids {@code resolveRectifiedInvoiceIds} falls back to.
    */
   @Test
   public void buildRectifiableInvoicesResponse_reportsCandidatesSuggestionAndFlag()
@@ -1360,13 +1415,19 @@ public class ReturnShipmentUtilsTest {
       NeoResponse response = ReturnShipmentUtils.buildRectifiableInvoicesResponse("ret-1");
 
       JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
-      assertEquals(2, data.getJSONArray("invoices").length());
-      assertEquals("inv-new", data.getString("suggestedInvoiceId"));
+      JSONArray invoices = data.getJSONArray("invoices");
+      assertEquals(2, invoices.length());
+      assertEquals("inv-new", invoices.getJSONObject(0).getString("id"));
+      assertEquals("inv-old", invoices.getJSONObject(1).getString("id"));
+      assertTrue("A chain-detected invoice must be flagged so the UI can preselect it",
+          invoices.getJSONObject(0).getBoolean("suggested"));
+      assertTrue(invoices.getJSONObject(1).getBoolean("suggested"));
+      assertEquals(Arrays.asList("inv-new", "inv-old"), idsOf(data, "suggestedInvoiceIds"));
       assertTrue(data.getBoolean("hasReturnInvoice"));
     }
   }
 
-  /** No candidates → an empty list and a {@code null} suggestion, never an error. */
+  /** No candidates → an empty list and no suggestions at all, never an error. */
   @Test
   public void buildRectifiableInvoicesResponse_noCandidates_reportsNullSuggestion()
       throws Exception {
@@ -1379,9 +1440,175 @@ public class ReturnShipmentUtilsTest {
 
       JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
       assertEquals(0, data.getJSONArray("invoices").length());
-      assertFalse(data.has("suggestedInvoiceId"));
+      assertEquals(0, data.getJSONArray("suggestedInvoiceIds").length());
+      assertFalse("The removed singular key must not come back",
+          data.has("suggestedInvoiceId"));
       assertFalse(data.getBoolean("hasReturnInvoice"));
     }
+  }
+
+  /**
+   * ETP-5381, production case #1: a return created by hand has NO {@code Canceled_Inoutline_ID}
+   * chain, so nothing is auto-detected — yet rectifying is perfectly legitimate. Before the
+   * split this emptied the whole list and left the user unable to create the rectificative at
+   * all, which is precisely the bug: the chain may limit the SUGGESTION, never the CHOICE.
+   */
+  @Test
+  public void buildRectifiableInvoicesResponse_noChain_stillOffersEverySelectableInvoice()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, false, Collections.<String>emptyList(),
+          Arrays.asList("inv-a", "inv-b", "inv-c"));
+
+      NeoResponse response = ReturnShipmentUtils.buildRectifiableInvoicesResponse("ret-1");
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      JSONArray invoices = data.getJSONArray("invoices");
+      assertEquals("An empty chain must not empty the selectable list", 3, invoices.length());
+      for (int i = 0; i < invoices.length(); i++) {
+        assertFalse("Nothing was detected, so nothing may be flagged as suggested",
+            invoices.getJSONObject(i).getBoolean("suggested"));
+      }
+      assertEquals(0, data.getJSONArray("suggestedInvoiceIds").length());
+    }
+  }
+
+  /**
+   * ETP-5381, production case #2: a return covering two shipments billed on two separate invoices
+   * must preselect BOTH. Reporting only the newest made the user re-find the second one by hand,
+   * and silently under-rectified whoever trusted the preselection.
+   */
+  @Test
+  public void buildRectifiableInvoicesResponse_twoDetectedInvoices_suggestsBoth()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, false, Arrays.asList("inv-new", "inv-old"),
+          Arrays.asList("inv-new", "inv-old", "inv-unrelated"));
+
+      NeoResponse response = ReturnShipmentUtils.buildRectifiableInvoicesResponse("ret-1");
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals("Both chain-detected invoices must be preselected, not just the newest",
+          Arrays.asList("inv-new", "inv-old"), idsOf(data, "suggestedInvoiceIds"));
+
+      JSONArray invoices = data.getJSONArray("invoices");
+      assertEquals(3, invoices.length());
+      assertTrue(invoices.getJSONObject(0).getBoolean("suggested"));
+      assertTrue(invoices.getJSONObject(1).getBoolean("suggested"));
+      assertFalse("An invoice outside the chain is selectable but never suggested",
+          invoices.getJSONObject(2).getBoolean("suggested"));
+    }
+  }
+
+  /**
+   * The selectable query is scoped to the return document itself: same client and same
+   * {@code IsSOTrx} flow, confirmed and active rows only, newest first and bounded. Without the
+   * flow filter a sales return would offer purchase invoices — a rectification the trigger
+   * would reject only after the user committed to it.
+   */
+  @Test
+  public void fetchSelectableInvoices_isScopedToTheReturnDocumentsClientAndFlow()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      java.sql.ResultSet rs =
+          ReturnInvoiceSqlTestSupport.invoiceResultSet(Arrays.asList("inv-a", "inv-b"));
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+
+      List<JSONObject> invoices = ReturnShipmentUtils.fetchSelectableInvoices("ret-1");
+
+      assertEquals(2, invoices.size());
+      assertEquals("inv-a", invoices.get(0).getString("id"));
+      verify(conn).prepareStatement(sqlCaptor.capture());
+      String sql = sqlCaptor.getValue();
+      assertTrue("Must stay inside the return document's flow",
+          sql.contains("i.IsSOTrx = ret.IsSOTrx"));
+      assertTrue("Must stay inside the return document's client",
+          sql.contains("i.AD_Client_ID = ret.AD_Client_ID"));
+      assertTrue("Only confirmed invoices can be rectified",
+          sql.contains("i.DocStatus = 'CO'"));
+      assertTrue("Inactive invoices must not be offered", sql.contains("i.IsActive = 'Y'"));
+      assertTrue("Newest first, so the preselection lands on the likely row",
+          sql.contains("ORDER BY i.DateInvoiced DESC, i.DocumentNo DESC"));
+      assertTrue("The list must stay bounded", sql.contains("LIMIT 500"));
+      assertFalse("The chain must not restrict the selectable list",
+          sql.contains("Canceled_Inoutline_ID"));
+      // The scope comes from the return document itself, so the only bound parameter is its id.
+      verify(ps).setString(1, "ret-1");
+      verify(ps, never()).setString(eq(2), anyString());
+    }
+  }
+
+  /** The chain query is the one that walks {@code Canceled_Inoutline_ID}, and only confirmed. */
+  @Test
+  public void fetchAutoDetectedInvoices_walksTheCancelledLineChain() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      java.sql.ResultSet rs =
+          ReturnInvoiceSqlTestSupport.invoiceResultSet(Collections.singletonList("inv-new"));
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+
+      List<JSONObject> invoices = ReturnShipmentUtils.fetchAutoDetectedInvoices("ret-1");
+
+      assertEquals(Collections.singletonList("inv-new"),
+          Collections.singletonList(invoices.get(0).getString("id")));
+      verify(conn).prepareStatement(sqlCaptor.capture());
+      String sql = sqlCaptor.getValue();
+      assertTrue(sql.contains("rl.Canceled_Inoutline_ID IS NOT NULL"));
+      assertTrue(sql.contains("i.DocStatus = 'CO'"));
+      verify(ps).setString(1, "ret-1");
+    }
+  }
+
+  /** Both candidate queries propagate DB failures with their own message, never an empty list. */
+  @Test
+  public void invoiceQueries_dbFailure_propagateDistinctMessages() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenThrow(new RuntimeException("DB down"));
+
+      try {
+        ReturnShipmentUtils.fetchSelectableInvoices("ret-1");
+        fail("An unreadable database must not look like 'no invoice to rectify'");
+      } catch (OBException e) {
+        assertEquals("Could not load the invoices available to rectify", e.getMessage());
+      }
+      try {
+        ReturnShipmentUtils.fetchAutoDetectedInvoices("ret-1");
+        fail("An unreadable database must not look like 'nothing detected'");
+      } catch (OBException e) {
+        assertEquals("Could not load the invoices detected for this return", e.getMessage());
+      }
+    }
+  }
+
+  /** Reads a string array out of the action payload so order can be asserted directly. */
+  private static List<String> idsOf(JSONObject data, String key) throws Exception {
+    JSONArray arr = data.getJSONArray(key);
+    List<String> ids = new java.util.ArrayList<>();
+    for (int i = 0; i < arr.length(); i++) {
+      ids.add(arr.getString(i));
+    }
+    return ids;
   }
 
   /** {@code linkRectifiedInvoices}' "is this pair already linked?" probe answers "no". */

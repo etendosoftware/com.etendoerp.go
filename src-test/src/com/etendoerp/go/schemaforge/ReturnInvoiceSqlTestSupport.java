@@ -1,20 +1,3 @@
-/*
- * *************************************************************************
- * The contents of this file are subject to the Etendo License
- * (the "License"), you may not use this file except in compliance with
- * the License.
- * You may obtain a copy of the License at
- * https://github.com/etendosoftware/etendo_core/blob/main/legal/Etendo_license.txt
- * Software distributed under the License is distributed on an
- * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
- * implied. See the License for the specific language governing rights
- * and limitations under the License.
- * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
- * All Rights Reserved.
- * Contributor(s): Futit Services S.L.
- * *************************************************************************
- */
-
 package com.etendoerp.go.schemaforge;
 
 import static org.mockito.ArgumentMatchers.anyString;
@@ -32,16 +15,19 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.openbravo.dal.service.OBDal;
 
 /**
- * Stubs the two raw-JDBC reads the ETP-5381 create-and-confirm path performs before it writes
- * anything: the duplicate-invoice guard ({@code hasNonVoidedReturnInvoice}) and the candidate
- * lookup ({@code fetchRectifiableInvoices}, used both by the {@code rectifiableInvoices} action
- * and by {@code resolveRectifiedInvoiceIds}' fallback).
+ * Stubs the raw-JDBC reads the ETP-5381 create-and-confirm path performs before it writes
+ * anything: the duplicate-invoice guard ({@code hasNonVoidedReturnInvoice}) and the two candidate
+ * lookups — {@code fetchAutoDetectedInvoices} (the {@code Canceled_Inoutline_ID} chain, which
+ * drives the suggestion and {@code resolveRectifiedInvoiceIds}' fallback) and
+ * {@code fetchSelectableInvoices} (every confirmed invoice of the flow, which drives the list the
+ * user may pick from).
  *
- * <p>Both go through {@code OBDal.getInstance().getConnection()}, and both PROPAGATE their
- * failures as {@code OBException} on purpose — so a test that leaves the connection unstubbed
- * does not exercise the path it claims to: the NPE becomes a 400 that swallows whatever the test
- * was actually asserting. Stubbing is therefore mandatory for every {@code createReturnInvoice}
- * test, which is why it lives here instead of being copy-pasted per test class.
+ * <p>All three go through {@code OBDal.getInstance().getConnection()}, and all three PROPAGATE
+ * their failures as {@code OBException} on purpose — so a test that leaves the connection
+ * unstubbed does not exercise the path it claims to: the NPE becomes a 400 that swallows whatever
+ * the test was actually asserting. Stubbing is therefore mandatory for every
+ * {@code createReturnInvoice} test, which is why it lives here instead of being copy-pasted per
+ * test class.
  *
  * <p>Statements are dispatched by SQL text rather than by call order: the completion path fires
  * its own unrelated statement ({@code populateVerifactuFieldsFromDocType}), so a positional
@@ -51,28 +37,40 @@ final class ReturnInvoiceSqlTestSupport {
 
   /** Only {@code hasNonVoidedReturnInvoice}'s query ends in a {@code LIMIT 1}. */
   private static final String HAS_INVOICE_MARKER = "LIMIT 1";
-  /** Only {@code fetchRectifiableInvoices} walks back through {@code Canceled_Inoutline_ID}. */
-  private static final String RECTIFIABLE_MARKER = "rl.Canceled_Inoutline_ID IS NOT NULL";
+  /** Only {@code fetchAutoDetectedInvoices} walks back through {@code Canceled_Inoutline_ID}. */
+  private static final String AUTO_DETECTED_MARKER = "rl.Canceled_Inoutline_ID IS NOT NULL";
+  /** Only {@code fetchSelectableInvoices} correlates the invoice flow with the return document. */
+  private static final String SELECTABLE_MARKER = "i.IsSOTrx = ret.IsSOTrx";
 
   private ReturnInvoiceSqlTestSupport() {
   }
 
   /**
-   * Stubs both reads on the given DAL mock.
+   * Stubs all three reads on the given DAL mock, with the selectable list stubbed independently
+   * from the auto-detected one.
+   *
+   * <p>The two lists are separate arguments because after ETP-5381 they genuinely differ: a
+   * standalone return has an EMPTY chain and a NON-empty selectable list, and collapsing them
+   * into one stub would make that exact production case untestable.
    *
    * @param dal the {@code OBDal} mock returned by the caller's {@code MockedStatic<OBDal>}
    * @param hasReturnInvoice what the duplicate-invoice guard should answer
-   * @param rectifiableInvoiceIds the candidate invoice ids, in the order the SQL would return
-   *     them (newest first); empty means "nothing to rectify"
+   * @param autoDetectedInvoiceIds the ids the {@code Canceled_Inoutline_ID} chain yields, in the
+   *     order the SQL would return them (newest first); empty means "no chain"
+   * @param selectableInvoiceIds the ids the user may pick from, newest first
    */
   static Connection stubReturnInvoiceQueries(OBDal dal, boolean hasReturnInvoice,
-      List<String> rectifiableInvoiceIds) throws Exception {
-    // Every mock is built and stubbed HERE, never inside the Answer below: stubbing a mock from
-    // within another mock's answer leaves Mockito with an unfinished stubbing and the resulting
-    // UnfinishedStubbingException surfaces as "Could not load the invoices available to rectify".
-    ResultSet rectifiableRs = rectifiableResultSet(rectifiableInvoiceIds);
-    PreparedStatement rectifiablePs = mock(PreparedStatement.class);
-    when(rectifiablePs.executeQuery()).thenReturn(rectifiableRs);
+      List<String> autoDetectedInvoiceIds, List<String> selectableInvoiceIds) throws Exception {
+    // Both result sets are built BEFORE any when(...) opens: invoiceResultSet stubs a mock of its
+    // own, and creating it inside a thenReturn() argument leaves Mockito's stubbing unfinished.
+    ResultSet autoDetectedRs = invoiceResultSet(autoDetectedInvoiceIds);
+    ResultSet selectableRs = invoiceResultSet(selectableInvoiceIds);
+
+    PreparedStatement autoDetectedPs = mock(PreparedStatement.class);
+    when(autoDetectedPs.executeQuery()).thenReturn(autoDetectedRs);
+
+    PreparedStatement selectablePs = mock(PreparedStatement.class);
+    when(selectablePs.executeQuery()).thenReturn(selectableRs);
 
     ResultSet hasInvoiceRs = mock(ResultSet.class);
     when(hasInvoiceRs.next()).thenReturn(hasReturnInvoice);
@@ -88,28 +86,39 @@ final class ReturnInvoiceSqlTestSupport {
     when(dal.getConnection()).thenReturn(conn);
     when(conn.prepareStatement(anyString())).thenAnswer(invocation -> {
       String sql = invocation.getArgument(0);
-      if (sql.contains(RECTIFIABLE_MARKER)) {
-        return rectifiablePs;
+      if (sql.contains(AUTO_DETECTED_MARKER)) {
+        return autoDetectedPs;
+      }
+      if (sql.contains(SELECTABLE_MARKER)) {
+        return selectablePs;
       }
       return sql.contains(HAS_INVOICE_MARKER) ? hasInvoicePs : otherPs;
     });
     return conn;
   }
 
-  /** Convenience overload: no existing invoice, one rectifiable candidate. */
+  /**
+   * Convenience overload for the common case where every chain-detected invoice is also offered
+   * in the selectable list — i.e. the return WAS created from an invoiced document.
+   */
+  static Connection stubReturnInvoiceQueries(OBDal dal, boolean hasReturnInvoice,
+      List<String> rectifiableInvoiceIds) throws Exception {
+    return stubReturnInvoiceQueries(dal, hasReturnInvoice, rectifiableInvoiceIds,
+        rectifiableInvoiceIds);
+  }
+
+  /** Convenience overload: no existing invoice, chain and selectable list alike. */
   static Connection stubReturnInvoiceQueries(OBDal dal, String... rectifiableInvoiceIds)
       throws Exception {
     return stubReturnInvoiceQueries(dal, false, Arrays.asList(rectifiableInvoiceIds));
   }
 
   /**
-   * A result set shaped like {@code fetchRectifiableInvoices}' projection: id, documentNo,
+   * A result set shaped like the invoice-candidate projection both queries share: id, documentNo,
    * invoiceDate, grandTotal, currency, business partner.
    */
-  private static ResultSet rectifiableResultSet(List<String> ids) throws Exception {
+  static ResultSet invoiceResultSet(List<String> ids) throws Exception {
     ResultSet rs = mock(ResultSet.class);
-    // Cursor restarts when it runs off the end, so a test may execute the query more than once
-    // (the rectifiableInvoices action and resolveRectifiedInvoiceIds both read it).
     AtomicInteger cursor = new AtomicInteger(-1);
     when(rs.next()).thenAnswer(i -> {
       if (cursor.incrementAndGet() < ids.size()) {

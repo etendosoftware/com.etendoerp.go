@@ -70,12 +70,6 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
   private static final String SPEC_PURCHASE_ORDER = "purchase-order";
   private static final String SPEC_GOODS_RECEIPT = "goods-receipt";
   private static final String FIELD_ORDERED_QUANTITY = "orderedQuantity";
-  // ETP-5381 — duplicate-invoice guard. English literal on purpose: localized by
-  // tools/app-shell/src/lib/backendErrors.js, the convention used by every other invoice-flow
-  // message in this module. Surfaced as 409, not 400 (see AlreadyInvoicedException).
-  private static final String ERR_RECEIPT_ALREADY_INVOICED =
-      "This goods receipt has already been fully invoiced.";
-
   @Inject
   InvoiceFromOrderSupport invoiceFromOrderSupport;
 
@@ -135,9 +129,6 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       } finally {
         OBContext.restorePreviousMode();
       }
-    } catch (AlreadyInvoicedException e) {
-      log.warn("Rejected duplicate purchase invoice for {}: {}", recordId, e.getMessage());
-      return errorResponse(HttpServletResponse.SC_CONFLICT, e.getMessage());
     } catch (OBException e) {
       log.warn("Error creating purchase invoice from order {}: {}", recordId, e.getMessage());
       return errorResponse(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
@@ -423,19 +414,17 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     }
 
     Map<String, BigDecimal> qtyOverrides = parseLineOverrides(body);
-    // ETP-5381 (guards P3a + P3b): when the caller sends no explicit line quantities — which is
-    // what the UI always does, it posts only priceListId — seed them from the receipt's pending
-    // quantities. Without this, resolveReceiptLineQty falls back to the FULL movementQuantity and
-    // the same receipt can be invoiced over and over; the javadoc of that method already promised
-    // this map came from computePendingQtyPerLine, it was simply never wired up.
-    // An empty result means there is genuinely nothing left, which is a duplicate request (409),
-    // not an empty receipt. The throwing variant is used so a DB failure surfaces as such instead
-    // of being mistaken for "fully invoiced".
+    // ETP-5381: when the caller sends no explicit line quantities — which is what the UI always
+    // does, it posts only priceListId — seed them from the receipt's pending quantities. This is
+    // not a duplicate-invoice guard but a correctness fix: resolveReceiptLineQty otherwise falls
+    // back to the FULL movementQuantity, so unlike the order path this one never consulted what
+    // was already invoiced. Its javadoc already promised the map came from
+    // computePendingQtyPerLine; it was simply never wired up.
+    // Nothing pending leaves the map empty, and the existing "no lines to invoice" check below
+    // rejects the request. The throwing variant is used so a DB failure surfaces as such instead
+    // of being mistaken for "nothing left to invoice".
     if (qtyOverrides.isEmpty()) {
       qtyOverrides = NeoInvoiceSupport.computePendingQtyPerLineOrThrow(receiptId, true);
-      if (qtyOverrides.isEmpty()) {
-        throw new AlreadyInvoicedException(ERR_RECEIPT_ALREADY_INVOICED);
-      }
     }
 
     Order linkedOrder = receipt.getSalesOrder();

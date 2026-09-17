@@ -1440,44 +1440,6 @@ public class CreateDraftInvoiceHandlerTest {
   }
 
   /**
-   * ETP-5381 guard P6 — a quotation already closed as "Invoice Created" ({@code ETGO_CI}) is
-   * rejected with a 409 before anything is created, so a double-click leaves no trace. A 400
-   * would be wrong here: nothing about the request is invalid, the work is simply already done.
-   */
-  @Test
-  public void handleCreate_quotationAlreadyInvoiced_returns409WithoutCreating() throws Exception {
-    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
-        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      mockAdminMode(obContextMock);
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-
-      Order quotation = mock(Order.class);
-      when(quotation.getDocumentStatus()).thenReturn("ETGO_CI");
-      when(dal.get(eq(Order.class), eq("quotation-done"))).thenReturn(quotation);
-
-      DispatchHandler handler = new DispatchHandler();
-
-      NeoResponse response = handler.handle(NeoContext.builder()
-          .specName(SPEC_SALES_QUOTATION)
-          .entityName(ENTITY_HEADER)
-          .httpMethod("POST")
-          .endpointType(NeoEndpointType.ACTION)
-          .fieldName(ACTION_CREATE)
-          .recordId("quotation-done")
-          .build());
-
-      assertNotNull(response);
-      assertEquals(409, response.getHttpStatus());
-      assertTrue(response.getBody().getString("message")
-          .contains("An invoice has already been generated for this quotation."));
-      assertNull("The guard must run before createFromOrder", handler.receivedLineOverrides);
-      assertNull(handler.markedQuotationId);
-      verify(dal, never()).flush();
-    }
-  }
-
-  /**
    * Verifies that quotation-based creation marks the source quotation as invoiced.
    *
    * <p>ETP-5381: the marking now happens only once the confirmation has succeeded, so the
@@ -1578,46 +1540,6 @@ public class CreateDraftInvoiceHandlerTest {
   }
 
   /**
-   * ETP-5381 — a shipment whose lines are all fully invoiced is rejected with a 409 and its
-   * dedicated message. Nothing is created: the guard runs in {@code handleCreate}, before
-   * {@code createFromShipments}.
-   */
-  @Test
-  public void handleCreate_goodsShipmentFullyInvoiced_returns409() throws Exception {
-    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
-        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
-        MockedStatic<NeoInvoiceSupport> supportMock =
-            Mockito.mockStatic(NeoInvoiceSupport.class)) {
-      mockAdminMode(obContextMock);
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-
-      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLineOrThrow(eq("ship-done"), eq(true)))
-          .thenReturn(Collections.emptyMap());
-
-      DispatchHandler handler = new DispatchHandler();
-      handler.parsedShipmentIds = Collections.singletonList("ship-done");
-
-      NeoResponse response = handler.handle(NeoContext.builder()
-          .specName(SPEC_GOODS_SHIPMENT)
-          .entityName(ENTITY_HEADER)
-          .httpMethod("POST")
-          .endpointType(NeoEndpointType.ACTION)
-          .fieldName(ACTION_CREATE)
-          .recordId("ship-done")
-          .requestBody(new JSONObject())
-          .build());
-
-      assertNotNull(response);
-      assertEquals(409, response.getHttpStatus());
-      assertEquals("This shipment has already been fully invoiced.",
-          response.getBody().getString("message"));
-      assertNull("The guard must run before createFromShipments", handler.receivedShipmentIds);
-      verify(dal, never()).flush();
-    }
-  }
-
-  /**
    * ETP-5381 — the bulk case: the guard is "at least one shipment still has something pending",
    * not "every shipment does". Rejecting a batch because its first shipment is already invoiced
    * would block a perfectly valid multi-shipment invoice.
@@ -1663,47 +1585,6 @@ public class CreateDraftInvoiceHandlerTest {
             201, response.getHttpStatus());
         assertEquals(Arrays.asList("ship-done", "ship-open"), handler.receivedShipmentIds);
       }
-    }
-  }
-
-  /**
-   * ETP-5381 — the test that separates infrastructure from a real duplicate. The guard uses
-   * {@code computePendingQtyPerLineOrThrow} precisely so a DB failure does NOT read as "empty
-   * map" → "already fully invoiced": a transient outage must surface as an error, never as a 409
-   * telling the user they already invoiced a shipment they did not.
-   */
-  @Test
-  public void handleCreate_goodsShipmentPendingQueryFails_returns400NotConflict() throws Exception {
-    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
-        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
-        MockedStatic<NeoInvoiceSupport> supportMock =
-            Mockito.mockStatic(NeoInvoiceSupport.class)) {
-      mockAdminMode(obContextMock);
-      OBDal dal = mock(OBDal.class);
-      obDalMock.when(OBDal::getInstance).thenReturn(dal);
-
-      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLineOrThrow(anyString(), eq(true)))
-          .thenThrow(new OBException("Could not determine pending quantities to invoice"));
-
-      DispatchHandler handler = new DispatchHandler();
-      handler.parsedShipmentIds = Collections.singletonList("ship-db-down");
-
-      NeoResponse response = handler.handle(NeoContext.builder()
-          .specName(SPEC_GOODS_SHIPMENT)
-          .entityName(ENTITY_HEADER)
-          .httpMethod("POST")
-          .endpointType(NeoEndpointType.ACTION)
-          .fieldName(ACTION_CREATE)
-          .recordId("ship-db-down")
-          .requestBody(new JSONObject())
-          .build());
-
-      assertNotNull(response);
-      assertEquals("A DB failure is not a duplicate request", 400, response.getHttpStatus());
-      assertEquals("Could not determine pending quantities to invoice",
-          response.getBody().getString("message"));
-      assertNull("Nothing must be created when the guard cannot be evaluated",
-          handler.receivedShipmentIds);
     }
   }
 
