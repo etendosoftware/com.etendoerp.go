@@ -17,10 +17,20 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
+import static com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.completionSuccess;
+import static com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.mockCompletedInvoice;
+import static com.etendoerp.go.schemaforge.ReturnInvoiceSqlTestSupport.stubReturnInvoiceQueries;
+
+import com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.CompletionMocks;
 
 import java.math.BigDecimal;
+import java.sql.Connection;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -28,10 +38,14 @@ import java.util.List;
 import org.hibernate.Session;
 import org.hibernate.criterion.SimpleExpression;
 import org.hibernate.query.Query;
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -42,6 +56,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.common.invoice.ReversedInvoice;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
@@ -1045,5 +1060,336 @@ public class ReturnShipmentUtilsTest {
       defaultsMock.verify(() -> NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
           "purchase-invoice", "header", createdInvoice, "shipment-purchase-002"));
     }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────────────────
+  // ETP-5381 — create-and-confirm: the rectified-invoice link, the P5 guard, and the order
+  // in which finalizeReturnInvoice performs them.
+  // ───────────────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * <b>The regression this whole ticket hinges on.</b> {@code C_INVOICE_REVERSE_TRG} rejects any
+   * insert into {@code C_Invoice_Reverse} once the invoice is {@code Processed='Y'}, and
+   * {@code ETSG_CHECK_RECTIF_INV_DOC} rejects completing a rectificative document type with no
+   * rectified invoices attached. Complete before linking and the document can be neither
+   * confirmed nor linked, ever — a permanently stuck invoice, only recoverable by hand in the DB.
+   *
+   * <p>Verified through the two observable side effects, in order: the {@code ReversedInvoice}
+   * row reaching the DAL, then {@code ProcessInvoiceUtil.process} running.
+   */
+  @Test
+  public void finalizeReturnInvoice_linksRectifiedInvoicesBeforeCompleting() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("ret-inv-1");
+      when(dal.get(eq(Invoice.class), eq("inv-origin-1"))).thenReturn(mock(Invoice.class));
+      stubNoExistingReversedInvoiceLink(dal);
+      ReversedInvoice link = mock(ReversedInvoice.class);
+      when(provider.get(ReversedInvoice.class)).thenReturn(link);
+
+      CreateDraftInvoiceHandler createDraftInvoiceHandler = mock(CreateDraftInvoiceHandler.class);
+      when(createDraftInvoiceHandler.getSupport()).thenReturn(mock(InvoiceFromOrderSupport.class));
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        mockCompletedInvoice(dal, "ret-inv-1", "REC-1000001", "CO");
+
+        NeoResponse response = ReturnShipmentUtils.finalizeReturnInvoice(invoice,
+            Collections.<ShipmentInOutLine>emptyList(), createDraftInvoiceHandler,
+            Collections.singletonList("inv-origin-1"), null);
+
+        InOrder inOrder = Mockito.inOrder(dal, completion.processInvoiceUtil);
+        inOrder.verify(dal).save(link);
+        inOrder.verify(completion.processInvoiceUtil).process(
+            eq("ret-inv-1"), eq("CO"), anyString(), anyString(), anyString(), any(), any());
+
+        JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+        assertEquals("ret-inv-1", data.getString("id"));
+        assertEquals("REC-1000001", data.getString("documentNo"));
+        assertEquals("CO", data.getString("documentStatus"));
+      }
+    }
+  }
+
+  // ── linkRectifiedInvoices ─────────────────────────────────────────────────
+
+  /**
+   * An empty selection is rejected instead of silently producing an unlinked rectificative
+   * invoice, which the completion trigger would refuse forever.
+   */
+  @Test
+  public void linkRectifiedInvoices_emptyList_throwsWithoutWriting() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      try {
+        ReturnShipmentUtils.linkRectifiedInvoices(mock(Invoice.class), Collections.emptyList());
+        fail("An empty selection must be rejected");
+      } catch (OBException e) {
+        assertEquals(ReturnShipmentUtils.ERR_RECTIFIED_INVOICE_REQUIRED, e.getMessage());
+      }
+      verify(dal, never()).save(any());
+    }
+  }
+
+  /** {@code null} is treated exactly like an empty selection. */
+  @Test
+  public void linkRectifiedInvoices_nullList_throwsWithoutWriting() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      try {
+        ReturnShipmentUtils.linkRectifiedInvoices(mock(Invoice.class), null);
+        fail("A null selection must be rejected");
+      } catch (OBException e) {
+        assertEquals(ReturnShipmentUtils.ERR_RECTIFIED_INVOICE_REQUIRED, e.getMessage());
+      }
+      verify(dal, never()).save(any());
+    }
+  }
+
+  /**
+   * A pair that is already linked is skipped: {@code C_Invoice_Reverse} has a uniqueness
+   * constraint on (invoice, rectified invoice), so inserting the duplicate would abort the
+   * transaction and roll the whole create-and-confirm step back.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void linkRectifiedInvoices_alreadyLinked_doesNotDuplicateTheRow() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+
+      when(dal.get(eq(Invoice.class), eq("inv-origin-1"))).thenReturn(mock(Invoice.class));
+      OBCriteria<ReversedInvoice> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(ReversedInvoice.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.list())
+          .thenReturn(Collections.singletonList(mock(ReversedInvoice.class)));
+
+      ReturnShipmentUtils.linkRectifiedInvoices(mock(Invoice.class),
+          Collections.singletonList("inv-origin-1"));
+
+      verify(provider, never()).get(ReversedInvoice.class);
+      verify(dal, never()).save(any(ReversedInvoice.class));
+    }
+  }
+
+  /** An id that resolves to nothing fails loudly rather than linking to null. */
+  @Test
+  public void linkRectifiedInvoices_unknownInvoiceId_throws() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(Invoice.class), eq("does-not-exist"))).thenReturn(null);
+
+      try {
+        ReturnShipmentUtils.linkRectifiedInvoices(mock(Invoice.class),
+            Collections.singletonList("does-not-exist"));
+        fail("An unresolvable invoice id must be rejected");
+      } catch (OBException e) {
+        assertEquals("Invoice to rectify not found: does-not-exist", e.getMessage());
+      }
+      verify(dal, never()).save(any(ReversedInvoice.class));
+    }
+  }
+
+  // ── hasNonVoidedReturnInvoice (guard P5) ──────────────────────────────────
+
+  @Test
+  public void hasNonVoidedReturnInvoice_rowFound_returnsTrue() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, true, Collections.<String>emptyList());
+
+      assertTrue(ReturnShipmentUtils.hasNonVoidedReturnInvoice("ret-1"));
+    }
+  }
+
+  @Test
+  public void hasNonVoidedReturnInvoice_noRow_returnsFalse() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, false, Collections.<String>emptyList());
+
+      assertFalse(ReturnShipmentUtils.hasNonVoidedReturnInvoice("ret-1"));
+    }
+  }
+
+  /**
+   * A DB failure must PROPAGATE, not degrade to "no invoice": answering false on an unreadable
+   * database would wave the duplicate through, which is the single thing this guard exists to
+   * prevent.
+   */
+  @Test
+  public void hasNonVoidedReturnInvoice_dbFailure_propagatesInsteadOfAnsweringFalse() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenThrow(new RuntimeException("DB down"));
+
+      try {
+        ReturnShipmentUtils.hasNonVoidedReturnInvoice("ret-1");
+        fail("A DB failure must not be reported as 'no invoice'");
+      } catch (OBException e) {
+        assertEquals("Could not verify existing invoices for this return document",
+            e.getMessage());
+      }
+    }
+  }
+
+  // ── resolveRectifiedInvoiceIds ────────────────────────────────────────────
+
+  /** An explicit selection is honoured verbatim; the candidate query is never consulted. */
+  @Test
+  public void resolveRectifiedInvoiceIds_explicitIds_areUsedAndDbIsNotQueried() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, "inv-auto");
+
+      JSONObject body = new JSONObject().put(ReturnShipmentUtils.PARAM_ORIGIN_INVOICES,
+          new JSONArray().put("inv-a").put("inv-b"));
+
+      assertEquals(Arrays.asList("inv-a", "inv-b"),
+          ReturnShipmentUtils.resolveRectifiedInvoiceIds(body, "ret-1"));
+      verify(dal, never()).getConnection();
+    }
+  }
+
+  /** Repeated and blank entries are dropped: each pair may only be linked once. */
+  @Test
+  public void resolveRectifiedInvoiceIds_deduplicatesAndSkipsBlanks() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, "inv-auto");
+
+      JSONObject body = new JSONObject().put(ReturnShipmentUtils.PARAM_ORIGIN_INVOICES,
+          new JSONArray().put("inv-a").put("inv-a").put("  ").put("inv-b"));
+
+      assertEquals(Arrays.asList("inv-a", "inv-b"),
+          ReturnShipmentUtils.resolveRectifiedInvoiceIds(body, "ret-1"));
+    }
+  }
+
+  /**
+   * With no explicit selection the fallback takes the FIRST candidate — the same one
+   * {@code buildRectifiableInvoicesResponse} reports as {@code suggestedInvoiceId}, so what the
+   * modal preselects and what the server would pick on its own can never diverge.
+   */
+  @Test
+  public void resolveRectifiedInvoiceIds_noSelection_fallsBackToFirstCandidate() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, "inv-new", "inv-old");
+
+      assertEquals(Collections.singletonList("inv-new"),
+          ReturnShipmentUtils.resolveRectifiedInvoiceIds(null, "ret-1"));
+    }
+  }
+
+  /** An empty {@code originInvoices} array behaves exactly like no key at all. */
+  @Test
+  public void resolveRectifiedInvoiceIds_emptyArray_fallsBackToFirstCandidate() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, "inv-new");
+
+      JSONObject body = new JSONObject()
+          .put(ReturnShipmentUtils.PARAM_ORIGIN_INVOICES, new JSONArray());
+
+      assertEquals(Collections.singletonList("inv-new"),
+          ReturnShipmentUtils.resolveRectifiedInvoiceIds(body, "ret-1"));
+    }
+  }
+
+  /**
+   * Nothing to rectify → throw BEFORE anything is written. The alternative (create the invoice
+   * and discover at completion time that it has no rectified invoice) leaves a draft that can
+   * never be confirmed.
+   */
+  @Test
+  public void resolveRectifiedInvoiceIds_noCandidates_throws() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal);
+
+      try {
+        ReturnShipmentUtils.resolveRectifiedInvoiceIds(null, "ret-1");
+        fail("A return document with no rectifiable invoice must be rejected");
+      } catch (OBException e) {
+        assertEquals(ReturnShipmentUtils.ERR_RECTIFIED_INVOICE_REQUIRED, e.getMessage());
+      }
+      verify(dal, never()).save(any());
+    }
+  }
+
+  // ── buildRectifiableInvoicesResponse ──────────────────────────────────────
+
+  /**
+   * The action payload carries the candidates, the auto-detected suggestion and the
+   * already-invoiced flag. The suggestion must be the same id
+   * {@code resolveRectifiedInvoiceIds} falls back to.
+   */
+  @Test
+  public void buildRectifiableInvoicesResponse_reportsCandidatesSuggestionAndFlag()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = stubReturnInvoiceQueries(dal, true, Arrays.asList("inv-new", "inv-old"));
+      assertNull(conn.getWarnings());
+
+      NeoResponse response = ReturnShipmentUtils.buildRectifiableInvoicesResponse("ret-1");
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals(2, data.getJSONArray("invoices").length());
+      assertEquals("inv-new", data.getString("suggestedInvoiceId"));
+      assertTrue(data.getBoolean("hasReturnInvoice"));
+    }
+  }
+
+  /** No candidates → an empty list and a {@code null} suggestion, never an error. */
+  @Test
+  public void buildRectifiableInvoicesResponse_noCandidates_reportsNullSuggestion()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal);
+
+      NeoResponse response = ReturnShipmentUtils.buildRectifiableInvoicesResponse("ret-1");
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals(0, data.getJSONArray("invoices").length());
+      assertFalse(data.has("suggestedInvoiceId"));
+      assertFalse(data.getBoolean("hasReturnInvoice"));
+    }
+  }
+
+  /** {@code linkRectifiedInvoices}' "is this pair already linked?" probe answers "no". */
+  @SuppressWarnings("unchecked")
+  private static void stubNoExistingReversedInvoiceLink(OBDal dal) {
+    OBCriteria<ReversedInvoice> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(ReversedInvoice.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.<ReversedInvoice>emptyList());
   }
 }

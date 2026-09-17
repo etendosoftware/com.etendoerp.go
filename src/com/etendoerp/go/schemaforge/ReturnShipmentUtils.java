@@ -740,8 +740,10 @@ final class ReturnShipmentUtils {
         "WHERE l.M_InOut_ID = ? " +
         "  AND i.DocStatus != 'VO' " +
         "LIMIT 1";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+    // getConnection() inside the try on purpose: acquiring the connection is exactly the step
+    // that fails when the DB is down, and leaving it outside would let that escape as a raw
+    // RuntimeException instead of the OBException this method's contract promises.
+    try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
       ps.setString(1, inOutId);
       try (ResultSet rs = ps.executeQuery()) {
         return rs.next();
@@ -782,8 +784,8 @@ final class ReturnShipmentUtils {
         "  AND rl.Canceled_Inoutline_ID IS NOT NULL " +
         "  AND i.DocStatus = 'CO' " +
         "ORDER BY i.DateInvoiced DESC";
-    Connection conn = OBDal.getInstance().getConnection();
-    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+    // getConnection() inside the try — see hasNonVoidedReturnInvoice for why.
+    try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
       ps.setString(1, inOutId);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
