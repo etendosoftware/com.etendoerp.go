@@ -53,6 +53,7 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.accounting.Costcenter;
+import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.payment.FIN_FinaccTransaction;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
@@ -337,9 +338,9 @@ public class FinancialAccountTransactionsLifecycleTest {
   }
 
   /**
-   * A PROCESSED (not posted) transaction only exposes the "safe" fields: G/L item, dimensions,
-   * description and dates are applied, but amount / type / status stay locked, and {@code
-   * process:true} is ignored (no Classic processing).
+   * A PROCESSED (not posted) transaction exposes the four accounting dimensions, the G/L item
+   * and the description (ETP-4879) — dates are NOT applied even when present in the body, amount
+   * / type / status stay locked, and {@code process:true} is ignored (no Classic processing).
    */
   @Test
   public void testUpdateProcessedAppliesOnlyDimensions() throws Exception {
@@ -347,6 +348,7 @@ public class FinancialAccountTransactionsLifecycleTest {
         .put("id", "tx-1")
         .put("description", "edited")
         .put("glItemId", "gl-1")
+        .put("bpartnerId", "bp-1")
         .put("projectId", "pj-1")
         .put("costcenterId", "cc-1")
         .put("productId", "pr-1")
@@ -357,6 +359,7 @@ public class FinancialAccountTransactionsLifecycleTest {
     when(trx.getPosted()).thenReturn("N");
     when(trx.isProcessed()).thenReturn(true);
 
+    BusinessPartner bp = mock(BusinessPartner.class);
     GLItem gl = mock(GLItem.class);
     Project project = mock(Project.class);
     Costcenter cc = mock(Costcenter.class);
@@ -368,6 +371,7 @@ public class FinancialAccountTransactionsLifecycleTest {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
       when(dal.get(eq(FIN_FinaccTransaction.class), eq("tx-1"))).thenReturn(trx);
+      when(dal.get(eq(BusinessPartner.class), eq("bp-1"))).thenReturn(bp);
       when(dal.get(eq(GLItem.class), eq("gl-1"))).thenReturn(gl);
       when(dal.get(eq(Project.class), eq("pj-1"))).thenReturn(project);
       when(dal.get(eq(Costcenter.class), eq("cc-1"))).thenReturn(cc);
@@ -376,12 +380,16 @@ public class FinancialAccountTransactionsLifecycleTest {
       NeoResponse r = handler.handle(postActionCtx("update", body));
 
       assertEquals(200, r.getHttpStatus());
-      // Safe (editable-while-processed) fields are applied.
-      verify(trx).setDescription("edited");
+      // The 4 accounting dimensions, G/L item and description are applied.
+      verify(trx).setBusinessPartner(bp);
       verify(trx).setGLItem(gl);
       verify(trx).setProject(project);
       verify(trx).setCostCenter(cc);
       verify(trx).setProduct(product);
+      verify(trx).setDescription("edited");
+      // Dates stay locked even though this path is reached (non-regression guard).
+      verify(trx, never()).setTransactionDate(any());
+      verify(trx, never()).setDateAcct(any());
       // Locked fields are never touched, and process:true is ignored.
       verify(trx, never()).setDepositAmount(any());
       verify(trx, never()).setStatus(anyString());
