@@ -182,7 +182,28 @@ public class NeoSelectorService {
     return querySelectorByColumn(null, column, columnName, search, limit, offset, contextParams);
   }
 
-  private static NeoResponse querySelectorByColumn(SFEntity sourceEntity, Column column, String columnName,
+  /**
+   * Same as {@link #querySelectorByColumn(Column, String, String, int, int, Map)}, but naming the
+   * Schema Forge entity the request came from.
+   *
+   * <p>ETP-5368. The overload above passes {@code null} for it, and a null source entity is not a
+   * harmless omission: it turns off the organisation-context resolution, the core-ComboTableData
+   * route, and every {@code SelectorContextPolicy} that scopes itself by source window or tab.
+   * The MCP called that overload for every selector it served, so it and the SPA were not running
+   * the same selector — the address wrapper's {@code region} was simply the case where the
+   * difference became visible. Callers that know their entity should pass it.
+   *
+   * @param sourceEntity  the Schema Forge entity the selector was requested from; may be
+   *                      {@code null} when genuinely unknown
+   * @param column        the AD_Column to query selectors for
+   * @param columnName    the DB column name (for error messages)
+   * @param search        optional search text
+   * @param limit         page size (default 20, max 100)
+   * @param offset        page offset (default 0)
+   * @param contextParams context parameters for validation rule resolution
+   * @return a {@link NeoResponse} with the paginated selector items, or an error response
+   */
+  public static NeoResponse querySelectorByColumn(SFEntity sourceEntity, Column column, String columnName,
       String search, int limit, int offset, Map<String, String> contextParams) {
     NeoResponse result = resolveSelectorResponse(
         sourceEntity, column, columnName, search, limit, offset, contextParams);

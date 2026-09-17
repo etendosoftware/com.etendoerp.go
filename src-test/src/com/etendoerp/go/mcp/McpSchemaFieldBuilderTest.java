@@ -47,6 +47,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -56,6 +57,7 @@ import org.openbravo.model.ad.ui.Process;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
+import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
@@ -2230,6 +2232,170 @@ class McpSchemaFieldBuilderTest {
       assertEquals("EM_Aeatsii_Descripcion_Sii", fields.getJSONObject(0).getString("label"));
       McpSchemaFieldBuilder.applyCuratedLabels(fields, null);
       assertEquals("EM_Aeatsii_Descripcion_Sii", fields.getJSONObject(0).getString("label"));
+    }
+  }
+
+  // ─── virtual fields (ETP-5368) ──────────────────────────────────────
+
+  @Nested
+  @DisplayName("virtual fields")
+  class VirtualFields {
+
+    private org.openbravo.model.ad.datamodel.Column locationColumn(String id, String dbColumnName,
+        String label, org.openbravo.model.ad.datamodel.Table table) {
+      org.openbravo.model.ad.datamodel.Column col =
+          mock(org.openbravo.model.ad.datamodel.Column.class);
+      when(col.getId()).thenReturn(id);
+      when(col.getDBColumnName()).thenReturn(dbColumnName);
+      when(col.getName()).thenReturn(label);
+      when(col.isActive()).thenReturn(true);
+      when(col.isMandatory()).thenReturn(false);
+      when(col.isUseAutomaticSequence()).thenReturn(false);
+      when(col.getDefaultValue()).thenReturn(null);
+      when(col.getReference()).thenReturn(null);
+      when(col.getTable()).thenReturn(table);
+      return col;
+    }
+
+    private Property property(String name) {
+      Property prop = mock(Property.class);
+      when(prop.getName()).thenReturn(name);
+      when(prop.getComputationFunction()).thenReturn(null);
+      return prop;
+    }
+
+    @Test
+    @DisplayName("appendVirtualFields appends in order, after the tab's own fields")
+    void appendsInOrder() throws Exception {
+      JSONArray fields = new JSONArray();
+      fields.put(new JSONObject().put("name", "phone"));
+      JSONArray extra = new JSONArray();
+      extra.put(new JSONObject().put("name", "addressLine1"));
+      extra.put(new JSONObject().put("name", "city"));
+
+      McpSchemaFieldBuilder.appendVirtualFields(fields, extra);
+
+      assertEquals(3, fields.length());
+      assertEquals("phone", fields.getJSONObject(0).getString("name"));
+      assertEquals("addressLine1", fields.getJSONObject(1).getString("name"));
+      assertEquals("city", fields.getJSONObject(2).getString("name"));
+    }
+
+    @Test
+    @DisplayName("an empty or null addition leaves the array untouched")
+    void emptyAndNullAreNoops() throws Exception {
+      JSONArray fields = new JSONArray();
+      fields.put(new JSONObject().put("name", "phone"));
+
+      McpSchemaFieldBuilder.appendVirtualFields(fields, new JSONArray());
+      McpSchemaFieldBuilder.appendVirtualFields(fields, null);
+      McpSchemaFieldBuilder.appendVirtualFields(null, new JSONArray());
+
+      assertEquals(1, fields.length());
+    }
+
+    @Test
+    @DisplayName("an entity with no wrapper policy contributes no virtual fields")
+    void noPolicyYieldsNoFields() throws Exception {
+      SFEntity sfEntity = mock(SFEntity.class);
+      try (MockedStatic<NeoSelectorPolicy> policy = mockStatic(NeoSelectorPolicy.class)) {
+        policy.when(() -> NeoSelectorPolicy.resolveVirtualColumns(sfEntity))
+            .thenReturn(List.of());
+
+        JSONArray fields = McpSchemaFieldBuilder.buildVirtualFieldsArray(sfEntity, null,
+            java.util.Set.of());
+
+        assertEquals(0, fields.length());
+      }
+    }
+
+    /**
+     * The invariant this ticket turns on. A virtual descriptor has no ETGO_SF_FIELD row to take a
+     * visibility from, and an absent visibility is not neutral: {@code isAgentSuppliable} reads it
+     * as "not the agent's to send", so the fields would be published by the full dump and then
+     * dropped from {@code view:"create"} — the projection an agent reads immediately before
+     * writing. Nothing else fails when that regresses.
+     */
+    @Test
+    @DisplayName("every virtual descriptor is one the agent may supply on a create")
+    void virtualDescriptorsAreAgentSuppliable() throws Exception {
+      org.openbravo.model.ad.datamodel.Table locationTable =
+          mock(org.openbravo.model.ad.datamodel.Table.class);
+      when(locationTable.getDBTableName()).thenReturn("C_Location");
+      org.openbravo.model.ad.datamodel.Column address1 =
+          locationColumn("COL-ADDR1", "Address1", "Address Line 1", locationTable);
+      org.openbravo.model.ad.datamodel.Column region =
+          locationColumn("COL-REGION", "C_Region_ID", "Region", locationTable);
+
+      org.openbravo.model.ad.datamodel.Table wrapperTable =
+          mock(org.openbravo.model.ad.datamodel.Table.class);
+      when(wrapperTable.getDBTableName()).thenReturn("C_BPartner_Location");
+      org.openbravo.model.ad.ui.Tab wrapperTab = mock(org.openbravo.model.ad.ui.Tab.class);
+      when(wrapperTab.getTable()).thenReturn(wrapperTable);
+
+      Entity backingEntity = mock(Entity.class);
+      when(backingEntity.getPropertyByColumnName("Address1")).thenReturn(property("addressLine1"));
+      when(backingEntity.getPropertyByColumnName("C_Region_ID")).thenReturn(property("region"));
+      ModelProvider modelProvider = mock(ModelProvider.class);
+      when(modelProvider.getEntityByTableName("C_Location")).thenReturn(backingEntity);
+
+      SFEntity sfEntity = mock(SFEntity.class);
+      try (MockedStatic<NeoSelectorPolicy> policy = mockStatic(NeoSelectorPolicy.class);
+           MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class)) {
+        policy.when(() -> NeoSelectorPolicy.resolveVirtualColumns(sfEntity))
+            .thenReturn(List.of(address1, region));
+        models.when(ModelProvider::getInstance).thenReturn(modelProvider);
+
+        JSONArray fields = McpSchemaFieldBuilder.buildVirtualFieldsArray(sfEntity, wrapperTab,
+            java.util.Set.of());
+
+        assertEquals(2, fields.length());
+        for (int i = 0; i < fields.length(); i++) {
+          JSONObject field = fields.getJSONObject(i);
+          assertEquals("editable", field.getString(McpSchemaFieldBuilder.KEY_VISIBILITY));
+          assertTrue(McpSchemaFieldBuilder.isAgentSuppliable(field),
+              "virtual field " + field.getString("name") + " must survive view:\"create\"");
+          // Says where the value really lands — the column is not on the wrapper's own table.
+          assertEquals("C_Location", field.getString("backingTable"));
+        }
+        // Declaration order, and the DAL property name the write handler actually reads.
+        assertEquals("addressLine1", fields.getJSONObject(0).getString("name"));
+        assertEquals("region", fields.getJSONObject(1).getString("name"));
+      }
+    }
+
+    @Test
+    @DisplayName("the region descriptor carries the guidance a column definition has no room for")
+    void regionCarriesAgentPrompt() throws Exception {
+      org.openbravo.model.ad.datamodel.Table locationTable =
+          mock(org.openbravo.model.ad.datamodel.Table.class);
+      when(locationTable.getDBTableName()).thenReturn("C_Location");
+      org.openbravo.model.ad.datamodel.Column region =
+          locationColumn("COL-REGION", "C_Region_ID", "Region", locationTable);
+
+      org.openbravo.model.ad.datamodel.Table wrapperTable =
+          mock(org.openbravo.model.ad.datamodel.Table.class);
+      when(wrapperTable.getDBTableName()).thenReturn("C_BPartner_Location");
+      org.openbravo.model.ad.ui.Tab wrapperTab = mock(org.openbravo.model.ad.ui.Tab.class);
+      when(wrapperTab.getTable()).thenReturn(wrapperTable);
+
+      ModelProvider modelProvider = mock(ModelProvider.class);
+      when(modelProvider.getEntityByTableName("C_Location")).thenReturn(null);
+
+      SFEntity sfEntity = mock(SFEntity.class);
+      try (MockedStatic<NeoSelectorPolicy> policy = mockStatic(NeoSelectorPolicy.class);
+           MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class)) {
+        policy.when(() -> NeoSelectorPolicy.resolveVirtualColumns(sfEntity))
+            .thenReturn(List.of(region));
+        models.when(ModelProvider::getInstance).thenReturn(modelProvider);
+
+        JSONArray fields = McpSchemaFieldBuilder.buildVirtualFieldsArray(sfEntity, wrapperTab,
+            java.util.Set.of());
+
+        String prompt = fields.getJSONObject(0).getString("agentPrompt");
+        assertTrue(prompt.contains("regionName"), "prompt must state the exclusion with regionName");
+        assertTrue(prompt.contains("country"), "prompt must state the dependency on the country");
+      }
     }
   }
 }

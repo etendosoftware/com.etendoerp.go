@@ -23,6 +23,7 @@ import static com.etendoerp.go.mcp.McpToolResponses.imageToolResult;
 
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -68,6 +69,7 @@ import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
+import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
@@ -767,7 +769,7 @@ public class McpToolRouter {
     }
 
     // Validate mandatory fields before insert — return structured error matching neo_schema contract
-    JSONArray missingFields = McpWriteRequestSupport.validateMandatoryFields(filteredBody, adTab, dalEntity, SYSTEM_COLUMNS, SELECTOR_REFS, log);
+    JSONArray missingFields = McpWriteRequestSupport.validateMandatoryFields(filteredBody, adTab, dalEntity, SYSTEM_COLUMNS, SELECTOR_REFS, sfEntity, log);
     if (missingFields.length() > 0) {
       // IMP-5: stable machine-detectable code + status so the agent can distinguish an
       // "invalid write" from a "server error"; the human text moves to `detail`, and the
@@ -1042,7 +1044,14 @@ public class McpToolRouter {
     Entity dalEntity = ModelProvider.getInstance()
       .getEntityByTableName(adTab.getTable().getDBTableName());
     Column adColumn = McpSchemaFieldBuilder.findColumn(adTab, columnName, dalEntity);
-
+    if (adColumn == null) {
+      // ETP-5368: an entity may expose columns of a table other than its own tab's — the address
+      // wrapper is backed by C_BPartner_Location while country and region live in C_Location. The
+      // REST selector endpoint has consulted this policy since it was written; the MCP resolved
+      // against the tab's table alone and so answered "Column not found in table: region" for a
+      // field the handler accepts and the SPA's own selector returns.
+      adColumn = NeoSelectorPolicy.resolveVirtualSelectorColumn(sfEntity, columnName);
+    }
     if (adColumn == null) {
       throw new IllegalArgumentException("Column not found in table: " + columnName);
     }
@@ -1051,8 +1060,11 @@ public class McpToolRouter {
     Map<String, String> contextParams = McpSelectorContextHelper.buildSelectorContextParams(
         args, adTab);
 
+    // ETP-5368: hand the source entity over rather than the column alone. See the javadoc on the
+    // overload — passing null disables organisation context and every source-scoped selector
+    // policy, which is how the MCP and the SPA ended up serving different candidate sets.
     NeoResponse neoResponse = NeoSelectorService.querySelectorByColumn(
-        adColumn, columnName, query, 50, 0, contextParams);
+        sfEntity, adColumn, columnName, query, 50, 0, contextParams);
 
     NeoResponse response = McpSelectorContextHelper.withDiagnostics(
         neoResponse, columnName, contextParams);
@@ -1189,6 +1201,11 @@ public class McpToolRouter {
         McpSchemaFieldBuilder.loadPreconditionRequirements(sfEntity);
     JSONArray fieldsArray = McpSchemaFieldBuilder.buildSchemaFieldsArray(adTab, dalEntity,
         fieldMetadata, promptByColumnId, SYSTEM_COLUMNS, SELECTOR_REFS);
+    // ETP-5368: an entity whose caller-facing fields live in a second table gets them appended
+    // here, before every projection below, so view:"create" and view:"full" cannot disagree about
+    // whether an address has a country. Empty for every entity without a wrapper policy.
+    McpSchemaFieldBuilder.appendVirtualFields(fieldsArray,
+        McpSchemaFieldBuilder.buildVirtualFieldsArray(sfEntity, adTab, SELECTOR_REFS));
     McpSchemaFieldBuilder.applyPreconditionRequirements(fieldsArray, requiredWhenByField);
     // IMP-1: overlay clean, localized labels + one-line descriptions from AD_Field so the agent
     // sees "SII Description" instead of the raw AD_Column name "EM_Aeatsii_Descripcion_Sii".
@@ -1218,9 +1235,14 @@ public class McpToolRouter {
       // telling the agent to pass a parentId would send it looking for an argument that does not
       // apply. requiresParentFor("create") is the precise question the hint answers.
       boolean isChildEntity = parentScope.requiresParentFor(McpParentSection.VERB_CREATE);
+      // ETP-5368: union the AD/neo_defaults answer with the fields a wrapper handler resolves
+      // itself. Both mean the same thing to the caller — "the server has this, do not ask the
+      // user" — and only the second one knows that an address wrapper builds its own C_Location.
+      Set<String> serverResolved = new HashSet<>(
+          McpSchemaResponseHints.serverDefaultedNames(specName, entityName, adTab, sfEntity));
+      serverResolved.addAll(NeoSelectorPolicy.serverResolvedFieldNames(sfEntity));
       return wrapAsTextContent(McpSchemaCreateView
-          .buildResponse(specName, entityName, fieldsArray,
-              McpSchemaResponseHints.serverDefaultedNames(specName, entityName, adTab, sfEntity), isChildEntity,
+          .buildResponse(specName, entityName, fieldsArray, serverResolved, isChildEntity,
               entityAgentPrompt));
     }
     // IMP-44: everything below is the full dump, and reaching it now requires having asked for

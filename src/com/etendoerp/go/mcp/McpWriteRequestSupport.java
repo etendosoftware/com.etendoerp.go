@@ -19,6 +19,7 @@ package com.etendoerp.go.mcp;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -37,6 +38,7 @@ import org.openbravo.service.json.JsonConstants;
 
 import com.etendoerp.go.schemaforge.NeoServerOwnedFields;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
 
@@ -178,6 +180,8 @@ final class McpWriteRequestSupport {
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableId(adTab.getTable().getId());
     McpQuerySupport.WriteGate gate = McpQuerySupport.writeGate(sfEntity, dalEntity);
+    // ETP-5368: resolved once for the whole body rather than per unresolved key — it is a DB read.
+    Set<String> virtualFieldNames = virtualFieldNames(sfEntity);
     JSONObject mapped = new JSONObject();
 
     Iterator<String> keys = fields.keys();
@@ -199,7 +203,10 @@ final class McpWriteRequestSupport {
       if (prop == null) {
         // parentId is a declared argument of the write tools, not a stray key - see
         // resolveParentFK. Every other unresolved key is reported, not refused (IMP-18).
-        if (!McpConstants.PARAM_PARENT_ID.equals(key)) {
+        // ETP-5368: a wrapper entity's virtual fields resolve against a second table, so they are
+        // not properties of this one - but neo_schema now publishes them and the handler writes
+        // them, and a key the schema advertises must not come back labelled unrecognised.
+        if (!McpConstants.PARAM_PARENT_ID.equals(key) && !virtualFieldNames.contains(key)) {
           unknown.add(key);
         }
       } else {
@@ -208,6 +215,29 @@ final class McpWriteRequestSupport {
       mapped.put(mappedKey, value);
     }
     return mapped;
+  }
+
+  /**
+   * The caller-facing names of the virtual fields the entity's wrapper policy publishes.
+   *
+   * <p>ETP-5368. Compared against the backing table's own DAL property names, resolved the same
+   * way {@code neo_schema} resolves them, so the two answers come from one source rather than from
+   * two hand-kept lists.
+   */
+  private static Set<String> virtualFieldNames(SFEntity sfEntity) {
+    Set<String> names = new HashSet<>();
+    for (Column col : NeoSelectorPolicy.resolveVirtualColumns(sfEntity)) {
+      names.add(col.getDBColumnName());
+      Entity backing = ModelProvider.getInstance()
+          .getEntityByTableName(col.getTable().getDBTableName());
+      Property prop = backing == null
+          ? null
+          : backing.getPropertyByColumnName(col.getDBColumnName(), false);
+      if (prop != null) {
+        names.add(prop.getName());
+      }
+    }
+    return names;
   }
 
   /**
@@ -370,20 +400,36 @@ final class McpWriteRequestSupport {
    * Returns a JSONArray of missing fields using the same structure as neo_schema
    * (name, column, type, hasSelector) so the model knows exactly what to provide.
    *
+   * <p><b>ETP-5368 — a field the server resolves is not a field the caller omitted.</b> This walk
+   * reads {@code col.isMandatory()} straight off AD, which describes the ROW, not the payload. On
+   * {@code contacts/locationAddress} that made the create mode the SPA always uses impossible
+   * through the MCP: {@code C_BPartner_Location.C_Location_ID} is NOT NULL, so a body carrying a
+   * country, a street and a province was refused with "Missing required fields" naming
+   * {@code locationAddress} — the very record {@code ContactsLocationAddressHandler} was about to
+   * create from those fields. Skipping the names the wrapper policy declares server-resolved is
+   * the same declaration {@code neo_schema} uses to demote them to {@code optional}, so the
+   * catalogue and the write agree instead of contradicting each other.
+   *
    * @param systemColumns system/audit columns excluded from schema (auto-managed by Etendo)
    * @param selectorRefs  AD_Reference IDs for OBUISEL selectors (extends the base FK refs from
    *                      NeoSelectorService)
+   * @param sfEntity      the Schema Forge entity, consulted for handler-resolved fields; may be
+   *                      {@code null}
    */
   static JSONArray validateMandatoryFields(JSONObject body, Tab adTab, Entity dalEntity,
-      Set<String> systemColumns, Set<String> selectorRefs, Logger log) {
+      Set<String> systemColumns, Set<String> selectorRefs, SFEntity sfEntity, Logger log) {
     JSONArray missing = new JSONArray();
     if (dalEntity == null) {
       return missing;
     }
+    Set<String> serverResolved = NeoSelectorPolicy.serverResolvedFieldNames(sfEntity);
 
     for (Column col : adTab.getTable().getADColumnList()) {
       Property prop = McpToolRouterSupport.resolveMandatoryProperty(adTab, dalEntity, col,
           systemColumns);
+      if (prop != null && serverResolved.contains(prop.getName())) {
+        continue;
+      }
       if (prop != null && McpToolRouterSupport.isMandatoryValueMissing(body, prop.getName())) {
         try {
           missing.put(McpToolRouterSupport.buildMissingFieldInfo(col, prop.getName(),

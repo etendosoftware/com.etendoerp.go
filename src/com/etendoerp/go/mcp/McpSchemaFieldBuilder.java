@@ -29,6 +29,7 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
@@ -42,6 +43,7 @@ import org.openbravo.model.ad.ui.Tab;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
+import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
@@ -56,6 +58,29 @@ final class McpSchemaFieldBuilder {
 
   private McpSchemaFieldBuilder() {
   }
+
+  /**
+   * Guidance for the wrapper's virtual fields, keyed by upper-cased DB column name (ETP-5368).
+   *
+   * <p>Each entry describes a choice, which is precisely what a column definition has no room for:
+   * region and regionName are the same answer for two kinds of country and the handler keeps them
+   * mutually exclusive, and the region selector cannot resolve anything without the country.
+   */
+  private static final Map<String, String> VIRTUAL_FIELD_PROMPTS = Map.of(
+      "C_COUNTRY_ID",
+      "The country of the address. Also the argument the region selector needs: call neo_selectors "
+          + "for 'region' with recordContext {\"country\": \"<this id>\"}, since province names "
+          + "exist only relative to a country.",
+      "C_REGION_ID",
+      "The province, as an ID ONLY — resolve it with neo_selectors, passing the country in "
+          + "recordContext. A province NAME sent here is refused, not resolved; send it in "
+          + "regionName instead. Mutually exclusive with regionName.",
+      "REGIONNAME",
+      "The province BY NAME, and the simpler option: it works for every country. For one that "
+          + "models provinces (Spain, the United States) the server resolves the name against the "
+          + "country in this same payload and stores the real link; for one that does not "
+          + "(Argentina, and most others) it is stored as free text. A name that matches nothing "
+          + "is refused rather than silently dropped. Mutually exclusive with region.");
 
   static final String KEY_DEFAULT_EXPRESSION = "defaultExpression";
   static final String KEY_DEFAULT_SOURCE = "defaultSource";
@@ -523,6 +548,75 @@ final class McpSchemaFieldBuilder {
       }
     }
     return fieldsArray;
+  }
+
+  /**
+   * Builds the descriptors for the columns an entity exposes from a table other than its own.
+   *
+   * <p><b>ETP-5368.</b> {@code locationAddress} is backed by {@code C_BPartner_Location}, but the
+   * street, city, postal code, country and province a caller actually fills live in
+   * {@code C_Location}; {@code ContactsLocationAddressHandler} accepts them in the payload and
+   * writes both rows in one transaction. {@link #buildSchemaFieldsArray} walks the tab's own table,
+   * so it emitted none of them: {@code neo_schema} on that entity answered with the phone, the fax
+   * and two booleans, and an agent could only reach the address by guessing field names it had no
+   * way to read anywhere. The names are not guessed here either — each column is resolved to its
+   * DAL property, which is what the handler reads.
+   *
+   * <p>Visibility is declared {@code editable} rather than looked up, because these columns have no
+   * {@code ETGO_SF_FIELD} row to look it up in, and an absent visibility is not neutral:
+   * {@link #isAgentSuppliable} treats it as "not the agent's to send", which would have published
+   * the fields in the full dump and then dropped every one of them from {@code view:"create"} —
+   * the projection an agent reads immediately before writing.
+   *
+   * @param sfEntity     the Schema Forge entity whose wrapper policy is consulted
+   * @param adTab        the wrapper's own tab, for the structural read-only check
+   * @param selectorRefs AD_Reference ids treated as selectors
+   * @return the virtual field descriptors, in declaration order; empty when the entity has none
+   * @throws JSONException if a descriptor cannot be assembled
+   */
+  /**
+   * Appends one field array onto another, in order. A no-op when {@code extra} is empty.
+   *
+   * @param fieldsArray the array to extend, mutated in place
+   * @param extra       the descriptors to append
+   */
+  static void appendVirtualFields(JSONArray fieldsArray, JSONArray extra) {
+    if (fieldsArray == null || extra == null) {
+      return;
+    }
+    for (int i = 0; i < extra.length(); i++) {
+      fieldsArray.put(extra.opt(i));
+    }
+  }
+
+  static JSONArray buildVirtualFieldsArray(SFEntity sfEntity, Tab adTab,
+      java.util.Set<String> selectorRefs) throws JSONException {
+    JSONArray virtualFields = new JSONArray();
+    List<Column> columns = NeoSelectorPolicy.resolveVirtualColumns(sfEntity);
+    if (columns.isEmpty()) {
+      return virtualFields;
+    }
+    Map<String, String> editable = new HashMap<>();
+    Map<String, String> promptByColumnId = new HashMap<>();
+    for (Column col : columns) {
+      editable.put((String) col.getId(), VISIBILITY_EDITABLE);
+      String prompt = VIRTUAL_FIELD_PROMPTS.get(col.getDBColumnName().toUpperCase());
+      if (prompt != null) {
+        promptByColumnId.put((String) col.getId(), prompt);
+      }
+    }
+    // Every declared column comes from the same backing table, so the DAL entity is resolved once.
+    Entity backingEntity = ModelProvider.getInstance()
+        .getEntityByTableName(columns.get(0).getTable().getDBTableName());
+    for (Column col : columns) {
+      JSONObject field = buildSchemaField(col, adTab, backingEntity, editable,
+          new HashMap<>(), new HashMap<>(), promptByColumnId, selectorRefs);
+      // Says where the value really lands, so a reader who checks the entity's table against this
+      // list does not conclude the schema is lying to them.
+      field.put("backingTable", col.getTable().getDBTableName());
+      virtualFields.put(field);
+    }
+    return virtualFields;
   }
 
   private static boolean shouldIncludeSchemaColumn(Column col, java.util.Set<String> systemColumns,
