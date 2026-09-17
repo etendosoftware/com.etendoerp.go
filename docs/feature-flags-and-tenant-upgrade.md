@@ -197,6 +197,12 @@ through `OwnerSupport`; an administrator role name or an email match is not suff
 access remains independent because environment discovery and NEO entry continue to evaluate the
 destination membership separately.
 
+For legacy free tenants, enforcement is opt-in through `etendo.go.demo.transition.activation.at`
+(`ETGO_DEMO_TRANSITION_ACTIVATION_AT`), an ISO-8601 UTC instant selected during rollout. The first
+lifecycle read persists that instant per tenant as `ETGO_LegacyTransitionStartedAt`; the configured
+trial duration then determines the deadline. With no activation instant configured, legacy tenants
+remain unresolved for a deliberate, reviewable rollout rather than receiving a guessed deadline.
+
 ### The plan is derived from the payment, not from the decision
 
 `isProductive()` is `true` when — and only when — the request was not refused **and** the payment

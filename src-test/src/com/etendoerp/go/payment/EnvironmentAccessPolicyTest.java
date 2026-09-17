@@ -27,7 +27,7 @@ public class EnvironmentAccessPolicyTest {
 
   @Test
   public void demoIsAvailableUntilConfiguredTrialBoundary() {
-    Environment demo = Environment.demo(START, START);
+    Environment demo = Environment.demo(START);
 
     assertEquals(Decision.ALLOWED, policy.evaluate(demo, true, SubscriptionStatus.NONE,
         START.plusSeconds(15 * 24 * 60 * 60L - 1), DEFAULTS));
@@ -37,7 +37,7 @@ public class EnvironmentAccessPolicyTest {
 
   @Test
   public void trialLengthIsConfigurable() {
-    Environment demo = Environment.demo(START, START);
+    Environment demo = Environment.demo(START);
     Configuration sevenDays = new Configuration(7, 15);
 
     assertEquals(Decision.DEMO_TRIAL_EXPIRED, policy.evaluate(demo, true, SubscriptionStatus.NONE,

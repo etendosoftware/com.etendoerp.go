@@ -40,6 +40,7 @@ public class TenantEnvironmentLifecycleService {
   public static final String DEMO_TRIAL_STARTED_ATTRIBUTE = "ETGO_DemoTrialStartedAt";
   public static final String SUBSCRIPTION_STATUS_ATTRIBUTE = "ETGO_SubscriptionStatus";
   public static final String SUBSCRIPTION_DUE_AT_ATTRIBUTE = "ETGO_SubscriptionDueAt";
+  public static final String LEGACY_TRANSITION_STARTED_ATTRIBUTE = "ETGO_LegacyTransitionStartedAt";
   public static final String ASSOCIATED_DEMO_ATTRIBUTE = "ETGO_AssociatedDemoClientId";
   public static final String ASSOCIATED_PRODUCTIVE_ATTRIBUTE = "ETGO_AssociatedProductiveClientId";
   public static final String TYPE_DEMO = "DEMO";
@@ -50,6 +51,9 @@ public class TenantEnvironmentLifecycleService {
   public static final String GRACE_DAYS_PROPERTY = "etendo.go.billing.grace.days";
   public static final String GRACE_DAYS_ENV = "ETGO_BILLING_GRACE_DAYS";
   public static final int DEFAULT_GRACE_DAYS = 15;
+  public static final String LEGACY_TRANSITION_ACTIVATION_PROPERTY =
+      "etendo.go.demo.transition.activation.at";
+  public static final String LEGACY_TRANSITION_ACTIVATION_ENV = "ETGO_DEMO_TRANSITION_ACTIVATION_AT";
 
   private static final String PARAM_ATTRIBUTE = "attribute";
   private static final String PARAM_CLIENT_ID = "clientId";
@@ -125,6 +129,10 @@ public class TenantEnvironmentLifecycleService {
             subscriptionStatus, renewalDueAt);
       }
       String startedAt = readPreference(DEMO_TRIAL_STARTED_ATTRIBUTE, clientId);
+      if (StringUtils.isBlank(startedAt)
+          && TenantPlanService.PLAN_FREE.equals(tenantPlanService.resolvePlan(clientId))) {
+        startedAt = ensureLegacyTransitionStart(clientId);
+      }
       if (StringUtils.isBlank(startedAt)) {
         return null;
       }
@@ -152,6 +160,32 @@ public class TenantEnvironmentLifecycleService {
     return new EnvironmentAccessPolicy.Configuration(
         GoRuntimeProperties.readInt(TRIAL_DAYS_PROPERTY, TRIAL_DAYS_ENV, DEFAULT_TRIAL_DAYS),
         GoRuntimeProperties.readInt(GRACE_DAYS_PROPERTY, GRACE_DAYS_ENV, DEFAULT_GRACE_DAYS));
+  }
+
+  /**
+   * Assigns the configured rollout instant to an unmanaged free tenant once. An unset activation
+   * instant deliberately leaves legacy data unresolved until the rollout is explicitly enabled.
+   */
+  private String ensureLegacyTransitionStart(String clientId) {
+    String persisted = readPreference(LEGACY_TRANSITION_STARTED_ATTRIBUTE, clientId);
+    if (StringUtils.isNotBlank(persisted)) {
+      return persisted;
+    }
+    String configured = StringUtils.trimToNull(GoRuntimeProperties.readValue(
+        LEGACY_TRANSITION_ACTIVATION_PROPERTY, LEGACY_TRANSITION_ACTIVATION_ENV, ""));
+    if (configured == null) {
+      return null;
+    }
+    Instant activation = parseInstant(configured);
+    if (activation == null) {
+      return null;
+    }
+    Client client = OBDal.getInstance().get(Client.class, clientId);
+    if (client == null) {
+      return null;
+    }
+    setPreference(LEGACY_TRANSITION_STARTED_ATTRIBUTE, activation.toString(), client);
+    return activation.toString();
   }
 
   /** Updates the local subscription projection; billing adapters supply the due date in UTC. */
