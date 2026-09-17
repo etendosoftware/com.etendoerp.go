@@ -1279,6 +1279,7 @@ GET /sws/neo/promoteuserrole?UserId=<id>&Mode=promote|demote              (§8i)
 GET /sws/neo/documentemailhistory?recordId=<id>[&specName=<spec>]         (§8j)
 GET /sws/neo/acctprocessmonitor[?Limit=<n>][&Action=trigger]              (§8k)
 GET /sws/neo/refreshtoken                                                 (§8l)
+GET /sws/neo/costingcadence[?scope=client|all]                            (§8m)
 Authorization: Bearer {token}
 ```
 
@@ -4077,6 +4078,130 @@ re-login.
 
 ---
 
+## 8m. Costing Schedule Cadence Realignment (SFCostingCadence Webhook, ETP-5370)
+
+`SFCostingCadence` (`GET /sws/neo/costingcadence[?scope=client|all]` — reached ONLY through the NEO
+pseudo-spec bridge, §4.10/§4.11) enforces the costing invariant on tenants that already exist:
+**exactly ONE active scheduled `CostingBackground` request per client, firing every 30 seconds.**
+
+> **This endpoint is the escape hatch, not the main path.** The fleet-wide correction is done by
+> `CostingCadenceStartup` (`com.etendoerp.go.startup`), which runs the same routine over every tenant
+> on application boot — and shipping the module IS a boot, so a release realigns everything with no
+> operator action. Reach for this webhook to correct ONE tenant without waiting for a release.
+> It is also what makes `scope=all` a rarely-needed path: see the scope note below.
+
+### Why this is a webhook and not a data-fix `.sql`
+
+This is the reusable lesson, not an implementation detail. **An `UPDATE` on `AD_PROCESS_REQUEST`
+does not change what a running instance executes.** `OBScheduler.initialize()` reads that table
+exactly ONCE, at Quartz startup; afterwards the trigger lives in Quartz's own JobStore and
+`DefaultJob.execute` rebuilds its bundle from the `JobDataMap`, never re-reading the row. The same
+conclusion was reached independently on ETP-5269 and is written up in `SFAcctProcessMonitor`'s class
+javadoc ("Refuted from source"), and the PSD2 schedule-removal data-fix records that even DELETING
+the row leaves the job firing — it just starts failing with an FK violation.
+
+Production does not restart Tomcat, so a `.sql` would leave every tenant's row claiming 30 seconds
+while the trigger kept firing every 5 minutes — worse than doing nothing, because the row would then
+be lying about what runs. The correction has to happen inside the live JVM. This is exactly the
+escape hatch the data-fixes framework documents for its own SQL-first rule (see `tenant-fixer.md`,
+"How to choose the fix mechanism"): too stateful for hand SQL → write it once in Java and expose it
+as a remediation webhook.
+
+### What it does
+
+The work lives in `OnboardingCostingScheduleService#realignCadence(String)`, next to the
+provisioning code whose row shape it has to match — one implementation, no SQL/Java drift. Per
+client:
+
+| Step | Behaviour |
+|---|---|
+| Winner | The most recently created active `SCH` request (ties broken by id, so the choice is deterministic) — it is the one onboarding or the ETP-5245 data-fix provisioned with a resolved `ob_context` for that tenant |
+| Losers | Unscheduled from Quartz, then marked `status='UNS'` + `isactive='N'`. **Never deleted** — the history stays auditable |
+| Cadence | `timing='S'`, `frequency='1'`, `SECONDLY_INTERVAL=30`, `MINUTELY_INTERVAL` cleared to `NULL` |
+| Re-arm | `OBScheduler.reschedule(...)` on the survivor — `schedule(...)` is a no-op when the Quartz job already exists, so reschedule (unschedule + delete + schedule) is the only thing that works here |
+| `COM` rows | Ignored. A completed one-shot run is execution history, not a schedule |
+
+The commit happens BEFORE the re-arm: `TriggerProvider` reads the timing columns through the
+scheduler's own JDBC connection, which cannot see an uncommitted row.
+
+**`NEXT_FIRE_TIME` must be nulled, or the new cadence is correct but dormant.** This is the one thing
+live verification caught that no unit test could. `ScheduledTriggerGenerator#getBuilder` does not
+start a rebuilt trigger from the request's start boundary when the row carries a next fire time — it
+starts it *at* that instant:
+
+```java
+if (StringUtils.isEmpty(data.nextFireTime)) { builder.startAt(getStartDate(data)); }
+else                                        { builder.startAt(getNextFireDate(data)); }
+```
+
+That column still holds the OLD trigger's next fire. Measured on the shared dev DB: the webhook ran
+at 19:55:02, the row read `1|30` immediately, and the process did not run once until **19:58:55** —
+the stale next fire — after which the 30-second cadence held exactly. Harmless when the old cadence
+was 5 minutes; a daily old cadence would have left the job idle for a day. `realignCadence` therefore
+nulls it in native SQL (the column is deliberately unmapped on the `ProcessRequest` entity — it is
+scheduler bookkeeping written by `ProcessMonitor` through `ProcessRequestData`'s XSQL) and restates
+`START_DATE`/`START_TIME` from the provisioning path's own helpers, jitter included.
+
+**The survivor is re-armed even when its row already reads 30 s.** That is deliberate, and it is the
+direct consequence of the section above: the row is not evidence about the live trigger. Re-arming is
+the only thing that can guarantee the invariant, and at a 30-second cadence resetting the trigger
+phase costs nothing. The per-client `status` still distinguishes `realigned` (the row needed
+changing) from `alreadyCorrect` (it did not).
+
+A failure on one tenant is rolled back, recorded as `failed`, and the sweep continues with the rest.
+
+### Access and scope
+
+Gated on `NeoAccessHelper.isAdminOrClientAdmin(role)`, enforced server-side.
+
+- `scope=client` (**default**) — realigns the CALLER'S OWN client only.
+- `scope=all` — sweeps every tenant in one call, and is **refused unless the caller is in the System
+  client (`'0'`)**. Letting a tenant admin re-arm other tenants' Quartz jobs would be a privilege
+  escalation, so the check is on the CLIENT, not only on the role.
+
+Refusals answer with a payload (`success:false` + `reason`), never a 403 — `NeoGoWebhookBridge` maps
+`responseVars["error"]` to HTTP 500, so a refusal must not travel as an error. Reasons:
+`notAuthorized`, `systemScopeRequired`, `schedulerUnavailable` (a node under the no-execute
+background policy leaves Quartz in standby, where schedule/reschedule silently no-op — reporting
+success there would be a lie).
+
+### Response
+
+```json
+{
+  "success": true,
+  "scope": "all",
+  "realigned": 3, "alreadyCorrect": 1, "failed": 0, "deactivated": 1,
+  "clients": [
+    { "clientId": "...", "clientName": "E2E User 1", "status": "realigned",
+      "requestId": "...", "deactivated": 0 }
+  ]
+}
+```
+
+### What it does not do
+
+**It never creates a missing schedule.** A client with zero active `SCH` requests is simply absent
+from the response. Provisioning one is a different problem with a different owner — onboarding step 8
+for new tenants, `R36-costing-background-schedule` for existing ones. Read an empty `clients` array as
+"nothing here was misconfigured", not as "every tenant is covered".
+
+Provisioning one was `R36-costing-background-schedule`'s job, and **that fix is retired as of
+ETP-5370** (`retired.json`): it hardcoded the 5-minute cadence, so any row it still created would be
+born with the value the product has moved away from. Its long-standing side problem is resolved by
+the same change — R36 INSERTed `SCH` rows and never registered them with Quartz, leaving them
+dormant until an `OBScheduler.initialize()` that never came, and `CostingCadenceStartup` now re-arms
+every surviving request on each boot, dormant ones included.
+
+### Verifying it worked
+
+The DB alone cannot prove it — that is the whole point. After calling it, check in Classic's Process
+Request window that `next_fire_time - previous_fire_time` is 30 s on the surviving row, **without
+having restarted Tomcat**. The DB-side invariant (one active `SCH` row per client at `1`/`30`) is
+necessary but not sufficient.
+
+---
+
 ## 9. Testing
 
 The module includes unit tests that run without a backend:
@@ -4119,8 +4244,8 @@ e.g. `UserRoleAssignmentHandlerTest`/`OwnerSupportTest`) and `src-test/src/com/e
 `resendInvitation` coverage, §8h, lives alongside its pre-existing `createInvitation`/
 `findLatestInvitationStatus` suites, same file, no separate class).
 The `NeoPseudoSpecDispatcher` routing for `userroleassignments`, `systemroletemplates`,
-`debuginvitationbypass`, `resendinvitation`, `promoteuserrole`, and `acctprocessmonitor` is
-covered by
+`debuginvitationbypass`, `resendinvitation`, `promoteuserrole`, `acctprocessmonitor`, and
+`costingcadence` is covered by
 `NeoPseudoSpecDispatcherTest` (same package), mirroring its existing per-endpoint dispatch/
 method-not-allowed test pairs — `debuginvitationbypass` additionally covers the flag-off/flag-on
 branch described in §8g (`resendinvitation` and `promoteuserrole` have no such flag to test, §8h/
