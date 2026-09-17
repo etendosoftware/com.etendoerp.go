@@ -209,6 +209,11 @@ scoped to the authenticated account and expose only the local purchase status, e
 and safe provisioning reference. They do not expose Stripe customer/session identifiers or create
 a second payment ledger.
 
+`GET /sws/go/billing/offers` supplies the display offer from the server-owned billing configuration
+(`etendo.go.billing.offer.amount.minor`, currency, and interval). The initial default is 4900 minor
+units in EUR per month. The browser uses this projection for display; the purchase boundary remains
+the authority for validation and checkout selection.
+
 `POST /sws/go/billing/purchases` also checks the durable request table for an active purchase with
 the same account and environment name. A duplicate submission returns HTTP 409 with the existing
 purchase ID and status, so a retry cannot create a second provider checkout. An unresolved `CREATING`
