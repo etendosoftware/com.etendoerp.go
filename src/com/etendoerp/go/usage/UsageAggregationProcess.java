@@ -28,6 +28,7 @@ import java.util.Map;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -80,28 +81,79 @@ public class UsageAggregationProcess extends DalBaseProcess {
 
       OBDal.getInstance().flush();
 
+      if (result.getResourcesFailed() > 0) {
+        fail(bundle, "Usage Aggregation Finished With Errors", partialFailureMessage(result));
+      }
+
       OBError success = new OBError();
-      success.setType(result.getResourcesFailed() > 0 ? "Warning" : "Success");
+      success.setType("Success");
       success.setTitle("Usage Aggregation Complete");
       success.setMessage(result.toString());
       bundle.setResult(success);
 
+    } catch (OBException e) {
+      // Already reported and already logged by fail(...); rethrowing is what records the run
+      // as an error rather than a success.
+      throw e;
     } catch (Exception e) {
       log.error("Error in UsageAggregationProcess", e);
       OBDal.getInstance().rollbackAndClose();
-      OBError error = new OBError();
-      error.setType("Error");
-      error.setTitle("Usage Aggregation Failed");
       // Each resource-day commits on its own, so days completed before the failure are already
       // written. Saying so avoids reading this as "nothing happened"; every day is idempotent,
       // so re-running the same range is the fix.
-      error.setMessage(e.getMessage()
+      fail(bundle, "Usage Aggregation Failed", e.getMessage()
           + " (days completed before the failure are already written; re-running the same"
           + " range is safe and will finish the rest)");
-      bundle.setResult(error);
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Reports a failed run on both surfaces, which need different things.
+   *
+   * <p>The interactive popup reads {@code ProcessBundle.getResult()} when the process returns
+   * normally, and the thrown exception's message when it does not -- the generated launcher
+   * runs {@code Utility.translateError(..., ex.getMessage())} in its catch. A scheduled run
+   * ignores the result entirely: {@code ProcessMonitor} records ERROR only when a
+   * {@code JobExecutionException} propagates out of {@code DefaultJob}, so a run that merely
+   * set an error result was recorded as a <b>success</b>. Setting the result and throwing
+   * covers both.
+   *
+   * @throws OBException always; that is the point
+   */
+  private void fail(ProcessBundle bundle, String title, String message) {
+    log.error("{}: {}", title, message);
+    OBError error = new OBError();
+    error.setType("Error");
+    error.setTitle(title);
+    error.setMessage(message);
+    bundle.setResult(error);
+    throw new OBException(message);
+  }
+
+  /**
+   * Names the resources that failed and why.
+   *
+   * <p>A count alone ("3 resource-day(s) failed") tells an operator nothing they can act on.
+   * The search key is what identifies a catalog row without a database lookup, and the first
+   * reason each gave is the one that explains it.
+   */
+  private String partialFailureMessage(UsageAggregationResult result) {
+    StringBuilder message = new StringBuilder(result.toString())
+        .append(". ")
+        .append(result.getResourcesSucceeded())
+        .append(" resource-day(s) completed and are already committed. Failed resource(s): ")
+        .append(UsageMessages.atSafe(result.getFailedResourceNames()))
+        .append(". ");
+    for (Map.Entry<String, String> failure : result.getFailures().entrySet()) {
+      // Both halves are values we do not own -- a search key an administrator typed, and an
+      // exception message from anywhere -- so both go through the at-sign guard.
+      message.append('[').append(UsageMessages.atSafe(failure.getKey())).append("] ")
+          .append(UsageMessages.atSafe(failure.getValue())).append(' ');
+    }
+    return message.append("Usage rows written before each failure are already committed;"
+        + " re-running the same range is safe.").toString();
   }
 
   /**

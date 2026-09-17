@@ -127,9 +127,11 @@ public final class UsageResourceValidator {
       return OBDal.getInstance().getSession().createQuery(hql, Object[].class);
     } catch (RuntimeException e) {
       throw new IllegalArgumentException("The HQL Restriction is not valid for entity '"
-          + resource.getCountedEntity() + "': " + rootCauseMessage(e)
+          + UsageMessages.atSafe(resource.getCountedEntity()) + "': "
+          + UsageMessages.atSafe(rootCauseMessage(e))
           + ". Use DAL property names with the alias 'e', for example"
-          + " \"e.salesTransaction = true\". The composed query was: " + hql, e);
+          + " \"e.salesTransaction = true\". The composed query was: "
+          + UsageMessages.atSafe(hql), e);
     }
   }
 
@@ -150,7 +152,7 @@ public final class UsageResourceValidator {
           + " on the date property it filters.", e);
     } catch (RuntimeException e) {
       throw new IllegalArgumentException("The counting query compiled but could not be run: "
-          + rootCauseMessage(e), e);
+          + UsageMessages.atSafe(rootCauseMessage(e)), e);
     }
     return System.currentTimeMillis() - startedAt;
   }
@@ -245,8 +247,8 @@ public final class UsageResourceValidator {
       // reach the user blank. Naming the annotations without the at-sign keeps the advice
       // while letting the message survive translateError.
       throw new IllegalArgumentException("No UsageResourceCounter is deployed with the"
-          + " qualifier \"" + qualifier + "\". Deployed qualifiers: "
-          + UsageCounterLookup.deployedQualifiers()
+          + " qualifier \"" + UsageMessages.atSafe(qualifier) + "\". Deployed qualifiers: "
+          + UsageMessages.atSafe(UsageCounterLookup.deployedQualifiers())
           + ". Note that a counter annotated with a normal scope such as ApplicationScoped is"
           + " silently invisible here: use the Named annotation alone.");
     }

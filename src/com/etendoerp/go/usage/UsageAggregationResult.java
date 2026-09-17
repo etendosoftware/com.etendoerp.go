@@ -17,6 +17,9 @@
 
 package com.etendoerp.go.usage;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 /** What one aggregation run did, for the process result message and the log. */
 public final class UsageAggregationResult {
 
@@ -24,6 +27,13 @@ public final class UsageAggregationResult {
   private int resourcesProcessed;
   private int rowsWritten;
   private int resourcesFailed;
+  /**
+   * Search key of every resource that failed, against the first reason it gave. Ordered and
+   * de-duplicated: a resource failing on four days of a six-day window is one entry, not four,
+   * because the operator has one thing to fix, and the first failure is the one that explains
+   * it. Counting alone was not enough -- "3 resource-day(s) failed" tells nobody which.
+   */
+  private final Map<String, String> failures = new LinkedHashMap<>();
 
   public void addDay() {
     daysProcessed++;
@@ -37,8 +47,20 @@ public final class UsageAggregationResult {
     rowsWritten += rows;
   }
 
-  public void addFailure() {
+  public void addFailure(String searchKey, String reason) {
     resourcesFailed++;
+    failures.putIfAbsent(searchKey == null ? "(unknown resource)" : searchKey,
+        reason == null ? "no reason reported" : reason);
+  }
+
+  /** Search key to first reason, for every resource that failed. Empty on a clean run. */
+  public Map<String, String> getFailures() {
+    return failures;
+  }
+
+  /** The failed resources by name, for a message an operator can act on. */
+  public String getFailedResourceNames() {
+    return String.join(", ", failures.keySet());
   }
 
   public int getDaysProcessed() {
@@ -57,10 +79,20 @@ public final class UsageAggregationResult {
     return resourcesFailed;
   }
 
+  /**
+   * Resource-days that completed and committed. On a partial run this is the number that
+   * matters most: it says how much of the range is already written, and therefore how much a
+   * re-run has left to do.
+   */
+  public int getResourcesSucceeded() {
+    return resourcesProcessed - resourcesFailed;
+  }
+
   @Override
   public String toString() {
     return "Processed " + daysProcessed + " day(s) over " + resourcesProcessed
-        + " resource-day(s), wrote " + rowsWritten + " usage row(s)"
-        + (resourcesFailed > 0 ? ", " + resourcesFailed + " resource-day(s) failed" : "");
+        + " resource-day(s): " + getResourcesSucceeded() + " succeeded"
+        + (resourcesFailed > 0 ? ", " + resourcesFailed + " failed" : "")
+        + ", wrote " + rowsWritten + " usage row(s)";
   }
 }

@@ -19,7 +19,11 @@ package com.etendoerp.go.usage;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -47,6 +51,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.session.OBPropertiesProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -120,14 +125,29 @@ class UsageAggregationProcessTest {
         .thenThrow(new IllegalStateException("properties are not available")));
   }
 
-  /** Runs doExecute against stubbed platform statics and an intercepted service. */
+  /** Runs doExecute over a clean service result, against stubbed platform statics. */
   private static Outcome execute(Map<String, Object> params,
       Consumer<MockedStatic<OBPropertiesProvider>> propertiesStub) throws Exception {
+    return execute(params, propertiesStub, new UsageAggregationResult());
+  }
+
+  /**
+   * Runs doExecute against stubbed platform statics and an intercepted service that reports the
+   * given result.
+   *
+   * <p>The {@code OBException} a failing run throws is CAUGHT here and handed back on the
+   * {@link Outcome} rather than allowed to escape, because both halves of a failure now have to
+   * be asserted together: the result set on the bundle (what the interactive popup shows) and the
+   * throw (what makes {@code ProcessMonitor} record the scheduled run as an error). A helper that
+   * let the throw escape could only ever assert one of them.
+   */
+  private static Outcome execute(Map<String, Object> params,
+      Consumer<MockedStatic<OBPropertiesProvider>> propertiesStub,
+      UsageAggregationResult serviceResult) throws Exception {
     ProcessBundle bundle = mock(ProcessBundle.class);
     when(bundle.getParams()).thenReturn(params);
 
     OBDal obDal = mock(OBDal.class);
-    UsageAggregationResult serviceResult = new UsageAggregationResult();
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
@@ -141,37 +161,84 @@ class UsageAggregationProcessTest {
       propertiesStub.accept(properties);
       obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
 
-      new UsageAggregationProcess().doExecute(bundle);
+      OBException thrown = null;
+      try {
+        new UsageAggregationProcess().doExecute(bundle);
+      } catch (OBException e) {
+        thrown = e;
+      }
 
       ArgumentCaptor<Object> result = ArgumentCaptor.forClass(Object.class);
       verify(bundle).setResult(result.capture());
 
       UsageAggregationService service =
           construction.constructed().isEmpty() ? null : construction.constructed().get(0);
-      return new Outcome((OBError) result.getValue(), service);
+      return new Outcome((OBError) result.getValue(), service, thrown, obDal);
     }
   }
 
-  /** What one doExecute did: the message it reported and the service run it requested. */
+  /** Runs doExecute over a settling-window run whose service reports the given result. */
+  private static Outcome executeSettlingWindowReporting(UsageAggregationResult serviceResult)
+      throws Exception {
+    return execute(new LinkedHashMap<>(), properties -> {
+    }, serviceResult);
+  }
+
+  /** What one doExecute did: what it reported, what it threw, and which run it requested. */
   private static final class Outcome {
     private final OBError error;
     private final UsageAggregationService service;
+    private final OBException thrown;
+    private final OBDal obDal;
 
-    private Outcome(OBError error, UsageAggregationService service) {
+    private Outcome(OBError error, UsageAggregationService service, OBException thrown,
+        OBDal obDal) {
       this.error = error;
       this.service = service;
+      this.thrown = thrown;
+      this.obDal = obDal;
     }
 
+    /**
+     * A failure owes BOTH surfaces, so both are asserted every time.
+     *
+     * <p>The interactive popup reads the result the process set; a scheduled run ignores it
+     * entirely and records ERROR only when an exception propagates out of {@code DefaultJob}
+     * ({@code ProcessMonitor} line 174). A run that only set an error result was therefore
+     * recorded as a SUCCESS in {@code AD_PROCESS_RUN} — a silent failure of the nightly job,
+     * which is the one place nobody is watching. Asserting only the result, as this class used
+     * to, would pass against exactly that.
+     */
     void assertFailedWith(String fragment) {
-      assertAll(() -> assertEquals("Error", error.getType(), "expected a failure result"),
+      assertAll(() -> assertNotNull(error, "nothing was reported to the bundle at all"),
+          () -> assertEquals("Error", error.getType(),
+              "expected a failure result, was: " + error.getMessage()),
           () -> assertTrue(error.getMessage().contains(fragment),
-              "message should explain the problem, was: " + error.getMessage()));
+              "message should explain the problem, was: " + error.getMessage()),
+          () -> assertNotNull(thrown,
+              "a failing run must also THROW, or the scheduled run is recorded as a success"),
+          () -> assertEquals(error.getMessage(), thrown.getMessage(),
+              "the thrown message is what the interactive launcher renders, so it must carry"
+                  + " the same reason as the result"));
     }
 
     void assertSucceeded() {
-      assertEquals("Success", error.getType(),
-          "expected a success result, was: " + error.getMessage());
+      assertAll(
+          () -> assertNull(thrown, "a successful run must return normally, not throw"),
+          () -> assertEquals("Success", error.getType(),
+              "expected a success result, was: " + error.getMessage()));
     }
+  }
+
+  /** How many times {@code needle} appears in {@code haystack}. */
+  private static int occurrencesOf(String needle, String haystack) {
+    int count = 0;
+    int at = haystack.indexOf(needle);
+    while (at >= 0) {
+      count++;
+      at = haystack.indexOf(needle, at + needle.length());
+    }
+    return count;
   }
 
   private static Map<String, Object> params(String fromKey, Object fromValue, String toKey,
@@ -372,38 +439,202 @@ class UsageAggregationProcessTest {
   class ResultReporting {
 
     /**
-     * A run in which some resource failed reports Warning, not Success. The distinction is what
-     * tells an operator that the numbers they are about to look at are incomplete — the run does
-     * not abort on one bad resource, so nothing else would say so.
+     * THE REGRESSION TEST, and it is about the NIGHTLY run, not the popup.
+     *
+     * <p>A partial run used to report Warning (and, before that, Success) and return normally.
+     * That is invisible where it matters most: {@code ProcessMonitor} sets
+     * {@code AD_PROCESS_RUN.STATUS} to ERROR only when an exception propagates out of
+     * {@code DefaultJob} — {@code bundle.setResult} is not consulted for status at all. So a
+     * night on which every resource failed was recorded as a successful run, and the only
+     * evidence was a log line nobody reads. The process must therefore BOTH report and throw.
+     *
+     * <p>The counts are pinned too, not just the type. "How many resource-days already
+     * committed" is the operator's signal for how much a re-run has left to do, and each
+     * resource-day commits on its own, so the successful ones really are written.
      */
     @Test
-    void aRunWithAFailedResourceIsReportedAsAWarning() throws Exception {
-      ProcessBundle bundle = mock(ProcessBundle.class);
-      when(bundle.getParams()).thenReturn(new LinkedHashMap<>());
-      OBDal obDal = mock(OBDal.class);
-
+    void aPartialRunIsReportedAsAnErrorAndThrowsSoTheScheduledRunIsNotRecordedAsASuccess()
+        throws Exception {
       UsageAggregationResult withFailure = new UsageAggregationResult();
       withFailure.addDay();
       withFailure.addResource();
-      withFailure.addFailure();
+      withFailure.addResource();
+      withFailure.addFailure("BROKEN_RESOURCE", "could not resolve property: osted of: Invoice");
 
-      try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
-          MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class);
-          MockedConstruction<UsageAggregationService> construction =
-              mockConstruction(UsageAggregationService.class,
-                  (service, context) -> when(service.runForSettlingWindow())
-                      .thenReturn(withFailure))) {
-        obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
+      Outcome outcome = executeSettlingWindowReporting(withFailure);
 
-        new UsageAggregationProcess().doExecute(bundle);
+      assertAll(
+          () -> assertEquals("Error", outcome.error.getType(),
+              "a partial run is not a success and not a warning: " + outcome.error.getMessage()),
+          () -> assertNotNull(outcome.thrown,
+              "without the throw, ProcessMonitor records the nightly run as a success"),
+          () -> assertTrue(outcome.error.getMessage().contains("BROKEN_RESOURCE"),
+              "names the resource the operator has to fix: " + outcome.error.getMessage()),
+          () -> assertTrue(
+              outcome.error.getMessage().contains("could not resolve property: osted"),
+              "and carries its reason: " + outcome.error.getMessage()),
+          () -> assertTrue(outcome.error.getMessage().contains("1 succeeded"),
+              "and says how much of the run is already written: " + outcome.error.getMessage()),
+          () -> assertTrue(outcome.error.getMessage().contains("re-running"),
+              "and that re-running is safe: " + outcome.error.getMessage()));
+    }
 
-        ArgumentCaptor<Object> result = ArgumentCaptor.forClass(Object.class);
-        verify(bundle).setResult(result.capture());
-        OBError reported = (OBError) result.getValue();
+    /**
+     * The thrown message is not a second-class citizen: the generated interactive launcher
+     * renders {@code ex.getMessage()} through {@code Utility.translateError} when a process
+     * throws, so a throw carrying a bare "error" would leave the user with the same silence the
+     * fix was for, while still recording ERROR for the scheduler.
+     */
+    @Test
+    void theThrownMessageCarriesTheSameDetailAsTheReportedOne() throws Exception {
+      UsageAggregationResult withFailure = new UsageAggregationResult();
+      withFailure.addDay();
+      withFailure.addResource();
+      withFailure.addResource();
+      withFailure.addFailure("BROKEN_RESOURCE", "boom");
 
-        assertAll(() -> assertEquals("Warning", reported.getType()),
-            () -> assertTrue(reported.getMessage().contains("failed"), reported.getMessage()));
+      Outcome outcome = executeSettlingWindowReporting(withFailure);
+
+      assertAll(() -> assertNotNull(outcome.thrown),
+          () -> assertEquals(outcome.error.getMessage(), outcome.thrown.getMessage()),
+          () -> assertTrue(outcome.thrown.getMessage().contains("BROKEN_RESOURCE"),
+              outcome.thrown.getMessage()),
+          () -> assertTrue(outcome.thrown.getMessage().contains("1 succeeded"),
+              outcome.thrown.getMessage()));
+    }
+
+    /**
+     * Every failed resource is named. A message that stopped at the first one would send the
+     * operator round the loop once per broken row, each time discovering another.
+     */
+    @Test
+    void everyFailedResourceIsNamedWithItsOwnReason() throws Exception {
+      UsageAggregationResult withFailures = new UsageAggregationResult();
+      withFailures.addDay();
+      withFailures.addResource();
+      withFailures.addResource();
+      withFailures.addFailure("FIRST_BROKEN", "no counter deployed");
+      withFailures.addFailure("SECOND_BROKEN", "connection closed");
+
+      Outcome outcome = executeSettlingWindowReporting(withFailures);
+
+      assertAll(
+          () -> assertTrue(outcome.error.getMessage().contains("FIRST_BROKEN"),
+              outcome.error.getMessage()),
+          () -> assertTrue(outcome.error.getMessage().contains("SECOND_BROKEN"),
+              outcome.error.getMessage()),
+          () -> assertTrue(outcome.error.getMessage().contains("no counter deployed"),
+              outcome.error.getMessage()),
+          () -> assertTrue(outcome.error.getMessage().contains("connection closed"),
+              outcome.error.getMessage()));
+    }
+
+    /**
+     * One resource failing on four days of a six-day window is ONE thing to fix, so it is named
+     * once, with the first reason it gave. Repeating it per day would bury the second broken
+     * resource under a wall of identical lines — and the first reason is the one that explains
+     * the rest.
+     *
+     * <p>The resource-day COUNT still counts every occurrence: the operator needs to know four
+     * days are missing even though there is only one row to repair. Both halves are asserted
+     * because collapsing the count along with the name would be the easy wrong fix.
+     */
+    @Test
+    void aResourceFailingOnSeveralDaysIsNamedOnceWithItsFirstReason() throws Exception {
+      UsageAggregationResult repeated = new UsageAggregationResult();
+      for (int day = 0; day < 4; day++) {
+        repeated.addDay();
+        repeated.addResource();
+        repeated.addFailure("FLAKY_RESOURCE", "reason from day " + day);
       }
+
+      Outcome outcome = executeSettlingWindowReporting(repeated);
+      String message = outcome.error.getMessage();
+
+      assertAll(
+          () -> assertEquals(2, occurrencesOf("FLAKY_RESOURCE", message),
+              "expected exactly two mentions -- once in the failed-resource list and once"
+                  + " against its reason -- not one pair per day: " + message),
+          () -> assertTrue(message.contains("reason from day 0"),
+              "the first reason is the one that explains it: " + message),
+          () -> assertFalse(message.contains("reason from day 3"),
+              "later repeats of the same resource add nothing: " + message),
+          () -> assertTrue(message.contains("4 failed"),
+              "but all four resource-days are still counted as lost: " + message));
+    }
+
+    /**
+     * A clean run returns normally and reports Success — the other half of the regression. A
+     * process that threw on every run would record ERROR for the scheduler just as reliably, and
+     * be just as useless.
+     */
+    @Test
+    void aCleanRunReturnsNormallyAndReportsSuccess() throws Exception {
+      UsageAggregationResult clean = new UsageAggregationResult();
+      clean.addDay();
+      clean.addResource();
+      clean.addRows(7);
+
+      Outcome outcome = executeSettlingWindowReporting(clean);
+
+      assertAll(() -> assertNull(outcome.thrown, "a clean run must not throw"),
+          () -> assertEquals("Success", outcome.error.getType()),
+          () -> assertTrue(outcome.error.getMessage().contains("1 succeeded"),
+              outcome.error.getMessage()),
+          () -> assertTrue(outcome.error.getMessage().contains("7 usage row(s)"),
+              outcome.error.getMessage()));
+    }
+
+    /**
+     * A partial run has already flushed and committed the resource-days that worked, so it must
+     * NOT roll back on its way out. Rolling back here would discard exactly the work the message
+     * tells the operator is already written.
+     */
+    @Test
+    void aPartialRunKeepsTheWorkThatSucceeded() throws Exception {
+      UsageAggregationResult withFailure = new UsageAggregationResult();
+      withFailure.addDay();
+      withFailure.addResource();
+      withFailure.addResource();
+      withFailure.addFailure("BROKEN_RESOURCE", "boom");
+
+      Outcome outcome = executeSettlingWindowReporting(withFailure);
+
+      assertAll(() -> verify(outcome.obDal).flush(),
+          () -> verify(outcome.obDal, never()).rollbackAndClose());
+    }
+
+    /**
+     * The wording this process COMPOSES carries no at-sign.
+     *
+     * <p>Openbravo parses '@' as its message-parameter delimiter, so a message containing one can
+     * reach the user blank — the trap that already cost us the undeployed-qualifier message in
+     * {@code UsageResourceValidator}. This failure message is on the same road: the interactive
+     * launcher renders it through {@code Utility.translateError}.
+     *
+     * <p><b>This is a guarantee about our own text only, and deliberately not about the whole
+     * message.</b> Two of its parts are values we do not own — the resource search keys, which an
+     * administrator types into the catalog, and the failure reasons, which are exception messages
+     * from anywhere (a Hibernate error quoting HQL, a CDI error naming an annotation). Asserting
+     * that the composed result never contains '@' would be asserting something we cannot hold,
+     * and the test would fail on a legitimate input rather than on a regression. So the fixture
+     * supplies at-sign-free values, and what is pinned is that nobody introduces an at-sign into
+     * the template around them. The dynamic halves are a known edge, recorded here rather than
+     * silently assumed away.
+     */
+    @Test
+    void theComposedFailureWordingContainsNoAtSign() throws Exception {
+      UsageAggregationResult withFailure = new UsageAggregationResult();
+      withFailure.addDay();
+      withFailure.addResource();
+      withFailure.addResource();
+      withFailure.addFailure("BROKEN_RESOURCE", "no counter is deployed for that qualifier");
+
+      Outcome outcome = executeSettlingWindowReporting(withFailure);
+
+      assertFalse(outcome.error.getMessage().contains("@"),
+          "Openbravo parses '@' as a message parameter, so an at-sign in our own wording can"
+              + " reach the user blank: " + outcome.error.getMessage());
     }
 
     /**
@@ -423,7 +654,9 @@ class UsageAggregationProcessTest {
           MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
         obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
 
-        new UsageAggregationProcess().doExecute(bundle);
+        // The rejection now throws as well as reporting, so the throw is absorbed here; that it
+        // happens at all is asserted by assertFailedWith on every rejection spec above.
+        assertThrows(OBException.class, () -> new UsageAggregationProcess().doExecute(bundle));
 
         assertAll(() -> verify(obDal).rollbackAndClose(),
             () -> verify(obDal, never()).flush());
@@ -446,7 +679,8 @@ class UsageAggregationProcessTest {
           MockedStatic<OBDal> obDalStatic = mockStatic(OBDal.class)) {
         obDalStatic.when(OBDal::getInstance).thenReturn(obDal);
 
-        new UsageAggregationProcess().doExecute(bundle);
+        // Throwing is the point of the failing path; the finally block must still restore.
+        assertThrows(OBException.class, () -> new UsageAggregationProcess().doExecute(bundle));
 
         obContext.verify(() -> OBContext.setAdminMode(false));
         obContext.verify(OBContext::restorePreviousMode);

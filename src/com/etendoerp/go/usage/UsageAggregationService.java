@@ -148,7 +148,8 @@ public class UsageAggregationService {
           OBDal.getInstance().commitAndClose();
           result.addRows(rows);
         } catch (Exception e) {
-          result.addFailure();
+          result.addFailure(resource != null ? resource.getSearchKey() : resourceId,
+              e.getMessage());
           // The search key, not the id: when the failure is "this resource is misconfigured",
           // the search key is what an operator can act on without a database lookup first.
           log.error("Resource '{}' failed for day {}: {}",
