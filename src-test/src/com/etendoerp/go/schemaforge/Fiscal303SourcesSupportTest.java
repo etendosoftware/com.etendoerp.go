@@ -76,7 +76,7 @@ public class Fiscal303SourcesSupportTest {
   @Test
   public void testCollectSources_populatedAccountingDate_isFormattedString() {
     Invoice inv = buildInvoice("inv-1", "F-2026-0001", date(2026, 1, 15), date(2026, 1, 20));
-    InvoiceTax it = buildInvoiceTax(inv, "rate-1", "100.00", "21.00");
+    InvoiceTax it = buildInvoiceTax(inv, "100.00", "21.00");
 
     List<Map<String, Object>> rows = runCollectSources(it, "rate-1", 7, 9);
 
@@ -94,7 +94,7 @@ public class Fiscal303SourcesSupportTest {
   @Test
   public void testCollectSources_nullAccountingDate_rowFieldIsNullNoNpe() {
     Invoice inv = buildInvoice("inv-2", "F-2026-0002", date(2026, 2, 10), null);
-    InvoiceTax it = buildInvoiceTax(inv, "rate-1", "50.00", "10.50");
+    InvoiceTax it = buildInvoiceTax(inv, "50.00", "10.50");
 
     List<Map<String, Object>> rows = runCollectSources(it, "rate-1", 7, 9);
 
@@ -148,7 +148,7 @@ public class Fiscal303SourcesSupportTest {
     return inv;
   }
 
-  private static InvoiceTax buildInvoiceTax(Invoice inv, String rateId, String base, String tax) {
+  private static InvoiceTax buildInvoiceTax(Invoice inv, String base, String tax) {
     InvoiceTax it = mock(InvoiceTax.class);
     when(it.getInvoice()).thenReturn(inv);
     when(it.getTaxableAmount()).thenReturn(new BigDecimal(base));
