@@ -2333,9 +2333,13 @@ class McpSchemaFieldBuilderTest {
       org.openbravo.model.ad.ui.Tab wrapperTab = mock(org.openbravo.model.ad.ui.Tab.class);
       when(wrapperTab.getTable()).thenReturn(wrapperTable);
 
+      // Built before the stubbing starts: property() stubs a mock of its own, and Mockito reads a
+      // nested when(...) inside an unfinished when(...) as the outer stubbing being abandoned.
+      Property addressProperty = property("addressLine1");
+      Property regionProperty = property("region");
       Entity backingEntity = mock(Entity.class);
-      when(backingEntity.getPropertyByColumnName("Address1")).thenReturn(property("addressLine1"));
-      when(backingEntity.getPropertyByColumnName("C_Region_ID")).thenReturn(property("region"));
+      when(backingEntity.getPropertyByColumnName("Address1")).thenReturn(addressProperty);
+      when(backingEntity.getPropertyByColumnName("C_Region_ID")).thenReturn(regionProperty);
       ModelProvider modelProvider = mock(ModelProvider.class);
       when(modelProvider.getEntityByTableName("C_Location")).thenReturn(backingEntity);
 

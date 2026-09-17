@@ -20,18 +20,29 @@ package com.etendoerp.go.schemaforge.selector.policy;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
+import org.hibernate.criterion.Criterion;
 import org.junit.Test;
 import org.mockito.MockedStatic;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.dal.service.OBCriteria;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.ad.ui.Tab;
 
@@ -40,11 +51,17 @@ import com.etendoerp.go.schemaforge.data.SFEntity;
 /**
  * Unit tests for {@link AddressVirtualSelectorPolicy} (ETP-5368).
  *
- * <p>Every case here stops before {@code locationColumns()}, which is the only method that touches
- * the DAL — that is the point. A guard that stopped working would let one of these reach OBDal and
- * fail outright, which is exactly the regression signal we want.</p>
+ * <p>{@code locationColumns()} is the only method that touches the DAL. Every case whose entity is
+ * NOT an address wrapper stops before reaching it — that is the point, and a guard that stopped
+ * working would let one of those reach OBDal and fail outright, which is exactly the regression
+ * signal we want. The cases that ARE about a wrapper have to get past the guard by definition, so
+ * they stub that one query through {@link #stubLocationColumns}; they must never be rewritten to
+ * avoid it, because what they assert only means anything once the column really resolved.</p>
  */
 public class AddressVirtualSelectorPolicyTest {
+
+  private static final String LOCATION_TABLE = "C_Location";
+  private static final String WRAPPER_TABLE = "C_BPartner_Location";
 
   private static SFEntity entityOnTable(String tableName) {
     Table table = mock(Table.class);
@@ -54,6 +71,59 @@ public class AddressVirtualSelectorPolicyTest {
     SFEntity entity = mock(SFEntity.class);
     when(entity.getADTab()).thenReturn(tab);
     return entity;
+  }
+
+  /** A {@code C_Location} AD_Column as {@code locationColumns()} reads one. */
+  private static Column locationColumn(String dbColumnName) {
+    Column column = mock(Column.class);
+    when(column.getDBColumnName()).thenReturn(dbColumnName);
+    return column;
+  }
+
+  /**
+   * Stands in for the single query {@code locationColumns()} runs, plus the DAL entity it uses to
+   * key each column under its property name as well as its DB name.
+   *
+   * <p>Only the wrapper cases need this: the policy reaches the DAL exactly when the wrapper guard
+   * lets it through, so stubbing the query is how those cases assert on a column that really
+   * resolved rather than on one that was never found.</p>
+   *
+   * @param dal     an open static mock of {@link OBDal}
+   * @param models  an open static mock of {@link ModelProvider}
+   * @param columns the rows the query returns, keyed DB column name to DAL property name; a
+   *                {@code null} property name means the column has no property alias
+   * @return the mocked columns, in iteration order, so a caller can assert identity
+   */
+  @SuppressWarnings("unchecked")
+  private static Map<String, Column> stubLocationColumns(MockedStatic<OBDal> dal,
+      MockedStatic<ModelProvider> models, Map<String, String> columns) {
+    Map<String, Column> built = new LinkedHashMap<>();
+    List<Column> rows = new ArrayList<>();
+    Entity locationEntity = mock(Entity.class);
+    for (Map.Entry<String, String> entry : columns.entrySet()) {
+      Column column = locationColumn(entry.getKey());
+      built.put(entry.getKey(), column);
+      rows.add(column);
+      Property property = null;
+      if (entry.getValue() != null) {
+        property = mock(Property.class);
+        when(property.getName()).thenReturn(entry.getValue());
+      }
+      when(locationEntity.getPropertyByColumnName(entry.getKey(), false)).thenReturn(property);
+    }
+
+    OBCriteria<Column> criteria = mock(OBCriteria.class);
+    when(criteria.createAlias(anyString(), anyString())).thenReturn(criteria);
+    when(criteria.add(any(Criterion.class))).thenReturn(criteria);
+    when(criteria.list()).thenReturn(rows);
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.createCriteria(Column.class)).thenReturn(criteria);
+    dal.when(OBDal::getInstance).thenReturn(obDal);
+
+    ModelProvider modelProvider = mock(ModelProvider.class);
+    when(modelProvider.getEntityByTableName(LOCATION_TABLE)).thenReturn(locationEntity);
+    models.when(ModelProvider::getInstance).thenReturn(modelProvider);
+    return built;
   }
 
   // ── isAddressWrapper ──────────────────────────────────────────────────
@@ -87,13 +157,48 @@ public class AddressVirtualSelectorPolicyTest {
 
   @Test
   public void nonForeignKeyVirtualColumnHasNoSelector() {
-    // Address1 is a virtual column of the wrapper, but free text: asking for a selector over it is
-    // a caller error and must keep answering as one. SELECTOR_COLUMNS is narrower than
-    // VIRTUAL_COLUMNS on purpose, and widening it would answer here instead of refusing.
-    assertNull(AddressVirtualSelectorPolicy.resolveVirtualSelectorColumn(
-        entityOnTable("C_BPartner_Location"), "Address1"));
-    assertNull(AddressVirtualSelectorPolicy.resolveVirtualSelectorColumn(
-        entityOnTable("C_BPartner_Location"), "RegionName"));
+    // Address1 and RegionName ARE virtual columns of the wrapper — they resolve, which is why the
+    // query is stubbed rather than left to answer nothing — but they are free text: asking for a
+    // selector over them is a caller error and must keep answering as one. SELECTOR_COLUMNS is
+    // narrower than VIRTUAL_COLUMNS on purpose, and widening it would answer here instead of
+    // refusing.
+    Map<String, String> columns = new LinkedHashMap<>();
+    columns.put("Address1", "addressLine1");
+    columns.put("RegionName", "regionName");
+
+    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+         MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class)) {
+      stubLocationColumns(dal, models, columns);
+
+      assertNull(AddressVirtualSelectorPolicy.resolveVirtualSelectorColumn(
+          entityOnTable(WRAPPER_TABLE), "Address1"));
+      assertNull(AddressVirtualSelectorPolicy.resolveVirtualSelectorColumn(
+          entityOnTable(WRAPPER_TABLE), "RegionName"));
+      // Also refused under the property spelling, which is the name neo_schema publishes.
+      assertNull(AddressVirtualSelectorPolicy.resolveVirtualSelectorColumn(
+          entityOnTable(WRAPPER_TABLE), "addressLine1"));
+    }
+  }
+
+  @Test
+  public void foreignKeyVirtualColumnResolvesUnderEitherSpelling() {
+    // The counterweight to the test above: the refusal there has to be about SELECTOR_COLUMNS, not
+    // about nothing ever resolving. C_Region_ID does resolve, and under both names the two front
+    // doors use — the SPA's selector URL names the DB column, neo_schema publishes the property.
+    Map<String, String> columns = new LinkedHashMap<>();
+    columns.put("C_Region_ID", "region");
+    columns.put("RegionName", "regionName");
+
+    try (MockedStatic<OBDal> dal = mockStatic(OBDal.class);
+         MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class)) {
+      Map<String, Column> built = stubLocationColumns(dal, models, columns);
+      Column region = built.get("C_Region_ID");
+
+      assertSame(region, AddressVirtualSelectorPolicy.resolveVirtualSelectorColumn(
+          entityOnTable(WRAPPER_TABLE), "C_Region_ID"));
+      assertSame(region, AddressVirtualSelectorPolicy.resolveVirtualSelectorColumn(
+          entityOnTable(WRAPPER_TABLE), "region"));
+    }
   }
 
   @Test
