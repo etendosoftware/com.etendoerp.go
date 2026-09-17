@@ -33,6 +33,7 @@ import java.util.stream.Collectors;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
@@ -592,13 +593,7 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
    * "manage" modal. The parent GET is never failed.
    */
   private void annotatePendingDocuments(JSONArray dataArr) throws Exception {
-    List<String> ids = new ArrayList<>();
-    for (int i = 0; i < dataArr.length(); i++) {
-      String id = dataArr.getJSONObject(i).optString(FIELD_ID, null);
-      if (id != null && !id.isEmpty()) {
-        ids.add(id);
-      }
-    }
+    List<String> ids = collectPendingDocsCandidateIds(dataArr);
     if (ids.isEmpty()) {
       return;
     }
@@ -614,36 +609,72 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       invoiceTotals = batchFetchLinkedInvoiceTotals(ids, soTrx);
     } catch (Exception e) {
       log.error("DB error computing needsPrimaryDoc/needsInvoiceDoc for {} order(s)", ids.size(), e);
-      for (int i = 0; i < dataArr.length(); i++) {
-        JSONObject rec = dataArr.getJSONObject(i);
-        rec.put(FIELD_NEEDS_PRIMARY_DOC, false);
-        rec.put(FIELD_NEEDS_INVOICE_DOC, false);
-      }
+      denyPendingDocumentFlags(dataArr);
       return;
     }
     for (int i = 0; i < dataArr.length(); i++) {
-      JSONObject rec = dataArr.getJSONObject(i);
-      String id = rec.optString(FIELD_ID, null);
-      if (id == null || id.isEmpty()) {
-        rec.put(FIELD_NEEDS_PRIMARY_DOC, false);
-        rec.put(FIELD_NEEDS_INVOICE_DOC, false);
-        continue;
-      }
-      OrderQuantities qty = quantities.get(id);
-      BigDecimal ordered = qty != null ? qty.ordered() : BigDecimal.ZERO;
-      BigDecimal delivered = qty != null ? qty.delivered() : BigDecimal.ZERO;
-      rec.put(FIELD_NEEDS_PRIMARY_DOC,
-          ordered.compareTo(delivered) != 0 && !withDraftPrimaryDoc.contains(id));
-
-      LinkedInvoiceTotals totals = invoiceTotals.get(id);
-      BigDecimal invoiced = totals != null ? totals.completedTotal() : BigDecimal.ZERO;
-      boolean hasDraftInvoice = totals != null && totals.hasDraft();
-      // The order total is read from the JSON record, not re-queried, so it is the SAME number
-      // the form sees: applyTotalDiscountToRecord() has already run over this array and may have
-      // adjusted grandTotalAmount for a draft carrying a not-yet-materialized total discount.
-      BigDecimal totalOrder = BigDecimal.valueOf(rec.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0));
-      rec.put(FIELD_NEEDS_INVOICE_DOC, totalOrder.compareTo(invoiced) != 0 && !hasDraftInvoice);
+      annotatePendingDocumentsOnRecord(
+          dataArr.getJSONObject(i), quantities, withDraftPrimaryDoc, invoiceTotals);
     }
+  }
+
+  /**
+   * The non-empty {@code id} of every record of the page, in page order — the exact id set the
+   * three batch queries are built from. A record without a usable id contributes nothing, so a
+   * page where NO record has one yields an empty list and no query is issued at all.
+   */
+  private List<String> collectPendingDocsCandidateIds(JSONArray dataArr) throws JSONException {
+    List<String> ids = new ArrayList<>();
+    for (int i = 0; i < dataArr.length(); i++) {
+      String id = dataArr.getJSONObject(i).optString(FIELD_ID, null);
+      if (id != null && !id.isEmpty()) {
+        ids.add(id);
+      }
+    }
+    return ids;
+  }
+
+  /**
+   * Annotates both flags {@code false} on every record of the page — the degraded answer used
+   * when the batch queries could not be run. See {@link #annotatePendingDocuments} for why the
+   * flags are set to {@code false} rather than left absent.
+   */
+  private void denyPendingDocumentFlags(JSONArray dataArr) throws JSONException {
+    for (int i = 0; i < dataArr.length(); i++) {
+      JSONObject rec = dataArr.getJSONObject(i);
+      rec.put(FIELD_NEEDS_PRIMARY_DOC, false);
+      rec.put(FIELD_NEEDS_INVOICE_DOC, false);
+    }
+  }
+
+  /**
+   * Applies both flags to ONE record, reading only the already-fetched batch results — no query
+   * of its own. A record without a usable id is in none of them and gets the same
+   * {@code false}/{@code false} degraded answer a DB failure would produce.
+   */
+  private void annotatePendingDocumentsOnRecord(JSONObject rec,
+      Map<String, OrderQuantities> quantities, Set<String> withDraftPrimaryDoc,
+      Map<String, LinkedInvoiceTotals> invoiceTotals) throws JSONException {
+    String id = rec.optString(FIELD_ID, null);
+    if (id == null || id.isEmpty()) {
+      rec.put(FIELD_NEEDS_PRIMARY_DOC, false);
+      rec.put(FIELD_NEEDS_INVOICE_DOC, false);
+      return;
+    }
+    OrderQuantities qty = quantities.get(id);
+    BigDecimal ordered = qty != null ? qty.ordered() : BigDecimal.ZERO;
+    BigDecimal delivered = qty != null ? qty.delivered() : BigDecimal.ZERO;
+    rec.put(FIELD_NEEDS_PRIMARY_DOC,
+        ordered.compareTo(delivered) != 0 && !withDraftPrimaryDoc.contains(id));
+
+    LinkedInvoiceTotals totals = invoiceTotals.get(id);
+    BigDecimal invoiced = totals != null ? totals.completedTotal() : BigDecimal.ZERO;
+    boolean hasDraftInvoice = totals != null && totals.hasDraft();
+    // The order total is read from the JSON record, not re-queried, so it is the SAME number
+    // the form sees: applyTotalDiscountToRecord() has already run over this array and may have
+    // adjusted grandTotalAmount for a draft carrying a not-yet-materialized total discount.
+    BigDecimal totalOrder = BigDecimal.valueOf(rec.optDouble(FIELD_GRAND_TOTAL_AMOUNT, 0.0));
+    rec.put(FIELD_NEEDS_INVOICE_DOC, totalOrder.compareTo(invoiced) != 0 && !hasDraftInvoice);
   }
 
   /**
