@@ -27,6 +27,7 @@ import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -329,6 +330,27 @@ public class OnboardingCostingScheduleService {
    * @return what happened, per client, for the caller to report
    */
   public RealignReport realignCadence(String clientIdFilter) {
+    return realignCadence(clientIdFilter, Collections.emptySet());
+  }
+
+  /**
+   * As {@link #realignCadence(String)}, but skipping tenants that have already been migrated.
+   *
+   * <p>This is what makes the one-shot startup sweep one-shot. The unconditional form above stays
+   * the webhook's entry point on purpose: an operator asking for ONE tenant to be corrected means
+   * it, and must not be silently ignored because a marker says the migration already ran.
+   *
+   * <p><b>Why skipping matters beyond saving work.</b> Converging every tenant to 30s on every boot
+   * is right for a migration and wrong as a standing policy: the day the product lets a user choose
+   * their own costing frequency, a permanent sweep would silently reset that choice on the next
+   * deploy. Skipping already-migrated tenants is what keeps this a migration.
+   *
+   * @param clientIdFilter a single client to act on, or {@code null} to sweep every tenant
+   * @param skipClientIds  clients to leave untouched (already migrated); never {@code null}
+   * @return what happened, per client, for the caller to report and to mark as migrated. Skipped
+   *     clients produce no outcome at all, so an empty report means there was nothing left to do.
+   */
+  public RealignReport realignCadence(String clientIdFilter, Set<String> skipClientIds) {
     RealignReport report = new RealignReport();
     OBContext.setAdminMode(true);
     try {
@@ -345,6 +367,9 @@ public class OnboardingCostingScheduleService {
       }
       for (Map.Entry<String, List<String>> entry
           : scheduledRequestIdsByClient(process, clientIdFilter).entrySet()) {
+        if (skipClientIds.contains(entry.getKey())) {
+          continue;
+        }
         realignClient(entry.getKey(), entry.getValue(), report);
       }
       return report;

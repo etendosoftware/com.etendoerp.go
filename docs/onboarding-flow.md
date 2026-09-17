@@ -270,7 +270,10 @@ It therefore lives in `OnboardingCostingScheduleService#realignCadence(String)`,
 triggered TWO ways. The primary one is `CostingCadenceStartup`, an application initializer that
 sweeps every tenant on boot — **shipping this module is itself a restart**, so the release that
 changes the cadence for new tenants is the same event that realigns the existing ones, with nobody
-doing anything. The secondary one is the `SFCostingCadence` webhook (NEO bridge, `costingcadence`),
+doing anything. It is **one-shot per tenant**: each migrated client is marked in
+`ETGO_DATA_FIX_HISTORY` (`fix_id='__costing-cadence-30s__'`) and skipped from the next boot on, so
+later restarts cost two queries and write nothing — and a frequency a user picks for themselves in
+the future is never silently reset. The secondary one is the `SFCostingCadence` webhook (NEO bridge, `costingcadence`),
 kept as the escape hatch for correcting a single tenant without waiting for a release.
 It enforces the invariant new tenants are born with: **exactly one active `SCH`
 `CostingBackground` request per client, at 30 s**, re-arming the surviving
