@@ -210,35 +210,6 @@ public class TenantEnvironmentLifecycleService {
     }
   }
 
-  /** Updates lifecycle values for the gated local development test tool. */
-  public boolean updateDevelopmentState(String clientId, EnvironmentAccessPolicy.EnvironmentType type,
-      Instant trialStartedAt, EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus,
-      Instant renewalDueAt) {
-    if (StringUtils.isBlank(clientId) || type == null) {
-      return false;
-    }
-    try {
-      Client client = OBDal.getInstance().get(Client.class, clientId);
-      if (client == null) return false;
-      setPreference(ENVIRONMENT_TYPE_ATTRIBUTE, type.name(), client);
-      if (type == EnvironmentAccessPolicy.EnvironmentType.DEMO && trialStartedAt != null) {
-        setPreference(DEMO_TRIAL_STARTED_ATTRIBUTE, trialStartedAt.toString(), client);
-      }
-      if (subscriptionStatus != null) {
-        setPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, subscriptionStatus.name(), client);
-      }
-      if (renewalDueAt != null) {
-        setPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE, renewalDueAt.toString(), client);
-      }
-      OBDal.getInstance().flush();
-      OBDal.getInstance().commitAndClose();
-      return true;
-    } catch (RuntimeException e) {
-      log.error("Could not update development lifecycle state for client {}", clientId, e);
-      return false;
-    }
-  }
-
   /**
    * Updates lifecycle values for the local development test tool. The HTTP caller must gate this
    * method with {@code DevLifecycleToolService.isEnabled()} and ownership validation.
