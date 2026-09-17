@@ -1986,6 +1986,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
 
+    if (rejectWhenPaidOnboardingIsNotOwned(accountEmail, onboardingRequest, response)) {
+      return;
+    }
+
     PaywallOutcome paywallOutcome =
         resolveOnboardingPaywall(accountEmail, onboardingRequest, response);
     if (paywallOutcome == PaywallOutcome.REFUSED) {
@@ -2228,6 +2232,31 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
       return PaywallOutcome.REFUSED;
     }
+  }
+
+  /** Paid retries are billing mutations too and require a server-marked environment owner. */
+  private boolean rejectWhenPaidOnboardingIsNotOwned(String accountEmail,
+      OnboardingRequestData onboardingRequest, HttpServletResponse response) throws IOException {
+    if (StringUtils.isBlank(onboardingRequest.paymentToken)) {
+      return false;
+    }
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    boolean hasEnvironments;
+    boolean billingOwner;
+    try {
+      hasEnvironments = EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail(accountEmail) > 0;
+      billingOwner = EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(accountEmail);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    if (hasEnvironments && !billingOwner) {
+      writeError(response, HttpServletResponse.SC_FORBIDDEN, "BILLING_OWNER_REQUIRED",
+          "Only the environment owner can manage billing",
+          "Only the environment owner can manage billing");
+      return true;
+    }
+    return false;
   }
 
   /**
