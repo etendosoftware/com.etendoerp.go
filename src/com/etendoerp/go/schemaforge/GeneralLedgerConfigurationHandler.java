@@ -94,6 +94,18 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
   private static final String FIELD_ALLOW_NEGATIVE = "allowNegative";
   private static final String FIELD_ACTIVE = "active";
 
+  /**
+   * Business Partner (Contacto) and Product (Producto) accounting-dimension elements are never
+   * shown in — nor editable through — the "Dimensiones contables" screen (ETP-4879): every window
+   * that renders these two dimensions (Assets, Financial Account, Amortization) already hardcodes
+   * them as always visible regardless of this config's {@code active} flag, so the toggle was a
+   * no-op that only confused users (the "Opcional · Ventas y Compras" caption made it look like
+   * disabling either one would hide it somewhere). Project and Cost Center remain genuinely
+   * config-gated and stay in this list. A companion data-fix keeps {@code IsActive='Y'} for these
+   * two element types across every client.
+   */
+  private static final List<String> LOCKED_DIMENSION_TYPES = Arrays.asList("BP", "PR");
+
   private static final String FIELD_SUSPENSE_BALANCING_USE = "suspenseBalancingUse";
   private static final String FIELD_SUSPENSE_BALANCING = "suspenseBalancing";
   private static final String FIELD_SUSPENSE_ERROR_USE = "suspenseErrorUse";
@@ -369,6 +381,9 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
   private JSONArray buildDimensions(List<AcctSchemaElement> dimensions) throws JSONException {
     JSONArray out = new JSONArray();
     for (AcctSchemaElement row : dimensions) {
+      if (LOCKED_DIMENSION_TYPES.contains(row.getType())) {
+        continue;
+      }
       JSONObject item = new JSONObject();
       item.put("id", row.getId());
       item.put("label", nullable(row.getName()));
@@ -549,7 +564,7 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
       JSONObject item = dimensions.optJSONObject(i);
       String id = item != null ? trimmedOrNull(item.optString("id", null)) : null;
       AcctSchemaElement row = id != null ? byId.get(id) : null;
-      if (row != null && item.has(FIELD_ACTIVE)) {
+      if (row != null && item.has(FIELD_ACTIVE) && !LOCKED_DIMENSION_TYPES.contains(row.getType())) {
         if (bool(row.isMandatory()) && !item.optBoolean(FIELD_ACTIVE)) {
           throw new OBException("Mandatory accounting dimensions cannot be deactivated");
         }
