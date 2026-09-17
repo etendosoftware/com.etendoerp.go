@@ -77,8 +77,6 @@ final class ReturnShipmentUtils {
   static final String ERR_RECTIFIED_INVOICE_REQUIRED =
       "Select at least one invoice to rectify: a rectificative invoice cannot be confirmed "
           + "without it.";
-  static final String ERR_RETURN_ALREADY_INVOICED =
-      "A rectificative invoice already exists for this return document.";
   private static final String FIELD_INVOICE_STATUS = "invoiceStatus";
 
   private ReturnShipmentUtils() {}

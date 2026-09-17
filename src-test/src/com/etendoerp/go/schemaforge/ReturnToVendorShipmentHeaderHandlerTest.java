@@ -1064,39 +1064,6 @@ public class ReturnToVendorShipmentHeaderHandlerTest {
   }
 
   /**
-   * ETP-5381 (guard P5): a return shipment that already carries a non-voided invoice is rejected
-   * with 409 BEFORE anything is written — no invoice header, no lines, no completion.
-   */
-  @Test
-  public void handleCreateReturnInvoice_alreadyInvoiced_returnsConflictAndWritesNothing()
-      throws Exception {
-    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(dal);
-      OBProvider provider = mock(OBProvider.class);
-      providerMock.when(OBProvider::getInstance).thenReturn(provider);
-      stubReturnInvoiceQueries(dal, true, Collections.singletonList("inv-src-1"));
-
-      ShipmentInOut returnDoc = mock(ShipmentInOut.class);
-      when(dal.get(ShipmentInOut.class, "ret-1")).thenReturn(returnDoc);
-      when(returnDoc.getDocumentStatus()).thenReturn("CO");
-
-      NeoResponse result = handler.handle(NeoContext.builder()
-          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
-          .fieldName("createReturnInvoice").recordId("ret-1").build());
-
-      assertNotNull(result);
-      assertEquals(HttpServletResponse.SC_CONFLICT, result.getHttpStatus());
-      assertEquals(ReturnShipmentUtils.ERR_RETURN_ALREADY_INVOICED, errorMessage(result));
-      verify(provider, Mockito.never()).get(Invoice.class);
-      verify(dal, Mockito.never()).save(any());
-      verify(dal, Mockito.never()).flush();
-    }
-  }
-
-  /**
    * ETP-5381: no confirmed invoice can be rectified → 400 with the "select an invoice" message,
    * and no invoice is created. A rectificative invoice with no {@code C_Invoice_Reverse} row
    * cannot ever be confirmed, so failing before any write beats leaving a stuck draft behind.

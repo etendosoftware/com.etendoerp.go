@@ -324,11 +324,6 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
               "Return shipment must be completed before creating a return invoice");
         }
 
-        // ETP-5381 (guard P5): reject a second rectificative invoice before writing anything.
-        if (ReturnShipmentUtils.hasNonVoidedReturnInvoice(returnId)) {
-          throw new AlreadyInvoicedException(ReturnShipmentUtils.ERR_RETURN_ALREADY_INVOICED);
-        }
-
         List<ShipmentInOutLine> lines = returnDoc.getMaterialMgmtShipmentInOutLineList()
             .stream().filter(l -> l.getProduct() != null).collect(Collectors.toList());
         if (lines.isEmpty()) {
@@ -361,10 +356,7 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
       } finally {
         OBContext.restorePreviousMode();
       }
-    } catch (AlreadyInvoicedException e) {
-      log.warn("Rejected duplicate return invoice for shipment {}: {}", returnId, e.getMessage());
-      return NeoResponse.error(HttpServletResponse.SC_CONFLICT, e.getMessage());
-    } catch (OBException e) {
+        } catch (OBException e) {
       log.warn("Return invoice creation rejected for shipment {}: {}", returnId, e.getMessage());
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {
