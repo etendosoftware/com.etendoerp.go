@@ -23,6 +23,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
@@ -721,7 +722,21 @@ final class ReturnShipmentUtils {
       detectedIds.add(inv.optString("id"));
     }
     List<JSONObject> selectable = fetchSelectableInvoices(inOutId);
+    Set<String> selectableIds = new HashSet<>();
+    for (JSONObject inv : selectable) {
+      selectableIds.add(inv.optString("id"));
+    }
+    // A detected invoice that falls outside the selectable page (it is capped at 500, newest
+    // first, so a late rectification of an old invoice would) must still be offered: otherwise its
+    // id ships in suggestedInvoiceIds, the frontend drops it for having no matching row, and the
+    // user sees an empty preselection with no error and no way to reach it from the picker.
     JSONArray arr = new JSONArray();
+    for (JSONObject inv : detected) {
+      if (!selectableIds.contains(inv.optString("id"))) {
+        inv.put("suggested", true);
+        arr.put(inv);
+      }
+    }
     for (JSONObject inv : selectable) {
       inv.put("suggested", detectedIds.contains(inv.optString("id")));
       arr.put(inv);
@@ -804,7 +819,8 @@ final class ReturnShipmentUtils {
         "  AND rl.Canceled_Inoutline_ID IS NOT NULL " +
         "  AND i.DocStatus = 'CO' " +
         "ORDER BY i.DateInvoiced DESC";
-    return runInvoiceQuery(sql, inOutId, "Could not load the invoices detected for this return");
+    return runInvoiceQuery(sql, Collections.singletonList(inOutId), "auto-detected",
+        "Could not load the invoices detected for this return");
   }
 
   /**
@@ -821,9 +837,18 @@ final class ReturnShipmentUtils {
    * {@code C_Invoice_Reverse} trigger enforces same-BP only where it applies (Verifactu orgs
    * permit cross-BP rectifications), and any rejection surfaces as a save error. Filtering here
    * would hide rows the database would have accepted.
+   *
+   * <p>Organization IS filtered, unlike business partner. This is raw JDBC, so none of DAL's
+   * implicit org scoping applies; without the clause the picker would offer invoices belonging to
+   * organizations the current role cannot even read, and the rejection would arrive late (on the
+   * link insert) or not at all.
    */
   @SuppressWarnings("java:S2077")
   static List<JSONObject> fetchSelectableInvoices(String inOutId) {
+    String[] readableOrgs = OBContext.getOBContext().getReadableOrganizations();
+    String orgPlaceholders = readableOrgs.length == 0
+        ? "''"
+        : String.join(",", Collections.nCopies(readableOrgs.length, "?"));
     String sql =
         "SELECT i.C_Invoice_ID, i.DocumentNo, i.DateInvoiced, i.GrandTotal, " +
         "  cur.ISO_Code, bp.Name " +
@@ -832,21 +857,33 @@ final class ReturnShipmentUtils {
         "LEFT JOIN C_Currency cur ON cur.C_Currency_ID = i.C_Currency_ID " +
         "LEFT JOIN C_BPartner bp ON bp.C_BPartner_ID = i.C_BPartner_ID " +
         "WHERE i.DocStatus = 'CO' " +
+        "  AND i.AD_Org_ID IN (" + orgPlaceholders + ") " +
         "  AND i.IsSOTrx = ret.IsSOTrx " +
         "  AND i.AD_Client_ID = ret.AD_Client_ID " +
         "  AND i.IsActive = 'Y' " +
         "ORDER BY i.DateInvoiced DESC, i.DocumentNo DESC " +
         "LIMIT 500";
-    return runInvoiceQuery(sql, inOutId, "Could not load the invoices available to rectify");
+    List<String> params = new ArrayList<>();
+    params.add(inOutId);
+    params.addAll(Arrays.asList(readableOrgs));
+    return runInvoiceQuery(sql, params, "selectable", "Could not load the invoices available to rectify");
   }
 
-  /** Shared execution + row mapping for the two invoice-candidate queries above. */
+  /**
+   * Shared execution + row mapping for the two invoice-candidate queries above.
+   *
+   * @param queryName short label identifying which query failed — the two share this method, so a
+   *     single generic log line would not say which one blew up
+   */
   @SuppressWarnings("java:S2077")
-  private static List<JSONObject> runInvoiceQuery(String sql, String inOutId, String errorMessage) {
+  private static List<JSONObject> runInvoiceQuery(String sql, List<String> params, String queryName,
+      String errorMessage) {
     List<JSONObject> result = new ArrayList<>();
     // getConnection() inside the try — see hasNonVoidedReturnInvoice for why.
     try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
-      ps.setString(1, inOutId);
+      for (int i = 0; i < params.size(); i++) {
+        ps.setString(i + 1, params.get(i));
+      }
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           JSONObject inv = new JSONObject();
@@ -861,7 +898,8 @@ final class ReturnShipmentUtils {
         }
       }
     } catch (Exception e) {
-      log.error("Error fetching rectifiable invoices for {}: {}", inOutId, e.getMessage(), e);
+      log.error("Error running the {} rectifiable-invoice query for {}: {}",
+          queryName, params.isEmpty() ? "?" : params.get(0), e.getMessage(), e);
       throw new OBException(errorMessage, e);
     }
     return result;
