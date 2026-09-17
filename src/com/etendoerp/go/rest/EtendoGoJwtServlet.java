@@ -66,6 +66,7 @@ import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.payment.HostedCheckoutService;
 import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.BillingEventStore;
+import com.etendoerp.go.payment.BillingOfferConfiguration;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
@@ -106,6 +107,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *   GET  /sws/go/environments — List environments for the account (requires session token),
  *                               each carrying its plan ("free" | "productive")
  *   GET  /sws/go/billing/overview — Account-level purchase projection (requires session token)
+ *   GET  /sws/go/billing/offers — Server-owned billing offer projection
  *   POST /sws/go/billing/purchases — Start a new owner-authorized purchase
  *   GET  /sws/go/billing/purchases/{id} — Read one account-scoped purchase projection
  *   GET  /sws/go/login?userId=X — Get an Etendo JWT for an AD_User (requires session token + ownership)
@@ -318,6 +320,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleGetOnboardingDraft(request, response);
     } else if (isPath(path, "/environments")) {
       handleEnvironments(request, response);
+    } else if (isPath(path, "/billing/offers")) {
+      handleBillingOffers(request, response);
     } else if (isPath(path, "/billing/overview")) {
       handleBillingOverview(request, response);
     } else if (path != null && path.startsWith("/billing/purchases/")) {
@@ -547,6 +551,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
       } finally {
         OBContext.restorePreviousMode();
+      }
+    });
+  }
+
+  /** Returns the server-owned offer projection used by the account billing UI. */
+  private void handleBillingOffers(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "billing-offers", account -> {
+      try {
+        BillingOfferConfiguration.Offer offer = BillingOfferConfiguration.current();
+        JSONObject result = new JSONObject();
+        result.put("code", "productive-tenant");
+        result.put("amountMinor", offer.getAmountMinor());
+        result.put("currency", offer.getCurrency());
+        result.put("interval", offer.getInterval());
+        writeResponse(response, HttpServletResponse.SC_OK, result);
+      } catch (JSONException e) {
+        log.error("JSON error building billing offer", e);
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
       }
     });
   }
