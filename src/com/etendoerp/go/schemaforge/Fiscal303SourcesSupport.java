@@ -105,6 +105,7 @@ class Fiscal303SourcesSupport {
     Map<String, Object> r = new LinkedHashMap<>();
     r.put("ref",   inv.getDocumentNo());
     r.put("date",  sdf.format(inv.getInvoiceDate()));
+    r.put("accountingDate", inv.getAccountingDate() != null ? sdf.format(inv.getAccountingDate()) : null);
     String cat = inv.getDocumentType().getDocumentCategory();
     r.put("type",  "ARI".equals(cat) || "ARI_RM".equals(cat) ? "Venta" : "Compra");
     r.put("party", inv.getBusinessPartner() != null ? inv.getBusinessPartner().getName() : "");
