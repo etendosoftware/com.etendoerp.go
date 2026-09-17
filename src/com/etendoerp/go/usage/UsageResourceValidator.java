@@ -185,7 +185,8 @@ public final class UsageResourceValidator {
       validateStrategy(resource);
     } else {
       throw new IllegalArgumentException(
-          "Unknown counting mode '" + mode + "'; expected '" + MODE_DECLARATIVE + "' or '"
+          "Unknown counting mode '" + UsageMessages.atSafe(mode) + "'; expected '"
+              + MODE_DECLARATIVE + "' or '"
               + MODE_STRATEGY + "'");
     }
   }
@@ -257,7 +258,7 @@ public final class UsageResourceValidator {
   private static Entity resolveEntity(String entityName) {
     Entity entity = ModelProvider.getInstance().getEntity(entityName, false);
     if (entity == null) {
-      throw new IllegalArgumentException("Counted Entity '" + entityName
+      throw new IllegalArgumentException("Counted Entity '" + UsageMessages.atSafe(entityName)
           + "' does not exist in the runtime model. Use the DAL entity name, for example"
           + " 'Invoice', not the database table name.");
     }
@@ -266,8 +267,8 @@ public final class UsageResourceValidator {
 
   private static Property resolveDateProperty(Entity entity, String dateProperty) {
     if (!entity.hasProperty(dateProperty)) {
-      throw new IllegalArgumentException("Date Property '" + dateProperty
-          + "' does not exist on entity '" + entity.getName() + "'");
+      throw new IllegalArgumentException("Date Property '" + UsageMessages.atSafe(dateProperty)
+          + "' does not exist on entity '" + UsageMessages.atSafe(entity.getName()) + "'");
     }
     return entity.getProperty(dateProperty, false);
   }
@@ -275,13 +276,15 @@ public final class UsageResourceValidator {
   private static void requireDateType(String entityName, String dateProperty,
       Property property) {
     if (property == null || !property.isPrimitive()) {
-      throw new IllegalArgumentException("Date Property '" + dateProperty + "' on entity '"
-          + entityName + "' is not a simple column, so it cannot be a counting date");
+      throw new IllegalArgumentException("Date Property '" + UsageMessages.atSafe(dateProperty)
+          + "' on entity '" + UsageMessages.atSafe(entityName)
+          + "' is not a simple column, so it cannot be a counting date");
     }
     Class<?> type = property.getPrimitiveObjectType();
     if (type == null || !Date.class.isAssignableFrom(type)) {
-      throw new IllegalArgumentException("Date Property '" + dateProperty + "' on entity '"
-          + entityName + "' holds " + (type == null ? "an unknown type" : type.getSimpleName())
+      throw new IllegalArgumentException("Date Property '" + UsageMessages.atSafe(dateProperty)
+          + "' on entity '" + UsageMessages.atSafe(entityName)
+          + "' holds " + (type == null ? "an unknown type" : type.getSimpleName())
           + ", not a date; counting buckets by it would be meaningless");
     }
   }

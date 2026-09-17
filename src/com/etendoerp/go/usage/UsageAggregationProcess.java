@@ -215,7 +215,8 @@ public class UsageAggregationProcess extends DalBaseProcess {
         return parsed;
       }
     }
-    throw new ParseException(name + " '" + text + "' is not a date. Accepted formats: "
+    throw new ParseException(name + " '" + UsageMessages.atSafe(text)
+        + "' is not a date. Accepted formats: "
         + String.join(", ", accepted) + ".", 0);
   }
 

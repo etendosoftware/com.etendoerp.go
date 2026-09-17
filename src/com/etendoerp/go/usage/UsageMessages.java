@@ -50,7 +50,7 @@ public final class UsageMessages {
    * {@code ab.com}, which reads as a real value and is wrong, while {@code a(at)b.com} is
    * visibly a substitution.
    *
-   * @param text any value interpolated into a user-facing message; null and blank pass through
+   * @param text any value interpolated into a user-facing message; null and empty pass through
    * @return the text with every at-sign replaced
    */
   public static String atSafe(String text) {
