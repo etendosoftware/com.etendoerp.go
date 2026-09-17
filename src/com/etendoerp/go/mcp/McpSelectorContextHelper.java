@@ -44,6 +44,7 @@ final class McpSelectorContextHelper {
       DateTimeFormatter.ofPattern("dd-MM-yyyy");
   private static final String KEY_MESSAGE = "message";
   private static final String KEY_PARAM = "param";
+  private static final String KEY_FIELD = "field";
   private static final String PARAM_IS_SO_TRX = "IsSOTrx";
   private static final String PARAM_IS_SO_TRX_LOWER = "isSOTrx";
   private static final String PARAM_BPARTNER = "C_BPartner_ID";
@@ -359,7 +360,7 @@ final class McpSelectorContextHelper {
     }
     JSONObject missing = new JSONObject();
     missing.put(KEY_PARAM, PARAM_COUNTRY);
-    missing.put("field", FIELD_COUNTRY);
+    missing.put(KEY_FIELD, FIELD_COUNTRY);
     missing.put(KEY_MESSAGE,
         "Provide country in recordContext to resolve " + columnName
             + ": region names exist only relative to a country.");
@@ -377,7 +378,7 @@ final class McpSelectorContextHelper {
     }
     JSONObject missing = new JSONObject();
     missing.put(KEY_PARAM, PARAM_BPARTNER);
-    missing.put("field", "businessPartner");
+    missing.put(KEY_FIELD, "businessPartner");
     missing.put(KEY_MESSAGE, "Provide businessPartner in recordContext to resolve " + columnName);
     missingContext.put(missing);
   }
@@ -411,7 +412,7 @@ final class McpSelectorContextHelper {
     }
     JSONObject missing = new JSONObject();
     missing.put(KEY_PARAM, PARAM_DATE_INVOICED);
-    missing.put("field", "invoiceDate or orderDate");
+    missing.put(KEY_FIELD, "invoiceDate or orderDate");
     missing.put(KEY_MESSAGE, "Provide invoiceDate or orderDate in recordContext to resolve tax selector");
     missingContext.put(missing);
   }
