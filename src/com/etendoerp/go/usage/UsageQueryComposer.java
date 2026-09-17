@@ -151,7 +151,17 @@ public final class UsageQueryComposer {
     if (StringUtils.isBlank(restriction)) {
       return;
     }
-    String fragment = restriction.trim();
+    scanFragment(restriction.trim());
+  }
+
+  /**
+   * Walks the fragment once, tracking literal state and parenthesis depth.
+   *
+   * @param fragment the trimmed restriction to scan
+   * @throws IllegalArgumentException if the fragment is unbalanced, carries a statement
+   *     terminator or comment marker outside a literal, or leaves a literal unterminated
+   */
+  private static void scanFragment(String fragment) {
     int depth = 0;
     boolean inLiteral = false;
 
@@ -176,6 +186,17 @@ public final class UsageQueryComposer {
       i++;
     }
 
+    requireClosed(inLiteral, depth);
+  }
+
+  /**
+   * Rejects a fragment that ends mid-literal or with parentheses left open.
+   *
+   * @param inLiteral whether the scan ended inside a string literal
+   * @param depth parenthesis depth left at the end of the scan
+   * @throws IllegalArgumentException when either is left unbalanced
+   */
+  private static void requireClosed(boolean inLiteral, int depth) {
     if (inLiteral) {
       throw new IllegalArgumentException(
           "HQL restriction has an unterminated string literal (odd number of quotes)");
