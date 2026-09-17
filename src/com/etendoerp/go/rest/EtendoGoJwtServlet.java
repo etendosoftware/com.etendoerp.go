@@ -268,6 +268,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
   TenantEnvironmentLifecycleService tenantEnvironmentLifecycleService =
       new TenantEnvironmentLifecycleService();
+  DevLifecycleToolService devLifecycleToolService = new DevLifecycleToolService();
   TenantPlanService tenantPlanService = new TenantPlanService();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
   CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
@@ -314,7 +315,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
-    if (isPath(path, "/me")) {
+    if (isPath(path, "/dev/lifecycle") && DevLifecycleToolService.isEnabled()) {
+      handleDevLifecycleGet(request, response);
+    } else if (isPath(path, "/me")) {
       handleMe(request, response);
     } else if (isPath(path, PATH_ONBOARDING_DRAFT)) {
       handleGetOnboardingDraft(request, response);
@@ -342,6 +345,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   @Override
   public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
+    if (isPath(path, "/dev/lifecycle") && DevLifecycleToolService.isEnabled()) {
+      handleDevLifecyclePost(request, response);
+      return;
+    }
     if (isPath(path, "/checkout/webhook")) {
       handleCheckoutWebhook(request, response);
       return;
@@ -353,6 +360,24 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
     routeOnboardingPost(path, request, response);
+  }
+
+  /** Local-only ETP-5396 lifecycle test controls. Disabled deployments answer the normal 404. */
+  private void handleDevLifecycleGet(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "dev-lifecycle-read", account ->
+        writeResponse(response, HttpServletResponse.SC_OK,
+            devLifecycleToolService.read(account.getEmail())));
+  }
+
+  private void handleDevLifecyclePost(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "dev-lifecycle-update", account -> {
+      JSONObject body = readJsonBodyOrBadRequest(request, response);
+      if (body == null) return;
+      writeResponse(response, HttpServletResponse.SC_OK,
+          devLifecycleToolService.update(account.getEmail(), body));
+    });
   }
 
   /**
