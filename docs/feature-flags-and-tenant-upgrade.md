@@ -219,6 +219,14 @@ the same account and environment name. A duplicate submission returns HTTP 409 w
 purchase ID and status, so a retry cannot create a second provider checkout. An unresolved `CREATING`
 row therefore remains visible for reconciliation rather than being silently replaced.
 
+Paid onboarding uses `PROVISIONING_ATTEMPTS` as a durable fencing token. The claim is normally
+taken from `PAID`; if the row has remained `PROVISIONING` longer than
+`etendo.go.billing.provisioning.lease.minutes` (`ETGO_BILLING_PROVISIONING_LEASE_MINUTES`), it is
+reclaimed, its attempt number is incremented, and its timestamp is renewed. The initial lease is
+30 minutes. Completion is an atomic status update guarded by that attempt number, so an old worker
+cannot close a request after a retry has taken over. This makes browser refreshes, process restarts,
+and stale workers recoverable without a schema migration or a second payment.
+
 ### The plan is derived from the payment, not from the decision
 
 `isProductive()` is `true` when — and only when — the request was not refused **and** the payment

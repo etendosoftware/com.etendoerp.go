@@ -2147,8 +2147,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     boolean paidUpgrade = paywallOutcome == PaywallOutcome.PAID;
 
-    if (rejectWhenProvisioningAlreadyClaimed(paidUpgrade, onboardingRequest, accountEmail,
-        response)) {
+    Long provisioningClaim = claimPaidProvisioning(paidUpgrade, onboardingRequest, accountEmail,
+        response);
+    if (paidUpgrade && provisioningClaim == null) {
       return;
     }
 
@@ -2224,7 +2225,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
 
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
-      completeCommittedOnboarding(token, accountEmail, onboardingRequest, clientId, paidUpgrade);
+      completeCommittedOnboarding(token, accountEmail, onboardingRequest, clientId, paidUpgrade,
+          provisioningClaim);
 
       sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
       sendProgress(writer, "finalize", "done", "Environment ready");
@@ -2264,18 +2266,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * @param response response the refusal is written to
    * @return true when the request was refused and the caller must stop
    */
-  private boolean rejectWhenProvisioningAlreadyClaimed(boolean paidUpgrade,
+  private Long claimPaidProvisioning(boolean paidUpgrade,
       OnboardingRequestData onboardingRequest, String accountEmail, HttpServletResponse response)
       throws IOException {
-    if (!paidUpgrade
-        || checkoutRequestStore.claimForProvisioning(onboardingRequest.paymentToken,
-            accountEmail)) {
-      return false;
+    if (!paidUpgrade) {
+      return null;
+    }
+    if (checkoutRequestStore.claimForProvisioning(onboardingRequest.paymentToken, accountEmail)) {
+      Long attempt = checkoutRequestStore.findProvisioningAttempt(onboardingRequest.paymentToken,
+          accountEmail);
+      // A successful conditional update always has a persisted attempt. Keep the success path
+      // recoverable even if a legacy database omits that value.
+      return attempt == null ? 0L : attempt;
     }
     writeError(response, HttpServletResponse.SC_CONFLICT, "PROVISIONING_ALREADY_IN_PROGRESS",
         "This environment is already being created",
         "This environment is already being created. Please wait for it to finish.");
-    return true;
+    return null;
   }
 
   /**
@@ -2315,10 +2322,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * @param paidUpgrade whether this environment was bought rather than free
    */
   private void completeCommittedOnboarding(String token, String accountEmail,
-      OnboardingRequestData onboardingRequest, String clientId, boolean paidUpgrade) {
+      OnboardingRequestData onboardingRequest, String clientId, boolean paidUpgrade,
+      Long provisioningClaim) {
     if (paidUpgrade) {
       try {
-        checkoutRequestStore.recordProvisioned(onboardingRequest.paymentToken, clientId);
+        checkoutRequestStore.recordProvisioned(onboardingRequest.paymentToken, clientId,
+            provisioningClaim);
       } catch (RuntimeException e) {
         log.error("Environment '{}' (client {}) was provisioned but its checkout request could "
             + "not be closed", onboardingRequest.clientName, clientId, e);
