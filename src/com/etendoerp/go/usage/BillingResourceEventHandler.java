@@ -21,6 +21,7 @@ import javax.enterprise.event.Observes;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
@@ -75,7 +76,18 @@ public class BillingResourceEventHandler extends EntityPersistenceEventObserver 
     BillingResource resource = (BillingResource) event.getTargetInstance();
     // Throwing here is deliberate: it aborts the save, which is the whole point of
     // validating at configuration time rather than discovering the problem in the job.
-    UsageResourceValidator.ProbeStamp stamp = UsageResourceValidator.validateAndProbe(resource);
+    UsageResourceValidator.ProbeStamp stamp;
+    try {
+      stamp = UsageResourceValidator.validateAndProbe(resource);
+    } catch (IllegalArgumentException e) {
+      // Rethrown as OBException so the reason actually reaches the user. The validator is
+      // also called outside a request -- from a backfill re-validating the catalog -- where
+      // IllegalArgumentException is the right type, so the translation belongs here at the UI
+      // boundary rather than in the validator. Without it the save is still refused, but
+      // silently: the record simply does not save and the screen says nothing, which is worse
+      // than no validation at all because the user cannot tell what is wrong.
+      throw new OBException(e.getMessage(), e);
+    }
     stamp(event, stamp);
     log.debug("Validated billing resource '{}'", resource.getSearchKey());
   }

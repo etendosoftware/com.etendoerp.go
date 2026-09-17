@@ -240,10 +240,15 @@ public final class UsageResourceValidator {
               + " is Named strategy; the strategy owns its own counting rule");
     }
     if (!UsageCounterLookup.isDeployed(qualifier)) {
-      throw new IllegalArgumentException("No UsageResourceCounter is deployed with @Named(\""
-          + qualifier + "\"). Deployed qualifiers: " + UsageCounterLookup.deployedQualifiers()
-          + ". Note that a counter annotated with a normal scope such as @ApplicationScoped is"
-          + " silently invisible here: use @Named alone.");
+      // No '@' anywhere in this text on purpose: Openbravo treats '@' as its message
+      // parameter delimiter, so a message containing one is parsed as a placeholder and can
+      // reach the user blank. Naming the annotations without the at-sign keeps the advice
+      // while letting the message survive translateError.
+      throw new IllegalArgumentException("No UsageResourceCounter is deployed with the"
+          + " qualifier \"" + qualifier + "\". Deployed qualifiers: "
+          + UsageCounterLookup.deployedQualifiers()
+          + ". Note that a counter annotated with a normal scope such as ApplicationScoped is"
+          + " silently invisible here: use the Named annotation alone.");
     }
   }
 

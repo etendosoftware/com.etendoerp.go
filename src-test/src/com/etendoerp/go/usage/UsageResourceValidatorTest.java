@@ -426,9 +426,124 @@ class UsageResourceValidatorTest {
                 "names the offending qualifier: " + thrown.getMessage()),
             () -> assertTrue(thrown.getMessage().contains("active-users, stored-documents"),
                 "and lists the deployed ones: " + thrown.getMessage()),
-            () -> assertTrue(thrown.getMessage().contains("@ApplicationScoped"),
-                "and warns about the normal-scope trap: " + thrown.getMessage()));
+            () -> assertTrue(thrown.getMessage().contains("ApplicationScoped")
+                && thrown.getMessage().contains("Named"),
+                "and warns about the normal-scope trap, naming both annotations: "
+                    + thrown.getMessage()),
+            () -> assertFalse(thrown.getMessage().contains("@"),
+                "without any at-sign, which Openbravo would parse as a message parameter: "
+                    + thrown.getMessage()));
       }
+    }
+  }
+
+  /**
+   * Every message this class can produce has to survive Openbravo's error rendering, and the one
+   * character that stops it is invisible to a human reading the string.
+   *
+   * <p>{@code OBMessageUtils.translateError} treats '@' as the delimiter of a message parameter —
+   * its javadoc says it searches "the @ parameters" — so a message containing one is parsed as a
+   * placeholder and can reach the user blank. The undeployed-qualifier message hit this in live
+   * testing because it named the CDI annotations the way a developer writes them
+   * ({@code @Named("...")}, {@code @ApplicationScoped}). The save was refused and the screen said
+   * nothing.
+   *
+   * <p>Pinned across ALL of them rather than only the one that broke: the trap is generic, the
+   * next message someone adds is just as exposed, and the failure mode is silence rather than an
+   * error anyone would chase back here.
+   */
+  @Nested
+  @DisplayName("no rejection message may contain an at-sign")
+  class MessagesSurviveOpenbravoRendering {
+
+    /** Rejects, and its reason contains no '@'. */
+    private void assertRejectedWithoutAnAtSign(org.junit.jupiter.api.function.Executable rejection,
+        String what) {
+      IllegalArgumentException thrown =
+          assertThrows(IllegalArgumentException.class, rejection, what + " must be rejected");
+      assertFalse(thrown.getMessage().contains("@"),
+          what + " produces a message Openbravo would eat: " + thrown.getMessage());
+    }
+
+    @Test
+    void noMessageTheModeChecksProduceContainsAnAtSign() {
+      assertAll(
+          () -> assertRejectedWithoutAnAtSign(() -> UsageResourceValidator.validate(null),
+              "a null resource"),
+          () -> assertRejectedWithoutAnAtSign(
+              () -> UsageResourceValidator.validate(resource("X")), "an unknown counting mode"));
+    }
+
+    @Test
+    void noMessageTheDeclarativeChecksProduceContainsAnAtSign() {
+      assertAll(() -> {
+        BillingResource row = resource(UsageResourceValidator.MODE_DECLARATIVE);
+        when(row.getDateProperty()).thenReturn(DATE_PROPERTY);
+        assertRejectedWithoutAnAtSign(() -> UsageResourceValidator.validate(row),
+            "a missing counted entity");
+      }, () -> {
+        BillingResource row = resource(UsageResourceValidator.MODE_DECLARATIVE);
+        when(row.getCountedEntity()).thenReturn(ENTITY);
+        assertRejectedWithoutAnAtSign(() -> UsageResourceValidator.validate(row),
+            "a missing date property");
+      }, () -> {
+        BillingResource row = declarativeRow();
+        when(row.getStrategyQualifier()).thenReturn(QUALIFIER);
+        assertRejectedWithoutAnAtSign(() -> UsageResourceValidator.validate(row),
+            "a declarative row carrying a qualifier");
+      }, () -> {
+        try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class)) {
+          givenNoEntityIsFound(modelProvider);
+          assertRejectedWithoutAnAtSign(() -> UsageResourceValidator.validate(declarativeRow()),
+              "an entity that is not in the model");
+        }
+      }, () -> {
+        try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class)) {
+          ModelProvider provider = mock(ModelProvider.class);
+          Entity entity = mock(Entity.class);
+          modelProvider.when(ModelProvider::getInstance).thenReturn(provider);
+          when(provider.getEntity(eq(ENTITY), anyBoolean())).thenReturn(entity);
+          when(entity.getName()).thenReturn(ENTITY);
+          when(entity.hasProperty(DATE_PROPERTY)).thenReturn(false);
+          assertRejectedWithoutAnAtSign(() -> UsageResourceValidator.validate(declarativeRow()),
+              "a date property that does not exist");
+        }
+      }, () -> {
+        try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class)) {
+          givenTheEntityHasAPropertyOfType(modelProvider, String.class);
+          assertRejectedWithoutAnAtSign(() -> UsageResourceValidator.validate(declarativeRow()),
+              "a date property that is not a date");
+        }
+      }, () -> {
+        try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class)) {
+          givenTheEntityHasADateProperty(modelProvider);
+          BillingResource row = declarativeRow();
+          when(row.getHQLRestriction()).thenReturn("1=1) or (1=1");
+          assertRejectedWithoutAnAtSign(() -> UsageResourceValidator.validate(row),
+              "an unsafe HQL restriction");
+        }
+      });
+    }
+
+    @Test
+    void noMessageTheStrategyChecksProduceContainsAnAtSign() {
+      assertAll(() -> {
+        BillingResource row = resource(UsageResourceValidator.MODE_STRATEGY);
+        assertRejectedWithoutAnAtSign(() -> UsageResourceValidator.validate(row),
+            "a missing qualifier");
+      }, () -> {
+        BillingResource row = strategyRow();
+        when(row.getCountedEntity()).thenReturn(ENTITY);
+        assertRejectedWithoutAnAtSign(() -> UsageResourceValidator.validate(row),
+            "a strategy row carrying a declarative descriptor");
+      }, () -> {
+        try (MockedStatic<UsageCounterLookup> lookup = mockStatic(UsageCounterLookup.class)) {
+          lookup.when(() -> UsageCounterLookup.isDeployed(anyString())).thenReturn(false);
+          lookup.when(UsageCounterLookup::deployedQualifiers).thenReturn("active-users");
+          assertRejectedWithoutAnAtSign(() -> UsageResourceValidator.validate(strategyRow()),
+              "an undeployed qualifier");
+        }
+      });
     }
   }
 

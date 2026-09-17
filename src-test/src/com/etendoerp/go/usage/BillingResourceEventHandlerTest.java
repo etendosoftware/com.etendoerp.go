@@ -19,10 +19,13 @@ package com.etendoerp.go.usage;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -35,7 +38,9 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.mockito.MockedStatic;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.client.kernel.event.EntityNewEvent;
@@ -161,11 +166,44 @@ class BillingResourceEventHandlerTest {
   }
 
   /**
-   * A new catalog row naming an undeployed qualifier is refused at save. The exception is what
-   * aborts the transaction, so it must propagate out of the observer rather than be logged.
+   * The assertions a rejection owes the USER, as opposed to the ones it owes the transaction.
+   *
+   * <p>Aborting the save was never the missing half — the old code aborted it too. What was
+   * missing is that the reason reached the screen: an {@code IllegalArgumentException} out of an
+   * observer is swallowed by the UI layer, so the record simply did not save and nothing was
+   * said, which is worse than no validation at all because the user cannot tell what is wrong.
+   * {@code OBException} is the house pattern for a validating observer in this module
+   * ({@code AssetSearchKeyUniqueHandler} does the same) and is what gets rendered.
+   *
+   * <p>So the type alone is not enough either: a wrapper that dropped or reworded the reason
+   * would satisfy "an OBException was thrown" while showing the user nothing useful. The message
+   * is therefore pinned to the cause's, and the cause is pinned to the original
+   * {@code IllegalArgumentException} — the validator still throws that deliberately, because it
+   * is also called outside a request, so this translation is a UI-boundary concern and the
+   * original must survive it intact.
+   */
+  private static void assertTheReasonReachesTheUser(Executable save) {
+    OBException thrown = assertThrows(OBException.class, save,
+        "an IllegalArgumentException out of an observer aborts the save silently; only an"
+            + " OBException reaches the screen");
+    Throwable cause = thrown.getCause();
+    assertAll(
+        () -> assertNotNull(cause, "the original failure must be chained, not discarded"),
+        () -> assertInstanceOf(IllegalArgumentException.class, cause,
+            "the validator's own type must survive as the cause"),
+        () -> assertEquals(cause.getMessage(), thrown.getMessage(),
+            "the wrapping must not reword or truncate the reason"),
+        () -> assertTrue(thrown.getMessage().contains("no-such-counter"),
+            "and the reason must name what is actually wrong: " + thrown.getMessage()));
+  }
+
+  /**
+   * A new catalog row naming an undeployed qualifier is refused at save, and the user is told
+   * why. The exception is what aborts the transaction, so it must propagate out of the observer
+   * rather than be logged — and it must be the type the UI renders.
    */
   @Test
-  void rejectsAnInvalidResourceOnInsert() {
+  void rejectsAnInvalidResourceOnInsertAndTellsTheUserWhy() {
     try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class);
         MockedStatic<TriggerHandler> triggerHandler = mockStatic(TriggerHandler.class);
         MockedStatic<UsageCounterLookup> lookup = mockStatic(UsageCounterLookup.class)) {
@@ -180,8 +218,7 @@ class BillingResourceEventHandlerTest {
       EntityNewEvent event = mock(EntityNewEvent.class);
       when(event.getTargetInstance()).thenReturn(resource);
 
-      assertThrows(IllegalArgumentException.class,
-          () -> new BillingResourceEventHandler().onNew(event));
+      assertTheReasonReachesTheUser(() -> new BillingResourceEventHandler().onNew(event));
     }
   }
 
@@ -190,7 +227,7 @@ class BillingResourceEventHandlerTest {
    * broken by editing a working one than by creating a bad one outright.
    */
   @Test
-  void rejectsAnInvalidResourceOnUpdate() {
+  void rejectsAnInvalidResourceOnUpdateAndTellsTheUserWhy() {
     try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class);
         MockedStatic<TriggerHandler> triggerHandler = mockStatic(TriggerHandler.class);
         MockedStatic<UsageCounterLookup> lookup = mockStatic(UsageCounterLookup.class)) {
@@ -203,8 +240,48 @@ class BillingResourceEventHandlerTest {
       EntityUpdateEvent event = mock(EntityUpdateEvent.class);
       when(event.getTargetInstance()).thenReturn(resource);
 
-      assertThrows(IllegalArgumentException.class,
-          () -> new BillingResourceEventHandler().onUpdate(event));
+      assertTheReasonReachesTheUser(() -> new BillingResourceEventHandler().onUpdate(event));
+    }
+  }
+
+  /**
+   * THE SECOND HALF OF THE SAME DEFECT, and the one no human spots by reading the string.
+   *
+   * <p>Openbravo treats '@' as its message-parameter delimiter — {@code OBMessageUtils} parses
+   * {@code @CODE@} style placeholders out of an error before rendering it — so a message that
+   * contains one is read as a placeholder and can reach the user blank or mangled. Our message
+   * was full of them, because it named the CDI annotations the way a developer writes them.
+   * The advice is the same without the at-signs; the rendering is not.
+   *
+   * <p>This is asserted at the OBSERVER, not only at the validator, because the observer is the
+   * only path on which it matters: the backfill prints to a log, where an '@' is harmless. It
+   * will come back the moment someone rewrites the message to mention the annotations
+   * "properly", and nothing else in the suite would notice.
+   */
+  @Test
+  void theMessageShownToTheUserContainsNoAtSign() {
+    try (MockedStatic<ModelProvider> modelProvider = mockStatic(ModelProvider.class);
+        MockedStatic<TriggerHandler> triggerHandler = mockStatic(TriggerHandler.class);
+        MockedStatic<UsageCounterLookup> lookup = mockStatic(UsageCounterLookup.class)) {
+      Entity entity = givenObservedEntity(modelProvider);
+      givenTriggersEnabled(triggerHandler);
+      lookup.when(() -> UsageCounterLookup.isDeployed("no-such-counter")).thenReturn(false);
+      lookup.when(UsageCounterLookup::deployedQualifiers).thenReturn("active-users");
+
+      BillingResource resource = targetResource(entity);
+      EntityNewEvent event = mock(EntityNewEvent.class);
+      when(event.getTargetInstance()).thenReturn(resource);
+
+      OBException thrown = assertThrows(OBException.class,
+          () -> new BillingResourceEventHandler().onNew(event));
+
+      assertAll(
+          () -> assertFalse(thrown.getMessage().contains("@"),
+              "Openbravo parses '@' as a message parameter, so an at-sign here can reach the"
+                  + " user blank: " + thrown.getMessage()),
+          () -> assertTrue(thrown.getMessage().contains("Named"),
+              "the advice about the annotation survives without the at-sign: "
+                  + thrown.getMessage()));
     }
   }
 
