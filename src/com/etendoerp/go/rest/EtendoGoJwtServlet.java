@@ -477,6 +477,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             "clientName is required", "clientName is required");
         return;
       }
+      CheckoutRequest activePurchase = checkoutRequestStore
+          .findActiveForAccountAndClientName(account.getEmail(), clientName);
+      if (activePurchase != null) {
+        JSONObject result = new JSONObject();
+        result.put("purchaseId", activePurchase.getRequest());
+        result.put(FIELD_STATUS, activePurchase.getCheckoutRequestStatus());
+        result.put(FIELD_CLIENT_NAME, activePurchase.getClientName());
+        writeResponse(response, HttpServletResponse.SC_CONFLICT, result);
+        return;
+      }
       String requestOrigin = request.getHeader("Origin");
       final String origin = StringUtils.isBlank(requestOrigin)
           ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;

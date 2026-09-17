@@ -209,6 +209,11 @@ scoped to the authenticated account and expose only the local purchase status, e
 and safe provisioning reference. They do not expose Stripe customer/session identifiers or create
 a second payment ledger.
 
+`POST /sws/go/billing/purchases` also checks the durable request table for an active purchase with
+the same account and environment name. A duplicate submission returns HTTP 409 with the existing
+purchase ID and status, so a retry cannot create a second provider checkout. An unresolved `CREATING`
+row therefore remains visible for reconciliation rather than being silently replaced.
+
 ### The plan is derived from the payment, not from the decision
 
 `isProductive()` is `true` when — and only when — the request was not refused **and** the payment

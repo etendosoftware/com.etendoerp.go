@@ -227,6 +227,30 @@ public class CheckoutRequestStore {
     }
   }
 
+  /** Finds an unfinished or paid purchase for the same account and environment name. */
+  public CheckoutRequest findActiveForAccountAndClientName(String accountEmail, String clientName) {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      if (StringUtils.isBlank(accountEmail) || StringUtils.isBlank(clientName)) {
+        return null;
+      }
+      OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
+          "as cr where lower(cr.accountEmail) = lower(:accountEmail)"
+              + " and lower(cr.clientName) = lower(:clientName)"
+              + " and cr.checkoutRequestStatus in ('CREATING', 'CREATED', 'PAID', 'PROVISIONING')"
+              + " order by cr.creationDate desc");
+      query.setNamedParameter("accountEmail", StringUtils.trimToEmpty(accountEmail));
+      query.setNamedParameter("clientName", StringUtils.trimToEmpty(clientName));
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setMaxResult(1);
+      return query.uniqueResult();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
   /**
    * Returns whether a confirmed payment backs this request, account and environment name.
    *
