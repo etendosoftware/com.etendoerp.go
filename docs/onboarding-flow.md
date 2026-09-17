@@ -465,6 +465,21 @@ user through the initial setup tasks. Its progress is persisted server-side in
 `{ "v": 1, "seen": true, "completed": ["company-data", "products"] }`), so the
 checklist keeps its state across logins and devices.
 
+**Who sees it at all (owner gate, ETP-5395).** The paragraph above and the plan
+gate below both describe what a viewer of this window sees — but as of ETP-5395
+only the tenant's onboarding Owner (`AD_User.EM_ETGO_Is_Owner`, ETP-4830, §7
+item 10 of `docs/neo-headless.md`) is a viewer at all. `SFWindowAccessMap`
+exposes this per-user, not per-role, as `capabilities.isOwner` (§8b of
+`docs/neo-headless.md`); the frontend (`etendo_schema_forge`) hides the menu
+entry for a non-owner and redirects away from `/first-steps` even on a direct
+URL hit, in both directions live (no reload needed if ownership changes
+mid-session). This backend endpoint pair (`GET`/`POST
+/sws/go/onboarding/first-steps`) itself performs no owner check — the gate is
+enforced entirely client-side, on top of the existing per-account auth these
+endpoints already require. See `etendo_schema_forge`'s
+`docs/functionalidad/02-capacidades-y-flujos.md` (capability CAP-ROL-05) for
+the full frontend mechanism.
+
 ### Which steps a tenant is shown (plan gate)
 
 The checklist is **shorter on a trial**. Two steps carry `productiveOnly` in
