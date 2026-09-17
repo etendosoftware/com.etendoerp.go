@@ -387,6 +387,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleSaveOnboardingDraft(request, response);
     } else if (isPath(path, "/onboarding")) {
       handleOnboarding(request, response);
+    } else if (isPath(path, "/billing/purchases")) {
+      handleBillingPurchaseCreate(request, response);
     } else if (isPath(path, "/checkout/sessions")) {
       handleCheckoutSession(request, response);
     } else if (isPath(path, "/company-invitations")) {
@@ -439,6 +441,53 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         log.error("Could not create hosted checkout session", e);
         writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "CHECKOUT_PROVIDER_ERROR",
             "Unable to create checkout session", "Unable to create checkout session");
+      }
+    });
+  }
+
+  /**
+   * Creates a new account-level purchase. The local contract is provider-neutral; the existing
+   * hosted checkout service is only the first adapter behind this boundary.
+   */
+  private void handleBillingPurchaseCreate(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    runWithAuthenticatedAccount(request, response, "billing-purchase-create", account -> {
+      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+      OBContext.setAdminMode(true);
+      boolean billingOwner;
+      try {
+        billingOwner = EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(account.getEmail());
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+      if (!billingOwner) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, "BILLING_OWNER_REQUIRED",
+            "Only the environment owner can manage billing",
+            "Only the environment owner can manage billing");
+        return;
+      }
+      JSONObject body = readJsonBodyOrBadRequest(request, response);
+      if (body == null) return;
+      String clientName = body.optString(FIELD_CLIENT_NAME, "").trim();
+      if (clientName.isEmpty()) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+            "clientName is required", "clientName is required");
+        return;
+      }
+      String requestOrigin = request.getHeader("Origin");
+      final String origin = StringUtils.isBlank(requestOrigin)
+          ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+      try {
+        JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
+            clientName, origin);
+        writeResponse(response, HttpServletResponse.SC_CREATED, result);
+      } catch (IllegalStateException e) {
+        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, "CHECKOUT_NOT_CONFIGURED",
+            "Checkout is not configured", "Checkout is not configured");
+      } catch (Exception e) {
+        log.error("Could not create account billing purchase", e);
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
+            "Unable to create billing purchase", "Unable to create billing purchase");
       }
     });
   }
