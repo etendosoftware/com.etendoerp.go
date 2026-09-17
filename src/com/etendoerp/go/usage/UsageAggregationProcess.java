@@ -45,7 +45,8 @@ import org.openbravo.service.db.DalBaseProcess;
  * to run repeatedly. It writes only to {@code ETGO_USAGE_DAILY} and calls no external
  * service, which is why it is safe to run in a real environment on day one.
  *
- * <p>Parameters (both optional): {@code DateFrom}, {@code DateTo}. Supplying one without the
+ * <p>Parameters (both optional), labelled {@code Starting Date} and {@code Ending Date} on
+ * screen and keyed {@code datefrom}/{@code dateto} in the bundle. Supplying one without the
  * other is rejected rather than guessed at. Either the instance's own display format (the
  * {@code dateFormat.java} property, which is what the parameter window sends) or
  * {@code yyyy-MM-dd} (what a scheduled request's JSON parameters naturally carry) is
@@ -55,24 +56,32 @@ public class UsageAggregationProcess extends DalBaseProcess {
 
   private static final Logger log = LogManager.getLogger(UsageAggregationProcess.class);
 
+  /**
+   * Lookup keys, which are the AD <b>column</b> names, not the display names. The parameter
+   * window puts {@code datefrom}/{@code dateto} into the bundle regardless of what the
+   * parameters are labelled, so renaming the labels does not reach this.
+   */
   static final String PARAM_DATE_FROM = "DateFrom";
   static final String PARAM_DATE_TO = "DateTo";
+  /** What the parameters are called on screen; used only in messages a user reads. */
+  static final String LABEL_DATE_FROM = "Starting Date";
+  static final String LABEL_DATE_TO = "Ending Date";
   private static final String DATE_FORMAT = "yyyy-MM-dd";
 
   @Override
   public void doExecute(ProcessBundle bundle) throws Exception {
     OBContext.setAdminMode(false);
     try {
-      Date from = readDate(bundle, PARAM_DATE_FROM);
-      Date to = readDate(bundle, PARAM_DATE_TO);
+      Date from = readDate(bundle, PARAM_DATE_FROM, LABEL_DATE_FROM);
+      Date to = readDate(bundle, PARAM_DATE_TO, LABEL_DATE_TO);
       if ((from == null) != (to == null)) {
         throw new IllegalArgumentException(
-            "Supply both " + PARAM_DATE_FROM + " and " + PARAM_DATE_TO + ", or neither to"
+            "Supply both " + LABEL_DATE_FROM + " and " + LABEL_DATE_TO + ", or neither to"
                 + " process the settling window");
       }
       if (from != null && from.after(to)) {
         throw new IllegalArgumentException(
-            PARAM_DATE_FROM + " must not be after " + PARAM_DATE_TO);
+            LABEL_DATE_FROM + " must not be after " + LABEL_DATE_TO);
       }
 
       UsageAggregationService service = new UsageAggregationService();
@@ -169,7 +178,8 @@ public class UsageAggregationProcess extends DalBaseProcess {
    * scheduled {@code ProcessRequest}, or a direct call. Matching exactly would silently read
    * null and quietly turn a requested backfill into an ordinary settling-window run.
    */
-  private Date readDate(ProcessBundle bundle, String name) throws ParseException {
+  private Date readDate(ProcessBundle bundle, String name, String label)
+      throws ParseException {
     Object raw = null;
     for (Map.Entry<String, Object> entry : bundle.getParams().entrySet()) {
       if (entry.getKey() != null && entry.getKey().equalsIgnoreCase(name)) {
@@ -187,7 +197,7 @@ public class UsageAggregationProcess extends DalBaseProcess {
     if (StringUtils.isBlank(text)) {
       return null;
     }
-    return UsageDayRange.startOfDay(parseDate(text, name));
+    return UsageDayRange.startOfDay(parseDate(text, label));
   }
 
   /**
