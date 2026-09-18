@@ -158,8 +158,14 @@ final class NeoDocumentDownloadService {
     if (attachRoot == null) {
       throw new OBException("Property '" + PROP_ATTACH_PATH + "' is not configured");
     }
-    String relativeDir = StringUtils.defaultIfBlank(attachment.getPath(),
-        attachment.getTable().getId() + "-" + attachment.getRecord());
+    // Built lazily on purpose: StringUtils.defaultIfBlank would evaluate the fallback even
+    // when a path is recorded (Java argument evaluation is eager), forcing a proxy load of
+    // AD_Table on every download and turning a null table into an NPE — which escapes the
+    // caller's catch, since that only covers OBException, and takes the servlet down
+    // instead of answering the controlled 500.
+    String recordedPath = StringUtils.trimToNull(attachment.getPath());
+    String relativeDir = recordedPath != null ? recordedPath
+        : attachment.getTable().getId() + "-" + attachment.getRecord();
     return new File(attachRoot + File.separator + relativeDir, attachment.getName());
   }
 
