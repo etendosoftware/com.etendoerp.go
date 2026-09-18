@@ -365,7 +365,7 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
   public void testAStaleProvisioningClaimCanBeReclaimedWithANewAttemptToken() {
     String email = newEmail("claim-stale");
     String accountId = createAccount(email);
-    String requestId = createPaidRequest(accountId, ENVIRONMENT);
+    String requestId = createPaidRequest(accountId, email);
 
     assertTrue(store.claimForProvisioning(requestId, email));
     forceTimestamp(requestId, "PROVISIONING_AT", DISTANT_PAST);
