@@ -4,6 +4,7 @@ package com.etendoerp.go.payment;
 import java.util.Arrays;
 import java.util.Date;
 import java.util.List;
+import java.util.function.Supplier;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -24,11 +25,14 @@ import com.etendoerp.go.schemaforge.data.Plan;
  * ({@code ETGO_BILLING_EVENT}) it replaces the in-memory {@code CheckoutPaymentRegistry} that
  * ETP-5045 retired: this table holds the payment correlation, that one the webhook idempotency.
  *
- * <p>Every method opens its own system context ({@code "0","0","0","0"} plus admin mode) and
- * restores it in a {@code finally}. This is deliberate rather than delegated to callers: the
- * webhook handler is matched before the authentication chain and therefore has no
- * {@link OBContext} at all, while the status and paywall callers already hold one. Opening it
- * here makes the store safe from both.
+ * <p>Every method runs its body through {@link #runAsSystem}, which opens the system context
+ * ({@code "0","0","0","0"} plus admin mode) and gives the caller's own context back in a
+ * {@code finally}. Opening it here is deliberate rather than delegated to callers: the webhook
+ * handler is matched before the authentication chain and therefore has no {@link OBContext} at
+ * all, while the status and paywall callers already hold one. Giving it back is what makes the
+ * store safe to call from the middle of another unit of work: {@code applyPaidUpgradeSideEffects}
+ * calls in after onboarding has installed its provisioning context, and every later step still
+ * depends on that context.
  *
  * <p>Rows are stored at client and organization {@code 0}, matching {@code ETGO_ACCOUNT} and the
  * table's {@code ACCESSLEVEL=4}. That also means DAL row-level security has nothing to filter on,
@@ -77,9 +81,7 @@ public class CheckoutRequestStore {
    */
   public void recordRequested(String requestId, String accountId, String accountEmail,
       String clientName, Plan plan) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
+    runAsSystem(() -> {
       CheckoutRequest request = OBProvider.getInstance().get(CheckoutRequest.class);
       request.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
       request.setOrganization(OBDal.getInstance().get(Organization.class, ZERO_ID));
@@ -93,9 +95,7 @@ public class CheckoutRequestStore {
       request.setProvisioningAttempts(0L);
       OBDal.getInstance().save(request);
       flushAndCommit();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   /**
@@ -109,9 +109,7 @@ public class CheckoutRequestStore {
    * @param stripeSessionId the {@code cs_...} Checkout Session id
    */
   public void recordSessionCreated(String requestId, String stripeSessionId) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
+    runAsSystem(() -> {
       CheckoutRequest request = findByRequestId(requestId);
       if (request == null) {
         log.error("No checkout request found for '{}' while recording the provider session",
@@ -126,9 +124,7 @@ public class CheckoutRequestStore {
       }
       OBDal.getInstance().save(request);
       flushAndCommit();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   /**
@@ -151,9 +147,7 @@ public class CheckoutRequestStore {
    */
   public boolean recordPaid(String requestId, String stripeCustomerId,
       String stripeSubscriptionId) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
+    return runAsSystem(() -> {
       CheckoutRequest request = findByRequestId(requestId);
       if (request == null) {
         log.error("No checkout request found for '{}' while recording a confirmed payment",
@@ -174,9 +168,7 @@ public class CheckoutRequestStore {
       OBDal.getInstance().save(request);
       flushAndCommit();
       return true;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   /**
@@ -192,9 +184,7 @@ public class CheckoutRequestStore {
    * @return the matching request, or null
    */
   public CheckoutRequest find(String requestId, String accountEmail) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
+    return runAsSystem(() -> {
       if (StringUtils.isBlank(requestId) || StringUtils.isBlank(accountEmail)) {
         return null;
       }
@@ -206,9 +196,7 @@ public class CheckoutRequestStore {
       query.setFilterOnReadableOrganization(false);
       query.setMaxResult(1);
       return query.uniqueResult();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   /**
@@ -256,9 +244,7 @@ public class CheckoutRequestStore {
    * @return true when this caller won the claim
    */
   public boolean claimForProvisioning(String requestId, String accountEmail) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
+    return runAsSystem(() -> {
       if (StringUtils.isBlank(requestId) || StringUtils.isBlank(accountEmail)) {
         return false;
       }
@@ -280,9 +266,7 @@ public class CheckoutRequestStore {
           .executeUpdate();
       flushAndCommit();
       return claimed == 1;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   /**
@@ -292,9 +276,7 @@ public class CheckoutRequestStore {
    * @param createdClientId {@code AD_CLIENT_ID} of the provisioned environment
    */
   public void recordProvisioned(String requestId, String createdClientId) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
+    runAsSystem(() -> {
       CheckoutRequest request = findByRequestId(requestId);
       if (request == null) {
         log.error("No checkout request found for '{}' while recording a provisioned environment",
@@ -309,9 +291,7 @@ public class CheckoutRequestStore {
       }
       OBDal.getInstance().save(request);
       flushAndCommit();
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   /**
@@ -326,21 +306,19 @@ public class CheckoutRequestStore {
    * @param reason operationally safe failure reason, truncated to the column width
    */
   public void recordFailureReason(String requestId, String reason) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
-      CheckoutRequest request = findByRequestId(requestId);
-      if (request == null) {
-        return;
+    runAsSystem(() -> {
+      try {
+        CheckoutRequest request = findByRequestId(requestId);
+        if (request == null) {
+          return;
+        }
+        request.setFailureReason(StringUtils.abbreviate(StringUtils.trimToEmpty(reason), 255));
+        OBDal.getInstance().save(request);
+        flushAndCommit();
+      } catch (RuntimeException e) {
+        log.error("Could not record the failure reason for checkout request '{}'", requestId, e);
       }
-      request.setFailureReason(StringUtils.abbreviate(StringUtils.trimToEmpty(reason), 255));
-      OBDal.getInstance().save(request);
-      flushAndCommit();
-    } catch (RuntimeException e) {
-      log.error("Could not record the failure reason for checkout request '{}'", requestId, e);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   /**
@@ -398,6 +376,87 @@ public class CheckoutRequestStore {
     query.setFilterOnReadableOrganization(false);
     query.setMaxResult(1);
     return query.uniqueResult();
+  }
+
+  /**
+   * Runs {@code body} as the system user ({@code "0","0","0","0"}) with admin mode on, and hands
+   * the caller back exactly the execution context it arrived with.
+   *
+   * <p>Restoring is the part that is easy to get wrong, and this class got it wrong until
+   * ETP-5045: {@link OBContext#restorePreviousMode()} pops the <em>admin-mode stack</em>, it does
+   * not undo {@link OBContext#setOBContext(String, String, String, String)}. So every method used
+   * to leave the system context installed on the calling thread. That was invisible while the only
+   * callers were the webhook (which has no context to lose) and the status endpoint (which is done
+   * when the store returns, near the end of a request). It stopped being invisible as soon as a
+   * caller in the middle of a unit of work started using the store: everything it ran afterwards
+   * silently continued as system instead of as the identity it had established.
+   *
+   * <p><b>{@code null} is a legitimate previous context, not a missing one.</b> The webhook handler
+   * is matched before the authentication chain and genuinely has none, so "no context" must be
+   * restored as no context. {@link OBContext#setOBContext(OBContext)} clears the thread-local when
+   * handed {@code null}, which is precisely the wanted behaviour — substituting a system context
+   * for it would leave the thread more privileged than it was found.
+   *
+   * @param body the work to run as system
+   * @param <T> the body's result type
+   * @return whatever the body returned
+   */
+  private <T> T runAsSystem(Supplier<T> body) {
+    OBContext previousContext = OBContext.getOBContext();
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      return body.get();
+    } finally {
+      // Order is load-bearing. Admin mode was entered on top of the system context, so it has to
+      // be left before that context is taken away: restorePreviousMode() pops the admin-mode stack
+      // and then looks at whichever context is current at that moment, clearing it outright when
+      // the stack empties on the shared admin context. Putting the caller's context back first
+      // would expose that context to the check and could null it out — reintroducing, from the
+      // other end, the very leak this method exists to close.
+      exitAdminModeQuietly();
+      restoreContextQuietly(previousContext);
+    }
+  }
+
+  /**
+   * Void form of {@link #runAsSystem(Supplier)}, for the methods that only write.
+   *
+   * @param body the work to run as system
+   */
+  private void runAsSystem(Runnable body) {
+    runAsSystem(() -> {
+      body.run();
+      return null;
+    });
+  }
+
+  /**
+   * Leaves admin mode without ever throwing: this runs in a {@code finally}, and an exception here
+   * would replace the real failure from the body with a misleading one.
+   */
+  private void exitAdminModeQuietly() {
+    try {
+      OBContext.restorePreviousMode();
+    } catch (RuntimeException e) {
+      log.error("Could not leave admin mode after a checkout-request store operation", e);
+    }
+  }
+
+  /**
+   * Reinstates the caller's context without ever throwing, for the same reason as
+   * {@link #exitAdminModeQuietly()}.
+   *
+   * @param previousContext the context captured on entry; {@code null} is a real value and is
+   *     restored as "no context"
+   */
+  private void restoreContextQuietly(OBContext previousContext) {
+    try {
+      OBContext.setOBContext(previousContext);
+    } catch (RuntimeException e) {
+      log.error("Could not restore the caller's OBContext after a checkout-request store operation",
+          e);
+    }
   }
 
   private void flushAndCommit() {
