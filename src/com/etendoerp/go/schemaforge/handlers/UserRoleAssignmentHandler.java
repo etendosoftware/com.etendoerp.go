@@ -347,7 +347,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     if (ownerId != null) {
       predicate.append("e.id = '").append(ownerId).append("' or ");
     }
-    predicate.append("exists (select 1 from Invitation i where i.user = e)");
+    predicate.append("exists (select 1 from ETGO_Invitation i where i.user = e)");
     String existing = queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM);
     queryParams.put(NeoCrudHelper.NEO_WHERE_PARAM, StringUtils.isBlank(existing)
         ? predicate.toString()

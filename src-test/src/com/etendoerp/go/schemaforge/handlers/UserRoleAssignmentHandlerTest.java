@@ -443,7 +443,7 @@ public class UserRoleAssignmentHandlerTest {
 
     assertNull(handler.handle(ctx));
 
-    assertEquals("exists (select 1 from Invitation i where i.user = e)",
+    assertEquals("exists (select 1 from ETGO_Invitation i where i.user = e)",
         queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
   }
 
@@ -483,7 +483,7 @@ public class UserRoleAssignmentHandlerTest {
     assertNull(handler.handle(ctx));
 
     assertEquals(
-        "(e.active = true) and (exists (select 1 from Invitation i where i.user = e))",
+        "(e.active = true) and (exists (select 1 from ETGO_Invitation i where i.user = e))",
         queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
   }
 
@@ -512,7 +512,7 @@ public class UserRoleAssignmentHandlerTest {
     }
 
     assertEquals(
-        "e.id = '" + OWNER_ID + "' or exists (select 1 from Invitation i where i.user = e)",
+        "e.id = '" + OWNER_ID + "' or exists (select 1 from ETGO_Invitation i where i.user = e)",
         queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
   }
 
@@ -540,7 +540,7 @@ public class UserRoleAssignmentHandlerTest {
       assertNull(handler.handle(ctx));
     }
 
-    assertEquals("exists (select 1 from Invitation i where i.user = e)",
+    assertEquals("exists (select 1 from ETGO_Invitation i where i.user = e)",
         queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
   }
 
@@ -590,7 +590,7 @@ public class UserRoleAssignmentHandlerTest {
     assertNull(handler.handle(ctx));
     assertNull(handler.afterHandle(ctx));
 
-    assertEquals("exists (select 1 from Invitation i where i.user = e)",
+    assertEquals("exists (select 1 from ETGO_Invitation i where i.user = e)",
         queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
     JSONObject inner = body.getJSONObject("response");
     assertEquals(1, inner.getJSONArray("data").length());
