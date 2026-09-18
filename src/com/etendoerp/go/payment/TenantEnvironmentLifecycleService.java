@@ -170,7 +170,11 @@ public class TenantEnvironmentLifecycleService {
     }
   }
 
-  /** Returns the current trial and grace-period configuration. */
+  /**
+   * Returns the current trial and grace-period configuration.
+   *
+   * @return the configured trial and grace-period values
+   */
   public EnvironmentAccessPolicy.Configuration configuration() {
     return new EnvironmentAccessPolicy.Configuration(
         GoRuntimeProperties.readInt(TRIAL_DAYS_PROPERTY, TRIAL_DAYS_ENV, DEFAULT_TRIAL_DAYS),
@@ -392,7 +396,11 @@ public class TenantEnvironmentLifecycleService {
       return renewalDueAt;
     }
 
-    /** Converts the stored projection to the provider-neutral policy input. */
+    /**
+     * Converts the stored projection to the provider-neutral policy input.
+     *
+     * @return the provider-neutral policy environment
+     */
     public EnvironmentAccessPolicy.Environment toPolicyEnvironment() {
       return type == EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE
           ? EnvironmentAccessPolicy.Environment.productive(renewalDueAt)

@@ -19,7 +19,11 @@ public final class BillingOfferConfiguration {
   private BillingOfferConfiguration() {
   }
 
-  /** Returns the configured offer, applying safe defaults for missing or invalid values. */
+  /**
+   * Returns the configured offer, applying safe defaults for missing or invalid values.
+   *
+   * @return the normalized billing offer
+   */
   public static Offer current() {
     long amount = readAmount();
     String currency = normalized(GoRuntimeProperties.readValue(CURRENCY_PROPERTY, CURRENCY_ENV,

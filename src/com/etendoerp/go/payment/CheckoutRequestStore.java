@@ -230,8 +230,8 @@ public class CheckoutRequestStore {
         return List.of();
       }
       OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
-          "as cr where lower(cr.accountEmail) = lower(:accountEmail) order by cr.creationDate desc");
-      query.setNamedParameter("accountEmail", StringUtils.trimToEmpty(accountEmail));
+          "as cr where lower(cr.accountEmail) = lower(:" + PARAM_ACCOUNT_EMAIL + ") order by cr.creationDate desc");
+      query.setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail));
       query.setFilterOnReadableClients(false);
       query.setFilterOnReadableOrganization(false);
       query.setMaxResult(20);
@@ -326,14 +326,14 @@ public class CheckoutRequestStore {
       int claimed = OBDal.getInstance()
           .getSession()
           .createQuery(HQL_UPDATE + CheckoutRequest.ENTITY_NAME + " cr"
-              + "   set cr.checkoutRequestStatus = :provisioning,"
+              + "   set cr.checkoutRequestStatus = :" + HQL_PROVISIONING + ","
               + "       cr.provisioningAt = coalesce(cr.provisioningAt, :now),"
               + "       cr.provisioningAttempts = cr.provisioningAttempts + 1,"
               + "       cr.updated = :now"
               + " where cr.request = :requestId"
               + "   and lower(cr.accountEmail) = lower(:" + PARAM_ACCOUNT_EMAIL + ")"
               + "   and cr.checkoutRequestStatus = :paid")
-          .setParameter("provisioning", STATUS_PROVISIONING)
+          .setParameter(HQL_PROVISIONING, STATUS_PROVISIONING)
           .setParameter("paid", STATUS_PAID)
           .setParameter("now", now)
           .setParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId))
@@ -413,16 +413,16 @@ public class CheckoutRequestStore {
       }
       if (claimAttempt != null) {
         int completed = OBDal.getInstance().getSession()
-            .createQuery("update " + CheckoutRequest.ENTITY_NAME + " cr"
+            .createQuery(HQL_UPDATE + CheckoutRequest.ENTITY_NAME + " cr"
                 + "   set cr.checkoutRequestStatus = :provisioned,"
                 + "       cr.createdClient = :createdClient,"
                 + "       cr.provisionedAt = :now,"
                 + "       cr.updated = :now"
                 + " where cr.request = :requestId"
-                + "   and cr.checkoutRequestStatus = :provisioning"
+                + "   and cr.checkoutRequestStatus = :" + HQL_PROVISIONING
                 + "   and cr.provisioningAttempts = :claimAttempt")
             .setParameter("provisioned", STATUS_PROVISIONED)
-            .setParameter("provisioning", STATUS_PROVISIONING)
+            .setParameter(HQL_PROVISIONING, STATUS_PROVISIONING)
             .setParameter("createdClient", StringUtils.isBlank(createdClientId)
                 ? null : OBDal.getInstance().get(Client.class, createdClientId))
             .setParameter("now", new Date())
