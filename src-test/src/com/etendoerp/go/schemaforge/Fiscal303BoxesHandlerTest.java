@@ -25,6 +25,7 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
@@ -1338,6 +1339,174 @@ public class Fiscal303BoxesHandlerTest {
     assertBd("-8.00",  result.boxes.get(15));
     // 210.00 + (-8.00) = 202.00 — plain sum, not a further-adjusted/double-counted value.
     assertBd("202.00", result.boxes.get(27));
+  }
+
+  // ── computePreOct2024EcDominantRate — regression: dominant-rate selection must also use
+  // ONLY_NORMAL, matching classic AEAT303Report2023#manage005062Percent (total0/05/062Percent-
+  // TaxBaseAmount there are themselves computed from calculateAmountsMap(..., ONLY_NORMAL) in
+  // generateSalesLines). Box 17 is a "which rate dominates" selector over NORMAL-invoice
+  // activity only — a rate with only corrective activity and no normal invoices this period is
+  // correctly excluded from being dominant, exactly like classic.
+
+  /**
+   * {@link Fiscal303BoxesHandler#computePreOct2024EcDominantRate} must invoke
+   * {@code calculateAmountsMap} with {@code ONLY_NORMAL}, never {@code ALL} — regression guard
+   * mirroring the base-box fix applied to {@code applyPercentageSplit}/{@code fillGroupBoxes}.
+   */
+  @Test
+  public void testComputePreOct2024EcDominantRate_usesOnlyNormalInvoiceType_notAll() {
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("0.50"));
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
+        .thenReturn(amounts("1000.00", "5.00"));
+
+    BigDecimal dominant =
+        handler.computePreOct2024EcDominantRate(helper, Collections.singletonList(rate));
+
+    assertBd("0.50", dominant);
+    verify(helper).calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL));
+    verify(helper, never()).calculateAmountsMap(any(), eq(InvoiceType.ALL));
+  }
+
+  /**
+   * A rate that only has corrective/credit-memo activity this period (ONLY_NORMAL amounts are
+   * zero for it) must NOT be selected as dominant, even if its raw corrective volume is large —
+   * box 17 only ever ranks NORMAL-invoice bases, exactly like the classic engine. This pins the
+   * ONLY_NORMAL fix's interaction with the "no normal invoices at this rate" edge case.
+   */
+  @Test
+  public void testComputePreOct2024EcDominantRate_rateWithOnlyCorrectiveActivity_neverWins() {
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    TaxRate zeroRate = mock(TaxRate.class);
+    when(zeroRate.getRate()).thenReturn(BigDecimal.ZERO);
+    TaxRate halfRate = mock(TaxRate.class);
+    when(halfRate.getRate()).thenReturn(new BigDecimal("0.50"));
+
+    // 0% rate: no normal invoices this period at all (only a credit memo exists upstream, not
+    // modeled here since ONLY_NORMAL is the only invoice type this method ever asks for) —
+    // ONLY_NORMAL comes back zero.
+    when(helper.calculateAmountsMap(argThat(list -> list != null && list.contains(zeroRate)),
+        eq(InvoiceType.ONLY_NORMAL))).thenReturn(amounts("0.00", "0.00"));
+    // 0.50% rate: small but genuine normal-invoice activity.
+    when(helper.calculateAmountsMap(argThat(list -> list != null && list.contains(halfRate)),
+        eq(InvoiceType.ONLY_NORMAL))).thenReturn(amounts("10.00", "0.05"));
+
+    BigDecimal dominant =
+        handler.computePreOct2024EcDominantRate(helper, Arrays.asList(zeroRate, halfRate));
+
+    assertBd("0.50", dominant);
+  }
+
+  // ── computeBoxes — regression: a rate with ONLY corrective activity (no normal invoices at
+  // all for it this period) must leave its base box absent while the corrective delta box
+  // (14/15/25/26/40/41) still carries the full corrective amount. ────────────────────────────
+
+  /**
+   * VAT_SALES_GENERAL 21% with zero normal-invoice activity this period (only a credit memo
+   * exists at that rate) must leave box[7]/box[9] absent — {@code addToBox} skips zero-valued
+   * writes — while box[14]/box[15] still carry the full corrective delta, and box[27] reflects
+   * only that corrective amount (no base-box contribution to double-count against).
+   */
+  @Test
+  public void testComputeBoxes_onlyCorrectiveActivityAtRate_baseBoxAbsent_correctiveBoxCarriesFull() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("21"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("VAT_SALES"), eq("VAT_SALES_GENERAL")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    // No normal invoices at this rate this period.
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
+        .thenReturn(amounts("0.00", "0.00"));
+    // Only a credit memo, at -100.00 base / -21.00 cuota.
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_MEMO_AND_CORRECTIVE)))
+        .thenReturn(amounts("-100.00", "-21.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertNull("box[7] must stay absent — no normal invoices at this rate", result.boxes.get(7));
+    assertNull("box[9] must stay absent — no normal invoices at this rate", result.boxes.get(9));
+    assertBd("-100.00", result.boxes.get(14));
+    assertBd("-21.00",  result.boxes.get(15));
+    // box[27] = 0 (absent box[9]) + (-21.00) (box[15]) = -21.00 — the corrective amount alone,
+    // not double-counted against a phantom base-box contribution.
+    assertBd("-21.00", result.boxes.get(27));
+  }
+
+  // ── computeBoxes — boundary: a period with ONLY corrective invoices (zero normal invoices
+  // across sales and purchases) must still balance — the totals must reflect only the
+  // corrective deltas, negative values must round-trip correctly, and nothing should NPE. ────
+
+  /**
+   * Sales-side 21% has only a corrective credit memo (net negative), purchase-side 21% has
+   * only a corrective credit memo too (net negative deduction). box[27]/[45]/[46]/[66]/[69]/[71]
+   * must all resolve from the corrective deltas alone, without throwing, and box[46] (a
+   * negative "a compensar" result here) must mirror correctly into 66/69/71.
+   */
+  @Test
+  public void testComputeBoxes_periodWithOnlyCorrectiveInvoices_totalsBalanceWithoutNormalActivity() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter salesParam = mock(TaxReportParameter.class);
+    TaxRate salesRate = mock(TaxRate.class);
+    when(salesRate.getRate()).thenReturn(new BigDecimal("21"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("VAT_SALES"), eq("VAT_SALES_GENERAL")))
+        .thenReturn(salesParam);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(salesParam)))
+        .thenReturn(Collections.singletonList(salesRate));
+
+    TaxReportParameter purchParam = mock(TaxReportParameter.class);
+    TaxRate purchRate = mock(TaxRate.class);
+    when(purchRate.getRate()).thenReturn(new BigDecimal("21"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("VAT_PURCHASE"), eq("Normal_Operations")))
+        .thenReturn(purchParam);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(purchParam)))
+        .thenReturn(Collections.singletonList(purchRate));
+
+    // Zero normal-invoice activity everywhere this period.
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
+        .thenReturn(amounts("0.00", "0.00"));
+    // Sales-side corrective credit memo: -500.00 base / -105.00 cuota (box 14/15).
+    // Purchase-side corrective credit memo: -200.00 base / -42.00 cuota (box 40/41).
+    when(helper.calculateAmountsMap(
+        argThat(list -> list != null && list.contains(salesRate) && !list.contains(purchRate)),
+        eq(InvoiceType.ONLY_MEMO_AND_CORRECTIVE))).thenReturn(amounts("-500.00", "-105.00"));
+    when(helper.calculateAmountsMap(
+        argThat(list -> list != null && list.contains(purchRate)),
+        eq(InvoiceType.ONLY_MEMO_AND_CORRECTIVE))).thenReturn(amounts("-200.00", "-42.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertNull("box[7]/[9] must stay absent — no normal sales activity", result.boxes.get(7));
+    assertNull(result.boxes.get(9));
+    assertNull("box[28]/[29] must stay absent — no normal purchase activity", result.boxes.get(28));
+    assertNull(result.boxes.get(29));
+    assertBd("-105.00", result.boxes.get(15));
+    assertBd("-42.00",  result.boxes.get(41));
+    assertBd("-105.00", result.boxes.get(27));  // accrued: only box 15 contributes
+    assertBd("-42.00",  result.boxes.get(45));  // deductible: only box 41 contributes
+    assertBd("-63.00",  result.boxes.get(46));  // 27 - 45 = -105 - (-42) = -63
+    assertBd("-63.00",  result.boxes.get(66));
+    assertBd("-63.00",  result.boxes.get(69));
+    assertBd("-63.00",  result.boxes.get(71));
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────

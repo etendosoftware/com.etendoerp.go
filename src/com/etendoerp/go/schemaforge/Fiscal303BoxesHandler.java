@@ -619,7 +619,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
   private void computeSummaryBoxes(Map<Integer, BigDecimal> b) {
     // ETP-5393 Bug F — box 26 (cuota, Modificaciones bases y cuotas del recargo de equivalencia)
     // added: box 15 (mod. régimen general) and 24 (RE 5.20%) were already summed into box 27
-    // even while always zero (boxes 14/25/26 were never computed — see fillMemoCorrectiveBoxPair);
+    // even while always zero (boxes 14/25/26 were never computed — see fillMemoCorrectiveBoxPair).
     // 26 was missing from this list entirely, so once it starts being populated it must roll
     // into the total exactly like its sibling cuota boxes always have.
     int[] accruedBoxes    = { 3, 6, 9, 11, 13, 15, 18, 21, 24, 26, 152, 158, 167, 170 };
