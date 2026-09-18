@@ -1,0 +1,87 @@
+<?xml version="1.0"?>
+  <database name="TABLE ETGO_PLAN_QUOTA">
+    <table name="ETGO_PLAN_QUOTA" primaryKey="ETGO_PLNQTA_PK">
+      <column name="ETGO_PLAN_QUOTA_ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_CLIENT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_ORG_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ISACTIVE" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[Y]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ETGO_PLAN_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ETGO_BILLING_RESOURCE_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="INCLUDED_QTY" primaryKey="false" required="true" type="DECIMAL" size="20,0" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ENFORCEMENT_MODE" primaryKey="false" required="true" type="VARCHAR" size="60" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="WARNING_THRESHOLD" primaryKey="false" required="false" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="CONSUMPTION_SOURCE" primaryKey="false" required="false" type="VARCHAR" size="60" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_PLNQTA_CLIENT_FK">
+        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_PLNQTA_CREATEDBY_FK">
+        <reference local="CREATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_ORG" name="ETGO_PLNQTA_ORG_FK">
+        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="ETGO_PLAN" name="ETGO_PLNQTA_PLAN_FK">
+        <reference local="ETGO_PLAN_ID" foreign="ETGO_PLAN_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="ETGO_BILLING_RESOURCE" name="ETGO_PLNQTA_RESOURCE_FK">
+        <reference local="ETGO_BILLING_RESOURCE_ID" foreign="ETGO_BILLING_RESOURCE_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_PLNQTA_UPDATEDBY_FK">
+        <reference local="UPDATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <unique name="ETGO_PLNQTA_PLAN_RES_UQ">
+        <unique-column name="ETGO_PLAN_ID"/>
+        <unique-column name="ETGO_BILLING_RESOURCE_ID"/>
+      </unique>
+      <check name="ETGO_PLNQTA_ISACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+      <check name="ETGO_PLNQTA_MODE_CHK"><![CDATA[ENFORCEMENT_MODE IN ('warn', 'block')]]></check>
+      <check name="ETGO_PLNQTA_QTY_CHK"><![CDATA[INCLUDED_QTY >= 0]]></check>
+      <check name="ETGO_PLNQTA_THRESHOLD_CHK"><![CDATA[WARNING_THRESHOLD IS NULL OR WARNING_THRESHOLD > 0 AND WARNING_THRESHOLD <= 100]]></check>
+    </table>
+  </database>
