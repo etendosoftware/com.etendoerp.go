@@ -280,11 +280,12 @@ final class ChartOfAccountsTreeMath {
   }
 
   /**
-   * @return the single resolved candidate's {@code value} from an {@code insertionChildren}
-   *     array, or {@code null} when it has zero or more than one entry — ETP-5399's "never
-   *     average/guess a single answer" rule for the Pattern B fan-out case. Used by
-   *     {@link ChartOfAccountsHandler#injectCodePrefix} to decide whether a single
-   *     {@code codePrefix} can be derived.
+   * @return the posting prefix derived from the single resolved candidate in an
+   *     {@code insertionChildren} array, or {@code null} when it has zero or more than one
+   *     entry. Numeric candidates are returned unchanged; a structural letter-suffixed
+   *     candidate such as {@code "4300A"} yields its numeric PGC prefix ({@code "4300"}).
+   *     Used by {@link ChartOfAccountsHandler#injectCodePrefix} to decide whether a single
+   *     {@code codePrefix} can be derived without changing the candidate's structural identity.
    */
   static String resolveSingleInsertionValue(JSONArray insertionChildren) throws Exception {
     if (insertionChildren == null || insertionChildren.length() != 1) {
@@ -294,7 +295,15 @@ final class ChartOfAccountsTreeMath {
     if (only == null || only.isNull("value")) {
       return null;
     }
-    return only.optString("value", null);
+    String value = only.optString("value", null);
+    if (value == null || NUMERIC_VALUE.matcher(value).matches()) {
+      return value;
+    }
+    if (value.length() < PARENT_CODE_LENGTH) {
+      return null;
+    }
+    String prefix = value.substring(0, PARENT_CODE_LENGTH);
+    return NUMERIC_VALUE.matcher(prefix).matches() ? prefix : null;
   }
 
   /** Builds one {@code {id, value, name, elementLevel}} candidate entry. */

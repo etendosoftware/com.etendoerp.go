@@ -1194,7 +1194,7 @@ public class ChartOfAccountsHandlerTest {
       assertNotNull(result);
       assertEquals(200, result.getHttpStatus());
       JSONObject defaults = result.getBody().getJSONObject("defaults");
-      assertEquals("4300A", defaults.getString("codePrefix"));
+      assertEquals("4300", defaults.getString("codePrefix"));
       assertFalse("codePrefix must never be the shallower Account-level letter code",
           "430A".equals(defaults.getString("codePrefix")));
       JSONArray insertionChildren = defaults.getJSONArray("insertionChildren");
@@ -1204,14 +1204,12 @@ public class ChartOfAccountsHandlerTest {
   }
 
   /**
-   * ETP-5399 §3.2.c graceful degradation: a letter-suffixed parent with literally NO existing
-   * children (first-ever subaccount under a brand-new branch) has nothing to drill into, so it
-   * legitimately keeps its own letter-suffixed value as {@code codePrefix} — by design, not a
-   * regression of the bug above (which requires a real Breakdown-level child to exist).
+   * A letter-suffixed parent with no existing children remains the structural insertion
+   * candidate, but it cannot supply a valid numeric posting prefix.
    */
   @SuppressWarnings("unchecked")
   @Test
-  public void afterHandleKeepsLetterSuffixedCodePrefixWhenLetterParentHasNoChildrenYet()
+  public void afterHandleKeepsInsertionCandidateButOmitsInvalidLetterSuffixedCodePrefix()
       throws Exception {
     JSONObject body = new JSONObject().put("defaults", new JSONObject());
     NeoResponse prevResult = mock(NeoResponse.class);
@@ -1262,8 +1260,10 @@ public class ChartOfAccountsHandlerTest {
 
       assertNotNull(result);
       JSONObject defaults = result.getBody().getJSONObject("defaults");
-      assertEquals("999X", defaults.getString("codePrefix"));
-      assertEquals(1, defaults.getJSONArray("insertionChildren").length());
+      assertFalse(defaults.has("codePrefix"));
+      JSONArray insertionChildren = defaults.getJSONArray("insertionChildren");
+      assertEquals(1, insertionChildren.length());
+      assertEquals("999X", insertionChildren.getJSONObject(0).getString("value"));
     }
   }
 

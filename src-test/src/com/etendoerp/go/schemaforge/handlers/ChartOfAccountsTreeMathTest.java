@@ -380,10 +380,26 @@ public class ChartOfAccountsTreeMathTest {
   }
 
   @Test
-  public void resolveSingleInsertionValueReturnsValueForSingleCandidate() throws Exception {
+  public void resolveSingleInsertionValueReturnsNumericPrefixForLetterSuffixedCandidate()
+      throws Exception {
     JSONArray array = new JSONArray();
     array.put(new JSONObject().put("id", "a").put("value", "4300A"));
-    assertEquals("4300A", ChartOfAccountsTreeMath.resolveSingleInsertionValue(array));
+    assertEquals("4300", ChartOfAccountsTreeMath.resolveSingleInsertionValue(array));
+  }
+
+  @Test
+  public void resolveSingleInsertionValueKeepsNumericCandidateUnchanged() throws Exception {
+    JSONArray array = new JSONArray();
+    array.put(new JSONObject().put("id", "a").put("value", "1603"));
+    assertEquals("1603", ChartOfAccountsTreeMath.resolveSingleInsertionValue(array));
+  }
+
+  @Test
+  public void resolveSingleInsertionValueRejectsCandidateWithoutFourLeadingDigits()
+      throws Exception {
+    JSONArray array = new JSONArray();
+    array.put(new JSONObject().put("id", "a").put("value", "99XA"));
+    assertNull(ChartOfAccountsTreeMath.resolveSingleInsertionValue(array));
   }
 
   @Test

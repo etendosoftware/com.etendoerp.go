@@ -1114,7 +1114,9 @@ public class ChartOfAccountsHandler implements NeoHandler {
    * were digits. It now reuses {@link ChartOfAccountsTreeMath#resolveInsertionChildren} (the
    * same tree-based resolution used by {@link #injectHierarchyFields}):
    * <ul>
-   *   <li>exactly one resolved candidate — its {@code value} becomes {@code codePrefix}.</li>
+   *   <li>exactly one resolved candidate — its numeric posting prefix becomes
+   *       {@code codePrefix}; the candidate's structural {@code value} remains unchanged in
+   *       {@code insertionChildren}.</li>
    *   <li>more than one candidate (Pattern B fan-out, e.g. {@code 160B -> 1603, 1604}) — no
    *       single {@code codePrefix} is guessed; {@code insertionChildren} still carries the
    *       full candidate list.</li>
