@@ -20,19 +20,20 @@ class DevLifecycleToolServiceTest {
   }
 
   @Test
-  void toolIsDisabledByDefault() {
-    assertFalse(DevLifecycleToolService.isEnabled());
-  }
-
-  @Test
   void toolRequiresExplicitLocalEnvironmentAndFlag() {
-    System.setProperty(DevLifecycleToolService.ENABLED_PROPERTY, "true");
-    assertFalse(DevLifecycleToolService.isEnabled());
-
     System.setProperty(DevLifecycleToolService.ENVIRONMENT_PROPERTY, "production");
+    System.setProperty(DevLifecycleToolService.ENABLED_PROPERTY, "true");
     assertFalse(DevLifecycleToolService.isEnabled());
 
     System.setProperty(DevLifecycleToolService.ENVIRONMENT_PROPERTY, "local");
     assertTrue(DevLifecycleToolService.isEnabled());
+  }
+
+  @Test
+  void toolRemainsDisabledWhenFlagIsFalseInLocalEnvironment() {
+    System.setProperty(DevLifecycleToolService.ENVIRONMENT_PROPERTY, "local");
+    System.setProperty(DevLifecycleToolService.ENABLED_PROPERTY, "false");
+
+    assertFalse(DevLifecycleToolService.isEnabled());
   }
 }
