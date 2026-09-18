@@ -1,53 +1,84 @@
 /* Etendo License. */
 package com.etendoerp.go.payment;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
 import java.io.UnsupportedEncodingException;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+
+import org.apache.commons.lang3.StringUtils;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
+import com.etendoerp.go.schemaforge.data.Plan;
+
 /** Small provider adapter for Stripe Checkout Sessions. Pricing is always selected server-side. */
 public class HostedCheckoutService {
+
+  private static final Logger log = LogManager.getLogger(HostedCheckoutService.class);
+
   CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
+  PlanCatalogService planCatalogService = new PlanCatalogService();
+  /**
+   * The provider gateway, package-visible so a test can swap in a recording double. Same shape as
+   * {@code PlanPriceDerivationHandler}'s: the base URL, the credentials and the timeouts belong to
+   * the implementation, not to this class.
+   */
+  StripeApiClient stripeApiClient = new HttpUrlConnectionStripeApiClient();
 
   /**
    * Creates a provider-hosted Checkout Session bound to the authenticated account.
+   *
+   * <p>The price is never an argument. The caller names a <em>plan key</em>, this method resolves
+   * it against the catalog, and the provider price id comes off the resolved row. There is
+   * deliberately no configured fallback price: a fallback is a price nobody reviewed, selected
+   * exactly when the intended configuration is missing.
+   *
    * @param accountId authenticated account id, correlated on the durable request row
    * @param accountEmail authenticated account email
    * @param clientName requested client name
    * @param origin public application origin for return URLs
+   * @param planKey catalog key of the plan being bought; required, with no default
    * @return checkout request id, URL, and mode
+   * @throws PlanNotAvailableException when the key names no active catalog row
+   * @throws IllegalStateException when checkout has no credentials, or the plan carries no
+   *     provider price id and therefore cannot be charged for
    * @throws IOException when the provider cannot be reached or rejects the request
    * @throws JSONException when the provider response is not valid JSON
    */
   public JSONObject createSession(String accountId, String accountEmail, String clientName,
-      String origin) throws IOException, JSONException {
-    if (!CheckoutConfiguration.isConfigured()) throw new IllegalStateException("Checkout is not configured");
+      String origin, String planKey) throws IOException, JSONException {
+    if (!CheckoutConfiguration.isConfigured()) {
+      throw new IllegalStateException("Checkout is not configured");
+    }
+    Plan plan = planCatalogService.findPurchasablePlan(planKey)
+        .orElseThrow(() -> new PlanNotAvailableException(planKey));
+    if (!planCatalogService.hasProviderPrice(plan)) {
+      // The catalog is fine; the deployment is not. A real price id is environment-specific (test
+      // vs live provider account) and cannot ship as sourcedata, so this is the state of a plan
+      // nobody has attached one to yet — and of the grandfathered legacy plan, which is not sold.
+      throw new IllegalStateException(
+          "Plan '" + plan.getSearchKey() + "' has no provider price id and cannot be charged for");
+    }
     String requestId = UUID.randomUUID().toString();
     // Recorded and committed BEFORE the provider is contacted. A crash during the call below would
     // otherwise leave a session at Stripe that nothing on this side can name, and therefore that no
     // reconciliation could ever find. The row is deliberately not rolled back when the call fails:
     // it is the evidence that someone tried to buy something, and it is always safe to expire
     // because the checkoutUrl only reaches the browser once this method returns.
-    checkoutRequestStore.recordRequested(requestId, accountId, accountEmail, clientName);
-    String form = buildSessionForm(requestId, accountEmail, clientName, origin);
-    HttpURLConnection connection = (HttpURLConnection) new URL(CheckoutConfiguration.apiBaseUrl() + "/v1/checkout/sessions").openConnection();
-    connection.setRequestMethod("POST");
-    connection.setDoOutput(true);
-    connection.setRequestProperty("Authorization", "Bearer " + CheckoutConfiguration.secretKey());
-    connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
-    try (OutputStream output = connection.getOutputStream()) { output.write(form.getBytes(StandardCharsets.UTF_8)); }
-    String response = read(connection);
-    if (connection.getResponseCode() / 100 != 2) throw new IOException("Checkout provider rejected session");
-    JSONObject provider = new JSONObject(response);
+    checkoutRequestStore.recordRequested(requestId, accountId, accountEmail, clientName, plan);
+    String form = buildSessionForm(requestId, accountEmail, clientName, origin,
+        plan.getProviderPriceID(), plan.getSearchKey());
+    StripeResponse response = stripeApiClient.postForm("/v1/checkout/sessions", form);
+    if (!response.isSuccess()) {
+      log.error("Checkout provider refused a session for plan '{}' with status {} and code '{}'",
+          plan.getSearchKey(), response.status(), response.errorCode());
+      throw new IOException("Checkout provider rejected session");
+    }
+    JSONObject provider = response.json();
     // The provider session id is the reconciliation anchor for an abandoned or lost checkout, and
     // this response is the only place it appears. Recorded before the URL is handed back.
     checkoutRequestStore.recordSessionCreated(requestId, provider.optString("id", ""));
@@ -70,16 +101,18 @@ public class HostedCheckoutService {
    * @param accountEmail authenticated account email
    * @param clientName requested environment name
    * @param origin public application origin for return URLs
+   * @param priceId provider price id resolved from the plan catalog, never from the browser
+   * @param planKey catalog key of the resolved plan, echoed as metadata for ETP-5047
    * @return the form-encoded request body
    * @throws UnsupportedEncodingException never in practice; UTF-8 is always available
    */
   static String buildSessionForm(String requestId, String accountEmail, String clientName,
-      String origin) throws UnsupportedEncodingException {
+      String origin, String priceId, String planKey) throws UnsupportedEncodingException {
     String success = origin + "/upgrade?checkout=success&requestId=" + requestId;
     String cancel = origin + "/upgrade?checkout=cancelled&requestId=" + requestId;
     StringBuilder form = new StringBuilder();
     add(form, "mode", CheckoutConfiguration.mode());
-    add(form, "line_items[0][price]", CheckoutConfiguration.priceId());
+    add(form, "line_items[0][price]", priceId);
     add(form, "line_items[0][quantity]", "1");
     add(form, "success_url", success);
     add(form, "cancel_url", cancel);
@@ -93,11 +126,15 @@ public class HostedCheckoutService {
     add(form, "metadata[account_email]", accountEmail);
     add(form, "metadata[client_name]", clientName);
     add(form, "metadata[request_id]", requestId);
+    // ETP-5047 correlates subscription lifecycle events back to a plan. The event carries the
+    // Stripe price id, but a price can be swapped on a plan, so the key is what stays meaningful.
+    add(form, "metadata[plan_key]", planKey);
     // The sandbox product is not configured for Stripe Managed Payments. Keep the
     // Checkout contract explicit until Product selects an eligible tax code.
     add(form, "managed_payments[enabled]", "false");
     if ("subscription".equals(CheckoutConfiguration.mode())) {
       add(form, "subscription_data[metadata][request_id]", requestId);
+      add(form, "subscription_data[metadata][plan_key]", planKey);
       // Skip the card when a promotion code brings the total to 0, so a 100%-off code does not make
       // the buyer enter card details for a charge that will never happen. Stripe evaluates this per
       // session against the amount due, so the ordinary paid path still collects a card.
@@ -115,16 +152,11 @@ public class HostedCheckoutService {
 
   private static void add(StringBuilder form, String key, String value)
       throws UnsupportedEncodingException {
-    if (form.length() > 0) form.append('&');
-    form.append(URLEncoder.encode(key, StandardCharsets.UTF_8.name())).append('=').append(URLEncoder.encode(value == null ? "" : value, StandardCharsets.UTF_8.name()));
-  }
-
-  private static String read(HttpURLConnection connection) throws IOException {
-    java.io.InputStream stream = connection.getResponseCode() / 100 == 2 ? connection.getInputStream() : connection.getErrorStream();
-    StringBuilder body = new StringBuilder();
-    try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
-      String line; while ((line = reader.readLine()) != null) body.append(line);
+    if (form.length() > 0) {
+      form.append('&');
     }
-    return body.toString();
+    form.append(URLEncoder.encode(key, StandardCharsets.UTF_8.name()))
+        .append('=')
+        .append(URLEncoder.encode(StringUtils.defaultString(value), StandardCharsets.UTF_8.name()));
   }
 }

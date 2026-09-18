@@ -555,7 +555,8 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
    */
   private String createRequest(String accountId, String email) {
     String requestId = newRequestId();
-    store.recordRequested(requestId, accountId, email, ENVIRONMENT);
+    // No plan: these specs exercise the lifecycle transitions, which do not read one.
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT, null);
     return requestId;
   }
 

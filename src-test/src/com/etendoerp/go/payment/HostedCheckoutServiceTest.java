@@ -35,7 +35,14 @@ class HostedCheckoutServiceTest {
   private static final String ORIGIN = "https://go.experimental.etendo.cloud";
 
   private static final String MODE_PROPERTY = "etendo.go.checkout.mode";
-  private static final String PRICE_PROPERTY = "etendo.go.checkout.price.id";
+  /**
+   * The provider price id, which since ETP-5046 comes off the resolved plan row and is passed in
+   * rather than read from configuration. There is deliberately no fallback price property: a
+   * fallback is a price nobody reviewed, selected exactly when the intended configuration is
+   * missing.
+   */
+  private static final String PRICE_ID = "price_TEST";
+  private static final String PLAN_KEY = "productive-monthly";
 
   private MockedStatic<OBPropertiesProvider> propertiesMock;
 
@@ -50,7 +57,6 @@ class HostedCheckoutServiceTest {
     Mockito.when(provider.getOpenbravoProperties()).thenReturn(new Properties());
     propertiesMock = Mockito.mockStatic(OBPropertiesProvider.class);
     propertiesMock.when(OBPropertiesProvider::getInstance).thenReturn(provider);
-    System.setProperty(PRICE_PROPERTY, "price_TEST");
   }
 
   @AfterEach
@@ -59,11 +65,11 @@ class HostedCheckoutServiceTest {
       propertiesMock.close();
     }
     System.clearProperty(MODE_PROPERTY);
-    System.clearProperty(PRICE_PROPERTY);
   }
 
   private static String form() throws UnsupportedEncodingException {
-    return HostedCheckoutService.buildSessionForm(REQUEST_ID, ACCOUNT_EMAIL, CLIENT_NAME, ORIGIN);
+    return HostedCheckoutService.buildSessionForm(REQUEST_ID, ACCOUNT_EMAIL, CLIENT_NAME, ORIGIN,
+        PRICE_ID, PLAN_KEY);
   }
 
   @Test
@@ -94,9 +100,17 @@ class HostedCheckoutServiceTest {
   void chargesTheServerSelectedPriceExactlyOnce() throws UnsupportedEncodingException {
     String body = form();
 
-    // Pricing is server-owned: the browser sends product intent only, never an amount or a price id.
-    assertTrue(body.contains("line_items%5B0%5D%5Bprice%5D=price_TEST"), body);
+    // Pricing is server-owned: the browser sends product intent only, never an amount or a price
+    // id. The value charged is the one resolved from the plan catalog row.
+    assertTrue(body.contains("line_items%5B0%5D%5Bprice%5D=" + PRICE_ID), body);
     assertTrue(body.contains("line_items%5B0%5D%5Bquantity%5D=1"), body);
+  }
+
+  @Test
+  void carriesThePlanKeySoLifecycleEventsCanBeAttributed() throws UnsupportedEncodingException {
+    // ETP-5047 correlates subscription lifecycle events back to a plan. The event carries the
+    // price id, but a price can be swapped on a plan, so the key is what stays meaningful.
+    assertTrue(form().contains("metadata%5Bplan_key%5D=" + PLAN_KEY), form());
   }
 
   @Test
@@ -139,6 +153,7 @@ class HostedCheckoutServiceTest {
     // Renewal events arrive on the subscription, not on the original session, so the correlation has
     // to live on both.
     assertTrue(body.contains("subscription_data%5Bmetadata%5D%5Brequest_id%5D=" + REQUEST_ID), body);
+    assertTrue(body.contains("subscription_data%5Bmetadata%5D%5Bplan_key%5D=" + PLAN_KEY), body);
   }
 
   @Test

@@ -29,14 +29,6 @@ public final class CheckoutConfiguration {
   }
 
   /**
-   * Returns the server-selected checkout price identifier.
-   * @return configured price identifier, or an empty string
-   */
-  public static String priceId() {
-    return GoRuntimeProperties.readValue("etendo.go.checkout.price.id", "ETGO_CHECKOUT_PRICE_ID", "");
-  }
-
-  /**
    * Returns the normalized checkout mode, defaulting to subscription.
    * @return {@code payment} or {@code subscription}
    */
@@ -54,10 +46,39 @@ public final class CheckoutConfiguration {
   }
 
   /**
+   * Returns how long to wait for the provider to accept a connection.
+   *
+   * @return connect timeout in milliseconds
+   */
+  public static int connectTimeoutMs() {
+    return GoRuntimeProperties.readInt("etendo.go.checkout.connect.timeout.ms",
+        "ETGO_CHECKOUT_CONNECT_TIMEOUT_MS", 10000);
+  }
+
+  /**
+   * Returns how long to wait for the provider to answer once connected.
+   *
+   * @return read timeout in milliseconds
+   */
+  public static int readTimeoutMs() {
+    return GoRuntimeProperties.readInt("etendo.go.checkout.read.timeout.ms",
+        "ETGO_CHECKOUT_READ_TIMEOUT_MS", 20000);
+  }
+
+  /**
    * Returns whether all mandatory checkout settings are present.
+   *
+   * <p>This used to also require a configured price id, so a true answer additionally proved that
+   * <em>a purchasable thing existed</em>. That guarantee has moved: what is purchasable now comes
+   * from the plan catalog — a plan row carrying a non-null provider price id — and there is
+   * deliberately no configured fallback price, because a fallback is a price nobody reviewed,
+   * selected exactly when the intended configuration is missing. The two conditions map onto the
+   * same {@code CHECKOUT_NOT_CONFIGURED} response for that reason: from the caller's side
+   * "checkout has no credentials" and "there is nothing to sell" are the same unavailability.
+   *
    * @return true when checkout can be used
    */
   public static boolean isConfigured() {
-    return !secretKey().trim().isEmpty() && !priceId().trim().isEmpty() && !webhookSecret().trim().isEmpty();
+    return !secretKey().trim().isEmpty() && !webhookSecret().trim().isEmpty();
   }
 }

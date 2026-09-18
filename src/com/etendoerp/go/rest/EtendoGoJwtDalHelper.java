@@ -36,7 +36,8 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.GoAccountResolver;
-import com.etendoerp.go.payment.TenantPlanService;
+import com.etendoerp.go.payment.EnvironmentPlanCache;
+import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -68,6 +69,8 @@ final class EtendoGoJwtDalHelper {
   private static final String FIELD_ADMIN_USER = "adminUser";
   private static final String FIELD_ADMIN_USER_NAME = "adminUserName";
   private static final String FIELD_PLAN = "plan";
+  private static final String FIELD_PLAN_KEY = "planKey";
+  private static final String FIELD_SUBSCRIPTION_STATUS = "subscriptionStatus";
   private static final String PROPERTY_PASSWORD_CHANGED = Account.PROPERTY_PASSWORDCHANGED;
   private static final String PROPERTY_RESET_TOKEN_CONSUMED = Account.PROPERTY_RESETTOKENCONSUMED;
   private static final String PROPERTY_RESET_TOKEN_EXPIRES = Account.PROPERTY_RESETTOKENEXPIRES;
@@ -84,7 +87,7 @@ final class EtendoGoJwtDalHelper {
   // ETP-5115: the constants naming the account's inline SSO columns are gone with the last reader
   // of those columns. The columns themselves stay as the migration fallback and are read only by
   // AccountIdentityDalHelper, through Account's own generated property names.
-  private static final TenantPlanService TENANT_PLAN_SERVICE = new TenantPlanService();
+  private static final SubscriptionService SUBSCRIPTION_SERVICE = new SubscriptionService();
   // ETP-4829: STATUS distinguishes an account that already owns a usable local password
   // ("active", the default for self-registration/SSO) from one an admin created on a user's
   // behalf, awaiting the ETP-4830 invite-email flow to set a password ("pending"). No login is
@@ -504,8 +507,56 @@ final class EtendoGoJwtDalHelper {
     return clientIds.size();
   }
 
-  static JSONObject buildEnvironmentJson(Client client, Organization organization, User environmentUser)
-      throws JSONException {
+  /**
+   * Serialises one environment for a caller that has no plan cache — a single-environment path,
+   * which can afford the one query the cache exists to avoid.
+   *
+   * @param client the tenant
+   * @param organization the organization inside it, may be null
+   * @param environmentUser the tenant's admin user linked to the account
+   * @return the environment object, carrying the same plan fields as the list endpoint
+   * @throws JSONException when the object cannot be built
+   */
+  static JSONObject buildEnvironmentJson(Client client, Organization organization,
+      User environmentUser) throws JSONException {
+    // ETP-5046-TRANSITIONAL-FALLBACK — the id is passed so this single-environment path resolves
+    // the plan exactly as the list endpoint does, including the retired-preference fallback for a
+    // tenant the R37 backfill has not reached. Delete the extra argument in Phase F.
+    return buildEnvironmentJson(client, organization, environmentUser,
+        EnvironmentPlanCache.of(List.of(client.getId()),
+            SUBSCRIPTION_SERVICE.findOpenForClients(List.of(client.getId()))));
+  }
+
+  /**
+   * Serialises one environment, reading its commercial state from a cache the caller built once
+   * for the whole page.
+   *
+   * <p><b>{@code plan} is byte-for-byte what it has always been.</b> Two live consumers read it
+   * directly — {@code environmentPresentation.js} and {@code UpgradePage.jsx} — and both compare
+   * it against the literal {@code "productive"}. The two fields added beside it are additive:
+   * a client that ignores them is unaffected.
+   *
+   * <p>{@code planKey} and {@code subscriptionStatus} are JSON null for a tenant with no
+   * subscription, deliberately <b>not</b> the string {@code "free"}: a plan key names a row in the
+   * catalog, and a free tenant has no such row. Reporting {@code "free"} there would invent a
+   * catalog entry that does not exist and that nothing could ever look up.
+   *
+   * <p><b>TRANSITIONAL (ETP-5046-TRANSITIONAL-FALLBACK).</b> One tenant shape carries
+   * {@code plan = "productive"} with both {@code planKey} and {@code subscriptionStatus} JSON
+   * null: a tenant still answered for by the retired {@code ETGO_TenantPlan} preference because
+   * the R37 backfill has not reached it. The nulls are the honest answer — there is no catalog row
+   * and no subscription — and they keep the gap visible to anyone reading the payload. This shape
+   * disappears with the fallback in Phase F.
+   *
+   * @param client the tenant
+   * @param organization the organization inside it, may be null
+   * @param environmentUser the tenant's admin user linked to the account
+   * @param planCache the per-request plan cache, never null
+   * @return the environment object
+   * @throws JSONException when the object cannot be built
+   */
+  static JSONObject buildEnvironmentJson(Client client, Organization organization,
+      User environmentUser, EnvironmentPlanCache planCache) throws JSONException {
     JSONObject env = new JSONObject();
     env.put(FIELD_CLIENT_ID, client.getId());
     env.put(FIELD_CLIENT_NAME, client.getName());
@@ -514,9 +565,14 @@ final class EtendoGoJwtDalHelper {
     env.put(FIELD_ADMIN_USER_ID, environmentUser.getId());
     env.put(FIELD_ADMIN_USER, environmentUser.getUsername());
     env.put(FIELD_ADMIN_USER_NAME, environmentUser.getName());
+    EnvironmentPlanCache.PlanView planView = planCache.viewFor(client.getId());
     // Additive since ETP-4686 so the environment picker can badge the plan. Older clients that
-    // ignore the field keep working, and a tenant with no plan marker reads back as free.
-    env.put(FIELD_PLAN, TENANT_PLAN_SERVICE.resolvePlan(client.getId()));
+    // ignore the field keep working, and a tenant with no subscription reads back as free.
+    env.put(FIELD_PLAN, planView.legacyPlan());
+    env.put(FIELD_PLAN_KEY,
+        planView.planKey() == null ? JSONObject.NULL : planView.planKey());
+    env.put(FIELD_SUBSCRIPTION_STATUS,
+        planView.status() == null ? JSONObject.NULL : planView.status());
     return env;
   }
 

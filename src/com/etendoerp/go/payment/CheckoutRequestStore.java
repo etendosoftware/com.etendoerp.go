@@ -17,6 +17,7 @@ import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
+import com.etendoerp.go.schemaforge.data.Plan;
 
 /**
  * Durable persistence for hosted-checkout requests. Together with {@link BillingEventStore}
@@ -71,9 +72,11 @@ public class CheckoutRequestStore {
    * @param accountId {@code ETGO_ACCOUNT_ID} of the authenticated account
    * @param accountEmail authenticated account email, denormalised for the tenancy check
    * @param clientName requested environment name
+   * @param plan the catalog row being bought, kept so the subscription opened after payment
+   *     records the plan the buyer actually saw rather than whatever is current by then
    */
   public void recordRequested(String requestId, String accountId, String accountEmail,
-      String clientName) {
+      String clientName, Plan plan) {
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
     OBContext.setAdminMode(true);
     try {
@@ -84,6 +87,7 @@ public class CheckoutRequestStore {
       request.setEtendoGoAccount(OBDal.getInstance().get(Account.class, accountId));
       request.setAccountEmail(StringUtils.trimToEmpty(accountEmail));
       request.setClientName(StringUtils.trimToEmpty(clientName));
+      request.setPlan(plan);
       request.setCheckoutRequestStatus(STATUS_CREATING);
       request.setCreatingAt(new Date());
       request.setProvisioningAttempts(0L);

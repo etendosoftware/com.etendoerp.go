@@ -33,6 +33,7 @@ import static org.mockito.Mockito.when;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
@@ -51,12 +52,14 @@ import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
+import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.Invitation;
@@ -467,7 +470,8 @@ class EtendoGoJwtDalHelperTest {
       when(environmentUser.getUsername()).thenReturn("admin@test.com");
       when(environmentUser.getName()).thenReturn("Admin User");
 
-      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser);
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser,
+          EnvironmentPlanCache.empty());
 
       assertNotNull(result);
       assertEquals("C-1", result.getString("clientId"));
@@ -488,7 +492,8 @@ class EtendoGoJwtDalHelperTest {
       when(environmentUser.getUsername()).thenReturn("admin@test.com");
       when(environmentUser.getName()).thenReturn("Admin User");
 
-      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser,
+          EnvironmentPlanCache.empty());
 
       assertNotNull(result);
       assertEquals("C-1", result.getString("clientId"));
@@ -501,8 +506,8 @@ class EtendoGoJwtDalHelperTest {
     }
 
     @Test
-    @DisplayName("all eight fields are populated")
-    void allEightFieldsPopulated() throws Exception {
+    @DisplayName("all ten fields are populated")
+    void allTenFieldsPopulated() throws Exception {
       when(client.getId()).thenReturn("C-2");
       when(client.getName()).thenReturn("Client Two");
       when(organization.getId()).thenReturn("O-2");
@@ -511,10 +516,12 @@ class EtendoGoJwtDalHelperTest {
       when(environmentUser.getUsername()).thenReturn("user@two.com");
       when(environmentUser.getName()).thenReturn("User Two");
 
-      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser);
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser,
+          EnvironmentPlanCache.empty());
 
-      // Seven original fields plus the plan badge added by ETP-4686.
-      assertEquals(8, result.length());
+      // Seven original fields, the plan badge added by ETP-4686, and the plan key and
+      // subscription status added by ETP-5046.
+      assertEquals(10, result.length());
     }
 
     @Test
@@ -526,9 +533,50 @@ class EtendoGoJwtDalHelperTest {
       when(environmentUser.getUsername()).thenReturn("user@three.com");
       when(environmentUser.getName()).thenReturn("User Three");
 
-      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser);
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser,
+          EnvironmentPlanCache.empty());
 
       assertEquals(TenantPlanService.PLAN_FREE, result.getString("plan"));
+      // A plan KEY names a row in the catalog, and a tenant with no subscription has none. Null,
+      // deliberately not the string "free", which would invent a catalog entry nothing can look
+      // up. The coarse `plan` field above is what stays "free" for backward compatibility.
+      assertTrue(result.isNull("planKey"));
+      assertTrue(result.isNull("subscriptionStatus"));
+    }
+
+    @Test
+    @DisplayName("ETP-5046-TRANSITIONAL-FALLBACK: a tenant the backfill has not reached is "
+        + "productive with null plan facts")
+    void reportsTheTransitionalFallbackTenantAsProductiveWithNullPlanFacts() throws Exception {
+      // TRANSITIONAL — delete with TenantPlanPreferenceFallback in Phase F.
+      // The tenant has no ETGO_SUBSCRIPTION row and still carries the retired ETGO_TenantPlan
+      // preference. It must read back as "productive" — environmentPresentation.js and
+      // UpgradePage.jsx both compare `plan` against that literal — while planKey and
+      // subscriptionStatus stay JSON null, because there genuinely is no catalog row and no
+      // subscription. Reporting an invented key such as "legacy-productive" would claim a row that
+      // does not exist and would hide the gap from anyone reading the payload.
+      when(client.getId()).thenReturn("C-4");
+      when(client.getName()).thenReturn("Client Four");
+      when(environmentUser.getId()).thenReturn("U-4");
+      when(environmentUser.getUsername()).thenReturn("user@four.com");
+      when(environmentUser.getName()).thenReturn("User Four");
+
+      Client preferenceTenant = mock(Client.class);
+      when(preferenceTenant.getId()).thenReturn("C-4");
+      Preference preference = mock(Preference.class);
+      when(preference.getVisibleAtClient()).thenReturn(preferenceTenant);
+      when(preference.getSearchKey()).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
+      @SuppressWarnings("unchecked")
+      OBQuery<Preference> preferenceQuery = mock(OBQuery.class);
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
+      when(preferenceQuery.list()).thenReturn(List.of(preference));
+
+      JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser,
+          EnvironmentPlanCache.of(List.of("C-4"), Map.of()));
+
+      assertEquals(TenantPlanService.PLAN_PRODUCTIVE, result.getString("plan"));
+      assertTrue(result.isNull("planKey"));
+      assertTrue(result.isNull("subscriptionStatus"));
     }
   }
 

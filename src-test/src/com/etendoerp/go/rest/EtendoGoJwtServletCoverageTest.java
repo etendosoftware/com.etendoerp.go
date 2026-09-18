@@ -29,10 +29,12 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import java.io.BufferedReader;
 import java.io.PrintWriter;
+import java.io.Serializable;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
@@ -46,6 +48,14 @@ import java.util.List;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.logging.log4j.Level;
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.core.Filter;
+import org.apache.logging.log4j.core.Layout;
+import org.apache.logging.log4j.core.LogEvent;
+import org.apache.logging.log4j.core.appender.AbstractAppender;
+import org.apache.logging.log4j.core.config.Configurator;
+import org.apache.logging.log4j.core.config.Property;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
@@ -60,7 +70,15 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
+import com.etendoerp.go.payment.CheckoutRequestStore;
+import com.etendoerp.go.payment.EnvironmentPlanCache;
+import com.etendoerp.go.payment.SubscriptionService;
+import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.CheckoutRequest;
+import com.etendoerp.go.schemaforge.data.Plan;
+import com.etendoerp.go.schemaforge.data.Subscription;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -71,6 +89,10 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * loop, the GET /login (environment login) success and user-not-found paths, and the
  * onboarding pre-flight helpers (resolveCurrencyId, parseOnboardingRequest,
  * resolveOnboardingAccountEmail, writeEnvironmentLoginResponse).
+ *
+ * <p>It also owns the specs for {@code applyPaidUpgradeSideEffects} (ETP-5046): which store records
+ * a paid tenant's plan, and that the per-tenant retirement of the legacy ETGO_TenantPlan preference
+ * can never fail an upgrade that has already been paid for.
  */
 public class EtendoGoJwtServletCoverageTest {
 
@@ -536,6 +558,12 @@ public class EtendoGoJwtServletCoverageTest {
     users.add(userWithOrgs);
     users.add(userWithoutOrgs);
 
+    // The environment list resolves every tenant's plan through ONE subscription query built
+    // before the sort. Stubbed here so this mapping spec stays a pure unit test.
+    SubscriptionService subscriptionService = mock(SubscriptionService.class);
+    when(subscriptionService.findOpenForClients(any())).thenReturn(java.util.Map.of());
+    servlet.subscriptionService = subscriptionService;
+
     try (var ctxMock = mockStatic(OBContext.class);
          var dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
@@ -547,14 +575,16 @@ public class EtendoGoJwtServletCoverageTest {
       dalMock.when(() -> EtendoGoJwtDalHelper.findNonStarOrganizations("client-2"))
           .thenReturn(Collections.emptyList());
       dalMock.when(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(
-          any(Client.class), any(), any(User.class))).thenReturn(new JSONObject());
+          any(Client.class), any(), any(User.class), any(EnvironmentPlanCache.class)))
+          .thenReturn(new JSONObject());
 
       servlet.doGet(req, resp.response);
 
       dalMock.verify(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(
-          eq(clientWithOrgs), eq(org), eq(userWithOrgs)));
+          eq(clientWithOrgs), eq(org), eq(userWithOrgs), any(EnvironmentPlanCache.class)));
       dalMock.verify(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(
-          eq(clientWithoutOrgs), eq(null), eq(userWithoutOrgs)));
+          eq(clientWithoutOrgs), eq(null), eq(userWithoutOrgs),
+          any(EnvironmentPlanCache.class)));
     }
 
     assertEquals(200, resp.status);
@@ -1291,6 +1321,203 @@ public class EtendoGoJwtServletCoverageTest {
     byte[] hash = digest.digest(password.getBytes(StandardCharsets.UTF_8));
     return Base64.getEncoder().encodeToString(salt) + ":"
         + Base64.getEncoder().encodeToString(hash);
+  }
+
+  // ===================== applyPaidUpgradeSideEffects — ETP-5046 per-tenant retirement ==========
+  //
+  // The paid-upgrade path used to write BOTH stores on every upgrade: the ETGO_SUBSCRIPTION row
+  // AND the legacy ETGO_TenantPlan preference. Since ETP-5046 the subscription is the source of
+  // truth, so writing the preference alongside it was not a safety measure but a second answer
+  // that drifts. The preference is now written ONLY when the subscription write failed — which is
+  // exactly when TenantPlanPreferenceFallback needs it — and is RETIRED on the success path, so a
+  // newly paid tenant lands directly in the post-cutover state. Grep marker for the Phase F
+  // deletion: ETP-5046-TRANSITIONAL-FALLBACK.
+
+  private static final String PAID_CLIENT_ID = "48F0981053084BC49CCEEFEC296E2A3D";
+  private static final String PAID_STAR_ORG_ID = "9F5511B92BD0465FA678F75278FA9C3A";
+  private static final String PAID_TOKEN = "chk_etp5046";
+
+  /**
+   * Wires the servlet with mocked collaborators and a checkout request that carries a plan, so the
+   * subscription write has everything it needs.
+   *
+   * @param subscriptionOpens whether {@code openSubscription} succeeds or throws
+   * @return the mocked collaborators, for verification
+   */
+  private PaidUpgradeFixture givenPaidUpgrade(boolean subscriptionOpens) {
+    PaidUpgradeFixture fixture = new PaidUpgradeFixture();
+    CheckoutRequest checkoutRequest = mock(CheckoutRequest.class);
+    when(checkoutRequest.getPlan()).thenReturn(mock(Plan.class));
+    when(fixture.checkoutRequestStore.find(eq(PAID_TOKEN), anyString())).thenReturn(checkoutRequest);
+    if (subscriptionOpens) {
+      when(fixture.subscriptionService.openSubscription(anyString(), any(), any(), any(), any()))
+          .thenReturn(mock(Subscription.class));
+    } else {
+      when(fixture.subscriptionService.openSubscription(anyString(), any(), any(), any(), any()))
+          .thenThrow(new IllegalStateException("subscription write failed"));
+    }
+    servlet.checkoutRequestStore = fixture.checkoutRequestStore;
+    servlet.subscriptionService = fixture.subscriptionService;
+    servlet.tenantPlanService = fixture.tenantPlanService;
+    servlet.onboardingForceTestModeService = fixture.forceTestModeService;
+    return fixture;
+  }
+
+  private void applyPaidUpgrade() {
+    servlet.applyPaidUpgradeSideEffects(PAID_CLIENT_ID, PAID_STAR_ORG_ID, "Acme S.L.",
+        "user@test.com", PAID_TOKEN);
+  }
+
+  @Test
+  public void paidUpgradeWithASubscriptionDoesNotWriteThePreferenceAndRetiresTheStaleOne() {
+    PaidUpgradeFixture fixture = givenPaidUpgrade(true);
+    when(fixture.tenantPlanService.retireProductivePreference(PAID_CLIENT_ID)).thenReturn(true);
+
+    applyPaidUpgrade();
+
+    verify(fixture.subscriptionService)
+        .openSubscription(eq(PAID_CLIENT_ID), any(), any(), any(), any());
+    // The whole point: no parallel truth is written any more.
+    verify(fixture.tenantPlanService, never()).markProductive(anyString(), anyString());
+    // ...and whatever marker this tenant still carried is retired, so it is immediately in the
+    // post-cutover state and the fleet-wide count moves one closer to zero.
+    verify(fixture.tenantPlanService).retireProductivePreference(PAID_CLIENT_ID);
+    // A recorded productive tenant still gets its ETSG_ForceTestMode override reverted (ETP-5117).
+    verify(fixture.forceTestModeService).revertTestModeForProductiveTenant(PAID_CLIENT_ID);
+  }
+
+  @Test
+  public void paidUpgradeWhoseSubscriptionWriteFailsWritesThePreferenceAsTheSafetyNet() {
+    PaidUpgradeFixture fixture = givenPaidUpgrade(false);
+    when(fixture.tenantPlanService.markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID))
+        .thenReturn(true);
+
+    applyPaidUpgrade();
+
+    // Without a subscription row, the preference is the ONLY record that this tenant paid, and
+    // TenantPlanPreferenceFallback is what will read it back. This is the case the fallback and
+    // the whole transitional apparatus exist for.
+    verify(fixture.tenantPlanService).markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID);
+    // Nothing is retired: retiring the safety net in the same breath as writing it would leave the
+    // tenant with no record at all.
+    verify(fixture.tenantPlanService, never()).retireProductivePreference(anyString());
+    verify(fixture.forceTestModeService).revertTestModeForProductiveTenant(PAID_CLIENT_ID);
+  }
+
+  @Test
+  public void paidUpgradeWithNoCheckoutRequestFallsBackToThePreferenceAndRetiresNothing() {
+    // The third way the subscription write can fail to record anything: the token resolves to no
+    // request at all, so there is no plan to open a subscription on. Same answer as a throwing
+    // write — the safety net is written, nothing is retired.
+    PaidUpgradeFixture fixture = new PaidUpgradeFixture();
+    when(fixture.checkoutRequestStore.find(eq(PAID_TOKEN), anyString())).thenReturn(null);
+    servlet.checkoutRequestStore = fixture.checkoutRequestStore;
+    servlet.subscriptionService = fixture.subscriptionService;
+    servlet.tenantPlanService = fixture.tenantPlanService;
+    servlet.onboardingForceTestModeService = fixture.forceTestModeService;
+    when(fixture.tenantPlanService.markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID))
+        .thenReturn(true);
+
+    applyPaidUpgrade();
+
+    verifyNoInteractions(fixture.subscriptionService);
+    verify(fixture.tenantPlanService).markProductive(PAID_CLIENT_ID, PAID_STAR_ORG_ID);
+    verify(fixture.tenantPlanService, never()).retireProductivePreference(anyString());
+  }
+
+  @Test
+  public void aFailedRetirementIsLoggedAndNeverFailsAnUpgradeThatWasAlreadyPaidFor() {
+    // Best-effort discipline, unchanged since ETP-4966: nothing in this method may abort a paid
+    // signup. A failed retirement is the most harmless of the three failures — the transitional
+    // fallback simply keeps answering for the tenant and the R37 backfill retires the row later —
+    // so it must be logged loudly and then ignored.
+    PaidUpgradeFixture fixture = givenPaidUpgrade(true);
+    when(fixture.tenantPlanService.retireProductivePreference(PAID_CLIENT_ID))
+        .thenThrow(new IllegalStateException("no session"));
+    LogCapture errors = LogCapture.attachTo(EtendoGoJwtServlet.class, Level.ERROR);
+
+    try {
+      applyPaidUpgrade();
+
+      List<String> logged = errors.messagesAt(Level.ERROR);
+      assertEquals("the failure must be searchable, not silent: " + logged, 1, logged.size());
+      assertTrue("the line must name the tenant: " + logged.get(0),
+          logged.get(0).contains(PAID_CLIENT_ID));
+      assertTrue("the line must name the preference that survived: " + logged.get(0),
+          logged.get(0).contains(TenantPlanService.PREFERENCE_ATTRIBUTE));
+      // The upgrade completed all the same: the subscription was written and the fiscal test-mode
+      // override was still reverted.
+      verify(fixture.subscriptionService)
+          .openSubscription(eq(PAID_CLIENT_ID), any(), any(), any(), any());
+      verify(fixture.forceTestModeService).revertTestModeForProductiveTenant(PAID_CLIENT_ID);
+      // And the failed retirement must NOT make the servlet fall back to writing the marker: the
+      // subscription exists, so the tenant is recorded.
+      verify(fixture.tenantPlanService, never()).markProductive(anyString(), anyString());
+    } finally {
+      errors.detach();
+    }
+  }
+
+  /** The mocked collaborators of one paid-upgrade spec. */
+  private static final class PaidUpgradeFixture {
+    final CheckoutRequestStore checkoutRequestStore = mock(CheckoutRequestStore.class);
+    final SubscriptionService subscriptionService = mock(SubscriptionService.class);
+    final TenantPlanService tenantPlanService = mock(TenantPlanService.class);
+    final OnboardingForceTestModeService forceTestModeService =
+        mock(OnboardingForceTestModeService.class);
+  }
+
+  /**
+   * Collects the log events of one logger so a spec can assert on them.
+   *
+   * <p>Log4j2's default configuration is ERROR-only in this build, so the level is pinned before
+   * attaching and restored afterwards; without that a WARN would never reach an appender and a
+   * spec asserting on one would pass vacuously.
+   */
+  private static final class LogCapture extends AbstractAppender {
+
+    private final List<LogEvent> events = new ArrayList<>();
+    private final String loggerName;
+    private final Level previousLevel;
+
+    private LogCapture(String loggerName, Level previousLevel) {
+      super("Etp5046ServletCapture", (Filter) null, (Layout<? extends Serializable>) null, true,
+          new Property[0]);
+      this.loggerName = loggerName;
+      this.previousLevel = previousLevel;
+    }
+
+    static LogCapture attachTo(Class<?> type, Level level) {
+      String name = type.getName();
+      Level previous = LogManager.getLogger(name).getLevel();
+      Configurator.setLevel(name, level);
+      LogCapture appender = new LogCapture(name, previous);
+      appender.start();
+      ((org.apache.logging.log4j.core.Logger) LogManager.getLogger(name)).addAppender(appender);
+      return appender;
+    }
+
+    void detach() {
+      ((org.apache.logging.log4j.core.Logger) LogManager.getLogger(loggerName))
+          .removeAppender(this);
+      stop();
+      Configurator.setLevel(loggerName, previousLevel);
+    }
+
+    List<String> messagesAt(Level level) {
+      List<String> messages = new ArrayList<>();
+      for (LogEvent event : events) {
+        if (level.equals(event.getLevel())) {
+          messages.add(event.getMessage().getFormattedMessage());
+        }
+      }
+      return messages;
+    }
+
+    @Override
+    public void append(LogEvent event) {
+      events.add(event.toImmutable());
+    }
   }
 
   private static Account stubAuthenticatedAccount(

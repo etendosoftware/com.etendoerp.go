@@ -384,7 +384,8 @@ public class OnboardingProvisioningClaimIntegrationTest extends OBBaseTest {
   private String createPaidRequest(String email, String clientName) {
     String accountId = accountIdFor(email);
     String requestId = MARKER + UUID.randomUUID().toString().replace("-", "");
-    fixtureStore.recordRequested(requestId, accountId, email, clientName);
+    // No plan: this fixture exercises the provisioning claim, which does not read one.
+    fixtureStore.recordRequested(requestId, accountId, email, clientName, null);
     fixtureStore.recordSessionCreated(requestId, "cs_" + requestId);
     fixtureStore.recordPaid(requestId, "cus_" + requestId, "sub_" + requestId);
     return requestId;

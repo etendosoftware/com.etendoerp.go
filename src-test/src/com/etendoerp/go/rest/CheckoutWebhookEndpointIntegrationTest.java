@@ -650,7 +650,8 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
   private String createRequest(String email) {
     String accountId = createAccount(email);
     String requestId = REQUEST_MARKER + UUID.randomUUID().toString().replace("-", "");
-    fixtureStore.recordRequested(requestId, accountId, email, ENVIRONMENT);
+    // No plan: this fixture exercises webhook correlation, which does not read one.
+    fixtureStore.recordRequested(requestId, accountId, email, ENVIRONMENT, null);
     fixtureStore.recordSessionCreated(requestId, "cs_" + requestId);
     return requestId;
   }

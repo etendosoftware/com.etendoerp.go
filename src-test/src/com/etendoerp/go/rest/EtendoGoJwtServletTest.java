@@ -42,6 +42,7 @@ import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.ArrayList;
@@ -66,7 +67,13 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.payment.EnvironmentPlanCache;
+import com.etendoerp.go.payment.HostedCheckoutService;
+import com.etendoerp.go.payment.PlanCatalogService;
+import com.etendoerp.go.payment.PlanNotAvailableException;
+import com.etendoerp.go.payment.SubscriptionService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.Plan;
 import com.etendoerp.go.schemaforge.data.AccountIdentity;
 
 /**
@@ -1924,6 +1931,12 @@ public class EtendoGoJwtServletTest {
     when(client.getId()).thenReturn("CLIENT-1");
     when(client.getName()).thenReturn("Client One");
 
+    // The environment list resolves every tenant's plan through ONE subscription query built
+    // before the sort. Stubbed here so this mapping spec stays a pure unit test.
+    SubscriptionService subscriptionService = mock(SubscriptionService.class);
+    when(subscriptionService.findOpenForClients(any())).thenReturn(java.util.Map.of());
+    servlet.subscriptionService = subscriptionService;
+
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
@@ -1933,7 +1946,8 @@ public class EtendoGoJwtServletTest {
       dalMock.when(() -> EtendoGoJwtDalHelper.findNonStarOrganizations("CLIENT-1"))
           .thenReturn(List.of(firstOrg, secondOrg));
       dalMock.when(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(any(Client.class),
-          any(Organization.class), any(User.class))).thenCallRealMethod();
+          any(Organization.class), any(User.class), any(EnvironmentPlanCache.class)))
+          .thenCallRealMethod();
 
       servlet.doGet(req, resp.response);
     }
@@ -1943,6 +1957,275 @@ public class EtendoGoJwtServletTest {
     assertEquals(2, environments.length());
     assertEquals("ORG-1", environments.getJSONObject(0).getString("orgId"));
     assertEquals("ORG-2", environments.getJSONObject(1).getString("orgId"));
+  }
+
+  // ===================== POST /checkout/sessions =====================
+
+  /**
+   * The browser names a PLAN, never a price. These specs pin the three answers that endpoint can
+   * give about a plan, because each one means something different to the person on the other end
+   * and they are easy to collapse into each other in review.
+   */
+  @Test
+  public void checkoutSessionRejectsARequestThatNamesNoPlan() throws Exception {
+    ResponseCapture resp = mockResponse();
+    JSONObject body = new JSONObject();
+    body.put("clientName", "Acme Productive");
+    HttpServletRequest req = authenticatedJsonRequest("/checkout/sessions", "valid-token", body);
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC-1");
+    when(account.getEmail()).thenReturn("user@test.com");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    // planKey is REQUIRED and has no default: there is no fallback price property to bridge a
+    // version skew, so the module and the app-shell ship together.
+    assertEquals(400, resp.status);
+    assertEquals("INVALID_REQUEST",
+        new JSONObject(resp.body()).getJSONObject("error").getString("code"));
+  }
+
+  @Test
+  public void checkoutSessionAnswersPlanNotAvailableForATamperedPlanKey() throws Exception {
+    ResponseCapture resp = mockResponse();
+    JSONObject body = new JSONObject();
+    body.put("clientName", "Acme Productive");
+    body.put("planKey", "tampered-key");
+    HttpServletRequest req = authenticatedJsonRequest("/checkout/sessions", "valid-token", body);
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC-1");
+    when(account.getEmail()).thenReturn("user@test.com");
+
+    HostedCheckoutService checkoutService = mock(HostedCheckoutService.class);
+    when(checkoutService.createSession(anyString(), anyString(), anyString(), anyString(),
+        eq("tampered-key"))).thenThrow(new PlanNotAvailableException("tampered-key"));
+    servlet.hostedCheckoutService = checkoutService;
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(400, resp.status);
+    JSONObject error = new JSONObject(resp.body()).getJSONObject("error");
+    assertEquals("PLAN_NOT_AVAILABLE", error.getString("code"));
+    // Unknown and inactive answer identically, and neither echoes the key back: the endpoint must
+    // not let a caller enumerate the catalog by probing keys. Same discipline as
+    // handleCheckoutStatus, which answers "pending" for an unknown request id.
+    assertFalse(error.getString("message").contains("tampered-key"));
+  }
+
+  @Test
+  public void checkoutSessionAnswersNotConfiguredForAPlanWithNoProviderPrice() throws Exception {
+    ResponseCapture resp = mockResponse();
+    JSONObject body = new JSONObject();
+    body.put("clientName", "Acme Productive");
+    body.put("planKey", "legacy-productive");
+    HttpServletRequest req = authenticatedJsonRequest("/checkout/sessions", "valid-token", body);
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC-1");
+    when(account.getEmail()).thenReturn("user@test.com");
+
+    HostedCheckoutService checkoutService = mock(HostedCheckoutService.class);
+    when(checkoutService.createSession(anyString(), anyString(), anyString(), anyString(),
+        anyString())).thenThrow(new IllegalStateException("no provider price id"));
+    servlet.hostedCheckoutService = checkoutService;
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    // A real, valid plan carrying no provider price — the grandfathered legacy plan, or one an
+    // operator has not yet attached an environment-specific price id to — is a DEPLOYMENT state,
+    // not a bad request. It shares the answer with missing credentials for that reason.
+    assertEquals(503, resp.status);
+    assertEquals("CHECKOUT_NOT_CONFIGURED",
+        new JSONObject(resp.body()).getJSONObject("error").getString("code"));
+  }
+
+  @Test
+  public void checkoutSessionIgnoresAPriceSubmittedByTheBrowser() throws Exception {
+    ResponseCapture resp = mockResponse();
+    JSONObject body = new JSONObject();
+    body.put("clientName", "Acme Productive");
+    body.put("planKey", "productive-monthly");
+    // A price the browser tried to dictate. There is no request field for one and no code path
+    // that reads one, so it is IGNORED, not validated — rejecting it would imply the server might
+    // otherwise have honoured it.
+    body.put("priceId", "price_ATTACKER_CONTROLLED");
+    HttpServletRequest req = authenticatedJsonRequest("/checkout/sessions", "valid-token", body);
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC-1");
+    when(account.getEmail()).thenReturn("user@test.com");
+
+    HostedCheckoutService checkoutService = mock(HostedCheckoutService.class);
+    JSONObject created = new JSONObject();
+    created.put("requestId", "REQ-1");
+    created.put("checkoutUrl", "https://checkout.test/s");
+    when(checkoutService.createSession(anyString(), anyString(), anyString(), anyString(),
+        anyString())).thenReturn(created);
+    servlet.hostedCheckoutService = checkoutService;
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    assertEquals(201, resp.status);
+    // The session is created from the plan key alone. createSession has no price parameter at
+    // all, which is the structural half of the guarantee; this verify is the behavioural half.
+    verify(checkoutService).createSession(eq("ACC-1"), eq("user@test.com"),
+        eq("Acme Productive"), anyString(), eq("productive-monthly"));
+  }
+
+  // ===================== GET /plans =====================
+
+  /**
+   * The catalog endpoint exists because {@link EtendoGoJwtServlet} requires a plan key and has no
+   * default. Without it the browser has no way to learn one, so the upgrade flow can only answer
+   * 400 — these specs pin what it is allowed to hand over, and what it must never.
+   */
+  @Test
+  public void plansReturnsOnlyWhatCanActuallyBeBought() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/plans", "valid-token");
+
+    Plan quotable = mockPlan("productive-monthly", "Productive", "A second tenant for real work",
+        new BigDecimal("49.00"), "EUR", "month");
+    // Sellable, but the catalog row carries no price to show. Offering it would produce a
+    // purchase whose price the buyer was never shown.
+    Plan unquotable = mockPlan("unquotable", "Unquotable", "", null, "EUR", "month");
+    PlanCatalogService catalog = mock(PlanCatalogService.class);
+    when(catalog.listPurchasablePlans()).thenReturn(List.of(quotable, unquotable));
+    servlet.planCatalogService = catalog;
+
+    // Built before the try: stubbing a fresh mock INSIDE a mockStatic `when(...)` lambda leaves
+    // Mockito's stubbing unfinished and fails the test.
+    Account account = mockAccount();
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
+
+      servlet.doGet(req, resp.response);
+    }
+
+    assertEquals(200, resp.status);
+    JSONArray plans = new JSONObject(resp.body()).getJSONArray("plans");
+    assertEquals(1, plans.length());
+    JSONObject plan = plans.getJSONObject(0);
+    assertEquals("productive-monthly", plan.getString("planKey"));
+    assertEquals("Productive", plan.getString("name"));
+    assertEquals("A second tenant for real work", plan.getString("description"));
+    // A string, not a double: the amount crosses to a client that formats it, and a binary
+    // float would quietly re-round a price on the way.
+    assertEquals("49.00", plan.getString("displayPrice"));
+    assertEquals("EUR", plan.getString("currency"));
+    assertEquals("month", plan.getString("billingInterval"));
+  }
+
+  @Test
+  public void plansNeverExposeTheProviderPriceId() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/plans", "valid-token");
+
+    Plan plan = mockPlan("productive-monthly", "Productive", "", new BigDecimal("49.00"), "EUR",
+        "month");
+    when(plan.getProviderPriceID()).thenReturn("price_LIVE_SECRET");
+    PlanCatalogService catalog = mock(PlanCatalogService.class);
+    when(catalog.listPurchasablePlans()).thenReturn(List.of(plan));
+    servlet.planCatalogService = catalog;
+
+    Account account = mockAccount();
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
+
+      servlet.doGet(req, resp.response);
+    }
+
+    // The browser names a PLAN, never a price: the checkout endpoint has no request field for a
+    // price and no code path that reads one, so a price id would be useless to a client and
+    // merely useful to an attacker. Asserted on the raw payload rather than field by field, so a
+    // future field carrying it under another name fails here too.
+    assertEquals(200, resp.status);
+    assertFalse(resp.body(), resp.body().contains("price_LIVE_SECRET"));
+    assertFalse(resp.body(), resp.body().toLowerCase(java.util.Locale.ROOT).contains("priceid"));
+  }
+
+  @Test
+  public void plansAnswerAnEmptyCatalogWithAnEmptyArray() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = authenticatedRequest("/plans", "valid-token");
+
+    PlanCatalogService catalog = mock(PlanCatalogService.class);
+    when(catalog.listPurchasablePlans()).thenReturn(Collections.emptyList());
+    servlet.planCatalogService = catalog;
+
+    Account account = mockAccount();
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+         MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
+          .thenReturn(account);
+
+      servlet.doGet(req, resp.response);
+    }
+
+    // "Nothing is on sale" is an answer, not a failure: the client renders the same
+    // "checkout unavailable" state either way, and a 5xx here would make a correctly
+    // configured-but-empty deployment look broken.
+    assertEquals(200, resp.status);
+    assertEquals(0, new JSONObject(resp.body()).getJSONArray("plans").length());
+  }
+
+  @Test
+  public void plansRequireASessionToken() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("/plans");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class)) {
+      servlet.doGet(req, resp.response);
+    }
+
+    // Same bearer-token treatment as the sibling checkout endpoints — no second, public auth
+    // path was invented for the catalog.
+    assertEquals(401, resp.status);
+  }
+
+  private static Account mockAccount() {
+    Account account = mock(Account.class);
+    when(account.getId()).thenReturn("ACC-1");
+    when(account.getEmail()).thenReturn("user@test.com");
+    return account;
+  }
+
+  private static Plan mockPlan(String searchKey, String name, String description,
+      BigDecimal displayPrice, String currencyCode, String billingInterval) {
+    Plan plan = mock(Plan.class);
+    when(plan.getSearchKey()).thenReturn(searchKey);
+    when(plan.getName()).thenReturn(name);
+    when(plan.getDescription()).thenReturn(description);
+    when(plan.getDisplayPrice()).thenReturn(displayPrice);
+    when(plan.getCurrencyCode()).thenReturn(currencyCode);
+    when(plan.getBillingInterval()).thenReturn(billingInterval);
+    return plan;
   }
 
   // ===================== Helpers =====================
