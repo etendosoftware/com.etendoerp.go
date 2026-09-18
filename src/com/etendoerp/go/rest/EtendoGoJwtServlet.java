@@ -509,9 +509,28 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       CheckoutRequest activePurchase = checkoutRequestStore
           .findActiveForAccountAndClientName(account.getEmail(), clientName);
       if (activePurchase != null) {
+        String status = activePurchase.getCheckoutRequestStatus();
+        if ("CREATING".equals(status) || "CREATED".equals(status)) {
+          String requestOrigin = request.getHeader("Origin");
+          final String origin = StringUtils.isBlank(requestOrigin)
+              ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+          try {
+            JSONObject result = hostedCheckoutService.reopenSession(activePurchase.getRequest(),
+                account.getEmail(), activePurchase.getClientName(), origin);
+            writeResponse(response, HttpServletResponse.SC_OK, result);
+          } catch (IllegalStateException e) {
+            writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, "CHECKOUT_NOT_CONFIGURED",
+                "Checkout is not configured", "Checkout is not configured");
+          } catch (Exception e) {
+            log.error("Could not reopen account billing purchase", e);
+            writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
+                "Unable to reopen billing purchase", "Unable to reopen billing purchase");
+          }
+          return;
+        }
         JSONObject result = new JSONObject();
         result.put("purchaseId", activePurchase.getRequest());
-        result.put(FIELD_STATUS, activePurchase.getCheckoutRequestStatus());
+        result.put(FIELD_STATUS, status);
         result.put(FIELD_CLIENT_NAME, activePurchase.getClientName());
         writeResponse(response, HttpServletResponse.SC_CONFLICT, result);
         return;
