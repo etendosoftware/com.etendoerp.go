@@ -4218,6 +4218,12 @@ pseudo-spec bridge, §4.10/§4.11) enforces the costing invariant on tenants tha
 > on application boot — and shipping the module IS a boot, so a release realigns everything with no
 > operator action. Reach for this webhook to correct ONE tenant without waiting for a release.
 > It is also what makes `scope=all` a rarely-needed path: see the scope note below.
+>
+> **The startup is ONE-SHOT per tenant; this endpoint is not.** The startup marks each tenant it
+> migrates in `ETGO_DATA_FIX_HISTORY` (`fix_id='__costing-cadence-30s__'`) and skips it from then on,
+> so it is a migration rather than a standing policy — see `CostingCadenceStartup`'s javadoc for why
+> that distinction matters once users can pick their own frequency. This webhook deliberately ignores
+> those markers: an operator asking for one tenant to be corrected means it.
 
 ### Why this is a webhook and not a data-fix `.sql`
 
