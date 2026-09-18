@@ -17,6 +17,7 @@
 package com.etendoerp.go.schemaforge;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.regex.Matcher;
@@ -104,6 +105,16 @@ class FiscalDeclCrudHandler {
    * {@link #PROPERTY_DECLARATION_STATUS} column.
    */
   static final String PROPERTY_SUBMISSION_METHOD = "submissionMethod";
+  /**
+   * {@code submissionMethod} value set only by {@code Fiscal303SubmissionSupport
+   * #persistSuccessfulSubmission} on a real, non-test-mode AEAT telematic success (ETP-4755).
+   * Duplicated here (rather than referencing {@code Fiscal303SubmissionSupport}'s private
+   * constant of the same value) because this class needs it purely as a guard value for the
+   * "Reactivar declaración" reverse transition below (ETP-5338) — reactivating a declaration
+   * that was actually filed with the AEAT would desync this table from what Hacienda has on
+   * record, so it is blocked here regardless of what the frontend sends.
+   */
+  static final String SUBMISSION_METHOD_AEAT_TELEMATIC = "aeat_telematic";
 
   /**
    * Entity name (= DB table name) for the AEAT validation-error rows persisted on every Modelo
@@ -367,40 +378,100 @@ class FiscalDeclCrudHandler {
     if (decl == null) {
       return;
     }
-    JSONObject body      = readJsonBody(request);
-    boolean hasStatus    = body.has(STATUS_KEY);
-    String status        = hasStatus ? body.getString(STATUS_KEY) : null;
-    boolean hasFileExt   = body.has(FILE_EXTERNAL_KEY);
-    boolean fileExternal = body.optBoolean(FILE_EXTERNAL_KEY, false);
-    boolean hasFileName  = body.has(FILE_NAME_KEY);
-    String  fileName     = hasFileName && !body.isNull(FILE_NAME_KEY)
-        ? body.getString(FILE_NAME_KEY) : null;
-    // manualData is the only optional field here that is an arbitrary nested object rather than
-    // a scalar the caller can't realistically malform, so it gets its own defensive setter
-    // (see setManualDataIfPresent) instead of the getString/optBoolean one-liners above.
-    //
-    // Unlike fileName above (hasFileName = body.has(...), no null-check — an explicit null there
-    // DOES clear the stored value via decl.set(..., null)), an explicit "manualData": null is
-    // treated as "not sent" rather than "clear the value": manualData is autosaved from ephemeral
-    // frontend state, so a caller wanting to reset it must send an empty object rather than null —
-    // treating null as "clear" would risk silently wiping real user data from a stray/racy
-    // autosave call. This asymmetry with fileName is intentional, not an oversight.
-    boolean hasManualData = body.has(MANUAL_DATA_KEY) && !body.isNull(MANUAL_DATA_KEY);
-    // submissionMethod (ETP-4755) follows the exact same "explicit null means not sent" precedent
-    // as manualData above, not fileName's "explicit null clears it" one: this field is set once,
-    // at the same time as the status change that makes the declaration "Presentado" (see
-    // FmOverlays.jsx's PresentModal / handlePresent call sites), and is never meant to be wiped by
-    // a stray/racy PUT that happens to include a null for it.
-    boolean hasSubmissionMethod = body.has(SUBMISSION_METHOD_KEY) && !body.isNull(SUBMISSION_METHOD_KEY);
-    String submissionMethod = hasSubmissionMethod ? body.getString(SUBMISSION_METHOD_KEY) : null;
-
-    if (hasStatus)     decl.set(PROPERTY_DECLARATION_STATUS, status);
-    if (hasFileExt)    decl.set(PROPERTY_FILE_EXTERNAL, fileExternal);
-    if (hasFileName)   decl.set(PROPERTY_DECLARATION_FILE_NAME, fileName);
-    if (hasSubmissionMethod) decl.set(PROPERTY_SUBMISSION_METHOD, submissionMethod);
-    boolean manualDataApplied = !hasManualData || setManualDataIfPresent(decl, body);
+    JSONObject body = readJsonBody(request);
+    if (rejectTelematicReactivation(decl, body, id, response)) {
+      return;
+    }
+    applyDeclPutScalarFields(decl, body);
+    boolean manualDataApplied = applyManualDataIfRequested(decl, body);
     decl.set(PROPERTY_UPDATED_BY, OBContext.getOBContext().getUser());
     OBDal.getInstance().commitAndClose();
+    writeDeclPutResponse(response, manualDataApplied);
+  }
+
+  /**
+   * Guards "Reactivar declaración" (ETP-5338), which reverts a presented declaration back to
+   * draft via this same PUT path ({@code status: "draft"}). Defense in depth, mirroring
+   * {@link #handleDeclDelete}'s draft-only guard: the frontend already hides the Reactivar action
+   * for {@code aeat_telematic} declarations ({@code FmRowActions.jsx} / {@code FmListPage.jsx}),
+   * but this is what actually prevents one from being reopened regardless of what the client
+   * sends — reactivating a declaration that was genuinely filed with the AEAT would desync this
+   * table from what Hacienda has on record, which is unrecoverable from here.
+   *
+   * @return {@code true} if the PUT was rejected (a 409 was already sent to {@code response} and
+   *         the caller must stop processing); {@code false} if the request may proceed.
+   */
+  private boolean rejectTelematicReactivation(BaseOBObject decl, JSONObject body, String id,
+      HttpServletResponse response) throws Exception {
+    boolean hasStatus = body.has(STATUS_KEY);
+    String status = hasStatus ? body.getString(STATUS_KEY) : null;
+    if (!hasStatus || !DEFAULT_STATUS.equals(status)) {
+      return false;
+    }
+    String currentSubmissionMethod = asString(decl.get(PROPERTY_SUBMISSION_METHOD));
+    if (!SUBMISSION_METHOD_AEAT_TELEMATIC.equals(currentSubmissionMethod)) {
+      return false;
+    }
+    servlet.sendError(response, HttpServletResponse.SC_CONFLICT,
+        "Cannot reactivate a declaration filed via AEAT telematic submission: " + id);
+    return true;
+  }
+
+  /**
+   * Applies every scalar (non-{@code manualData}) optional field {@link #handleDeclPut} accepts —
+   * {@code status}, {@code fileExternal}, {@code fileName}, {@code submissionMethod} — each only
+   * when the caller actually sent it.
+   *
+   * <p>{@code fileName}: unlike {@code submissionMethod} below, an explicit {@code null} here DOES
+   * clear the stored value via {@code decl.set(..., null)} — {@code hasFileName} does not check
+   * {@code isNull}, so a present-but-null {@code fileName} still reaches the setter as {@code null}.
+   *
+   * <p>{@code submissionMethod} (ETP-4755) follows the same "explicit null means not sent"
+   * precedent as {@code manualData} (see {@link #applyManualDataIfRequested}), not
+   * {@code fileName}'s "explicit null clears it" one: this field is set once, at the same time as
+   * the status change that makes the declaration "Presentado" (see {@code FmOverlays.jsx}'s
+   * {@code PresentModal} / {@code handlePresent} call sites), and is never meant to be wiped by a
+   * stray/racy PUT that happens to include a null for it.
+   */
+  private void applyDeclPutScalarFields(BaseOBObject decl, JSONObject body) throws JSONException {
+    if (body.has(STATUS_KEY)) {
+      decl.set(PROPERTY_DECLARATION_STATUS, body.getString(STATUS_KEY));
+    }
+    if (body.has(FILE_EXTERNAL_KEY)) {
+      decl.set(PROPERTY_FILE_EXTERNAL, body.optBoolean(FILE_EXTERNAL_KEY, false));
+    }
+    if (body.has(FILE_NAME_KEY)) {
+      String fileName = !body.isNull(FILE_NAME_KEY) ? body.getString(FILE_NAME_KEY) : null;
+      decl.set(PROPERTY_DECLARATION_FILE_NAME, fileName);
+    }
+    if (body.has(SUBMISSION_METHOD_KEY) && !body.isNull(SUBMISSION_METHOD_KEY)) {
+      decl.set(PROPERTY_SUBMISSION_METHOD, body.getString(SUBMISSION_METHOD_KEY));
+    }
+  }
+
+  /**
+   * Applies {@code manualData} when the caller sent a non-null value — see
+   * {@link #setManualDataIfPresent} for the persistence/error-tolerance contract. manualData is
+   * the only optional {@link #handleDeclPut} field that is an arbitrary nested object rather than
+   * a scalar the caller can't realistically malform, so it gets its own defensive setter instead
+   * of a one-liner in {@link #applyDeclPutScalarFields}.
+   *
+   * <p>An explicit {@code "manualData": null} is treated as "not sent" rather than "clear the
+   * value": manualData is autosaved from ephemeral frontend state, so a caller wanting to reset it
+   * must send an empty object rather than null — treating null as "clear" would risk silently
+   * wiping real user data from a stray/racy autosave call. This asymmetry with {@code fileName} is
+   * intentional, not an oversight.
+   *
+   * @return {@code true} if manualData was applied or not requested; {@code false} if it was
+   *         requested but malformed and the write was skipped.
+   */
+  private boolean applyManualDataIfRequested(BaseOBObject decl, JSONObject body) {
+    boolean hasManualData = body.has(MANUAL_DATA_KEY) && !body.isNull(MANUAL_DATA_KEY);
+    return !hasManualData || setManualDataIfPresent(decl, body);
+  }
+
+  private void writeDeclPutResponse(HttpServletResponse response, boolean manualDataApplied)
+      throws IOException {
     if (manualDataApplied) {
       response.getWriter().write("{\"ok\":true}");
     } else {
