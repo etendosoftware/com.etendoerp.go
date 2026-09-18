@@ -50,6 +50,8 @@ public final class OwnerSupport {
   private static final Logger log = LogManager.getLogger(OwnerSupport.class);
 
   private static final String COLUMN_IS_OWNER = "em_etgo_is_owner";
+  /** Sonar java:S1192 — ETP-5411 added a 3rd {@code setParameter("clientId", ...)} call. */
+  private static final String PARAM_CLIENT_ID = "clientId";
 
   private OwnerSupport() {
     // static helper
@@ -95,7 +97,7 @@ public final class OwnerSupport {
     NativeQuery<Object> query = session.createNativeQuery(
         "SELECT 1 FROM ad_user WHERE ad_client_id = :clientId AND " + COLUMN_IS_OWNER
             + " = 'Y' LIMIT 1");
-    query.setParameter("clientId", clientId);
+    query.setParameter(PARAM_CLIENT_ID, clientId);
     return !query.getResultList().isEmpty();
   }
 
@@ -119,7 +121,7 @@ public final class OwnerSupport {
     NativeQuery<Object> query = session.createNativeQuery(
         "SELECT ad_user_id FROM ad_user WHERE ad_client_id = :clientId AND " + COLUMN_IS_OWNER
             + " = 'Y' LIMIT 1");
-    query.setParameter("clientId", clientId);
+    query.setParameter(PARAM_CLIENT_ID, clientId);
     List<Object> results = query.getResultList();
     if (results.isEmpty() || !(results.get(0) instanceof String)) {
       return null;
@@ -159,7 +161,7 @@ public final class OwnerSupport {
             + "SELECT 1 FROM ad_user u2 WHERE u2.ad_client_id = :clientId AND u2."
             + COLUMN_IS_OWNER + " = 'Y')");
     update.setParameter("userId", userId);
-    update.setParameter("clientId", clientId);
+    update.setParameter(PARAM_CLIENT_ID, clientId);
     int updated = update.executeUpdate();
     if (updated == 0) {
       // Zero rows affected means either: no AD_User row matches userId for this clientId, OR the
