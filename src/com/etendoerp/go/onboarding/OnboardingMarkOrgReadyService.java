@@ -68,7 +68,65 @@ public class OnboardingMarkOrgReadyService {
           + " WHERE t.ad_org_id = :orgId AND t.ad_parent_org_id = '0')";
 
   /**
-   * Marks the organization as ready if not already done.
+   * ETP-5352 reconciliation. AD_Org_Ready derives {@code AD_LEGALENTITY_ORG_ID} /
+   * {@code AD_BUSINESSUNIT_ORG_ID} through {@code ad_get_org_le_bu_treenode()} and writes whatever
+   * it computed — including NULL — in a single UPDATE. That function only short-circuits to the
+   * organization itself when the org's type already carries {@code ISLEGALENTITY = 'Y'}; otherwise
+   * it walks AD_TREENODE, and a walk that finds no parent returns NULL silently (AD_Org_Ready wraps
+   * the call in {@code EXCEPTION WHEN DATA_EXCEPTION THEN ... := NULL}, so nothing is logged
+   * either). An empty legal entity pointer then breaks {@code ad_get_org_le_bu()}, which breaks
+   * {@code C_GETTAX}'s cash-VAT criterion, which makes every non-zero-rate tax unresolvable — the
+   * user-visible symptom being {@code @TaxNotFound@} when invoicing a shipment with no sales order.
+   *
+   * <p>We recompute both pointers here, on the DAL session connection and after
+   * {@link #provisionOrgTree} has put AD_ORG_TREE in place, using the same core function so the
+   * semantics cannot drift. The COALESCE pair makes it strictly non-destructive (an already
+   * populated pointer is never overwritten) and the WHERE clause makes it a no-op once healthy.</p>
+   *
+   * <p>A NULL business unit is normal and expected for a legal-entity organization — it is not
+   * part of the defect. The predicate therefore only treats it as repairable when
+   * {@code ad_get_org_le_bu_treenode(org, 'BU')} actually has a value to write; matching on
+   * {@code ad_businessunit_org_id IS NULL} alone would make this UPDATE touch every healthy
+   * onboarding org, bump its audit stamp and fire the WARN below on every single alta, which
+   * would destroy the one signal this method exists to raise.</p>
+   */
+  private static final String ORG_HIERARCHY_POINTERS_SQL =
+      "UPDATE ad_org"
+          + " SET ad_legalentity_org_id = COALESCE(ad_legalentity_org_id,"
+          + " ad_get_org_le_bu_treenode(ad_org_id, 'LE')),"
+          + " ad_businessunit_org_id = COALESCE(ad_businessunit_org_id,"
+          + " ad_get_org_le_bu_treenode(ad_org_id, 'BU')),"
+          + " updated = now(), updatedby = '0'"
+          + " WHERE ad_org_id = :orgId AND ad_client_id = :clientId"
+          + " AND (ad_legalentity_org_id IS NULL"
+          + " OR (ad_businessunit_org_id IS NULL"
+          + " AND ad_get_org_le_bu_treenode(ad_org_id, 'BU') IS NOT NULL))";
+
+  /**
+   * Reads the two facts {@link #verifyOrgHierarchy} asserts on, straight from the database rather
+   * than from the DAL entity — the reconciliation above is a native UPDATE, so a cached
+   * {@link Organization} would still show the pre-update values.
+   */
+  private static final String ORG_HIERARCHY_CHECK_SQL =
+      "SELECT ot.islegalentity, o.ad_legalentity_org_id"
+          + " FROM ad_org o JOIN ad_orgtype ot ON ot.ad_orgtype_id = o.ad_orgtype_id"
+          + " WHERE o.ad_org_id = :orgId";
+
+  /**
+   * Marks the organization as ready and reconciles the derived hierarchy state that depends on it.
+   *
+   * <p>Two responsibilities live here and they are gated differently:</p>
+   * <ul>
+   *   <li><b>Running AD_Org_Ready</b> stays conditional on {@code isReady}. The process is not
+   *       idempotent: when one of its internal checks fails it rolls back and raises
+   *       {@code @20545@}, which would take the whole onboarding down.</li>
+   *   <li><b>Reconciling derived state</b> ({@code AD_ORG_TREE}, then the legal entity / business
+   *       unit pointers) runs <b>always</b>, because it is idempotent and because {@code isReady}
+   *       is not the state it repairs. {@code InitialOrgSetup.createOrganization()} already runs
+   *       AD_Org_Ready before this method is called, so the organization arrives here with
+   *       {@code isReady = 'Y'} — the early return that used to key on that flag skipped every
+   *       repair below, which is how ETP-5352's tenants kept an empty legal entity pointer.</li>
+   * </ul>
    *
    * @param clientId    target client identifier
    * @param orgId       target organization identifier
@@ -80,25 +138,119 @@ public class OnboardingMarkOrgReadyService {
     if (org == null) {
       throw new OBException("Organization not found for markOrgReady: " + orgId);
     }
+
     if (Boolean.TRUE.equals(org.isReady())) {
-      log.debug("Organization {} is already ready, skipping", orgId);
-      return;
-    }
+      log.debug("Organization {} is already ready, skipping AD_Org_Ready", orgId);
+    } else {
+      flushChanges();
+      executeOrgReadyProcess(orgId, clientId, adminUserId, adminRoleId);
 
-    flushChanges();
-    executeOrgReadyProcess(orgId, clientId, adminUserId, adminRoleId);
+      // AD_Org_Ready wrote AD_ORG through PL/SQL, so the DAL still holds the pre-process entity.
+      // Evict it BEFORE the defensive setReady below: saving a stale copy would flush the columns
+      // the process just derived (legal entity, business unit, calendar owner) back to their old
+      // NULLs. This is hypothesis (b) of gap D1 in docs/etendo-ad/onboarding-gaps.md.
+      refreshOrganization(orgId);
 
-    // Defensive: ensure the OBDal entity reflects ready state after process execution
-    org = resolveOrganization(orgId);
-    if (org != null && !Boolean.TRUE.equals(org.isReady())) {
-      org.setReady(true);
-      saveOrganization(org);
+      // Defensive: ensure the OBDal entity reflects ready state after process execution
+      org = resolveOrganization(orgId);
+      if (org != null && !Boolean.TRUE.equals(org.isReady())) {
+        org.setReady(true);
+        saveOrganization(org);
+      }
     }
 
     // B1: (re)provision the AD_ORG_TREE rows on the DAL session connection. See ORG_TREE_*_SQL.
     provisionOrgTree(clientId, orgId);
 
+    // Flush before the native reconciliation so it sees every pending entity change, and once the
+    // tree above is in place so ad_get_org_le_bu_treenode() has something to walk.
     flushChanges();
+    reconcileOrgHierarchyPointers(clientId, orgId);
+    verifyOrgHierarchy(orgId);
+  }
+
+  /**
+   * ETP-5352. Recomputes the legal entity / business unit pointers that AD_Org_Ready may have left
+   * empty. Idempotent and non-destructive: see {@link #ORG_HIERARCHY_POINTERS_SQL}. Logs at WARN
+   * when it actually repairs something, because a repair here means AD_Org_Ready failed silently
+   * and we want that visible in the onboarding log rather than discovered months later through a
+   * {@code @TaxNotFound@} report from production.
+   */
+  protected void reconcileOrgHierarchyPointers(String clientId, String orgId) {
+    int rows = OBDal.getInstance().getSession()
+        .createNativeQuery(ORG_HIERARCHY_POINTERS_SQL)
+        .setParameter("clientId", clientId)
+        .setParameter("orgId", orgId)
+        .executeUpdate();
+    if (rows > 0) {
+      log.warn("Reconciled legal entity / business unit pointers for org {}: AD_Org_Ready"
+          + " left them unset", orgId);
+      // The UPDATE above bypassed the DAL, so drop the now-stale entity from the session. Leaving
+      // it cached risks a later flush writing the pre-update NULLs straight back over the repair.
+      refreshOrganization(orgId);
+    }
+  }
+
+  /**
+   * ETP-5352. Fails the onboarding loudly when the organization's hierarchy is still inconsistent
+   * after reconciliation. A half-provisioned tenant is worse than an alta that stops with a clear
+   * message: what hid this defect for so long is that everything looked correct from the UI while
+   * invoicing was broken.
+   *
+   * <p>Both assertions are precise enough not to fire on a healthy tenant. Onboarding always
+   * creates the organization as "Legal with accounting", so a non-legal-entity type here is itself
+   * the anomaly that produces the empty pointer — checking it catches the defect at its source
+   * rather than at its symptom.</p>
+   */
+  protected void verifyOrgHierarchy(String orgId) {
+    Object[] row = (Object[]) OBDal.getInstance().getSession()
+        .createNativeQuery(ORG_HIERARCHY_CHECK_SQL)
+        .setParameter("orgId", orgId)
+        .uniqueResult();
+    if (row == null) {
+      throw new OBException("Organization not found while verifying hierarchy: " + orgId);
+    }
+    if (!isYesFlag(row[0])) {
+      throw new OBException("Onboarding organization " + orgId + " is not typed as a legal entity;"
+          + " AD_Org_Ready cannot derive its legal entity pointer and tax resolution would fail");
+    }
+    if (row[1] == null) {
+      throw new OBException("Organization " + orgId + " has no legal entity pointer after"
+          + " reconciliation; tax resolution (C_GETTAX) would fail for any non-zero-rate tax");
+    }
+  }
+
+  /**
+   * Reads an Etendo {@code char(1)} yes/no flag out of a native-query result row.
+   *
+   * <p>This exists because of a trap that is invisible in a unit test. Etendo's boolean columns are
+   * {@code character(1)}, and Hibernate's implicit scalar resolution for a native query derives the
+   * Java type from the JDBC metadata: {@code JdbcResultMetadata#getHibernateType} sees
+   * {@link java.sql.Types#CHAR} with a display size of 1 and {@code Dialect}'s
+   * {@code registerHibernateType(Types.CHAR, 1, CHARACTER)} resolves it to {@code CharacterType}.
+   * The value therefore arrives as a {@link Character}, not a {@link String}, and
+   * {@code "Y".equals(row[0])} is <b>always false</b> — including on a perfectly healthy
+   * organization. A mock that stubs {@code uniqueResult()} with a {@code String} passes happily
+   * while the real onboarding fails 100% of the time, which is exactly how this shipped.</p>
+   *
+   * <p>Normalizing through {@link String#valueOf} covers both mappings and does not depend on the
+   * driver, the dialect or the column's declared width.</p>
+   *
+   * @param flag the raw value read from the result row, possibly {@code null}
+   * @return {@code true} when the flag is Etendo's {@code 'Y'}
+   */
+  protected static boolean isYesFlag(Object flag) {
+    return flag != null && "Y".equals(String.valueOf(flag));
+  }
+
+  /**
+   * Re-reads the organization into the DAL session after a native UPDATE changed it underneath.
+   */
+  protected void refreshOrganization(String orgId) {
+    Organization org = resolveOrganization(orgId);
+    if (org != null) {
+      OBDal.getInstance().getSession().refresh(org);
+    }
   }
 
   /**
