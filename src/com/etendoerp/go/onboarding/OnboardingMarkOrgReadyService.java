@@ -43,6 +43,10 @@ public class OnboardingMarkOrgReadyService {
 
   private static final String ORG_READY_PROCESS_KEY = "AD_Org_Ready";
 
+  /** Named bind parameters shared by every native statement below. */
+  private static final String PARAM_ORG_ID = "orgId";
+  private static final String PARAM_CLIENT_ID = "clientId";
+
   /**
    * B1 defensive provisioning. AD_Org_Ready already populates AD_ORG_TREE, but its tree INSERT
    * filters on AD_ISORGINCLUDED_TREENODE(...) &gt; 0 and runs on its own DalConnectionProvider
@@ -179,8 +183,8 @@ public class OnboardingMarkOrgReadyService {
   protected void reconcileOrgHierarchyPointers(String clientId, String orgId) {
     int rows = OBDal.getInstance().getSession()
         .createNativeQuery(ORG_HIERARCHY_POINTERS_SQL)
-        .setParameter("clientId", clientId)
-        .setParameter("orgId", orgId)
+        .setParameter(PARAM_CLIENT_ID, clientId)
+        .setParameter(PARAM_ORG_ID, orgId)
         .executeUpdate();
     if (rows > 0) {
       log.warn("Reconciled legal entity / business unit pointers for org {}: AD_Org_Ready"
@@ -205,7 +209,7 @@ public class OnboardingMarkOrgReadyService {
   protected void verifyOrgHierarchy(String orgId) {
     Object[] row = (Object[]) OBDal.getInstance().getSession()
         .createNativeQuery(ORG_HIERARCHY_CHECK_SQL)
-        .setParameter("orgId", orgId)
+        .setParameter(PARAM_ORG_ID, orgId)
         .uniqueResult();
     if (row == null) {
       throw new OBException("Organization not found while verifying hierarchy: " + orgId);
@@ -268,8 +272,8 @@ public class OnboardingMarkOrgReadyService {
   protected void runOrgTreeInsert(String sql, String clientId, String orgId) {
     int rows = OBDal.getInstance().getSession()
         .createNativeQuery(sql)
-        .setParameter("clientId", clientId)
-        .setParameter("orgId", orgId)
+        .setParameter(PARAM_CLIENT_ID, clientId)
+        .setParameter(PARAM_ORG_ID, orgId)
         .executeUpdate();
     if (rows > 0) {
       log.debug("Provisioned {} AD_ORG_TREE row(s) for org {}", rows, orgId);
