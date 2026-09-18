@@ -16,6 +16,8 @@
  */
 package com.etendoerp.go.common;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -29,6 +31,8 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -125,6 +129,52 @@ class CorsUtilsTest {
       CorsUtils.apply(request, response, "GET", "Content-Type", null, false);
 
       verify(response, never()).setHeader(eq("Access-Control-Expose-Headers"), anyString());
+    }
+  }
+
+  /**
+   * The session CSRF/origin check calls isAllowedOrigin, so an origin missing from
+   * the default allowlist surfaces as "CSRF validation failed" even when the token
+   * is correct. That is exactly what happened: the defaults carried 3000 (CRA) and
+   * 5173 (vite's own default) but not the ports this project actually serves on —
+   * 3100 for dev and preview, 4173 for the E2E harness — so no local UI could
+   * issue an unsafe request and the integration suite could not pass at all.
+   */
+  @Nested
+  @DisplayName("isAllowedOrigin — local development origins")
+  class LocalOriginAllowlist {
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "http://localhost:3000",
+        "http://localhost:3100",
+        "http://localhost:4173",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3100",
+        "http://127.0.0.1:4173",
+        "http://127.0.0.1:5173",
+    })
+    void trustsEveryLocalDevelopmentOrigin(String origin) {
+      when(request.getRequestURL()).thenReturn(new StringBuffer("http://server:8080/api"));
+
+      assertTrue(CorsUtils.isAllowedOrigin(request, origin),
+          origin + " must be trusted, or a local UI cannot issue an unsafe request");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "http://evil.example",
+        "https://localhost:4173",
+        "http://localhost:4174",
+        "http://localhost",
+    })
+    void stillRejectsAnythingElse(String origin) {
+      when(request.getRequestURL()).thenReturn(new StringBuffer("http://server:8080/api"));
+
+      assertFalse(CorsUtils.isAllowedOrigin(request, origin),
+          origin + " must not be trusted by default — widening the list is what "
+              + "etgo.allowed.origins is for");
     }
   }
 }
