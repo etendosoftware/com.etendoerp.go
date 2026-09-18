@@ -68,6 +68,7 @@ public class EmailMessageEditsTest {
       fail("expected rejection");
     } catch (EmailMessageEdits.InvalidMessageEditsException expected) {
       assertTrue(expected.getMessage().length() > 0);
+      assertEquals(EmailMessageEdits.REASON_INVALID_TYPE, expected.getReasonCode());
     }
   }
 
@@ -79,6 +80,7 @@ public class EmailMessageEditsTest {
       fail("expected rejection");
     } catch (EmailMessageEdits.InvalidMessageEditsException expected) {
       assertTrue(expected.getMessage().contains("bodyHtml"));
+      assertEquals(EmailMessageEdits.REASON_UNKNOWN_FIELD, expected.getReasonCode());
     }
   }
 
@@ -89,7 +91,7 @@ public class EmailMessageEditsTest {
           new JSONObject("{\"messageEdits\":{\"subject\":\" \",\"message\":\"  \"}}"));
       fail("expected rejection");
     } catch (EmailMessageEdits.InvalidMessageEditsException expected) {
-      // expected
+      assertEquals(EmailMessageEdits.REASON_MISSING_SUBJECT_OR_MESSAGE, expected.getReasonCode());
     }
   }
 
@@ -103,7 +105,7 @@ public class EmailMessageEditsTest {
       EmailMessageEdits.fromBody(subjectBody);
       fail("expected subject rejection");
     } catch (EmailMessageEdits.InvalidMessageEditsException expected) {
-      // expected
+      assertEquals(EmailMessageEdits.REASON_SUBJECT_TOO_LONG, expected.getReasonCode());
     }
 
     JSONObject longMessage = new JSONObject();
@@ -114,7 +116,7 @@ public class EmailMessageEditsTest {
       EmailMessageEdits.fromBody(messageBody);
       fail("expected message rejection");
     } catch (EmailMessageEdits.InvalidMessageEditsException expected) {
-      // expected
+      assertEquals(EmailMessageEdits.REASON_MESSAGE_TOO_LONG, expected.getReasonCode());
     }
   }
 

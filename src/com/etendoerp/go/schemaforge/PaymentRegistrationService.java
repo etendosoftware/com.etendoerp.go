@@ -20,9 +20,8 @@ package com.etendoerp.go.schemaforge;
 import java.math.BigDecimal;
 import java.text.ParseException;
 import java.util.Date;
-import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 
 import javax.servlet.http.HttpServletResponse;
@@ -111,6 +110,11 @@ public final class PaymentRegistrationService {
 
   // OBError type returned by FIN_AddPayment.processPayment on failure
   private static final String STATUS_ERROR = "Error";
+
+  // ETP-5238: org "0" (the "*" org) — a payment method defined there must stay visible to every
+  // organization. Same convention as SelectorOrgFilter.buildOrganizationPredicate/
+  // buildReadableOrgsPredicate (includeOrgZero).
+  private static final String ORG_ZERO = "0";
 
   private PaymentRegistrationService() {
   }
@@ -451,11 +455,20 @@ public final class PaymentRegistrationService {
     return item;
   }
 
-  // ─── PAYMENT METHODS: list methods valid for the invoice's accounts ────────
+  // ─── PAYMENT METHODS: list the full catalog for the invoice's direction ────
 
   /**
-   * Lists the distinct payment methods configured (in the invoice's direction)
-   * for financial accounts in the natural org tree of the invoice.
+   * Lists the full {@link FIN_PaymentMethod} catalog available for the invoice's direction —
+   * active, {@code payinAllow}/{@code payoutAllow} per {@code isReceipt} — scoped to the invoice's
+   * own natural org tree (plus org {@code "0"}, the "*" org — see {@link #ORG_ZERO}).
+   *
+   * <p>ETP-5238: this used to walk {@link FinAccPaymentMethod} link rows, so only methods already
+   * linked to a Financial Account were offered. That coupling is gone: the method list no longer
+   * depends on which accounts exist. This stays safe only in combination with
+   * {@link #handleListAccounts}, which is UNCHANGED and still only offers accounts that support
+   * the selected method — so every (account, method) pair the user can submit still has a
+   * {@link FinAccPaymentMethod} link row for Core's accounting resolution to find. Do not free
+   * the account side without that guarantee.
    */
   static NeoResponse handleListPaymentMethods(NeoContext context, boolean isReceipt) {
     String invoiceId = context.getRecordId();
@@ -469,30 +482,31 @@ public final class PaymentRegistrationService {
         if (invoice == null) {
           return NeoResponse.error(HttpServletResponse.SC_NOT_FOUND, MSG_INVOICE_NOT_FOUND);
         }
-        Set<String> naturalTree = OBContext.getOBContext()
+        Set<String> naturalTree = new LinkedHashSet<>(OBContext.getOBContext()
             .getOrganizationStructureProvider(invoice.getClient().getId())
-            .getNaturalTree(invoice.getOrganization().getId());
+            .getNaturalTree(invoice.getOrganization().getId()));
+        // getNaturalTree does not include org "0" — add it explicitly so a payment method defined
+        // at the "*" org remains visible to every organization (see ORG_ZERO javadoc).
+        naturalTree.add(ORG_ZERO);
 
-        OBCriteria<FinAccPaymentMethod> crit = OBDal.getInstance()
-            .createCriteria(FinAccPaymentMethod.class);
+        OBCriteria<FIN_PaymentMethod> crit = OBDal.getInstance()
+            .createCriteria(FIN_PaymentMethod.class);
         crit.setFilterOnReadableOrganization(false);
-        crit.add(Restrictions.eq(allowProperty(isReceipt), Boolean.TRUE));
-
-        Map<String, FIN_PaymentMethod> distinct = new LinkedHashMap<>();
-        for (FinAccPaymentMethod fapm : crit.list()) {
-          collectMethodInTree(distinct, fapm, naturalTree);
-        }
+        crit.add(Restrictions.eq(FIN_PaymentMethod.PROPERTY_ACTIVE, Boolean.TRUE));
+        crit.add(Restrictions.eq(paymentMethodAllowProperty(isReceipt), Boolean.TRUE));
+        crit.add(Restrictions.in(FIN_PaymentMethod.PROPERTY_ORGANIZATION + ".id", naturalTree));
+        crit.addOrderBy(FIN_PaymentMethod.PROPERTY_NAME, true);
 
         JSONArray arr = new JSONArray();
-        for (Map.Entry<String, FIN_PaymentMethod> e : distinct.entrySet()) {
+        for (FIN_PaymentMethod pm : crit.list()) {
           JSONObject item = new JSONObject();
-          item.put("id", e.getKey());
-          item.put(KEY_LABEL, e.getValue().getName());
+          item.put("id", pm.getId());
+          item.put(KEY_LABEL, pm.getName());
           // ETP-4891: the SPA used to guess "is this a transfer?" from the label with a regex.
           // That gate now BLOCKS a payment (a transfer on an account whose PSD2 connection is
           // inactive cannot be paid), so a method merely NAMED like a transfer must no longer
           // trip it. Same predicate the runtime uses for the Automatic Withdrawn invariant.
-          item.put("isBankTransfer", FinancialAccountSupport.isBankTransferMethod(e.getValue()));
+          item.put("isBankTransfer", FinancialAccountSupport.isBankTransferMethod(pm));
           arr.put(item);
         }
         return itemsResponse(arr);
@@ -506,18 +520,22 @@ public final class PaymentRegistrationService {
     }
   }
 
-  /** Adds the method behind {@code fapm} to {@code distinct} when its account is in the org tree. */
-  private static void collectMethodInTree(Map<String, FIN_PaymentMethod> distinct,
-      FinAccPaymentMethod fapm, Set<String> naturalTree) {
-    FIN_FinancialAccount acc = fapm.getAccount();
-    if (acc == null || acc.getOrganization() == null
-        || (!naturalTree.isEmpty() && !naturalTree.contains(acc.getOrganization().getId()))) {
-      return;
-    }
-    FIN_PaymentMethod pm = fapm.getPaymentMethod();
-    if (pm != null && !distinct.containsKey(pm.getId())) {
-      distinct.put(pm.getId(), pm);
-    }
+  /**
+   * Maps the invoice direction to {@link FIN_PaymentMethod}'s own
+   * {@code payinAllow}/{@code payoutAllow} property name. {@code public}: the single source of
+   * truth for this mapping, also called by {@code PaymentMethodSelectorSupport} (ETP-5238) so the
+   * document-header SELECTOR and this payment-modal list never diverge on "which flag means which
+   * direction". Distinct from {@link #allowProperty(boolean)} below, which maps the same direction
+   * onto the {@link FinAccPaymentMethod} LINK entity's own (differently-typed) property constants.
+   *
+   * @param isReceipt {@code true} for the pay-in (receipt/sales) direction, {@code false} for
+   *                  the pay-out (payment/purchase) direction.
+   * @return the {@link FIN_PaymentMethod} property name for that direction's allow flag.
+   */
+  public static String paymentMethodAllowProperty(boolean isReceipt) {
+    return isReceipt
+        ? FIN_PaymentMethod.PROPERTY_PAYINALLOW
+        : FIN_PaymentMethod.PROPERTY_PAYOUTALLOW;
   }
 
   // ─── CREDIT SOURCES: consumable credit / saldo a favor of the BP ───────────

@@ -19,9 +19,15 @@ package com.etendoerp.go.featureflags;
 
 import java.util.Map;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
+import com.configcat.PollingModes;
+import com.etendoerp.go.common.GoRuntimeProperties;
+
+import dev.openfeature.contrib.providers.configcat.ConfigCatProvider;
+import dev.openfeature.contrib.providers.configcat.ConfigCatProviderConfig;
 import dev.openfeature.sdk.Client;
 import dev.openfeature.sdk.FeatureProvider;
 import dev.openfeature.sdk.MutableContext;
@@ -34,16 +40,35 @@ import dev.openfeature.sdk.OpenFeatureAPI;
  * calls {@link #isEnabled(String, FeatureFlagContext)} and never sees an OpenFeature type, so the
  * control plane behind it can change without touching a single caller.
  *
- * <p><strong>Control plane:</strong> currently {@link PropertiesFeatureProvider} — flags come from
- * local configuration ({@code etendo.go.flags.<flag-key>}), evaluated in-process with no network
- * call, no background thread and no polling.
+ * <p><strong>Control plane: ConfigCat when configured, local properties otherwise.</strong> With
+ * {@value #CONFIGCAT_SDK_KEY_PROPERTY} set, {@link ConfigCatProvider} serves flags from ConfigCat,
+ * so a flag can be flipped and per-account targeting rules changed <em>without a restart</em>. With
+ * it unset, {@link PropertiesFeatureProvider} resolves flags from local configuration
+ * ({@code etendo.go.flags.<flag-key>}) in-process with no network call — a plain boolean per
+ * environment, with no per-account targeting. Keeping both is deliberate: dev, CI and e2e stay
+ * deterministic and independent of a shared remote project.
+ *
+ * <p><b>Per-account targeting therefore requires ConfigCat.</b> There is deliberately no
+ * local mechanism for it: a second way to express the same decision is a second thing to keep in
+ * sync, and — worse — it would silently do nothing wherever an SDK key is set, since only one
+ * provider is ever installed. A configuration knob that silently does nothing is the same family of
+ * trap as ETP-4966. Locally the plain boolean is enough, because a dev box has one user.
  *
  * <p><strong>Swap point.</strong> {@link #createProvider()} is the <em>only</em> place that decides
- * which provider backs the API. Moving to a hosted control plane (Mixpanel Feature Flags with local
- * evaluation and polling, per the team plan) means returning a different {@code FeatureProvider}
- * from that one method, plus adding its dependency in {@code build.gradle}. Nothing else in this
- * class, this package, or any caller changes. Keep it that way: provider-specific configuration,
- * scheduling and failure handling belong inside the provider, not here.
+ * which provider backs the API. Nothing else in this class, this package, or any caller changes.
+ * Keep it that way: provider-specific configuration, scheduling and failure handling belong inside
+ * the provider, not here.
+ *
+ * <p><strong>⚠ A flag read by BOTH ends now needs {@code targeting-key-divergence} closed first.</strong>
+ * Before ConfigCat was wired here, the backend could not read the same control plane as the browser,
+ * so the two ends <em>could not</em> share a flag. Now they can — and they still send <b>different
+ * targeting keys</b>: the web client sends the ERP username ({@code sf_auth_user}), this module
+ * sends the {@code ETGO_ACCOUNT} email. A flag evaluated on both ends would therefore bucket the
+ * same human two ways, which is exactly the ETP-4966 failure: an unset or differently-resolved key
+ * on one end is indistinguishable from a disabled feature, and it shipped a charged account a free
+ * environment. Until the {@code targeting-key-divergence} item on {@code paid-second-tenant} is
+ * closed, a new flag must be read on <em>one</em> end only. {@link #FLAG_BP_PORTAL_LINK} is
+ * backend-only for this reason and must never be added to the web client's {@code flag-keys.js}.
  *
  * <p><strong>Failure behaviour — never block, never fail, default false.</strong> A flag check runs
  * inside request handling, so it must not be able to slow down or break a request:
@@ -63,11 +88,65 @@ public final class GoFeatureFlags {
 
   private static final Logger log = LogManager.getLogger(GoFeatureFlags.class);
 
-  // No backend flag is declared today. `tenant-upgrade` was retired in ETP-4966: the paid
-  // productive-environment capability is permanent, and gating it behind a key the browser and the
-  // backend resolved through different control planes is what let a charged account receive a demo
-  // environment. The infrastructure below stays as the entry point and swap point for the next
-  // flag; declare its key here when there is one.
+  // `tenant-upgrade` was retired in ETP-4966: the paid productive-environment capability is
+  // permanent, and gating it behind a key the browser and the backend resolved through different
+  // control planes is what let a charged account receive a demo environment.
+
+  /**
+   * ETP-5267 — whether a {@code sales-invoice-send} email carries a link to the Business Partner
+   * self-service portal.
+   *
+   * <p><b>Targeted per sending account, and false for everyone until one is named.</b> The
+   * decision is "does the account sending this invoice have the portal link switched on", answered
+   * against the {@code ETGO_ACCOUNT} email this module publishes in the evaluation context (both as
+   * the targeting key and as {@link FeatureFlagContext#ATTRIBUTE_EMAIL}). Per-account enablement is
+   * a ConfigCat targeting rule; with no SDK key configured the flag is a plain per-environment
+   * boolean, so a shared environment must have ConfigCat set up before this is switched on for
+   * anyone. See {@code PortalLinkPolicy}, which resolves the sending account and owns this flag's
+   * only call site.
+   *
+   * <p><b>Backend-only, and it must stay that way.</b> No key is declared in the web client's
+   * {@code flag-keys.js} and nothing in the browser reads this — <b>never add one.</b> The decision
+   * point is entirely server-side, since the link is injected while building the email in Java, so
+   * a browser key would create a second evaluator with nothing to evaluate. That is not a style
+   * preference: per the ETP-4966 lesson above, a flag whose two ends resolve from different control
+   * planes has no single truth, and an unset key on one end is indistinguishable from a disabled
+   * feature. With a single evaluator there is no second end to disagree.
+   *
+   * <p>This also does <em>not</em> reopen the {@code targeting-key-divergence} item on
+   * {@code paid-second-tenant}: that divergence is the frontend sending the ERP username while the
+   * backend targets the account email. This flag targets the account email — the key the backend
+   * targets on — and has no frontend end at all.
+   *
+   * <p><b>It gates the link, not the portal.</b> The {@code /portal/:token} route, the three
+   * {@code /sws/portal/*} endpoints, the {@code etgo_portal_access} table and the revoke action all
+   * ship unconditionally — the same pattern {@code docs/feature-flags.md} already documents as
+   * correct for {@code /upgrade}, where the route is registered unconditionally and only the menu
+   * entry is gated, "because hiding the route would imply the flag was protecting something, which
+   * it is not". What protects the endpoints is the token. Revocation in particular must keep working
+   * whatever this flag says: it is the only kill switch for a link already out.
+   */
+  public static final String FLAG_BP_PORTAL_LINK = "bp-portal-link";
+
+  /**
+   * ConfigCat SDK key. Set ⇒ flags come from ConfigCat and can be flipped without a restart; unset
+   * ⇒ {@link PropertiesFeatureProvider} resolves them from local configuration.
+   */
+  static final String CONFIGCAT_SDK_KEY_PROPERTY = "etendo.go.configcat.sdkKey";
+
+  /** Environment-variable spelling of {@value #CONFIGCAT_SDK_KEY_PROPERTY}. */
+  static final String CONFIGCAT_SDK_KEY_ENV = "ETGO_CONFIGCAT_SDK_KEY";
+
+  /** How often ConfigCat re-polls its configuration in the background. */
+  private static final int CONFIGCAT_POLL_SECONDS = 60;
+
+  /**
+   * Upper bound on how long installing the provider may wait for ConfigCat's first fetch. Past it
+   * the client serves its own snapshot rather than blocking a request thread — a flag check runs
+   * inside request handling, so an unreachable control plane must cost a bounded wait once, never
+   * an unbounded one per call.
+   */
+  private static final int CONFIGCAT_MAX_INIT_WAIT_SECONDS = 5;
 
   /**
    * OpenFeature domain the provider is bound to. Using a domain instead of the global default
@@ -110,16 +189,42 @@ public final class GoFeatureFlags {
   /**
    * Builds the provider backing flag evaluation.
    *
-   * <p><strong>This is the swap point for the control plane.</strong> Return a different
-   * {@code FeatureProvider} here — for example a Mixpanel provider configured for local evaluation
-   * with background polling — and the whole module picks it up with no other change. Whatever
-   * provider is returned must honour the guarantees documented on this class: never block the
-   * calling thread on I/O, never throw, and resolve to the caller's default when it cannot answer.
+   * <p><strong>This is the swap point for the control plane, and it now has two arms.</strong>
+   * With {@value #CONFIGCAT_SDK_KEY_PROPERTY} set, flags come from ConfigCat — hosted, so a flag
+   * can be flipped without a restart, with per-account targeting rules evaluated remotely. With it
+   * unset, {@link PropertiesFeatureProvider} resolves flags from local configuration. That fallback
+   * is deliberate, not a leftover: dev boxes, CI and e2e stay deterministic and independent of any
+   * shared remote project. It is a plain per-environment boolean — per-account targeting exists
+   * only on the ConfigCat arm, on purpose (see this class's javadoc).
+   *
+   * <p><strong>An absent, blank or wrong SDK key must mean "flag off", never "flag on".</strong> A
+   * blank key takes the local arm, where an unconfigured flag is {@code false}. A wrong key makes
+   * ConfigCat's initialization fail, {@link #install()} catch it, and every flag resolve to its
+   * {@code false} code default. Both roads lead to off. This is the ETP-4966 shape and it is the
+   * one behaviour here that must never be "improved" into a fallback that allows.
+   *
+   * <p>Initialization is bounded: {@link PollingModes#autoPoll(int, int)} caps how long the first
+   * evaluation may wait on the network at {@value #CONFIGCAT_MAX_INIT_WAIT_SECONDS} seconds, after
+   * which the client answers from its own in-memory snapshot while background polling continues.
+   * Nothing here caches by hand — that is the SDK's job, and duplicating it would add a second
+   * staleness window nobody is watching.
    *
    * @return the provider to bind to the {@value #OPENFEATURE_DOMAIN} domain
    */
   private static FeatureProvider createProvider() {
-    return new PropertiesFeatureProvider();
+    String sdkKey = StringUtils.trimToNull(GoRuntimeProperties.readValue(
+        CONFIGCAT_SDK_KEY_PROPERTY, CONFIGCAT_SDK_KEY_ENV, null));
+    if (sdkKey == null) {
+      log.info("{} is not configured; feature flags resolve from local configuration",
+          CONFIGCAT_SDK_KEY_PROPERTY);
+      return new PropertiesFeatureProvider();
+    }
+    ConfigCatProviderConfig config = ConfigCatProviderConfig.builder()
+        .sdkKey(sdkKey)
+        .options(options -> options.pollingMode(
+            PollingModes.autoPoll(CONFIGCAT_POLL_SECONDS, CONFIGCAT_MAX_INIT_WAIT_SECONDS)))
+        .build();
+    return new ConfigCatProvider(config);
   }
 
   /**

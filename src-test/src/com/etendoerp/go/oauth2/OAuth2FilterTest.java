@@ -778,6 +778,7 @@ class OAuth2FilterTest {
       when(rs.getString("ad_user_id")).thenReturn(userId);
       when(rs.getString("ad_role_id")).thenReturn(roleId);
       when(rs.getString("etendo_client_id")).thenReturn(clientId);
+      when(rs.getString("etendo_org_id")).thenReturn("0");
 
       return work.execute(connection);
     });

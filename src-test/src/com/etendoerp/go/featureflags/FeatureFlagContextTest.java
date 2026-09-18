@@ -20,7 +20,8 @@ package com.etendoerp.go.featureflags;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.util.Map;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -33,7 +34,10 @@ class FeatureFlagContextTest {
   void targetsOnTheAccountEmail() {
     FeatureFlagContext context = FeatureFlagContext.forAccount("user@example.com");
     assertEquals("user@example.com", context.getTargetingKey());
-    assertTrue(context.getAttributes().isEmpty());
+    // forAccount() publishes the email as BOTH the targeting key and the Email attribute — see
+    // FeatureFlagContext.ATTRIBUTE_EMAIL for why the duplication is load-bearing (ETP-4966).
+    assertEquals(Map.of(FeatureFlagContext.ATTRIBUTE_EMAIL, "user@example.com"),
+        context.getAttributes());
   }
 
   @ParameterizedTest
@@ -48,7 +52,9 @@ class FeatureFlagContextTest {
     FeatureFlagContext base = FeatureFlagContext.forAccount("user@example.com");
     FeatureFlagContext scoped = base.with(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, "CLIENT1");
 
-    assertTrue(base.getAttributes().isEmpty());
+    // base still carries exactly what forAccount() gave it: it never gained clientId.
+    assertEquals(Map.of(FeatureFlagContext.ATTRIBUTE_EMAIL, "user@example.com"),
+        base.getAttributes());
     assertEquals("CLIENT1", scoped.getAttributes().get(FeatureFlagContext.ATTRIBUTE_CLIENT_ID));
     assertEquals("user@example.com", scoped.getTargetingKey());
   }
@@ -60,7 +66,9 @@ class FeatureFlagContextTest {
         .with(FeatureFlagContext.ATTRIBUTE_CLIENT_ID, "  ")
         .with(null, "CLIENT1")
         .with("   ", "CLIENT1");
-    assertTrue(context.getAttributes().isEmpty());
+    // Only the Email attribute survives: none of the four blank with() calls added anything.
+    assertEquals(Map.of(FeatureFlagContext.ATTRIBUTE_EMAIL, "user@example.com"),
+        context.getAttributes());
   }
 
   @Test

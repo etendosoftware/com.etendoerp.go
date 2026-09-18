@@ -55,9 +55,7 @@ import org.openbravo.service.db.DalConnectionProvider;
  * (no Hibernate-level {@code EntityPersistenceEventObserver}); a config created only in Classic
  * gets no automatic schedule.
  *
- * <p><b>Per-organization scope.</b> Unlike {@code OnboardingBankConnectionSyncService}'s PSD2
- * schedule (client-wide: the PSD2 sync process itself iterates every connected account regardless
- * of client, so one request per client is correct), SII and TicketBAI configurations are
+ * <p><b>Per-organization scope.</b> SII and TicketBAI configurations are
  * inherently per-organization records ({@code AEATSII_CONFIG}/{@code TBAI_Config} both carry
  * their own {@code AD_Org_ID}, and the sending processes operate on that organization's invoices).
  * Idempotency is therefore scoped to client + organization + process, not client + process alone
@@ -66,7 +64,7 @@ import org.openbravo.service.db.DalConnectionProvider;
  *
  * <p>The two AD_Process records (Grouped invoices SII sending process / RegisterTBAInvoice) are
  * resolved by search key — never hardcoded UUIDs, module sourcedata, defensive null-guard,
- * non-fatal (mirrors {@code OnboardingBankConnectionSyncService#resolveProcess}).
+ * non-fatal — see {@link #resolveProcess}.
  *
  * <p>Creating the row and activating it in Quartz are split, same as the onboarding precedent:
  * {@link #ensureAutoSendSchedule} creates (or reuses) the row inside the caller's own request
@@ -111,8 +109,7 @@ public class SiiTbaiAutoSendScheduleService {
   /**
    * AD_Process_Request.Status value "Unscheduled" — mirrors
    * {@code org.openbravo.scheduling.Process.UNSCHEDULED}. Kept as a local literal, matching the
-   * sibling {@link #STATUS_SCHEDULED} above (and {@code OnboardingBankConnectionSyncService}),
-   * rather than importing the core constant: this class already imports
+   * sibling {@link #STATUS_SCHEDULED} above, rather than importing the core constant: this class already imports
    * {@link org.openbravo.model.ad.ui.Process} for the AD entity, so referencing the scheduling
    * {@code Process} would need a fully-qualified name for one of the two constants only.
    */

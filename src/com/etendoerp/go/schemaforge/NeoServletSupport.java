@@ -21,6 +21,7 @@ import org.openbravo.model.common.enterprise.Warehouse;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAuditTokenRefresh;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -119,9 +120,7 @@ class NeoServletSupport {
         if (preResult.getHttpStatus() >= 400) {
           return preResult;
         }
-        context.setPreviousResult(preResult);
-        NeoResponse afterResult = handler.afterHandle(context);
-        return afterResult != null ? afterResult : preResult;
+        return runPostHook(handler, context, preResult);
       }
 
       NeoResponse defaultResult = crudHandler.handleDefault(context);
@@ -134,13 +133,43 @@ class NeoServletSupport {
         return defaultResult;
       }
 
-      context.setPreviousResult(defaultResult);
-      NeoResponse afterResult = handler.afterHandle(context);
-      return afterResult != null ? afterResult : defaultResult;
+      return runPostHook(handler, context, defaultResult);
     } catch (Exception e) {
       log.error("Error executing hook handler: {}", javaQualifier, e);
       return NeoResponse.error(500, "Hook handler error: " + e.getMessage());
     }
+  }
+
+  /**
+   * Runs {@code afterHandle} over an already-produced write/read result and returns the response
+   * the client will actually receive.
+   *
+   * <p>Both branches of {@link #handleWithHooks} end this way — the one whose result came from the
+   * handler's own pre-hook, and the one whose result came from the default CRUD service — and they
+   * used to spell it out separately. Extracting it is what makes the ETP-5262 refresh cover both
+   * branches by construction instead of by remembering to add it twice; the post-hook contract
+   * ("{@code null} keeps the previous result") is now stated exactly once, next to the correction
+   * that contract makes necessary.
+   *
+   * <p>The refresh runs on the EFFECTIVE response, whichever of the two it is: a post-hook that
+   * writes to its own record invalidates the {@code updated} token in a body that was serialised
+   * before it ran, and a handler that builds a replacement response from
+   * {@code context.getPreviousResult()} — which is what almost all of them do — carries that stale
+   * token straight into it. See {@link NeoAuditTokenRefresh} for why this belongs here rather than
+   * in each handler.
+   *
+   * @param handler       the entity's handler; never {@code null} at this point
+   * @param context       the request context, whose {@code previousResult} this method sets
+   * @param previousResult the result {@code afterHandle} is being given the chance to replace
+   * @return the post-hook's response when it returned one, otherwise {@code previousResult}
+   */
+  private static NeoResponse runPostHook(NeoHandler handler, NeoContext context,
+      NeoResponse previousResult) {
+    context.setPreviousResult(previousResult);
+    NeoResponse afterResult = handler.afterHandle(context);
+    NeoResponse effective = afterResult != null ? afterResult : previousResult;
+    NeoAuditTokenRefresh.refreshInResponse(context, effective);
+    return effective;
   }
 
   static NeoHandler lookupHandler(String qualifier) {

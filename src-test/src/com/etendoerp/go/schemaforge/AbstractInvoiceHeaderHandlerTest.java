@@ -1522,6 +1522,306 @@ public class AbstractInvoiceHeaderHandlerTest {
     assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
   }
 
+  // ── ETP-5334 — order-line-aware over-invoicing guard (split reception) ─────
+
+  /**
+   * Stubs the invoice-lines query of {@code validateLineQtyBeforeComplete} with a single row.
+   *
+   * @param orderLineId value of {@code c_invoiceline.c_orderline_id} ({@code null} = the invoice
+   *                    line does not come from an order)
+   */
+  private static void stubSingleLinkedInvoiceLine(OBDal dal, String inOutLineId, String qty,
+      String inOutId, String docNo, String orderLineId) throws Exception {
+    Connection conn = mock(Connection.class);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    ResultSet rs = mock(ResultSet.class);
+    when(dal.getConnection()).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, false);
+    when(rs.getString(1)).thenReturn(inOutLineId);
+    when(rs.getBigDecimal(2)).thenReturn(new BigDecimal(qty));
+    when(rs.getString(3)).thenReturn(inOutId);
+    when(rs.getString(4)).thenReturn(docNo);
+    when(rs.getString(5)).thenReturn(orderLineId);
+  }
+
+  /**
+   * ETP-5334 — the bug. A purchase order line of 10 received across TWO partial receipts (4 + 6):
+   * the invoice line created from the order carries 10 but {@code InvoiceLineLinker} could only
+   * pin it to ONE receipt line (the 4). The per-inout-line pending (4) blocked completion
+   * forever; with the order-line aggregate (10) the invoice completes.
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_splitReceptionCoversOrderLine_returnsNull()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-split")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoInvoiceSupport> supportMock =
+             Mockito.mockStatic(NeoInvoiceSupport.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      stubSingleLinkedInvoiceLine(dal, "iol-4", "10", "inout-1", "R-2024-001", "ol-1");
+
+      // Per-inout-line pending is only 4 → would block. It must not decide for a split order line.
+      Map<String, BigDecimal> perLine = new HashMap<>();
+      perLine.put("iol-4", new BigDecimal("4"));
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLine(eq("inout-1"), eq(false)))
+          .thenReturn(perLine);
+      Map<String, BigDecimal> perOrderLine = new HashMap<>();
+      perOrderLine.put("ol-1", new BigDecimal("10"));  // 4 + 6 received, nothing invoiced yet
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerOrderLine(eq("inv-split")))
+          .thenReturn(perOrderLine);
+
+      // Returning null with a per-inout-line pending of 4 against a draft qty of 10 is only
+      // possible because the order-line aggregate decided instead.
+      assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
+    }
+  }
+
+  /**
+   * ETP-5334 control case — a single, full receipt. The order line has only one inout line, so
+   * {@code computePendingQtyPerOrderLine} returns nothing for it and the untouched
+   * per-inout-line path still decides. No behaviour change for the ordinary flow.
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_singleReceiptOrderLine_usesPerInoutLinePending()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-single")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoInvoiceSupport> supportMock =
+             Mockito.mockStatic(NeoInvoiceSupport.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      stubSingleLinkedInvoiceLine(dal, "iol-10", "10", "inout-9", "R-2024-009", "ol-9");
+
+      // Not split → absent from the order-line map → per-inout-line pending (10) applies.
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerOrderLine(eq("inv-single")))
+          .thenReturn(Collections.emptyMap());
+      Map<String, BigDecimal> perLine = new HashMap<>();
+      perLine.put("iol-10", new BigDecimal("10"));
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLine(eq("inout-9"), eq(false)))
+          .thenReturn(perLine);
+
+      assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
+      supportMock.verify(
+          () -> NeoInvoiceSupport.computePendingQtyPerLine(eq("inout-9"), eq(false)));
+    }
+  }
+
+  /**
+   * ETP-5334 — the guard must NOT become a no-op. When the order line's receipts are already
+   * invoiced by another completed invoice, the aggregate pending (4) is below the draft
+   * quantity (10) and completion is still blocked.
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_splitReceptionGenuineOverInvoicing_returns400()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-split-over")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoInvoiceSupport> supportMock =
+             Mockito.mockStatic(NeoInvoiceSupport.class);
+         MockedStatic<OBMessageUtils> msgMock =
+             Mockito.mockStatic(OBMessageUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      stubSingleLinkedInvoiceLine(dal, "iol-4", "10", "inout-1", "R-2024-001", "ol-1");
+
+      Map<String, BigDecimal> perOrderLine = new HashMap<>();
+      perOrderLine.put("ol-1", new BigDecimal("4"));  // 10 received, 6 already invoiced elsewhere
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerOrderLine(eq("inv-split-over")))
+          .thenReturn(perOrderLine);
+
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvoiceLineAlreadyInvoiced"))
+          .thenReturn("Document @docNo@ invoiced @invoiced@ pending @pending@");
+
+      NeoResponse result = AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx);
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      assertTrue(result.getBody().getString("message").contains("R-2024-001"));
+    }
+  }
+
+  /**
+   * ETP-5334 — Sales symmetry. {@code SalesInvoiceHeaderHandler} and
+   * {@code PurchaseInvoiceHeaderHandler} both call this same static guard, so a sales order line
+   * delivered in two partial shipments behaves exactly like the purchase case: the aggregate
+   * shipped quantity (10) covers the invoice line and completion proceeds.
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_splitShipmentSalesInvoice_returnsNull()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .specName("sales-invoice")
+        .entityName("header")
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("ar-inv-split")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoInvoiceSupport> supportMock =
+             Mockito.mockStatic(NeoInvoiceSupport.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      stubSingleLinkedInvoiceLine(dal, "sol-3", "10", "shipment-1", "ALB-2024-001", "sord-line-1");
+
+      Map<String, BigDecimal> perLine = new HashMap<>();
+      perLine.put("sol-3", new BigDecimal("3"));  // first partial shipment only
+      supportMock.when(
+          () -> NeoInvoiceSupport.computePendingQtyPerLine(eq("shipment-1"), eq(false)))
+          .thenReturn(perLine);
+      Map<String, BigDecimal> perOrderLine = new HashMap<>();
+      perOrderLine.put("sord-line-1", new BigDecimal("10"));  // 3 + 7 shipped
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerOrderLine(eq("ar-inv-split")))
+          .thenReturn(perOrderLine);
+
+      assertNull(AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx));
+    }
+  }
+
+  /**
+   * ETP-5334 — an invoice line with no {@code c_orderline_id} (invoice created straight from a
+   * receipt, no purchase order) keeps the exact previous behaviour: the order-line aggregate is
+   * never even queried, and the per-inout-line pending still blocks over-invoicing.
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_lineWithoutOrderLine_skipsOrderLineAggregate()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-no-order")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoInvoiceSupport> supportMock =
+             Mockito.mockStatic(NeoInvoiceSupport.class);
+         MockedStatic<OBMessageUtils> msgMock =
+             Mockito.mockStatic(OBMessageUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      stubSingleLinkedInvoiceLine(dal, "iol-free", "8", "inout-free", "R-FREE", null);
+
+      Map<String, BigDecimal> perLine = new HashMap<>();
+      perLine.put("iol-free", new BigDecimal("2"));
+      supportMock.when(
+          () -> NeoInvoiceSupport.computePendingQtyPerLine(eq("inout-free"), eq(false)))
+          .thenReturn(perLine);
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvoiceLineAlreadyInvoiced"))
+          .thenReturn("Document @docNo@ invoiced @invoiced@ pending @pending@");
+
+      NeoResponse result = AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx);
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      supportMock.verify(() -> NeoInvoiceSupport.computePendingQtyPerOrderLine(anyString()),
+          Mockito.never());
+    }
+  }
+
+  /**
+   * ETP-5334 — two draft invoice lines on the SAME split order line are summed before the
+   * comparison (6 + 6 = 12 &gt; 10 pending), so neither line can consume the whole aggregate on
+   * its own. Without the sum each line would pass independently and the invoice would
+   * over-invoice by 2.
+   */
+  @Test
+  public void validateLineQtyBeforeComplete_twoDraftLinesOnSameOrderLine_sumsBeforeComparing()
+      throws Exception {
+    JSONObject body = new JSONObject().put("documentAction", "CO");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH")
+        .endpointType(NeoEndpointType.CRUD)
+        .recordId("inv-two-lines")
+        .requestBody(body)
+        .build();
+
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<NeoInvoiceSupport> supportMock =
+             Mockito.mockStatic(NeoInvoiceSupport.class);
+         MockedStatic<OBMessageUtils> msgMock =
+             Mockito.mockStatic(OBMessageUtils.class)) {
+      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      Connection conn = mock(Connection.class);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(dal.getConnection()).thenReturn(conn);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+      when(rs.next()).thenReturn(true, true, false);
+      when(rs.getString(1)).thenReturn("iol-a", "iol-b");
+      when(rs.getBigDecimal(2)).thenReturn(new BigDecimal("6"), new BigDecimal("6"));
+      when(rs.getString(3)).thenReturn("inout-a", "inout-b");
+      when(rs.getString(4)).thenReturn("R-A", "R-B");
+      when(rs.getString(5)).thenReturn("ol-1", "ol-1");
+
+      Map<String, BigDecimal> perOrderLine = new HashMap<>();
+      perOrderLine.put("ol-1", new BigDecimal("10"));
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerOrderLine(eq("inv-two-lines")))
+          .thenReturn(perOrderLine);
+      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvoiceLineAlreadyInvoiced"))
+          .thenReturn("Document @docNo@ invoiced @invoiced@ pending @pending@");
+
+      NeoResponse result = AbstractInvoiceHeaderHandler.validateLineQtyBeforeComplete(ctx);
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      assertTrue(result.getBody().getString("message").contains("invoiced 12"));
+    }
+  }
+
   /**
    * When the invoice lines SQL throws an unexpected exception the method catches it
    * and returns null (fail-open so completion is not blocked by a technical error).
@@ -3343,10 +3643,21 @@ public class AbstractInvoiceHeaderHandlerTest {
     assertEquals("2026-07-05", updates.getString("accountingDate"));
   }
 
-  // ── ETP-4531: mirrorAccountingDate (unified date, server-side mirror) ───────
+  // ── ETP-5273: mirrorAccountingDateOnCreate (independent date, POST-only default) ─────
+  //
+  // ETP-4531 originally mirrored accountingDate from invoiceDate on every CRUD write
+  // (POST/PUT/PATCH), unconditionally overwriting whatever was already there — the tests
+  // below used to assert exactly that. ETP-5273 reintroduces accountingDate as an
+  // independent, user-editable field for invoices: it must default from invoiceDate ONLY
+  // when the invoice is first created and the caller did not already supply a value, and
+  // must NEVER be touched again afterwards — a PUT/PATCH must leave whatever value the
+  // record (or the user's own edit) already carries untouched, even if invoiceDate also
+  // changed in the same request. That forward sync on update is instead the job of the
+  // classic Etendo callout executed server-side by NeoCalloutService (see
+  // AbstractInvoiceHeaderHandler#handleInvoiceAfterCallout).
 
   @Test
-  public void mirrorAccountingDate_postCrud_copiesInvoiceDateIntoAccountingDate()
+  public void mirrorAccountingDateOnCreate_postCrudNoExplicitValue_copiesInvoiceDate()
       throws Exception {
     JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
     NeoContext ctx = NeoContext.builder()
@@ -3355,13 +3666,34 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
     assertEquals("2026-07-01", body.getString("accountingDate"));
   }
 
   @Test
-  public void mirrorAccountingDate_putCrud_overwritesStaleAccountingDate() throws Exception {
+  public void mirrorAccountingDateOnCreate_postCrudExplicitValue_doesNotOverwrite()
+      throws Exception {
+    // The user (or an import) explicitly set accountingDate independently of invoiceDate on
+    // create — the default must not clobber it.
+    JSONObject body = new JSONObject()
+        .put("invoiceDate", "2026-07-01").put("accountingDate", "2026-06-15");
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("POST")
+        .requestBody(body)
+        .build();
+
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
+
+    assertEquals("2026-06-15", body.getString("accountingDate"));
+  }
+
+  @Test
+  public void mirrorAccountingDateOnCreate_putCrud_doesNotTouchAccountingDate()
+      throws Exception {
+    // ETP-5273: unlike the old unified-date mirror, PUT is a no-op — an update must never
+    // re-derive accountingDate from invoiceDate, even when invoiceDate itself changed.
     JSONObject body = new JSONObject()
         .put("invoiceDate", "2026-07-10").put("accountingDate", "2026-01-01");
     NeoContext ctx = NeoContext.builder()
@@ -3370,13 +3702,13 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
-    assertEquals("2026-07-10", body.getString("accountingDate"));
+    assertEquals("2026-01-01", body.getString("accountingDate"));
   }
 
   @Test
-  public void mirrorAccountingDate_nonCrudEndpoint_doesNotMutateBody() throws Exception {
+  public void mirrorAccountingDateOnCreate_nonCrudEndpoint_doesNotMutateBody() throws Exception {
     JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.ACTION)
@@ -3384,13 +3716,13 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
     assertTrue(!body.has("accountingDate"));
   }
 
   @Test
-  public void mirrorAccountingDate_getMethod_doesNotMutateBody() throws Exception {
+  public void mirrorAccountingDateOnCreate_getMethod_doesNotMutateBody() throws Exception {
     JSONObject body = new JSONObject().put("invoiceDate", "2026-07-01");
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
@@ -3398,26 +3730,27 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
     assertTrue(!body.has("accountingDate"));
   }
 
   /**
-   * Regression test for the live-reproduced bug: editing just the date on an EXISTING invoice
-   * and saving through the real React UI sends a {@code PATCH} with a SPARSE body containing
-   * only the changed field ({@code useEntity.js#buildPatchPayload} diffs {@code editing} against
-   * {@code selected} and sends only what changed — never a full record, and never a {@code PUT}).
-   * The original {@code mirrorAccountingDate()} checked only {@code POST}/{@code PUT}, so this
-   * exact request shape silently never mirrored {@code accountingDate} on update — reproduced
-   * against invoice {@code 0BC614E563FC4E7EB63B6FCF9788730B}: DateInvoiced updated to
-   * 2026-07-15 but DateAcct stayed at the stale create-time value of 2026-07-17.
+   * ETP-5273 regression guard for the bug the ORIGINAL unified-date mirror had at ETP-4531:
+   * editing just the date on an EXISTING invoice through the real React UI sends a
+   * {@code PATCH} with a SPARSE body containing only the changed field
+   * ({@code useEntity.js#buildPatchPayload} diffs {@code editing} against {@code selected} and
+   * sends only what changed — never a full record, and never a {@code PUT}). That old mirror
+   * checked only {@code POST}/{@code PUT}, so this exact request shape silently never mirrored
+   * {@code accountingDate} on update. Under the current, independent-field design that same
+   * PATCH must simply leave {@code accountingDate} alone — there is nothing to mirror on
+   * update anymore, so the sparse body must stay exactly as sent.
    */
   @Test
-  public void mirrorAccountingDate_patchCrudSparseBody_copiesInvoiceDateIntoAccountingDate()
+  public void mirrorAccountingDateOnCreate_patchCrudSparseBody_doesNotAddAccountingDate()
       throws Exception {
     // Sparse body: exactly what useEntity.js's buildPatchPayload sends for a date-only edit —
-    // no other header fields, unlike the multi-field bodies the original POST/PUT tests used.
+    // no other header fields.
     JSONObject body = new JSONObject().put("invoiceDate", "2026-07-15");
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
@@ -3425,14 +3758,17 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
-    assertEquals("2026-07-15", body.getString("accountingDate"));
+    assertTrue(!body.has("accountingDate"));
   }
 
   @Test
-  public void mirrorAccountingDate_patchCrud_overwritesStaleAccountingDate() throws Exception {
-    // Mirrors the real DB state before the fix: accountingDate present but stale from create.
+  public void mirrorAccountingDateOnCreate_patchCrud_doesNotTouchExistingAccountingDate()
+      throws Exception {
+    // A PATCH changing invoiceDate on an existing invoice must never re-derive
+    // accountingDate — CP-2: an independently-edited accounting date must survive an
+    // unrelated document-date change untouched by this mirror.
     JSONObject body = new JSONObject()
         .put("invoiceDate", "2026-07-15").put("accountingDate", "2026-07-17");
     NeoContext ctx = NeoContext.builder()
@@ -3441,13 +3777,13 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
-    assertEquals("2026-07-15", body.getString("accountingDate"));
+    assertEquals("2026-07-17", body.getString("accountingDate"));
   }
 
   @Test
-  public void mirrorAccountingDate_patchCrudUnrelatedFieldOnly_doesNotAddAccountingDate()
+  public void mirrorAccountingDateOnCreate_patchCrudUnrelatedFieldOnly_doesNotAddAccountingDate()
       throws Exception {
     // A PATCH that doesn't touch invoiceDate at all (e.g. only businessPartner changed) must
     // stay a no-op — mirroring must not fabricate an accountingDate out of nowhere.
@@ -3458,7 +3794,7 @@ public class AbstractInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    NeoHandlerUtils.mirrorAccountingDate(ctx, "invoiceDate", "accountingDate");
+    NeoHandlerUtils.mirrorAccountingDateOnCreate(ctx, "invoiceDate", "accountingDate");
 
     assertTrue(!body.has("accountingDate"));
   }

@@ -18,9 +18,11 @@
 package com.etendoerp.go.mcp;
 
 import static com.etendoerp.go.mcp.McpJsonSchema.KEY_REQUIRED;
+import static com.etendoerp.go.mcp.McpJsonSchema.booleanProp;
 import static com.etendoerp.go.mcp.McpJsonSchema.buildObjectSchema;
 import static com.etendoerp.go.mcp.McpJsonSchema.enumProp;
 import static com.etendoerp.go.mcp.McpJsonSchema.numericProp;
+import static com.etendoerp.go.mcp.McpJsonSchema.objectArrayProp;
 import static com.etendoerp.go.mcp.McpJsonSchema.objectProp;
 import static com.etendoerp.go.mcp.McpJsonSchema.stringArrayProp;
 import static com.etendoerp.go.mcp.McpJsonSchema.stringProp;
@@ -93,6 +95,7 @@ public class ToolRegistry {
       // built-in read tool, not gated on any accessible window spec.
       tools.add(buildWidgetTool());
       tools.add(buildVectorSearchTool());
+      tools.add(buildFeedbackTool());
     }
 
     // Query all active specs
@@ -300,7 +303,8 @@ public class ToolRegistry {
    */
   public static String resolveSpecName(String toolName, org.codehaus.jettison.json.JSONObject arguments) {
     // Static tools (e.g. docs) are not tied to any spec
-    if ("docs".equals(toolName) || McpConstants.TOOL_NEO_VECTOR_SEARCH.equals(toolName)) {
+    if ("docs".equals(toolName) || McpConstants.TOOL_NEO_VECTOR_SEARCH.equals(toolName)
+        || McpConstants.TOOL_NEO_FEEDBACK.equals(toolName)) {
       return null;
     }
 
@@ -385,6 +389,108 @@ public class ToolRegistry {
             + "Use this to look up how-tos, concepts, and reference material before "
             + "answering questions about Etendo Go.",
         buildObjectSchema(props, List.of("topic")));
+  }
+
+  // ── Feedback tool (B3) ─────────────────────────────────────────────────
+
+  /**
+   * The {@code neo_feedback} tool definition.
+   *
+   * <p>The description does real work here. An agent will not volunteer feedback it was never
+   * invited to give, so the text says plainly that reporting friction is wanted, that it costs
+   * nothing, and that it is never held against the agent. That invitation, plus the pointer on
+   * error envelopes, is the whole adoption mechanism (B3).</p>
+   */
+  private McpToolDefinition buildFeedbackTool() {
+    Map<String, Object> friction = new LinkedHashMap<>();
+    friction.put("what", stringProp("What was difficult, ambiguous or unclear."));
+    friction.put("cost", stringProp("What it cost, e.g. '3 wasted calls'."));
+    friction.put("phase", enumProp("Where in the task the difficulty occurred.",
+        McpFeedbackVerdict.PHASES));
+
+    Map<String, Object> failure = new LinkedHashMap<>();
+    failure.put("tool", stringProp("Exact name of the tool that failed."));
+    failure.put("payload", objectProp("The exact arguments sent on the failing call."));
+    failure.put("error", stringProp("The error returned, verbatim."));
+    failure.put("recovered", booleanProp(
+        "Whether you afterwards worked around it. A failure you fixed yourself is still a defect "
+            + "on our side — report it either way."));
+    failure.put("howRecovered", stringProp("How you worked around it, if you did."));
+
+    // v2: the call that returned 200 and got you nowhere. It has its own list rather than being
+    // folded into frictions so it can be counted — nothing in the transcript marks it, because
+    // nothing went wrong.
+    Map<String, Object> wastedCall = new LinkedHashMap<>();
+    wastedCall.put("tool", stringProp("Exact name of the tool you called."));
+    wastedCall.put("expected", stringProp(
+        "What you expected this call to return, as you expected it BEFORE you made the call."));
+    wastedCall.put("whatHappened", stringProp(
+        "What it actually returned, and why that was of no use to you."));
+
+    // v3: suggestions carry a shape so they can be counted and grouped, instead of being prose
+    // nobody can aggregate.
+    Map<String, Object> suggestion = new LinkedHashMap<>();
+    suggestion.put("what", stringProp("What should exist or change."));
+    suggestion.put("kind", enumProp(
+        "Which kind of thing you are asking for. Pick 'other' whenever nothing here fits — it is "
+            + "a normal answer, not a last resort, and it is how we find out which category we "
+            + "are missing. Do not force your suggestion into a category it does not belong in.",
+        McpFeedbackVerdict.SUGGESTION_KINDS));
+    suggestion.put("wouldHaveSaved", stringProp(
+        "What this would have saved you on THIS task specifically — the calls, the guesswork or "
+            + "the dead end it would have removed. If it would have saved you nothing here, say "
+            + "so plainly: a suggestion that helps somebody else is still worth having, and an "
+            + "invented payoff is worse than none."));
+
+    Map<String, Object> props = new LinkedHashMap<>();
+    props.put("outcome", enumProp(
+        "OKAY only if the task was fully completed; MIXED if partially; ERROR if not completed.",
+        McpFeedbackVerdict.OUTCOMES));
+    props.put("summary", stringProp("One sentence: what happened."));
+    props.put("achieved", stringProp("What you actually accomplished, not what you attempted."));
+    // v2: what you MEANT to do, and where that came from. Both descriptions say outright that
+    // "no plan" and "I guessed" are acceptable — a schema that makes the honest answer feel wrong
+    // gets fiction back, and fiction here is worse than a blank.
+    props.put("plannedApproach", stringProp(
+        "Recall the plan you had BEFORE you started: the sequence of tools you intended to use, "
+            + "as you understood the task at the time — for example 'list the entities, then read "
+            + "the schema of the right one, then create the record'. Report what you actually "
+            + "believed then, not the route that turned out to work. If you had no plan and "
+            + "worked it out as you went, say exactly that: it is a complete and acceptable "
+            + "answer."));
+    props.put("howKnown", stringProp(
+        "Where that plan came from. Name the specific source: the output of a particular tool "
+            + "(name the tool and say what in its output told you), the description of a "
+            + "particular tool, knowledge you already had, or guesswork. 'I guessed' is a valid "
+            + "and valuable answer — say so plainly rather than inventing a source. A vague "
+            + "answer such as 'from the tools' is of no use."));
+    props.put("frictions", objectArrayProp(
+        "Everything that was hard, ambiguous, or had to be guessed at.", friction,
+        List.of("what", "phase")));
+    props.put("failures", objectArrayProp(
+        "Tool calls that failed, including ones you later fixed yourself.", failure,
+        List.of("tool", "error")));
+    props.put("wastedCalls", objectArrayProp(
+        "Calls that SUCCEEDED but got you nowhere: they returned no error, and the answer turned "
+            + "out to be of no use for the task. They cost you just as much as a failure did, and "
+            + "nothing in the record shows them unless you report them here.",
+        wastedCall, List.of("tool", "expected", "whatHappened")));
+    props.put("suggestions", objectArrayProp(
+        "What would have made this task easy. This is the one field that looks forward rather "
+            + "than back, so it is worth spending a sentence on each entry.",
+        // `kind` is deliberately NOT required: an unclassified suggestion is stored with
+        // kind:null, which is a different fact from a deliberate `other`.
+        suggestion, List.of("what", "wouldHaveSaved")));
+
+    return new McpToolDefinition(
+        McpConstants.TOOL_NEO_FEEDBACK,
+        "Report what this API was like to use: what confused you, what you could not find, what "
+            + "you had to guess at, and what failed. This is wanted, it costs you nothing, and it "
+            + "is never held against you — it is the only way the people who build this API find "
+            + "out where it gets in the way. Send one consolidated report per task, ideally when "
+            + "you finish or when you give up. Report failures you worked around too: a problem "
+            + "you solved yourself is still a problem on our side.",
+        buildObjectSchema(props, List.of("outcome", "summary", "achieved")));
   }
 
   // ── Widget tool (business widgets enum, gap G4) ───────────────────────

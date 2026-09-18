@@ -28,25 +28,23 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Savepoint;
+import java.util.regex.Pattern;
 
 import javax.inject.Named;
-import javax.servlet.http.HttpServletRequest;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.MatchMode;
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.client.kernel.RequestContext;
 import org.openbravo.dal.core.OBContext;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBCurrencyUtils;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
-import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
+
+import com.etendoerp.go.common.SpanishTaxIdValidator;
+import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
 
 /**
  * Pre/post-save hook for the businessPartner entity in the contacts spec.
@@ -68,6 +66,19 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
  *       only when the record's current {@code name} is blank in the database.</li>
  * </ul>
  *
+ * <p>On POST/PATCH/PUT, {@code handle()} also rejects a malformed {@code TaxID} (ETP-5031)
+ * before it is stored. Dispatch is keyed by the sibling {@code EM_OBTIK_Tax_ID_Key} field on the
+ * SAME record: {@code "1"} (NIF) is checked with {@link SpanishTaxIdValidator} — the same
+ * algorithm {@link com.etendoerp.go.schemaforge.handlers.OrganizationInformationHandler} applies
+ * to {@code AD_OrgInfo.TaxID} (ETP-5190) — {@code "3"} (Pasaporte) is checked against the ICAO
+ * Doc 9303 shape (up to 9 letters/digits, no check digit), and every other value is left
+ * unvalidated. Unlike the Organization window, this is deliberately NOT gated on country: a
+ * Business Partner carries no country of its own (only its addresses do), and
+ * {@code oBTIKTaxIDKey} is already the semantic discriminator for the foreign case (value
+ * {@code "4"}). To keep dirty legacy data editable, the check only runs on create or when the
+ * incoming {@code TaxID} differs from what is already persisted — see
+ * {@link #validateTaxId(NeoContext, JSONObject, String)}.
+ *
  * <p>On GET (single record, i.e. {@code /contacts/businessPartner/{id}}):
  * <ul>
  *   <li>{@code afterHandle()} fills the {@code etgoEmail} field with the email of one
@@ -78,18 +89,22 @@ import org.openbravo.model.financialmgmt.payment.FIN_PaymentMethod;
  * </ul>
  *
  * <p>On SELECTOR (ETP-5183, {@code handle()} pre-hook, short-circuits before the generic
- * selector flow): filters the Payment Method selector for {@code paymentMethod}
- * ({@code FIN_Paymentmethod_ID}, pay-in) and {@code pOPaymentMethod}
- * ({@code PO_Paymentmethod_ID}, pay-out) directly against {@code FIN_PaymentMethod}, restricted
- * ONLY by the field's own {@code Payin_Allow}/{@code Payout_Allow} flag — no join to
- * {@code FIN_FinAcc_PaymentMethod}. Classic (and every other window sharing these columns —
- * sales invoice, sales order, payment-in, simple G/L journal, the Classic Business Partner tabs
- * themselves) resolves this selector through an {@code AD_Val_Rule} that also requires the
- * payment method to be linked to at least one active Financial Account; on {@code /contacts}
- * that account-linkage requirement is wrong, since a Business Partner's preferred Payment
- * Method is configured independently of which Financial Account will end up settling it. This
- * branch checks the field name and falls through ({@code null}) for every other selector field
- * this entity exposes, so no other column or window is affected.
+ * selector flow): delegates to {@link PaymentMethodSelectorSupport#handleIfPaymentMethodSelector}
+ * to filter the Payment Method selector for {@code paymentMethod} ({@code FIN_Paymentmethod_ID},
+ * pay-in) and {@code pOPaymentMethod} ({@code PO_Paymentmethod_ID}, pay-out) directly against
+ * {@code FIN_PaymentMethod}, restricted ONLY by the field's own
+ * {@code Payin_Allow}/{@code Payout_Allow} flag — no join to {@code FIN_FinAcc_PaymentMethod}.
+ * Classic (and every other window sharing these columns — sales invoice, sales order,
+ * payment-in, simple G/L journal, the Classic Business Partner tabs themselves) resolves this
+ * selector through an {@code AD_Val_Rule} that also requires the payment method to be linked to
+ * at least one active Financial Account; on {@code /contacts} that account-linkage requirement is
+ * wrong, since a Business Partner's preferred Payment Method is configured independently of which
+ * Financial Account will end up settling it. Since ETP-5238, the same shared class also serves
+ * the sales quotation, sales order, sales invoice, purchase order and purchase invoice header
+ * handlers, resolving the pay-in/pay-out direction from the {@code IsSOTrx} request parameter on
+ * those windows (falling back to field name, exactly as here, when it is absent). This branch
+ * checks the field name and falls through ({@code null}) for every other selector field this
+ * entity exposes, so no other column or window is affected.
  *
  * <p>Registered via {@code JAVA_QUALIFIER = 'businessPartnerHandler'} on the
  * ETGO_SF_ENTITY record for the contacts spec's businessPartner entity.
@@ -120,31 +135,56 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   private static final String FIELD_CUSTOMER = "customer";
   private static final String FIELD_VENDOR = "vendor";
 
-  // ETP-5183 — Payment Method selector filtering (SELECTOR pre-hook, see PaymentMethodSelector*
-  // constants and handlePaymentMethodSelector() below). Field/column names for both directions:
-  // customer entity uses paymentMethod/FIN_Paymentmethod_ID (pay-in), vendorCreditor entity uses
-  // pOPaymentMethod/PO_Paymentmethod_ID (pay-out).
-  private static final String SELECTOR_FIELD_PAYMENT_METHOD = "paymentMethod";
-  private static final String SELECTOR_COLUMN_PAYMENT_METHOD = "FIN_Paymentmethod_ID";
-  private static final String SELECTOR_FIELD_PO_PAYMENT_METHOD = "pOPaymentMethod";
-  private static final String SELECTOR_COLUMN_PO_PAYMENT_METHOD = "PO_Paymentmethod_ID";
-  private static final String SELECTOR_PARAM_SEARCH = "q";
-  private static final String SELECTOR_PARAM_LIMIT = "limit";
-  private static final String SELECTOR_PARAM_OFFSET = "offset";
-  private static final int SELECTOR_DEFAULT_LIMIT = 20;
-  private static final int SELECTOR_MAX_LIMIT = 100;
-  private static final String SELECTOR_FIELD_ID = "id";
-  private static final String SELECTOR_FIELD_LABEL = "label";
-  private static final String SELECTOR_FIELD_ITEMS = "items";
-  private static final String SELECTOR_FIELD_COLUMNS = "columns";
-  private static final String SELECTOR_FIELD_TOTAL_COUNT = "totalCount";
-  private static final String SELECTOR_FIELD_HAS_MORE = "hasMore";
+  // ETP-5031 — TaxID validation. Field names mirror the contract (artifacts/contacts/contract.json).
+  private static final String FIELD_TAX_ID = "taxID";
+  private static final String FIELD_TAX_ID_KEY = "oBTIKTaxIDKey";
+  /** {@code EM_OBTIK_Tax_ID_Key} enum value for "NIF" (see the window's decisions.json). */
+  private static final String TAX_ID_KEY_NIF = "1";
+  /** {@code EM_OBTIK_Tax_ID_Key} enum value for "Pasaporte". */
+  private static final String TAX_ID_KEY_PASSPORT = "3";
+  /** ICAO Doc 9303 passport number shape: up to 9 letters/digits, no check digit. */
+  private static final Pattern PASSPORT_PATTERN = Pattern.compile("^[A-Z0-9]{1,9}$");
+  /**
+   * Raw English literal returned as-is (same mechanism as {@link SpanishTaxIdValidator}'s own
+   * messages): the frontend's {@code BACKEND_ERROR_MAP} (`lib/backendErrors.js`) maps this exact
+   * string to an i18n key. Keep both sides in sync when changing this text.
+   */
+  private static final String ERR_PASSPORT_FORMAT =
+      "The passport ID is not valid. It must be up to 9 letters or digits.";
 
-  /** Pay-in (customer) vs. pay-out (vendor/creditor) direction of a requested selector field. */
-  private enum PaymentMethodDirection {
-    PAY_IN,
-    PAY_OUT
-  }
+  // ETP-5031 follow-up — email/web/phone format validation, moved server-side. Until now these
+  // three fields were only checked by contactsFieldValidation.js / recipientEdits.js (browser,
+  // save-blocking), the same gap TaxID had before this class started validating it too: a direct
+  // API/MCP write bypasses React entirely and reaches this handler with no format check at all
+  // (confirmed live — an MCP write previously stored "ABC-telefono-invalido-123456789" as
+  // etgoPhone and "f" / "a@" as etgoWeb / etgoEmail). Rules mirror the browser checks EXACTLY so
+  // a value rejected in one place is rejected in the other:
+  //   - email:  EMAIL_PATTERN, same regex as recipientEdits.js's EMAIL_PATTERN.
+  //   - web:    domain-shaped host (>=2 dot-separated labels, last a 2+ letter TLD), same shape
+  //             recipientEdits.js's isSecureUrl() checks on "https://" + value — etgoWeb stores
+  //             only the part after the UI's fixed "https://" inputPrefix, so the stored value
+  //             itself is the host to check, no scheme to strip.
+  //   - phone:  charset [0-9+()-. \s] with at least one digit, same as recipientEdits.js's
+  //             isValidPhone(), plus the AD column's own maxLength (15, E.164 cap per
+  //             artifacts/contacts/decisions.json -> etgoPhone.maxLength).
+  // Like validateTaxId(), a write that does not touch the field is never re-validated, and an
+  // incoming value identical to what is already persisted is never re-validated either — so a
+  // dirty legacy value does not block unrelated edits to the same record.
+  private static final String FIELD_WEB = "etgoWeb";
+  private static final String FIELD_PHONE = "etgoPhone";
+  private static final Pattern EMAIL_PATTERN =
+      Pattern.compile("^[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}$", Pattern.CASE_INSENSITIVE);
+  private static final Pattern DOMAIN_LABEL_PATTERN =
+      Pattern.compile("^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", Pattern.CASE_INSENSITIVE);
+  private static final Pattern TLD_PATTERN = Pattern.compile("^[a-z]{2,}$", Pattern.CASE_INSENSITIVE);
+  private static final Pattern PHONE_CHARSET_PATTERN = Pattern.compile("^[0-9+()\\-.\\s]+$");
+  /** {@code EM_Etgo_Phone} column length (ETP-5031, E.164 cap). */
+  private static final int PHONE_MAX_LENGTH = 15;
+  /** Raw English literals, same mapping mechanism as {@link #ERR_PASSPORT_FORMAT}. */
+  private static final String ERR_EMAIL_FORMAT = "The email address is not valid.";
+  private static final String ERR_WEBSITE_FORMAT = "The website is not a valid domain, e.g. domain.com.";
+  private static final String ERR_PHONE_FORMAT =
+      "The phone number can only contain digits and the + ( ) - . characters, up to 15 characters.";
 
   // ETP-4565 posting-account backfill (see provisionMissingBpAcctRows()): scoped to a single
   // already-persisted business partner (bound by ? = c_bpartner_id) instead of a client-wide
@@ -333,7 +373,8 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       // A SELECTOR request is never a write, so falling through to the isWrite check below
       // (when this isn't a Payment Method field) already returns null for it — no separate
       // early return needed here.
-      NeoResponse selectorResult = handlePaymentMethodSelector(ctx);
+      NeoResponse selectorResult = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(ctx,
+          PaymentMethodSelectorSupport.DirectionFallback.FIELD_NAME);
       if (selectorResult != null) {
         return selectorResult;
       }
@@ -348,6 +389,15 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       return null;
     }
     try {
+      NeoResponse taxIdError = validateTaxId(ctx, body, method);
+      if (taxIdError != null) {
+        return taxIdError;
+      }
+      NeoResponse formatError = validateContactFormats(ctx, body, method);
+      if (formatError != null) {
+        return formatError;
+      }
+
       deriveName(ctx, body);
 
       if ("POST".equals(method)) {
@@ -365,9 +415,200 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
       }
     } catch (Exception e) {
       log.error("BusinessPartnerHandler: error in handle()", e);
-      throw new OBException("Error processing BusinessPartner name derivation", e);
+      throw new OBException("Error processing BusinessPartner pre-save hooks", e);
     }
     return null;
+  }
+
+  /**
+   * Pre-hook guard: rejects a malformed {@code TaxID} before it is stored (ETP-5031). See the
+   * class javadoc for the full dispatch and legacy-data rules.
+   *
+   * @return an error {@link NeoResponse} when the value is rejected, {@code null} to continue
+   *     with the default CRUD
+   */
+  private NeoResponse validateTaxId(NeoContext ctx, JSONObject body, String method) throws Exception {
+    if (!body.has(FIELD_TAX_ID)) {
+      // A write that does not touch TaxID must not be re-validated against an already-stored
+      // value it is not sending — otherwise a dirty legacy value would block every later edit,
+      // including the edit that fixes it.
+      return null;
+    }
+    String taxId = StringUtils.trimToNull(body.optString(FIELD_TAX_ID, null));
+    if (taxId == null) {
+      // Clearing the field is the `required` mechanism's business, not the format rules'.
+      return null;
+    }
+
+    String[] persisted = null;
+    if (!"POST".equals(method)) {
+      String recordId = ctx.getRecordId();
+      if (StringUtils.isBlank(recordId)) {
+        return null;
+      }
+      persisted = queryPersistedTaxIdParts(recordId);
+      if (taxId.equals(StringUtils.trimToNull(persisted[0]))) {
+        // Unchanged from what is already persisted: never block edits to unrelated fields on a
+        // record carrying a dirty legacy TaxID.
+        return null;
+      }
+    }
+
+    String taxIdKey = resolveTaxIdKey(body, persisted);
+
+    if (TAX_ID_KEY_NIF.equals(taxIdKey)) {
+      switch (SpanishTaxIdValidator.validate(taxId)) {
+        case BAD_FORMAT:
+          return NeoResponse.error(400, SpanishTaxIdValidator.ERR_FORMAT);
+        case BAD_CHECK_DIGIT:
+          return NeoResponse.error(400, SpanishTaxIdValidator.ERR_CHECK_DIGIT);
+        default:
+          return null;
+      }
+    }
+    if (TAX_ID_KEY_PASSPORT.equals(taxIdKey)) {
+      String normalized = taxId.toUpperCase();
+      return PASSPORT_PATTERN.matcher(normalized).matches() ? null : NeoResponse.error(400, ERR_PASSPORT_FORMAT);
+    }
+    return null;
+  }
+
+  /**
+   * Resolves the document-type key ({@code EM_OBTIK_Tax_ID_Key}) to dispatch on: the body's own
+   * value when the request sends it, otherwise the persisted value queried for the legacy-data
+   * check above (so a PATCH that omits the key still dispatches on what the record actually is).
+   */
+  private static String resolveTaxIdKey(JSONObject body, String[] persisted) {
+    if (body.has(FIELD_TAX_ID_KEY)) {
+      return StringUtils.trimToNull(body.optString(FIELD_TAX_ID_KEY, null));
+    }
+    return persisted != null ? StringUtils.trimToNull(persisted[1]) : null;
+  }
+
+  /**
+   * Returns {@code [taxId, taxIdKey]} for the given business partner, or two {@code null}s when
+   * the record does not exist (a race between the PATCH request and a concurrent delete).
+   */
+  private static String[] queryPersistedTaxIdParts(String recordId) throws Exception {
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(
+        "SELECT taxid, em_obtik_tax_id_key FROM c_bpartner WHERE c_bpartner_id = ?")) {
+      ps.setString(1, recordId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          return new String[]{ rs.getString(1), rs.getString(2) };
+        }
+      }
+    }
+    return new String[]{ null, null };
+  }
+
+  /**
+   * Pre-hook guard: rejects a malformed {@code etgoEmail}/{@code etgoWeb}/{@code etgoPhone}
+   * before it is stored (ETP-5031 follow-up). See the constants above for the exact rules,
+   * which mirror {@code recipientEdits.js} field-for-field.
+   *
+   * @return an error {@link NeoResponse} for the first rejected field, {@code null} to continue
+   *     with the default CRUD
+   */
+  private NeoResponse validateContactFormats(NeoContext ctx, JSONObject body, String method) throws Exception {
+    boolean touchesAny = body.has(FIELD_EMAIL) || body.has(FIELD_WEB) || body.has(FIELD_PHONE);
+    if (!touchesAny) {
+      return null;
+    }
+    String[] persisted = null;
+    if (!"POST".equals(method)) {
+      String recordId = ctx.getRecordId();
+      if (StringUtils.isNotBlank(recordId)) {
+        persisted = queryPersistedContactFormatParts(recordId);
+      }
+    }
+    NeoResponse emailError = validateFormatField(body, FIELD_EMAIL, persisted != null ? persisted[0] : null,
+        EMAIL_PATTERN.asPredicate(), ERR_EMAIL_FORMAT);
+    if (emailError != null) {
+      return emailError;
+    }
+    NeoResponse webError = validateFormatField(body, FIELD_WEB, persisted != null ? persisted[1] : null,
+        BusinessPartnerHandler::isDomainShaped, ERR_WEBSITE_FORMAT);
+    if (webError != null) {
+      return webError;
+    }
+    return validateFormatField(body, FIELD_PHONE, persisted != null ? persisted[2] : null,
+        BusinessPartnerHandler::isPlausiblePhone, ERR_PHONE_FORMAT);
+  }
+
+  /**
+   * Applies {@code isValid} to one field's incoming value, skipping (returning {@code null})
+   * when the write does not touch the field, the value is blank (emptying is the {@code
+   * required} mechanism's job, not this one's), or the incoming value is unchanged from what is
+   * already persisted — so a dirty legacy value never blocks an unrelated edit to the record.
+   */
+  private static NeoResponse validateFormatField(JSONObject body, String field, String persistedValue,
+      java.util.function.Predicate<String> isValid, String errorMessage) {
+    if (!body.has(field)) {
+      return null;
+    }
+    String value = StringUtils.trimToNull(body.optString(field, null));
+    if (value == null) {
+      return null;
+    }
+    if (value.equals(StringUtils.trimToNull(persistedValue))) {
+      return null;
+    }
+    return isValid.test(value) ? null : NeoResponse.error(400, errorMessage);
+  }
+
+  /**
+   * Domain-shaped host: at least two dot-separated labels, the last a 2+ letter TLD, each label
+   * a valid DNS label. Same shape {@code recipientEdits.js}'s {@code isSecureUrl()} checks on
+   * the host part — {@code etgoWeb} stores only what follows the UI's fixed {@code https://}
+   * prefix, so the stored value itself IS the host, with no scheme to strip first.
+   */
+  private static boolean isDomainShaped(String value) {
+    String[] labels = value.split("\\.");
+    if (labels.length < 2) {
+      return false;
+    }
+    if (!TLD_PATTERN.matcher(labels[labels.length - 1]).matches()) {
+      return false;
+    }
+    for (String label : labels) {
+      if (!DOMAIN_LABEL_PATTERN.matcher(label).matches()) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * Charset guard mirroring {@code recipientEdits.js}'s {@code isValidPhone()} (digits and
+   * {@code + ( ) - .} and whitespace, at least one digit), plus the AD column's own
+   * {@value #PHONE_MAX_LENGTH}-character cap.
+   */
+  private static boolean isPlausiblePhone(String value) {
+    if (value.length() > PHONE_MAX_LENGTH) {
+      return false;
+    }
+    return PHONE_CHARSET_PATTERN.matcher(value).matches() && value.chars().anyMatch(Character::isDigit);
+  }
+
+  /**
+   * Returns {@code [etgoEmail, etgoWeb, etgoPhone]} for the given business partner, or three
+   * {@code null}s when the record does not exist (a race between the PATCH request and a
+   * concurrent delete) — same shape and rationale as {@link #queryPersistedTaxIdParts(String)}.
+   */
+  private static String[] queryPersistedContactFormatParts(String recordId) throws Exception {
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(
+        "SELECT em_etgo_email, em_etgo_web, em_etgo_phone FROM c_bpartner WHERE c_bpartner_id = ?")) {
+      ps.setString(1, recordId);
+      try (ResultSet rs = ps.executeQuery()) {
+        if (rs.next()) {
+          return new String[]{ rs.getString(1), rs.getString(2), rs.getString(3) };
+        }
+      }
+    }
+    return new String[]{ null, null, null };
   }
 
   /**
@@ -406,132 +647,6 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
     for (String key : PRECREATE_BILLING_FIELDS) {
       body.remove(key);
       body.remove(key + "$_identifier");
-    }
-  }
-
-  /**
-   * ETP-5183 SELECTOR pre-hook: resolves the Payment Method field name to a pay-in/pay-out
-   * direction and, when it is one of ours, queries {@code FIN_PaymentMethod} directly. Returns
-   * {@code null} for any other field/entity so nothing else on {@code businessPartner} is
-   * affected.
-   */
-  private NeoResponse handlePaymentMethodSelector(NeoContext ctx) {
-    PaymentMethodDirection direction = resolvePaymentMethodDirection(ctx.getFieldName());
-    if (direction == null) {
-      return null;
-    }
-    try {
-      return queryPaymentMethods(direction);
-    } catch (Exception e) {
-      log.error("BusinessPartnerHandler: error querying payment method selector ({}): {}",
-          direction, e.getMessage(), e);
-      return NeoResponse.error(500, "Error querying payment methods");
-    }
-  }
-
-  /**
-   * Maps the requested selector field to its pay-in/pay-out direction, matching either the DAL
-   * property name or the raw DB column name (case-insensitive). Returns {@code null} for any
-   * field this branch does not own.
-   */
-  private static PaymentMethodDirection resolvePaymentMethodDirection(String fieldName) {
-    if (StringUtils.isBlank(fieldName)) {
-      return null;
-    }
-    if (SELECTOR_FIELD_PAYMENT_METHOD.equalsIgnoreCase(fieldName)
-        || SELECTOR_COLUMN_PAYMENT_METHOD.equalsIgnoreCase(fieldName)) {
-      return PaymentMethodDirection.PAY_IN;
-    }
-    if (SELECTOR_FIELD_PO_PAYMENT_METHOD.equalsIgnoreCase(fieldName)
-        || SELECTOR_COLUMN_PO_PAYMENT_METHOD.equalsIgnoreCase(fieldName)) {
-      return PaymentMethodDirection.PAY_OUT;
-    }
-    return null;
-  }
-
-  /**
-   * Queries {@code FIN_PaymentMethod} directly — active + the direction's own allow flag only,
-   * no {@code FIN_FinAcc_PaymentMethod} join — and returns the same
-   * {@code {items, columns, totalCount, hasMore}} envelope the generic selector produces.
-   */
-  private static NeoResponse queryPaymentMethods(PaymentMethodDirection direction) throws Exception {
-    HttpServletRequest request = currentSelectorRequest();
-    String search = request != null
-        ? StringUtils.trimToNull(request.getParameter(SELECTOR_PARAM_SEARCH)) : null;
-    int limit = parseSelectorIntParam(request, SELECTOR_PARAM_LIMIT, SELECTOR_DEFAULT_LIMIT, 1,
-        SELECTOR_MAX_LIMIT);
-    int offset = parseSelectorIntParam(request, SELECTOR_PARAM_OFFSET, 0, 0, Integer.MAX_VALUE);
-
-    try {
-      OBContext.setAdminMode();
-
-      int totalCount = buildPaymentMethodCriteria(direction, search).count();
-
-      OBCriteria<FIN_PaymentMethod> dataCriteria = buildPaymentMethodCriteria(direction, search);
-      dataCriteria.addOrderBy(FIN_PaymentMethod.PROPERTY_NAME, true);
-      dataCriteria.setMaxResults(limit);
-      dataCriteria.setFirstResult(offset);
-      List<FIN_PaymentMethod> rows = dataCriteria.list();
-
-      JSONArray items = new JSONArray();
-      for (FIN_PaymentMethod paymentMethod : rows) {
-        JSONObject item = new JSONObject();
-        item.put(SELECTOR_FIELD_ID, paymentMethod.getId());
-        item.put(SELECTOR_FIELD_LABEL, paymentMethod.getName());
-        items.put(item);
-      }
-
-      JSONObject result = new JSONObject();
-      result.put(SELECTOR_FIELD_ITEMS, items);
-      result.put(SELECTOR_FIELD_COLUMNS, new JSONArray());
-      result.put(SELECTOR_FIELD_TOTAL_COUNT, totalCount);
-      result.put(SELECTOR_FIELD_HAS_MORE, offset + limit < totalCount);
-      return NeoResponse.ok(result);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  private static OBCriteria<FIN_PaymentMethod> buildPaymentMethodCriteria(
-      PaymentMethodDirection direction, String search) {
-    OBCriteria<FIN_PaymentMethod> criteria = OBDal.getInstance().createCriteria(FIN_PaymentMethod.class);
-    criteria.add(Restrictions.eq(FIN_PaymentMethod.PROPERTY_ACTIVE, true));
-    String allowProperty = direction == PaymentMethodDirection.PAY_IN
-        ? FIN_PaymentMethod.PROPERTY_PAYINALLOW
-        : FIN_PaymentMethod.PROPERTY_PAYOUTALLOW;
-    criteria.add(Restrictions.eq(allowProperty, true));
-    if (StringUtils.isNotBlank(search)) {
-      criteria.add(Restrictions.ilike(FIN_PaymentMethod.PROPERTY_NAME, search, MatchMode.ANYWHERE));
-    }
-    return criteria;
-  }
-
-  /**
-   * The current request, resolved from Openbravo's request-scoped {@link RequestContext} rather
-   * than threaded through {@link NeoContext} — the SELECTOR sub-endpoint's hook context does not
-   * carry query params (only CRUD does).
-   */
-  private static HttpServletRequest currentSelectorRequest() {
-    return RequestContext.get() != null ? RequestContext.get().getRequest() : null;
-  }
-
-  private static int parseSelectorIntParam(HttpServletRequest request, String name,
-      int defaultValue, int min, int max) {
-    if (request == null) {
-      return defaultValue;
-    }
-    String raw = StringUtils.trimToNull(request.getParameter(name));
-    if (raw == null) {
-      return defaultValue;
-    }
-    try {
-      int value = Integer.parseInt(raw);
-      if (value < min) {
-        return min;
-      }
-      return Math.min(value, max);
-    } catch (NumberFormatException e) {
-      return defaultValue;
     }
   }
 

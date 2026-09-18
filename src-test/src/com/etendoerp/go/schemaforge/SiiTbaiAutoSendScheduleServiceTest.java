@@ -59,7 +59,7 @@ import org.openbravo.scheduling.ProcessContext;
 /**
  * Unit tests for {@link SiiTbaiAutoSendScheduleService} (ETP-5117).
  *
- * <p>Follows the same convention as {@code OnboardingBankConnectionSyncServiceTest}: the
+ * <p>Testing convention: the
  * protected seams ({@code resolveProcess}, {@code findExistingRequest}, {@code buildObContext})
  * are stubbed via a Mockito spy for the orchestration-level tests ({@link #ensureAutoSendSchedule}
  * skip / idempotent / creation branches and the scheduling field values written on a fresh
@@ -236,7 +236,7 @@ public class SiiTbaiAutoSendScheduleServiceTest {
     doReturn(null).when(service).findExistingRequest(CLIENT_ID, ORG_ID, process);
     doReturn(OB_CONTEXT).when(service).buildObContext(CLIENT_ID, ORG_ID, USER_ID, ROLE_ID);
 
-    // Spy so the FK setters are no-ops (same precedent as OnboardingBankConnectionSyncServiceTest):
+    // Spy so the FK setters are no-ops:
     // setting a mock Client/Organization/User on a real DAL object triggers
     // BaseOBObject.checkIsValidValue, which NPEs on the mock's null Entity. The scheduling-field
     // setters asserted below are left untouched.

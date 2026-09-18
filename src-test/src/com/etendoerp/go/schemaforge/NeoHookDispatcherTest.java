@@ -41,6 +41,7 @@ import org.openbravo.dal.core.OBContext;
 
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.NeoAuditTokenRefresh;
 
 /**
  * Unit tests for {@link NeoHookDispatcher}.
@@ -51,6 +52,7 @@ class NeoHookDispatcherTest {
   private NeoServlet servlet;
   private NeoHookDispatcher dispatcher;
   private MockedStatic<OBContext> obContextStatic;
+  private MockedStatic<NeoAuditTokenRefresh> auditTokenRefreshStatic;
 
   private SFSpec spec;
   private NeoResponse defaultResponse;
@@ -63,6 +65,7 @@ class NeoHookDispatcherTest {
     dispatcher = new NeoHookDispatcher(servlet);
 
     obContextStatic = Mockito.mockStatic(OBContext.class);
+    auditTokenRefreshStatic = Mockito.mockStatic(NeoAuditTokenRefresh.class);
     OBContext mockOBContext = mock(OBContext.class);
     obContextStatic.when(OBContext::getOBContext).thenReturn(mockOBContext);
 
@@ -82,6 +85,9 @@ class NeoHookDispatcherTest {
   void tearDown() {
     if (obContextStatic != null) {
       obContextStatic.close();
+    }
+    if (auditTokenRefreshStatic != null) {
+      auditTokenRefreshStatic.close();
     }
   }
 
@@ -173,6 +179,8 @@ class NeoHookDispatcherTest {
     assertEquals(false, defaultActionCalled.get());
     verify(handler).handle(Mockito.any(NeoContext.class));
     verify(handler).afterHandle(Mockito.any(NeoContext.class));
+    auditTokenRefreshStatic.verify(() -> NeoAuditTokenRefresh.refreshInResponse(
+        Mockito.any(NeoContext.class), eq(afterResponse)));
   }
 
   // ── Hook chain: handle() returns null → default runs, afterHandle enriches ──
@@ -198,6 +206,8 @@ class NeoHookDispatcherTest {
     assertEquals(true, defaultActionCalled.get());
     verify(handler).handle(Mockito.any(NeoContext.class));
     verify(handler).afterHandle(Mockito.any(NeoContext.class));
+    auditTokenRefreshStatic.verify(() -> NeoAuditTokenRefresh.refreshInResponse(
+        Mockito.any(NeoContext.class), eq(afterResponse)));
   }
 
   // ── afterHandle returns null → original result preserved ──
@@ -221,6 +231,8 @@ class NeoHookDispatcherTest {
 
     assertSame(hookResponse, result);
     assertEquals(false, defaultActionCalled.get());
+    auditTokenRefreshStatic.verify(() -> NeoAuditTokenRefresh.refreshInResponse(
+        Mockito.any(NeoContext.class), eq(hookResponse)));
   }
 
   @Test

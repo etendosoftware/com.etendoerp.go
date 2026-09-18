@@ -9,7 +9,7 @@
  * "AS IS" basis, WITHOUT WARRANTY OF ANY KIND, either express or
  * implied. See the License for the specific language governing rights
  * and limitations under the License.
- * All portions are Copyright (C) 2021-2026 FUTIT SERVICES, S.L
+ * All portions are Copyright (C) 2026 FUTIT SERVICES, S.L
  * All Rights Reserved.
  * Contributor(s): Futit Services S.L.
  * *************************************************************************
@@ -21,7 +21,6 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -48,15 +47,28 @@ import org.openbravo.model.ad.ui.ProcessRequest;
 import org.openbravo.model.common.enterprise.Organization;
 
 /**
- * Unit tests for {@link OnboardingBankConnectionSyncService}.
+ * Unit tests for {@link OnboardingCostingScheduleService}.
  *
- * <p>The protected seams ({@code resolveProcess}, {@code findExistingRequest}, {@code buildObContext})
- * are stubbed via a Mockito spy so the tests assert only the service's orchestration: the skip / idempotent
- * branches, the scheduling field values written on a fresh request, and the best-effort error swallowing of
- * {@link OnboardingBankConnectionSyncService#activateSchedule(String)}.
+ * <p>Testing convention: the protected seams
+ * ({@code resolveProcess}, {@code findExistingRequest}, {@code buildObContext}) are stubbed via a
+ * Mockito spy so the tests assert only this service's own orchestration — the skip / idempotent
+ * branches, the scheduling field values written on a fresh request, and the best-effort error
+ * swallowing of {@link OnboardingCostingScheduleService#activateSchedule(String)}.
+ *
+ * <p>The field assertions are the point of this class, not ceremony. Timing {@code 'S'} plus
+ * frequency {@code '1'} is the {@code "S1"} key core's {@code TriggerProvider} maps to
+ * {@code repeatSecondlyForever}, and it reads {@code SECONDLY_INTERVAL} — not the minutely or daily
+ * interval — for the period. Getting any one of the three wrong yields a row that looks scheduled in
+ * the Process Request window and either never fires or fires on the wrong cadence, which is exactly
+ * the class of bug that leaves a tenant's costs uncalculated with nothing visibly broken.
+ *
+ * <p>ETP-5370 lowered the cadence from 5 minutes ({@code '2'} + {@code MINUTELY_INTERVAL=5}) to 30
+ * seconds, which swapped which interval column has to be written and which ones have to stay empty.
+ * That inversion is what the assertions below pin down; the corrective half of the same ticket
+ * ({@code realignCadence}) is covered by {@link OnboardingCostingScheduleRealignTest}.
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
-public class OnboardingBankConnectionSyncServiceTest {
+public class OnboardingCostingScheduleServiceTest {
 
   private static final String CLIENT_ID = "client-1";
   private static final String ORG_ID = "org-1";
@@ -71,32 +83,34 @@ public class OnboardingBankConnectionSyncServiceTest {
     Mockito.framework().clearInlineMocks();
   }
 
-  /** When the PSD2 process is not installed, the schedule is skipped and nothing is persisted. */
+  /** An AD without the core costing process (partially updated) is skipped, not fatal. */
   @Test
-  public void scheduleBankConnectionStatementSyncSkipsWhenProcessNotFound() {
-    OnboardingBankConnectionSyncService service = spy(new OnboardingBankConnectionSyncService());
-    doReturn(null).when(service).resolveProcess(OnboardingBankConnectionSyncService.PSD2_PROCESS_KEY);
+  public void scheduleCostingBackgroundSkipsWhenProcessNotFound() {
+    OnboardingCostingScheduleService service = spy(new OnboardingCostingScheduleService());
+    doReturn(null).when(service).resolveProcess(OnboardingCostingScheduleService.COSTING_PROCESS_KEY);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
         MockedStatic<OBDal> obDal = mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
 
-      String result = service.scheduleBankConnectionStatementSync(CLIENT_ID, ORG_ID, ADMIN_USER_ID, ADMIN_ROLE_ID);
+      String result = service.scheduleCostingBackground(CLIENT_ID, ORG_ID, ADMIN_USER_ID,
+          ADMIN_ROLE_ID);
 
       assertNull(result);
       verify(dal, never()).save(any());
     }
   }
 
-  /** A second onboarding of the same client reuses the existing request without persisting a new row. */
+  /** A second onboarding of the same client reuses the existing request instead of duplicating it. */
   @Test
-  public void scheduleBankConnectionStatementSyncIsIdempotent() {
-    OnboardingBankConnectionSyncService service = spy(new OnboardingBankConnectionSyncService());
+  public void scheduleCostingBackgroundIsIdempotent() {
+    OnboardingCostingScheduleService service = spy(new OnboardingCostingScheduleService());
     Process process = mock(Process.class);
     ProcessRequest existing = mock(ProcessRequest.class);
     when(existing.getId()).thenReturn(EXISTING_REQUEST_ID);
-    doReturn(process).when(service).resolveProcess(OnboardingBankConnectionSyncService.PSD2_PROCESS_KEY);
+    doReturn(process).when(service)
+        .resolveProcess(OnboardingCostingScheduleService.COSTING_PROCESS_KEY);
     doReturn(existing).when(service).findExistingRequest(CLIENT_ID, process);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class);
@@ -104,19 +118,28 @@ public class OnboardingBankConnectionSyncServiceTest {
       OBDal dal = mock(OBDal.class);
       obDal.when(OBDal::getInstance).thenReturn(dal);
 
-      String result = service.scheduleBankConnectionStatementSync(CLIENT_ID, ORG_ID, ADMIN_USER_ID, ADMIN_ROLE_ID);
+      String result = service.scheduleCostingBackground(CLIENT_ID, ORG_ID, ADMIN_USER_ID,
+          ADMIN_ROLE_ID);
 
       assertEquals(EXISTING_REQUEST_ID, result);
       verify(dal, never()).save(any());
     }
   }
 
-  /** A fresh schedule is built with the daily 03:00–06:00 scheduling fields, then saved and flushed once. */
+  /**
+   * A fresh schedule carries the secondly/30 trigger fields, and is saved and flushed once.
+   *
+   * <p>The interval is asserted on {@code intervalInSeconds} AND the two neighbouring interval
+   * columns are asserted null: a leftover {@code minutelyInterval} from the pre-ETP-5370 5-minute
+   * shape is inert (the scheduler reads only the column matching {@code FREQUENCY}) but it produces
+   * a row that matches no hand-made one, which is the hard part to diagnose later.
+   */
   @Test
-  public void scheduleBankConnectionStatementSyncCreatesRequestWithSchedulingFields() {
-    OnboardingBankConnectionSyncService service = spy(new OnboardingBankConnectionSyncService());
+  public void scheduleCostingBackgroundCreatesRequestWithSecondlySchedulingFields() {
+    OnboardingCostingScheduleService service = spy(new OnboardingCostingScheduleService());
     Process process = mock(Process.class);
-    doReturn(process).when(service).resolveProcess(OnboardingBankConnectionSyncService.PSD2_PROCESS_KEY);
+    doReturn(process).when(service)
+        .resolveProcess(OnboardingCostingScheduleService.COSTING_PROCESS_KEY);
     doReturn(null).when(service).findExistingRequest(CLIENT_ID, process);
     doReturn(OB_CONTEXT).when(service)
         .buildObContext(CLIENT_ID, ORG_ID, ADMIN_USER_ID, ADMIN_ROLE_ID);
@@ -146,33 +169,57 @@ public class OnboardingBankConnectionSyncServiceTest {
       when(dal.get(Organization.class, ORG_ID)).thenReturn(mock(Organization.class));
       when(dal.get(User.class, ADMIN_USER_ID)).thenReturn(mock(User.class));
 
-      String result = service.scheduleBankConnectionStatementSync(CLIENT_ID, ORG_ID, ADMIN_USER_ID, ADMIN_ROLE_ID);
+      String result = service.scheduleCostingBackground(CLIENT_ID, ORG_ID, ADMIN_USER_ID,
+          ADMIN_ROLE_ID);
 
       assertEquals(NEW_REQUEST_ID, result);
       assertEquals("S", request.getTiming());
-      assertEquals("4", request.getFrequency());
-      assertEquals(Long.valueOf(1L), request.getDailyInterval());
-      assertEquals("N", request.getDailyOption());
+      assertEquals("1", request.getFrequency());
+      assertEquals(Long.valueOf(30L), request.getIntervalInSeconds());
+      assertNull("a minutely interval would compete with the secondly one",
+          request.getIntervalInMinutes());
+      assertNull("an hourly interval would compete with the secondly one",
+          request.getHourlyInterval());
+      assertNull("no repetition cap — the schedule must repeat forever",
+          request.getNumRepetitions());
       assertEquals("SCH", request.getStatus());
       assertEquals("Process Scheduler", request.getChannel());
       assertTrue(request.isSecurityBasedOnRole());
       assertTrue(request.isActive());
       assertEquals(OB_CONTEXT, request.getOpenbravoContext());
+      assertNotNull(request.getStartDate());
       assertNotNull(request.getStartTime());
-      int hour = request.getStartTime().toLocalDateTime().getHour();
-      assertTrue("startTime hour must be in [3,6) but was " + hour, hour >= 3 && hour < 6);
 
       verify(dal).save(request);
       verify(dal).flush();
     }
   }
 
+  /** The start instant is spread inside the 30-second cadence, so a bulk fix cannot phase-align tenants. */
+  @Test
+  public void spreadStartTimeStaysWithinTheCadence() {
+    OnboardingCostingScheduleService service = new OnboardingCostingScheduleService();
+    long cadenceMillis = 30L * 1000L;
+
+    // Sampled rather than asserted once: the offset is random, so a single draw proves nothing
+    // about the bound it is supposed to respect.
+    for (int i = 0; i < 50; i++) {
+      long before = System.currentTimeMillis();
+      long start = service.spreadStartTime().getTime();
+      long offset = start - before;
+      assertTrue("start instant must not be in the past, was " + offset + "ms off",
+          offset > -1000L);
+      assertTrue("start instant must stay inside the 30-second cadence, was " + offset + "ms off",
+          offset < cadenceMillis);
+    }
+  }
+
   /** activateSchedule is best-effort: an error resolving the process is swallowed, never propagated. */
   @Test
   public void activateScheduleSwallowsErrors() {
-    OnboardingBankConnectionSyncService service = spy(new OnboardingBankConnectionSyncService());
+    OnboardingCostingScheduleService service = spy(new OnboardingCostingScheduleService());
     doThrow(new RuntimeException("boom")).when(service)
-        .resolveProcess(OnboardingBankConnectionSyncService.PSD2_PROCESS_KEY);
+        .resolveProcess(OnboardingCostingScheduleService.COSTING_PROCESS_KEY);
 
     try (MockedStatic<OBContext> obContext = mockStatic(OBContext.class)) {
       service.activateSchedule(CLIENT_ID);

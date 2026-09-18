@@ -16,11 +16,15 @@
  */
 package com.etendoerp.go.schemaforge.handlers;
 
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import javax.inject.Named;
 
@@ -30,7 +34,9 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.MatchMode;
 import org.hibernate.criterion.Restrictions;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -125,7 +131,14 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  *   pill fix) attached directly onto the {@code POST} create response itself, right after the
  *   invitation is created (see {@link #inviteNewlyCreatedUser}), so the pill renders on the
  *   detail header's FIRST paint instead of only after a subsequent GET (leaving and re-entering
- *   the record).</li>
+ *   the record). <b>Duplicate-email guard (ETP-5264):</b> because the create form never shows
+ *   {@code username}, a client submitting an email that already belongs to one of its users used
+ *   to fail on the DB's {@code username} unique-constraint violation instead — the derived
+ *   username collides too, but the resulting error names the technical {@code username} column,
+ *   which the user never typed and the frontend ({@code backendErrors.js}) has no mapping for, so
+ *   it surfaced raw and misleadingly. {@link #rejectDuplicateEmail} runs BEFORE the {@code
+ *   username} derivation above and returns a clear 400 instead, so the confusing DB message is
+ *   never reached.</li>
  *
  *   <li><b>Write-path guards on {@code PUT}/{@code PATCH} (ETP-4830 QA rejection cycle 1):</b>
  *   {@link #handle(NeoContext)} rejects two dangerous updates with a 400 BEFORE the default CRUD
@@ -173,6 +186,18 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
  *   "the owner can't deactivate themselves" generically — no separate case needed here). A
  *   target that is not flagged as owner (every pre-existing user until a separate,
  *   human-reviewed backfill data-fix runs) never triggers this guard at all.</li>
+ *
+ *   <li><b>Delete-path guards on {@code DELETE} (ETP-5195 Bug 3):</b> {@link
+ *   #handle(NeoContext)} previously had no {@code DELETE} case at all, so a delete request fell
+ *   straight through to the default CRUD delete with none of this window's other guards applied
+ *   — an administrator could delete their own {@code AD_User} record outright. {@link
+ *   #rejectDangerousDelete} now rejects three cases before the default CRUD delete ever runs:
+ *   a self-delete (same {@code actingUserId.equals(userId)} pattern as the deactivation guard
+ *   above), a delete of the record flagged as the client's owner via {@link OwnerSupport#isOwner}
+ *   (unconditional — unlike the update guard's owner protection, the owner is NOT exempt from
+ *   deleting their own record here), and a delete of the last remaining active client-admin
+ *   (reusing {@link #isLastActiveClientAdmin} as-is). Same fail-CLOSED contract as the other
+ *   guards in this class.</li>
  * </ol>
  *
  * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
@@ -187,9 +212,37 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   private static final String METHOD_POST = "POST";
   private static final String METHOD_PUT = "PUT";
   private static final String METHOD_PATCH = "PATCH";
+  private static final String METHOD_DELETE = "DELETE";
 
   /** {@code AD_User_ID} of the System-client "Admin" and "System" bootstrap accounts. */
   private static final Set<String> HIDDEN_BOOTSTRAP_USER_IDS = Set.of("0", "100");
+
+  /**
+   * ETP-5188 — query params for the "Rol" advanced filter on the {@code user} list. See {@link
+   * #applyRoleFilter(NeoContext)}'s javadoc for the full contract.
+   */
+  private static final String QUERY_PARAM_ROLE_IDS = "RoleIds";
+  private static final String QUERY_PARAM_NO_ROLE = "NoRole";
+  /**
+   * ETP-5188 — negates the ENTIRE {@code RoleIds}/{@code NoRole} predicate {@link
+   * #applyRoleFilter(NeoContext)} builds, wrapping it in an HQL {@code not (...)}. Backs the
+   * "No es" ({@code RoleIds} + negate) and "No está vacío" ({@code NoRole} + negate) advanced-
+   * filter operators — see {@link #applyRoleFilter(NeoContext)}'s javadoc for the full contract.
+   */
+  private static final String QUERY_PARAM_ROLE_FILTER_NEGATE = "RoleFilterNegate";
+  private static final String TRUE_STRING = "true";
+
+  /**
+   * ETP-5188 — every {@code AD_Role_ID} this handler inlines into an HQL {@code _neoWhere}
+   * predicate (see {@link #applyRoleFilter(NeoContext)}) MUST match this shape before being
+   * concatenated into the predicate string: {@link NeoCrudHelper#NEO_WHERE_PARAM} has no
+   * bind-parameter mechanism (confirmed by reading {@code NeoCrudHelper#buildWhereClause} — the
+   * predicate is spliced into the HQL text as-is), so a literal id is the only way to express
+   * this filter, and this regex is the substitute for parameterization. Etendo AD ids are 32
+   * hex chars (see {@code CLAUDE.md}'s "Generating new Etendo UUIDs" section); case-insensitive
+   * since the frontend echoes back whatever case the DB already stores the id in.
+   */
+  private static final Pattern ROLE_ID_PATTERN = Pattern.compile("^[A-Fa-f0-9]{32}$");
 
   private static final String FIELD_TOTAL_ROWS = "totalRows";
   private static final String FIELD_ID = "id";
@@ -197,6 +250,11 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   private static final String FIELD_EMAIL = "email";
   private static final String FIELD_INVITATION_STATUS = "invitationStatus";
   private static final String FIELD_IS_OWNER = "isOwner";
+  /** ETP-5277: fields patched onto the create response by {@link #patchUserDefaultsOntoRow}. */
+  private static final String FIELD_DEFAULT_ROLE = "defaultRole";
+  private static final String FIELD_DEFAULT_CLIENT = "defaultClient";
+  private static final String FIELD_DEFAULT_ORGANIZATION = "defaultOrganization";
+  private static final String FIELD_DEFAULT_WAREHOUSE = "defaultWarehouse";
   /** Keys of the {@code JSONObject} returned by {@code CompanyInvitationService} (ETP-4830). */
   private static final String FIELD_ERROR = "error";
   private static final String FIELD_MESSAGE = "message";
@@ -207,9 +265,10 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * Pre-hook dispatch: on a {@code user} {@code POST} (create), derives a unique {@code
    * username}; on a {@code user} {@code PUT}/{@code PATCH} (update), guards against the
    * email-immutability and self/last-admin-lockout writes described in the class javadoc's
-   * ETP-4830 write-path-guards concern; on a {@code user} list {@code GET}, excludes
-   * contact-only rows (see {@link #excludeContactOnlyUsers}, ETP-5019). No-op for every other
-   * method/endpoint.
+   * ETP-4830 write-path-guards concern; on a {@code user} {@code DELETE}, guards against the
+   * self/last-admin/owner deletes described in the class javadoc's ETP-5195 delete-guards
+   * concern; on a {@code user} list {@code GET}, excludes contact-only rows (see {@link
+   * #excludeContactOnlyUsers}, ETP-5019). No-op for every other method/endpoint.
    */
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -223,8 +282,12 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     if (METHOD_PUT.equalsIgnoreCase(method) || METHOD_PATCH.equalsIgnoreCase(method)) {
       return validateUpdate(context);
     }
+    if (METHOD_DELETE.equalsIgnoreCase(method)) {
+      return rejectDangerousDelete(context);
+    }
     if (METHOD_GET.equalsIgnoreCase(method) && context.getRecordId() == null) {
       excludeContactOnlyUsers(context);
+      applyRoleFilter(context);
     }
     return null;
   }
@@ -267,8 +330,244 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   }
 
   /**
+   * ETP-5188 — server-side half of the Users window's "Rol" advanced filter. The frontend's
+   * generic {@code criteria=} query-param mechanism cannot express this (confirmed empirically,
+   * 500 error): it builds a naive dotted HQL property path through the {@code
+   * aDUserRolesList} collection, which is invalid HQL for a one-to-many association. So the
+   * frontend instead sends two DEDICATED query params on this same {@code user} list {@code GET}:
+   *
+   * <ul>
+   *   <li>{@code RoleIds=<id1>,<id2>,...} — comma-separated {@code AD_Role_ID}s of the fixed
+   *   system role templates ({@link com.etendoerp.go.roles.SystemRoleTemplates#byName()}) and/or
+   *   the caller's own client's admin ("Administrador") role id.</li>
+   *   <li>{@code NoRole=true} — users with no composed role at all (and not the admin).</li>
+   * </ul>
+   *
+   * <p>Since ETP-4906, a user's actual access is never a direct {@code Default_Ad_Role_ID} match
+   * against a template — it is expressed via that user's PERSONAL role (see {@link
+   * com.etendoerp.go.roles.UserRoleCompositionService}'s own class javadoc), which COMPOSES 1+
+   * templates through an active {@code AD_Role_Inheritance} row. The one exception is the
+   * client-admin "Admin" role, which {@code UserRoleCompositionService} never lets a personal
+   * role compose — it is always a DIRECT {@code Default_Ad_Role_ID} assignment (see that class's
+   * "Never touches the Admin role" javadoc section). {@link #buildComposedOrDirectPredicate}
+   * covers both shapes with a single OR: a direct {@code Default_Ad_Role_ID} match (the only way
+   * the admin id can ever match, but harmless to check for a template id too — no personal role's
+   * id is ever equal to a template's own id) OR an active inheritance from one of the requested
+   * template ids.
+   *
+   * <p>Injected as an HQL {@code _neoWhere} predicate (see {@link
+   * NeoCrudHelper#NEO_WHERE_PARAM}), the exact same mechanism {@link
+   * #excludeContactOnlyUsers(NeoContext)} already uses on this same list {@code GET} — combined
+   * with that method's own predicate (and any other existing one) via {@code and}, while
+   * {@code RoleIds} and {@code NoRole} are combined with {@code or} between themselves: they are
+   * two chips of the SAME multi-select filter ("match any of the selected options"), not two
+   * independent filters.
+   *
+   * <p><b>No bind-parameter mechanism exists for {@code _neoWhere}</b> (confirmed by reading
+   * {@link NeoCrudHelper#buildWhereClause} in full — the predicate string is spliced verbatim
+   * into the HQL text). Every {@code AD_Role_ID} inlined into the predicate is therefore first
+   * validated against {@link #ROLE_ID_PATTERN} in {@link #sanitizeRoleIds(String)} — anything
+   * that doesn't match a 32-char hex id is dropped (logged, not rejected with an error, so one
+   * malformed entry doesn't 500 the whole list) rather than ever reaching the HQL string
+   * unescaped. This is the same literal-string-only precedent {@link #excludeContactOnlyUsers}
+   * already sets for this file (its predicate has no dynamic values at all, so it never needed
+   * this sanitization step), used here in the substitute-for-parameterization sense CLAUDE.md's
+   * NeoHandler guidance calls for.
+   *
+   * <p><b>ETP-5188 negation ({@code RoleFilterNegate=true}).</b> The frontend's "Rol" filter
+   * offers four operators — "Es", "No es", "Está vacío", "No está vacío" — but only needs the two
+   * primitives above ({@code RoleIds}, {@code NoRole}) plus this one boolean flag to express all
+   * four; no new query semantics are needed:
+   * <ul>
+   *   <li>"Es" — {@code RoleIds} alone, no negate (unchanged, pre-ETP-5188 behavior).</li>
+   *   <li>"No es" — {@code RoleIds} + {@code RoleFilterNegate=true}: NOT the same predicate "Es"
+   *   builds — "this user has none of the selected roles".</li>
+   *   <li>"Está vacío" — {@code NoRole=true} alone, no negate (unchanged "Sin rol" behavior).</li>
+   *   <li>"No está vacío" — {@code NoRole=true} + {@code RoleFilterNegate=true}: NOT "Sin rol" —
+   *   "this user has some role, whichever it is".</li>
+   * </ul>
+   * When present, {@code RoleFilterNegate} wraps the ENTIRE {@code or}-joined combination of
+   * whichever branches ({@code RoleIds}/{@code NoRole}) are present in one outer HQL
+   * {@code not (...)}, applied AFTER that combination is built and BEFORE it is merged into any
+   * existing {@code _neoWhere} predicate — so it composes with an already-present filter exactly
+   * like the un-negated predicate always did. Parsed with the same strict {@code
+   * TRUE_STRING.equalsIgnoreCase(StringUtils.trimToNull(...))} convention {@code NoRole} already
+   * uses (see {@link #isRoleFilterNegated(Map)}): anything other than a case-insensitive
+   * {@code "true"} is treated as absent/false, so this is a pure additive change — behavior is
+   * byte-for-byte unchanged whenever {@code RoleFilterNegate} is absent.
+   *
+   * <p>A no-op when neither {@code RoleIds} nor {@code NoRole} is present, regardless of {@code
+   * RoleFilterNegate} — negating an empty/no-op filter would otherwise wrongly match every user.
+   */
+  private void applyRoleFilter(NeoContext context) {
+    Map<String, String> queryParams = context.getQueryParams();
+    if (queryParams == null) {
+      return;
+    }
+    Set<String> roleIds = sanitizeRoleIds(queryParams.get(QUERY_PARAM_ROLE_IDS));
+    boolean noRole = TRUE_STRING.equalsIgnoreCase(
+        StringUtils.trimToNull(queryParams.get(QUERY_PARAM_NO_ROLE)));
+    if (roleIds.isEmpty() && !noRole) {
+      return;
+    }
+
+    List<String> predicates = new ArrayList<>();
+    if (!roleIds.isEmpty()) {
+      predicates.add(buildComposedOrDirectPredicate(roleIds));
+    }
+    if (noRole) {
+      predicates.add(buildNoRolePredicate(resolveClientAdminRoleId(context.getObContext())));
+    }
+
+    String predicate = "(" + String.join(") or (", predicates) + ")";
+    if (isRoleFilterNegated(queryParams)) {
+      predicate = "not (" + predicate + ")";
+    }
+    String existing = queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM);
+    queryParams.put(NeoCrudHelper.NEO_WHERE_PARAM,
+        StringUtils.isBlank(existing) ? predicate : "(" + existing + ") and (" + predicate + ")");
+  }
+
+  /**
+   * ETP-5188 — whether the current request asked to negate the whole {@code RoleIds}/{@code
+   * NoRole} predicate via {@link #QUERY_PARAM_ROLE_FILTER_NEGATE}. Same strict, case-insensitive
+   * {@code "true"}-only parsing convention {@code NoRole} already uses one line above in {@link
+   * #applyRoleFilter(NeoContext)} — anything else (missing, blank, {@code "1"}, {@code "yes"},
+   * mixed case aside from {@code true}/{@code TRUE}/{@code True}-style variants, ...) is treated
+   * as absent/false. Carries no id/value of its own, so it needs no {@link #ROLE_ID_PATTERN}-style
+   * sanitization before being inlined — it never reaches the HQL string itself, only decides
+   * whether to prepend the literal {@code "not "} wrapper.
+   */
+  private boolean isRoleFilterNegated(Map<String, String> queryParams) {
+    return TRUE_STRING.equalsIgnoreCase(
+        StringUtils.trimToNull(queryParams.get(QUERY_PARAM_ROLE_FILTER_NEGATE)));
+  }
+
+  /**
+   * Splits {@code rawRoleIds} on {@code ,}, trims each entry, and keeps only the ones matching
+   * {@link #ROLE_ID_PATTERN} — see {@link #applyRoleFilter(NeoContext)}'s javadoc for why this
+   * validation stands in for a bind-parameter mechanism {@code _neoWhere} does not have. A
+   * malformed entry is logged at WARN and silently dropped rather than failing the whole request.
+   *
+   * @param rawRoleIds the raw {@code RoleIds} query param value, possibly {@code null}/blank
+   * @return the validated, deduplicated (insertion-order) set of role ids; empty if {@code
+   *     rawRoleIds} is blank or every entry was malformed
+   */
+  private Set<String> sanitizeRoleIds(String rawRoleIds) {
+    Set<String> result = new LinkedHashSet<>();
+    if (StringUtils.isBlank(rawRoleIds)) {
+      return result;
+    }
+    for (String candidate : rawRoleIds.split(",")) {
+      String trimmed = StringUtils.trimToNull(candidate);
+      if (trimmed == null) {
+        continue;
+      }
+      if (ROLE_ID_PATTERN.matcher(trimmed).matches()) {
+        result.add(trimmed);
+      } else {
+        log.warn("UserRoleAssignmentHandler.applyRoleFilter: rejected malformed RoleIds entry "
+            + "'{}' — not a 32-char hex AD_Role_ID", trimmed);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Builds the OR of the two ways a user can match one of {@code roleIds} — see {@link
+   * #applyRoleFilter(NeoContext)}'s javadoc for why both branches are needed. {@code roleIds} is
+   * already sanitized by {@link #sanitizeRoleIds(String)} (32-char hex only), so inlining it
+   * directly into the HQL literal list is safe.
+   *
+   * @param roleIds a non-empty, pre-sanitized set of {@code AD_Role_ID}s
+   * @return an HQL boolean expression, not yet wrapped in an outer paren by the caller
+   */
+  private String buildComposedOrDirectPredicate(Set<String> roleIds) {
+    String literalIdList = toHqlLiteralList(roleIds);
+    return "(e.defaultRole.id in (" + literalIdList + ")) or "
+        + "(exists (select 1 from ADRoleInheritance ri where ri.role = e.defaultRole and "
+        + "ri.active = true and ri.inheritFrom.id in (" + literalIdList + ")))";
+  }
+
+  /**
+   * Builds the "Sin rol" predicate: no active composed template inheritance from the user's
+   * personal role, AND the user's {@code Default_Ad_Role_ID} is not the client's admin role
+   * (admin is a real, direct role assignment — never "no role" — see {@link
+   * #applyRoleFilter(NeoContext)}'s javadoc). The {@code exists} subquery correlates on {@code
+   * ri.role = e.defaultRole} — an entity/FK comparison, not a dotted property-value read — so a
+   * {@code null} {@code e.defaultRole} simply makes the correlation (and therefore the {@code
+   * exists}) false, with no join required; the same safe pattern {@link
+   * #buildComposedOrDirectPredicate} already relies on.
+   *
+   * @param adminRoleId the caller's client's admin role id, or {@code null} if it could not be
+   *     resolved (e.g. no {@code OBContext}/client on this request) — the admin-exclusion clause
+   *     is simply omitted in that case, never inlined as a literal {@code null}
+   * @return an HQL boolean expression, not yet wrapped in an outer paren by the caller
+   */
+  private String buildNoRolePredicate(String adminRoleId) {
+    StringBuilder predicate = new StringBuilder(
+        "not exists (select 1 from ADRoleInheritance ri where ri.role = e.defaultRole and "
+            + "ri.active = true)");
+    if (adminRoleId != null) {
+      predicate.append(" and (e.defaultRole is null or e.defaultRole.id <> '")
+          .append(adminRoleId).append("')");
+    }
+    return predicate.toString();
+  }
+
+  /**
+   * Resolves the caller's own client's active client-admin ({@code IsClientAdmin = 'Y'}) role
+   * id, following the exact same {@code OBCriteria} shape {@code SFRolesOverview#resolveTenantRoles}
+   * already uses to find a tenant's admin role — see that method for the precedent. Wrapped in
+   * {@code OBContext.setAdminMode(true)} like every other DB read in this class that isn't
+   * scoped to the acting user's own default client/org (e.g. {@link #attachOwnerFlag}), since
+   * this runs during a plain list {@code GET} under the acting user's own (non-admin) context.
+   *
+   * @param obContext the request's resolved {@code OBContext}, or {@code null}
+   * @return the client-admin role id, or {@code null} if {@code obContext}/its current client is
+   *     unavailable, or the client genuinely has no active admin role
+   */
+  private String resolveClientAdminRoleId(OBContext obContext) {
+    String clientId = obContext != null && obContext.getCurrentClient() != null
+        ? obContext.getCurrentClient().getId() : null;
+    if (clientId == null) {
+      return null;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      OBCriteria<Role> criteria = OBDal.getInstance().createCriteria(Role.class);
+      criteria.setFilterOnReadableClients(false);
+      criteria.setFilterOnReadableOrganization(false);
+      criteria.add(Restrictions.eq(Role.PROPERTY_CLIENT + ".id", clientId));
+      criteria.add(Restrictions.eq(Role.PROPERTY_ACTIVE, true));
+      criteria.add(Restrictions.eq(Role.PROPERTY_CLIENTADMIN, true));
+      criteria.setMaxResults(1);
+      List<Role> results = criteria.list();
+      return results.isEmpty() ? null : results.get(0).getId();
+    } catch (Exception e) {
+      log.warn("UserRoleAssignmentHandler.resolveClientAdminRoleId error for client {}: {}",
+          clientId, e.getMessage(), e);
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Joins {@code ids} into a comma-separated, single-quoted HQL literal list — e.g. {@code
+   * 'ID1','ID2'} — for splicing into an {@code in (...)} clause. Callers are responsible for
+   * ensuring every id is already safe to inline (see {@link #sanitizeRoleIds(String)}).
+   */
+  private static String toHqlLiteralList(Set<String> ids) {
+    return ids.stream().map(id -> "'" + id + "'").collect(Collectors.joining(","));
+  }
+
+  /**
    * Derives a unique {@code username} from {@code email} and the current client, and rejects a
-   * blank/missing email with 400.
+   * blank/missing email with 400. Before that derivation runs, also rejects a duplicate {@code
+   * email} within the same client with a clear 400 (see {@link #rejectDuplicateEmail}, ETP-5264)
+   * — otherwise the derived {@code username} would collide too, and the resulting DB
+   * unique-constraint error would confusingly name a field this create form never shows.
    *
    * <p>No longer validates or reads an admin-typed {@code password} (ETP-4830 removed that
    * temporary bypass — see the class javadoc's concern (3)): invite-email is now the only way
@@ -286,11 +585,15 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     if (email == null) {
       return NeoResponse.error(400, "Field 'email' is required to create a user");
     }
+    String normalizedEmail = email.toLowerCase();
+    OBContext obContext = OBContext.getOBContext();
+    Client client = obContext != null ? obContext.getCurrentClient() : null;
+    NeoResponse duplicateEmailGuard = rejectDuplicateEmail(normalizedEmail, client);
+    if (duplicateEmailGuard != null) {
+      return duplicateEmailGuard;
+    }
     try {
-      String normalizedEmail = email.toLowerCase();
-      OBContext obContext = OBContext.getOBContext();
-      String clientName = obContext != null && obContext.getCurrentClient() != null
-          ? obContext.getCurrentClient().getName() : null;
+      String clientName = client != null ? client.getName() : null;
       requestBody.put(FIELD_USERNAME,
           clientName == null
               ? normalizedEmail
@@ -298,6 +601,32 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     } catch (Exception e) {
       log.warn("UserRoleAssignmentHandler.handle: failed to derive username from email: {}",
           e.getMessage(), e);
+    }
+    return null;
+  }
+
+  /**
+   * Rejects a {@code user} create whose {@code email} (already lowercased by the caller) is
+   * already used by another {@code AD_User} of the same {@code client} — see the class javadoc's
+   * ETP-5264 duplicate-email-guard concern for why this proactive check exists (it stands in for
+   * the DB's own {@code username} unique-constraint, whose violation would otherwise surface a
+   * raw message naming a field this form never shows). Deliberately does NOT filter by {@code
+   * active} — the DB constraint this check stands in for doesn't care about the {@code active}
+   * flag either, so filtering here would create a gap where this pre-check passes but the DB
+   * insert still fails with the confusing raw message. A no-op ({@code null}) when {@code client}
+   * is {@code null} — {@link #handleCreate} still falls through to its own best-effort username
+   * derivation in that case, unchanged from before ETP-5264.
+   */
+  private NeoResponse rejectDuplicateEmail(String normalizedEmail, Client client) {
+    if (client == null) {
+      return null;
+    }
+    OBCriteria<User> criteria = OBDal.getInstance().createCriteria(User.class);
+    criteria.add(Restrictions.eq(User.PROPERTY_CLIENT, client));
+    criteria.add(Restrictions.ilike(User.PROPERTY_EMAIL, normalizedEmail, MatchMode.EXACT));
+    criteria.setMaxResults(1);
+    if (!criteria.list().isEmpty()) {
+      return NeoResponse.error(400, "A user with this email address already exists");
     }
     return null;
   }
@@ -439,6 +768,75 @@ public class UserRoleAssignmentHandler implements NeoHandler {
           userId, e.getMessage(), e);
       // Fail CLOSED: an error here must not silently let a lockout-risking deactivation through.
       return NeoResponse.error(500, "Error validating deactivation: " + e.getMessage());
+    }
+  }
+
+  /**
+   * Pre-hook guard for a {@code user} {@code DELETE}: rejects a self-delete, a delete of the
+   * client's owner record (by anyone, including the owner themself), and a delete of the last
+   * remaining active client-admin. Runs BEFORE the default CRUD delete (this is a {@code
+   * handle()} pre-hook), so a rejection here never lets the record reach the DB delete at all.
+   *
+   * <p><b>ETP-5195 Bug 3.</b> {@link #handle(NeoContext)} previously had no {@code DELETE} case
+   * whatsoever, so a delete request fell straight through to the default CRUD delete with NONE
+   * of this window's existing write-path guards applied — an administrator could delete their
+   * own {@code AD_User} record outright. This mirrors the {@code
+   * actingUserId.equals(userId)} self-check from {@link #rejectDangerousDeactivation}, the
+   * {@link OwnerSupport#isOwner} check from {@link #rejectNonOwnerEditingOwner} (widened here:
+   * unlike the update guard, which lets the owner edit their OWN record, a delete of the owner's
+   * record is blocked unconditionally — the owner is not exempt from deleting themself), and
+   * reuses {@link #isLastActiveClientAdmin} as-is. Same fail-CLOSED reasoning as the other guards
+   * in this class: an unexpected error surfaces a 500 rather than silently letting the delete
+   * proceed.
+   *
+   * @return a 400/500 error response to short-circuit the request, or {@code null} to let the
+   *     default CRUD delete proceed
+   */
+  private NeoResponse rejectDangerousDelete(NeoContext context) {
+    // ETP-5195, R3: resolve the EFFECTIVE target id the same way NeoCrudHandler#buildDalParams
+    // now does — the path id wins when present, otherwise fall back to the query "id" — so this
+    // guard always evaluates the exact same record the CRUD delete will actually touch. Before
+    // this fix, a request like DELETE /sws/neo/user/user/<ordinary-id>?id=<protected-id> let a
+    // query "id" silently override the path id at the CRUD layer while this guard kept looking
+    // only at the path id, so guard and delete disagreed on the target; a path-less DELETE
+    // .../user?id=<protected-id> bypassed the guard outright, since it bailed out immediately
+    // below with no query fallback at all.
+    String userId = context.getRecordId();
+    if (userId == null && context.getQueryParams() != null) {
+      userId = context.getQueryParams().get(FIELD_ID);
+    }
+    if (userId == null) {
+      return null;
+    }
+    OBContext obContext = context.getObContext();
+    String actingUserId = obContext != null && obContext.getUser() != null
+        ? obContext.getUser().getId() : null;
+    if (actingUserId != null && actingUserId.equals(userId)) {
+      return NeoResponse.error(400, "You cannot delete your own user account");
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        if (OwnerSupport.isOwner(userId)) {
+          return NeoResponse.error(400, "This user is the tenant owner and cannot be deleted");
+        }
+        User targetUser = OBDal.getInstance().get(User.class, userId);
+        if (targetUser == null) {
+          return null;
+        }
+        if (isLastActiveClientAdmin(targetUser)) {
+          return NeoResponse.error(400,
+              "Cannot delete the last active administrator for this client");
+        }
+        return null;
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("UserRoleAssignmentHandler.rejectDangerousDelete error for user {}: {}", userId,
+          e.getMessage(), e);
+      // Fail CLOSED: an error here must not silently let a dangerous delete through unverified.
+      return NeoResponse.error(500, "Error validating delete: " + e.getMessage());
     }
   }
 
@@ -623,7 +1021,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
         // MUST run before the invitation is created, so no other role ever gets a chance to land
         // on this user first. Best-effort (see the method's own javadoc): a failure here is
         // logged and swallowed, it never blocks the invitation that follows.
-        ensurePersonalRoleForNewlyCreatedUser(userId, email, clientId);
+        ensurePersonalRoleForNewlyCreatedUser(userId, email, clientId, data);
         invitationResult = new CompanyInvitationService().createInvitationForNewlyCreatedUser(
             obContext, email.toLowerCase(), null, null);
         // ETP-4830 pending-invite-pill fix: attach invitationStatus onto THIS SAME create
@@ -687,14 +1085,32 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * every failure path is logged at WARN with enough context (userId/email/clientId) to diagnose
    * without a DB query, never silently swallowed.</p>
    *
+   * <p>ETP-5277: {@code createFreshPersonalRole} above (via {@code
+   * PersonalRoleAccessProvisioningService#applyUserDefaults}) also recomputes {@code
+   * defaultClient}/{@code defaultOrganization}/{@code defaultWarehouse} on {@code user} from the
+   * real client/organization/first-active-warehouse, and this method itself sets {@code
+   * defaultRole} to the personal role right below — but none of that was ever reflected back into
+   * the create response's {@code data} row, which was built from the request payload BEFORE these
+   * writes ran. {@code NeoDefaultsService}'s create-defaults bootstrap can leak the CREATING
+   * admin's own session-derived role/client/org/warehouse into that payload (no {@code
+   * AD_Preference} configured for these 4 columns), so the create response briefly echoed back the
+   * wrong user's values until a follow-up GET. {@link #patchUserDefaultsOntoRow} closes that gap by
+   * re-reading the 4 fields off {@code user} once they are final, mirroring how {@link
+   * #attachInvitationStatusToRowSafely} patches {@code invitationStatus} onto this same {@code
+   * data} reference.</p>
+   *
    * @param userId the newly-created user's {@code AD_User_ID}, read from the create response's
    *     {@code data[0].id} by the caller — {@code null} (missing from the response) is logged and
    *     treated as a no-op, since there is nothing to look up
    * @param email the newly-created user's email — used only for logging context
    * @param clientId the current client id — used only for logging context
+   * @param data the create response's {@code data[0]} row (see {@link #inviteNewlyCreatedUser}) —
+   *     patched in place with the final {@code defaultRole}/{@code defaultClient}/{@code
+   *     defaultOrganization}/{@code defaultWarehouse} once this method's own writes succeed;
+   *     {@code null} is tolerated (no-op patch, everything else still runs)
    */
   private void ensurePersonalRoleForNewlyCreatedUser(String userId, String email,
-      String clientId) {
+      String clientId, JSONObject data) {
     if (userId == null) {
       log.warn("UserRoleAssignmentHandler.ensurePersonalRoleForNewlyCreatedUser: no 'id' entry "
               + "in the create response for email={} clientId={} — personal role not created",
@@ -717,11 +1133,79 @@ public class UserRoleAssignmentHandler implements NeoHandler {
       log.info("UserRoleAssignmentHandler.ensurePersonalRoleForNewlyCreatedUser: assigned "
               + "personal role {} to newly-created user {} (email={} clientId={})",
           personalRole.getId(), userId, email, clientId);
+      patchUserDefaultsOntoRowSafely(data, user, userId, email, clientId);
     } catch (Exception e) {
       log.warn("UserRoleAssignmentHandler.ensurePersonalRoleForNewlyCreatedUser error for user "
               + "{} email={} clientId={}: {}",
           userId, email, clientId, e.getMessage(), e);
     }
+  }
+
+  /**
+   * ETP-5277: best-effort wrapper around {@link #patchUserDefaultsOntoRow} — isolated in its own
+   * try/catch, same reasoning as {@link #attachInvitationStatusToRowSafely}: the {@code AD_User}
+   * write above (personal role + {@code applyUserDefaults}) has already succeeded by the time this
+   * runs, so a JSON failure here must be logged as its own thing rather than folded into the
+   * caller's generic {@code catch}, which would misleadingly read as "personal role not created".
+   */
+  private void patchUserDefaultsOntoRowSafely(JSONObject data, User user, String userId,
+      String email, String clientId) {
+    try {
+      patchUserDefaultsOntoRow(data, user);
+    } catch (Exception e) {
+      log.warn("UserRoleAssignmentHandler.ensurePersonalRoleForNewlyCreatedUser: failed to patch "
+              + "default-* fields onto the create response for user={} email={} clientId={}: {}",
+          userId, email, clientId, e.getMessage(), e);
+    }
+  }
+
+  /**
+   * ETP-5277: writes the FINAL, already-persisted {@code defaultRole}/{@code defaultClient}/
+   * {@code defaultOrganization}/{@code defaultWarehouse} (plus their {@code $_identifier}
+   * companions) from {@code user} onto the create response's {@code data} row — see {@link
+   * #ensurePersonalRoleForNewlyCreatedUser}'s javadoc for why this is needed.
+   *
+   * <p>Identifier companions use {@link BaseOBObject#getIdentifier()}, the same convention {@code
+   * NeoDefaultsService#tryInjectIdentifier} and core's {@code DefaultJsonDataService} already use
+   * for every other FK field's {@code $_identifier} value — deliberately not a hand-rolled
+   * per-entity {@code getName()}/hardcoded map (see {@code artifacts/user/decisions.json}'s own
+   * {@code defaultRole} entry in the functional repo, which documents that exact mistake already
+   * made and fixed once, 2026-07-27: a static value→name map only works for the tenant it was
+   * built from).</p>
+   *
+   * <p>Any of the 4 references being {@code null} on {@code user} (e.g. {@code defaultWarehouse}
+   * when the client has no active warehouse yet) is tolerated: that field is simply omitted from
+   * the patch, left exactly as the create payload already had it — never forced to {@code
+   * JSONObject.NULL}, since a merely-absent field and an explicitly-null one are handled
+   * differently by the frontend's defaults-merge.</p>
+   *
+   * @param data the create response row to patch in place; a no-op if {@code null}
+   * @param user the newly-created user, re-read after {@code createFreshPersonalRole}/{@code
+   *     setDefaultRole}/{@code flush} so every getter below reflects the persisted final state
+   */
+  private void patchUserDefaultsOntoRow(JSONObject data, User user) throws JSONException {
+    if (data == null || user == null) {
+      return;
+    }
+    putDefaultFieldWithIdentifier(data, FIELD_DEFAULT_ROLE, user.getDefaultRole());
+    putDefaultFieldWithIdentifier(data, FIELD_DEFAULT_CLIENT, user.getDefaultClient());
+    putDefaultFieldWithIdentifier(data, FIELD_DEFAULT_ORGANIZATION, user.getDefaultOrganization());
+    putDefaultFieldWithIdentifier(data, FIELD_DEFAULT_WAREHOUSE, user.getDefaultWarehouse());
+  }
+
+  /**
+   * Writes {@code propertyName} (the referenced record's id) and {@code propertyName$_identifier}
+   * (its display label, via {@link BaseOBObject#getIdentifier()}) onto {@code data} — skipped
+   * entirely when {@code reference} is {@code null} (see {@link #patchUserDefaultsOntoRow}'s
+   * javadoc on why that case is left untouched rather than nulled).
+   */
+  private static void putDefaultFieldWithIdentifier(JSONObject data, String propertyName,
+      BaseOBObject reference) throws JSONException {
+    if (reference == null) {
+      return;
+    }
+    data.put(propertyName, reference.getId());
+    data.put(propertyName + "$" + JsonConstants.IDENTIFIER, reference.getIdentifier());
   }
 
   /**

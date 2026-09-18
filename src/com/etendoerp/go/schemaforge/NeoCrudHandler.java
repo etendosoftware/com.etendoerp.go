@@ -40,6 +40,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -47,6 +48,7 @@ import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
+import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
@@ -62,6 +64,7 @@ import com.etendoerp.go.schemaforge.util.NeoLocatorIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
+import com.etendoerp.go.schemaforge.util.NeoValidationErrorResponseBuilder;
 
 /**
  * Handles all CRUD operations for NEO window entity endpoints.
@@ -452,11 +455,18 @@ class NeoCrudHandler {
     params.put(JsonConstants.WINDOW_ID, adTab.getWindow().getId());
     params.put(JsonConstants.NO_ACTIVE_FILTER, "true");
 
-    if (context.getRecordId() != null) {
-      params.put(JsonConstants.ID, context.getRecordId());
-    }
+    // ETP-5195, R3: query params are merged in FIRST, and the path-derived id (when present) is
+    // applied LAST, so it is always authoritative. Previously the path id was set before the
+    // query params were merged in, so a caller could pass a conflicting "id" on the query string
+    // (e.g. DELETE /sws/neo/user/user/<ordinary-id>?id=<protected-id>) and silently redirect the
+    // CRUD operation to a different record than the one guards like
+    // UserRoleAssignmentHandler#rejectDangerousDelete evaluated. When there is no path id, a
+    // query "id" still flows through unchanged, exactly as before.
     if (context.getQueryParams() != null) {
       params.putAll(context.getQueryParams());
+    }
+    if (context.getRecordId() != null) {
+      params.put(JsonConstants.ID, context.getRecordId());
     }
 
     normalizeBooleanCriteria(params, dalEntityName);
@@ -568,9 +578,23 @@ class NeoCrudHandler {
       return errorResponse;
     }
     fieldFilter.filterGetResponse(responseJson);
-    if ("GET".equals(context.getHttpMethod()) && context.getSfEntity() != null) {
-      NeoListIdentifierHelper.enrichListIdentifiers(responseJson, context.getSfEntity());
-      NeoLocatorIdentifierHelper.enrichLocatorIdentifiers(responseJson, context.getSfEntity());
+    if (context.getSfEntity() != null) {
+      String httpMethod = context.getHttpMethod();
+      if ("GET".equals(httpMethod)) {
+        NeoListIdentifierHelper.enrichListIdentifiers(responseJson, context.getSfEntity());
+      }
+      // ETP-5037 (QA finding, Emilio Polliotti): a Locator FK's warehouse-name label must
+      // also survive a write, not just a GET. POST/PUT/PATCH echo the just-saved record back
+      // to the frontend, which uses it directly for the row's optimistic update (see
+      // DetailView.jsx's buildInlineRowUpdateHandler / applyLocalChildRowUpdate) — with
+      // GET-only enrichment, that echoed record showed the raw bin code (e.g. "AS-0-0-0")
+      // instead of the warehouse name until the next full refetch. Reproduced on both
+      // Goods Movements and Internal Consumption; the enrichment itself is generic
+      // (any Locator FK, any window), so this fix covers all of them at once.
+      if ("GET".equals(httpMethod) || "POST".equals(httpMethod) || "PUT".equals(httpMethod)
+          || METHOD_PATCH.equals(httpMethod)) {
+        NeoLocatorIdentifierHelper.enrichLocatorIdentifiers(responseJson, context.getSfEntity());
+      }
     }
     return NeoResponse.ok(responseJson);
   }
@@ -624,7 +648,9 @@ class NeoCrudHandler {
   private NeoResponse detectStaleRecord(NeoContext context, String dalEntityName) {
     JSONObject body = context.getRequestBody();
     String clientValue = body == null ? null : body.optString(FIELD_UPDATED, null);
-    if (!NeoRecordVersion.isStale(dalEntityName, context.getRecordId(), clientValue)) {
+    String route = NeoRecordVersion.routeOf(context.getHttpMethod(), context.getSpecName(),
+        context.getEntityName(), context.getRecordId());
+    if (!NeoRecordVersion.isStale(dalEntityName, context.getRecordId(), clientValue, route)) {
       return null;
     }
     NeoWriteRefusalLog.staleRecord(context, clientValue);
@@ -771,7 +797,10 @@ class NeoCrudHandler {
             NeoListReferenceError.enrich(translated))));
     }
     if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
+      // ETP-5323: delegated to NeoValidationErrorResponseBuilder (kept out of this class to stay
+      // under SonarQube's method-count limit, java:S1448) — see its javadoc for the full
+      // RPCREQUEST_STATUS_VALIDATION_ERROR body shape and rationale.
+      return NeoValidationErrorResponseBuilder.build(innerResponse);
     }
     return null;
   }
@@ -981,7 +1010,27 @@ class NeoCrudHandler {
     // its read, never data we persist: core reads it, compares it, and overwrites the column with
     // its own timestamp on save.
     Object updatedBeforeFilter = rawBody != null ? rawBody.opt(FIELD_UPDATED) : null;
+    // Same capture-before-filter reason: DocumentNo is read-only for the client, so the filter
+    // strips it and we could no longer tell "the caller sent a number" from "it never sent one".
+    // regenerateDocumentNoOnDocTypeChange must not overwrite a number the caller authored itself.
+    boolean clientSentDocumentNo = DocumentNoRepreviewHelper.hasClientAuthoredDocumentNo(rawBody);
     JSONObject filteredBody = fieldFilter.filterWriteRequest(rawBody);
+    // Keep C_DocType_ID in sync with the doc-type target the client just submitted. The create
+    // path does this through DocTypeResolver.reapplyDocTypeFromTabFilter; without it here,
+    // changing the document type of an already-saved draft leaves the effective doctype stale and
+    // the document number is generated from the wrong sequence. Runs after filtering because the
+    // helper addresses the body by DAL property name.
+    DocTypeResolver.syncDocumentTypeToSubmittedTarget(filteredBody, context.getAdTab());
+    // Syncing the effective doctype is not enough for an already-saved draft: its DocumentNo was
+    // taken from the OLD doctype's sequence and stays persisted, so a credit note would keep an
+    // invoice number. Replicates the classic SL_Invoice_Legacy callout — on a doc-type change the
+    // draft gets the new sequence's <currentnext> PLACEHOLDER (angle brackets, sequence not
+    // consumed); the real number is materialized on completion.
+    DocumentNoRepreviewHelper.regenerateDocumentNoOnDocTypeChange(
+        filteredBody, context, dalEntityName, clientSentDocumentNo);
+    // ETP-5286: on a PATCH that changes `product` on a transactional document line, re-derive
+    // `uOM` from the NEW product. See applyDerivedUomOnUpdate's own javadoc for the why.
+    NeoCommercialLinePolicy.applyDerivedUomOnUpdate(filteredBody, dalEntityName);
     // Inject lineNetAmount when absent from filteredBody (stripped by readOnly filter).
     // The frontend sends invoicedQuantity and unitPrice as editable fields, so both are
     // available here to compute the correct net amount even for products where SL_Invoice_Amt

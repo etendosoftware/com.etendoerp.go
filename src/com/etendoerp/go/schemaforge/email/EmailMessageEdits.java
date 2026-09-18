@@ -50,6 +50,14 @@ public final class EmailMessageEdits {
   static final int MAX_SUBJECT_LENGTH = 200;
   static final int MAX_MESSAGE_LENGTH = 5000;
 
+  /** Reason codes for {@link InvalidMessageEditsException}, mapped to copy on the frontend. */
+  public static final String REASON_INVALID_TYPE = "MESSAGE_EDITS_INVALID_TYPE";
+  public static final String REASON_UNKNOWN_FIELD = "MESSAGE_EDITS_UNKNOWN_FIELD";
+  public static final String REASON_MISSING_SUBJECT_OR_MESSAGE =
+      "MESSAGE_EDITS_MISSING_SUBJECT_OR_MESSAGE";
+  public static final String REASON_SUBJECT_TOO_LONG = "MESSAGE_EDITS_SUBJECT_TOO_LONG";
+  public static final String REASON_MESSAGE_TOO_LONG = "MESSAGE_EDITS_MESSAGE_TOO_LONG";
+
   private final String subject;
   private final String message;
 
@@ -73,26 +81,28 @@ public final class EmailMessageEdits {
     }
     Object raw = body.opt(EmailContractCommandSupport.FIELD_MESSAGE_EDITS);
     if (!(raw instanceof JSONObject)) {
-      throw new InvalidMessageEditsException("messageEdits must be an object");
+      throw new InvalidMessageEditsException(REASON_INVALID_TYPE, "messageEdits must be an object");
     }
     JSONObject edits = (JSONObject) raw;
     for (Iterator<?> keys = edits.keys(); keys.hasNext();) {
       String key = String.valueOf(keys.next());
       if (!ALLOWED_KEYS.contains(key)) {
-        throw new InvalidMessageEditsException("Unknown messageEdits field: " + key);
+        throw new InvalidMessageEditsException(REASON_UNKNOWN_FIELD,
+            "Unknown messageEdits field: " + key);
       }
     }
     String subject = sanitizeSubject(StringUtils.trimToNull(edits.optString(KEY_SUBJECT)));
     String message = StringUtils.trimToNull(edits.optString(KEY_MESSAGE));
     if (subject == null && message == null) {
-      throw new InvalidMessageEditsException("messageEdits must carry a subject or a message");
+      throw new InvalidMessageEditsException(REASON_MISSING_SUBJECT_OR_MESSAGE,
+          "messageEdits must carry a subject or a message");
     }
     if (subject != null && subject.length() > MAX_SUBJECT_LENGTH) {
-      throw new InvalidMessageEditsException(
+      throw new InvalidMessageEditsException(REASON_SUBJECT_TOO_LONG,
           "Subject exceeds the maximum of " + MAX_SUBJECT_LENGTH + " characters");
     }
     if (message != null && message.length() > MAX_MESSAGE_LENGTH) {
-      throw new InvalidMessageEditsException(
+      throw new InvalidMessageEditsException(REASON_MESSAGE_TOO_LONG,
           "Message exceeds the maximum of " + MAX_MESSAGE_LENGTH + " characters");
     }
     return Optional.of(new EmailMessageEdits(subject, message));
@@ -166,13 +176,26 @@ public final class EmailMessageEdits {
   public static final class InvalidMessageEditsException extends Exception {
     private static final long serialVersionUID = 1L;
 
+    private final String reasonCode;
+
     /**
-     * Creates an exception with a client-safe message.
+     * Creates an exception with a machine-readable reason code and a client-safe message.
      *
+     * @param reasonCode stable, machine-readable reason code for the rejection
      * @param message client-safe rejection message
      */
-    public InvalidMessageEditsException(String message) {
+    public InvalidMessageEditsException(String reasonCode, String message) {
       super(message);
+      this.reasonCode = reasonCode;
+    }
+
+    /**
+     * Returns the machine-readable reason code, for the frontend to map to a translated message.
+     *
+     * @return the reason code
+     */
+    public String getReasonCode() {
+      return reasonCode;
     }
   }
 }

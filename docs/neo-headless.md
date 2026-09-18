@@ -571,6 +571,104 @@ core's own check be the final word rather than fabricating a conflict.
 edit then 400s as `missing_updated` no matter how freshly the record was just read. See §5.3's
 `ChartOfAccountsHandler` example for a concrete case that hit exactly this gap.
 
+#### 4.3.4 Create-defaults exclusion for `AD_User`'s 4 `Default_*` columns (ETP-5277)
+
+Neither the `user` entity's create-defaults bootstrap (`GET /{specName}/user/defaults`, consulted
+by the create form on load) nor its `POST /{specName}/user` create response will ever resolve or
+echo a session-derived value for these 4 `AD_User` columns:
+
+- `Default_Ad_Role_ID`
+- `Default_Ad_Client_ID`
+- `Default_Ad_Org_ID`
+- `Default_M_Warehouse_ID`
+
+**Why.** These columns have no `AD_Column`/`ETGO_SF_FIELD` default configured, so resolution used
+to fall through to the generic create-defaults fallback chain — which, for a brand-new `AD_User`
+record with no matching `AD_Preference` row, resolves to whatever the *creating caller's own
+session* (or, in one variant of the bug, an arbitrary unscoped first row of the whole table)
+happens to hold. Concretely: creating a new user showed it, in the instant right after Guardar and
+before any refresh, already holding the *creating admin's own* role/client/org/warehouse — in one
+observed case even a **different tenant's** client/org entirely, since the combo-preselection
+fallback below queried with no scoping at all. Neither leak is a real grant: the backend
+(`UserRoleAssignmentHandler#ensurePersonalRoleForNewlyCreatedUser`) always persists the correct
+values (a fresh, empty personal role; the real client/organization/first-active-warehouse) in the
+same request — the bug was that the create response was never told about it, so the wrong values
+lingered until a follow-up `GET`.
+
+**Where the guard lives.** `NeoDefaultsService.isUserSessionFallbackExcludedColumn(Column)` is a
+small, explicit deny-list (table `AD_USER` + the 4 DB column names above, case-insensitive; fails
+open — returns `false` — on missing table/column metadata, so it can never accidentally exclude a
+column it can't positively identify). It is checked inside the **primitives themselves**, not at
+each call site, so every current and future caller is covered by construction:
+
+- `NeoDefaultsService.resolveFirstComboOption(Column, NeoContext)` — the combo/selector
+  first-option fallback (an unscoped "first row of the table" query when no other default
+  resolves). This is the primitive `resolveOrFirstComboOption`, `applyDefaultWithComboFallback`,
+  and `NeoMandatoryDefaultsService#tryInjectFirstFromLookup` all eventually reach.
+- `NeoDefaultsService.resolveFromPrefsOrDocType(...)` — the `Utility.getPreference` session/prefs
+  fallback used when no `AD_Preference` row exists for the column.
+- `NeoMandatoryDefaultsService#tryInjectFromSession` — a structurally separate mechanism (reads
+  `#ColumnName`/`ColumnName` straight off the session, bypassing both primitives above), reusing
+  the same deny-list rather than a second copy. Dormant in practice today only because core seeds
+  session vars as `#AD_Role_ID`/`#AD_Client_ID`/`#AD_Org_ID`/`#M_Warehouse_ID`, never as
+  `#Default_Ad_Role_ID` etc. — a naming coincidence, not a structural guarantee, which is exactly
+  why it is guarded rather than left to that coincidence.
+
+**Why the guard sits at the primitive, not the call site — read this before adding a 6th caller.**
+Every round of investigating this bug turned up one more unguarded caller of the same underlying
+fallback (the original `defaultRole` leak → an unscoped cross-tenant combo-fallback leak found
+while fixing it → two more call sites found in review → a fifth found while hardening those two).
+Guarding one call site at a time was whack-a-mole: each fix left the mechanism itself still capable
+of leaking through whatever caller nobody had looked at yet. The guard therefore lives inside
+`resolveFirstComboOption` and `resolveFromPrefsOrDocType` — the two low-level primitives every one
+of those callers eventually routes through — so a **new** caller added later (a new combo fallback,
+a new session/prefs read) inherits the exclusion automatically, with nothing to remember at the
+call site. If you are adding a new resolution path for create-defaults values, route it through
+one of these two primitives (or, if it must read the session directly like
+`tryInjectFromSession` does, call `isUserSessionFallbackExcludedColumn` yourself first) — do not
+special-case `AD_User` at your own call site instead.
+
+**Response-patch complement.** Because the 4 fields are still real, meaningful data once
+persisted, the create response is patched with their final values immediately after
+`ensurePersonalRoleForNewlyCreatedUser` runs (`UserRoleAssignmentHandler#patchUserDefaultsOntoRow`),
+re-reading them off the just-saved `User` entity and writing both `<field>` and its
+`<field>$_identifier` companion (via `BaseOBObject#getIdentifier()`, the same convention every
+other FK field's identifier uses — not a hand-rolled per-tenant name map). This mirrors the
+existing `attachInvitationStatusToRowSafely` pattern in the same file: best-effort, isolated in its
+own `try/catch`, logged (never thrown) on failure, and a `null` reference (e.g. no active warehouse
+yet) is omitted from the row rather than forced to `JSONObject.NULL`. Net effect: the create
+response is now honest about the field this same request just changed, instead of only becoming
+correct after a follow-up `GET`.
+
+**Scope — deliberately narrow.** The deny-list is exactly these 4 columns on exactly `AD_User`; it
+does not weaken `resolveFirstComboOption`/`resolveFromPrefsOrDocType`/`tryInjectFromSession` for any
+other entity or column (e.g. `AD_User.AD_Language`, on the same table, still resolves normally
+through the same fallback — that's the control case the regression tests assert). No
+existing-record path (`PUT`/`PATCH`) reaches either primitive — both are exclusively new-record
+paths — so nothing here affects editing an existing user.
+
+**Known limitations surfaced while fixing this, not fixed here:**
+
+- `WarehouseLookupHelper#findFirstActiveWarehouse` (`src/com/etendoerp/go/common/WarehouseLookupHelper.java`)
+  has no `ORDER BY` on either of its `OBCriteria` lookups, only `setMaxResults(1)` — so "first
+  active warehouse" is non-deterministic whenever 2+ are active for the same client/organization.
+  Pre-existing (ETP-4894), not introduced by ETP-5277 — but the response-patch above makes a
+  wrong-but-plausible warehouse **more visible** than before (previously `null` until a refresh;
+  now shown immediately in the create response). Candidate follow-up: add a stable `ORDER BY` (id
+  or creation date) to both criteria.
+- `Utility.getPreference` — the mechanism `resolveFromPrefsOrDocType` falls back from — was
+  **already structurally incapable of returning a real, admin-configured `AD_Preference` value**
+  through this call path, for *any* column, not just the 4 excluded here, before ETP-5277 existed.
+  It only ever consults the session snapshot (never a live DB query), and
+  `NeoSessionVarsCache`'s `IDENTITY_KEYS` whitelist (`src/com/etendoerp/go/schemaforge/util/NeoSessionVarsCache.java`)
+  — the fixed set of keys that snapshot is allowed to carry — does not include the `"P|"`-prefixed
+  keys `Preferences.savePreferenceInSession` writes real preferences under. So a legitimately
+  configured `AD_Preference` for a create-defaults column was already invisible to this endpoint
+  everywhere in NEO Headless, not just for `AD_User`. ETP-5277's guard changes nothing about this —
+  it is called out here because the investigation is what surfaced it. Candidate follow-up: widen
+  `IDENTITY_KEYS` to include `"P|"`-prefixed keys, or route this fallback through a live
+  `AD_Preference` query instead of the session snapshot.
+
 ### 4.4 Selectors (FK Dropdowns)
 
 The selector service resolves foreign key references and provides searchable dropdown values.
@@ -805,6 +903,35 @@ document window. Implemented in `NeoAttachmentsHelper.java`, routed from
 
 **Base path:** `/sws/neo/attachments`
 
+#### GET — Upload policy (accepted types + max size)
+
+```
+GET /sws/neo/attachments/config
+Authorization: Bearer {token}
+```
+
+Returns `200` with the policy the upload endpoint below enforces:
+
+```json
+{
+  "maxSizeMB": 10,
+  "allowedMimeTypes": ["application/pdf", "application/msword", "..."],
+  "allowedExtensions": ["pdf", "doc", "docx", "xls", "..."],
+  "typeGroups": ["pdf", "word", "excel", "powerpoint", "image", "xml", "zip", "rtf"]
+}
+```
+
+This is THE single source of truth (`NeoAttachmentPolicy.java`, ETP-5038). The React Attachments
+tab fetches it once per session and builds its `accept` attribute, its client-side check and its
+translated "Supported formats" label from it — `typeGroups` is the coarse bucket list the label is
+built from, so the label can never advertise a format the API would reject. Two hardcoded lists
+would drift, and the drift is user-hostile: the UI says yes, the API answers 400. Same pattern as
+`GET /sws/neo/currency-format`.
+
+Plain text (`text/plain`) is deliberately **not** accepted — the ticket's original complaint was
+that `.txt` uploaded fine while the UI advertised "PDF, Word, Excel, PowerPoint, images". ZIP, XML
+and RTF are kept: Facturae XML and zipped document bundles are real use cases.
+
 #### GET — List attachments
 
 ```
@@ -863,7 +990,23 @@ Content-Type: application/pdf
 ```
 
 Expects a single multipart part named `file`. Optional query parameter `tabId` overrides automatic
-tab resolution (useful when a table has multiple tabs). With `markAsMain=true`, the newly-created
+tab resolution (useful when a table has multiple tabs).
+
+**Validated server-side (ETP-5038), against `NeoAttachmentPolicy`:**
+
+| Check | Rejection (HTTP 400) |
+|---|---|
+| Declared part size, then the bytes actually written, vs `maxSizeMB` | `File exceeds the maximum allowed size of 10 MB` |
+| File extension against `allowedExtensions` | `File type not allowed: .txt. Allowed types: pdf, doc, ...` |
+| Leading bytes against the signature the extension implies | `File content does not match its .pdf extension` |
+
+The part's own `Content-Type` is deliberately **not** the check: the caller chooses it, so it
+proves nothing. Renaming `notes.txt` to `notes.pdf` and declaring `Content-Type: application/pdf`
+is still rejected by the magic-byte check. The published MIME list exists for the browser's file
+picker, not for server-side authorization.
+
+Known limit: XML and SVG have no binary signature, so the only structural check is "the first
+non-whitespace character is `<`". Both are stored, never rendered inline by the app. With `markAsMain=true`, the newly-created
 attachment is marked as the record's main document immediately after upload — deleting any
 previously-marked attachment, same as the PATCH above. Returns `201` with
 `{ "name", "message", "id"?, "isMain"? }` (the last two only present when `markAsMain=true`).
@@ -1134,12 +1277,16 @@ GET /sws/neo/debuginvitationbypass?Action=forceStatus&Email=<email>&Status=<stat
 GET /sws/neo/resendinvitation?AdUserId=<id>                               (§8h)
 GET /sws/neo/promoteuserrole?UserId=<id>&Mode=promote|demote              (§8i)
 GET /sws/neo/documentemailhistory?recordId=<id>[&specName=<spec>]         (§8j)
+GET /sws/neo/acctprocessmonitor[?Limit=<n>][&Action=trigger]              (§8k)
+GET /sws/neo/refreshtoken                                                 (§8l)
+GET /sws/neo/costingcadence[?scope=client|all]                            (§8m)
 Authorization: Bearer {token}
 ```
 
 `NeoGoWebhookBridge` runs `SFListMenu`/`SFWindowAccessMap`/`SFRolesOverview`/`SFAssignUserRoles`/
 `SFUserRoleAssignments`/`SFSystemRoleTemplates`/`SFDebugInvitationBypass`/`SFResendInvitation`/
-`SFPromoteUserRole`/`SFDocumentEmailHistory` (§8, §8b, §8c, §8d, §8e, §8f, §8g, §8h, §8i, §8j)
+`SFPromoteUserRole`/`SFDocumentEmailHistory`/`SFAcctProcessMonitor`/`SFRefreshToken`
+(§8, §8b, §8c, §8d, §8e, §8f, §8g, §8h, §8i, §8j, §8k, §8l)
 through NEO's own
 JWT authentication instead of the Webhooks module's HTTP dispatch — the same pattern
 `NeoSimSearchEndpoint` (§4.9) already used for `SimSearch`. Each of these pseudo-specs constructs
@@ -1153,14 +1300,15 @@ original `/webhooks/*` paths too — the Webhooks module dispatch was not remove
 and no `SMFWHE_DEFINEDWEBHOOK_ROLE` grant is required for it. `SFAssignUserRoles` (ETP-4852),
 `SFUserRoleAssignments` (ETP-4906), `SFSystemRoleTemplates` (ETP-4906),
 `SFDebugInvitationBypass` (ETP-4830), `SFResendInvitation` (ETP-4830), `SFPromoteUserRole`
-(ETP-5019), and `SFDocumentEmailHistory` (ETP-5069) are `/sws/neo/*`-only — all seven were
-authored after this pattern was already established, so none ever had a legacy `/webhooks/*`
-path to keep.
+(ETP-5019), `SFDocumentEmailHistory` (ETP-5069), `SFAcctProcessMonitor` (ETP-5269), and
+`SFRefreshToken` (ETP-5195) are `/sws/neo/*`-only — all were authored after this pattern was
+established, so none ever had a legacy `/webhooks/*` path to keep.
 
 Each webhook's own access rule is unaffected and still enforced inside its `get()` — see
-§8/§8b/§8c/§8d/§8e/§8f/§8g/§8h/§8i/§8j for what each one checks
+§8/§8b/§8c/§8d/§8e/§8f/§8g/§8h/§8i/§8j/§8k/§8l for what each one checks
 (`NeoAccessHelper.isAdminOrClientAdmin`, window/process access checks, and — for
-`documentemailhistory` alone — DAL's own readable-client/org filtering, §8j). Non-`GET`
+`documentemailhistory` alone — DAL's own readable-client/org filtering, §8j;
+`refreshtoken` has no role gate at all — see §8l for why). Non-`GET`
 requests get `405`; a webhook that throws gets
 `500` with the exception message (except `SFAssignUserRoles`'s own expected domain-validation
 rejections, `SFUserRoleAssignments`'s own expected domain rejections, and `SFPromoteUserRole`'s
@@ -1710,6 +1858,44 @@ Making the schema itself tell the truth is the deeper fix and is proposed, not i
 `MCP_CONFIG` section). It touches `validateMandatoryFields`, the write gate for the whole MCP, so it
 was deferred to its own cycle.
 
+#### 4.12.7 Reserved keys are stripped from every MCP tool result (ETP-5306)
+
+`$ref` is a **reserved key inside Google Gemini's `function_response.response`**: it means "a
+pointer to an attached part, resolvable by `display_name`". Openbravo's
+`DataToJsonConverter#toJsonObject` puts one on every serialised record (`JsonConstants.REF`), so
+every row of a `neo_list` / `neo_get` carried:
+
+```json
+"$ref": "BusinessPartner/BC8DDDF69DDA49E9938729F19B0F330E"
+```
+
+Gemini tried to resolve that pointer, found no matching part, and rejected the **entire** request
+with HTTP 400 `INVALID_ARGUMENT` — *"The referenced name `BusinessPartner/BC8D…` in
+function_response.response does not match to a display_name in the function_response.parts"*. The
+rejection is on the tool **result**, so no prompt change and no retry worked around it: the MCP
+server was unusable with any Gemini model as soon as the agent read a record.
+
+Measured against the live gateway with hand-built tool results, the trigger is the **literal key
+name**, irrespective of its value — a `$ref` carrying the string `"hello world"` fails the same
+way. Keys that merely *contain* a `$` are fine, which is why the `xxx$_identifier` columns are
+untouched, and a `"$ref:<opId>"` **value** (the `neo_batch` placeholder, §4.12.4) is untouched too:
+only key names are inspected.
+
+**Where it is stripped.** `McpResponseSanitizer`, called from the JSON overloads of
+`McpToolRouter.wrapAsTextContent` / `wrapAsErrorContent` — the MCP's single content egress, which
+every tool result and every `NeoResponse`-carrying path (`McpHookExecutor.neoResponseToMcpResult`)
+passes through. Stripping is recursive, because rows nest. **The NEO REST API is unchanged**: the
+`$ref` comes from the shared core serialiser, and the MCP removes it on its own way out rather than
+touching that serialiser, so the React SPA and every other REST consumer still get the platform
+shape. The overloads take a `JSONObject` and render it, rather than sanitising rendered text, so no
+number is re-parsed on the way out (jettison would degrade a decimal wider than a `double`).
+
+**Nothing is lost.** The value is exactly `_entityName` + `"/"` + `id`, both already on the same
+row. The construction rule is now declared once per session instead of paid for on every row —
+`McpConstants.RECORD_REF_NOTE`, emitted in the `neo_schema` hint and as the `docs` preamble. That
+makes this an Agent Context Economy win as well as a fix (see the ACE index in
+`schema_forge/docs/mcp-evaluation/mcp-improvements-registry.md`).
+
 ---
 
 ### 4.13 Image Fields and Image Upload (ETP-5184)
@@ -1993,6 +2179,30 @@ the class javadoc in `YearCloseHandler.java` for the complete rationale. Treat t
 last-resort pattern, not a default — only reach for it once you've confirmed (not assumed) that
 `CallProcess` genuinely has no path for the process in question.
 
+**Advanced pattern — hand-writing into a table an engine owns (`ProductCostingHandler`, ETP-5245):**
+`M_Costing` is the costing engine's own table. Exposing its tab for manual entry (the Product
+window's Cost tab) is only safe because the handler forces every column whose value is not the
+user's to decide — `costType = 'STA'`, `permanent = false`, `production = false`, `manual = true`,
+the currency from the organization — and strips the columns that only belong to an engine-generated
+row. Three things generalize to any handler in this position:
+
+- **The forced columns must be `system` in `decisions.json`, never `discarded`.**
+  `NeoFieldFilter.filterCreateRequest` removes `discarded` fields from the POST body, which would
+  silently drop the handler's own values and create the row with the AD defaults instead. This
+  failure is invisible: the request succeeds and the row looks plausible.
+- **Guard update/delete in `handle`, not only in the UI.** `ProductCostingHandler.guardEngineRow`
+  returns `403` on any `PATCH`/`PUT`/`DELETE` against a row the engine produced. The UI's
+  read-only rule is a courtesy; this is what also covers the REST API and the MCP.
+- **Repair neighbouring state in `afterHandle` rather than rejecting the input.** Core resolves a
+  standard cost with `get(0)` over an unordered criteria, so overlapping date ranges make the
+  applied cost depend on the query plan. The handler closes the adjacent ranges — what
+  `StandardAlgorithm#insertCost` itself does — best-effort, so tidying failures never turn a valid
+  save into an error.
+
+The class javadoc in `ProductCostingHandler.java` carries the per-column rationale (which core
+class reads each flag, and what breaks if it is wrong); the user-facing behaviour is written up in
+`etendo_schema_forge`'s `docs/generated-custom-windows/product.md` § ETP-5245.
+
 **NeoContext fields:**
 
 | Field | Type | Description |
@@ -2070,7 +2280,7 @@ Core Etendo's accounting engine (`AcctServer`) doesn't always say *which* entity
   3. **Both addendum message templates were reworded for clarity.** The old parenthesized form — `"(Missing account setup on BP Group: @missingAccounts@)"` / `"(Missing account setup on Product: @missingAccounts@)"` — read ambiguously, since `@missingAccounts@` could be misread as naming the BP Group/Product itself rather than its missing account labels. Both `AD_MESSAGE` (`ETGO_InvalidAccountMissingBpGroupAccounts`, `ETGO_InvalidAccountMissingProductAccounts`) entries were reworded to plain sentences: `"Please review the BP Group's accounting setup: @missingAccounts@."` / `"Please review the Product's accounting setup: @missingAccounts@."` (Spanish: `"Revise la configuración contable del Grupo de Terceros: @missingAccounts@."` / `"Revise la configuración contable del Producto: @missingAccounts@."`).
 - **Spanish translations added for all four message keys in the chain (ETP-5175, same increment).** `src-db/database/sourcedata/AD_MESSAGE_TRL.xml` — a new file, this table had no rows for this catalog before — now carries `es_ES` rows for the two reworded ETP-5175 addendum keys above **and** for the two pre-existing ETP-4706 baseline keys (`ETGO_InvalidAccountBpAndGroup` → `"(Contacto: @bpName@, Grupo de Terceros: @bpGroup@)"`, `ETGO_InvalidAccountBpOnly` → `"(Contacto: @bpName@)"`), which predate ETP-5175 but were found untranslated during the same live-testing session. All four rows are `ISTRANSLATED='Y'` real translations, not placeholders.
   - **Hand-authored, not machine-exported — flag for whoever runs a clean `export.database` next.** The canonical DB-first flow (SQL `UPDATE`/`INSERT` the rows, then `./gradlew export.database` to regenerate sourcedata) was attempted, but `export.database` fails in this checkout on a **pre-existing, unrelated** issue: `ETGO_EMAIL_SEND_LOG.STATUS` has a `FieldLength`/actual-column drift left over from ETP-5069 (`AD_Column` says 60, the model XML and the live DB column both say 40). Not fixed here (out of scope). `AD_MESSAGE_TRL.xml` was therefore hand-authored to match the table model and the existing `AD_MESSAGE.xml`'s `<!--ID-->`-comment format; the four rows were verified present and correct in the live local DB via direct `psql` queries. Whoever next gets a clean `export.database` run on this module should diff the machine-generated `AD_MESSAGE_TRL.xml` against this hand-authored one to confirm they match — the export format could differ in some detail (whitespace, `MSGTIP` handling) that couldn't be verified without a working export.
-  - **Reject-cycle lesson worth documenting.** The first pass at the Spanish translations for the two ETP-4706 baseline keys dropped the enclosing parentheses that the English `AD_MESSAGE` text has (`"Contacto: @bpName@"` instead of `"(Contacto: @bpName@)"`), producing a run-on sentence once the ETP-5175 addendum sentence got appended after it — reintroducing, in Spanish only, the exact ambiguity problem this whole feature exists to solve. Fixed in commit `71aeb484` (restored parentheses on both rows, live DB synced via targeted `UPDATE`s). The bug is now guarded by a new XML-level test, `AccountErrorMessageTrlSampleDataTest` (`src-test/src/com/etendoerp/go/schemaforge/handlers/AccountErrorMessageTrlSampleDataTest.java`, added in `5487573b`, same direct-XML-parsing pattern as `BpGroupAcctSampleDataTest`), which parses `AD_MESSAGE_TRL.xml` itself and asserts both `MSGTEXT` values stay wrapped in parentheses — verified to fail against the pre-fix XML and pass against the corrected one. This is worth calling out precisely because the *original* pinning regression test for this message chain (`DocumentPostingServiceTest#postComposesExactSpanishMessageForBpGroupAndProductScenario`) mocks `OBMessageUtils.messageBD(...)` with hardcoded Java strings and never reads the XML at all — it could not have caught this regression, and was deliberately left as-is (its own javadoc already flags the gap for a future update) rather than patched over.
+  - **Reject-cycle lesson worth documenting.** The first pass at the Spanish translations for the two ETP-4706 baseline keys dropped the enclosing parentheses that the English `AD_MESSAGE` text has (`"Contacto: @bpName@"` instead of `"(Contacto: @bpName@)"`), producing a run-on sentence once the ETP-5175 addendum sentence got appended after it — reintroducing, in Spanish only, the exact ambiguity problem this whole feature exists to solve. Fixed in commit `71aeb484` (restored parentheses on both rows, live DB synced via targeted `UPDATE`s). The bug was briefly guarded by an XML-level test, `AccountErrorMessageTrlSampleDataTest` (added in `5487573b`, same direct-XML-parsing pattern as `BpGroupAcctSampleDataTest`), which parsed `AD_MESSAGE_TRL.xml` itself and asserted both `MSGTEXT` values stayed wrapped in parentheses — verified to fail against the pre-fix XML and pass against the corrected one. **Deleted in ETP-5377**, however: `AD_MESSAGE_TRL.xml` is not exported by `./gradlew export.database` for this module and gets removed by every export run, so the test broke — through no fault of the developer — on any normal `export.database` workflow. The DB rows themselves remain correct (verified live in the DB); this was a test-design flaw, not a data regression. This is worth calling out precisely because the *original* pinning regression test for this message chain (`DocumentPostingServiceTest#postComposesExactSpanishMessageForBpGroupAndProductScenario`) mocks `OBMessageUtils.messageBD(...)` with hardcoded Java strings and never reads the XML at all — it could not have caught this regression, and remains the only (partial) automated coverage for this area after the ETP-5377 deletion.
   - **Final example strings**, illustrating labels, wording, and translation together on the same repro scenario (Business Partner "Blanquiceleste S.A.", BP Group "Proveedora", missing `Invoice Price Variance` on the product):
     - EN: `"Account could not be found. (Business Partner: Blanquiceleste S.A., BP Group: Proveedora) Please review the Product's accounting setup: Invoice Price Variance."`
     - ES: `"No se pudo encontrar la cuenta. (Contacto: Blanquiceleste S.A., Grupo de Terceros: Proveedora) Revise la configuración contable del Producto: Desviación Pr. Factura."`
@@ -2162,6 +2372,27 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 
   One behaviour was also **widened**, but only at the no-locator-at-all edge: `createReturnLineShell` used to guard the write with `if (anchoredBin != null)`, so when the header warehouse had no active locator whatsoever the shell kept whatever bin the entity provider defaulted to instead of an explicit `null`. It now always calls `setStorageBin` with the anchor result, so that edge fails loudly at posting instead of silently keeping a stale value — the same contract every other anchored write path follows. A source line with no bin whose header warehouse DOES have an active locator was already anchored to it before this widening: the cascade treats "absent" and "belongs elsewhere" identically, so that scenario is preexisting behaviour, not part of what changed here.
 
+**Real-world example — `ReturnLineQuantityPolicy` (the return-line quantity sign, ETP-5313):** a return line's `M_InOutLine.MovementQty` is **stored NEGATIVE and exposed POSITIVE**, in BOTH return windows (`return-material-receipt`, sales; `return-to-vendor-shipment`, purchase). `schemaforge/ReturnLineQuantityPolicy.java` is the single owner of that rule and every write and read path goes through it.
+
+  Why the DB sign is not a free choice:
+  - Core `M_INOUT_POST` negates `MovementQty` **and** `QuantityOrder` whenever the document's `MovementType` ends in `-`. A SALES return must INCREASE stock and always ends up as `C-`, so it only restores stock if the stored quantity is negative. A PURCHASE return gets `V+`, is not negated, and must DECREASE stock — so it needs a negative quantity too. One rule covers both.
+  - `MovementType` cannot be used as the lever: core trigger `M_INOUT_TRG_PROV` (BEFORE INSERT OR UPDATE, FOR EACH ROW) rewrites it on every write from `IsSOTrx` alone (`'N' → 'V+'`, else `'C-'`) and ignores `C_DocType.IsReturn`, so `C+`/`V-` are unreachable and any `setMovementType("C-")` in the document factories is decorative. Etendo Classic solves it the same way (`RMInOutPickEditLines` persists `qtyReceived.negate()`).
+  - The functional contract keeps the user-facing field ("Cant. a devolver") POSITIVE in every response, in both windows — the DB sign never reaches the UI.
+
+  | Path | Direction |
+  |---|---|
+  | `ReturnMaterialReceiptLineHandler#handle` / `ReturnToVendorShipmentLineHandler#handle` (CRUD `POST`/`PUT`/`PATCH`) | `applyStoredSignToWriteBody` |
+  | `ReturnShipmentUtils.buildAndSaveReturnLine` (import-lines action, both windows) | `toStoredQuantity` |
+  | `NeoReturnReceiptService#buildAndSaveReturnLine` + `applyOrderUOM` (`createReturn` action) | `toStoredQuantity`, on `MovementQty` **and** `QuantityOrder` |
+  | `CreatePurchaseReturnHandler#addReturnLine` | `toStoredQuantity` |
+  | both line handlers' `afterHandle` | `applyDisplaySignToRecord` |
+
+  The display flip runs on **every response that carries a line**, not just on GET (ETP-5336). `NeoHandlerUtils.extractResponseDataArray` is the method-agnostic twin of `extractGetDataArray` used for that: a `PATCH` echoes the persisted record back and the frontend renders it optimistically (`DetailView.jsx`'s `buildInlineRowUpdateHandler`), so a GET-only flip made the line flash its stored NEGATIVE quantity until the next refetch. The rule of thumb: enrichment that *describes the record* (a sign convention, an identifier label) belongs on every response; enrichment that is a read-only aggregate or a batch SQL lookup for the grid — like the `orderQuantity`/`productCode` injection in both return line handlers — stays GET-only so it does not add a query to every save. Those `afterHandle`s mutate the body in place and return `null` on a write, so the original response and its status code are preserved.
+
+  Both line handlers also override `afterCallout` to call `NeoHandlerUtils.stripStockDerivedMovementQuantity` (ETP-5336), the same protection `GoodsReceiptLineHandler` (ETP-4671) and `GoodsShipmentLineHandler` (ETP-5062) already had: the classic `SL_InOutLine_Product` callout echoes the product's **on-hand stock** back as `movementQuantity` on every product selection, which on a return line is meaningless — the quantity is what is being sent back — and silently overwrote what the user typed. Note that `ReturnToVendorShipmentLineHandler`'s `body.remove("product")` on `PUT`/`PATCH` is **not** that protection: the NEO CRUD callout cascade only runs on create (`NeoCrudHandler#executePostCreate`), never on an update, so that line only makes the product of an existing RTV line immutable.
+
+  Both sign directions are `abs()`-based normalisations, not `negate()` flips, so they are **idempotent** — a caller that already normalised is never flipped back. Everything that reads a return quantity for aggregation is sign-agnostic by construction (`SUM(ABS(rl.MovementQty))` in the "already returned" availability queries of both header handlers; `resolveShipmentLineQty`'s explicit `signum()`/`abs()` split in `CreateDraftInvoiceHandler`). The one deliberate exception is the rectificative invoice line, which must stay NEGATIVE by functional decision: `ReturnShipmentUtils.addReturnInvoiceLines` forces it with `abs().negate()` (ETP-4737) and stays sign-agnostic so it keeps working for return documents created before ETP-5313.
+
 **Real-world example — `NeoExchangeRateService.hasRate` (one lookup behind two surfaces, ETP-4838):** exchange-rate availability is asked twice for the same user gesture — once by the frontend through `GET /sws/neo/validate-exchange-rate` before it applies a currency change, and once by `afterCallout()` on the order/invoice header handlers, which appends a `WARNING` message when the user edits `currency` by hand. Both now call the package-private `NeoExchangeRateService.hasRate(from, to, date)`, which reuses the endpoint's own `queryRate` — including its `AD_Client_ID IN ('0', ?)` scoping and its inverse-direction fallback — and fails **open** (returns `true`) on any error so a DB hiccup never manufactures a false warning.
 
   Previously `AbstractOrderHeaderHandler` and `AbstractInvoiceHeaderHandler` each carried a private `hasConversionRate()` copy of the query filtered by `ad_client_id = ?` alone. When ETP-4474 moved the currencyLayer rate sync to the System client, those copies went blind to it: the endpoint answered `hasRate: true` and the callout warned `noExchangeRateAvailable` for the very same pair and date. The lesson generalises — **when a handler needs an answer a NEO endpoint already computes, call the endpoint's helper, don't re-derive the query.** Two copies of a client-scoping filter is exactly the kind of drift that survives review and only surfaces when the data moves.
@@ -2176,6 +2407,7 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 **Real-world example — `UserRoleAssignmentHandler`'s admin-created-user invitation (ETP-4830, superseding ETP-4829):** the `user` entity's `POST` post-hook used to eagerly provision an `etgo_account` row via a now-deleted `EtendoGoAccountProvisioning` bridge class — `pending` by default, or `active` immediately if the admin typed a password on the create form (a temporary workaround gated by `PasswordPolicy.isStrong` in the `handle()` pre-hook). ETP-4830 replaced both:
 
   - The `handle()` pre-hook no longer reads or validates a `password` field at all — the field, if the frontend still sends one, is simply ignored by this handler (it still reaches `AD_User.Password`, Openbravo's own classic-backend login, unrelated to `etgo_account`). Invite-email is now the only way to activate an admin-created user's account.
+  - **Duplicate-email pre-check (ETP-5264).** Before deriving `username` from `email`, `handleCreate`'s `handle()` pre-hook now calls `rejectDuplicateEmail(normalizedEmail, client)`, which queries for another `AD_User` of the SAME client whose `email` already matches (case-insensitive exact match) and, if found, short-circuits with a clear `400` — `"A user with this email address already exists"` — WITHOUT ever writing `username` onto the request body. Previously a duplicate email fell through to username derivation, so both users ended up with colliding derived `username`s and the create failed on the DB's own unique-constraint violation instead — a raw message naming `username`, a field this create form never shows, which read as confusing/misleading to the admin. A `null` client (no `OBContext`) is a no-op, same as before ETP-5264: `handleCreate` still falls through to its best-effort username derivation in that case. On the frontend (`etendo_schema_forge`), this 400 is mapped via `backendErrors.js`'s `backendError.duplicateUserEmail` key to a correctly-worded toast — see that repo's `docs/generated-custom-windows/user.md` step 1a-bis. Covered by `UserRoleAssignmentHandlerTest#handleRejectsDuplicateEmailOnCreateBeforeUsernameIsDerived`/`#handleAllowsCreateWhenNoDuplicateEmailExistsForClient`.
   - **Ordering (ETP-4830 human-directed requirement, item #14): "create user → assign personal role → invite."** `afterHandle()`'s `POST` branch FIRST calls `ensurePersonalRoleForNewlyCreatedUser` — which delegates to `UserRoleCompositionService#createFreshPersonalRole(User)`, never the get-or-create `ensurePersonalRole(User)`, so a brand-new user can never end up with someone else's orphaned role (see the org-access/defaults writeup in §8d) — and only THEN calls `CompanyInvitationService#createInvitationForNewlyCreatedUser`, so no other role can ever land on the user before its own personal role exists. The strict ordering is proven by a call-order test, not just "both ran" (`UserRoleAssignmentHandlerTest`'s `afterHandleAssignsPersonalRoleBeforeInvitationOnCreate`). Template-role composition on top of that empty personal role happens independently, any time after creation, via `AssignTemplateRolesControl`'s own save — which is why the invitation intentionally skips the "invited user already has an active role" check below (an empty personal role with no templates composed onto it is not a meaningful "active role" from that check's perspective).
   - `afterHandle()`'s `POST` branch then calls `CompanyInvitationService#createInvitationForNewlyCreatedUser(obContext, email, appBaseUrl, language)` — the same invitation/token/`company-invitation`-contract/dedup/throttle machinery ETP-4894 built for a company administrator inviting an *existing* user (§ `docs/transactional-email-contracts.md`). It resolves the inviter from `context.getObContext()` (captured by the dispatcher before this method's own `OBContext.setAdminMode(true)`, so it still reflects the real acting admin's client/org/user) rather than from an authenticated `etgo_account` bearer token, since this runs from a NeoHandler post-hook, not from the public `/sws/go/invitations` endpoint. It deliberately skips the "invited user already has an active role in the invitation organization" check `createInvitation` otherwise enforces — a freshly `POST`-created `AD_User` has zero roles yet by construction beyond the empty personal role just created above (role composition happens independently, any time after creation, via `AssignTemplateRolesControl`'s own save/`PUT`), so that check would always 400 here and adds no real safety. `CompanyInvitationService` grew a `requireExistingRole` private overload for this rather than a bespoke duplicate of `createInvitationForInviter`, so the new call site still gets dedup-of-an-open-invitation and throttling for free.
   - There is no eager `etgo_account` row on this path any more: the invitation's `register-and-accept` flow is now the *sole* place an `etgo_account` gets created for an admin-created user, lazily, once the invitee actually accepts. Accepting that invitation does not require the invited `AD_User` to already hold a role — an earlier revision's `hasActiveRoleForOrganization` accept-time check was dropped from both `acceptExistingAccountInAdminMode` and `registerAndAcceptInAdminMode` for exactly this reason (a freshly-created user has none yet by construction); see `docs/transactional-email-contracts.md` for the full accept-time contract this handler's invitation flows into.
@@ -2184,6 +2416,108 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
   Both changes are best-effort, same contract as the handler's other two concerns: any failure is logged and swallowed, never failing the parent `AD_User` request.
 
   - **`ETGO_INVITATION_USER_FK` cascade delete (ETP-4830):** because this handler makes admin-created-user invitations part of the normal create flow, `ETGO_INVITATION` rows now exist for ordinary users, not just for ETP-4894's opt-in "invite an existing user" path. `ETGO_INVITATION.AD_USER_ID` originally referenced `AD_USER` with no `ON DELETE` behavior (`onDelete` omitted in `src-db/database/model/tables/ETGO_INVITATION.xml`, i.e. `NO ACTION`), so deleting an `AD_User` that had ever received an invitation failed with a 500 ("Este registro no puede ser eliminado ya que está relacionado con otros elementos existentes.") — a pre-existing ETP-4894 schema gap, only surfaced now that this handler makes invitation rows routine. Fixed by adding `onDelete="cascade"` to `ETGO_INVITATION_USER_FK`: deleting the `AD_User` now deletes its `ETGO_INVITATION` row(s) with it, since a dangling invitation for a user that no longer exists can never sensibly be accepted. The sibling `ETGO_INVITATION_CREATEDBY_FK`/`ETGO_INVITATION_UPDATEDBY_FK`/`ETGO_INVITATION_ACCOUNT_FK`/`ETGO_INVITATION_CLIENT_FK`/`ETGO_INVITATION_ORG_FK` constraints are intentionally left as `NO ACTION` — those reference the actor/tenant, not the invited user, and Etendo audit columns (`CREATEDBY`/`UPDATEDBY`) are never expected to be deleted out from under a row.
+
+**Real-world example — `UserRoleAssignmentHandler`'s "Rol" advanced-filter query params (ETP-5188):** the Users window's list `GET` (record id absent) gained a THIRD pre-hook concern, `applyRoleFilter`, alongside the existing `excludeContactOnlyUsers` (ETP-5019) — both run unconditionally on every `user` list fetch, in `handle()`. The frontend's generic `criteria=` mechanism cannot express "filter by composed role" at all: it would build a dotted HQL property path through the `aDUserRolesList` one-to-many collection, which is invalid HQL and 500s (confirmed empirically). So the frontend's "Rol" advanced-filter field bypasses `criteria=` entirely for this one field and instead sends three DEDICATED query params on the same `user` list `GET`:
+
+| Query param | Meaning |
+|---|---|
+| `RoleIds=<id1>,<id2>,...` | Comma-separated `AD_Role_ID`s — the fixed system role templates and/or the caller's own client's admin role. |
+| `NoRole=true` | Users with no composed role at all (and not the admin). |
+| `RoleFilterNegate=true` | Negates the ENTIRE `RoleIds`/`NoRole` combination (wraps it in `not (...)`) — no new query semantics on top of the two params above. |
+
+Together these three primitives express the frontend's 4 advanced-filter operators (see
+`etendo_schema_forge`'s `docs/generated-custom-windows/user.md` → "Users list role filter" for the
+UI side):
+
+| Operator ("Rol" field) | Query params |
+|---|---|
+| Es | `RoleIds=` and/or `NoRole=true` |
+| No es | same, plus `RoleFilterNegate=true` |
+| Está vacío | `NoRole=true` alone |
+| No está vacío | `NoRole=true&RoleFilterNegate=true` |
+
+**Why two branches for a `RoleIds` match.** Since ETP-4906, a user's actual access is never a direct
+`Default_Ad_Role_ID` match against a template — it is expressed via that user's PERSONAL role, which
+COMPOSES 1+ templates through an active `AD_Role_Inheritance` row. The one exception is the
+client-admin "Admin" role, which `UserRoleCompositionService` never lets a personal role compose —
+it is always a DIRECT `Default_Ad_Role_ID` assignment (see §8d). `buildComposedOrDirectPredicate`
+covers both shapes with one OR:
+
+```
+(e.defaultRole.id in ('ID1','ID2')) or
+(exists (select 1 from ADRoleInheritance ri where ri.role = e.defaultRole and
+         ri.active = true and ri.inheritFrom.id in ('ID1','ID2')))
+```
+
+**The "Sin rol" (`NoRole=true`) predicate** additionally excludes the client-admin role — Admin is a
+real, direct role assignment, never "no role":
+
+```
+not exists (select 1 from ADRoleInheritance ri where ri.role = e.defaultRole and ri.active = true)
+and (e.defaultRole is null or e.defaultRole.id <> '<clientAdminRoleId>')
+```
+
+`<clientAdminRoleId>` is resolved per-request from the caller's own `OBContext.getCurrentClient()`
+(`resolveClientAdminRoleId`, the same `OBCriteria` shape `SFRolesOverview#resolveTenantRoles`
+already uses) and simply omitted from the predicate — never inlined as a literal `null` — when it
+cannot be resolved.
+
+**Injection mechanism and id sanitization.** Both predicates are injected as an HQL `_neoWhere`
+predicate (`NeoCrudHelper.NEO_WHERE_PARAM`, the exact same query-param mechanism
+`excludeContactOnlyUsers` already uses on this same list `GET`) — combined with any EXISTING
+`_neoWhere` predicate (from `excludeContactOnlyUsers` or elsewhere) via `and`, while `RoleIds` and
+`NoRole` combine with `or` BETWEEN themselves (two chips of the same multi-select filter, not two
+independent filters). `RoleFilterNegate`, when present, wraps that `or`-joined combination in one
+outer `not (...)` — applied AFTER the combination is built and BEFORE it is merged into any existing
+`_neoWhere` predicate.
+
+`NEO_WHERE_PARAM` has **no bind-parameter mechanism** — `NeoCrudHelper#buildWhereClause` splices the
+predicate string into the HQL text verbatim. Every `AD_Role_ID` inlined into the predicate is
+therefore validated against `^[A-Fa-f0-9]{32}$` (`sanitizeRoleIds`, Etendo AD ids are 32 hex chars,
+case-insensitive) before being spliced in — an entry that doesn't match is logged at WARN and
+silently dropped rather than reaching the HQL string unescaped, so one malformed id in `RoleIds`
+degrades the filter instead of 500ing the whole list. `RoleFilterNegate` itself carries no id/value
+and needs no sanitization — it only decides whether to prepend the literal `"not "` wrapper, and is
+parsed with the same strict `"true"`-only (case-insensitive), anything-else-is-absent convention
+`NoRole` already uses.
+
+**No-op contract.** `applyRoleFilter` returns immediately, touching nothing, when both `RoleIds` is
+empty/absent AND `NoRole` is absent — regardless of `RoleFilterNegate` (negating an empty/no-op
+filter would otherwise wrongly match every user). Every other `user` entity concern in this class
+(the invitation flow above, the write-path guards, `excludeContactOnlyUsers`) is unaffected — this
+is purely additive to the list `GET` path.
+
+*As of this writing, `applyRoleFilter`/`sanitizeRoleIds`/`buildComposedOrDirectPredicate`/
+`buildNoRolePredicate` have no dedicated unit test in `UserRoleAssignmentHandlerTest` — this feature
+was verified live/manually against `localhost:3100` instead (see `etendo_schema_forge`'s
+`docs/plans/2026-09-11-etp-5188-role-filter-open-questions.md`, "Live verification performed").*
+
+#### 5.3.1 Post-hook writes and the `updated` audit token (ETP-5255 / ETP-5262)
+
+See also the shorter, author-facing version of this rule in `docs/neo-headless-extensibility.md` §2.3a in the `schema_forge_core` repo.
+
+**The rule for handler authors: a handler MAY write its own record inside `afterHandle`, and it does not need to hand back a refreshed response to keep the `updated` token correct — the dispatcher already does that.** Both hook entry points, `NeoServletSupport.runPostHook` (`schemaforge/NeoServletSupport.java:166-173`) and `McpHookExecutor.runPostHook` (`mcp/McpHookExecutor.java:158-178`), call `NeoAuditTokenRefresh.refreshInResponse` / `refreshInBody` on the EFFECTIVE response — whichever of `afterHandle`'s own return value or the previous result ends up going to the client — immediately after the hook runs. If you find yourself hand-building a "corrected" response just to fix up `updated` after a save inside `afterHandle`, that is now redundant: return `null` (or your normal replacement response) and let the refresh happen underneath you.
+
+**Why this lives in the dispatcher and not in each handler.** `UserRoleAssignmentHandler` handles user creation entirely in `afterHandle` (`schemaforge/handlers/UserRoleAssignmentHandler.java:487`): `inviteNewlyCreatedUser` (`:594`) reads `context.getPreviousResult()` — the response body the CRUD write already serialised, carrying the `updated` token the client is about to cache — and then calls `ensurePersonalRoleForNewlyCreatedUser` (`:696-715`), which writes `AD_User.defaultRole` and flushes (`:715`), bumping the row's real `updated` past what the cached response says. Because returning `null` from `afterHandle` means "keep the default result" (`NeoAuditTokenRefresh.java:44-48`), the client walked away with a token the row had already moved past — and ETP-5122 made the React client harvest exactly that value as the record's version, so the very first edit of a user an admin had just created was refused as a `stale_record` 409 against nobody (ETP-5262). It was intermittent, not constant, because the comparison zeroes milliseconds (`NeoRecordVersion.equalToTheSecond`) — it only misfired when the personal-role flush happened to cross a wall-clock second boundary from the create.
+
+A per-handler fix — every post-hook patching the body it just invalidated — is a rule that has to be remembered by every handler ever written, on a failure mode that shows up as an unreproducible 409 in production, not as a broken test. This is not hypothetical: the sibling defect of a post-hook's own field values being invisible in the response has already been independently rediscovered once (ETP-4783's `injectAuthorizationnoIntoSaveResponse`), and the token's *format* bug below shipped three separate times. `NeoAuditTokenRefresh` (`schemaforge/util/NeoAuditTokenRefresh.java`) exists precisely so a fourth handler that writes its own record in `afterHandle` is covered automatically, by construction, rather than by every author remembering this section. It costs one `OBDal.get` per write response — a session-cache hit for the record the request just wrote — and only runs for CRUD `POST`/`PUT`/`PATCH` (never `GET`, never `DELETE`, never a non-CRUD `ACTION`).
+
+**The one thing an author must still get right: if you serialise `updated` yourself, use `NeoDateFormat.toAuditToken`, never `toCanonical`.** This only applies to a handler that builds its own response JSON outside the generic `DataSourceServlet` path — typically one reading straight from native SQL, like `ChartOfAccountsHandler`'s list/detail reads (§5.3 above). `toCanonical` is correct for a *business* datetime (a civil, wall-clock value, deliberately offset-free per §4.3.1) but wrong for a *concurrency* token: core's reader, `JsonUtils.createDateTimeFormat()`, requires a trailing zone offset, and `JsonUtils.convertFromXSDToJavaFormat` appends `"+0000"` to a token that lacks one instead of rejecting it (`NeoDateFormat.java:155-156`; also documented at `NeoRecordVersion.java:191-195`, the parse-repair step that hits this same behavior on the read side). An offsetless token is therefore not refused — it is silently re-read as UTC, and every write on that record then fails as stale by exactly the server's UTC offset, regardless of how recently it was read. `toAuditToken` (`NeoDateFormat.java:180-204`) is the one method that formats through core's own writer instead of a hand-rolled pattern, so the value it produces is guaranteed to round-trip through the same reader that will later compare it.
+
+This exact mistake shipped three times, in three different handlers, each time by reaching for `toCanonical` because it looks like the obvious tool (`NeoDateFormat.java:161-166`): first in `FinancialAccountsPageHandler` (ETP-5073, on a UTC-3 tenant — every write read as three hours stale), then reintroduced independently in `ProductPriceHandler` and in `ChartOfAccountsHandler` (both found together during ETP-5255). All three were routed through `toAuditToken` in the same change that added it.
+
+**How to diagnose it in the field.** `NeoRecordVersion.isStale` (`schemaforge/util/NeoRecordVersion.java:135-154`) logs every decided verdict — WARN on refusal, DEBUG on a pass, gated by `isDebugEnabled()` so the successful case only costs anything when someone is actually looking — through `describeComparison` (`:257-267`), which prints both sides of the comparison as rendered timestamps *and* as epoch milliseconds, the **signed delta** (`client - stored`, in ms), and the server's own timezone ID. Read the delta like this:
+
+| Delta | Likely cause |
+|---|---|
+| `0` | The two instants are equal and the check still said stale — a defect in the comparison itself, not in the data. |
+| A whole-hour multiple (e.g. `±3600000`, `±7200000`) equal to the server's UTC offset | The offset bug above: the token lost its zone somewhere and was re-read as UTC. Check whether the handler formats `updated` by hand with `toCanonical` instead of `toAuditToken`. |
+| Sub-second, non-zero | A post-hook wrote to the record after the response body was serialised — the ETP-5262 scenario. Check whether the entity's `afterHandle` writes its own record and, if this predates `NeoAuditTokenRefresh` reaching that code path, whether the refresh is actually wired in for that dispatch route. |
+| An arbitrary, larger delta, with another writer identifiable | A genuine concurrent modification — the check did its job. |
+
+The three "cannot decide" guards inside `isStale` — a blank/missing client token, a non-`Traceable` entity, an unparseable client value (`NeoRecordVersion.java:138-141`, `:170-173`, `:202-204`) — are logged at WARN too, and worth checking first: they all silently answer "not stale" and let core's own check be the final word, so a concurrency check that never ran is otherwise indistinguishable in the client's eyes from one that ran and passed.
+
+**The failure mode of the refresh itself.** `NeoAuditTokenRefresh` is best-effort by construction: an unreadable row, an unrecognised response body shape, or a token `toAuditToken` cannot render all leave the response body byte-identical to what it would have been without the refresh, and log a WARN naming the entity and record id (`NeoAuditTokenRefresh.java:168-172`, `:291-295`). It never adds an `updated` key that was not already there, never flushes on the entity's behalf, and never touches `NeoRecordVersion`'s comparison — it only corrects a value the response already publishes. So the refresh degrades to the pre-ETP-5262 behavior on failure (the client may hit one spurious, retriable `stale_record` 409) rather than breaking the write that already succeeded.
 
 ---
 
@@ -3511,7 +3845,7 @@ eight audit call sites funnel through — writes the history row immediately BEF
 `EmailSafetyStore#recordAudit`, so both land in the same transaction (the DAL safety store ends a
 successful send with `SessionHandler.commitAndStart()`). The gate is declarative:
 `EmailContract#logsSendHistory()` defaults to `false` and is overridden `true` once, in
-`DefaultDocumentSendEmailContract`, so the six document-send contracts opt in automatically while
+`DefaultDocumentSendEmailContract`, so the eight document-send contracts opt in automatically while
 the account/auth family (invitation, reset password, login alert, organization joined) stays out.
 There is no contract-name list anywhere.
 
@@ -3531,6 +3865,415 @@ sizing live in `docs/transactional-email-contracts.md` → *Readable send histor
 privacy decision and its operational rules live in the functional repo's
 `docs/ops/transactional-email-security.md` → *Email Audit Redaction & Storage Policy*. This section
 stays the reference for the endpoint itself.
+
+---
+
+## 8k. Accounting Process Monitor (SFAcctProcessMonitor Webhook, ETP-5269)
+
+`SFAcctProcessMonitor` (`GET /sws/neo/acctprocessmonitor[?Limit=<n>][&Action=trigger]` — reached
+ONLY through the NEO pseudo-spec bridge, §4.10/§4.11; no legacy `/webhooks/*` path) reports the
+status and recent execution history of Etendo's accounting server process
+(`AD_Process.Value = 'AcctServerProcess'`, resolved by search key so no id is hardcoded), and lets
+an administrator launch a run manually. It backs the admin-only page at `/acct-process-monitor`
+(`tools/app-shell/src/pages/AcctProcessMonitorPage.jsx` in `etendo_schema_forge`), whose full
+functional guide is `docs/generated-custom-windows/acct-process-monitor.md` there.
+
+**Two actions on one endpoint, and reading is the default.** `Action` is compared
+case-insensitively against `"trigger"`; any other value — including absent — is a read. Because
+the whole pseudo-spec family is reached over `GET`, a side-effecting action cannot be inferred
+from the HTTP method, so making it opt-in is what keeps an accidental, prefetched, bookmarked or
+retried request from firing the accounting process. `Limit` defaults to 20, is clamped to 100, and
+falls back to 20 for anything unparseable. Within a triggering request the webhook **schedules
+first and reads afterwards**, so `running`, `lastRun` and `history` in one response all describe
+the same moment.
+
+**Access rule: `NeoAccessHelper.isAdminOrClientAdmin`, checked before anything is read or
+scheduled.** A caller with a restricted role, or with no role at all, gets the `notAuthorized`
+payload. The frontend's `acct-process-monitor` feature flag gates only the menu entry — the React
+route is registered unconditionally — so this check is the actual authorization boundary and must
+not be weakened on the assumption that the flag protects anything.
+
+It enters `OBContext.setAdminMode(true)` — the **stricter** variant, which keeps the cross-client
+write check, unlike the no-arg form its ten siblings in this package use. Admin mode is required
+because the recurring request is a System (`AD_Client_ID = '0'`) row a tenant admin's own context
+cannot read; `true` is affordable because this class performs no OBDal writes at all (its only
+mutation goes through raw XSQL in `ProcessRequestData.insert`, which never reaches
+`SecurityChecker`). Every criteria then states its client restriction explicitly and sets
+`setFilterOnReadableClients(false)`/`setFilterOnReadableOrganization(false)`, so the scope never
+depends on ambient context.
+
+**Tenant scope — a manual run posts only the CALLER's client.** `AcctServerProcess.doExecute`
+branches on the bundle context's client: `'0'` loops over every non-System client, anything else
+processes that client alone. The recurring cadence is a System row and therefore sweeps the whole
+instance, which is right for an unattended job and wrong for a button any client-admin can press.
+The one-shot bundle is built from `OBContext.getOBContext().getCurrentClient().getId()` with
+organization `'0'` (= every organization *within* that one client), so a manual run is scoped to
+the caller. A System-context caller has no own tenant to scope to and is refused with
+`systemClientNotScopable` rather than silently widened. This was a product decision (2026-09-10)
+that overrode the original design — see `flags-registry.json` → `acct-process-monitor` →
+`$scopeChangeComment` in `etendo_schema_forge`.
+
+Reads are scoped the same way: history and the in-progress probe cover the caller's own client
+**plus System**. System is included deliberately and is not a leak — the System cadence posts this
+caller's documents too, so its runs are the history of work done on the caller's own data.
+Excluding them would make the page look as though the process had never run. Another tenant's
+*manual* runs are excluded. The pending-one-shot guard is the exception: it looks at the caller's
+client only, because another tenant's queued run must not disable this caller's button.
+
+**Mechanism — a one-shot sibling request, never the recurring row.** Triggering calls
+`OBScheduler.schedule(ProcessBundle)` (the no-requestId overload), which mints a fresh id, INSERTs
+its own `AD_PROCESS_REQUEST` with status `SCH` and NULL timing, and schedules it;
+`TriggerProvider` maps null timing to `TimingOption.IMMEDIATE` (`newTrigger().startNow()`). **The
+recurring row is read for its identity and its `nextExecution` and is never written — not one
+column.** Two alternatives were rejected because both mutate it: invoking the "Schedule Process"
+AD_Process (`0515E6559C31478E92703A3D10E6783B`, which rewrites the schedule of the row it runs
+against), and updating `start_date`/`start_time` directly (`OBScheduler.initialize()` reads that
+table exactly once at Quartz startup, so the UPDATE would be invisible until a Tomcat restart
+while still having corrupted the stored schedule). The one-shot carries no frequency, so it can
+never become a second recurring job.
+
+The channel is **`Channel.BACKGROUND`, never `DIRECT`**. `AcctServerProcess` sets
+`isDirect = bundle.getChannel() == Channel.DIRECT` and then loads its table/org/date parameters
+from `AD_PINSTANCE_PARA`. A scheduled one-shot has no pinstance, and those generated finders
+return `""` rather than `null`, so `strOrg` would be silently overwritten from `"0"` to `""` and
+**the run would report success while posting nothing.** `BACKGROUND` keeps `isDirect` false and
+takes the same path as the automatic run; it also stays distinct from `"Direct"` (the interactive
+*Posting by DB tables* form) and `"Process Scheduler"` (the recurring row), which is what lets the
+queries tell the three kinds of row apart without a new column. **Accepted trade-off:**
+`OBScheduler.initialize()` skips rescheduling a leftover `SCH` row only when its channel is
+`Direct` or its timing is IMMEDIATE, so a `BACKGROUND` one-shot interrupted between INSERT and
+firing is re-fired once on the next startup. Harmless — `AcctServer` only posts still-unposted
+documents — and far better than a run that silently posts nothing.
+
+**Concurrency: the System cadence cannot veto a manual run.** `AD_Process.preventconcurrent` is
+`'Y'` and the flag does reach the trigger, but `ProcessMonitor.vetoJobExecution` treats another
+job as concurrent only when it matches on **both** client and organization, comparing
+`ProcessBundle.getContext().getClient()`. The manual run is the caller's client; the recurring run
+is System. Different client, mutually invisible. The only reachable veto is same-client-same-org
+(a second manual run through the TOCTOU gap, or a tenant holding its own recurring request), where
+vetoing is **correct** and must not be worked around — the in-flight run is already posting exactly
+those documents. An automatic retry was evaluated and rejected on those grounds.
+
+A veto is **not reliably distinguishable from a real failure** here: `ProcessMonitor.stopConcurrency`
+writes an `AD_PROCESS_RUN` row with status `ERR` and duration `"00:00:00.000"` — identical to any
+genuine sub-millisecond failure, since `getDuration(0)` renders the same string — and puts its
+explanation in `LOG`, which this endpoint never exposes. Neither path writes `RESULT` or `REPORT`
+(they are not even parameters of `ProcessRunData.insert`). **Do not build logic that branches on
+"zero-duration `ERR` means it was skipped".**
+
+**`AD_PROCESS_RUN.LOG` and `REPORT` are never read into the response** — not in the list, not
+truncated, not behind a drill-down. The log is a CLOB of raw process output that can carry
+arbitrary internal detail, and this endpoint is reachable by every client-admin, not only by a
+system administrator. `toRunJson` carries a standing comment saying so. Do not add a log field,
+and do not add one on the frontend either.
+
+**Which recurring row wins when there is more than one.** The shipped configuration is a single
+System row, but a tenant may also hold its own. The lookup excludes both one-shot channels
+(`Background`, `Direct`), then orders by soonest `nextExecution`, tie-broken by id. Soonest — not
+"prefer the caller's client": the row feeds only *Next automatic run*, both candidates post the
+caller's documents, so the truthful answer is whichever fires first. Preferring the caller's client
+would announce a nightly tenant job while a five-minute System sweep was about to post the same
+documents.
+
+**Response.** The bridge's usual envelope — `{"result": "<JSON string>"}` — carrying either the
+status object or a refusal. Timestamps are `yyyy-MM-dd'T'HH:mm:ss` with **no zone**, because the
+underlying columns are `timestamp without time zone` (server wall clock); the browser formats them.
+
+```json
+{
+  "error": false,
+  "processName": "<AD_Process.Name for AcctServerProcess>",
+  "scheduled": true,
+  "nextRunTime": "2026-09-10T18:35:00",
+  "running": false,
+  "lastRun": {
+    "id": "A1B2...", "status": "SUC",
+    "startTime": "2026-09-10T18:30:00", "endTime": "2026-09-10T18:30:00",
+    "duration": "00:00:00.085", "manual": false
+  },
+  "history": [ "…same row shape, newest first, at most Limit rows…" ],
+  "triggered": { "started": true, "reason": "started" }
+}
+```
+
+- A run row carries exactly six keys: `duration`, `endTime`, `id`, `manual`, `startTime`,
+  `status`. `manual` is derived from the owning request's `CHANNEL` (`Background` → manual), so it
+  needs no extra column and stays correct for runs created before this feature existed.
+- `triggered` is present only on a triggering request.
+- `running` is bounded by a 1-hour staleness window: a `PRC` row is only moved out of that state by
+  `ProcessMonitor` when the job finishes, so a JVM killed mid-run would otherwise leave the manual
+  trigger disabled for the life of the instance. The same bound applies to the pending-one-shot
+  guard.
+- A refusal is a **200** with `{"error": true, "reason": "...", "message": "..."}` — the
+  "answer, don't 403" convention this family uses. `reason` is `notAuthorized` or `notInstalled`;
+  it exists so callers never string-match `message`, since those two states need very different UI.
+
+**`triggered.reason`** — one success value and five refusals. `started: true` means the job was
+handed to **Quartz**, not that it has run or even that its `AD_PROCESS_RUN` row exists yet
+(`ProcessMonitor.jobToBeExecuted` writes that row on the scheduler's own thread). Callers must
+poll after a successful trigger rather than treating the triggering response as final; the
+frontend hook does exactly that, on a bounded deadline.
+
+| `reason` | `started` | Meaning |
+|---|:---:|---|
+| `started` | `true` | Handed to Quartz. The run row appears shortly. |
+| `alreadyRunning` | `false` | A run is already in progress for this client, or a one-shot it queued has not fired yet. |
+| `notScheduled` | `false` | No active recurring request for this process on the instance. |
+| `schedulerUnavailable` | `false` | Quartz is in standby (no-execute background policy), where `schedule(...)` silently no-ops. Reported rather than claimed as success. |
+| `systemClientNotScopable` | `false` | The caller's session is the System context, which has no single company to scope the run to. |
+| `scheduleFailed` | `false` | The scheduler threw; logged server-side and reported rather than escaping to the bridge. |
+
+Covered by `SFAcctProcessMonitorTest` (31 tests) and the two `NeoPseudoSpecDispatcherTest` routing
+cases — see §9.
+
+---
+
+## 8l. Refresh Token (SFRefreshToken Webhook, ETP-5195)
+
+`SFRefreshToken` (`GET /sws/neo/refreshtoken`, no parameters — reached ONLY through the NEO
+pseudo-spec bridge, §4.10/§4.11; no legacy `/webhooks/*` path, same as every sibling authored
+after the pattern existed) reissues the CALLER'S OWN NEO bearer JWT, embedding their CURRENT
+`AD_User.Default_Ad_Role_ID` instead of whatever role the token they are calling with happened to
+be minted with.
+
+**The bug this closes.** `NeoAuthenticator#authenticateJwt` rebuilds `OBContext` on every NEO
+request straight from the incoming token's `role` claim — that claim is fixed at mint time and is
+never re-derived from the DB on later requests. `UserRoleCompositionService#promoteToAdmin`/
+`#demoteFromAdmin` (§8i) DO swap `Default_Ad_Role_ID` when an owner/admin promotes or demotes a
+user, but the affected user's own already-issued token keeps authenticating as their
+pre-promotion/demotion role until a new token is minted — previously only possible by a full
+re-login. This endpoint gives the frontend a way to swap the role in place right after such an
+action.
+
+**Access rule: no role gate at all, and deliberately so.** Unlike every other webhook in this
+family, `SFRefreshToken` does not call `NeoAccessHelper.isAdminOrClientAdmin` or any other
+role check — reissuing your OWN token under your OWN current role is not a privileged operation,
+it is the same trust boundary a normal login already crosses. The only real security requirement
+is scope, not privilege: this endpoint must never be able to mint a token for anyone other than
+the caller (see below).
+
+**`userId` comes ONLY from the already-validated token, never from a request parameter.** By the
+time `SFRefreshToken#get` runs, `NeoServlet#processRequest` has already called
+`authenticator.authenticateRequest(...)` — the exact same signature/expiry validation every other
+NEO request goes through — and a failure there returns `401` before the pseudo-spec dispatcher,
+hence this webhook, is ever reached. `authenticateJwt` populates `OBContext` from that same
+token's own `user` claim, and `SFRefreshToken` reads the caller's id from
+`OBContext.getOBContext().getUser()` — nowhere else. There is intentionally no `UserId`-style
+parameter: accepting one would let any caller mint a token for an arbitrary target user, a
+privilege-escalation hole this endpoint must not open.
+
+**Role resolution.** The token's own `role` claim is discarded on purpose. The webhook re-reads
+the `User` fresh from `OBDal` by the id above and calls `user.getDefaultRole()` — the CURRENT
+`AD_User.Default_Ad_Role_ID` — then mints the new token via
+`SecureWebServicesUtils.generateToken(user, currentRole)`, the exact 2-argument overload
+`EtendoGoJwtServlet#writeEnvironmentLoginResponse` already uses at login (this is only the second
+production call site for that overload). Passing `org`/`warehouse` as `null` lets that method
+re-resolve a matching organization/warehouse for the new role itself, the same way login does,
+instead of carrying over whatever the stale token's `organization`/`warehouse` claims said.
+
+**R5 eligibility check.** Before that, `get()` rejects an inactive caller outright —
+`!Boolean.TRUE.equals(user.isActive())` fails with "User is not active" before any role
+resolution is attempted. Then, when `currentRole` is non-null, `isEligibleForRole(user,
+currentRole)` gates minting rather than trusting `Default_Ad_Role_ID` blindly:
+- the role must belong to the SAME client as the caller's own currently-authenticated session
+  (a cross-client guard — a role from a different client would otherwise mint a token embedding
+  that role, and its org/warehouse, from a different tenant than the caller's own validated
+  session);
+- the role must itself be `Active`;
+- and the user must hold a genuine, ACTIVE `AD_User_Roles` assignment to that role, rather than
+  assuming `Default_Ad_Role_ID` and `AD_User_Roles` always agree.
+
+Any of these failing returns `success:false` with "User is not eligible for the assigned role"
+instead of minting a token — role resolution here is NOT unconditional. A `currentRole == null`
+(no assignable role) is unaffected by this check and still flows straight through, per the
+existing "no assignable role" case below.
+
+**Response — session metadata extension (ETP-5195, backend half).** When `currentRole` is
+genuinely resolved for the caller (the ordinary case, having just passed the R5 eligibility
+check above), the response carries a `session` object alongside the token:
+
+```json
+{
+  "token": "<new signed JWT>",
+  "session": {
+    "version": 1,
+    "userId": "...",
+    "clientId": "...",
+    "selectedRoleId": "...",
+    "selectedOrgId": "...",
+    "roleList": [{
+      "id": "...",
+      "name": "...",
+      "orgList": [{ "id": "...", "name": "..." }],
+      "effectiveRoleNames": ["Finance", "Sales"]
+    }]
+  }
+}
+```
+
+wrapped in the bridge's usual envelope, i.e. `{"result": "{\"token\": \"...\", \"session\": {...}}"}`.
+`userId`/`clientId`/`selectedRoleId`/`selectedOrgId` are read back from the `user`/`client`/
+`role`/`organization` claims of the token *just minted*, via
+`SecureWebServicesUtils.decodeToken(String)` — never re-derived independently, so the response
+can never disagree with what the JWT actually contains. `roleList` reuses
+`EtendoGoJwtSupport.loadRoleListData(String)` (widened to `public` for this call site), the same
+helper/query already used to build the equivalent list at login. This activates the richer
+validation `schema_forge_core`'s `reconcileSessionRefresh` already implements client-side (see
+`docs/auth-session-refresh.md` in that repo) instead of its "legacy" token-swap-only fallback.
+
+**`effectiveRoleNames` (ETP-5329).** The names of the template roles composed (via
+`AD_Role_Inheritance`) into the user's personal role, resolved through
+`UserRoleCompositionService#getAppliedTemplateRoleIds(String)`, in `Seqno` order — this is what
+the topbar should display instead of the auto-generated `"Personal – <username>"` role name. It
+appears ONLY on the `roleList` entry whose `id` equals the user's actual default/personal role
+(`AD_User.Default_Ad_Role_ID`), never on every entry: a rare pre-existing anomaly (ETP-4604) can
+leave a user with more than one active `AD_User_Roles` row, and attaching the composed-template
+list to a non-default entry would misrepresent a role it doesn't actually apply to. The key is
+omitted entirely when the default role has no composed templates (e.g. right after
+`ensurePersonalRole`, before any `assignTemplateRoles` call) — frontends should fall back to the
+role's own `name` in that case. A template role id with no matching (active) `Role` row — deleted
+or renamed out from under `AD_Role_Inheritance`, an ETP-4604-style anomaly — is silently skipped
+(logged as a `warn`, not thrown), so `effectiveRoleNames.length` can be smaller than the number of
+composed template roles; the array is never padded or nulled out for a single unresolved entry.
+
+The `currentRole == null` case is UNCHANGED: the response stays the bare
+`{"token": "<new signed JWT>"}`, no `session` key, so the frontend's legacy fallback still
+applies. A user resolving to literally no assignable role at all — not the ordinary case; the
+promote/demote invariant this endpoint exists for always leaves one — is a genuinely unexpected
+state rather than an expected domain rejection, so unlike `SFPromoteUserRole`'s target-user
+validation it is NOT modeled as a `success:false` `200`; it surfaces as the bridge's normal
+`error`/`500` path.
+
+**Frontend usage.** Call this endpoint right after a promote/demote action (or any other flow
+that may have changed the caller's own `Default_Ad_Role_ID`) and swap the stored bearer token for
+the returned one before the next NEO request, instead of forcing the user through a full
+re-login.
+
+---
+
+---
+
+## 8m. Costing Schedule Cadence Realignment (SFCostingCadence Webhook, ETP-5370)
+
+`SFCostingCadence` (`GET /sws/neo/costingcadence[?scope=client|all]` — reached ONLY through the NEO
+pseudo-spec bridge, §4.10/§4.11) enforces the costing invariant on tenants that already exist:
+**exactly ONE active scheduled `CostingBackground` request per client, firing every 30 seconds.**
+
+> **This endpoint is the escape hatch, not the main path.** The fleet-wide correction is done by
+> `CostingCadenceStartup` (`com.etendoerp.go.startup`), which runs the same routine over every tenant
+> on application boot — and shipping the module IS a boot, so a release realigns everything with no
+> operator action. Reach for this webhook to correct ONE tenant without waiting for a release.
+> It is also what makes `scope=all` a rarely-needed path: see the scope note below.
+
+### Why this is a webhook and not a data-fix `.sql`
+
+This is the reusable lesson, not an implementation detail. **An `UPDATE` on `AD_PROCESS_REQUEST`
+does not change what a running instance executes.** `OBScheduler.initialize()` reads that table
+exactly ONCE, at Quartz startup; afterwards the trigger lives in Quartz's own JobStore and
+`DefaultJob.execute` rebuilds its bundle from the `JobDataMap`, never re-reading the row. The same
+conclusion was reached independently on ETP-5269 and is written up in `SFAcctProcessMonitor`'s class
+javadoc ("Refuted from source"), and the PSD2 schedule-removal data-fix records that even DELETING
+the row leaves the job firing — it just starts failing with an FK violation.
+
+Production does not restart Tomcat, so a `.sql` would leave every tenant's row claiming 30 seconds
+while the trigger kept firing every 5 minutes — worse than doing nothing, because the row would then
+be lying about what runs. The correction has to happen inside the live JVM. This is exactly the
+escape hatch the data-fixes framework documents for its own SQL-first rule (see `tenant-fixer.md`,
+"How to choose the fix mechanism"): too stateful for hand SQL → write it once in Java and expose it
+as a remediation webhook.
+
+### What it does
+
+The work lives in `OnboardingCostingScheduleService#realignCadence(String)`, next to the
+provisioning code whose row shape it has to match — one implementation, no SQL/Java drift. Per
+client:
+
+| Step | Behaviour |
+|---|---|
+| Winner | The most recently created active `SCH` request (ties broken by id, so the choice is deterministic) — it is the one onboarding or the ETP-5245 data-fix provisioned with a resolved `ob_context` for that tenant |
+| Losers | Unscheduled from Quartz, then marked `status='UNS'` + `isactive='N'`. **Never deleted** — the history stays auditable |
+| Cadence | `timing='S'`, `frequency='1'`, `SECONDLY_INTERVAL=30`, `MINUTELY_INTERVAL` cleared to `NULL` |
+| Re-arm | `OBScheduler.reschedule(...)` on the survivor — `schedule(...)` is a no-op when the Quartz job already exists, so reschedule (unschedule + delete + schedule) is the only thing that works here |
+| `COM` rows | Ignored. A completed one-shot run is execution history, not a schedule |
+
+The commit happens BEFORE the re-arm: `TriggerProvider` reads the timing columns through the
+scheduler's own JDBC connection, which cannot see an uncommitted row.
+
+**`NEXT_FIRE_TIME` must be nulled, or the new cadence is correct but dormant.** This is the one thing
+live verification caught that no unit test could. `ScheduledTriggerGenerator#getBuilder` does not
+start a rebuilt trigger from the request's start boundary when the row carries a next fire time — it
+starts it *at* that instant:
+
+```java
+if (StringUtils.isEmpty(data.nextFireTime)) { builder.startAt(getStartDate(data)); }
+else                                        { builder.startAt(getNextFireDate(data)); }
+```
+
+That column still holds the OLD trigger's next fire. Measured on the shared dev DB: the webhook ran
+at 19:55:02, the row read `1|30` immediately, and the process did not run once until **19:58:55** —
+the stale next fire — after which the 30-second cadence held exactly. Harmless when the old cadence
+was 5 minutes; a daily old cadence would have left the job idle for a day. `realignCadence` therefore
+nulls it in native SQL (the column is deliberately unmapped on the `ProcessRequest` entity — it is
+scheduler bookkeeping written by `ProcessMonitor` through `ProcessRequestData`'s XSQL) and restates
+`START_DATE`/`START_TIME` from the provisioning path's own helpers, jitter included.
+
+**The survivor is re-armed even when its row already reads 30 s.** That is deliberate, and it is the
+direct consequence of the section above: the row is not evidence about the live trigger. Re-arming is
+the only thing that can guarantee the invariant, and at a 30-second cadence resetting the trigger
+phase costs nothing. The per-client `status` still distinguishes `realigned` (the row needed
+changing) from `alreadyCorrect` (it did not).
+
+A failure on one tenant is rolled back, recorded as `failed`, and the sweep continues with the rest.
+
+### Access and scope
+
+Gated on `NeoAccessHelper.isAdminOrClientAdmin(role)`, enforced server-side.
+
+- `scope=client` (**default**) — realigns the CALLER'S OWN client only.
+- `scope=all` — sweeps every tenant in one call, and is **refused unless the caller is in the System
+  client (`'0'`)**. Letting a tenant admin re-arm other tenants' Quartz jobs would be a privilege
+  escalation, so the check is on the CLIENT, not only on the role.
+
+Refusals answer with a payload (`success:false` + `reason`), never a 403 — `NeoGoWebhookBridge` maps
+`responseVars["error"]` to HTTP 500, so a refusal must not travel as an error. Reasons:
+`notAuthorized`, `systemScopeRequired`, `schedulerUnavailable` (a node under the no-execute
+background policy leaves Quartz in standby, where schedule/reschedule silently no-op — reporting
+success there would be a lie).
+
+### Response
+
+```json
+{
+  "success": true,
+  "scope": "all",
+  "realigned": 3, "alreadyCorrect": 1, "failed": 0, "deactivated": 1,
+  "clients": [
+    { "clientId": "...", "clientName": "E2E User 1", "status": "realigned",
+      "requestId": "...", "deactivated": 0 }
+  ]
+}
+```
+
+### What it does not do
+
+**It never creates a missing schedule.** A client with zero active `SCH` requests is simply absent
+from the response. Provisioning one is a different problem with a different owner — onboarding step 8
+for new tenants, `R36-costing-background-schedule` for existing ones. Read an empty `clients` array as
+"nothing here was misconfigured", not as "every tenant is covered".
+
+Provisioning one was `R36-costing-background-schedule`'s job, and **that fix is retired as of
+ETP-5370** (`retired.json`): it hardcoded the 5-minute cadence, so any row it still created would be
+born with the value the product has moved away from. Its long-standing side problem is resolved by
+the same change — R36 INSERTed `SCH` rows and never registered them with Quartz, leaving them
+dormant until an `OBScheduler.initialize()` that never came, and `CostingCadenceStartup` now re-arms
+every surviving request on each boot, dormant ones included.
+
+### Verifying it worked
+
+The DB alone cannot prove it — that is the whole point. After calling it, check in Classic's Process
+Request window that `next_fire_time - previous_fire_time` is 30 s on the surviving row, **without
+having restarted Tomcat**. The DB-side invariant (one active `SCH` row per client at `1`/`30`) is
+necessary but not sufficient.
 
 ---
 
@@ -3565,6 +4308,9 @@ The module includes unit tests that run without a backend:
 | `OwnerSupportTest` (ETP-4830) | -- | Unit test for §7 item 10's `EM_ETGO_Is_Owner` read/write helper, mirroring `SFWindowAccessMapTest`'s native-query mocking convention (`MockedStatic<OBDal>` + a mocked `Session`/`NativeQuery`, `Character` rows for the `char(1)` column, never `String`): `isOwner` true/false/null-column/missing-user, and `false` for a blank/`null` id without ever touching `OBDal`; `clientHasOwner` true/false, same blank/`null` short-circuit; `markAsOwnerIfNoneExists` executes the `UPDATE` only when `clientHasOwner` first reads empty (2 native queries), is a complete no-op (only 1 native query, the check) when the client already has an owner, and never touches `OBDal` at all for a missing client id or user id. |
 | `UserRoleAssignmentHandlerTest` (owner-protection additions, ETP-4830) | -- | `rejectNonOwnerEditingOwner` (§7 item 10's path (a)): a non-owner's PATCH/PUT on an `EM_ETGO_Is_Owner`-flagged record is rejected with `400` regardless of which field it touches (separate cases for `name`, `email`, and `active`, the last two proving the owner guard's own message wins over the ALSO-400 email-immutability/self-lockout guards it runs before — and that `OBDal` is never even reached for those); the owner editing their own record is a no-op that falls through to the other guards unchanged; a target NOT flagged as owner is unaffected regardless of caller (baseline); and an `OwnerSupport.isOwner` lookup failure fails CLOSED (`500`), same convention as every other guard in this handler. Every PRE-EXISTING PUT/PATCH test in this file also gained a `MockedStatic<OwnerSupport>` stub (`isOwner` → `false`) plus, where the test did not already mock it, a matching `MockedStatic<OBContext>` stub — the new guard's own `OBContext.setAdminMode`/`OwnerSupport.isOwner` calls run unconditionally on every PUT/PATCH now, ahead of the email/deactivation guards those tests actually target. **ETP-4830 item #4 additions (`attachOwnerFlag`):** `isOwner` attached `true`/`false` per row on a list GET (`OwnerSupport.isOwner` mocked statically, one stub per row id); attached on a single-record GET the same way; attached with NO `obContext`/`clientId` at all (unlike `invitationStatus`, confirming the two attach steps are independently scoped); and left unattached (best-effort, no field written, `afterHandle` itself never throws) when `OwnerSupport.isOwner` throws. |
 
+| `SFAcctProcessMonitorTest` (ETP-5269) | -- | Unit test (31 tests) for §8k, `OBDal`/`OBContext`/`OBScheduler`/`NeoAccessHelper` as Mockito static mocks. Access gate: non-admin, no role, and a restricted role that explicitly asks to trigger are all refused without reading or scheduling; client-admin and System Administrator are allowed. Action semantics: a bare GET never reaches the scheduler, an unrelated `Action` value is treated as a read, matching is case-insensitive. The trigger's two load-bearing invariants: **the one-shot `ProcessBundle` is built from the CALLING client, not the recurring System row**, and **its channel is `BACKGROUND`, never `DIRECT`** (the defect that would have made a run report success while posting nothing) — plus a System-context caller refused with `systemClientNotScopable` and nothing scheduled, and an assertion that triggering never writes or mutates the recurring request. Scope: history is the caller's client PLUS System and nobody else; the in-progress probe shares that scope; the pending-one-shot guard is caller's-client-only. Lookup determinism: the recurring query excludes both one-shot channels (so it cannot pick up our own run) and is ordered, so `setMaxResults(1)` picks the same row every time. Non-exposure: the run log and report never reach the response. Plus `lastRun`/history ordering, the `manual` label derived from the owning request's channel, the four refusal paths (`alreadyRunning` from a run in progress and from a queued one-shot, `schedulerUnavailable`, `notScheduled`, `scheduleFailed`), `notInstalled` on an instance with no accounting process, and the post-trigger read ORDER — history and the in-progress flag are both captured after scheduling, exactly once, so the response's fields agree with each other. |
+| `NeoPseudoSpecDispatcherTest#acctProcessMonitor*` (ETP-5269) | -- | §8k routing: a `GET` on `acctprocessmonitor` dispatches through `NeoGoWebhookBridge` with a real `SFAcctProcessMonitor` instance (captured and type-asserted) and writes the bridge's response; a non-`GET` returns `405 "Acctprocessmonitor endpoint only supports GET"` with the bridge never invoked. |
+
 Tests are located in `src-test/src/com/etendoerp/go/schemaforge/` (including its `webhooks/`
 subpackage, e.g. `SFAssignUserRolesTest`/`SFUserRoleAssignmentsTest`/`SFSystemRoleTemplatesTest`/
 `SFDebugInvitationBypassTest`/`SFResendInvitationTest`, and its `handlers/`/`util/` subpackages,
@@ -3573,7 +4319,8 @@ e.g. `UserRoleAssignmentHandlerTest`/`OwnerSupportTest`) and `src-test/src/com/e
 `resendInvitation` coverage, §8h, lives alongside its pre-existing `createInvitation`/
 `findLatestInvitationStatus` suites, same file, no separate class).
 The `NeoPseudoSpecDispatcher` routing for `userroleassignments`, `systemroletemplates`,
-`debuginvitationbypass`, `resendinvitation`, and `promoteuserrole` is covered by
+`debuginvitationbypass`, `resendinvitation`, `promoteuserrole`, `acctprocessmonitor`, and
+`costingcadence` is covered by
 `NeoPseudoSpecDispatcherTest` (same package), mirroring its existing per-endpoint dispatch/
 method-not-allowed test pairs — `debuginvitationbypass` additionally covers the flag-off/flag-on
 branch described in §8g (`resendinvitation` and `promoteuserrole` have no such flag to test, §8h/

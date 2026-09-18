@@ -29,6 +29,7 @@ import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.util.NeoAuditTokenRefresh;
 import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
 
 /**
@@ -161,7 +162,19 @@ final class McpHookExecutor {
     }
     ctx.setPreviousResult(NeoResponse.ok(responseJson));
     NeoResponse post = handler.afterHandle(ctx);
-    return post != null ? neoResponseToMcpResult(post) : null;
+    // ETP-5262: the post-hook may have written to the record whose response was serialised before
+    // it ran, which leaves the `updated` concurrency token in that response one version behind the
+    // row. Refreshed on both outcomes for the same reason the REST dispatcher does it in one place
+    // (see NeoAuditTokenRefresh): a handler that returns a replacement response almost always
+    // builds it from `previousResult`, so the stale token travels into it. The declining case
+    // patches `responseJson` in place, which is the object the caller goes on to flatten and hand
+    // to the agent.
+    if (post != null) {
+      NeoAuditTokenRefresh.refreshInResponse(ctx, post);
+      return neoResponseToMcpResult(post);
+    }
+    NeoAuditTokenRefresh.refreshInBody(ctx, responseJson);
+    return null;
   }
 
   /**
@@ -179,14 +192,13 @@ final class McpHookExecutor {
    * live in {@code NeoResponse.error} itself.</p>
    */
   static JSONObject neoResponseToMcpResult(NeoResponse neoResponse) throws JSONException {
+    // ETP-5306: both branches hand over the JSONObject, so the reserved-key sanitisation in the
+    // content wrappers covers every NeoResponse-carrying path funnelled through here — a handler's
+    // body is produced by the same core serialiser that puts `$ref` on a row.
     if (neoResponse.getHttpStatus() >= 400) {
-      String errorText = McpToolRouterSupport
-          .toMcpHandlerError(neoResponse.getBody(), neoResponse.getHttpStatus()).toString(2);
-      return McpToolRouter.wrapAsErrorContent(errorText);
+      return McpToolRouter.wrapAsErrorContent(McpToolRouterSupport
+          .toMcpHandlerError(neoResponse.getBody(), neoResponse.getHttpStatus()));
     }
-    String text = neoResponse.getBody() != null
-        ? neoResponse.getBody().toString(2)
-        : "{}";
-    return McpToolRouter.wrapAsTextContent(text);
+    return McpToolRouter.wrapAsTextContent(neoResponse.getBody());
   }
 }

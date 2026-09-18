@@ -20,8 +20,13 @@ package com.etendoerp.go.schemaforge;
 import javax.inject.Inject;
 import javax.inject.Named;
 
+import com.etendoerp.go.schemaforge.handlers.PaymentMethodSelectorSupport;
+
 /**
  * NeoHandler for the Purchase Order header entity.
+ *
+ * <p>ETP-5238: the {@code paymentMethod} SELECTOR is served by
+ * {@link PaymentMethodSelectorSupport}, independent of Financial Account linkage.
  *
  * Dispatches custom ACTION requests to the appropriate handler:
  * <ul>
@@ -62,6 +67,11 @@ public class PurchaseOrderHeaderHandler extends AbstractOrderHeaderHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
+    NeoResponse paymentMethodSelector = PaymentMethodSelectorSupport.handleIfPaymentMethodSelector(context,
+        PaymentMethodSelectorSupport.DirectionFallback.WINDOW);
+    if (paymentMethodSelector != null) {
+      return paymentMethodSelector;
+    }
     AbstractOrderHeaderHandler.mirrorAccountingDate(context);
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, false);
     return NeoHeaderActionRouter.dispatch(

@@ -304,6 +304,52 @@ public class OnboardingDatasetCorrectionsSampleDataTest {
         OnboardingDatasetDefinition.getIncludedTables().contains("M_PRODUCT_CATEGORY_TRL"));
   }
 
+  // ─── Starter tariffs (ETP-5190) ────────────────────────────────────────────
+
+  /**
+   * Both starter tariffs ship marked as the default for their direction.
+   *
+   * <p>Nothing in the database enforces this. {@code M_PRICELIST}'s only unique key is over
+   * {@code (NAME, AD_ORG_ID, AD_CLIENT_ID)} and {@code M_PRICELIST_TRG} guards
+   * {@code ISTAXINCLUDED} and nothing else, so "exactly one default per direction" is an invariant
+   * of this dataset alone — which is why it is asserted here rather than left to the schema.</p>
+   *
+   * <p>The flag has two live consumers. {@code ProductPriceHandler} publishes it as
+   * {@code priceListVersion$default} precisely so the Product window's Price tab can pick the right
+   * tariff per direction when a product has several, and {@code PriceListHeaderHandler} (ETP-4592)
+   * refuses to deactivate a tariff that carries it. Both were dead weight while the dataset shipped
+   * {@code ISDEFAULT='N'}: a survey of the local instance found 174 tariffs across 75 clients with a
+   * single default among them.</p>
+   *
+   * <p>The regression path is a dataset re-export. These files are dumped from a live GOClient, so
+   * exporting from an instance where someone unchecked the box silently reverts both rows — which is
+   * how they arrived at {@code 'N'} in the first place.</p>
+   */
+  @Test
+  public void testBothStarterTariffsShipMarkedAsDefault() throws Exception {
+    List<Element> tariffs = rows("M_PRICELIST.xml", "M_PRICELIST");
+    assertEquals("the starter dataset ships exactly two tariffs, one per direction", 2,
+        tariffs.size());
+
+    Map<String, String> nameByDirection = new LinkedHashMap<>();
+    for (Element tariff : tariffs) {
+      String name = childText(tariff, "NAME");
+      String direction = childText(tariff, "ISSOPRICELIST");
+      assertNotNull("tariff '" + name + "' must declare ISSOPRICELIST", direction);
+      assertTrue("two tariffs share ISSOPRICELIST='" + direction + "'; the default flag is only"
+          + " unambiguous with one tariff per direction",
+          nameByDirection.put(direction, name) == null);
+      assertEquals("tariff '" + name + "' must ship marked as default, so the Product window's"
+          + " Price tab can resolve it (ProductPriceHandler -> priceListVersion$default)",
+          "Y", childText(tariff, "ISDEFAULT"));
+    }
+
+    assertEquals("the sales tariff is missing", "Tarifa de venta principal",
+        nameByDirection.get("Y"));
+    assertEquals("the purchase tariff is missing", "Tarifa de compra principal",
+        nameByDirection.get("N"));
+  }
+
   private void assertEqualNumbers(String message, String expected, String actual) {
     assertEquals(message + " (was " + actual + ")", 0,
         new BigDecimal(expected).compareTo(new BigDecimal(actual.trim())));

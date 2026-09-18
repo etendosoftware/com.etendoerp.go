@@ -181,14 +181,23 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
     applyCombination(row::setFINOutIntransitAcct, body, FIELD_IN_TRANSIT_OUT_ACCT, ledger);
     applyCombination(row::setWithdrawalAccount, body, FIELD_WITHDRAWAL_ACCT, ledger);
     applyCombination(row::setClearedPaymentAccountOUT, body, FIELD_CLEARED_PAYMENT_ACCT_OUT, ledger);
-    // WARNING (ETP-4530): this flips EnableBankStatement to Y on EVERY Contabilidad save, not just
-    // the fields this tab visually presents — Classic's bank-statement accounting engine only
-    // reads this row's accounting fields when this flag is Y, so without it the save would have
-    // no observable effect in Classic. The flag itself is NOT exposed as an editable field here
-    // (out of scope for this ticket), so a user who later opens the equivalent Classic window will
-    // find it pre-checked without having touched it directly — see financial-account.md, "Not
-    // implemented yet", for the full note.
-    row.setEnablebankstatement(true);
+    // ETP-4530 set this to Y on EVERY Contabilidad save so Classic's bank-statement accounting
+    // engine would read the row at all. ETP-5305 narrowed it to the only case where it is both
+    // legal and useful, because forcing it unconditionally had become purely destructive:
+    //
+    //   - DB: `fin_finacc_acct_bsconfig_check` rejects EnableBankStatement='Y' when either
+    //     FIN_Asset_Acct or FIN_Transitory_Acct is null, so the flush failed with a 500.
+    //   - Classic: DocFINBankStatement.getDocumentConfirmation requires the flag AND both of
+    //     those accounts, so setting the flag alone enables exactly nothing anyway.
+    //
+    // ETP-4872 retired that pair from this handler and nothing else writes it, so in practice the
+    // flag now stays as it is — which matches reality: bank-statement posting was never actually
+    // enabled through this tab. The guard reads the stored row rather than the request because the
+    // pair is not part of this entity's field set. If the pair is ever re-exposed, this starts
+    // firing again on its own. See financial-account.md for the full note.
+    if (row.getFINAssetAcct() != null && row.getFINTransitoryAcct() != null) {
+      row.setEnablebankstatement(true);
+    }
     OBDal.getInstance().save(row);
     OBDal.getInstance().flush();
 
@@ -201,13 +210,27 @@ public class FinancialAccountAccountingHandler implements NeoHandler {
    * a per-account-type partial form never accidentally nulls out fields it doesn't render); a
    * field present with a null/blank value explicitly clears it. No field is required — see the
    * class Javadoc above.
+   *
+   * <p>The {@code isNull} check is load-bearing, not defensive (ETP-5305): for a key whose JSON
+   * value is {@code null}, Jettison stores {@code JSONObject.NULL}, and {@code optString(key,
+   * null)} returns that sentinel's {@code toString()} — the literal 4-character string
+   * {@code "null"} — rather than a Java {@code null}. Without this guard such a field was routed
+   * to {@link #resolveCombination}, which found no record with id {@code "null"} and failed the
+   * whole save with {@code "Accounting combination not found: null"}. That made the Contabilidad
+   * tab unsaveable for EVERY account, since {@code useFinancialAccountAccounting.js} serialises
+   * all nine keys on every save and defaults each to {@code null}. Note {@code isNull} is also
+   * {@code true} for an absent key, so it must stay behind the {@code has} guard above — swapping
+   * the two would turn "leave untouched" into "clear".
+   *
+   * <p>Same root cause, and same fix, as {@code FinancialAccountCountrySupport.bodyString} on the
+   * sibling tab of this window.
    */
   private void applyCombination(java.util.function.Consumer<AccountingCombination> setter,
       JSONObject body, String field, AcctSchema ledger) {
     if (!body.has(field)) {
       return;
     }
-    String id = StringUtils.trimToNull(body.optString(field, null));
+    String id = body.isNull(field) ? null : StringUtils.trimToNull(body.optString(field, null));
     setter.accept(id != null ? resolveCombination(id, ledger) : null);
   }
 

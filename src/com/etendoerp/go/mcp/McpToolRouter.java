@@ -164,6 +164,9 @@ public class McpToolRouter {
             return handleGenerateAmortizationPlan(arguments);
           case McpConstants.TOOL_NEO_WIDGET:
             return McpWidgetHandler.handle(arguments);
+          // B3: addresses no spec and touches no business data — it only reports on the API itself.
+          case McpConstants.TOOL_NEO_FEEDBACK:
+            return McpFeedbackTool.handle(arguments);
           case McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD:
             return imageToolResult(McpImageTools.requestUpload(arguments));
           case McpConstants.TOOL_NEO_UPLOAD_IMAGE:
@@ -203,7 +206,8 @@ public class McpToolRouter {
         McpArgumentUtils.optionalString(arguments, "topK"),
         McpArgumentUtils.optionalString(arguments, "minScore"),
         McpArgumentUtils.optionalString(arguments, "maxScore"), null);
-    String body = response.getBody() == null ? "{}" : response.getBody().toString();
+    // ETP-5306: the JSONObject overloads, so the body is sanitised before it is rendered.
+    JSONObject body = response.getBody();
     return response.getHttpStatus() >= 400 ? wrapAsErrorContent(body) : wrapAsTextContent(body);
   }
 
@@ -252,7 +256,10 @@ public class McpToolRouter {
       if (StringUtils.isBlank(body)) {
         return wrapAsTextContent("No documentation found for topic '" + topic + "'.");
       }
-      return wrapAsTextContent(body);
+      // ETP-5306: the recipe surface states the record-reference format too, for an agent that
+      // came here without reading neo_schema. One constant, declared once per response, instead
+      // of a `$ref` field repeated on every row.
+      return wrapAsTextContent(McpConstants.RECORD_REF_NOTE + "\n\n" + body);
     } catch (Exception e) {
       log.error("Error fetching docs for topic '{}'", topic, e);
       return wrapAsErrorContent("Error fetching docs: " + e.getMessage());
@@ -330,7 +337,7 @@ public class McpToolRouter {
     if (app != null) {
       result.put(McpRecordUrls.KEY_APP, app);
     }
-    return wrapAsTextContent(result.toString(2));
+    return wrapAsTextContent(result);
   }
 
   // ── neo_list ──────────────────────────────────────────────────────────
@@ -391,7 +398,7 @@ public class McpToolRouter {
     // Check for errors
     JSONObject error = McpWriteRequestSupport.checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_READING);
     if (error != null) {
-      return wrapAsErrorContent(error.toString(2));
+      return wrapAsErrorContent(error);
     }
 
     // Apply field filtering
@@ -405,7 +412,7 @@ public class McpToolRouter {
     // IMP-5 clause (iii): flatten last, so projection and field filtering keep operating on the
     // wrapped shape core produced and only the body handed to the agent changes.
     return wrapAsTextContent(
-        McpToolRouterSupport.flattenCoreResponse(responseJson).toString(2));
+        McpToolRouterSupport.flattenCoreResponse(responseJson));
   }
 
   // ── neo_get ───────────────────────────────────────────────────────────
@@ -435,7 +442,7 @@ public class McpToolRouter {
 
     JSONObject error = McpWriteRequestSupport.checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_READING);
     if (error != null) {
-      return wrapAsErrorContent(error.toString(2));
+      return wrapAsErrorContent(error);
     }
 
     // IMP-5: a get-by-id that matched nothing comes back as {data:[], status:0} — a
@@ -443,7 +450,7 @@ public class McpToolRouter {
     // not-found so the agent can tell "not found" from "empty match" and self-correct.
     if (McpToolRouterSupport.isEmptySuccessResult(responseJson)) {
       return wrapAsErrorContent(
-          McpToolRouterSupport.buildNotFoundError(specName, entityName, recordId).toString(2));
+          McpToolRouterSupport.buildNotFoundError(specName, entityName, recordId));
     }
 
     fieldFilter.filterGetResponse(responseJson);
@@ -458,7 +465,7 @@ public class McpToolRouter {
     // ETP-5200: the link the agent hands the user. Header records only — a line has no app page.
     McpRecordUrls.addRecordUrl(flat, specName, recordId,
         McpToolRouterSupport.isPrimaryTab(adTab));
-    return wrapAsTextContent(flat.toString(2));
+    return wrapAsTextContent(flat);
   }
 
   // ── neo_create ────────────────────────────────────────────────────────
@@ -502,7 +509,7 @@ public class McpToolRouter {
     // cannot search — a dead end. Here it gets told which tool produces a valid id instead.
     JSONObject imageError = McpImageFieldSupport.validateImageFields(filteredBody, adTab, dalEntity);
     if (imageError != null) {
-      return wrapAsErrorContent(imageError.toString(2));
+      return wrapAsErrorContent(imageError);
     }
 
     // IMP-4: resolve FK-by-name search strings (e.g. businessPartner:"Acme Corp") into real
@@ -511,7 +518,7 @@ public class McpToolRouter {
     JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody, dalEntity, adTab,
         McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log);
     if (fkError != null) {
-      return wrapAsErrorContent(fkError.toString(2));
+      return wrapAsErrorContent(fkError);
     }
 
     // Snapshot user-provided fields BEFORE callout cascade can overwrite them.
@@ -583,7 +590,7 @@ public class McpToolRouter {
     // the agent cannot act on.
     JSONArray invalidDates = McpWriteRequestSupport.coerceFieldTypes(filteredBody, dalEntity, userProvided, log);
     if (invalidDates.length() > 0) {
-      return wrapAsErrorContent(McpWriteRequestSupport.buildInvalidDatesError(invalidDates).toString(2));
+      return wrapAsErrorContent(McpWriteRequestSupport.buildInvalidDatesError(invalidDates));
     }
 
     // Validate mandatory fields before insert — return structured error matching neo_schema contract
@@ -599,7 +606,7 @@ public class McpToolRouter {
       errorObj.put("missingFields", missingFields);
       errorObj.put("hint", "Provide these fields in the request, or use neo_selectors to find valid values for foreignKey fields");
       errorObj.put(McpConstants.KEY_SEE_ALSO, McpConstants.SEE_ALSO_WRITING);
-      return wrapAsErrorContent(errorObj.toString(2));
+      return wrapAsErrorContent(errorObj);
     }
 
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path): it may
@@ -623,7 +630,7 @@ public class McpToolRouter {
     JSONObject error = McpWriteRequestSupport.checkJsonServiceError(responseJson,
         McpConstants.SEE_ALSO_WRITING, NeoCrudHelper.snapshotBodyFields(userProvided));
     if (error != null) {
-      return wrapAsErrorContent(error.toString(2));
+      return wrapAsErrorContent(error);
     }
 
     fieldFilter.filterGetResponse(responseJson);
@@ -639,7 +646,7 @@ public class McpToolRouter {
     // ETP-5200: the id only exists in the response here, so it is read back from the flat body.
     McpRecordUrls.addRecordUrl(flat, specName, null,
         McpToolRouterSupport.isPrimaryTab(adTab));
-    return wrapAsTextContent(flat.toString(2));
+    return wrapAsTextContent(flat);
   }
 
   // ── neo_update ────────────────────────────────────────────────────────
@@ -689,13 +696,13 @@ public class McpToolRouter {
     // ETP-5184: same pre-FK image guard as handleCreate, and for the same reason — see there.
     JSONObject imageError = McpImageFieldSupport.validateImageFields(filteredBody, adTab, dalEntity);
     if (imageError != null) {
-      return wrapAsErrorContent(imageError.toString(2));
+      return wrapAsErrorContent(imageError);
     }
 
     JSONObject fkError = McpFkResolver.resolveFkNames(filteredBody, dalEntity, adTab,
         McpSelectorContextHelper.buildSelectorContextParams(null, adTab), log);
     if (fkError != null) {
-      return wrapAsErrorContent(fkError.toString(2));
+      return wrapAsErrorContent(fkError);
     }
 
     // ETP-4793 / IMP-16: the same coercion pass handleCreate runs, and for the same reason. Until
@@ -709,7 +716,7 @@ public class McpToolRouter {
     // `null` says so directly rather than passing a copy of the body to be compared against itself.
     JSONArray invalidDates = McpWriteRequestSupport.coerceFieldTypes(filteredBody, dalEntity, null, log);
     if (invalidDates.length() > 0) {
-      return wrapAsErrorContent(McpWriteRequestSupport.buildInvalidDatesError(invalidDates).toString(2));
+      return wrapAsErrorContent(McpWriteRequestSupport.buildInvalidDatesError(invalidDates));
     }
 
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path).
@@ -723,8 +730,12 @@ public class McpToolRouter {
     // ETP-5073 / DOC-04: the conflict is detected before the write, for the same reason the REST
     // path does it there — core's refusal reaches us as translated prose with nothing stable to
     // key on. See NeoRecordVersion.
-    if (NeoRecordVersion.isStale(dalEntityName, recordId, updated)) {
-      return wrapAsErrorContent(McpWriteRequestSupport.buildStaleRecordError().toString(2));
+    // Named requestRoute, not route: this class already has a route(..) method and a local of
+    // that name would read like it.
+    String requestRoute = NeoRecordVersion.routeOf(HTTP_METHOD_PUT, specName, entityName,
+        recordId);
+    if (NeoRecordVersion.isStale(dalEntityName, recordId, updated, requestRoute)) {
+      return wrapAsErrorContent(McpWriteRequestSupport.buildStaleRecordError());
     }
 
     // ETP-5073 / DOC-04: injected here, deliberately last, so it never passes through the type
@@ -744,7 +755,7 @@ public class McpToolRouter {
     JSONObject error = McpWriteRequestSupport.checkJsonServiceError(responseJson,
         McpConstants.SEE_ALSO_WRITING, updateUserProvidedFields);
     if (error != null) {
-      return wrapAsErrorContent(error.toString(2));
+      return wrapAsErrorContent(error);
     }
 
     fieldFilter.filterGetResponse(responseJson);
@@ -757,7 +768,7 @@ public class McpToolRouter {
     // IMP-5 clause (iii): the post-hook still sees core's wrapped body, for parity with the REST
     // CRUD path a handler was written against; only the body handed to the agent is flattened.
     return wrapAsTextContent(
-        McpToolRouterSupport.flattenCoreResponse(responseJson).toString(2));
+        McpToolRouterSupport.flattenCoreResponse(responseJson));
   }
 
   // ── neo_delete ────────────────────────────────────────────────────────
@@ -797,13 +808,13 @@ public class McpToolRouter {
 
     JSONObject error = McpWriteRequestSupport.checkJsonServiceError(responseJson, McpConstants.SEE_ALSO_WRITING);
     if (error != null) {
-      return wrapAsErrorContent(error.toString(2));
+      return wrapAsErrorContent(error);
     }
 
     JSONObject deleteResult = new JSONObject();
     deleteResult.put("deleted", true);
     deleteResult.put("id", recordId);
-    return wrapAsTextContent(deleteResult.toString(2));
+    return wrapAsTextContent(deleteResult);
   }
 
   // ── neo_selectors ─────────────────────────────────────────────────────
@@ -1009,7 +1020,7 @@ public class McpToolRouter {
     // IMP-6: view:"actions" collapses the dump down to the callable buttons/processes.
     if (McpActionsView.isActionsView(view)) {
       return wrapAsTextContent(
-          McpActionsView.buildResponse(specName, entityName, fieldsArray).toString(2));
+          McpActionsView.buildResponse(specName, entityName, fieldsArray));
     }
     // IMP-12: view:"create" keeps only what the agent may actually send, split into
     // required/optional. 157 fields / 62 kB on sales-invoice/header collapses to the handful that
@@ -1023,8 +1034,7 @@ public class McpToolRouter {
       return wrapAsTextContent(McpSchemaCreateView
           .buildResponse(specName, entityName, fieldsArray,
               serverDefaultedNames(specName, entityName, adTab, sfEntity), isChildEntity,
-              entityAgentPrompt)
-          .toString(2));
+              entityAgentPrompt));
     }
     // IMP-12: fields:[…] — an explicit whitelist, for an agent that already knows what it wants.
     // Unmatched names are echoed back rather than dropped in silence (cf. IMP-18).
@@ -1116,9 +1126,12 @@ public class McpToolRouter {
         + "Use neo_selectors for FK fields with hasSelector=true. "
         + "Fields with businessCritical=true carry core business data (amounts, categories, "
         + "key dates) — you MUST confirm these values with the user before creating or "
-        + "modifying records.");
+        + "modifying records. "
+        // ETP-5306: stated here because neo_schema is where an agent learns what a row looks
+        // like, and the prebuilt reference field it used to read no longer exists.
+        + McpConstants.RECORD_REF_NOTE);
 
-    return wrapAsTextContent(entitySchema.toString(2));
+    return wrapAsTextContent(entitySchema);
   }
 
   /**
@@ -1266,7 +1279,7 @@ public class McpToolRouter {
         // IMP-5 clause (i): reported through the same outcome envelope as a failure inside
         // executeBatch, and as text rather than error content for the same reason — one condition
         // must not have two shapes depending on which funnel caught it.
-        return wrapAsTextContent(fkError.toString(2));
+        return wrapAsTextContent(fkError);
       }
       JSONObject result = BatchService.forBatchOnly().executeBatch(operations);
       if (!result.optBoolean("committed", false)) {
@@ -1274,7 +1287,7 @@ public class McpToolRouter {
         // error code instead of the raw DAL sub-response BatchService forwards to REST callers.
         McpToolRouterSupport.toMcpBatchFailure(result);
       }
-      return wrapAsTextContent(result.toString(2));
+      return wrapAsTextContent(result);
     } catch (SecurityException e) {
       log.warn("neo_batch access denied", e);
       return wrapAsErrorContent(e.getMessage());
@@ -1447,7 +1460,7 @@ public class McpToolRouter {
         actionResult.put(McpConstants.KEY_PROCESS_MESSAGE,
             "Request failed with HTTP status " + neoResponse.getHttpStatus());
       }
-      return wrapAsErrorContent(actionResult.toString(2));
+      return wrapAsErrorContent(actionResult);
     }
 
     // Post-hook only on the success path, mirroring handleCreate/handleUpdate, which both
@@ -1457,7 +1470,7 @@ public class McpToolRouter {
       return postHookResult;
     }
 
-    return wrapAsTextContent(actionResult.toString(2));
+    return wrapAsTextContent(actionResult);
   }
 
   // ── neo_generate_amortization_plan ────────────────────────────────────
@@ -1476,11 +1489,13 @@ public class McpToolRouter {
       return wrapAsErrorContent("Internal error: service returned a null response");
     }
     if (response.getHttpStatus() >= 400) {
-      return wrapAsErrorContent(
-          response.getBody() != null ? response.getBody().toString() : "Error generating amortization plan");
+      // ETP-5306: the body goes through the JSONObject overload so it is sanitised like every
+      // other tool result; only the no-body fallback is prose.
+      return response.getBody() != null
+          ? wrapAsErrorContent(response.getBody())
+          : wrapAsErrorContent("Error generating amortization plan");
     }
-    return wrapAsTextContent(
-        response.getBody() != null ? response.getBody().toString(2) : "{}");
+    return wrapAsTextContent(response.getBody());
   }
 
   // ── Process execution ─────────────────────────────────────────────────
@@ -1534,7 +1549,7 @@ public class McpToolRouter {
     if (handler == null) {
       // Non-callable report: identical message to neo_discover. Not an error path.
       return wrapAsTextContent(
-          NeoReportCallability.buildNotConfiguredResponse(specName).toString(2));
+          NeoReportCallability.buildNotConfiguredResponse(specName));
     }
 
     // The handler's own declaration is the authority on what it accepts, and it is the same
@@ -1546,7 +1561,7 @@ public class McpToolRouter {
         reportEntity.getJavaQualifier());
     if (contract.isEmpty()) {
       return wrapAsTextContent(
-          NeoReportCallability.buildNotConfiguredResponse(specName).toString(2));
+          NeoReportCallability.buildNotConfiguredResponse(specName));
     }
 
     JSONObject parameters = args != null ? args.optJSONObject(McpConstants.PARAM_PARAMETERS) : null;
@@ -1557,7 +1572,7 @@ public class McpToolRouter {
     JSONObject contractError = validateReportRequest(contract.get(), parameters,
         args != null ? args.optString(McpConstants.PARAM_FORMAT, null) : null);
     if (contractError != null) {
-      return wrapAsErrorContent(contractError.toString(2));
+      return wrapAsErrorContent(contractError);
     }
 
     NeoContext ctx = NeoContext.builder()
@@ -1571,7 +1586,7 @@ public class McpToolRouter {
     NeoResponse neoResponse = handler.handle(ctx);
     if (neoResponse == null) {
       return wrapAsTextContent(
-          NeoReportCallability.buildNotConfiguredResponse(specName).toString(2));
+          NeoReportCallability.buildNotConfiguredResponse(specName));
     }
     return McpHookExecutor.neoResponseToMcpResult(neoResponse);
   }
@@ -1687,7 +1702,52 @@ public class McpToolRouter {
   // ── MCP content formatting ────────────────────────────────────────────
 
   /**
+   * Wrap a JSON body as MCP tool result content.
+   *
+   * <p>ETP-5306: this overload, not {@link #wrapAsTextContent(String)}, is what every tool that
+   * answers with JSON must call. It is the single egress where {@link McpResponseSanitizer} removes
+   * the keys an MCP client may not receive — today {@code $ref}, which Gemini treats as a pointer
+   * into {@code function_response.parts} and which made it reject every response carrying a record.
+   * Rendering the body here rather than at the call site is what makes that guarantee total: a
+   * caller that hands over the object cannot forget the sanitisation, and the object is sanitised
+   * before it is serialised, so no number is re-parsed on the way out (see the class javadoc of
+   * {@link McpResponseSanitizer}).</p>
+   *
+   * @param body the tool-result body ({@code null} renders as an empty object)
+   * @return MCP text content
+   */
+  static JSONObject wrapAsTextContent(JSONObject body) {
+    try {
+      return wrapAsTextContent(McpResponseSanitizer.render(body));
+    } catch (JSONException e) {
+      throw new McpToolException("Error building MCP content", e);
+    }
+  }
+
+  /**
+   * Wrap a JSON error body as MCP tool result content with the {@code isError} flag.
+   *
+   * <p>ETP-5306: the error counterpart of {@link #wrapAsTextContent(JSONObject)}, sanitised for the
+   * same reason — an error envelope can echo a record (a stale-record conflict, a handler's own
+   * body), and a single surviving {@code $ref} rejects the whole response.</p>
+   *
+   * @param body the error body ({@code null} renders as an empty object)
+   * @return MCP error content
+   */
+  static JSONObject wrapAsErrorContent(JSONObject body) {
+    try {
+      return wrapAsErrorContent(McpResponseSanitizer.render(body));
+    } catch (JSONException e) {
+      throw new McpToolException("Error building MCP error content", e);
+    }
+  }
+
+  /**
    * Wrap a text string as MCP tool result content.
+   *
+   * <p>For bodies that are genuinely text (the {@code docs} passthrough, a prose message). Anything
+   * that is a JSON document must go through {@link #wrapAsTextContent(JSONObject)} instead, which
+   * is where response sanitisation happens.</p>
    */
   static JSONObject wrapAsTextContent(String text) {
     try {

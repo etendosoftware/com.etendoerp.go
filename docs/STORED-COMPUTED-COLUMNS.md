@@ -167,18 +167,26 @@ Two canonical patterns:
 **Pattern 1 — single, immutable target** (the FK to the target never changes on update):
 
 ```sql
-SELECT COALESCE(NEW.c_order_id, OLD.c_order_id)
+SELECT COALESCE(NEW.c_order_id, OLD.c_order_id) FROM dual
 -- NEW on insert/update, OLD on delete
 ```
+
+> **`FROM dual` is mandatory, not decoration.** A resolver with no `FROM` clause is valid
+> PostgreSQL but not valid Oracle, so the generator rejects it — and it rejects it as a
+> `log.warn`, NOT as a build error: `update.database` finishes green, the dependency is silently
+> skipped, and the column is left with no enqueue trigger. It then keeps whatever value it was
+> last given and never refreshes again, which looks exactly like a working column. Etendo ships
+> `public.dual` on PostgreSQL, so the clause costs nothing. This is how ETP-5216 shipped a
+> dependency that generated no trigger.
 
 **Pattern 2 — reparenting** (the FK *can* be reassigned on update — a line moved to another order).
 A single update is then a **two-target** event: the *old* parent's aggregate is now stale (a child
 left) and the *new* parent's is stale (a child arrived). Both must recompute:
 
 ```sql
-SELECT NEW.c_order_id WHERE NEW.c_order_id IS NOT NULL
+SELECT NEW.c_order_id FROM dual WHERE NEW.c_order_id IS NOT NULL
 UNION
-SELECT OLD.c_order_id WHERE OLD.c_order_id IS NOT NULL
+SELECT OLD.c_order_id FROM dual WHERE OLD.c_order_id IS NOT NULL
 ```
 
 - `UNION` (not `UNION ALL`) collapses the two rows into one when `NEW = OLD` (an ordinary update
@@ -188,6 +196,32 @@ SELECT OLD.c_order_id WHERE OLD.c_order_id IS NOT NULL
 
 > **Rule of thumb:** immutable mapping → `COALESCE`. Walkable/reassignable FK → `UNION` form —
 > otherwise every reparenting update corrupts one aggregate.
+
+**Pattern 3 — configuration fan-out** (the source is a *config* row that governs many targets, so
+one change invalidates all of them):
+
+```sql
+SELECT i.c_invoice_id FROM c_invoice i
+ WHERE i.ad_client_id = COALESCE(NEW.ad_client_id, OLD.ad_client_id)
+   AND i.ad_org_id = COALESCE(NEW.ad_org_id, OLD.ad_org_id)
+```
+
+- **No `FROM dual` here.** The rule above applies to resolvers with *no* `FROM` clause; this one
+  selects from a real table and is portable as written.
+- **Filter on the columns of an existing index**, not only the one you conceptually need. Adding
+  `ad_client_id` lets this enter through `c_invoice_client_org_date_doc` instead of scanning
+  `c_invoice` on every config save.
+- **Size the blast radius before choosing this pattern.** With `Refresh_Mode = 'S'` the whole
+  fan-out recomputes *inside the transaction that saves the config row*, so the user waits for it
+  and a single failing row blocks the save. It is the right trade when the config changes rarely
+  (an adoption date, a fiscal regime) and wrong when it is edited routinely.
+- The alternative — omitting the dependency and relying on `ad_scd_rebuild` — is worse than it
+  looks: nothing detects the omission. `ad_scd_check` reports 0 because the engine was never told
+  those rows are stale, so the column reads clean while being wrong.
+
+Real example: `EM_ETGO_Tbai_Status` depends on `TBAI_Config` this way (ETP-5216), so an
+organization that adopts TicketBAI later has its existing invoices reclassified automatically
+instead of keeping a stale "does not apply" forever.
 
 ---
 
@@ -218,9 +252,14 @@ gatekeeper:
 - **`AD_Field.ReadOnlyLogic = 'Y'`** — propagated automatically by a Gradle/ModuleScript step
   (`EnforceStoredComputedReadOnly`), a callout at field-creation time, and an `@OBDALEventHandler`
   (`ADFieldStoredComputedHandler`) on every save, including programmatic ones.
-- **Schema Forge pipeline** — `resolve-curated.js` forces `readOnly` regardless of `decisions.json`;
-  `push-to-neo.js` sets `Is_ReadOnly = true` in `ETGO_SF_FIELD`; the pipeline validator blocks any
-  contract field backed by a stored computed column that is not read-only.
+- **Schema Forge pipeline — NOT enforced today.** An earlier revision of this document claimed
+  `resolve-curated.js` forces `readOnly`, `push-to-neo.js` sets `Is_ReadOnly` in `ETGO_SF_FIELD`,
+  and the pipeline validator blocks a non-read-only contract field backed by a stored computed
+  column. None of that exists in `@etendosoftware/schema-forge-cli` (verified at 0.3.47: grepping
+  `storedComputed` / `isStoredComputed` in those three files returns nothing). Until it is
+  implemented, `"visibility": "readOnly"` must be set by hand in the window's `decisions.json` — it
+  is the only thing between the pipeline and an editable input bound to a column the DAL maps
+  `insert="false" update="false"`.
 - **Generated React UI** — stored computed fields are emitted display-only, never as an input.
 
 ---
@@ -265,11 +304,18 @@ One `AD_COLUMN_COMP_DEPENDENCY` row per source table you must react to:
 |-------|---------|-------|
 | `Source_Table_ID` | `C_OrderLine` | The table whose changes trigger a refresh |
 | `Insert_Event` / `Update_Event` / `Delete_Event` | Y / Y / Y | Which events fire |
-| `Watched_Columns` | `LineNetAmt` (+ `QtyOrdered`) | Required for UPDATE; recompute only if one changed |
 | `Target_ID_Resolver_SQL` | `SELECT COALESCE(NEW.c_order_id, OLD.c_order_id)` | Maps source row → target id(s); must never return NULL |
 | `SeqNo` | 10 | Row ordering within the column's dependency set |
 
 Exactly **one** of `Target_ID_Resolver_SQL` / `Target_Link_Column_ID` must be set (rule V11).
+
+**Watched columns are a child table, not a field.** `AD_COLUMN_COMP_DEPENDENCY` has no
+`Watched_Columns` column — an earlier revision of this document presented one, and it does not
+exist. Add one row of **`AD_COMPDEP_WATCHED_COL`** (`AD_COLUMN_COMP_DEPENDENCY_ID` + `AD_COLUMN_ID`
++ `SeqNo` + `AD_MODULE_ID`) per watched column; see
+`src-db/database/sourcedata/AD_COMPDEP_WATCHED_COL.xml` for the real records. At least one is
+required for any dependency with `Update_Event = 'Y'` (rule V9), and an UPDATE that touches no
+watched column enqueues nothing.
 
 ### Step 4 — Deploy
 

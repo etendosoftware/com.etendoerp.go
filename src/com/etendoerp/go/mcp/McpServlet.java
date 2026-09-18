@@ -28,6 +28,7 @@ import javax.servlet.http.HttpServlet;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -68,6 +69,8 @@ public class McpServlet extends HttpServlet {
   private static final String SERVER_VERSION = "1.0.0";
 
   private static final String CONTENT_TYPE_JSON = "application/json;charset=UTF-8";
+  /** The only JSON-RPC method that produces a telemetry row (B1). */
+  private static final String TOOLS_CALL = "tools/call";
   // Browser sessions use the validated legacy JWT path. RBAC still filters the
   // catalog and authorizes each operation by the user's role and window access.
   private static final String LEGACY_JWT_FALLBACK_SCOPES =
@@ -111,16 +114,27 @@ public class McpServlet extends HttpServlet {
     response.setContentType(CONTENT_TYPE_JSON);
 
     String body = readRequestBody(request);
+    // Telemetry only (B1): started before parsing so the measured duration is the whole call, and
+    // read here because nothing downstream sees the raw request.
+    long startedAtNanos = System.nanoTime();
+    JSONObject callParams = null;
+    String toolName = null;
 
+    McpUsageTelemetry.setCurrentSessionKey(
+        StringUtils.trimToNull(request.getHeader(McpUsageTelemetry.HEADER_SESSION_ID)));
     try {
       JSONObject rpcMessage = new JSONObject(body);
       String method = rpcMessage.optString("method", "");
       Object id = rpcMessage.opt("id");
+      callParams = rpcMessage.optJSONObject("params");
+      toolName = TOOLS_CALL.equals(method) && callParams != null
+          ? callParams.optString("name", null)
+          : null;
 
       log.debug("MCP request: method={}, id={}", method, id);
 
       // Dispatch the method
-      JSONObject result = dispatchMethod(identity, method, rpcMessage.optJSONObject("params"));
+      JSONObject result = dispatchMethod(identity, method, callParams, response);
 
       // Notifications (no id) don't get a response body
       if (id == null) {
@@ -134,8 +148,14 @@ public class McpServlet extends HttpServlet {
       rpcResponse.put("id", id);
       rpcResponse.put("result", result != null ? result : new JSONObject());
 
+      String rendered = rpcResponse.toString();
       response.setStatus(HttpServletResponse.SC_OK);
-      response.getWriter().write(rpcResponse.toString());
+      response.getWriter().write(rendered);
+
+      // AFTER the business transaction has been committed and closed by McpSessionManager, and
+      // after the caller already has its answer: nothing below can affect either.
+      recordToolCall(identity, new McpCallObservation(request, body, rendered, startedAtNanos),
+          toolName, callParams, result, null);
 
     } catch (Exception e) {
       log.error("Error processing MCP message: {}", e.getMessage(), e);
@@ -145,13 +165,116 @@ public class McpServlet extends HttpServlet {
         int errorCode = (e instanceof McpMethodNotFoundException) ? -32601 : -32603;
         JSONObject errorResponse = buildJsonRpcError(rpcId, errorCode, e.getMessage());
 
+        String rendered = errorResponse.toString();
         response.setStatus(HttpServletResponse.SC_OK);
-        response.getWriter().write(errorResponse.toString());
+        response.getWriter().write(rendered);
+
+        recordToolCall(identity, new McpCallObservation(request, body, rendered, startedAtNanos),
+            toolName, callParams, null, McpConstants.ERROR_SERVER);
       } catch (Exception ex) {
         response.setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
         response.getWriter().write("{\"error\":\"Internal server error\"}");
       }
+    } finally {
+      // Servlet threads are pooled: a leaked session key would attribute one client's calls to
+      // another client's session.
+      McpUsageTelemetry.clearCurrentSessionKey();
     }
+  }
+
+  // ── Telemetry (Track B1) ────────────────────────────────────────────────
+
+  /**
+   * Stop the telemetry writer on undeploy or container shutdown, so whatever is still queued is
+   * reported rather than lost silently (see {@link McpUsageLogger#shutdown()}).
+   */
+  @Override
+  public void destroy() {
+    try {
+      McpUsageLogger.shutdown();
+    } catch (Exception e) {
+      log.debug("Could not stop MCP telemetry on servlet destroy.", e);
+    }
+    super.destroy();
+  }
+  // ── Telemetry (Track B1) ────────────────────────────────────────────────
+
+  /**
+   * Hand one {@code tools/call} to {@link McpUsageLogger}, which writes it on its own thread, on its
+   * own connection, in its own transaction.
+   * <p>
+   * Called only once the response has been written, so the user's answer is already out and the
+   * business transaction is already committed and closed. The whole body is wrapped in a
+   * {@code catch (Throwable)} for the same reason the logger is: a defect in telemetry must not turn
+   * a successful tool call into a failed HTTP request.
+   *
+   * @param forcedErrorCode the canonical code to record when the call blew up before producing a
+   *     result envelope; null when {@code result} carries its own outcome
+   */
+  private void recordToolCall(AuthIdentity identity, McpCallObservation call, String toolName,
+      JSONObject params, JSONObject result, String forcedErrorCode) {
+    try {
+      if (StringUtils.isBlank(toolName) || !McpUsageLogger.isEnabled()) {
+        return;
+      }
+      JSONObject arguments = params != null ? params.optJSONObject("arguments") : null;
+      String sessionKey = call.sessionKey();
+      McpUsageTelemetry.ClientInfo client = McpUsageTelemetry.clientInfo(sessionKey);
+
+      boolean failed = forcedErrorCode != null || McpUsageTelemetry.isError(result);
+      String errorCode = errorCodeToRecord(forcedErrorCode, failed, result);
+
+      // B3/D31: a neo_feedback call IS a tool call, so it produces exactly ONE row — this one —
+      // discriminated by row_type and carrying the report. It therefore inherits the session,
+      // tenant, timestamp and client columns, and lands in the same sequence as the calls that
+      // provoked it. The payload is stored only when the tool accepted the verdict; a rejected or
+      // rate-limited call is an ordinary error row with nothing in Payload.
+      boolean isFeedback = McpConstants.TOOL_NEO_FEEDBACK.equals(toolName);
+      String payload = (isFeedback && !failed) ? McpFeedbackTool.payloadFor(arguments) : null;
+
+      McpUsageLogger.enqueue(McpUsageRow.builder()
+          .clientId(identity != null ? identity.clientId : null)
+          .orgId(identity != null ? identity.orgId : null)
+          .userId(identity != null ? identity.userId : null)
+          .sessionKey(sessionKey)
+          .toolName(toolName)
+          .verb(McpUsageTelemetry.verbFor(toolName))
+          .targetEntity(McpUsageTelemetry.targetEntityFor(arguments))
+          .fieldsTouched(McpUsageTelemetry.fieldsTouched(arguments))
+          .outcome(failed ? McpUsageRow.OUTCOME_ERROR : McpUsageRow.OUTCOME_OK)
+          .errorCode(errorCode)
+          .durationMs(call.durationMs())
+          .reqBytes(call.reqBytes())
+          .respBytes(call.respBytes())
+          .clientName(client.getName())
+          .clientVersion(client.getVersion())
+          .rowType(isFeedback ? McpUsageRow.ROW_TYPE_FEEDBACK : McpUsageRow.ROW_TYPE_TOOL_CALL)
+          .payload(payload)
+          .build());
+    } catch (Throwable t) { // NOSONAR — telemetry never escalates to the caller.
+      log.debug("Could not record MCP usage for tool '{}'.", toolName, t);
+    }
+  }
+
+  /**
+   * The canonical error code to store on the row, or null when the call succeeded.
+   *
+   * <p>Its own method rather than a nested ternary (java:S3358): this expression decides whether a
+   * call is remembered as failed and under which code, so it is worth reading at a glance. The
+   * order matters — a {@code forcedErrorCode} is set when the call blew up <i>before</i> producing
+   * a result envelope, so there is no envelope to derive a code from and it wins outright.</p>
+   *
+   * @param forcedErrorCode the code imposed by the caller, or null to derive one
+   * @param failed          whether the call is being recorded as a failure
+   * @param result          the tool result envelope, which may carry its own code
+   * @return the code to store, or null for a successful call
+   */
+  private static String errorCodeToRecord(String forcedErrorCode, boolean failed,
+      JSONObject result) {
+    if (forcedErrorCode != null) {
+      return forcedErrorCode;
+    }
+    return failed ? McpUsageTelemetry.errorCodeFrom(result) : null;
   }
 
   // ── GET: Server info / health check ────────────────────────────────────
@@ -276,11 +399,11 @@ public class McpServlet extends HttpServlet {
   /**
    * Route a JSON-RPC method to its handler.
    */
-  private JSONObject dispatchMethod(AuthIdentity identity, String method, JSONObject params)
-      throws Exception {
+  private JSONObject dispatchMethod(AuthIdentity identity, String method, JSONObject params,
+      HttpServletResponse response) throws Exception {
     switch (method) {
       case "initialize":
-        return handleInitialize();
+        return handleInitialize(params, response);
       case "initialized":
       case "notifications/initialized":
         return null;
@@ -288,7 +411,7 @@ public class McpServlet extends HttpServlet {
         return new JSONObject();
       case "tools/list":
         return handleToolsList(identity);
-      case "tools/call":
+      case TOOLS_CALL:
         return handleToolsCall(identity, params);
       case "resources/list":
         return handleResourcesList(identity);
@@ -301,7 +424,24 @@ public class McpServlet extends HttpServlet {
 
   // ── Handler: initialize ─────────────────────────────────────────────────
 
-  private JSONObject handleInitialize() throws JSONException {
+  /**
+   * Answer the handshake and open a telemetry session.
+   * <p>
+   * The session key is published in the {@value McpUsageTelemetry#HEADER_SESSION_ID} response
+   * header, where the Streamable HTTP transport says it belongs; a spec-conformant client returns
+   * it on every later request, which is what lets a sequence of tool calls be read as one task and
+   * what carries {@code clientInfo} forward (B1). A client that ignores the header still works — it
+   * simply produces rows with no session key and no client name.
+   */
+  private JSONObject handleInitialize(JSONObject params, HttpServletResponse response)
+      throws JSONException {
+    try {
+      response.setHeader(McpUsageTelemetry.HEADER_SESSION_ID, McpUsageTelemetry.openSession(params));
+    } catch (Exception e) {
+      // Telemetry must never break the handshake.
+      log.debug("Could not open an MCP telemetry session.", e);
+    }
+
     JSONObject result = new JSONObject();
     result.put("protocolVersion", PROTOCOL_VERSION);
 

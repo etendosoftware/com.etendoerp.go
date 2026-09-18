@@ -1159,40 +1159,73 @@ public class Fiscal303BoxesHandlerTest {
     assertEquals("X", Fiscal303BoxesHandler.resolveDeclType("X"));
   }
 
-  /** Null tipo must fall back to "N". */
+  /**
+   * ETP-5187 hardening: a null tipo must be REJECTED, never silently resolved to "N" — the
+   * declaration type must always be explicit, never guessed.
+   */
   @Test
-  public void testResolveDeclType_nullFallsBackToN() {
-    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType(null));
+  public void testResolveDeclType_nullIsRejected() {
+    try {
+      Fiscal303BoxesHandler.resolveDeclType(null);
+      fail("Expected IllegalArgumentException for null tipo");
+    } catch (IllegalArgumentException e) {
+      assertTrue("Message must mention the missing/invalid declaration type",
+          e.getMessage().contains("declaration type"));
+    }
   }
 
-  /** Empty string must fall back to "N". */
+  /** ETP-5187 hardening: an empty string must be rejected, never silently resolved to "N". */
   @Test
-  public void testResolveDeclType_emptyFallsBackToN() {
-    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType(""));
-  }
-
-  /** Unknown code (old Spanish alias) must fall back to "N". */
-  @Test
-  public void testResolveDeclType_unknownAliasFallsBackToN() {
-    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("ingresar"));
-    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("compensar"));
-    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("devolver"));
+  public void testResolveDeclType_emptyIsRejected() {
+    try {
+      Fiscal303BoxesHandler.resolveDeclType("");
+      fail("Expected IllegalArgumentException for empty tipo");
+    } catch (IllegalArgumentException e) {
+      assertTrue("Message must mention the missing/invalid declaration type",
+          e.getMessage().contains("declaration type"));
+    }
   }
 
   /**
-   * A genuinely invented single-letter code (not among the 7 accepted AEAT letters) must still
-   * fall back to "N" — confirms the BLOCKER fix's widened whitelist ({@code D}/{@code X} added)
-   * did not accidentally loosen the fallback into a catch-all.
+   * ETP-5187 hardening: an unknown code (old Spanish alias) must be rejected, never silently
+   * mapped to "N".
    */
   @Test
-  public void testResolveDeclType_inventedLetterFallsBackToN() {
-    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("Z"));
-    assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("Q"));
+  public void testResolveDeclType_unknownAliasIsRejected() {
+    for (String alias : new String[]{"ingresar", "compensar", "devolver"}) {
+      try {
+        Fiscal303BoxesHandler.resolveDeclType(alias);
+        fail("Expected IllegalArgumentException for alias " + alias);
+      } catch (IllegalArgumentException e) {
+        // expected
+      }
+    }
   }
 
-  /** "N" itself must be treated as an unknown code and return "N" via the fallback path. */
+  /**
+   * ETP-5187 hardening: a genuinely invented single-letter code (not among the 8 accepted AEAT
+   * letters) must be rejected — confirms the accepted whitelist did not accidentally loosen into
+   * a catch-all.
+   */
   @Test
-  public void testResolveDeclType_literalNReturnedAsDefault() {
+  public void testResolveDeclType_inventedLetterIsRejected() {
+    for (String code : new String[]{"Z", "Q"}) {
+      try {
+        Fiscal303BoxesHandler.resolveDeclType(code);
+        fail("Expected IllegalArgumentException for code " + code);
+      } catch (IllegalArgumentException e) {
+        // expected
+      }
+    }
+  }
+
+  /**
+   * "N" (Resultado cero / sin actividad) is a genuinely selectable frontend option. ETP-5187
+   * makes it an explicitly accepted code — no longer just an accident of the removed
+   * catch-all fallback — so it must still resolve to itself exactly like before.
+   */
+  @Test
+  public void testResolveDeclType_literalNIsExplicitlyAccepted() {
     assertEquals("N", Fiscal303BoxesHandler.resolveDeclType("N"));
   }
 

@@ -22,11 +22,15 @@ import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import com.etendoerp.go.common.GoRuntimeProperties;
+import com.etendoerp.go.schemaforge.webhooks.SFAcctProcessMonitor;
+import com.etendoerp.go.schemaforge.webhooks.SFCostingCadence;
 import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
 import com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistory;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
+import com.etendoerp.go.schemaforge.webhooks.SFPortalAccess;
 import com.etendoerp.go.schemaforge.webhooks.SFPromoteUserRole;
+import com.etendoerp.go.schemaforge.webhooks.SFRefreshToken;
 import com.etendoerp.go.schemaforge.webhooks.SFResendInvitation;
 import com.etendoerp.go.schemaforge.webhooks.SFRolesOverview;
 import com.etendoerp.go.schemaforge.webhooks.SFSystemRoleTemplates;
@@ -78,91 +82,131 @@ class NeoPseudoSpecDispatcher {
    */
   boolean handle(NeoServlet.NeoPathInfo pathInfo, String method,
       HttpServletRequest request, HttpServletResponse response) throws IOException {
-    // Generic transactional batch endpoint: POST /sws/neo/batch
-    //   Runs an ordered list of CRUD ops in one OBDal transaction with
-    //   $ref:<opId> substitution between ops. Same primitive is consumed by
-    //   the React UI (composite-document ingest) and external agents (MCP).
-    //   Find-or-create logic stays with the caller — no per-window server code.
-    if ("batch".equals(pathInfo.specName)) {
-      return dispatchBatch(method, request, response);
+    // A switch on specName (instead of a chain of if-return checks) keeps this dispatcher's
+    // Cognitive Complexity flat as new pseudo-specs are added below: SonarQube's cognitive
+    // complexity model charges a switch statement +1 ONCE, not once per case — the same fixed-name
+    // dispatch this method already does, just counted the way the tool expects it to scale.
+    // NeoServletSupport.parsePath returns a NeoPathInfo with specName == null for an empty/"/"
+    // request path — the original if-chain was null-safe (`"batch".equals(pathInfo.specName)`),
+    // so this guard preserves that: falling through to `return false` instead of switching on null
+    // (which would throw NullPointerException).
+    if (pathInfo.specName == null) {
+      return false;
     }
+    switch (pathInfo.specName) {
+      // Generic transactional batch endpoint: POST /sws/neo/batch
+      //   Runs an ordered list of CRUD ops in one OBDal transaction with
+      //   $ref:<opId> substitution between ops. Same primitive is consumed by
+      //   the React UI (composite-document ingest) and external agents (MCP).
+      //   Find-or-create logic stays with the caller — no per-window server code.
+      case "batch":
+        return dispatchBatch(method, request, response);
 
-    // Global similarity-search endpoint: GET /sws/neo/simsearch
-    //   Same trigram matching as the "SimSearch" webhook, reached through NEO's own
-    //   JWT auth instead of the Webhooks module's per-role grant table. See
-    //   NeoSimSearchEndpoint for the authorization-model rationale.
-    if ("simsearch".equals(pathInfo.specName)) {
-      return dispatchSimSearch(method, request, response);
-    }
-    if ("vectorsearch".equals(pathInfo.specName)) {
-      return dispatchVectorSearch(method, request, response);
-    }
+      // Global similarity-search endpoint: GET /sws/neo/simsearch
+      //   Same trigram matching as the "SimSearch" webhook, reached through NEO's own
+      //   JWT auth instead of the Webhooks module's per-role grant table. See
+      //   NeoSimSearchEndpoint for the authorization-model rationale.
+      case "simsearch":
+        return dispatchSimSearch(method, request, response);
 
-    // Etendo GO's own webhooks, reached through NEO's own JWT auth instead of the Webhooks
-    // module's per-role SMFWHE_DEFINEDWEBHOOK_ROLE grant table (wiped by update.database — see
-    // NeoGoWebhookBridge's class javadoc for the full rationale). A fixed, explicit allow-list,
-    // never a generic "call any webhook by name" passthrough — bypassing the grant gate for a
-    // third-party module's webhook is not this bridge's call to make.
-    if ("listmenu".equals(pathInfo.specName)) {
-      return dispatchGoWebhook("Listmenu", method, request, response, new SFListMenu());
+      case "vectorsearch":
+        return dispatchVectorSearch(method, request, response);
+
+      // Etendo GO's own webhooks, reached through NEO's own JWT auth instead of the Webhooks
+      // module's per-role SMFWHE_DEFINEDWEBHOOK_ROLE grant table (wiped by update.database — see
+      // NeoGoWebhookBridge's class javadoc for the full rationale). A fixed, explicit allow-list,
+      // never a generic "call any webhook by name" passthrough — bypassing the grant gate for a
+      // third-party module's webhook is not this bridge's call to make.
+      case "listmenu":
+        return dispatchGoWebhook("Listmenu", method, request, response, new SFListMenu());
+      case "windowaccessmap":
+        return dispatchGoWebhook("Windowaccessmap", method, request, response, new SFWindowAccessMap());
+      case "rolesoverview":
+        return dispatchGoWebhook("Rolesoverview", method, request, response, new SFRolesOverview());
+
+      // ETP-5069: one document's readable email send history, feeding the preview panel's Emails
+      // card. Unlike its neighbours above it needs no role gate and no admin mode — DAL's default
+      // readable-client/org filtering over the client-level ETGO_Email_Send_Log IS the access
+      // rule. See SFDocumentEmailHistory's class javadoc.
+      case "documentemailhistory":
+        return dispatchGoWebhook("Documentemailhistory", method, request, response,
+            new SFDocumentEmailHistory());
+
+      // ETP-4852: compose a user's access from 1+ system-level template roles. See
+      // SFAssignUserRoles's class javadoc for the full mechanism and response shape.
+      case "assignuserroles":
+        return dispatchGoWebhook("Assignuserroles", method, request, response,
+            new SFAssignUserRoles());
+
+      // ETP-4906: read-path companion to assignuserroles — "which template roles does user X (or
+      // every user of my client) currently have applied". See SFUserRoleAssignments's class
+      // javadoc for the full mechanism and both response shapes.
+      case "userroleassignments":
+        return dispatchGoWebhook("Userroleassignments", method, request, response,
+            new SFUserRoleAssignments());
+
+      // ETP-4906 (Manual QA Feedback Round 2, finding 2): the 4 fixed role templates resolved at
+      // the SYSTEM client (AD_Client_ID = '0'), not the caller's own tenant — see
+      // SFSystemRoleTemplates's class javadoc for why this can't just repoint SFRolesOverview.
+      case "systemroletemplates":
+        return dispatchGoWebhook("Systemroletemplates", method, request, response,
+            new SFSystemRoleTemplates());
+
+      // ETP-5019: promote an invited user to the client's Admin role, or demote an Admin back
+      // to their personal role. See SFPromoteUserRole's class javadoc for the full mechanism
+      // and response shape.
+      case "promoteuserrole":
+        return dispatchGoWebhook("Promoteuserrole", method, request, response,
+            new SFPromoteUserRole());
+
+      // ETP-5195: reissues the CALLER'S OWN NEO bearer JWT with their CURRENT
+      // Default_Ad_Role_ID, closing the "stale role claim" gap a promote/demote (§8i) leaves
+      // behind until the caller's next login. See SFRefreshToken's class javadoc for the full
+      // mechanism and response shape.
+      case "refreshtoken":
+        return dispatchGoWebhook("Refreshtoken", method, request, response, new SFRefreshToken());
+
+      // ETP-4830 (item #4) — dev/QA-only endpoint to force-accept an invitation or force an
+      // ETGO_INVITATION.STATUS value, so the invite-email flow and the frontend's status pill can
+      // be exercised without a real email round-trip. See SFDebugInvitationBypass's class javadoc
+      // for the two actions. GATED OFF BY DEFAULT — see dispatchDebugInvitationBypass.
+      case "debuginvitationbypass":
+        return dispatchDebugInvitationBypass(method, request, response);
+
+      // ETP-4830 (item #2) — admin "Resend invitation" action on the user detail header. Real,
+      // always-on production feature (no feature flag, unlike debuginvitationbypass above) — the
+      // access boundary is SFResendInvitation's own admin/client-admin role check plus
+      // CompanyInvitationService#resendInvitation scoping the target user to the caller's client.
+      case "resendinvitation":
+        return dispatchGoWebhook("Resendinvitation", method, request, response,
+            new SFResendInvitation());
+
+      // ETP-5269 — status/history of the accounting server process, plus an admin-only manual
+      // trigger (?Action=trigger). The trigger schedules a SEPARATE one-shot AD_PROCESS_REQUEST and
+      // never touches the recurring every-5-minutes one; see SFAcctProcessMonitor's class javadoc for
+      // why that mechanism was chosen over the two alternatives.
+      case "acctprocessmonitor":
+        return dispatchGoWebhook("Acctprocessmonitor", method, request, response,
+            new SFAcctProcessMonitor());
+
+      // ETP-5370 — one-shot remediation that leaves exactly ONE active CostingBackground schedule
+      // per client, firing every 30s, and RE-ARMS its Quartz trigger. It is a webhook rather than a
+      // data-fix .sql because production does not restart Tomcat and an UPDATE to AD_PROCESS_REQUEST
+      // is invisible to an already-armed trigger; see SFCostingCadence's class javadoc.
+      case "costingcadence":
+        return dispatchGoWebhook("Costingcadence", method, request, response,
+            new SFCostingCadence());
+
+      // ETP-5267 — the internal-user side of the Business Partner self-service portal: does this
+      // Business Partner have a live portal link, and revoke it. Deliberately NOT behind the
+      // bp-portal-link flag: revocation is the only kill switch for a link that is already out, and
+      // must work whatever the flag says for this sender. See SFPortalAccess's class javadoc.
+      case "portalaccess":
+        return dispatchGoWebhook("Portalaccess", method, request, response, new SFPortalAccess());
+
+      default:
+        return false;
     }
-    if ("windowaccessmap".equals(pathInfo.specName)) {
-      return dispatchGoWebhook("Windowaccessmap", method, request, response, new SFWindowAccessMap());
-    }
-    if ("rolesoverview".equals(pathInfo.specName)) {
-      return dispatchGoWebhook("Rolesoverview", method, request, response, new SFRolesOverview());
-    }
-    // ETP-5069: one document's readable email send history, feeding the preview panel's Emails
-    // card. Unlike its neighbours above it needs no role gate and no admin mode — DAL's default
-    // readable-client/org filtering over the client-level ETGO_Email_Send_Log IS the access
-    // rule. See SFDocumentEmailHistory's class javadoc.
-    if ("documentemailhistory".equals(pathInfo.specName)) {
-      return dispatchGoWebhook("Documentemailhistory", method, request, response,
-          new SFDocumentEmailHistory());
-    }
-    // ETP-4852: compose a user's access from 1+ system-level template roles. See
-    // SFAssignUserRoles's class javadoc for the full mechanism and response shape.
-    if ("assignuserroles".equals(pathInfo.specName)) {
-      return dispatchGoWebhook("Assignuserroles", method, request, response,
-          new SFAssignUserRoles());
-    }
-    // ETP-4906: read-path companion to assignuserroles — "which template roles does user X (or
-    // every user of my client) currently have applied". See SFUserRoleAssignments's class
-    // javadoc for the full mechanism and both response shapes.
-    if ("userroleassignments".equals(pathInfo.specName)) {
-      return dispatchGoWebhook("Userroleassignments", method, request, response,
-          new SFUserRoleAssignments());
-    }
-    // ETP-4906 (Manual QA Feedback Round 2, finding 2): the 4 fixed role templates resolved at
-    // the SYSTEM client (AD_Client_ID = '0'), not the caller's own tenant — see
-    // SFSystemRoleTemplates's class javadoc for why this can't just repoint SFRolesOverview.
-    if ("systemroletemplates".equals(pathInfo.specName)) {
-      return dispatchGoWebhook("Systemroletemplates", method, request, response,
-          new SFSystemRoleTemplates());
-    }
-    // ETP-5019: promote an invited user to the client's Admin role, or demote an Admin back
-    // to their personal role. See SFPromoteUserRole's class javadoc for the full mechanism
-    // and response shape.
-    if ("promoteuserrole".equals(pathInfo.specName)) {
-      return dispatchGoWebhook("Promoteuserrole", method, request, response,
-          new SFPromoteUserRole());
-    }
-    // ETP-4830 (item #4) — dev/QA-only endpoint to force-accept an invitation or force an
-    // ETGO_INVITATION.STATUS value, so the invite-email flow and the frontend's status pill can
-    // be exercised without a real email round-trip. See SFDebugInvitationBypass's class javadoc
-    // for the two actions. GATED OFF BY DEFAULT — see dispatchDebugInvitationBypass.
-    if ("debuginvitationbypass".equals(pathInfo.specName)) {
-      return dispatchDebugInvitationBypass(method, request, response);
-    }
-    // ETP-4830 (item #2) — admin "Resend invitation" action on the user detail header. Real,
-    // always-on production feature (no feature flag, unlike debuginvitationbypass above) — the
-    // access boundary is SFResendInvitation's own admin/client-admin role check plus
-    // CompanyInvitationService#resendInvitation scoping the target user to the caller's client.
-    if ("resendinvitation".equals(pathInfo.specName)) {
-      return dispatchGoWebhook("Resendinvitation", method, request, response,
-          new SFResendInvitation());
-    }
-    return false;
   }
 
   private boolean dispatchBatch(String method, HttpServletRequest request,

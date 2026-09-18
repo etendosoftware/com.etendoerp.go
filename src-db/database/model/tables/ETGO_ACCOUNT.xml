@@ -101,6 +101,10 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="FIRST_STEPS" primaryKey="false" required="false" type="VARCHAR" size="1000" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_ACCOUNT_CLI_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>

@@ -23,6 +23,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -263,7 +264,7 @@ public abstract class AbstractInvoiceHeaderHandler {
    * Captures and strips {@code originInvoice}/{@code originInvoices} from the raw request body
    * BEFORE the generic field filter runs, so {@link #persistOriginInvoice} can still use them
    * later in {@code afterHandle()}. Must be called from each subclass's {@code handle()} (the
-   * pre-hook), e.g. alongside the existing {@code NeoHandlerUtils.mirrorAccountingDate(...)}
+   * pre-hook), e.g. alongside the existing {@code NeoHandlerUtils.mirrorAccountingDateOnCreate(...)}
    * call.
    *
    * <p>Neither field is a decisions.json/contract field, so
@@ -953,10 +954,44 @@ public abstract class AbstractInvoiceHeaderHandler {
   static final String FIELD_DOCUMENT_ACTION_INV = "documentAction";
 
   /**
+   * One draft invoice line of the invoice being completed, already joined to its shipment/receipt.
+   * Only lines with a non-null {@code m_inoutline_id} are represented.
+   */
+  private static final class LinkedInvoiceLine {
+    private final String inOutLineId;
+    private final BigDecimal qty;
+    private final String inOutId;
+    private final String orderLineId;
+
+    private LinkedInvoiceLine(String inOutLineId, BigDecimal qty, String inOutId,
+        String orderLineId) {
+      this.inOutLineId = inOutLineId;
+      this.qty = qty != null ? qty : BigDecimal.ZERO;
+      this.inOutId = inOutId;
+      this.orderLineId = orderLineId;
+    }
+  }
+
+  /**
    * Blocks invoice completion when any invoice line would over-invoice a shipment or receipt line.
    * For each invoice line with {@code m_inoutline_id}, computes the pending (uninvoiced) quantity
    * on the referenced shipment/receipt line (excluding other drafts) and rejects if the draft
    * quantity exceeds what is still available.
+   *
+   * <p><b>ETP-5334 — split reception.</b> When the invoice line's order line was received (or
+   * shipped) across MORE THAN ONE inout line, the per-inout-line comparison is wrong: the invoice
+   * line carries the full pending ORDER quantity but {@code M_InOutLine_ID} can only point at one
+   * of the receipts, so an order of 10 delivered as 4 + 6 is compared against 4 and can never be
+   * completed. For those order lines the pending quantity is aggregated across ALL their inout
+   * lines by {@code NeoInvoiceSupport#computePendingQtyPerOrderLine}, and the invoice's own lines
+   * for the same order line are summed before comparing — so two draft lines on one order line
+   * cannot each consume the whole aggregate. Everything already invoiced by other non-draft
+   * invoices is still subtracted, so genuine over-invoicing is still blocked.
+   *
+   * <p>Invoice lines with no {@code c_orderline_id} (e.g. an invoice created straight from a
+   * receipt with no purchase order), and order lines with a single inout line, keep the exact
+   * per-inout-line behaviour. Applies to Sales and Purchase alike — both header handlers call
+   * this shared guard.
    *
    * <p>Call at the top of {@code handle()} in both AR and AP invoice header subclasses, after the
    * exchange-rate check.
@@ -964,7 +999,6 @@ public abstract class AbstractInvoiceHeaderHandler {
    * @param context the current NeoContext
    * @return a NeoResponse error to block completion, or {@code null} to proceed
    */
-  @SuppressWarnings("java:S2077")
   static NeoResponse validateLineQtyBeforeComplete(NeoContext context) {
     if (!InvoiceCalloutHelper.isInvoiceCompleteAction(context)) {
       return null;
@@ -976,31 +1010,33 @@ public abstract class AbstractInvoiceHeaderHandler {
     OBContext.setAdminMode(true);
     try {
       Map<String, String> docNoByInout = new LinkedHashMap<>();
-      Map<String, Map<String, BigDecimal>> linesByInout = new LinkedHashMap<>();
-
-      String sql =
-          "SELECT il.m_inoutline_id, ABS(il.qtyinvoiced), io.m_inout_id, io.documentno "
-          + "FROM c_invoiceline il "
-          + "JOIN m_inoutline iol ON iol.m_inoutline_id = il.m_inoutline_id "
-          + "JOIN m_inout io ON io.m_inout_id = iol.m_inout_id "
-          + "WHERE il.c_invoice_id = ? AND il.isactive = 'Y' AND il.m_inoutline_id IS NOT NULL";
-      Connection conn = OBDal.getReadOnlyInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        ps.setString(1, invoiceId);
-        try (ResultSet rs = ps.executeQuery()) {
-          while (rs.next()) {
-            String lineId = rs.getString(1);
-            BigDecimal qty = rs.getBigDecimal(2);
-            String inoutId = rs.getString(3);
-            String docNo = rs.getString(4);
-            docNoByInout.put(inoutId, docNo);
-            linesByInout.computeIfAbsent(inoutId, k -> new LinkedHashMap<>()).put(lineId, qty);
-          }
-        }
-      }
-      if (linesByInout.isEmpty()) {
+      List<LinkedInvoiceLine> rows = readLinkedInvoiceLines(invoiceId, docNoByInout);
+      if (rows.isEmpty()) {
         return null;
       }
+
+      // ETP-5334: only queried when at least one line comes from an order — an invoice built
+      // straight from a receipt has nothing to aggregate and must keep the old behaviour.
+      Map<String, BigDecimal> splitPending = anyOrderLine(rows)
+          ? NeoInvoiceSupport.computePendingQtyPerOrderLine(invoiceId)
+          : Collections.emptyMap();
+      if (splitPending == null) {
+        splitPending = Collections.emptyMap();
+      }
+
+      Map<String, Map<String, BigDecimal>> linesByInout = new LinkedHashMap<>();
+      Map<String, BigDecimal> qtyByOrderLine = new LinkedHashMap<>();
+      Map<String, String> inoutByOrderLine = new LinkedHashMap<>();
+      for (LinkedInvoiceLine row : rows) {
+        if (row.orderLineId != null && splitPending.containsKey(row.orderLineId)) {
+          qtyByOrderLine.merge(row.orderLineId, row.qty, BigDecimal::add);
+          inoutByOrderLine.putIfAbsent(row.orderLineId, row.inOutId);
+        } else {
+          linesByInout.computeIfAbsent(row.inOutId, k -> new LinkedHashMap<>())
+              .put(row.inOutLineId, row.qty);
+        }
+      }
+
       for (Map.Entry<String, Map<String, BigDecimal>> inoutEntry : linesByInout.entrySet()) {
         NeoResponse error = checkInoutEntryForOverInvoicing(
             inoutEntry.getKey(), inoutEntry.getValue(), docNoByInout, invoiceId);
@@ -1008,13 +1044,53 @@ public abstract class AbstractInvoiceHeaderHandler {
           return error;
         }
       }
-      return null;
+      return checkOrderLinesForOverInvoicing(
+          qtyByOrderLine, splitPending, inoutByOrderLine, docNoByInout, invoiceId);
     } catch (Exception e) {
       log.error("Error validating invoice lines before complete for invoice {}", invoiceId, e);
       return null;
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Reads every active invoice line of the invoice that is linked to a shipment/receipt line,
+   * filling {@code docNoByInout} with the document number of each referenced shipment/receipt.
+   */
+  @SuppressWarnings("java:S2077")
+  private static List<LinkedInvoiceLine> readLinkedInvoiceLines(String invoiceId,
+      Map<String, String> docNoByInout) throws Exception {
+    String sql =
+        "SELECT il.m_inoutline_id, ABS(il.qtyinvoiced), io.m_inout_id, io.documentno, "
+        + "il.c_orderline_id "
+        + "FROM c_invoiceline il "
+        + "JOIN m_inoutline iol ON iol.m_inoutline_id = il.m_inoutline_id "
+        + "JOIN m_inout io ON io.m_inout_id = iol.m_inout_id "
+        + "WHERE il.c_invoice_id = ? AND il.isactive = 'Y' AND il.m_inoutline_id IS NOT NULL";
+    List<LinkedInvoiceLine> rows = new ArrayList<>();
+    Connection conn = OBDal.getReadOnlyInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      ps.setString(1, invoiceId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String inOutId = rs.getString(3);
+          docNoByInout.put(inOutId, rs.getString(4));
+          rows.add(new LinkedInvoiceLine(
+              rs.getString(1), rs.getBigDecimal(2), inOutId, rs.getString(5)));
+        }
+      }
+    }
+    return rows;
+  }
+
+  private static boolean anyOrderLine(List<LinkedInvoiceLine> rows) {
+    for (LinkedInvoiceLine row : rows) {
+      if (row.orderLineId != null) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private static NeoResponse checkInoutEntryForOverInvoicing(String inoutId,
@@ -1029,20 +1105,47 @@ public abstract class AbstractInvoiceHeaderHandler {
       }
       BigDecimal pendingQty = pendingMap.getOrDefault(lineId, BigDecimal.ZERO);
       if (pendingQty.compareTo(draftQty) < 0) {
-        String docNo = docNoByInout.get(inoutId);
-        String template = OBMessageUtils.messageBD("ETGO_InvoiceLineAlreadyInvoiced");
-        String msg = template
-            .replace("@docNo@", docNo)
-            .replace("@invoiced@", draftQty.toPlainString())
-            .replace("@pending@", pendingQty.toPlainString());
-        log.warn("Blocking invoice completion id={}: {}", invoiceId, msg);
-        JSONObject body = new JSONObject();
-        body.put("status", "error");
-        body.put("message", msg);
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
+        return overInvoicedError(docNoByInout.get(inoutId), draftQty, pendingQty, invoiceId);
       }
     }
     return null;
+  }
+
+  /**
+   * ETP-5334 counterpart of {@link #checkInoutEntryForOverInvoicing} for order lines received or
+   * shipped across several inout lines: compares the invoice's TOTAL quantity for the order line
+   * against the pending quantity aggregated over all of that order line's receipts/shipments.
+   */
+  private static NeoResponse checkOrderLinesForOverInvoicing(Map<String, BigDecimal> qtyByOrderLine,
+      Map<String, BigDecimal> pendingByOrderLine, Map<String, String> inoutByOrderLine,
+      Map<String, String> docNoByInout, String invoiceId) throws Exception {
+    for (Map.Entry<String, BigDecimal> entry : qtyByOrderLine.entrySet()) {
+      BigDecimal draftQty = entry.getValue();
+      if (draftQty == null || draftQty.compareTo(BigDecimal.ZERO) <= 0) {
+        continue;
+      }
+      BigDecimal pendingQty = pendingByOrderLine.getOrDefault(entry.getKey(), BigDecimal.ZERO);
+      if (pendingQty.compareTo(draftQty) < 0) {
+        String docNo = docNoByInout.get(inoutByOrderLine.get(entry.getKey()));
+        return overInvoicedError(docNo, draftQty, pendingQty, invoiceId);
+      }
+    }
+    return null;
+  }
+
+  /** Builds the 400 response carrying the {@code ETGO_InvoiceLineAlreadyInvoiced} message. */
+  private static NeoResponse overInvoicedError(String docNo, BigDecimal draftQty,
+      BigDecimal pendingQty, String invoiceId) throws Exception {
+    String template = OBMessageUtils.messageBD("ETGO_InvoiceLineAlreadyInvoiced");
+    String msg = template
+        .replace("@docNo@", docNo != null ? docNo : "")
+        .replace("@invoiced@", draftQty.toPlainString())
+        .replace("@pending@", pendingQty.toPlainString());
+    log.warn("Blocking invoice completion id={}: {}", invoiceId, msg);
+    JSONObject body = new JSONObject();
+    body.put("status", "error");
+    body.put("message", msg);
+    return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
   }
 
   // ---------------------------------------------------------------------------
@@ -1150,23 +1253,22 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   // ---------------------------------------------------------------------------
-  // Unified date (ETP-4531)
+  // Unified date (ETP-4531) / re-revert to independent accounting date (ETP-5273)
   // ---------------------------------------------------------------------------
   //
-  // The mirrorAccountingDate(NeoContext, String, String) logic itself lives in
-  // NeoHandlerUtils — shared with AbstractOrderHeaderHandler — see
-  // NeoHandlerUtils#mirrorAccountingDate. Call sites here invoke it with
-  // ("invoiceDate", "accountingDate").
+  // The mirrorAccountingDateOnCreate(NeoContext, String, String) logic itself lives in
+  // NeoHandlerUtils — shared with AbstractOrderHeaderHandler, GoodsReceiptHeaderHandler and
+  // GoodsShipmentHeaderHandler — see NeoHandlerUtils#mirrorAccountingDateOnCreate. Call sites
+  // here invoke it with ("invoiceDate", "accountingDate").
 
   /**
    * Shared {@code afterCallout} body: blocks callout-driven currency updates and appends an
    * exchange-rate warning when the user directly changes the invoice currency (ETP-4029); and
    * blocks callout-driven document type updates on an already-saved invoice (ETP-4535).
    *
-   * <p>{@code accountingDate} cascades from {@code invoiceDate} via the classic Etendo callout
-   * ({@code SE_Invoice_AccountingDate}) are intentionally left untouched — ETP-4531 now requires
-   * the single visible date to be mirrored into {@code accountingDate} on save, so that cascade
-   * is exactly the behavior wanted.
+   * <p>Note that {@code accountingDate} is deliberately NOT guarded here — see the comment at the
+   * call site for why matching Classic's one-way {@code DateInvoiced -> DateAcct} cascade is the
+   * intended behaviour (ETP-5273).
    *
    * <p>Identical for both {@link PurchaseInvoiceHeaderHandler} and {@link SalesInvoiceHeaderHandler}
    * — each subclass's {@code afterCallout()} override should just delegate here.
@@ -1178,6 +1280,14 @@ public abstract class AbstractInvoiceHeaderHandler {
         return null;
       }
       blockCalloutCurrencyUpdate(fields.updates(), fields.triggerField());
+      // ETP-5273: accountingDate is deliberately NOT guarded here. Classic propagates
+      // DateInvoiced -> DateAcct one way (SE_Invoice_AccountingDate, reached through
+      // SifInvoiceOperationDateCallout on C_Invoice.DateInvoiced), and this window must
+      // match that. The reverse cascade needs no guard either: the callout registered on
+      // DateAcct is SE_Invoice_TaxDate, which writes Taxdate only and never touches
+      // DateInvoiced. Independent editing is preserved by restricting the server-side
+      // mirror to creation (NeoHandlerUtils#mirrorAccountingDateOnCreate), not by
+      // stripping the cascade.
       checkExchangeRateWarning(fields.body(), fields.requestBody(), fields.formState(), fields.triggerField());
       String recordId = InvoiceCalloutHelper.resolveCalloutRecordId(context, fields.formState());
       blockCalloutDocTypeUpdateIfLocked(fields.updates(), fields.triggerField(), recordId);
@@ -1186,7 +1296,7 @@ public abstract class AbstractInvoiceHeaderHandler {
       InvoiceCalloutHelper.applyRectificativeFieldsFromDocType(fields.triggerField(), fields.requestBody(), fields.updates());
       InvoiceCalloutHelper.realignVerifactuDescWithFormStateDocType(fields.triggerField(), fields.formState(), fields.updates());
     } catch (Exception e) {
-      log.warn("[ETP-4029/ETP-4535] afterCallout failed (non-fatal): {}", e.getMessage());
+      log.warn("[ETP-4029/ETP-5273/ETP-4535] afterCallout failed (non-fatal): {}", e.getMessage());
     }
     return null; // mutations applied in-place; dispatcher merges nothing extra
   }

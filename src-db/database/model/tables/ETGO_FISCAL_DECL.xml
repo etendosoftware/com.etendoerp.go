@@ -69,6 +69,10 @@
         <default/>
         <onCreateDefault/>
       </column>
+      <column name="DECL_SEQ" primaryKey="false" required="true" type="DECIMAL" size="10,0" autoIncrement="false">
+        <default><![CDATA[0]]></default>
+        <onCreateDefault/>
+      </column>
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_FISCAL_DECL_CLI_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
@@ -87,7 +91,7 @@
         <unique-column name="MODEL"/>
         <unique-column name="FISCAL_YEAR"/>
         <unique-column name="PERIOD"/>
-        <unique-column name="DECL_TYPE"/>
+        <unique-column name="DECL_SEQ"/>
       </unique>
       <check name="ETGO_FISCAL_DECL_FEXT"><![CDATA[FILE_EXTERNAL IN ('Y', 'N')]]></check>
       <check name="ETGO_FISCAL_DECL_ISACTIVE"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>

@@ -1162,7 +1162,8 @@ public class UserRoleCompositionService {
    * @return an {@link AssignmentResult} whose {@code personalRoleId} is the restored (or
    *     freshly created) personal role's id (field reused, not renamed, to avoid touching
    *     {@code SFAssignUserRoles}'s response shape for the unrelated composition endpoint)
-   * @throws OBException if the caller is not owner/admin, the target is the owner (never
+   * @throws OBException if the caller is not owner/admin, the caller is demoting themselves
+   *     (nobody may remove their own Admin role, ETP-5206), the target is the owner (never
    *     demotable, by anyone), or the target does not currently hold the client-admin role
    */
   public AssignmentResult demoteFromAdmin(String callerUserId, Role callerRole,
@@ -1172,6 +1173,9 @@ public class UserRoleCompositionService {
     }
     if (!callerIsOwnerOrAdmin(callerUserId)) {
       throw new OBException("Not authorized to demote an Admin: " + callerUserId);
+    }
+    if (callerUserId != null && callerUserId.equals(targetUserId)) {
+      throw new OBException("An Admin cannot demote themselves: " + targetUserId);
     }
     User target = OBDal.getInstance().get(User.class, targetUserId);
     if (target == null) {

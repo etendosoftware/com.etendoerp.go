@@ -541,6 +541,13 @@ public class InvoiceLineTaxSifSelectorPolicyTest {
     return (String) field.get(null);
   }
 
+  /** Same anti-drift technique as {@link #adOrgIdParamName()}, for the ETP-5229 flag. */
+  private static String includeChildrenParamName() throws Exception {
+    Field field = InvoiceLineTaxSifSelectorPolicy.class.getDeclaredField("INCLUDE_CHILDREN_PARAM");
+    field.setAccessible(true);
+    return (String) field.get(null);
+  }
+
   private static Map<String, String> ctxWithOrg(String sourceEntity, String windowId, String orgId)
       throws Exception {
     Map<String, String> params = ctx(sourceEntity, windowId);
@@ -699,6 +706,134 @@ public class InvoiceLineTaxSifSelectorPolicyTest {
         assertFalse("structural column " + structuralColumn + " must never be COALESCEd",
             sql.contains("coalesce(nullif(trim(t." + structuralColumn));
       }
+    }
+  }
+
+  // ── ETP-5229: compound-tax children invisible to the base selector query ──
+
+  /**
+   * Stubs a single-row ResultSet on {@code ps} for a {@code SELECT c_tax_id FROM c_tax WHERE
+   * parent_tax_id IN (...)}-shaped query — only {@code c_tax_id} is ever read by
+   * {@code queryChildTaxIds}, so unlike {@link #stubResultSetForTax} this only needs that one
+   * column.
+   */
+  private static void stubResultSetForChildId(PreparedStatement ps, String childId) throws SQLException {
+    ResultSet rs = mock(ResultSet.class);
+    when(ps.executeQuery()).thenReturn(rs);
+    when(rs.next()).thenReturn(true, false);
+    when(rs.getString("c_tax_id")).thenReturn(childId);
+  }
+
+  /**
+   * Full ETP-5229 flow: a summary tax's child is NOT present in the base selector page (the
+   * {@code AD_Ref_Table} filter permanently excludes it), so when the caller sets
+   * {@code includeTaxChildren=true} the policy must run a SECOND direct query for
+   * {@code parent_tax_id IN (summaryIds)}, then a THIRD query to enrich those child ids with the
+   * same structural + SIF value columns, and finally APPEND the child as a new item — never
+   * replacing or removing the summary tax's own item.
+   */
+  @Test
+  public void enrichAppendsSummaryTaxChildrenWhenIncludeChildrenParamIsTrue() throws Exception {
+    JSONArray items = new JSONArray().put(new JSONObject().put("id", "tax-summary"));
+    NeoResponse response = new NeoResponse(200, new JSONObject().put("items", items));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Connection conn = wireConnection(dalMock);
+
+      // 1st prepareStatement: querySifColumns([tax-summary]) — the page's own enrichment.
+      PreparedStatement psSummary = mock(PreparedStatement.class);
+      Map<String, String> summaryRow = new HashMap<>();
+      summaryRow.put("c_tax_id", "tax-summary");
+      summaryRow.put("issummary", "Y");
+      stubResultSetForTax(psSummary, summaryRow);
+
+      // 2nd prepareStatement: queryChildTaxIds([tax-summary]) — SELECT c_tax_id FROM c_tax
+      // WHERE parent_tax_id IN (?).
+      PreparedStatement psChildIds = mock(PreparedStatement.class);
+      stubResultSetForChildId(psChildIds, "tax-child");
+
+      // 3rd prepareStatement: querySifColumns([tax-child]) — enriching the newly found child.
+      PreparedStatement psChildSif = mock(PreparedStatement.class);
+      Map<String, String> childSifRow = new HashMap<>();
+      childSifRow.put("c_tax_id", "tax-child");
+      childSifRow.put("em_obspti_isequivalentcharge", "N");
+      childSifRow.put("em_etvfac_vat_regime", "01");
+      stubResultSetForTax(psChildSif, childSifRow);
+
+      when(conn.prepareStatement(anyString())).thenReturn(psSummary, psChildIds, psChildSif);
+
+      Map<String, String> ctxParams = ctx(ENTITY_LINES, WINDOW_SALES_INVOICE);
+      ctxParams.put(includeChildrenParamName(), "true");
+
+      policy.enrich(response, metaFor(TARGET_TAX_RATE), ctxParams);
+
+      JSONArray resultItems = response.getBody().getJSONArray("items");
+      // Original summary item is still there, untouched aside from its own enrichment.
+      assertEquals(2, resultItems.length());
+      assertEquals("tax-summary", resultItems.getJSONObject(0).getString("id"));
+      assertEquals("Y", resultItems.getJSONObject(0).getString("isSummary"));
+
+      // The child is APPENDED as a brand-new item, fully enriched.
+      JSONObject childItem = resultItems.getJSONObject(1);
+      assertEquals("tax-child", childItem.getString("id"));
+      assertEquals("01", childItem.getString("EM_Etvfac_Vat_Regime"));
+      assertEquals("N", childItem.getString("isEquivalentCharge"));
+    }
+  }
+
+  /**
+   * Without the flag (the picker's own live search — {@code InlineSearchCombo} never sends
+   * it), no extra query runs at all and the response is exactly as the pre-ETP-5229 behavior
+   * left it: only ONE prepareStatement call, only the summary item, no children appended.
+   */
+  @Test
+  public void enrichDoesNotAppendChildrenWhenFlagIsAbsent() throws Exception {
+    JSONArray items = new JSONArray().put(new JSONObject().put("id", "tax-summary"));
+    NeoResponse response = new NeoResponse(200, new JSONObject().put("items", items));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Connection conn = wireConnection(dalMock);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      Map<String, String> row = new HashMap<>();
+      row.put("c_tax_id", "tax-summary");
+      row.put("issummary", "Y");
+      stubResultSetForTax(ps, row);
+
+      policy.enrich(response, metaFor(TARGET_TAX_RATE), ctx(ENTITY_LINES, WINDOW_SALES_INVOICE));
+
+      verify(conn, times(1)).prepareStatement(anyString());
+      assertEquals(1, response.getBody().getJSONArray("items").length());
+    }
+  }
+
+  /**
+   * The flag alone is not enough to trigger the extra queries — when NONE of the page's own
+   * items are summary taxes, there is nothing to look up children for, so the second/third
+   * queries must never run.
+   */
+  @Test
+  public void enrichSkipsChildLookupWhenNoSummaryTaxesPresentEvenWithFlagSet() throws Exception {
+    JSONArray items = new JSONArray().put(new JSONObject().put("id", "tax-plain"));
+    NeoResponse response = new NeoResponse(200, new JSONObject().put("items", items));
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      Connection conn = wireConnection(dalMock);
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+      Map<String, String> row = new HashMap<>();
+      row.put("c_tax_id", "tax-plain");
+      row.put("issummary", "N");
+      stubResultSetForTax(ps, row);
+
+      Map<String, String> ctxParams = ctx(ENTITY_LINES, WINDOW_SALES_INVOICE);
+      ctxParams.put(includeChildrenParamName(), "true");
+
+      policy.enrich(response, metaFor(TARGET_TAX_RATE), ctxParams);
+
+      // Only the ONE query for the page's own enrichment — no child lookup at all.
+      verify(conn, times(1)).prepareStatement(anyString());
+      assertEquals(1, response.getBody().getJSONArray("items").length());
     }
   }
 }

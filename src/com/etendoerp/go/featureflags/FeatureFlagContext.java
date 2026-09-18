@@ -35,6 +35,21 @@ public final class FeatureFlagContext {
   /** Attribute carrying the AD_Client the evaluation is scoped to, when one is known. */
   public static final String ATTRIBUTE_CLIENT_ID = "clientId";
 
+  /**
+   * Attribute carrying the account email, <b>in addition to</b> the targeting key.
+   *
+   * <p><b>The capitalisation is load-bearing and the duplication is deliberate.</b> A hosted
+   * provider turns this context into its own user object: the targeting key becomes the
+   * <em>identifier</em>, and only an attribute named exactly {@code Email} becomes the
+   * <em>email</em> (ConfigCat's {@code ContextTransformer} matches that literal; anything else
+   * lands as a custom attribute). Publishing the address in both places means a targeting rule
+   * written against Email and one written against Identifier both match. Sending it only as the
+   * targeting key is the trap: a dashboard rule on Email — the obvious one to write — would match
+   * nobody, and a flag that silently resolves false is indistinguishable from one deliberately off
+   * (ETP-4966).
+   */
+  public static final String ATTRIBUTE_EMAIL = "Email";
+
   private final String targetingKey;
   private final Map<String, String> attributes;
 
@@ -44,14 +59,19 @@ public final class FeatureFlagContext {
   }
 
   /**
-   * Builds a context targeted at an account.
+   * Builds a context targeted at an account, carrying the email as both the targeting key and the
+   * {@value #ATTRIBUTE_EMAIL} attribute — see that constant for why both.
    *
    * @param accountEmail the authenticated account email; may be null when no account is known
-   * @return a context carrying only the targeting key
+   * @return a context targeted at the account, or one with no targeting key at all when the email
+   *     is blank (which every provider must treat as "not this account", never as "everyone")
    */
   public static FeatureFlagContext forAccount(String accountEmail) {
-    return new FeatureFlagContext(StringUtils.trimToNull(accountEmail),
-        Collections.emptyMap());
+    String normalized = StringUtils.trimToNull(accountEmail);
+    // with() ignores a blank value, so an unknown account yields a context carrying neither the
+    // key nor the attribute rather than an empty-string identity that could match a rule.
+    return new FeatureFlagContext(normalized, Collections.emptyMap())
+        .with(ATTRIBUTE_EMAIL, normalized);
   }
 
   /**

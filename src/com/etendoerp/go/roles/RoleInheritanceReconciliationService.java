@@ -354,6 +354,16 @@ class RoleInheritanceReconciliationService {
   List<RoleInheritance> findExistingInheritances(Role personalRole) {
     OBCriteria<RoleInheritance> criteria = OBDal.getInstance()
         .createCriteria(RoleInheritance.class);
+    // A system-OBContext caller (e.g. the environment-login flow, which runs under
+    // OBContext.setOBContext("0","0","0",...)) does not have the target tenant's client in its
+    // readable-clients set, so the default readable-clients/organization filter silently returns
+    // zero rows for a personal role that genuinely has composed templates — mirrors the same fix
+    // already applied to the bulk equivalent, findActiveTemplateIdsByPersonalRoleId. Safe to widen
+    // unconditionally: this query is already pinned to one exact personalRole via the
+    // Restrictions.eq below, so disabling the filter cannot leak any OTHER role's data — it only
+    // fixes false negatives for a caller whose own OBContext client doesn't include this role's.
+    criteria.setFilterOnReadableClients(false);
+    criteria.setFilterOnReadableOrganization(false);
     criteria.add(Restrictions.eq(RoleInheritance.PROPERTY_ROLE, personalRole));
     criteria.addOrderBy(RoleInheritance.PROPERTY_SEQUENCENUMBER, true);
     return criteria.list();

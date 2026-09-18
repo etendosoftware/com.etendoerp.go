@@ -38,7 +38,8 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.service.json.JsonUtils;
+
+import com.etendoerp.go.schemaforge.util.NeoDateFormat;
 
 
 /**
@@ -347,9 +348,13 @@ public class FinancialAccountsPageHandler implements NeoHandler {
           // therefore read as UTC, so on a UTC-3 server every write looked three hours old and the
           // concurrency check refused it as `stale_record`. NeoDateFormat.toCanonical is the wrong
           // tool here: it deliberately DROPS the offset.
-          java.sql.Timestamp rawUpdated = rs.getTimestamp(24);
-          row.updated = rawUpdated != null
-              ? JsonUtils.createDateTimeFormat().format(rawUpdated) : "";
+          //
+          // ETP-5255 moved that formatting into NeoDateFormat.toAuditToken and routed this call
+          // site through it: the same defect was found still live in two other handlers, so the
+          // reasoning above now lives next to the emitter instead of only here. Empty string, not
+          // null, when there is no value — this row's serialiser distinguishes the two.
+          String auditToken = NeoDateFormat.toAuditToken(rs.getTimestamp(24));
+          row.updated = auditToken != null ? auditToken : "";
           rows.add(row);
         }
       }

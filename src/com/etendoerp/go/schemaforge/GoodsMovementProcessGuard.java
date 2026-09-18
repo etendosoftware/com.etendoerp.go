@@ -41,14 +41,25 @@ import org.openbravo.model.materialmgmt.transaction.InternalMovement;
 import org.openbravo.model.materialmgmt.transaction.InternalMovementLine;
 
 /**
- * Blocks "Procesar" on a Goods Movement ({@code M_Movement}) when the cumulative requested
- * quantity for any (product, source storage bin) pair across the document's lines exceeds
- * on-hand stock (ETP-5037).
+ * Blocks "Procesar" on a Goods Movement ({@code M_Movement}) when either (a) the cumulative
+ * requested quantity for any (product, source storage bin) pair across the document's lines
+ * exceeds on-hand stock, or (b) a line has a zero-or-negative quantity that classic core would
+ * reject too (ETP-5037).
  *
  * <p>{@link StockAvailabilityGuard} already blocks any single line whose own quantity exceeds
- * stock at save time, so by the time this runs the only remaining failure mode is the
+ * stock at save time, so by the time (a) runs here the only remaining failure mode is the
  * cumulative one: two or more lines, individually valid, that together move more than what is
  * available from the same source warehouse.
+ *
+ * <p>(b) exists because neither {@link StockAvailabilityGuard} nor the cumulative check above
+ * ever look at a zero-or-negative quantity — both skip those lines on purpose, leaving them for
+ * "the generic CRUD / other validations" (see {@code StockAvailabilityGuard.rejectIfInsufficientStock}).
+ * That other validation is classic core's {@code M_Movement_Post} function
+ * ({@code src-db/database/model/functions/M_MOVEMENT_POST.xml}), which raises
+ * {@code GoodsMovementsWithNegativeQty} naming only the raw line number — poor UX, and the exact
+ * gap a QA pass (Emilio Polliotti) found after this guard shipped. This method mirrors that
+ * function's own condition (blocks only when the source OR destination locator disallows
+ * overissue) so behavior is unchanged; only the message improves, naming the product(s) instead.
  *
  * <p>Intercepts the request before it reaches the classic completion process
  * ({@code M_Movement_Post}/{@code M_Check_Stock}, both left untouched by this fix): returning a
@@ -118,6 +129,10 @@ final class GoodsMovementProcessGuard {
       if (movement == null) {
         return null;
       }
+      Set<String> zeroOrNegativeQtyProducts = findZeroOrNegativeQtyProducts(movement);
+      if (!zeroOrNegativeQtyProducts.isEmpty()) {
+        return zeroOrNegativeQtyResponse(zeroOrNegativeQtyProducts);
+      }
       Collection<Violation> violations = findViolations(movement);
       return violations.isEmpty() ? null : insufficientStockResponse(violations);
     } catch (Exception e) {
@@ -126,6 +141,52 @@ final class GoodsMovementProcessGuard {
       return null;
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Detects lines whose movement quantity is zero or negative, mirroring the exact condition
+   * {@code M_MOVEMENT_POST.xml} applies at classic completion time: a line is only flagged when
+   * its source ({@code M_Locator_ID}) or destination ({@code M_LocatorTo_ID}) locator has an
+   * inventory status that disallows overissue — the same gate
+   * {@link StockAvailabilityGuard#allowsOverissue(Locator)} already checks for the source side
+   * of the insufficient-stock case. Returns the offending products' labels (deduplicated,
+   * insertion order), empty when nothing is flagged.
+   */
+  private static Set<String> findZeroOrNegativeQtyProducts(InternalMovement movement) {
+    Set<String> productLabels = new LinkedHashSet<>();
+    for (InternalMovementLine line : movement.getMaterialMgmtInternalMovementLineList()) {
+      Product product = line.getProduct();
+      BigDecimal qty = line.getMovementQuantity();
+      if (product == null || qty == null || qty.compareTo(BigDecimal.ZERO) > 0) {
+        continue;
+      }
+      Locator source = line.getStorageBin();
+      Locator destination = line.getNewStorageBin();
+      boolean sourceBlocks = source != null && !StockAvailabilityGuard.allowsOverissue(source);
+      boolean destinationBlocks = destination != null
+          && !StockAvailabilityGuard.allowsOverissue(destination);
+      if (sourceBlocks || destinationBlocks) {
+        productLabels.add(StringUtils.defaultIfBlank(product.getName(), product.getSearchKey()));
+      }
+    }
+    return productLabels;
+  }
+
+  private static NeoResponse zeroOrNegativeQtyResponse(Set<String> productLabels) {
+    try {
+      String template = OBMessageUtils.messageBD("ETGO_ZeroOrNegativeQtyProcess");
+      String message = template.replace("@products@", String.join(", ", productLabels));
+
+      JSONObject body = new JSONObject();
+      body.put("status", "error");
+      body.put("code", "ZERO_OR_NEGATIVE_QTY");
+      body.put("message", message);
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
+    } catch (JSONException e) {
+      log.warn("[GOODS-MOVEMENTS] Could not build zero-or-negative-qty process response: {}",
+          e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Zero or negative quantity");
     }
   }
 

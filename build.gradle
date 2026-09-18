@@ -77,10 +77,19 @@ dependencies {
     implementation('com.etendoerp:accounting.dimensions.assets.template:[3.0.0,)')
     implementation('com.etendoerp:payment.removal:[3.0.0,)')
     implementation('com.google.api-client:google-api-client:2.8.1')
-    // Feature flags: OpenFeature is the application-facing API. The control plane is currently a
-    // local properties-backed provider; see docs/feature-flags-and-tenant-upgrade.md for the
-    // single registration point a hosted provider replaces.
+    // Feature flags: OpenFeature is the application-facing API. GoFeatureFlags.createProvider() is
+    // the single registration point that chooses the control plane — ConfigCat when an SDK key is
+    // configured, the local properties-backed provider otherwise. See
+    // docs/feature-flags-and-tenant-upgrade.md.
     implementation('dev.openfeature:sdk:1.20.1')
+    // ETP-5267 — hosted control plane, so a flag can be flipped without a Tomcat restart. Pinned
+    // rather than '0.1.+': this is a 0.x artifact with no API stability guarantee, and 0.1.1 is the
+    // version whose API was actually verified (ConfigCatProvider takes a ConfigCatProviderConfig
+    // built by a builder, NOT a bare SDK-key string). 0.2.1 exists and is a deliberate later
+    // decision. Brings okhttp/okio/kotlin-stdlib/semantic-version into WEB-INF/lib on the next
+    // build; gson, slf4j-api and commons-codec are already deployed at HIGHER versions, which
+    // Gradle's highest-wins resolution keeps, so nothing is double-bundled.
+    implementation('dev.openfeature.contrib.providers:configcat:0.1.1')
     compileOnly 'io.swagger.core.v3:swagger-models:2.1.13'
     compileOnly 'org.apache.commons:commons-lang3:3.12.0'
     // ETP-4997 — xlsx export (NeoXlsxExportWriter). compileOnly, not implementation: POI is

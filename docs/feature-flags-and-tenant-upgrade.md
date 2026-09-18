@@ -60,13 +60,29 @@ A flag `my-flag` is read from `etendo.go.flags.my-flag`, resolved in priority or
 property, `Openbravo.properties`, environment variable `ETGO_FLAG_MY_FLAG` (uppercased, every
 non-alphanumeric character replaced by `_`). See `com.etendoerp.go.common.GoRuntimeProperties`.
 
-No backend flag is declared today: `tenant-upgrade` was the only one and it retired with ETP-4966.
-The stack stays as the entry point for the next one — declare its key as a constant on
-`GoFeatureFlags` and add its row here.
+These local properties are a **plain boolean per environment**. Per-account targeting is a ConfigCat
+concern only — see **Per-account targeting** below for why there is deliberately no local equivalent.
+
+Declare every flag's key as a constant on `GoFeatureFlags` and add its row here.
 
 | Flag | Property | Environment variable | Default |
 |------|----------|---------------------|---------|
-| *(none)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
+| `bp-portal-link` | `etendo.go.flags.bp-portal-link` | `ETGO_FLAG_BP_PORTAL_LINK` | absent ⇒ **`false`** |
+| *(pattern for a new flag)* | `etendo.go.flags.<key>` | `ETGO_FLAG_<KEY>` | absent ⇒ **`false`** |
+
+`bp-portal-link` (ETP-5267) decides whether a `sales-invoice-send` email carries a link to the
+Business Partner self-service portal. It is **targeted per sending account** and false for everyone
+until a ConfigCat targeting rule names that account's email, so day-to-day enablement happens in the
+ConfigCat dashboard and takes effect without a restart. Where no SDK key is configured the flag
+degrades to the local per-environment boolean above, which has no per-account notion — so a shared
+environment needs ConfigCat set up before the link is switched on for anyone. It is
+**backend-only** — no key in the web client's `flag-keys.js`, nothing in the
+browser reads it, and none must be added. It gates the link only: the portal route, the three
+`/sws/portal/*` endpoints, the `etgo_portal_access` table and the revoke action all ship
+unconditionally, and revocation in particular must work whatever the flag says, since it is the only
+kill switch for a link already out.
+
+`tenant-upgrade` was the only earlier backend flag and it retired with ETP-4966.
 
 **Lesson from the retired flag, worth honouring for the next one:** a flag whose two ends read from
 different control planes has no single truth. Either both ends resolve the same key from the same
@@ -76,9 +92,38 @@ indistinguishable from a disabled feature — which is how a charged account got
 Accepted affirmatives: `true`, `Y`, `yes`, `1`. Accepted negatives: `false`, `N`, `no`, `0`
 (case-insensitive).
 
-Because flags come from configuration, this provider serves **environment-level rollout, not
-per-user targeting**. The evaluation context is accepted for API compatibility and passed through,
-but does not affect the result. Per-user bucketing arrives with the hosted provider.
+### Per-account targeting (ETP-5267) — ConfigCat only, deliberately
+
+This module publishes the account identity into every evaluation, so a hosted provider can target on
+it: `FeatureFlagContext.forAccount(...)` sets the `ETGO_ACCOUNT` email as the OpenFeature
+**targeting key** *and* as the `Email` attribute. Both, because ConfigCat's `ContextTransformer` maps
+the targeting key to its user *identifier* and only an attribute named exactly `Email` to the
+*email* — so a dashboard rule written against Email (the obvious one to write) matches, and so does
+one written against Identifier. Publishing only the targeting key is the trap: the obvious rule would
+match nobody, and a flag that silently resolves false is indistinguishable from one deliberately off.
+
+**There is no local per-account mechanism, and that is a decision rather than a gap.** An earlier
+iteration of ETP-5267 added an `etendo.go.flags.<key>.emails` allowlist to
+`PropertiesFeatureProvider` and it was removed the same day, for two reasons:
+
+- **It would silently do nothing wherever ConfigCat is configured.** Only one provider is ever
+  installed, so with an SDK key set the property is inert — a configuration knob that appears to
+  control something and does not. That is the same family of failure as ETP-4966.
+- **Two ways to express one decision is two things to keep in sync**, in code shared by every flag in
+  the module.
+
+Consequences to hold onto:
+
+- **A dev box needs no targeting.** It has one user, so the plain boolean is enough there.
+- **A shared environment must have ConfigCat configured before the flag is switched on**, because
+  the local arm can only answer "everyone" or "nobody".
+- **Evaluation is in-memory and costs no network call.** ConfigCat's `autoPoll` fetches in the
+  background (60 s here, `CONFIGCAT_POLL_SECONDS`) and evaluates against the in-memory snapshot, so
+  a flag check inside request handling is a map lookup.
+- **A flag that does not exist in ConfigCat resolves to its code default, `false`** — asking for an
+  undefined key is never an error.
+- **Creating a flag or changing a targeting rule is visible within one poll interval, with no
+  restart.** That, not the local properties, is the day-to-day path.
 
 ### Targeting key — still OPEN for any future flag, no longer blocking this capability
 
@@ -120,9 +165,16 @@ package, so it needs no core change and no version bump — which is what unbloc
 `/environments` route stalled on the core helper dropping top-level fields.
 
 **This is not closed until the web client consumes them.** The backend now exposes the identity; the
-frontend half is the remaining scope. Until it lands, the two ends still bucket differently and no
-targeting-aware provider should be installed. Full client-side reasoning is in `docs/feature-flags.md`
-in the functional repo.
+frontend half is the remaining scope. Until it lands, the two ends still bucket differently, so **no
+flag with a frontend end may be made targeting-aware**. Full client-side reasoning is in
+`docs/feature-flags.md` in the functional repo.
+
+**What ETP-5267 changed, and why it is not a violation of the above.** A targeting-aware provider
+*is* now installed (see **Per-account targeting**), which the previous wording ruled out
+categorically. The narrower rule is the correct one: this divergence is between *two* evaluators, so
+it can only bite a flag the browser also reads. A backend-only flag that targets the **account
+email** — the key this section says the backend targets on — has no second end to disagree with. A
+flag read on both ends still needs the frontend half of ETP-4693 first.
 
 ### Failure behaviour — never block, never fail, default false
 

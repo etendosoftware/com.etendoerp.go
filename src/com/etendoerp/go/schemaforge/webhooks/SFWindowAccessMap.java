@@ -98,6 +98,9 @@ public class SFWindowAccessMap extends BaseWebhookService {
   /** JSON key used for the admin/client-admin capability (ETP-4513). */
   private static final String IS_ADMIN_OR_CLIENT_ADMIN = "isAdminOrClientAdmin";
 
+  /** Public API credentials are available to every authenticated active role. */
+  private static final String PUBLIC_API_KEY_MANAGEMENT = "publicApiKeyManagement";
+
   /** Access-tier value for a role with full (read+write) access to a window. */
   private static final String FULL = "full";
 
@@ -163,10 +166,12 @@ public class SFWindowAccessMap extends BaseWebhookService {
       }
       capabilities.put(SHOW_ACCOUNTING_FIELDS, true);
       capabilities.put(IS_ADMIN_OR_CLIENT_ADMIN, true);
+      capabilities.put(PUBLIC_API_KEY_MANAGEMENT, true);
     } else {
       populateWindowAccessForRole(role, windowAccess);
       capabilities.put(SHOW_ACCOUNTING_FIELDS, resolveShowAccountingFields(role));
       capabilities.put(IS_ADMIN_OR_CLIENT_ADMIN, false);
+      capabilities.put(PUBLIC_API_KEY_MANAGEMENT, true);
     }
 
     JSONObject result = new JSONObject();

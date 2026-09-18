@@ -224,13 +224,37 @@ class ToolRegistryGenerateToolsTest {
       List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:read"));
 
       List<String> names = toolNames(tools);
-      // Read access always yields neo_discover + docs + neo_widget + neo_vector_search when no
-      // specs exist. These are built-in read tools (ETP-4284 / ETP-5123).
+      // Read access always yields neo_discover + docs + neo_widget + neo_vector_search +
+      // neo_feedback when no specs exist. These are built-in read tools
+      // (ETP-4284 / ETP-5123 / ETP-5306).
       assertTrue(names.contains("neo_discover"));
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
       assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
-      assertEquals(4, tools.size());
+      assertTrue(names.contains(McpConstants.TOOL_NEO_FEEDBACK), names.toString());
+      assertEquals(5, tools.size(), names.toString());
+    }
+
+    @Test
+    @DisplayName("neo_feedback is exposed at neo:read scope, not only at write scopes")
+    void feedbackToolIsReadScoped() {
+      SFSpec spec = createWindowSpecWithWindow(SPEC_SALES_ORDER, WINDOW_ID);
+      accessMock.when(() -> NeoAccessUtils.hasWindowAccessForSpec(spec, "GET")).thenReturn(true);
+      mockSpecCriteria(List.of(spec));
+
+      // ETP-5306: neo_feedback is deliberately gated on neo:read and NOT on neo:write. A
+      // read-only session must still be able to report back, otherwise the feedback corpus is
+      // biased towards write-heavy sessions — and the failure mode of "tightening" this to
+      // neo:write is silent: no error is raised anywhere, feedback from every read-only session
+      // simply stops arriving. This test is the only thing that fails if that happens.
+      List<String> readNames = toolNames(registry.generateTools(scopesOf("neo:read")));
+      assertTrue(readNames.contains(McpConstants.TOOL_NEO_FEEDBACK),
+          "neo_feedback must be available to a read-only session: " + readNames);
+
+      // The wildcard scope implies read, so it must carry the tool too.
+      List<String> wildcardNames = toolNames(registry.generateTools(scopesOf("neo:*")));
+      assertTrue(wildcardNames.contains(McpConstants.TOOL_NEO_FEEDBACK),
+          "neo_feedback must be available under neo:*: " + wildcardNames);
     }
 
     @Test
@@ -338,8 +362,8 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(tools);
 
       // No CRUD tools since there are no accessible window specs; only the
-      // read-scope baseline tools (neo_discover + docs + neo_widget + neo_vector_search) are
-      // present.
+      // read-scope baseline tools (neo_discover + docs + neo_widget + neo_vector_search +
+      // neo_feedback) are present.
       assertFalse(names.contains("neo_list"));
       assertFalse(names.contains("neo_get"));
       assertFalse(names.contains("neo_create"));
@@ -347,7 +371,8 @@ class ToolRegistryGenerateToolsTest {
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
       assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
-      assertEquals(4, tools.size());
+      assertTrue(names.contains(McpConstants.TOOL_NEO_FEEDBACK), names.toString());
+      assertEquals(5, tools.size(), names.toString());
     }
 
     @Test
@@ -373,8 +398,8 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(tools);
 
       // No CRUD tools since there are no accessible window specs; only the
-      // read-scope baseline tools (neo_discover + docs + neo_widget + neo_vector_search) are
-      // present.
+      // read-scope baseline tools (neo_discover + docs + neo_widget + neo_vector_search +
+      // neo_feedback) are present.
       assertFalse(names.contains("neo_list"));
       assertFalse(names.contains("neo_get"));
       assertFalse(names.contains("neo_create"));
@@ -382,7 +407,8 @@ class ToolRegistryGenerateToolsTest {
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
       assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
-      assertEquals(4, tools.size());
+      assertTrue(names.contains(McpConstants.TOOL_NEO_FEEDBACK), names.toString());
+      assertEquals(5, tools.size(), names.toString());
     }
 
     @Test
@@ -481,8 +507,8 @@ class ToolRegistryGenerateToolsTest {
       List<String> names = toolNames(tools);
 
       // No window specs => no CRUD/window tools. What remains is the read-scope baseline
-      // (neo_discover + docs + neo_widget + neo_vector_search) plus the three write-scope
-      // image-upload tools (ETP-5184), which are built-in and not gated on any spec.
+      // (neo_discover + docs + neo_widget + neo_vector_search + neo_feedback) plus the three
+      // write-scope image-upload tools (ETP-5184), which are built-in and not gated on any spec.
       assertFalse(names.contains("neo_list"));
       assertFalse(names.contains("neo_create"));
       assertFalse(names.contains("neo_update"));
@@ -491,10 +517,11 @@ class ToolRegistryGenerateToolsTest {
       assertTrue(names.contains("docs"));
       assertTrue(names.contains(McpConstants.TOOL_NEO_WIDGET));
       assertTrue(names.contains(McpConstants.TOOL_NEO_VECTOR_SEARCH));
+      assertTrue(names.contains(McpConstants.TOOL_NEO_FEEDBACK), names.toString());
       assertTrue(names.contains(McpConstants.TOOL_NEO_REQUEST_IMAGE_UPLOAD));
       assertTrue(names.contains(McpConstants.TOOL_NEO_UPLOAD_IMAGE));
       assertTrue(names.contains(McpConstants.TOOL_NEO_GET_IMAGE_UPLOAD));
-      assertEquals(7, tools.size());
+      assertEquals(8, tools.size(), names.toString());
     }
   }
 

@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge.handlers;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -32,10 +33,14 @@ import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
+import java.text.ParseException;
+import java.text.SimpleDateFormat;
 import java.util.Collections;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import javax.inject.Named;
 
@@ -58,6 +63,7 @@ import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.accounting.coa.ElementValue;
 import org.openbravo.model.financialmgmt.gl.GLItem;
 import org.openbravo.model.financialmgmt.gl.GLItemAccounts;
+import org.openbravo.service.json.JsonUtils;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
@@ -1222,8 +1228,60 @@ public class ChartOfAccountsHandlerTest {
   /** Raw Postgres timestamp shape for {@code row[7]} ({@code updated}) — see ETP-5101. */
   private static final String SAMPLE_UPDATED_RAW = "2026-09-02 14:30:00.123456";
 
-  /** Canonical ISO form {@link NeoDateFormat#toCanonical} produces for {@link #SAMPLE_UPDATED_RAW}. */
-  private static final String SAMPLE_UPDATED_CANONICAL = "2026-09-02T14:30:00";
+  /**
+   * The server-local wall clock {@link #SAMPLE_UPDATED_RAW} denotes, with NO zone offset.
+   *
+   * <p>This is deliberately <b>not</b> the expected value: it is the shape
+   * {@link NeoDateFormat#toCanonical} produced before ETP-5255, kept so the assertions below can
+   * state that the emitted token starts with this wall clock (no instant was shifted) and is
+   * nevertheless never equal to it (the offset is present).
+   */
+  private static final String SAMPLE_UPDATED_WALL_CLOCK = "2026-09-02T14:30:00";
+
+  /**
+   * The shape of an {@code updated} audit token: the canonical ISO datetime plus a
+   * <b>mandatory</b> RFC-822 zone offset, which is what {@code JsonUtils.createDateTimeFormat()}
+   * ({@code yyyy-MM-dd'T'HH:mm:ssZZZZZ}) both emits and requires back. The offset is asserted as
+   * a shape rather than a literal because it is the JVM's default zone: hardcoding the developer
+   * machine's {@code -0300} would only move the failure to CI.
+   */
+  private static final Pattern AUDIT_TOKEN_SHAPE = Pattern
+      .compile("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}[+-]\\d{2}:\\d{2}$");
+
+  /**
+   * Asserts that {@code emitted} is a valid {@code updated} concurrency token for the
+   * server-local wall clock {@code expectedWallClock}, per ETP-5255.
+   *
+   * <p>Three independent properties, each of which the pre-ETP-5255 offsetless output violates:
+   * <ol>
+   *   <li>it carries a zone offset ({@link #AUDIT_TOKEN_SHAPE}) — an offsetless value is
+   *       silently re-read as UTC by {@code JsonUtils.convertFromXSDToJavaFormat}, which appends
+   *       {@code "+0000"} rather than rejecting it, so the concurrency check then fails by
+   *       exactly the server's UTC offset;</li>
+   *   <li>core's own reader can parse it back — the reader is the only consumer that matters;</li>
+   *   <li>it round-trips to the same <b>instant</b> as the server-local wall clock, so the offset
+   *       was derived from the value and not concatenated onto a re-interpreted one.</li>
+   * </ol>
+   */
+  private static void assertIsAuditTokenFor(String expectedWallClock, String emitted)
+      throws ParseException {
+    assertTrue("'" + emitted + "' must carry a zone offset (yyyy-MM-dd'T'HH:mm:ssZ)",
+        AUDIT_TOKEN_SHAPE.matcher(emitted).matches());
+    assertTrue("'" + emitted + "' must keep the server-local wall clock " + expectedWallClock,
+        emitted.startsWith(expectedWallClock));
+    assertNotEquals("the offsetless canonical form is NOT a valid concurrency token (ETP-5255)",
+        expectedWallClock, emitted);
+    Date expectedInstant = new SimpleDateFormat(NeoDateFormat.ISO_DATETIME).parse(expectedWallClock);
+    // ETP-5283: read back through core's FULL reader — the repair, then the parse. That is what
+    // JsonToDataConverter (JsonUtils.convertFromXSDToJavaFormat at 166/179/182/387) and
+    // NeoRecordVersion.parseClientValue both do; no production call site parses the raw token.
+    // createDateTimeFormat's pattern cannot read the XSD colon offset on its own — feeding it the
+    // unrepaired token asserted half the pipeline, and only passed while the emitter was skipping
+    // convertToCorrectXSDFormat.
+    assertEquals("the token must round-trip through core's own reader to the same instant",
+        expectedInstant,
+        JsonUtils.createDateTimeFormat().parse(JsonUtils.convertFromXSDToJavaFormat(emitted)));
+  }
 
   private static Object[] rowWith(Object issummary, Object isactive) {
     return rowWith(issummary, isactive, SAMPLE_UPDATED_RAW);
@@ -1233,8 +1291,8 @@ public class ChartOfAccountsHandlerTest {
    * ETP-5101: {@code toAccountJson} now reads an 8th column, {@code row[7]} ({@code updated}),
    * mandatory for every PUT/PATCH by {@code NeoCrudHandler#validateUpdateRequest}
    * (ETP-5073/DOC-04). {@code updated} lets a caller pass a specific raw value (including
-   * {@code null}) to exercise the {@link NeoDateFormat#toCanonical} formatting and its
-   * null-safety independently of the {@code summaryLevel}/{@code active} coverage above.
+   * {@code null}) to exercise the {@link NeoDateFormat#toAuditToken} formatting (ETP-5255) and
+   * its null-safety independently of the {@code summaryLevel}/{@code active} coverage above.
    */
   private static Object[] rowWith(Object issummary, Object isactive, Object updated) {
     return new Object[]{"EV1", "10000001", "Test Account", null, null, issummary, isactive, updated};
@@ -1246,16 +1304,23 @@ public class ChartOfAccountsHandlerTest {
     return (JSONObject) method.invoke(null, (Object) row);
   }
 
+  /**
+   * ETP-5101: {@code row[7]} (the raw Postgres timestamp) must be reformatted into the wire shape
+   * {@code NeoRecordVersion} and {@code JsonUtils} parse back, not passed through verbatim —
+   * passing it through is what let {@code missing_updated} PATCH/PUT requests through.
+   *
+   * <p>ETP-5255: that shape is {@link NeoDateFormat#toAuditToken}, <b>not</b>
+   * {@code toCanonical}. The token is a concurrency value, read back by
+   * {@code JsonUtils.createDateTimeFormat}, whose offset is mandatory. {@code toCanonical} drops
+   * the offset by design, so every edit came back stale by exactly the server's UTC offset. See
+   * {@link NeoDateFormat#toAuditToken}'s own javadoc.
+   */
   @Test
   public void toAccountJsonHandlesPlainStringYValues() throws Exception {
     JSONObject entry = invokeToAccountJson(rowWith("Y", "Y"));
     assertTrue("summaryLevel must be true for a plain String \"Y\"", entry.getBoolean("summaryLevel"));
     assertTrue("active must be true for a plain String \"Y\"", entry.getBoolean("active"));
-    // ETP-5101: row[7] (raw Postgres timestamp) must be reformatted through
-    // NeoDateFormat.toCanonical into the ISO wire shape NeoRecordVersion/JsonUtils parse back,
-    // not passed through verbatim — this is what let missing_updated PATCH/PUT requests through.
-    assertEquals("updated must be reformatted to the canonical ISO datetime via NeoDateFormat.toCanonical",
-        SAMPLE_UPDATED_CANONICAL, entry.getString("updated"));
+    assertIsAuditTokenFor(SAMPLE_UPDATED_WALL_CLOCK, entry.getString("updated"));
   }
 
   @Test
@@ -1297,15 +1362,15 @@ public class ChartOfAccountsHandlerTest {
     assertEquals(JSONObject.NULL, entry.get("updated"));
   }
 
-  /** A non-null {@code row[7]} shape {@link NeoDateFormat#toCanonical} cannot parse. */
+  /** A non-null {@code row[7]} shape {@link NeoDateFormat#toAuditToken} cannot parse. */
   private static final String SAMPLE_UPDATED_UNPARSEABLE = "not-a-real-timestamp";
 
   /**
-   * ETP-5101 regression. {@code NeoDateFormat.toCanonical} returning {@code null} does not mean
+   * ETP-5101 regression. {@code NeoDateFormat.toAuditToken} returning {@code null} does not mean
    * "no value" — per that class's own contract (see its class javadoc: "an input it does not
    * recognise yields {@code null}, and every caller must then pass the original value through
    * verbatim rather than blank it"), {@code toAccountJson} must fall back to the RAW {@code
-   * row[7]} string when canonicalization fails, never to {@code JSONObject.NULL}. Blanking it
+   * row[7]} string when the token cannot be rendered, never to {@code JSONObject.NULL}. Blanking it
    * would leave a client with no {@code updated} token to echo back on its next PATCH/PUT,
    * tripping the mandatory-{@code updated} concurrency guard ({@code missing_updated}) — the
    * exact bug class ETP-5101 already fixed once, via a different code path (see {@link
