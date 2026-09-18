@@ -152,6 +152,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_LANGUAGE = "language";
   private static final String FIELD_PAYMENT_TOKEN = "paymentToken";
   private static final String FIELD_ACCOUNT_EMAIL = "accountEmail";
+  private static final String FIELD_CURRENCY = "currency";
+  private static final String HEADER_ORIGIN = "Origin";
+  private static final String BILLING_OWNER_REQUIRED = "BILLING_OWNER_REQUIRED";
+  private static final String BILLING_OWNER_MESSAGE = "Only the environment owner can manage billing";
+  private static final String CLIENT_NAME_REQUIRED = "clientName is required";
+  private static final String CHECKOUT_NOT_CONFIGURED = "CHECKOUT_NOT_CONFIGURED";
+  private static final String CHECKOUT_NOT_CONFIGURED_MESSAGE = "Checkout is not configured";
   private static final String FIELD_ERROR = "error";
   private static final String ERROR_PAYMENT_REQUIRED = "payment_required";
   // javax.servlet.http.HttpServletResponse predates RFC 7231 and has no 402 constant.
@@ -245,7 +252,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_FULL_NAME = "fullName";
   private static final String FIELD_ADDRESS = "address";
   private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { FIELD_FULL_NAME, "businessType",
-      FIELD_CLIENT_NAME, "currency", FIELD_LANGUAGE, FIELD_COUNTRY_CODE, "fiscalIdType",
+      FIELD_CLIENT_NAME, FIELD_CURRENCY, FIELD_LANGUAGE, FIELD_COUNTRY_CODE, "fiscalIdType",
       "fiscalIdValue", FIELD_ADDRESS, "sector" };
   private static final String PATH_ONBOARDING_FIRST_STEPS = "/onboarding/first-steps";
   private static final String FIELD_FIRST_STEPS = "firstSteps";
@@ -340,6 +347,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
+    if (routePrimaryGet(path, request, response) || routeBillingGet(path, request, response)
+        || routeAccountGet(path, request, response) || routeCheckoutGet(path, request, response)) {
+      return;
+    }
+    writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
+  }
+
+  private boolean routePrimaryGet(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
     if (isPath(path, "/dev/lifecycle") && DevLifecycleToolService.isEnabled()) {
       handleDevLifecycleGet(request, response);
     } else if (isPath(path, "/me")) {
@@ -352,23 +368,48 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleGetCompanyData(request, response);
     } else if (isPath(path, "/environments")) {
       handleEnvironments(request, response);
-    } else if (isPath(path, "/billing/offers")) {
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  private boolean routeBillingGet(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (isPath(path, "/billing/offers")) {
       handleBillingOffers(request, response);
     } else if (isPath(path, "/billing/overview")) {
       handleBillingOverview(request, response);
     } else if (path != null && path.startsWith("/billing/purchases/")) {
       handleBillingPurchase(request, response);
-    } else if (isPath(path, "/login")) {
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  private boolean routeAccountGet(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (isPath(path, "/login")) {
       handleEnvironmentLogin(request, response);
     } else if (isPath(path, "/company-invitations/mine")) {
       handleCompanyInvitationMine(request, response);
     } else if (isPath(path, "/company-invitations/resolve")) {
       handleCompanyInvitationResolve(request, response);
-    } else if (path != null && path.startsWith("/checkout/sessions/")) {
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  private boolean routeCheckoutGet(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (path != null && path.startsWith("/checkout/sessions/")) {
       handleCheckoutStatus(request, response);
     } else {
-      writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
+      return false;
     }
+    return true;
   }
 
   @Override
@@ -477,9 +518,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         OBContext.restorePreviousMode();
       }
       if (!billingOwner) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN, "BILLING_OWNER_REQUIRED",
-            "Only the environment owner can manage billing",
-            "Only the environment owner can manage billing");
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, BILLING_OWNER_REQUIRED,
+            BILLING_OWNER_MESSAGE, BILLING_OWNER_MESSAGE);
         return;
       }
       JSONObject body = readJsonBodyOrBadRequest(request, response);
@@ -487,10 +527,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String clientName = body.optString(FIELD_CLIENT_NAME, "").trim();
       if (clientName.isEmpty()) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
-            "clientName is required", "clientName is required");
+            CLIENT_NAME_REQUIRED, CLIENT_NAME_REQUIRED);
         return;
       }
-      String requestOrigin = request.getHeader("Origin");
+      String requestOrigin = request.getHeader(HEADER_ORIGIN);
       final String origin = StringUtils.isBlank(requestOrigin)
           ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
       try {
@@ -498,8 +538,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             clientName, origin);
         writeResponse(response, HttpServletResponse.SC_CREATED, result);
       } catch (IllegalStateException e) {
-        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, "CHECKOUT_NOT_CONFIGURED",
-            "Checkout is not configured", "Checkout is not configured");
+        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
+            CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
       } catch (Exception e) {
         log.error("Could not create hosted checkout session", e);
         writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "CHECKOUT_PROVIDER_ERROR",
@@ -524,9 +564,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         OBContext.restorePreviousMode();
       }
       if (!billingOwner) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN, "BILLING_OWNER_REQUIRED",
-            "Only the environment owner can manage billing",
-            "Only the environment owner can manage billing");
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, BILLING_OWNER_REQUIRED,
+            BILLING_OWNER_MESSAGE, BILLING_OWNER_MESSAGE);
         return;
       }
       JSONObject body = readJsonBodyOrBadRequest(request, response);
@@ -534,39 +573,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String clientName = body.optString(FIELD_CLIENT_NAME, "").trim();
       if (clientName.isEmpty()) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
-            "clientName is required", "clientName is required");
+            CLIENT_NAME_REQUIRED, CLIENT_NAME_REQUIRED);
         return;
       }
       CheckoutRequest activePurchase = checkoutRequestStore
           .findActiveForAccountAndClientName(account.getEmail(), clientName);
       if (activePurchase != null) {
-        String status = activePurchase.getCheckoutRequestStatus();
-        if ("CREATING".equals(status) || "CREATED".equals(status)) {
-          String requestOrigin = request.getHeader("Origin");
-          final String origin = StringUtils.isBlank(requestOrigin)
-              ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
-          try {
-            JSONObject result = hostedCheckoutService.reopenSession(activePurchase.getRequest(),
-                account.getEmail(), activePurchase.getClientName(), origin);
-            writeResponse(response, HttpServletResponse.SC_OK, result);
-          } catch (IllegalStateException e) {
-            writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, "CHECKOUT_NOT_CONFIGURED",
-                "Checkout is not configured", "Checkout is not configured");
-          } catch (Exception e) {
-            log.error("Could not reopen account billing purchase", e);
-            writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
-                "Unable to reopen billing purchase", "Unable to reopen billing purchase");
-          }
-          return;
-        }
-        JSONObject result = new JSONObject();
-        result.put("purchaseId", activePurchase.getRequest());
-        result.put(FIELD_STATUS, status);
-        result.put(FIELD_CLIENT_NAME, activePurchase.getClientName());
-        writeResponse(response, HttpServletResponse.SC_CONFLICT, result);
+        handleExistingBillingPurchase(request, response, account, activePurchase);
         return;
       }
-      String requestOrigin = request.getHeader("Origin");
+      String requestOrigin = request.getHeader(HEADER_ORIGIN);
       final String origin = StringUtils.isBlank(requestOrigin)
           ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
       try {
@@ -574,14 +590,43 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             clientName, origin);
         writeResponse(response, HttpServletResponse.SC_CREATED, result);
       } catch (IllegalStateException e) {
-        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, "CHECKOUT_NOT_CONFIGURED",
-            "Checkout is not configured", "Checkout is not configured");
+        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
+            CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
       } catch (Exception e) {
         log.error("Could not create account billing purchase", e);
         writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
             "Unable to create billing purchase", "Unable to create billing purchase");
       }
     });
+  }
+
+  private void handleExistingBillingPurchase(HttpServletRequest request,
+      HttpServletResponse response, Account account, CheckoutRequest activePurchase)
+      throws IOException, JSONException {
+    String status = activePurchase.getCheckoutRequestStatus();
+    if ("CREATING".equals(status) || "CREATED".equals(status)) {
+      String requestOrigin = request.getHeader(HEADER_ORIGIN);
+      final String origin = StringUtils.isBlank(requestOrigin)
+          ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+      try {
+        JSONObject result = hostedCheckoutService.reopenSession(activePurchase.getRequest(),
+            account.getEmail(), activePurchase.getClientName(), origin);
+        writeResponse(response, HttpServletResponse.SC_OK, result);
+      } catch (IllegalStateException e) {
+        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
+            CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
+      } catch (Exception e) {
+        log.error("Could not reopen account billing purchase", e);
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
+            "Unable to reopen billing purchase", "Unable to reopen billing purchase");
+      }
+      return;
+    }
+    JSONObject result = new JSONObject();
+    result.put("purchaseId", activePurchase.getRequest());
+    result.put(FIELD_STATUS, status);
+    result.put(FIELD_CLIENT_NAME, activePurchase.getClientName());
+    writeResponse(response, HttpServletResponse.SC_CONFLICT, result);
   }
 
   private void handleCheckoutStatus(HttpServletRequest request, HttpServletResponse response)
@@ -639,7 +684,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         JSONObject result = new JSONObject();
         result.put("code", "productive-tenant");
         result.put("amountMinor", offer.getAmountMinor());
-        result.put("currency", offer.getCurrency());
+        result.put(FIELD_CURRENCY, offer.getCurrency());
         result.put("interval", offer.getInterval());
         writeResponse(response, HttpServletResponse.SC_OK, result);
       } catch (JSONException e) {
@@ -835,7 +880,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     String email = body.optString(FIELD_EMAIL, "").trim();
     String language = body.optString(FIELD_LANGUAGE, "").trim();
-    String requestOrigin = request.getHeader("Origin");
+    String requestOrigin = request.getHeader(HEADER_ORIGIN);
     String origin = StringUtils.isBlank(requestOrigin)
         ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
     runWithAuthenticatedAccount(request, response, "create company invitation", account -> {
@@ -2362,51 +2407,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleOnboarding(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    String token = extractBearerToken(request);
-    if (token == null) {
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
-          INVALID_AUTHORIZATION_HEADER);
+    OnboardingPreparation preparation = prepareOnboarding(request, response);
+    if (preparation == null) {
       return;
     }
-
-    String accountEmail = resolveOnboardingAccountEmail(token, response);
-    if (accountEmail == null) {
-      return;
-    }
-
-    // ETP-4798. Sits beside the paywall below, for the same reason: before the NDJSON stream opens
-    // and before any provisioning runs, so a refused request answers with plain JSON and leaves no
-    // half-created tenant behind.
-    if (rejectWhenEmailNotVerified(token, response)) {
-      return;
-    }
-
-    OnboardingRequestData onboardingRequest = parseOnboardingRequest(request, response);
-    if (onboardingRequest == null) {
-      return;
-    }
-
-    String currencyId = resolveCurrencyId(onboardingRequest.currencyIso, response);
-    if (currencyId == null) {
-      return;
-    }
-
-    if (rejectWhenPaidOnboardingIsNotOwned(accountEmail, onboardingRequest, response)) {
-      return;
-    }
-
-    PaywallOutcome paywallOutcome =
-        resolveOnboardingPaywall(accountEmail, onboardingRequest, response);
-    if (paywallOutcome == PaywallOutcome.REFUSED) {
-      return;
-    }
-    boolean paidUpgrade = paywallOutcome == PaywallOutcome.PAID;
-
-    Long provisioningClaim = claimPaidProvisioning(paidUpgrade, onboardingRequest, accountEmail,
-        response);
-    if (paidUpgrade && provisioningClaim == null) {
-      return;
-    }
+    String token = preparation.token;
+    String accountEmail = preparation.accountEmail;
+    OnboardingRequestData onboardingRequest = preparation.request;
+    String currencyId = preparation.currencyId;
+    boolean paidUpgrade = preparation.paidUpgrade;
+    Long provisioningClaim = preparation.provisioningClaim;
 
     // Tracked across the try/catch/finally below. Provisioning has many graceful exits that
     // `return` after writing a result line rather than throwing, so the catch block alone would
@@ -2508,6 +2518,41 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writer.flush();
       warnWhenOnboardingStreamWasLost(writer, accountEmail);
     }
+  }
+
+  private OnboardingPreparation prepareOnboarding(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    String token = extractBearerToken(request);
+    if (token == null) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
+      return null;
+    }
+    String accountEmail = resolveOnboardingAccountEmail(token, response);
+    if (accountEmail == null || rejectWhenEmailNotVerified(token, response)) {
+      return null;
+    }
+    OnboardingRequestData onboardingRequest = parseOnboardingRequest(request, response);
+    if (onboardingRequest == null) {
+      return null;
+    }
+    String currencyId = resolveCurrencyId(onboardingRequest.currencyIso, response);
+    if (currencyId == null
+        || rejectWhenPaidOnboardingIsNotOwned(accountEmail, onboardingRequest, response)) {
+      return null;
+    }
+    PaywallOutcome paywallOutcome =
+        resolveOnboardingPaywall(accountEmail, onboardingRequest, response);
+    if (paywallOutcome == PaywallOutcome.REFUSED) {
+      return null;
+    }
+    boolean paidUpgrade = paywallOutcome == PaywallOutcome.PAID;
+    Long provisioningClaim = claimPaidProvisioning(paidUpgrade, onboardingRequest, accountEmail,
+        response);
+    if (paidUpgrade && provisioningClaim == null) {
+      return null;
+    }
+    return new OnboardingPreparation(token, accountEmail, onboardingRequest, currencyId,
+        paidUpgrade, provisioningClaim);
   }
 
   /**
@@ -2665,9 +2710,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.restorePreviousMode();
     }
     if (hasEnvironments && !billingOwner) {
-      writeError(response, HttpServletResponse.SC_FORBIDDEN, "BILLING_OWNER_REQUIRED",
-          "Only the environment owner can manage billing",
-          "Only the environment owner can manage billing");
+      writeError(response, HttpServletResponse.SC_FORBIDDEN, BILLING_OWNER_REQUIRED,
+          BILLING_OWNER_MESSAGE, BILLING_OWNER_MESSAGE);
       return true;
     }
     return false;
@@ -2845,7 +2889,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
       OnboardingRequestData data = new OnboardingRequestData();
       data.clientName = clientName;
-      data.currencyIso = body.optString("currency", "EUR").trim();
+      data.currencyIso = body.optString(FIELD_CURRENCY, "EUR").trim();
       data.language = body.optString(FIELD_LANGUAGE, "en_US").trim();
       // Country drives the org's tax resolution; default to Spain (ES) when the form omits it.
       data.countryCode = body.optString(FIELD_COUNTRY_CODE, "ES").trim();
@@ -3994,6 +4038,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (JSONException e) {
       log.error("JSON error building field-too-long response", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    }
+  }
+
+  private static final class OnboardingPreparation {
+    private final String token;
+    private final String accountEmail;
+    private final OnboardingRequestData request;
+    private final String currencyId;
+    private final boolean paidUpgrade;
+    private final Long provisioningClaim;
+
+    private OnboardingPreparation(String token, String accountEmail, OnboardingRequestData request,
+        String currencyId, boolean paidUpgrade, Long provisioningClaim) {
+      this.token = token;
+      this.accountEmail = accountEmail;
+      this.request = request;
+      this.currencyId = currencyId;
+      this.paidUpgrade = paidUpgrade;
+      this.provisioningClaim = provisioningClaim;
     }
   }
 
