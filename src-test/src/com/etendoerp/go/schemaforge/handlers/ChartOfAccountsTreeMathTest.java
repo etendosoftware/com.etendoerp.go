@@ -49,7 +49,6 @@ import org.mockito.junit.MockitoJUnitRunner;
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class ChartOfAccountsTreeMathTest {
 
-  private static final String LEVEL_HEADING = "E";
   private static final String LEVEL_ACCOUNT = "C";
   private static final String LEVEL_BREAKDOWN = "D";
   private static final String LEVEL_SUBACCOUNT = "S";

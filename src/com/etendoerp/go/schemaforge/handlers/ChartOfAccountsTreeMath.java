@@ -47,6 +47,9 @@ final class ChartOfAccountsTreeMath {
   /** Matches a {@code Value} that is purely numeric — a genuine PGC grouping/leaf code. */
   private static final Pattern NUMERIC_VALUE = Pattern.compile("\\d+");
 
+  /** JSON key for a node's {@code C_ElementValue.Value} in the candidate/ancestor payloads. */
+  private static final String FIELD_VALUE = "value";
+
   private ChartOfAccountsTreeMath() {
     // Utility class — no instances.
   }
@@ -82,7 +85,7 @@ final class ChartOfAccountsTreeMath {
       String level = nodeElementLevelMap.get(current);
 
       JSONObject ancestor = new JSONObject();
-      ancestor.put("value", value != null ? value : JSONObject.NULL);
+      ancestor.put(FIELD_VALUE, value != null ? value : JSONObject.NULL);
       ancestor.put("name", name != null ? name : JSONObject.NULL);
       ancestor.put("elementLevel", level != null ? level : JSONObject.NULL);
       chain.add(ancestor);
@@ -292,10 +295,10 @@ final class ChartOfAccountsTreeMath {
       return null;
     }
     JSONObject only = insertionChildren.optJSONObject(0);
-    if (only == null || only.isNull("value")) {
+    if (only == null || only.isNull(FIELD_VALUE)) {
       return null;
     }
-    String value = only.optString("value", null);
+    String value = only.optString(FIELD_VALUE, null);
     if (value == null || NUMERIC_VALUE.matcher(value).matches()) {
       return value;
     }
@@ -311,7 +314,7 @@ final class ChartOfAccountsTreeMath {
       Map<String, String> nodeNameMap, Map<String, String> nodeElementLevelMap) throws Exception {
     JSONObject candidate = new JSONObject();
     candidate.put("id", nodeId);
-    candidate.put("value", orNull(nodeValueMap.get(nodeId)));
+    candidate.put(FIELD_VALUE, orNull(nodeValueMap.get(nodeId)));
     candidate.put("name", orNull(nodeNameMap.get(nodeId)));
     candidate.put("elementLevel", orNull(nodeElementLevelMap.get(nodeId)));
     return candidate;
