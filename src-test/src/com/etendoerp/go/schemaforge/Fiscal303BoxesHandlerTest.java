@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -475,7 +476,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "210.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -508,7 +509,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "100.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -541,7 +542,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "40.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -575,7 +576,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "0.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -605,7 +606,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "20.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -638,7 +639,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "52.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -668,7 +669,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "14.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -698,7 +699,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "5.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -728,7 +729,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "17.50"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -759,7 +760,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("800.00", "168.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -791,7 +792,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("600.00", "126.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -823,7 +824,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("5000.00", "1050.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -856,7 +857,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("2000.00", "420.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -886,7 +887,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("500.00", "105.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -916,7 +917,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "210.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -947,7 +948,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("2300.00", "0.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -978,7 +979,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("3600.00", "0.00"));
 
     ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
@@ -1021,7 +1022,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(Collections.singletonList(purchRate));
 
     // Call order: (1) applyPercentageSplit for VAT_SALES_GENERAL, (2) fillGroupBoxes for Normal_Operations
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "210.00"))
         .thenReturn(amounts("500.00", "105.00"));
 
@@ -1062,7 +1063,7 @@ public class Fiscal303BoxesHandlerTest {
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(purchParam)))
         .thenReturn(Collections.singletonList(purchRate));
 
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "210.00"))
         .thenReturn(amounts("500.00", "105.00"));
 
@@ -1093,7 +1094,8 @@ public class Fiscal303BoxesHandlerTest {
 
   /**
    * Box 14/15 must be populated from the SAME TaxRates already resolved for VAT_SALES_GENERAL
-   * (box 1/3, 4% here), computed with InvoiceType.ONLY_MEMO_AND_CORRECTIVE rather than ALL.
+   * (box 1/3, 4% here), computed with InvoiceType.ONLY_MEMO_AND_CORRECTIVE rather than
+   * ONLY_NORMAL (the InvoiceType used for the base box 1/3 itself).
    */
   @Test
   public void testComputeBoxes_modificacionBasesYCuotas_mapsToBoxes14and15() {
@@ -1113,7 +1115,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "40.00"));
     when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_MEMO_AND_CORRECTIVE)))
         .thenReturn(amounts("-200.00", "-8.00"));
@@ -1147,7 +1149,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("100.00", "5.20"));
     when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_MEMO_AND_CORRECTIVE)))
         .thenReturn(amounts("50.00", "2.60"));
@@ -1156,7 +1158,7 @@ public class Fiscal303BoxesHandlerTest {
 
     assertBd("50.00", result.boxes.get(25));
     assertBd("2.60",  result.boxes.get(26));
-    // box[24] (5.20% cuota, ALL) = 5.20; box[26] (mod. recargo cuota, MEMO_AND_CORRECTIVE) = 2.60
+    // box[24] (5.20% cuota, ONLY_NORMAL) = 5.20; box[26] (mod. recargo cuota, MEMO_AND_CORRECTIVE) = 2.60
     assertBd("7.80",  result.boxes.get(27));
   }
 
@@ -1183,7 +1185,7 @@ public class Fiscal303BoxesHandlerTest {
         .thenReturn(param);
     when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
         .thenReturn(Collections.singletonList(rate));
-    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
         .thenReturn(amounts("1000.00", "210.00"));
     when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_MEMO_AND_CORRECTIVE)))
         .thenReturn(amounts("-100.00", "-21.00"));
@@ -1192,7 +1194,7 @@ public class Fiscal303BoxesHandlerTest {
 
     assertBd("-100.00", result.boxes.get(40));
     assertBd("-21.00",  result.boxes.get(41));
-    // box[29] (normal operations cuota, ALL) = 210.00; box[41] (rectificación, MEMO_AND_CORRECTIVE) = -21.00
+    // box[29] (normal operations cuota, ONLY_NORMAL) = 210.00; box[41] (rectificación, MEMO_AND_CORRECTIVE) = -21.00
     assertBd("189.00",  result.boxes.get(45));
   }
 
@@ -1218,6 +1220,124 @@ public class Fiscal303BoxesHandlerTest {
         result.boxes.get(14));
     assertNull("box[15] must stay absent when there is no sales activity at all",
         result.boxes.get(15));
+  }
+
+  // ── computeBoxes — regression: base boxes must use ONLY_NORMAL, never ALL ────────────────
+  //
+  // Bug found while validating ETP-5393 Bug F against a real AEAT XML/paper form: the base
+  // box groups (07/09, 04/06, 01/03, 150/152, 165/167, 22/24, 19/21, 156/158, 16/18, 168/170,
+  // 28/29...39) were computed with InvoiceType.ALL (normal + corrective already netted
+  // together), while boxes 14/15, 25/26 and 40/41 SEPARATELY add the corrective-only delta
+  // (InvoiceType.ONLY_MEMO_AND_CORRECTIVE) on top. Summing both into the box[27]/[45]/[46]
+  // totals double-counted the corrective effect. The classic engine (AEAT303Report2014,
+  // every year-override 2015→2026) always computes these same base boxes with
+  // InvoiceType.ONLY_NORMAL. Fix: applyPercentageSplit/fillGroupBoxes now use ONLY_NORMAL.
+
+  /**
+   * VAT_SALES_GENERAL (box 7/9) must invoke calculateAmountsMap with ONLY_NORMAL, and must
+   * NEVER invoke it with ALL — regression guard for the double-counted corrective VAT bug.
+   */
+  @Test
+  public void testComputeBoxes_sale21pct_usesOnlyNormalInvoiceType_notAll() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("21"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("VAT_SALES"), eq("VAT_SALES_GENERAL")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
+        .thenReturn(amounts("1000.00", "210.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertBd("1000.00", result.boxes.get(7));
+    assertBd("210.00",  result.boxes.get(9));
+    verify(helper).calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL));
+    verify(helper, never()).calculateAmountsMap(any(), eq(InvoiceType.ALL));
+  }
+
+  /**
+   * VAT_PURCHASE Normal_Operations (box 28/29, via fillGroupBoxes) must also invoke
+   * calculateAmountsMap with ONLY_NORMAL, never ALL.
+   */
+  @Test
+  public void testComputeBoxes_purchaseNormalOps_usesOnlyNormalInvoiceType_notAll() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("21"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("VAT_PURCHASE"), eq("Normal_Operations")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
+        .thenReturn(amounts("5000.00", "1050.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertBd("5000.00", result.boxes.get(28));
+    assertBd("1050.00", result.boxes.get(29));
+    verify(helper).calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL));
+    verify(helper, never()).calculateAmountsMap(any(), eq(InvoiceType.ALL));
+  }
+
+  /**
+   * With both a normal-only base box (ONLY_NORMAL) and a corrective delta (box 14/15,
+   * ONLY_MEMO_AND_CORRECTIVE) present, box[27] must be their plain SUM — box 9 + box 15 —
+   * and must NOT also subtract/double-apply the corrective delta a second time. Before the
+   * fix, box 9 itself was computed with InvoiceType.ALL (which already nets in the corrective
+   * activity), so summing it with the separately-computed box 15 corrective delta
+   * double-counted the correction. This test pins the correct additive relationship.
+   */
+  @Test
+  public void testComputeBoxes_box27IsPlainSumOfNormalAndCorrective_noDoubleCounting() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("21"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("VAT_SALES"), eq("VAT_SALES_GENERAL")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    // box 9 (normal-only cuota) = 210.00
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_NORMAL)))
+        .thenReturn(amounts("1000.00", "210.00"));
+    // box 15 (corrective-only cuota delta) = -8.00
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_MEMO_AND_CORRECTIVE)))
+        .thenReturn(amounts("-200.00", "-8.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertBd("210.00", result.boxes.get(9));
+    assertBd("-8.00",  result.boxes.get(15));
+    // 210.00 + (-8.00) = 202.00 — plain sum, not a further-adjusted/double-counted value.
+    assertBd("202.00", result.boxes.get(27));
   }
 
   // ── helpers ───────────────────────────────────────────────────────────────

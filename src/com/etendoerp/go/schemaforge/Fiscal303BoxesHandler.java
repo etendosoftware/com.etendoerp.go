@@ -510,7 +510,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
       BigDecimal normRate = rate.setScale(2, java.math.RoundingMode.HALF_UP);
       List<TaxRate> group = split.get(normRate);
       if (group == null || group.isEmpty()) continue;
-      Map<String, BigDecimal> amounts = helper.calculateAmountsMap(group, InvoiceType.ALL);
+      Map<String, BigDecimal> amounts = helper.calculateAmountsMap(group, InvoiceType.ONLY_NORMAL);
       BigDecimal base = amounts.getOrDefault(TAX_BASE_AMOUNT, BigDecimal.ZERO).abs();
       if (base.compareTo(maxBase) > 0) {
         maxBase = base;
@@ -520,12 +520,17 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
     return dominantRate;
   }
 
+  // NOTE: uses InvoiceType.ONLY_NORMAL (not ALL) — the classic engine (AEAT303Report2014,
+  // every year-override 2015→2026) always computes these base boxes from normal invoices
+  // only. The corrective/credit-memo delta is added separately via fillMemoCorrectiveBoxPair
+  // (boxes 14/15, 25/26, 40/41). Using ALL here double-counts the corrective effect when both
+  // are summed into totals 27/45/46/66/69/71 — see ETP-5393 follow-up fix.
   private void applyPercentageSplit(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
       List<TaxRate> rates, Function<BigDecimal, List<Integer>> boxMapper,
       Map<String, List<Integer>> rateToBoxes) {
     for (Map.Entry<BigDecimal, List<TaxRate>> e : splitByPercentage(rates).entrySet()) {
       BigDecimal pct = e.getKey();
-      Map<String, BigDecimal> r = helper.calculateAmountsMap(e.getValue(), InvoiceType.ALL);
+      Map<String, BigDecimal> r = helper.calculateAmountsMap(e.getValue(), InvoiceType.ONLY_NORMAL);
       List<Integer> boxes = boxMapper.apply(pct);
       if (!boxes.isEmpty()) {
         addToBox(b, boxes.get(0), r.get(TAX_BASE_AMOUNT));
@@ -562,7 +567,8 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
   // taxBox == 0 means base-only (no corresponding tax amount box, e.g. 0% exempt rows).
   // Returns the resolved TaxRate list (empty when the param/rates don't exist) so callers can
   // accumulate it into a UNION for the "Modificación"/"Rectificación" corrective box pairs —
-  // see fillMemoCorrectiveBoxPair.
+  // see fillMemoCorrectiveBoxPair. Uses InvoiceType.ONLY_NORMAL for the same reason as
+  // applyPercentageSplit above — ALL would double-count the corrective delta added there.
   private List<TaxRate> fillGroupBoxes(Map<Integer, BigDecimal> b, AEAT303CalculationsHelper helper,
       AEAT303Report2014Dao dao303, TaxReport taxReport,
       BoxGroupConfig cfg, Map<String, List<Integer>> rateToBoxes) {
@@ -571,7 +577,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
     List<TaxRate> rates =
         dao303.get303Taxes(taxReport.getId(), cfg.taxType, cfg.equivCharge, cfg.intracom, param);
     if (rates.isEmpty()) return rates;
-    Map<String, BigDecimal> result = helper.calculateAmountsMap(rates, InvoiceType.ALL);
+    Map<String, BigDecimal> result = helper.calculateAmountsMap(rates, InvoiceType.ONLY_NORMAL);
     addToBox(b, cfg.baseBox, result.get(TAX_BASE_AMOUNT));
     if (cfg.taxBox > 0) addToBox(b, cfg.taxBox, result.get(TAX_AMOUNT));
     List<Integer> boxes = cfg.taxBox > 0
