@@ -382,6 +382,9 @@ class FiscalDeclCrudHandler {
     if (rejectTelematicReactivation(decl, body, id, response)) {
       return;
     }
+    if (rejectNegativeManualBoxes(body, id, response)) {
+      return;
+    }
     applyDeclPutScalarFields(decl, body);
     boolean manualDataApplied = applyManualDataIfRequested(decl, body);
     decl.set(PROPERTY_UPDATED_BY, OBContext.getOBContext().getUser());
@@ -415,6 +418,51 @@ class FiscalDeclCrudHandler {
     servlet.sendError(response, HttpServletResponse.SC_CONFLICT,
         "Cannot reactivate a declaration filed via AEAT telematic submission: " + id);
     return true;
+  }
+
+  // ETP-5393 Bug C — boxes the classic AEAT303Report engine hard-rejects when negative:
+  // box 111 "Rectificación – Importe" (AEAT303Report2024.java:276-278,
+  // @AEAT303_Negative_Not_Allowed_For_111@) and box 77 "IVA a la importación liquidado por la
+  // Aduana pendiente de ingreso" (AEAT303Report2015.java:149-162,
+  // @AEAT303_Negative_IVA_IMPORT_ADUANA@). The GO previsualización's manualOverrides had no
+  // equivalent server-side check at all — unlike setManualDataIfPresent's tolerant handling of a
+  // malformed manualData blob, a negative value here is a real business-rule violation the caller
+  // must be told about, not silently swallowed.
+  private static final java.util.Set<String> NEGATIVE_NOT_ALLOWED_BOX_KEYS =
+      java.util.Set.of("111", "77");
+
+  /**
+   * Rejects a PUT whose {@code manualData.manualOverrides} sets box 111 or box 77 to a negative
+   * value — see {@link #NEGATIVE_NOT_ALLOWED_BOX_KEYS}. A missing/malformed {@code manualData} or
+   * {@code manualOverrides} is not this method's concern (left to {@link #setManualDataIfPresent}'s
+   * existing tolerant handling); this only fires when one of the two watched boxes is present and
+   * parses to a negative number.
+   *
+   * @return {@code true} if the PUT was rejected (a 400 was already sent to {@code response} and
+   *         the caller must stop processing); {@code false} if the request may proceed.
+   */
+  private boolean rejectNegativeManualBoxes(JSONObject body, String id, HttpServletResponse response)
+      throws IOException {
+    if (!body.has(MANUAL_DATA_KEY) || body.isNull(MANUAL_DATA_KEY)) {
+      return false;
+    }
+    JSONObject manualData = body.optJSONObject(MANUAL_DATA_KEY);
+    JSONObject overrides = manualData != null ? manualData.optJSONObject("manualOverrides") : null;
+    if (overrides == null) {
+      return false;
+    }
+    for (String boxKey : NEGATIVE_NOT_ALLOWED_BOX_KEYS) {
+      if (!overrides.has(boxKey) || overrides.isNull(boxKey)) {
+        continue;
+      }
+      double value = overrides.optDouble(boxKey, 0d);
+      if (!Double.isNaN(value) && value < 0) {
+        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+            "Box " + boxKey + " does not accept negative values: " + id);
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
