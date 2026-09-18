@@ -100,6 +100,34 @@ public final class OwnerSupport {
   }
 
   /**
+   * Returns {@code clientId}'s owner {@code AD_User_ID}, or {@code null} when the client has no
+   * owner flagged yet — ETP-5411, used by {@code UserRoleAssignmentHandler#excludeContactOnlyUsers}
+   * to keep the tenant owner in the Users list even though the owner never goes through {@code
+   * CompanyInvitationService} (see that method's javadoc). Native SQL, same reasoning as {@link
+   * #isOwner(String)}/{@link #clientHasOwner(String)} — the column is not a mapped entity
+   * property.
+   *
+   * @param clientId the {@code AD_Client_ID} to look up
+   * @return the owner's {@code AD_User_ID}, or {@code null} if {@code clientId} is blank, has no
+   *     owner, or the underlying row's id is somehow not a {@code String}
+   */
+  public static String findOwnerUserId(String clientId) {
+    if (clientId == null || clientId.isBlank()) {
+      return null;
+    }
+    Session session = OBDal.getInstance().getSession();
+    NativeQuery<Object> query = session.createNativeQuery(
+        "SELECT ad_user_id FROM ad_user WHERE ad_client_id = :clientId AND " + COLUMN_IS_OWNER
+            + " = 'Y' LIMIT 1");
+    query.setParameter("clientId", clientId);
+    List<Object> results = query.getResultList();
+    if (results.isEmpty() || !(results.get(0) instanceof String)) {
+      return null;
+    }
+    return (String) results.get(0);
+  }
+
+  /**
    * Flags {@code userId} as {@code clientId}'s owner, UNLESS the client already has one — the
    * one-owner-per-client invariant (ETP-4830). A no-op (never overwrites, never moves ownership)
    * when a resumed/retried tenant-provisioning call finds an owner already set, so this is safe

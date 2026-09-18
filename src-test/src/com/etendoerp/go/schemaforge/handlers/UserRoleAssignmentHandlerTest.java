@@ -120,6 +120,11 @@ import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
 public class UserRoleAssignmentHandlerTest {
 
   private static final String USER_ID = "user-001";
+  private static final String CLIENT_ID = "client-001";
+  /** A shape-valid (32-hex) id, distinct from {@link #USER_ID}, for {@link #ROLE_ID_PATTERN}
+   *  splicing tests — {@code USER_ID} itself is not hex-shaped and must never satisfy that
+   *  check. */
+  private static final String OWNER_ID = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
   /**
    * ETP-4830 — bundles the three collaborators {@link
@@ -421,10 +426,13 @@ public class UserRoleAssignmentHandlerTest {
     assertNull(handler.handle(ctx));
   }
 
-  // ─── handle(): GET list pre-hook — exclude contact-only users (ETP-5019) ─────
+  // ─── handle(): GET list pre-hook — exclude contact-only users (ETP-5019/ETP-5411) ─
 
   @Test
-  public void handleInjectsUsernameNotBlankPredicateOnListGet() {
+  public void handleInjectsInvitationExistsPredicateOnListGet() {
+    // ETP-5411: username-based filtering was superseded — a classic-backend Contact can now
+    // get a non-blank username too. The new signal is an ETGO_INVITATION row pointing at the
+    // user. No ObContext/client is set on this NeoContext, so no owner clause is added.
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
     Map<String, String> queryParams = new HashMap<>();
     NeoContext ctx = NeoContext.builder()
@@ -435,17 +443,17 @@ public class UserRoleAssignmentHandlerTest {
 
     assertNull(handler.handle(ctx));
 
-    assertEquals("e.username is not null and e.username <> ''",
+    assertEquals("exists (select 1 from Invitation i where i.user = e)",
         queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
   }
 
   @Test
-  public void handleContactExclusionPredicateFiltersOnUsernameNotRoleCount() {
-    // Regression guard (ETP-5019): a real user can legitimately have zero AD_User_Roles rows
-    // (not yet assigned any role) but always has a non-blank username — see the handler's own
-    // javadoc for excludeContactOnlyUsers. The injected predicate must never reference roles or
-    // AD_User_Roles, only username presence, or it would wrongly hide legitimate
-    // not-yet-assigned real users.
+  public void handleContactExclusionPredicateFiltersOnInvitationNotRoleCount() {
+    // Regression guard (ETP-5019, still true under ETP-5411): a real user can legitimately have
+    // zero AD_User_Roles rows (not yet assigned any role) — see the handler's own javadoc for
+    // excludeContactOnlyUsers. The injected predicate must never reference roles or
+    // AD_User_Roles, only Invitation existence (plus the owner literal), or it would wrongly
+    // hide legitimate not-yet-assigned real users.
     UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
     Map<String, String> queryParams = new HashMap<>();
     NeoContext ctx = NeoContext.builder()
@@ -457,7 +465,7 @@ public class UserRoleAssignmentHandlerTest {
     assertNull(handler.handle(ctx));
 
     String predicate = queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM);
-    assertTrue(predicate.contains("username"));
+    assertTrue(predicate.contains("Invitation"));
     assertFalse(predicate.toLowerCase().contains("role"));
   }
 
@@ -474,7 +482,65 @@ public class UserRoleAssignmentHandlerTest {
 
     assertNull(handler.handle(ctx));
 
-    assertEquals("(e.active = true) and (e.username is not null and e.username <> '')",
+    assertEquals(
+        "(e.active = true) and (exists (select 1 from Invitation i where i.user = e))",
+        queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
+  }
+
+  @Test
+  public void handleIncludesOwnerLiteralInContactExclusionPredicateWhenOwnerResolved() {
+    // ETP-5411: the tenant owner never gets an Invitation row (self-service onboarding, not
+    // CompanyInvitationService), so it needs its own literal clause or it would wrongly
+    // disappear from the Users list.
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    Map<String, String> queryParams = new HashMap<>();
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    OBContext obContext = mock(OBContext.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .queryParams(queryParams)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
+      ownerMock.when(() -> OwnerSupport.findOwnerUserId(CLIENT_ID)).thenReturn(OWNER_ID);
+
+      assertNull(handler.handle(ctx));
+    }
+
+    assertEquals(
+        "e.id = '" + OWNER_ID + "' or exists (select 1 from Invitation i where i.user = e)",
+        queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
+  }
+
+  @Test
+  public void handleOmitsOwnerLiteralWhenOwnerIdFailsShapeCheck() {
+    // Fail-closed: an unexpectedly-shaped id from OwnerSupport must never reach the HQL string
+    // unvalidated (same defense _neoWhere's RoleIds splicing already relies on).
+    UserRoleAssignmentHandler handler = new UserRoleAssignmentHandler();
+    Map<String, String> queryParams = new HashMap<>();
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn(CLIENT_ID);
+    OBContext obContext = mock(OBContext.class);
+    when(obContext.getCurrentClient()).thenReturn(client);
+    NeoContext ctx = NeoContext.builder()
+        .endpointType(NeoEndpointType.CRUD)
+        .httpMethod("GET")
+        .queryParams(queryParams)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
+      ownerMock.when(() -> OwnerSupport.findOwnerUserId(CLIENT_ID))
+          .thenReturn("not-a-valid-id; drop table");
+
+      assertNull(handler.handle(ctx));
+    }
+
+    assertEquals("exists (select 1 from Invitation i where i.user = e)",
         queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
   }
 
@@ -524,7 +590,7 @@ public class UserRoleAssignmentHandlerTest {
     assertNull(handler.handle(ctx));
     assertNull(handler.afterHandle(ctx));
 
-    assertEquals("e.username is not null and e.username <> ''",
+    assertEquals("exists (select 1 from Invitation i where i.user = e)",
         queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM));
     JSONObject inner = body.getJSONObject("response");
     assertEquals(1, inner.getJSONArray("data").length());

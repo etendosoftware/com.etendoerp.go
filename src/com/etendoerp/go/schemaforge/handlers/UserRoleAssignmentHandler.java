@@ -54,6 +54,7 @@ import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.data.Invitation;
 import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
@@ -268,7 +269,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * ETP-4830 write-path-guards concern; on a {@code user} {@code DELETE}, guards against the
    * self/last-admin/owner deletes described in the class javadoc's ETP-5195 delete-guards
    * concern; on a {@code user} list {@code GET}, excludes contact-only rows (see {@link
-   * #excludeContactOnlyUsers}, ETP-5019). No-op for every other method/endpoint.
+   * #excludeContactOnlyUsers}, ETP-5019/ETP-5411). No-op for every other method/endpoint.
    */
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -299,15 +300,33 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * Users window's list ("Default Customer Contact" rows for every client, plus assorted named
    * BP-contact rows) even though they are not real application users.
    *
-   * <p>Structural signal, confirmed by direct DB query rather than a name match on "Contact":
-   * EVERY genuinely login-capable {@code AD_User} — admin-created via this window's own {@link
-   * #handleCreate}, or provisioned by {@code InitialSetupUtility#insertUser} at client onboarding
-   * — always gets a non-blank {@code username} (this handler itself derives one from {@code
-   * email} on every create, see the class javadoc's concern (3)). A BP-contact-only row never
-   * has one. This holds even for a real user with zero roles assigned yet (confirmed: 42 of 185
-   * real users in this sandbox have zero {@code AD_User_Roles} rows but all 185 have a
-   * non-blank {@code username}) — so filtering on role count, unlike {@code username}, would
-   * wrongly hide legitimate not-yet-assigned users.
+   * <p><b>ETP-5411 — {@code username}-based filtering superseded.</b> The original signal
+   * ({@code username is not null}) relied on every genuinely login-capable user getting a
+   * non-blank username and every BP-contact row never getting one. That second half broke: a
+   * Contact created from the CLASSIC backend's Contacts tab (bypassing this handler's {@link
+   * #handleCreate} entirely) can end up with a non-blank {@code Username} — the classic UI
+   * doesn't leave it blank the way the original ETP-5019 sampling assumed. The new structural
+   * signal is {@code ETGO_INVITATION.AD_USER_ID}: every real user created through the Go SPA
+   * goes through {@link CompanyInvitationService#createInvitationForNewlyCreatedUser}, which
+   * persists an {@link Invitation} row with {@code invitation.setUser(invitedUser)} — i.e. the
+   * FK is set at invite-creation time, not at acceptance. A classic-backend Contact never goes
+   * through this path, so it never gets a matching {@code Invitation} row regardless of what its
+   * {@code username} contains.
+   *
+   * <p>One exception: the ONE user per client flagged {@code EM_ETGO_Is_Owner} (see {@link
+   * OwnerSupport}) is provisioned by the self-service onboarding flow, not {@link
+   * CompanyInvitationService} — the owner never gets an {@code Invitation} row either, so it
+   * needs its own clause or it would wrongly disappear from the list. {@code
+   * EM_ETGO_Is_Owner} is NOT a mapped entity property ({@link OwnerSupport}'s own javadoc — read
+   * via native SQL only), so it cannot be referenced as {@code e.emEtgoIsOwner} in this HQL
+   * predicate; instead {@link OwnerSupport#findOwnerUserId} resolves the current client's owner
+   * id via native SQL, and — validated against {@link #ROLE_ID_PATTERN} before being inlined,
+   * the same "no bind parameters for {@code _neoWhere}" precedent {@link #applyRoleFilter} already
+   * uses for {@code RoleIds} — it is spliced in as a literal {@code e.id = '<ownerId>'} branch.
+   *
+   * <p>Role count (a real user can have zero {@code AD_User_Roles} rows) remains ruled out for
+   * the same reason ETP-5019 originally ruled it out: 42 of 185 real users sampled had zero roles
+   * assigned yet.
    *
    * <p>Injects the exclusion as a {@code _neoWhere} HQL predicate (see {@link
    * NeoCrudHelper#NEO_WHERE_PARAM}) BEFORE the default CRUD list fetch runs, rather than
@@ -323,10 +342,37 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     if (queryParams == null) {
       return;
     }
-    String predicate = "e.username is not null and e.username <> ''";
+    String ownerId = resolveCurrentClientOwnerId(context.getObContext());
+    StringBuilder predicate = new StringBuilder();
+    if (ownerId != null) {
+      predicate.append("e.id = '").append(ownerId).append("' or ");
+    }
+    predicate.append("exists (select 1 from Invitation i where i.user = e)");
     String existing = queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM);
-    queryParams.put(NeoCrudHelper.NEO_WHERE_PARAM,
-        StringUtils.isBlank(existing) ? predicate : "(" + existing + ") and (" + predicate + ")");
+    queryParams.put(NeoCrudHelper.NEO_WHERE_PARAM, StringUtils.isBlank(existing)
+        ? predicate.toString()
+        : "(" + existing + ") and (" + predicate + ")");
+  }
+
+  /**
+   * Resolves the current request's client's owner {@code AD_User_ID} (see {@link
+   * OwnerSupport#findOwnerUserId}), validated against {@link #ROLE_ID_PATTERN} before ever being
+   * eligible for inlining into an HQL {@code _neoWhere} predicate — same defense used for
+   * {@code RoleIds} in {@link #applyRoleFilter}, since {@code _neoWhere} has no bind-parameter
+   * mechanism. Returns {@code null} whenever there is no client, no owner, or the resolved id
+   * unexpectedly fails the shape check (fails closed: no owner clause is added, so the owner
+   * would simply be excluded from this list rather than the predicate ever carrying an
+   * unvalidated value).
+   */
+  private String resolveCurrentClientOwnerId(OBContext obContext) {
+    if (obContext == null || obContext.getCurrentClient() == null) {
+      return null;
+    }
+    String ownerId = OwnerSupport.findOwnerUserId(obContext.getCurrentClient().getId());
+    if (ownerId == null || !ROLE_ID_PATTERN.matcher(ownerId).matches()) {
+      return null;
+    }
+    return ownerId;
   }
 
   /**
