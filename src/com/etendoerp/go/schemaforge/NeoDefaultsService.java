@@ -1298,6 +1298,15 @@ public class NeoDefaultsService {
     private final JSONObject updates = new JSONObject();
     private final JSONObject combos = new JSONObject();
     private final JSONArray messages = new JSONArray();
+    /**
+     * IMP-45: fields a callout resolved a different value for and was not allowed to write,
+     * because the caller had sent that field itself (ETP-4784's protected-fields rule). Keyed by
+     * field name; each entry carries {@code sent} (the value that survived) and {@code callout}
+     * (the value the callout derived from the record's real context). Recording it changes
+     * nothing about which value wins — the caller's still does — it only makes the divergence
+     * visible to a caller that re-sent a default it was handed rather than one a human chose.
+     */
+    private final JSONObject supersededDefaults = new JSONObject();
     int chainDepth = 0;
     boolean truncated = false;
 
@@ -1307,6 +1316,29 @@ public class NeoDefaultsService {
 
     int updatedFieldCount() {
       return updates.length();
+    }
+
+    /**
+     * Record that {@code field} kept the caller's value while a callout derived a different one.
+     *
+     * @param field    the protected field name
+     * @param kept     the value that stays on the record (the caller's)
+     * @param callout  the value the callout resolved and could not apply
+     */
+    void recordSuperseded(String field, Object kept, Object callout) {
+      try {
+        JSONObject entry = new JSONObject();
+        entry.put("sent", kept);
+        entry.put("callout", callout);
+        supersededDefaults.put(field, entry);
+      } catch (Exception e) {
+        // never in practice; a missing diagnostic must not break the write
+      }
+    }
+
+    /** @return the IMP-45 divergences recorded during this cascade; empty when there were none. */
+    public JSONObject getSupersededDefaults() {
+      return supersededDefaults;
     }
 
     void mergeUpdates(JSONObject newUpdates) {

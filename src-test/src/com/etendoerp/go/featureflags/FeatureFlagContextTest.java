@@ -20,6 +20,7 @@ package com.etendoerp.go.featureflags;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Map;
 
@@ -30,6 +31,14 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 class FeatureFlagContextTest {
 
+  /**
+   * Updated: {@code forAccount} now carries the email as BOTH the targeting key and the
+   * {@code Email} attribute — see {@code FeatureFlagContext#ATTRIBUTE_EMAIL} for why both. The
+   * assertion that the attribute map was empty pinned the earlier shape, so it is rewritten to
+   * guard the current one rather than dropped: an email that stopped reaching the attribute would
+   * silently stop matching every attribute-based targeting rule, with the targeting key still
+   * looking right.
+   */
   @Test
   void targetsOnTheAccountEmail() {
     FeatureFlagContext context = FeatureFlagContext.forAccount("user@example.com");
@@ -38,6 +47,20 @@ class FeatureFlagContextTest {
     // FeatureFlagContext.ATTRIBUTE_EMAIL for why the duplication is load-bearing (ETP-4966).
     assertEquals(Map.of(FeatureFlagContext.ATTRIBUTE_EMAIL, "user@example.com"),
         context.getAttributes());
+  }
+
+  /**
+   * The blank case is the one that matters: a context with neither the key nor the attribute must
+   * never read as an empty-string identity a rule could match.
+   *
+   * <p>Kept through the develop merge that rewrote this class to whole-map assertions:
+   * {@code aBlankAccountLeavesNoTargetingKey} covers the targeting key for the same inputs, and
+   * nothing else covers the attribute map, which is the half a rule would match on.</p>
+   */
+  @Test
+  void aBlankAccountCarriesNoEmailAttributeEither() {
+    assertTrue(FeatureFlagContext.forAccount("   ").getAttributes().isEmpty());
+    assertTrue(FeatureFlagContext.forAccount(null).getAttributes().isEmpty());
   }
 
   @ParameterizedTest
@@ -56,6 +79,9 @@ class FeatureFlagContextTest {
     assertEquals(Map.of(FeatureFlagContext.ATTRIBUTE_EMAIL, "user@example.com"),
         base.getAttributes());
     assertEquals("CLIENT1", scoped.getAttributes().get(FeatureFlagContext.ATTRIBUTE_CLIENT_ID));
+    assertEquals("user@example.com",
+        scoped.getAttributes().get(FeatureFlagContext.ATTRIBUTE_EMAIL),
+        "with() must carry the attributes it inherited, not replace them");
     assertEquals("user@example.com", scoped.getTargetingKey());
   }
 
