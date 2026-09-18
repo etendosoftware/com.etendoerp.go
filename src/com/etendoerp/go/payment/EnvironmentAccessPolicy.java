@@ -25,11 +25,13 @@ import java.time.temporal.ChronoUnit;
  */
 public final class EnvironmentAccessPolicy {
 
+  /** Distinguishes a trial environment from a paid productive environment. */
   public enum EnvironmentType {
     DEMO,
     PRODUCTIVE
   }
 
+  /** Billing state used by the access policy. */
   public enum SubscriptionStatus {
     NONE,
     CURRENT,
@@ -39,6 +41,7 @@ public final class EnvironmentAccessPolicy {
     LEGACY_ENTITLEMENT
   }
 
+  /** Result returned when evaluating access for an environment member. */
   public enum Decision {
     ALLOWED,
     MEMBERSHIP_REQUIRED,
@@ -51,6 +54,7 @@ public final class EnvironmentAccessPolicy {
     private final int trialDays;
     private final int renewalGraceDays;
 
+    /** Creates policy configuration with validated trial and grace periods. */
     public Configuration(int trialDays, int renewalGraceDays) {
       if (trialDays <= 0) {
         throw new IllegalArgumentException("trialDays must be greater than zero");
@@ -71,6 +75,7 @@ public final class EnvironmentAccessPolicy {
     }
   }
 
+  /** Immutable environment facts consumed by the access policy. */
   public static final class Environment {
     private final EnvironmentType type;
     private final Instant trialStartedAt;
@@ -82,10 +87,12 @@ public final class EnvironmentAccessPolicy {
       this.renewalDueAt = renewalDueAt;
     }
 
+    /** Creates a demo environment with no renewal date. */
     public static Environment demo(Instant trialStartedAt) {
       return demo(trialStartedAt, null);
     }
 
+    /** Creates a demo environment with an optional renewal date. */
     public static Environment demo(Instant trialStartedAt, Instant renewalDueAt) {
       if (trialStartedAt == null) {
         throw new IllegalArgumentException("A demo requires a trial start timestamp");
@@ -93,10 +100,12 @@ public final class EnvironmentAccessPolicy {
       return new Environment(EnvironmentType.DEMO, trialStartedAt, renewalDueAt);
     }
 
+    /** Creates a productive environment with no renewal date. */
     public static Environment productive() {
       return new Environment(EnvironmentType.PRODUCTIVE, null, null);
     }
 
+    /** Creates a productive environment with an optional renewal date. */
     public static Environment productive(Instant renewalDueAt) {
       return new Environment(EnvironmentType.PRODUCTIVE, null, renewalDueAt);
     }
@@ -114,7 +123,12 @@ public final class EnvironmentAccessPolicy {
     }
   }
 
-  /** Returns the instant at which an environment's configured trial ends. */
+  /**
+   * Returns the instant at which an environment's configured trial ends.
+   * @param environment environment facts to evaluate
+   * @param configuration configured trial duration
+   * @return trial expiration instant, or null for productive environments
+   */
   public Instant trialExpiresAt(Environment environment, Configuration configuration) {
     if (environment == null || environment.type != EnvironmentType.DEMO) {
       return null;
@@ -125,6 +139,10 @@ public final class EnvironmentAccessPolicy {
   /**
    * Returns whole calendar days remaining for display. A still usable partial day is shown as one;
    * an expired trial is always shown as zero.
+   * @param environment environment facts to evaluate
+   * @param now current instant
+   * @param configuration configured trial duration
+   * @return whole days remaining in the trial
    */
   public long remainingTrialDays(Environment environment, Instant now,
       Configuration configuration) {
@@ -143,6 +161,12 @@ public final class EnvironmentAccessPolicy {
   /**
    * Evaluates access for a member of the destination company. Membership is intentionally an
    * input independent of subscription ownership, which preserves invited-user access semantics.
+   * @param environment environment facts to evaluate
+   * @param activeMembership whether the caller belongs to the environment
+   * @param subscriptionStatus current subscription state
+   * @param now current instant
+   * @param configuration configured trial and grace periods
+   * @return the access decision
    */
   public Decision evaluate(Environment environment, boolean activeMembership,
       SubscriptionStatus subscriptionStatus, Instant now, Configuration configuration) {

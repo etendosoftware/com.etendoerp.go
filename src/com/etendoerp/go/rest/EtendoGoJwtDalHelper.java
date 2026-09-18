@@ -45,6 +45,7 @@ import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
+@SuppressWarnings("java:S1448")
 final class EtendoGoJwtDalHelper {
 
   private static final Logger log = LogManager.getLogger();
