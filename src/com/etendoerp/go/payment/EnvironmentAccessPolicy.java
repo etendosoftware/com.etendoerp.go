@@ -54,12 +54,7 @@ public final class EnvironmentAccessPolicy {
     private final int trialDays;
     private final int renewalGraceDays;
 
-    /**
-     * Creates policy configuration with validated trial and grace periods.
-     *
-     * @param trialDays number of days in a demo trial
-     * @param renewalGraceDays number of grace days after renewal is due
-     */
+    /** Creates policy configuration with validated trial and grace periods. */
     public Configuration(int trialDays, int renewalGraceDays) {
       if (trialDays <= 0) {
         throw new IllegalArgumentException("trialDays must be greater than zero");
@@ -92,23 +87,12 @@ public final class EnvironmentAccessPolicy {
       this.renewalDueAt = renewalDueAt;
     }
 
-    /**
-     * Creates a demo environment with no renewal date.
-     *
-     * @param trialStartedAt instant when the demo trial started
-     * @return a demo environment
-     */
+    /** Creates a demo environment with no renewal date. */
     public static Environment demo(Instant trialStartedAt) {
       return demo(trialStartedAt, null);
     }
 
-    /**
-     * Creates a demo environment with an optional renewal date.
-     *
-     * @param trialStartedAt instant when the demo trial started
-     * @param renewalDueAt instant when the associated renewal is due
-     * @return a demo environment
-     */
+    /** Creates a demo environment with an optional renewal date. */
     public static Environment demo(Instant trialStartedAt, Instant renewalDueAt) {
       if (trialStartedAt == null) {
         throw new IllegalArgumentException("A demo requires a trial start timestamp");
@@ -116,21 +100,12 @@ public final class EnvironmentAccessPolicy {
       return new Environment(EnvironmentType.DEMO, trialStartedAt, renewalDueAt);
     }
 
-    /**
-     * Creates a productive environment with no renewal date.
-     *
-     * @return a productive environment
-     */
+    /** Creates a productive environment with no renewal date. */
     public static Environment productive() {
       return new Environment(EnvironmentType.PRODUCTIVE, null, null);
     }
 
-    /**
-     * Creates a productive environment with an optional renewal date.
-     *
-     * @param renewalDueAt instant when the subscription renewal is due
-     * @return a productive environment
-     */
+    /** Creates a productive environment with an optional renewal date. */
     public static Environment productive(Instant renewalDueAt) {
       return new Environment(EnvironmentType.PRODUCTIVE, null, renewalDueAt);
     }
