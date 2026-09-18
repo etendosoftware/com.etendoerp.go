@@ -132,6 +132,13 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
   private static final String PARAM_INCLUDE_CHILD_DATA = "includeChildData";
   private static final String FIELD_CHILD_DATA = "etgoChildData";
   private static final String FIELD_CURRENCY = "bPCurrencyID";
+  /**
+   * ETP-5284 — the same column under the name the MCP tools expose it as. The REST body spells
+   * this field {@link #FIELD_CURRENCY}; the MCP one spells it {@code currency}, and each path
+   * discards the other's spelling without reporting it. Until the two conventions are reconciled
+   * at the hook boundary, an injected value has to be written under the caller's own name.
+   */
+  private static final String FIELD_CURRENCY_MCP = "currency";
   private static final String FIELD_CUSTOMER = "customer";
   private static final String FIELD_VENDOR = "vendor";
 
@@ -620,7 +627,12 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
    * Never overwrites a currency the caller explicitly set.
    */
   private void injectOrgCurrency(NeoContext ctx, JSONObject body) {
-    if (body.has(FIELD_CURRENCY) && StringUtils.isNotBlank(body.optString(FIELD_CURRENCY, null))) {
+    // ETP-5284 — write under the caller's own spelling of BP_Currency_ID. MCP and REST hand this
+    // hook a body in different field-naming conventions and each discards the other's key without
+    // reporting it, so injecting under the wrong one is lost in silence. Collapse this back to a
+    // single constant once the two conventions are reconciled at the hook boundary.
+    String currencyKey = ctx.isMcpOrigin() ? FIELD_CURRENCY_MCP : FIELD_CURRENCY;
+    if (body.has(currencyKey) && StringUtils.isNotBlank(body.optString(currencyKey, null))) {
       return;
     }
     OBContext obContext = ctx.getObContext();
@@ -633,7 +645,7 @@ public class BusinessPartnerHandler extends AbstractPersonNameHandler {
         String orgId = obContext.getCurrentOrganization().getId();
         String currencyId = OBCurrencyUtils.getOrgCurrency(orgId);
         if (StringUtils.isNotBlank(currencyId)) {
-          body.put(FIELD_CURRENCY, currencyId);
+          body.put(currencyKey, currencyId);
         }
       } finally {
         OBContext.restorePreviousMode();
