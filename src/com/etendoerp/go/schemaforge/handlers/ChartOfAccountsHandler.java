@@ -74,8 +74,10 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  *       Leaf balances are read from {@code fact_acct} in one query; summary-account totals
  *       are computed in-memory via a bottom-up tree rollup — no recursive SQL.</li>
  *   <li><b>D — codePrefix default</b> (handle, DEFAULTS): when {@code parentAccountId}
- *       is present as a query parameter, returns the first 4 characters of the parent's
- *       {@code Value} (account code) as {@code codePrefix} in the defaults payload.</li>
+ *       is present as a query parameter, resolves the real insertion point(s) below that
+ *       parent via {@link ChartOfAccountsTreeMath#resolveInsertionChildren} and returns
+ *       {@code codePrefix} (when unambiguous) plus the full {@code insertionChildren}
+ *       candidate list in the defaults payload (ETP-5399).</li>
  *   <li><b>E — PGC save validation</b> (handle, CRUD POST/PUT/PATCH): code format, protected
  *       parent-like codes, cross-client duplicates on create, and code-immutability rules on
  *       update. Delegated to {@link ChartOfAccountsSaveValidationSupport#validateSave} — split
@@ -760,6 +762,11 @@ public class ChartOfAccountsHandler implements NeoHandler {
    *   <li>{@code nodeElementLevelMap} — {@code nodeId → ElementLevel} ({@code E} Heading,
    *       {@code C} Account, {@code D} Breakdown, {@code S} Subaccount).</li>
    *   <li>{@code parentNodeIds} — set of nodeIds that have at least one child in the tree.</li>
+   *   <li>{@code childrenMap} — {@code parentId -> List<childId>}, the inverse of
+   *       {@code nodeParentMap}. Added for ETP-5399's {@code insertionChildren} resolution
+   *       ({@link ChartOfAccountsTreeMath#resolveInsertionChildren}), which needs to walk
+   *       DOWN from a chosen parent to its real children — something {@code nodeParentMap}
+   *       alone (parent lookup only) cannot answer.</li>
    * </ul>
    */
   private static class TreeData {
@@ -768,15 +775,17 @@ public class ChartOfAccountsHandler implements NeoHandler {
     final Map<String, String> nodeNameMap;
     final Map<String, String> nodeElementLevelMap;
     final Set<String> parentNodeIds;
+    final Map<String, List<String>> childrenMap;
 
     TreeData(Map<String, String> nodeParent, Map<String, String> nodeValue,
         Map<String, String> nodeName, Map<String, String> nodeElementLevel,
-        Set<String> parents) {
+        Set<String> parents, Map<String, List<String>> children) {
       this.nodeParentMap = nodeParent;
       this.nodeValueMap = nodeValue;
       this.nodeNameMap = nodeName;
       this.nodeElementLevelMap = nodeElementLevel;
       this.parentNodeIds = parents;
+      this.childrenMap = children;
     }
   }
 
@@ -803,7 +812,8 @@ public class ChartOfAccountsHandler implements NeoHandler {
       if (treeRows.isEmpty()) {
         log.debug("ChartOfAccountsHandler: no EV tree found for clientId={}", clientId);
         return new TreeData(Collections.emptyMap(), Collections.emptyMap(),
-            Collections.emptyMap(), Collections.emptyMap(), Collections.emptySet());
+            Collections.emptyMap(), Collections.emptyMap(), Collections.emptySet(),
+            Collections.emptyMap());
       }
       String treeId = (String) treeRows.get(0);
 
@@ -816,6 +826,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
 
       Map<String, String> nodeParentMap = new HashMap<>(nodeRows.size() * 2);
       Set<String> parentNodeIds = new HashSet<>();
+      Map<String, List<String>> childrenMap = new HashMap<>(nodeRows.size() * 2);
 
       for (Object rawRow : nodeRows) {
         Object[] row = (Object[]) rawRow;
@@ -825,6 +836,9 @@ public class ChartOfAccountsHandler implements NeoHandler {
         if (parentId != null && !"0".equals(parentId)) {
           nodeParentMap.put(nodeId, parentId);
           parentNodeIds.add(parentId);
+          // ETP-5399 — inverse lookup (parentId -> children), needed to resolve the real
+          // insertion point(s) below a chosen parent (see ChartOfAccountsTreeMath#resolveInsertionChildren).
+          childrenMap.computeIfAbsent(parentId, k -> new ArrayList<>()).add(nodeId);
         } else {
           nodeParentMap.put(nodeId, null); // root — no parent
         }
@@ -848,7 +862,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
       }
 
       return new TreeData(nodeParentMap, nodeValueMap, nodeNameMap, nodeElementLevelMap,
-          parentNodeIds);
+          parentNodeIds, childrenMap);
 
     } finally {
       OBContext.restorePreviousMode();
@@ -872,6 +886,20 @@ public class ChartOfAccountsHandler implements NeoHandler {
    *       ({@code E}/{@code C}/{@code D}/{@code S}); JSON null if not found.</li>
    *   <li>{@code ancestors} — full ancestor chain, root-to-leaf, node itself excluded; each
    *       entry is {@code {value, name, elementLevel}}. Empty array for root nodes.</li>
+   *   <li>{@code insertionChildren} (ETP-5399) — the real, structural insertion point(s)
+   *       resolved from this row's DIRECT PARENT ({@code parentId} above), i.e. the corrected
+   *       replacement for {@code parentCode4}: every row here is a leaf (this list is already
+   *       filtered to {@code issummary = 'N'}), and a leaf's direct parent is always the
+   *       Breakdown-level grouping node whose {@code Value} is the true new-subaccount prefix.
+   *       {@code parentCode4} finds that same node by counting Value CHARACTERS ({@code == 4}),
+   *       which cannot tell a genuine 4-digit grouping ({@code "2000"}) apart from a
+   *       letter-suffixed one at a DIFFERENT tree depth ({@code "430A"}, the Account level, one
+   *       hop too shallow) — see {@link ChartOfAccountsTreeMath#resolveInsertionChildren} for
+   *       the corrected, {@code ElementLevel}-based algorithm. Normally a single-element array
+   *       (a leaf has exactly one real ancestor at each level); more than one entry only when
+   *       the tree itself is malformed for this node (defensive, not the common case). Added
+   *       ALONGSIDE {@code parentCode4}/{@code parentCode4Name}, not replacing them — see those
+   *       fields' own javadoc note on backward compatibility.</li>
    * </ul>
    */
   private void applyHierarchyMetadata(JSONArray data, TreeData tree) throws Exception {
@@ -901,6 +929,15 @@ public class ChartOfAccountsHandler implements NeoHandler {
     String elementLevel = tree.nodeElementLevelMap.get(id);
     JSONArray ancestors = ChartOfAccountsTreeMath.buildAncestorChain(id, tree.nodeParentMap,
         tree.nodeValueMap, tree.nodeNameMap, tree.nodeElementLevelMap);
+    // ETP-5399: resolved from this row's DIRECT PARENT, not the row's own id. Every real GET
+    // list row here is a leaf (issummary = 'N' at the SQL level — see filterToSubaccounts), and
+    // a leaf's direct parent is always the Breakdown-level grouping node whose Value is the
+    // correct new-subaccount prefix (confirmed: this client's whole wired tree has zero
+    // exceptions to the E -> E|C -> D -> S level chain). This is the corrected, structural
+    // replacement for parentCode4's "nearest 4-character ancestor" bug: a letter-suffixed
+    // Breakdown node (e.g. "4300A") now resolves correctly instead of being skipped.
+    JSONArray insertionChildren = ChartOfAccountsTreeMath.resolveInsertionChildren(parentId,
+        tree.nodeValueMap, tree.nodeNameMap, tree.nodeElementLevelMap, tree.childrenMap);
 
     entry.put("parentId", ChartOfAccountsTreeMath.orNull(parentId));
     entry.put("depth", depth);
@@ -909,6 +946,7 @@ public class ChartOfAccountsHandler implements NeoHandler {
     entry.put("parentCode4Name", ChartOfAccountsTreeMath.orNull(parentCode4Name));
     entry.put("elementLevel", ChartOfAccountsTreeMath.orNull(elementLevel));
     entry.put("ancestors", ancestors);
+    entry.put("insertionChildren", insertionChildren);
   }
 
   // ── C. YTD balances ───────────────────────────────────────────────────────
@@ -1066,9 +1104,27 @@ public class ChartOfAccountsHandler implements NeoHandler {
    *
    * <p>The response structure produced by the defaults service is:
    * <pre>{@code {"defaults": { "isActive": true, ... }}}</pre>
-   * This method adds {@code "codePrefix": "<first 4 digits of parent Value>"} inside the
-   * existing {@code defaults} object, so both the standard field defaults and the prefix
+   * This method adds {@code "codePrefix"} and {@code "insertionChildren"} (ETP-5399) inside
+   * the existing {@code defaults} object, so both the standard field defaults and the prefix
    * hint reach the frontend in a single response.
+   *
+   * <p><b>ETP-5399:</b> this used to be a second, independent copy of the same "just take the
+   * first/only 4 characters" bug {@code findParentCode4} had — {@code parentCode.substring(0,
+   * PGC_PREFIX_LENGTH)} on the parent's raw {@code Value}, with no check that those characters
+   * were digits. It now reuses {@link ChartOfAccountsTreeMath#resolveInsertionChildren} (the
+   * same tree-based resolution used by {@link #injectHierarchyFields}):
+   * <ul>
+   *   <li>exactly one resolved candidate — its {@code value} becomes {@code codePrefix}.</li>
+   *   <li>more than one candidate (Pattern B fan-out, e.g. {@code 160B -> 1603, 1604}) — no
+   *       single {@code codePrefix} is guessed; {@code insertionChildren} still carries the
+   *       full candidate list.</li>
+   *   <li>no candidate resolved (only possible for a numeric parent shallower than the grouping
+   *       depth with no children, or an unknown node) — falls back to the legacy substring
+   *       behavior when the parent's own raw code is purely numeric and long enough, so the
+   *       pre-existing numeric behavior is never regressed. This fallback is never reached for
+   *       a letter-suffixed parent, since that branch of {@code resolveInsertionChildren} always
+   *       returns at least one candidate.</li>
+   * </ul>
    *
    * <p>Query-param lookup follows the two-step pattern established by
    * {@code AmortizationHeaderHandler}:
@@ -1103,11 +1159,8 @@ public class ChartOfAccountsHandler implements NeoHandler {
         return null;
       }
       String parentCode = parent.getSearchKey();
-      if (parentCode == null || parentCode.length() < PGC_PREFIX_LENGTH) {
-        log.debug("ChartOfAccountsHandler: parent code too short to derive prefix id={}",
-            parentAccountId);
-        return null;
-      }
+
+      JSONArray insertionChildren = resolveInsertionChildrenForDefaults(context, parentAccountId);
 
       JSONObject body = previous.getBody();
       JSONObject defaults = body.optJSONObject("defaults");
@@ -1115,7 +1168,17 @@ public class ChartOfAccountsHandler implements NeoHandler {
         defaults = new JSONObject();
         body.put("defaults", defaults);
       }
-      defaults.put("codePrefix", parentCode.substring(0, PGC_PREFIX_LENGTH));
+      String resolvedPrefix = ChartOfAccountsTreeMath.resolveSingleInsertionValue(insertionChildren);
+      if (resolvedPrefix != null) {
+        defaults.put("codePrefix", resolvedPrefix);
+      } else if (parentCode != null && parentCode.matches("\\d+")
+          && parentCode.length() >= PGC_PREFIX_LENGTH) {
+        // Legacy fallback — only reached when resolveInsertionChildren had no confident answer
+        // AND the parent's raw code is already purely numeric, so the pre-ETP-5399 numeric
+        // behavior is preserved byte-for-byte. Never reached for a letter-suffixed parent.
+        defaults.put("codePrefix", parentCode.substring(0, PGC_PREFIX_LENGTH));
+      }
+      defaults.put("insertionChildren", insertionChildren);
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("ChartOfAccountsHandler.injectCodePrefix error for parentAccountId={}: {}",
@@ -1124,6 +1187,23 @@ public class ChartOfAccountsHandler implements NeoHandler {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * ETP-5399. Resolves {@code insertionChildren} for the DEFAULTS path, loading the client's
+   * tree only when a client can be resolved from the context. Returns an empty {@link JSONArray}
+   * (never {@code null}) when the client is unknown, so callers can always add it to the
+   * response unconditionally.
+   */
+  private JSONArray resolveInsertionChildrenForDefaults(NeoContext context, String parentAccountId)
+      throws Exception {
+    OBContext obCtx = context.getObContext();
+    if (obCtx == null || obCtx.getCurrentClient() == null) {
+      return new JSONArray();
+    }
+    TreeData tree = loadTreeData(obCtx.getCurrentClient().getId());
+    return ChartOfAccountsTreeMath.resolveInsertionChildren(parentAccountId, tree.nodeValueMap,
+        tree.nodeNameMap, tree.nodeElementLevelMap, tree.childrenMap);
   }
 
   /**

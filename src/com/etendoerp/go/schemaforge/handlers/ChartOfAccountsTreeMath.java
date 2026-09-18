@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
@@ -42,6 +43,9 @@ final class ChartOfAccountsTreeMath {
    * {@link #findParentCode4} / {@link #findParentCode4Name}.
    */
   static final int PARENT_CODE_LENGTH = 4;
+
+  /** Matches a {@code Value} that is purely numeric — a genuine PGC grouping/leaf code. */
+  private static final Pattern NUMERIC_VALUE = Pattern.compile("\\d+");
 
   private ChartOfAccountsTreeMath() {
     // Utility class — no instances.
@@ -152,5 +156,155 @@ final class ChartOfAccountsTreeMath {
       guard++;
     }
     return null;
+  }
+
+  // ── ETP-5399 — real insertion-children resolution (letter-suffixed grouping fix) ──
+
+  /** {@code C_ElementValue.ElementLevel} value for a Breakdown-level grouping node. */
+  private static final String LEVEL_BREAKDOWN = "D";
+
+  /** {@code C_ElementValue.ElementLevel} value for a genuine leaf/posting account. */
+  private static final String LEVEL_SUBACCOUNT = "S";
+
+  /**
+   * Resolves the real, structural insertion point(s) for a new subaccount created under
+   * {@code parentNodeId} — the fix for ETP-5399: {@link #findParentCode4} counts
+   * <em>characters</em>, not digits, so a letter-suffixed grouping code (e.g. {@code "430A"},
+   * {@code "103A"}) is indistinguishable from a genuine 4-digit numeric grouping code.
+   *
+   * <p>This does NOT fix the bug by inspecting or stripping the letter — that is exactly the
+   * text-manipulation approach the ticket rules out. Instead it uses {@code ElementLevel}
+   * ({@code C_ElementValue.ElementLevel}: {@code E} Heading, {@code C} Account, {@code D}
+   * Breakdown, {@code S} Subaccount), a semantic AD column that already encodes the node's
+   * tree position independently of what its {@code Value} text looks like. Live-data
+   * verification against this client's full 1798-node wired tree confirms the transition is
+   * always exactly {@code E -> E|C}, {@code C -> D}, {@code D -> S}, with zero exceptions —
+   * so "is this node's level {@code D}?" is a fully general terminal test, whether the
+   * {@code D} node's {@code Value} happens to be numeric ({@code "2000"}) or letter-suffixed
+   * ({@code "4300A"}). This is what makes the fix generalize to any of the ~49 letter-suffixed
+   * families and to any depth, with no per-family lookup table and no letter/length parsing.
+   *
+   * <p>Algorithm (operates purely on {@code (nodeId -> value/name/elementLevel)} and the
+   * {@code (parentId -> List<childId>)} inverse map — no SQL, no side effects):
+   * <ul>
+   *   <li><b>{@code ElementLevel == "D"}</b> (Breakdown) — this IS the correct grouping depth
+   *       (the existing/working case, e.g. {@code "2000"}, and — newly correct — a
+   *       letter-suffixed Breakdown like {@code "4300A"}). Returns the node itself, regardless
+   *       of whether it already has leaf children. The pre-existing numeric behavior is
+   *       unchanged; this is the exact node {@code findParentCode4} missed for letters.</li>
+   *   <li><b>{@code ElementLevel == "S"}</b> (Subaccount/leaf) — a real leaf was chosen
+   *       directly as the "parent," which is not a valid insertion point; returns an empty
+   *       result (no confident answer) rather than fabricating one from its own code.</li>
+   *   <li><b>Any other level</b> ({@code "E"}/{@code "C"}, or unknown — see the fallback
+   *       below) — not yet at grouping depth, so this drills into the node's real children:
+   *       zero children degrades gracefully to the node itself (first-ever subaccount under a
+   *       brand-new branch — nothing to drill into, and no leaf-numbering scheme can be
+   *       invented from nothing); exactly one child recurses into it (generalizes to any
+   *       depth); more than one child surfaces ALL of them as candidates — covering both a
+   *       purely-numeric fan-out ({@code 160B -> 1603, 1604}) and a still-letter-suffixed
+   *       fan-out ({@code 430A -> 4300A, 4304A, 4309A}, confirmed live) uniformly, since
+   *       neither branch inspects the children's {@code Value} text at all. Never
+   *       averages/guesses a single answer among multiple candidates.</li>
+   * </ul>
+   *
+   * <p>When {@code ElementLevel} is unavailable for a node (defensive fallback only — every
+   * real {@code C_ElementValue} row has it; this exists for corrupted data or a caller that
+   * only populated the value/children maps), the terminal test falls back to the pre-ETP-5399
+   * heuristic PLUS the missing digit check: {@code Value} is purely numeric AND exactly
+   * {@value #PARENT_CODE_LENGTH} characters. This still closes the original bug (a
+   * letter-suffixed 4-character value like {@code "430A"} no longer matches) even without
+   * {@code ElementLevel} data.
+   *
+   * <p>Capped at {@value ChartOfAccountsHandler#MAX_TREE_DEPTH} recursive hops, mirroring every
+   * other traversal in this class, to guard against a circular reference in corrupted
+   * {@code AD_TreeNode} data.
+   *
+   * @return a possibly-empty {@link JSONArray} of candidates, each {@code {id, value, name,
+   *     elementLevel}}; empty when {@code parentNodeId} is unknown, is itself a leaf, or
+   *     (not yet at grouping depth) has no children to drill into.
+   */
+  static JSONArray resolveInsertionChildren(String parentNodeId, Map<String, String> nodeValueMap,
+      Map<String, String> nodeNameMap, Map<String, String> nodeElementLevelMap,
+      Map<String, List<String>> childrenMap) throws Exception {
+    return resolveInsertionChildren(parentNodeId, nodeValueMap, nodeNameMap, nodeElementLevelMap,
+        childrenMap, 0);
+  }
+
+  private static JSONArray resolveInsertionChildren(String nodeId, Map<String, String> nodeValueMap,
+      Map<String, String> nodeNameMap, Map<String, String> nodeElementLevelMap,
+      Map<String, List<String>> childrenMap, int depth) throws Exception {
+    JSONArray result = new JSONArray();
+    String value = nodeValueMap.get(nodeId);
+    if (value == null || value.isEmpty()) {
+      return result; // unknown/blank node — no confident answer
+    }
+    String level = nodeElementLevelMap.get(nodeId);
+
+    if (isTerminalGroupingLevel(level, value)) {
+      result.put(buildCandidate(nodeId, nodeValueMap, nodeNameMap, nodeElementLevelMap));
+      return result;
+    }
+    if (LEVEL_SUBACCOUNT.equals(level)) {
+      return result; // a real leaf chosen directly as "parent" — no confident answer
+    }
+
+    List<String> children = childrenMap.getOrDefault(nodeId, Collections.emptyList());
+    if (children.isEmpty() || depth >= ChartOfAccountsHandler.MAX_TREE_DEPTH) {
+      // Nothing deeper to offer — graceful fallback to this node itself. Covers the
+      // first-ever-subaccount case (§3.2.c) and the circular-reference guard uniformly.
+      result.put(buildCandidate(nodeId, nodeValueMap, nodeNameMap, nodeElementLevelMap));
+      return result;
+    }
+    if (children.size() == 1) {
+      return resolveInsertionChildren(children.get(0), nodeValueMap, nodeNameMap,
+          nodeElementLevelMap, childrenMap, depth + 1);
+    }
+    // More than one real child — surface all of them. Never average/guess a single answer.
+    for (String child : children) {
+      result.put(buildCandidate(child, nodeValueMap, nodeNameMap, nodeElementLevelMap));
+    }
+    return result;
+  }
+
+  /**
+   * @return {@code true} when {@code level} is the Breakdown level ({@value #LEVEL_BREAKDOWN}),
+   *     or — when {@code level} is unavailable — {@code value} is purely numeric AND exactly
+   *     {@value #PARENT_CODE_LENGTH} characters (the defensive fallback; see this method's
+   *     caller javadoc).
+   */
+  private static boolean isTerminalGroupingLevel(String level, String value) {
+    if (level != null) {
+      return LEVEL_BREAKDOWN.equals(level);
+    }
+    return value.length() == PARENT_CODE_LENGTH && NUMERIC_VALUE.matcher(value).matches();
+  }
+
+  /**
+   * @return the single resolved candidate's {@code value} from an {@code insertionChildren}
+   *     array, or {@code null} when it has zero or more than one entry — ETP-5399's "never
+   *     average/guess a single answer" rule for the Pattern B fan-out case. Used by
+   *     {@link ChartOfAccountsHandler#injectCodePrefix} to decide whether a single
+   *     {@code codePrefix} can be derived.
+   */
+  static String resolveSingleInsertionValue(JSONArray insertionChildren) throws Exception {
+    if (insertionChildren == null || insertionChildren.length() != 1) {
+      return null;
+    }
+    JSONObject only = insertionChildren.optJSONObject(0);
+    if (only == null || only.isNull("value")) {
+      return null;
+    }
+    return only.optString("value", null);
+  }
+
+  /** Builds one {@code {id, value, name, elementLevel}} candidate entry. */
+  private static JSONObject buildCandidate(String nodeId, Map<String, String> nodeValueMap,
+      Map<String, String> nodeNameMap, Map<String, String> nodeElementLevelMap) throws Exception {
+    JSONObject candidate = new JSONObject();
+    candidate.put("id", nodeId);
+    candidate.put("value", orNull(nodeValueMap.get(nodeId)));
+    candidate.put("name", orNull(nodeNameMap.get(nodeId)));
+    candidate.put("elementLevel", orNull(nodeElementLevelMap.get(nodeId)));
+    return candidate;
   }
 }
