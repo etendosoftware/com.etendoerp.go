@@ -40,11 +40,13 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.financialmgmt.payment.FIN_FinancialAccount;
 
+import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.psd2.bank.integration.data.FinaccConnection;
 import com.etendoerp.psd2.bank.integration.data.Provider;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationConstants;
 import com.etendoerp.psd2.bank.integration.utils.BankIntegrationUtils;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper;
+import com.etendoerp.psd2.bank.integration.utils.SaltEdgeConnectionBuilder;
 import com.etendoerp.psd2.bank.integration.utils.SaltEdgeAccountLinkHelper.LinkAccountData;
 import com.google.common.cache.Cache;
 import com.google.common.cache.CacheBuilder;
@@ -165,6 +167,19 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
   // contract — rewording it silently un-translates the toast.
   private static final String MSG_IMPORT_RANGE_INVALID =
       "The import from date cannot be later than the import to date";
+
+  /** Resolves the tenant's commercial plan; see {@link #includeSandboxProviders()}. */
+  private final TenantPlanService tenantPlanService;
+
+  /** CDI requires a no-arg constructor; delegates to the test-injection one. */
+  public FinancialAccountBankConnectionHandler() {
+    this(new TenantPlanService());
+  }
+
+  /** Visible for tests — inject a stub {@link TenantPlanService}. */
+  FinancialAccountBankConnectionHandler(TenantPlanService tenantPlanService) {
+    this.tenantPlanService = tenantPlanService;
+  }
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -492,10 +507,38 @@ public class FinancialAccountBankConnectionHandler implements NeoHandler {
       }
     }
     // provider may be null (no bank remembered) → buildAndConnect shows the full provider picker.
-    String connectUrl = BankIntegrationUtils.createSaltEdgeConnection(apiKey, returnTo, provider);
+    String connectUrl = SaltEdgeConnectionBuilder.createSaltEdgeConnection(apiKey, returnTo, provider,
+        includeSandboxProviders());
     JSONObject data = new JSONObject();
     data.put(KEY_CONNECT_URL, connectUrl);
     return FinancialAccountBankConnectionSupport.okData(data);
+  }
+
+  /**
+   * Whether the Salt Edge widget should offer sandbox/fake banks alongside the real ones
+   * (ETP-5344).
+   *
+   * <p>Two conditions, both required. {@code PSD2_ShowFakeProviders} is the PSD2 module's own
+   * switch and stays the necessary condition — this module never overrides an operator who turned
+   * it off. On top of it, a tenant that paid for its plan never sees test banks, no matter what
+   * the preference says: fake providers exist so a Demo tenant can exercise the connection flow
+   * without real credentials, and a paying tenant connecting its actual bank has no use for them.
+   *
+   * <p>The plan is read live on every connect rather than cached into a preference, so upgrading
+   * a tenant takes effect on its very next connection with nothing else to run. Absence of the
+   * plan marker reads back as {@link TenantPlanService#PLAN_FREE} (see that class), so every
+   * tenant is Demo until it pays — which is also what makes this safe for a tenant provisioned
+   * before the plan marker existed.
+   *
+   * <p>The mirror-image decision for Demo tenants' fiscal submissions lives in {@code
+   * OnboardingForceTestModeService}, gated on the very same signal.
+   */
+  private boolean includeSandboxProviders() {
+    if (!BankIntegrationUtils.isFakeProvidersEnabled()) {
+      return false;
+    }
+    return !TenantPlanService.PLAN_PRODUCTIVE.equals(
+        tenantPlanService.resolvePlan(currentClient().getId()));
   }
 
   // ---------------------------------------------------------------------------

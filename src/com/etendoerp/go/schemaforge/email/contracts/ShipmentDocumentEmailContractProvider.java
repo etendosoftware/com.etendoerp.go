@@ -26,8 +26,10 @@ import java.util.Collection;
 import javax.enterprise.context.ApplicationScoped;
 
 /**
- * Provides sales-side {@code M_InOut} email contracts: goods shipment (outbound) and, since
- * ETP-5124, Return Material Receipt (inbound sales return).
+ * Provides {@code M_InOut} email contracts on both transaction sides: sales-side goods shipment
+ * (outbound) and, since ETP-5124, Return Material Receipt (inbound sales return); and, also since
+ * ETP-5124, the purchase-side Return to Vendor Shipment (inbound purchase return counterpart of a
+ * Goods Receipt).
  */
 @ApplicationScoped
 public final class ShipmentDocumentEmailContractProvider implements EmailContractProvider {
@@ -37,6 +39,8 @@ public final class ShipmentDocumentEmailContractProvider implements EmailContrac
     return Arrays.asList(
         new GoodsShipmentSendEmailContract(new DalShipmentEmailDocumentResolver()),
         new ReturnMaterialReceiptSendEmailContract(
-            new DalReturnMaterialReceiptEmailDocumentResolver()));
+            new DalReturnMaterialReceiptEmailDocumentResolver()),
+        new ReturnToVendorShipmentSendEmailContract(
+            new DalReturnToVendorShipmentEmailDocumentResolver()));
   }
 }
