@@ -1350,6 +1350,10 @@ class ToolRegistryGenerateToolsTest {
       when(adColumn.getDBColumnName()).thenReturn("C_Order_ID");
       when(adColumn.getName()).thenReturn("Order");
       when(field.getADColumn()).thenReturn(adColumn);
+      // Inclusion used to be a criteria predicate, and the criteria is mocked here, so the flag
+      // could stay unstubbed. buildProcessParamSchema now resolves it through McpFieldView, where
+      // an unstubbed Boolean reads as not included and the parameter would vanish.
+      when(field.isIncluded()).thenReturn(true);
       when(fieldCriteria.list()).thenReturn(List.of(field));
 
       mockSpecCriteria(List.of(spec));
@@ -1407,6 +1411,86 @@ class ToolRegistryGenerateToolsTest {
       Map<String, Object> paramsProp = (Map<String, Object>) props.get("parameters");
       // No nested properties since the only field had no column
       assertFalse(paramsProp.containsKey("properties"));
+    }
+
+    /**
+     * Inclusion is still enforced, resolved in Java rather than in the criteria — so an excluded
+     * field stays out of the advertised parameter set, and a field an {@code MCP_CONFIG}
+     * {@code fields.included} override reclaims gets in, which no criteria could have done.
+     */
+    @Test
+    @DisplayName("an excluded field is left out and an override-reclaimed one is advertised")
+    @SuppressWarnings("unchecked")
+    void processToolResolvesInclusionThroughTheView() {
+      McpConfigSections.resetForTests();
+      McpConfigCache.invalidateAll();
+
+      SFSpec spec = createProcessSpec(SPEC_COMPLETE_ORDER);
+      when(spec.getProcess()).thenReturn(null);
+      when(spec.getId()).thenReturn("spec-id-1");
+
+      OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+      when(mockOBDal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+
+      SFEntity entity = mock(SFEntity.class);
+      when(entity.getId()).thenReturn("entity-id-1");
+      when(entity.get(SFEntity.PROPERTY_MCPCONFIG)).thenReturn(null);
+
+      // A second entity whose override reclaims its field — the case the criteria could not see.
+      SFEntity overridden = mock(SFEntity.class);
+      when(overridden.getId()).thenReturn("entity-id-2");
+      when(overridden.get(SFEntity.PROPERTY_MCPCONFIG)).thenReturn(
+          "{\"fields\":{\"included\":true,\"reason\":\"process param fixture\"}}");
+      when(entityCriteria.list()).thenReturn(List.of(entity, overridden));
+
+      OBCriteria<SFField> fieldCriteria = mock(OBCriteria.class);
+      when(mockOBDal.createCriteria(SFField.class)).thenReturn(fieldCriteria);
+
+      SFField excluded = mockParamField("C_Order_ID", "Order", "excluded-field-1", entity, false);
+      SFField reclaimed = mockParamField("M_Product_ID", "Product", "reclaimed-field-1",
+          overridden, false);
+      when(fieldCriteria.list()).thenReturn(List.of(excluded, reclaimed));
+
+      mockSpecCriteria(List.of(spec));
+
+      List<McpToolDefinition> tools = registry.generateTools(scopesOf("neo:process"));
+
+      McpToolDefinition tool = tools.stream()
+          .filter(t -> "complete_order".equals(t.getName()))
+          .findFirst()
+          .orElse(null);
+      assertNotNull(tool);
+
+      Map<String, Object> props = (Map<String, Object>) tool.getInputSchema().get("properties");
+      Map<String, Object> paramsProp = (Map<String, Object>) props.get("parameters");
+      Map<String, Object> nestedProps = (Map<String, Object>) paramsProp.get("properties");
+      assertNotNull(nestedProps);
+      assertFalse(nestedProps.containsKey("C_Order_ID"),
+          "the row excludes it and no override says otherwise");
+      assertTrue(nestedProps.containsKey("M_Product_ID"),
+          "the override reclaims it, and an ISINCLUDED predicate could never have seen that");
+    }
+
+    /**
+     * A process-parameter field mock.
+     *
+     * @param columnName the AD column's DB name, which becomes the parameter name
+     * @param label      the AD column's name
+     * @param id         the field id, which doubles as the {@code McpConfigCache} key
+     * @param owner      the entity whose {@code MCP_CONFIG} applies
+     * @param included   the {@code ISINCLUDED} value on the row itself
+     */
+    private SFField mockParamField(String columnName, String label, String id, SFEntity owner,
+        boolean included) {
+      SFField field = mock(SFField.class);
+      Column adColumn = mock(Column.class);
+      when(adColumn.getDBColumnName()).thenReturn(columnName);
+      when(adColumn.getName()).thenReturn(label);
+      when(field.getADColumn()).thenReturn(adColumn);
+      when(field.getId()).thenReturn(id);
+      when(field.isIncluded()).thenReturn(included);
+      when(field.getETGOSFEntity()).thenReturn(owner);
+      return field;
     }
   }
 
@@ -1767,10 +1851,16 @@ class ToolRegistryGenerateToolsTest {
         assertFalse(names.contains("neo_create"));
         assertFalse(names.contains("neo_update"));
         assertFalse(names.contains("neo_delete"));
-        // neo_batch has no spec enum to narrow (its ops name their spec inline) and
-        // neo_action is not gated by the method flags, so both stay registered.
-        assertTrue(names.contains("neo_batch"));
+        // neo_action is not gated by the method flags, so it stays registered.
         assertTrue(names.contains("neo_action"));
+        // ETP-5335: neo_batch used to stay registered here too — it has no spec enum to narrow,
+        // since its operations name their spec inline. It is now published only while
+        // BATCH_TOOL_ENABLED is on, because it was a second create implementation that had
+        // drifted from neo_create in both directions. The assertion follows the flag rather than
+        // hardcoding today's value, so flipping it back on does not fail a test that was never
+        // about the flag.
+        assertEquals(McpConstants.BATCH_TOOL_ENABLED, names.contains("neo_batch"),
+            "neo_batch must be published exactly while its flag is on");
       }
     }
   }

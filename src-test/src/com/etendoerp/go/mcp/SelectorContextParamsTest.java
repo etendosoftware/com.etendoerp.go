@@ -440,6 +440,145 @@ public class SelectorContextParamsTest {
     assertEquals("Caller's context map must not be mutated", "N", base.get("IsSOTrx"));
   }
 
+  // ── copyCountryContext — the region selector's validation rule (ETP-5368) ─
+
+  @Test
+  public void testBuildSelectorContextParamsMapsCountry() throws Exception {
+    JSONObject args = new JSONObject();
+    JSONObject recordContext = new JSONObject();
+    recordContext.put("country", "COUNTRY-ES");
+    args.put(McpConstants.PARAM_RECORD_CONTEXT, recordContext);
+
+    Map<String, String> result = McpSelectorContextHelper.buildSelectorContextParams(args, null);
+
+    // C_Region.C_Country_ID=@C_Country_ID@ is the rule the province selector resolves against:
+    // without this mapping it has nothing to filter by and answers with every province there is.
+    assertEquals("COUNTRY-ES", result.get("C_Country_ID"));
+  }
+
+  @Test
+  public void testBuildSelectorContextParamsMapsCountryFromClassicColumnName() throws Exception {
+    JSONObject args = new JSONObject();
+    JSONObject recordContext = new JSONObject();
+    recordContext.put("C_Country_ID", "COUNTRY-RAW");
+    args.put(McpConstants.PARAM_RECORD_CONTEXT, recordContext);
+
+    Map<String, String> result = McpSelectorContextHelper.buildSelectorContextParams(args, null);
+
+    assertEquals("COUNTRY-RAW", result.get("C_Country_ID"));
+  }
+
+  @Test
+  public void testBuildSelectorContextParamsMapsCountryFromParentContext() throws Exception {
+    JSONObject args = new JSONObject();
+    JSONObject parentContext = new JSONObject();
+    parentContext.put("country", "COUNTRY-PARENT");
+    args.put(McpConstants.PARAM_PARENT_CONTEXT, parentContext);
+
+    Map<String, String> result = McpSelectorContextHelper.buildSelectorContextParams(args, null);
+
+    assertEquals("COUNTRY-PARENT", result.get("C_Country_ID"));
+  }
+
+  @Test
+  public void testBuildSelectorContextParamsSkipsBlankCountry() throws Exception {
+    JSONObject args = new JSONObject();
+    JSONObject recordContext = new JSONObject();
+    recordContext.put("country", "   ");
+    args.put(McpConstants.PARAM_RECORD_CONTEXT, recordContext);
+
+    Map<String, String> result = McpSelectorContextHelper.buildSelectorContextParams(args, null);
+
+    // A blank must look absent, not empty: an empty C_Country_ID in the rule matches no province.
+    assertFalse(result.containsKey("C_Country_ID"));
+  }
+
+  @Test
+  public void testBuildSelectorContextParamsSkipsAbsentCountry() throws Exception {
+    JSONObject args = new JSONObject();
+    JSONObject recordContext = new JSONObject();
+    recordContext.put("businessPartner", "BP-001");
+    args.put(McpConstants.PARAM_RECORD_CONTEXT, recordContext);
+
+    Map<String, String> result = McpSelectorContextHelper.buildSelectorContextParams(args, null);
+
+    assertFalse(result.containsKey("C_Country_ID"));
+  }
+
+  // ── addCountryDiagnostic — naming the one missing argument (ETP-5368) ─────
+
+  @Test
+  public void testDiagnosticsSuggestsCountryForRegionSelector() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("items", new JSONArray());
+    body.put("totalCount", 0);
+    NeoResponse response = NeoResponse.ok(body);
+
+    NeoResponse result = McpSelectorContextHelper.withDiagnostics(response, "C_Region_ID",
+        new HashMap<>());
+
+    JSONArray missingContext = result.getBody().getJSONObject("diagnostics")
+        .getJSONArray("missingContext");
+
+    assertTrue("Should name country for an empty region selector",
+        containsMissingContext(missingContext, "C_Country_ID", "country"));
+  }
+
+  @Test
+  public void testDiagnosticsSuggestsCountryForRegionFieldName() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("items", new JSONArray());
+    body.put("totalCount", 0);
+    NeoResponse response = NeoResponse.ok(body);
+
+    // The MCP caller names the field, not the column — "region" is what neo_selectors is asked for.
+    NeoResponse result = McpSelectorContextHelper.withDiagnostics(response, "region",
+        new HashMap<>());
+
+    JSONArray missingContext = result.getBody().getJSONObject("diagnostics")
+        .getJSONArray("missingContext");
+
+    assertTrue(containsMissingContext(missingContext, "C_Country_ID", "country"));
+  }
+
+  @Test
+  public void testNoCountryDiagnosticForUnrelatedColumn() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("items", new JSONArray());
+    body.put("totalCount", 0);
+    NeoResponse response = NeoResponse.ok(body);
+
+    NeoResponse result = McpSelectorContextHelper.withDiagnostics(response, "C_Currency_ID",
+        new HashMap<>());
+
+    JSONArray missingContext = result.getBody().getJSONObject("diagnostics")
+        .getJSONArray("missingContext");
+
+    assertFalse("Only the region selector depends on a country",
+        containsMissingContext(missingContext, "C_Country_ID", "country"));
+  }
+
+  @Test
+  public void testNoCountryDiagnosticWhenCountryAlreadyProvided() throws Exception {
+    JSONObject body = new JSONObject();
+    body.put("items", new JSONArray());
+    body.put("totalCount", 0);
+    NeoResponse response = NeoResponse.ok(body);
+
+    Map<String, String> contextParams = new HashMap<>();
+    contextParams.put("C_Country_ID", "COUNTRY-ES");
+
+    NeoResponse result = McpSelectorContextHelper.withDiagnostics(response, "C_Region_ID",
+        contextParams);
+
+    JSONArray missingContext = result.getBody().getJSONObject("diagnostics")
+        .getJSONArray("missingContext");
+
+    // The country was supplied and the answer is still empty — blaming it would send the caller
+    // after an argument it already passed.
+    assertFalse(containsMissingContext(missingContext, "C_Country_ID", "country"));
+  }
+
   private boolean containsMissingContext(JSONArray missingContext, String param, String field)
       throws Exception {
     for (int i = 0; i < missingContext.length(); i++) {

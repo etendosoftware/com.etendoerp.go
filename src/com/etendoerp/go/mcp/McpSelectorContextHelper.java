@@ -28,7 +28,9 @@ import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Tab;
+import org.openbravo.model.common.geography.Country;
 import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -42,6 +44,7 @@ final class McpSelectorContextHelper {
       DateTimeFormatter.ofPattern("dd-MM-yyyy");
   private static final String KEY_MESSAGE = "message";
   private static final String KEY_PARAM = "param";
+  private static final String KEY_FIELD = "field";
   private static final String PARAM_IS_SO_TRX = "IsSOTrx";
   private static final String PARAM_IS_SO_TRX_LOWER = "isSOTrx";
   private static final String PARAM_BPARTNER = "C_BPartner_ID";
@@ -53,6 +56,10 @@ final class McpSelectorContextHelper {
   private static final String PARAM_PRICE_LIST = "priceList";
   private static final String PARAM_PRICE_LIST_CLASSIC = "PriceList";
   private static final String PARAM_PRICE_LIST_ID = "M_PriceList_ID";
+  private static final String PARAM_COUNTRY = "C_Country_ID";
+  private static final String FIELD_COUNTRY = "country";
+  private static final String FIELD_REGION = "region";
+  private static final String COLUMN_REGION = "C_Region_ID";
 
   private McpSelectorContextHelper() {
   }
@@ -128,17 +135,53 @@ final class McpSelectorContextHelper {
     }
 
     JSONArray missingContext = buildMissingContext(columnName, contextParams);
-    if (missingContext.length() == 0) {
+    String resolution = resolveEmptyAnswerHint(columnName, contextParams);
+    if (missingContext.length() == 0 && resolution == null) {
       return neoResponse;
     }
 
     JSONObject diagnostics = new JSONObject();
     diagnostics.put("column", columnName);
-    diagnostics.put(KEY_MESSAGE,
-        "No selector results found. This may be due to missing context parameters.");
-    diagnostics.put("missingContext", missingContext);
+    diagnostics.put(KEY_MESSAGE, resolution != null
+        ? resolution
+        : "No selector results found. This may be due to missing context parameters.");
+    if (missingContext.length() > 0) {
+      diagnostics.put("missingContext", missingContext);
+    }
     body.put("diagnostics", diagnostics);
     return NeoResponse.ok(body);
+  }
+
+  /**
+   * Explains an empty answer that is CORRECT — where no argument is missing and retrying cannot
+   * help, because the candidate set is genuinely empty for this context.
+   *
+   * <p>ETP-5368, found in live verification. The region selector for Argentina returns zero rows
+   * and is right to: {@code C_Country.HasRegion} is {@code 'N'} there and no {@code C_Region} row
+   * exists. Answering that with a bare empty list is the exact silent shape this ticket was raised
+   * for — ETP-4997 already recorded that a caller which cannot tell "no provinces exist" from
+   * "the lookup failed" quietly drops the province and saves an address without one, and nothing
+   * tells the user. {@code C_Location.RegionName} is Etendo's own home for that case, so name it.
+   *
+   * @return the explanation, or {@code null} when the empty answer needs no special account
+   */
+  private static String resolveEmptyAnswerHint(String columnName, Map<String, String> contextParams) {
+    String countryId = contextParams.get(PARAM_COUNTRY);
+    if (!isRegionColumn(columnName) || StringUtils.isBlank(countryId)) {
+      return null;
+    }
+    try {
+      Country country = OBDal.getInstance().get(Country.class, countryId);
+      if (country == null || Boolean.TRUE.equals(country.isHasRegions())) {
+        return null;
+      }
+      return "This country (" + country.getName() + ") does not model regions, so this selector is "
+          + "correctly empty and retrying will not change it. Send the province as free text in "
+          + "'regionName' instead of 'region'.";
+    } catch (Exception e) {
+      // A diagnostic must never be the reason a working selector fails.
+      return null;
+    }
   }
 
   static void copyContextIfPresent(JSONObject recordContext, String sourceKey,
@@ -163,6 +206,24 @@ final class McpSelectorContextHelper {
     copyPriceListContext(context, contextParams);
     copySalesContext(context, contextParams);
     copyDateContext(context, contextParams);
+    copyCountryContext(context, contextParams);
+  }
+
+  /**
+   * Carries the country into the region selector's validation rule (ETP-5368).
+   *
+   * <p>{@code C_Location.C_Region_ID} is validated by {@code C_Region.C_Country_ID=@C_Country_ID@}
+   * — the candidate provinces exist only relative to a country, so without it the rule has nothing
+   * to resolve. The SPA passes the country on the query string and gets Spain's 104 provinces; the
+   * MCP had no mapping for it at all, so the same selector came back unfiltered. Accepted under the
+   * DAL property name the wrapper's own schema publishes ({@code country}) and under the classic
+   * column name, matching how businessPartner and priceList are already taken.
+   */
+  private static void copyCountryContext(JSONObject context, Map<String, String> contextParams) {
+    String country = firstNonBlank(context, FIELD_COUNTRY, PARAM_COUNTRY);
+    if (StringUtils.isNotBlank(country)) {
+      contextParams.put(PARAM_COUNTRY, country);
+    }
   }
 
   private static void copyPriceListContext(JSONObject context, Map<String, String> contextParams) {
@@ -284,7 +345,30 @@ final class McpSelectorContextHelper {
     addBusinessPartnerDiagnostic(columnName, contextParams, missingContext);
     addSalesDiagnostic(contextParams, missingContext);
     addDateDiagnostic(columnName, contextParams, missingContext);
+    addCountryDiagnostic(columnName, contextParams, missingContext);
     return missingContext;
+  }
+
+  /**
+   * ETP-5368. An unfiltered region selector is the failure this ticket was raised for, and its
+   * empty answer said nothing about why. Name the one argument that fixes it.
+   */
+  private static void addCountryDiagnostic(String columnName, Map<String, String> contextParams,
+      JSONArray missingContext) throws JSONException {
+    if (contextParams.containsKey(PARAM_COUNTRY) || !isRegionColumn(columnName)) {
+      return;
+    }
+    JSONObject missing = new JSONObject();
+    missing.put(KEY_PARAM, PARAM_COUNTRY);
+    missing.put(KEY_FIELD, FIELD_COUNTRY);
+    missing.put(KEY_MESSAGE,
+        "Provide country in recordContext to resolve " + columnName
+            + ": region names exist only relative to a country.");
+    missingContext.put(missing);
+  }
+
+  private static boolean isRegionColumn(String columnName) {
+    return COLUMN_REGION.equalsIgnoreCase(columnName) || FIELD_REGION.equalsIgnoreCase(columnName);
   }
 
   private static void addBusinessPartnerDiagnostic(String columnName,
@@ -294,7 +378,7 @@ final class McpSelectorContextHelper {
     }
     JSONObject missing = new JSONObject();
     missing.put(KEY_PARAM, PARAM_BPARTNER);
-    missing.put("field", "businessPartner");
+    missing.put(KEY_FIELD, "businessPartner");
     missing.put(KEY_MESSAGE, "Provide businessPartner in recordContext to resolve " + columnName);
     missingContext.put(missing);
   }
@@ -328,7 +412,7 @@ final class McpSelectorContextHelper {
     }
     JSONObject missing = new JSONObject();
     missing.put(KEY_PARAM, PARAM_DATE_INVOICED);
-    missing.put("field", "invoiceDate or orderDate");
+    missing.put(KEY_FIELD, "invoiceDate or orderDate");
     missing.put(KEY_MESSAGE, "Provide invoiceDate or orderDate in recordContext to resolve tax selector");
     missingContext.put(missing);
   }

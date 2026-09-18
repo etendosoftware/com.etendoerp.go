@@ -439,6 +439,7 @@ public class NeoFieldFilter {
    * @return the filtered JSON (modified in place)
    */
   public JSONObject filterWriteRequest(JSONObject requestBody) {
+    stripServerOwnedFields(requestBody);
     return filterBody(requestBody, writableFields);
   }
 
@@ -517,6 +518,7 @@ public class NeoFieldFilter {
    *     to an entity with no NeoHandler that could have supplied it
    */
   public JSONObject filterCreateRequest(JSONObject requestBody) {
+    stripServerOwnedFields(requestBody);
     if (active && requestBody != null) {
       JSONObject dataNode = requestBody.optJSONObject("data");
       rejectDisallowedReadOnlyFields(dataNode != null ? dataNode : requestBody);
@@ -542,6 +544,30 @@ public class NeoFieldFilter {
         throw new ReadOnlyFieldRejectedException(key);
       }
     }
+  }
+
+  /**
+   * Drops {@code client} and {@code organization} from a write body, whatever the caller sent.
+   *
+   * <p>Today the whitelist below would strip them anyway, since neither column has an
+   * {@code ETGO_SF_FIELD} row and so neither is an included field. That is not a guarantee: it
+   * holds only while nobody curates {@code AD_Org_ID}, and it does not hold at all when the
+   * filter is inactive, which is exactly when {@link #filterBody} returns the body untouched.
+   * The tenant rule must not depend on either condition, so it is stated here explicitly and
+   * runs before both.</p>
+   *
+   * <p>The values are not reported on this path. REST clients are the SPA, which never sends
+   * them; the MCP write path reports instead, because an agent that sent one needs to know it
+   * was dropped. See {@code NeoServerOwnedFields}.</p>
+   *
+   * @param requestBody the request body, modified in place; {@code null} is tolerated
+   */
+  private void stripServerOwnedFields(JSONObject requestBody) {
+    if (requestBody == null) {
+      return;
+    }
+    JSONObject dataNode = requestBody.optJSONObject("data");
+    NeoServerOwnedFields.stripServerOwned(dataNode != null ? dataNode : requestBody, null);
   }
 
   /**
