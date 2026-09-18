@@ -908,7 +908,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
   private PublicApiKeyContext requirePublicApiKeyContext(HttpServletRequest request)
       throws AuthException {
-    DecodedJWT jwt = authenticateJwt(request);
+    // ETP-4575 — qualified, like every other authenticator call in this class: the method was
+    // extracted to OAuth2RequestAuthenticator when the cookie session landed. This call site
+    // arrived from develop, where the method still lived here, so the unqualified form compiled
+    // on both sides separately and only broke once the two met.
+    DecodedJWT jwt = OAuth2RequestAuthenticator.authenticateJwt(request);
     String userId = requiredClaim(jwt, "user");
     String roleId = requiredClaim(jwt, "role");
     String clientId = requiredClaim(jwt, "client");
