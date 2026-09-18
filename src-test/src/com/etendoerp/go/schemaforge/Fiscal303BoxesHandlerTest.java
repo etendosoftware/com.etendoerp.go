@@ -1075,6 +1075,151 @@ public class Fiscal303BoxesHandlerTest {
     assertTrue("box[71] must equal box[46]", box46.compareTo(result.boxes.get(71)) == 0);
   }
 
+  // ── computeBoxes — ETP-5393 Bug F (Modificación/Rectificación box pairs) ──────────────────
+  //
+  // Boxes 14/15 ("Modificación bases y cuotas"), 25/26 ("Modificaciones bases y cuotas del
+  // recargo de equivalencia") and 40/41 ("Rectificación de deducciones") always rendered blank
+  // in the Go preview because this handler never computed them at all. The classic engine
+  // (org.openbravo.module.aeat303.es) has always derived them from corrective/credit-memo
+  // invoices only (InvoiceType.ONLY_MEMO_AND_CORRECTIVE) over the union of the TaxRates already
+  // resolved for the "normal" boxes:
+  //   - 14/15: VAT_SALES_GENERAL ∪ VAT_SALES_EU ∪ VAT_SALES_ISP taxRates
+  //     (AEAT303Report2014#generateSalesLines, ~lines 424-513)
+  //   - 25/26: VAT_SALES_EC taxRates
+  //     (AEAT303Report2014#generateSalesLines, ~lines 556-568)
+  //   - 40/41: union of every VAT_PURCHASE group's taxRates (Normal_Operations,
+  //     Investment_Goods, Import_Goods, Import_Investment_Goods, Intracommunity_Goods,
+  //     Intracommunity_Investments) (AEAT303Report2014#generatePurchaseLines, ~lines 618-689)
+
+  /**
+   * Box 14/15 must be populated from the SAME TaxRates already resolved for VAT_SALES_GENERAL
+   * (box 1/3, 4% here), computed with InvoiceType.ONLY_MEMO_AND_CORRECTIVE rather than ALL.
+   */
+  @Test
+  public void testComputeBoxes_modificacionBasesYCuotas_mapsToBoxes14and15() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("4"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("VAT_SALES"), eq("VAT_SALES_GENERAL")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+        .thenReturn(amounts("1000.00", "40.00"));
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_MEMO_AND_CORRECTIVE)))
+        .thenReturn(amounts("-200.00", "-8.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertBd("-200.00", result.boxes.get(14));
+    assertBd("-8.00",   result.boxes.get(15));
+  }
+
+  /**
+   * Box 25/26 must be populated from the EC (recargo equivalencia) TaxRates, computed with
+   * InvoiceType.ONLY_MEMO_AND_CORRECTIVE, and box 26 (cuota) must roll into the box[27] total
+   * exactly like its sibling accrued-cuota boxes (15, 24, ...) already do.
+   */
+  @Test
+  public void testComputeBoxes_modificacionRecargo_mapsToBoxes25and26_andRollsIntoBox27() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("5.20"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("VAT_SALES"), eq("VAT_SALES_EC")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+        .thenReturn(amounts("100.00", "5.20"));
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_MEMO_AND_CORRECTIVE)))
+        .thenReturn(amounts("50.00", "2.60"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertBd("50.00", result.boxes.get(25));
+    assertBd("2.60",  result.boxes.get(26));
+    // box[24] (5.20% cuota, ALL) = 5.20; box[26] (mod. recargo cuota, MEMO_AND_CORRECTIVE) = 2.60
+    assertBd("7.80",  result.boxes.get(27));
+  }
+
+  /**
+   * Box 40/41 must be populated from the union of every VAT_PURCHASE group's TaxRates
+   * (here: Normal_Operations only, to keep the mock setup focused), computed with
+   * InvoiceType.ONLY_MEMO_AND_CORRECTIVE, and box 41 (cuota) must roll into box[45].
+   */
+  @Test
+  public void testComputeBoxes_rectificacionDeducciones_mapsToBoxes40and41_andRollsIntoBox45() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    TaxReportParameter param = mock(TaxReportParameter.class);
+    TaxRate rate = mock(TaxRate.class);
+    when(rate.getRate()).thenReturn(new BigDecimal("21"));
+    when(dao303.getTaxReportParameter(eq(taxReport), eq("VAT_PURCHASE"), eq("Normal_Operations")))
+        .thenReturn(param);
+    when(dao303.get303Taxes(eq("test-report-id"), anyString(), anyString(), anyString(), eq(param)))
+        .thenReturn(Collections.singletonList(rate));
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ALL)))
+        .thenReturn(amounts("1000.00", "210.00"));
+    when(helper.calculateAmountsMap(any(), eq(InvoiceType.ONLY_MEMO_AND_CORRECTIVE)))
+        .thenReturn(amounts("-100.00", "-21.00"));
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertBd("-100.00", result.boxes.get(40));
+    assertBd("-21.00",  result.boxes.get(41));
+    // box[29] (normal operations cuota, ALL) = 210.00; box[41] (rectificación, MEMO_AND_CORRECTIVE) = -21.00
+    assertBd("189.00",  result.boxes.get(45));
+  }
+
+  /**
+   * When no sales tax rates exist at all (VAT_SALES_GENERAL/EU/ISP params all null), boxes
+   * 14/15 must simply stay absent — no NPE from calling calculateAmountsMap with an empty
+   * TaxRate union.
+   */
+  @Test
+  public void testComputeBoxes_noSalesTaxRates_box14and15StayAbsent_noNpe() {
+    Organization org = mock(Organization.class);
+    TaxReport taxReport = mock(TaxReport.class);
+    when(taxReport.getId()).thenReturn("test-report-id");
+    List<Period> periods = Collections.emptyList();
+    AEAT303CalculationsHelper helper = mock(AEAT303CalculationsHelper.class);
+    AEAT303Report2014Dao dao303 = mock(AEAT303Report2014Dao.class);
+    when(dao303.getTaxReportParameter(any(TaxReport.class), anyString(), anyString()))
+        .thenReturn(null);
+
+    ComputeResult result = handler.computeBoxes(org, taxReport, periods, helper, dao303);
+
+    assertNull("box[14] must stay absent when there is no sales activity at all",
+        result.boxes.get(14));
+    assertNull("box[15] must stay absent when there is no sales activity at all",
+        result.boxes.get(15));
+  }
+
   // ── helpers ───────────────────────────────────────────────────────────────
 
   private static Map<String, BigDecimal> amounts(String base, String tax) {

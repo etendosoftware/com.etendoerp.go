@@ -725,6 +725,220 @@ public class FiscalDeclCrudHandlerTest {
     assertEquals("{\"ok\":true}", sw.toString());
   }
 
+  // ── handleDeclPut (negative box111/box77 rejection, ETP-5393 Bug C) ─
+  // The classic AEAT303Report engine hard-rejects a negative value for box 111
+  // (AEAT303Report2024.java:276-278, @AEAT303_Negative_Not_Allowed_For_111@) and box 77
+  // (AEAT303Report2015.java:149-162, @AEAT303_Negative_IVA_IMPORT_ADUANA@). The GO
+  // manualOverrides PUT had no equivalent server-side check at all. Unlike a malformed
+  // manualData blob (tolerated, see the tests above), a negative value on either box is a real
+  // business-rule violation and must reject the whole PUT with 400, leaving the record untouched.
+
+  /**
+   * A negative box 111 in {@code manualData.manualOverrides} must reject the PUT with 400 and
+   * leave the declaration record completely unwritten — no status/manualData set, no commit.
+   */
+  @Test
+  public void testHandleDeclPutWithNegativeBox111Returns400AndLeavesRecordUnchanged()
+      throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":{\"111\":-500}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+      verify(decl, never()).set(any(), any());
+      verify(obDal, never()).commitAndClose();
+    }
+  }
+
+  /**
+   * A negative box 77 in {@code manualData.manualOverrides} must also reject the PUT with 400 —
+   * mirrors the box 111 case above, the other classic-engine negative-not-allowed box.
+   */
+  @Test
+  public void testHandleDeclPutWithNegativeBox77Returns400() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":{\"77\":-12.34}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+      verify(decl, never()).set(any(), any());
+    }
+  }
+
+  /**
+   * A negative value on a box OTHER than 111/77 (e.g. box 27, a normal accrued-VAT box that can
+   * legitimately be negative — credit notes) must NOT be rejected: the guard only watches the
+   * two classic-engine "negative not allowed" boxes, everything else passes through unchanged.
+   */
+  @Test
+  public void testHandleDeclPutWithNegativeOtherBoxSucceeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":{\"27\":-100}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet, never()).sendError(any(), anyInt(), anyString());
+      verify(decl).set(eq(FiscalDeclCrudHandler.PROPERTY_MANUAL_DATA), any());
+    }
+  }
+
+  /**
+   * A positive box 111 must be accepted normally — the guard only fires on a negative value.
+   */
+  @Test
+  public void testHandleDeclPutWithPositiveBox111Succeeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":{\"111\":250}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    }
+  }
+
+  /**
+   * QA edge case (ETP-5393 Bug C): the negative-value guard reads {@code manualOverrides} via
+   * {@code JSONObject#optDouble}, which also coerces a JSON STRING value (not just a JSON
+   * number) — this endpoint is a generic PUT body, not exclusively fed by the frontend's own
+   * numeric serializer, so a string-encoded negative box 111 (e.g. {@code "111": "-12"}) must be
+   * rejected exactly like a numeric one, not silently pass through as a non-numeric default.
+   */
+  @Test
+  public void testHandleDeclPutWithStringEncodedNegativeBox111Returns400() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":{\"111\":\"-12\"}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+      verify(decl, never()).set(any(), any());
+    }
+  }
+
+  /**
+   * QA edge case (ETP-5393 Bug C): box 111 exactly {@code 0} (the boundary, not just a clearly
+   * positive value) must be accepted — the guard's condition is strictly {@code < 0}.
+   */
+  @Test
+  public void testHandleDeclPutWithZeroBox111Succeeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":{\"111\":0}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    }
+  }
+
+  /**
+   * QA edge case (ETP-5393 Bug C): boxes 111 AND 77 both negative in the SAME PUT body must
+   * still reject with a single 400 (the loop returns on the first offending box found) — no
+   * partial application, no double-write.
+   */
+  @Test
+  public void testHandleDeclPutWithBothBoxesNegativeReturns400Once() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":{\"111\":-1,\"77\":-2}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet, times(1)).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+      verify(decl, never()).set(any(), any());
+    }
+  }
+
   // ── handleDeclPut (submissionMethod, ETP-4755) ──────────────────────
   // Mirrors the manualData tests above exactly: submissionMethod follows the same
   // "explicit null means not sent" precedent (see handleDeclPut's javadoc comment), not

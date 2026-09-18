@@ -52,7 +52,7 @@
       <foreign-key foreignTable="AD_CLIENT" name="ETGO_CALDECLINCIDENT_LIENT_FK">
         <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
       </foreign-key>
-      <foreign-key foreignTable="ETGO_FISCAL_DECL" name="ETGO_FDI_DECL_FK">
+      <foreign-key foreignTable="ETGO_FISCAL_DECL" name="ETGO_FDI_DECL_FK" onDelete="cascade">
         <reference local="ETGO_FISCAL_DECL_ID" foreign="ETGO_FISCAL_DECL_ID"/>
       </foreign-key>
       <foreign-key foreignTable="AD_ORG" name="ETGO_ISCALDECLINCIDENT_DORG_FK">
