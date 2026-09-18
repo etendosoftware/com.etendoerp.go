@@ -40,6 +40,8 @@ import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
+import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
+
 /**
  * Post-hook for the Return Material Receipt header entity.
  *
@@ -62,6 +64,14 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
   @Inject
   NeoCloneRecordHandler cloneRecordHandler;
 
+  @Inject
+  private DocumentPostingService postingService;
+
+  /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
+  void setPostingService(DocumentPostingService postingService) {
+    this.postingService = postingService;
+  }
+
   private static final String FIELD_SOURCE_SHIPMENT_DOC_NO = "sourceShipmentDocNo";
   private static final String FIELD_SOURCE_SHIPMENTS = "sourceShipments";
   private static final String FIELD_MOVEMENT_DATE = "movementDate";
@@ -75,6 +85,15 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
   @Override
   public NeoResponse handle(NeoContext context) {
     mirrorAccountingDate(context);
+    // ETP-5378: this window's own handler owns the JAVA_QUALIFIER slot, so the shared
+    // @Named("document-posting") handler can never be reached for it. Without this
+    // delegation "post"/"unpost" fall through to the generic AD-button path, which looks
+    // for a button column literally named "post", finds none, and answers
+    // 404 "Action not found: post" (NeoButtonActionHelper#executeButtonActionCore).
+    NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
+    if (posting != null) {
+      return posting;
+    }
 
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())
         && "POST".equals(context.getHttpMethod())
