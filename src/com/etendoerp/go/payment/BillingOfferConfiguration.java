@@ -19,7 +19,6 @@ public final class BillingOfferConfiguration {
   private BillingOfferConfiguration() {
   }
 
-  /** Returns the configured offer, applying safe defaults for missing or invalid values. */
   public static Offer current() {
     long amount = readAmount();
     String currency = normalized(GoRuntimeProperties.readValue(CURRENCY_PROPERTY, CURRENCY_ENV,
@@ -45,7 +44,6 @@ public final class BillingOfferConfiguration {
     return result.isEmpty() ? fallback : result;
   }
 
-  /** Immutable commercial offer value returned to billing consumers. */
   public static final class Offer {
     private final long amountMinor;
     private final String currency;

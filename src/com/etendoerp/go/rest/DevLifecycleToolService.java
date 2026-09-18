@@ -30,7 +30,6 @@ public final class DevLifecycleToolService {
 
   private final TenantEnvironmentLifecycleService lifecycle;
 
-  /** Creates a development lifecycle tool backed by the default lifecycle service. */
   public DevLifecycleToolService() {
     this(new TenantEnvironmentLifecycleService());
   }
@@ -45,12 +44,6 @@ public final class DevLifecycleToolService {
             ENVIRONMENT_PROPERTY, ENVIRONMENT_ENV, ""));
   }
 
-  /**
-   * Reads lifecycle configuration and owned environments for a development account.
-   * @param accountEmail authenticated account email
-   * @return JSON representation of the local lifecycle state
-   * @throws JSONException when the response cannot be assembled
-   */
   public JSONObject read(String accountEmail) throws JSONException {
     JSONObject result = new JSONObject();
     result.put("enabled", isEnabled());
@@ -67,13 +60,6 @@ public final class DevLifecycleToolService {
     return result;
   }
 
-  /**
-   * Updates local lifecycle configuration or one owned environment.
-   * @param accountEmail authenticated account email
-   * @param body requested configuration and environment changes
-   * @return JSON representation of the resulting lifecycle state
-   * @throws JSONException when the response cannot be assembled
-   */
   public JSONObject update(String accountEmail, JSONObject body) throws JSONException {
     int trialDays = optionalInt(body, "trialDays");
     int graceDays = optionalInt(body, "renewalGraceDays");

@@ -61,7 +61,6 @@ public class TenantEnvironmentLifecycleService {
 
   private final TenantPlanService tenantPlanService;
 
-  /** Creates a lifecycle service backed by the default plan resolver. */
   public TenantEnvironmentLifecycleService() {
     this(new TenantPlanService());
   }
@@ -70,12 +69,7 @@ public class TenantEnvironmentLifecycleService {
     this.tenantPlanService = tenantPlanService;
   }
 
-  /**
-   * Records a demo as ready, preserving the first successful start timestamp.
-   * @param clientId environment client id
-   * @param trialStartedAt first trial start instant
-   * @return true when lifecycle metadata was stored
-   */
+  /** Records a demo as ready, preserving the first successful start timestamp. */
   public boolean markDemoReady(String clientId, Instant trialStartedAt) {
     if (StringUtils.isBlank(clientId) || trialStartedAt == null) {
       return false;
@@ -97,11 +91,7 @@ public class TenantEnvironmentLifecycleService {
     }
   }
 
-  /**
-   * Records a productive environment without changing any existing Stripe fields.
-   * @param clientId environment client id
-   * @return true when lifecycle metadata was stored
-   */
+  /** Records a productive environment without changing any existing Stripe fields. */
   public boolean markProductive(String clientId) {
     if (StringUtils.isBlank(clientId)) {
       return false;
@@ -121,11 +111,7 @@ public class TenantEnvironmentLifecycleService {
     }
   }
 
-  /**
-   * Resolves a stored environment snapshot, falling back to the existing productive marker.
-   * @param clientId environment client id
-   * @return lifecycle snapshot, or null when metadata is unavailable
-   */
+  /** Resolves a stored environment snapshot, falling back to the existing productive marker. */
   public EnvironmentSnapshot resolve(String clientId) {
     if (StringUtils.isBlank(clientId)) {
       return null;
@@ -170,7 +156,6 @@ public class TenantEnvironmentLifecycleService {
     }
   }
 
-  /** Returns the current trial and grace-period configuration. */
   public EnvironmentAccessPolicy.Configuration configuration() {
     return new EnvironmentAccessPolicy.Configuration(
         GoRuntimeProperties.readInt(TRIAL_DAYS_PROPERTY, TRIAL_DAYS_ENV, DEFAULT_TRIAL_DAYS),
@@ -203,13 +188,7 @@ public class TenantEnvironmentLifecycleService {
     return activation.toString();
   }
 
-  /**
-   * Updates the local subscription projection; billing adapters supply the due date in UTC.
-   * @param clientId environment client id
-   * @param status subscription status to store
-   * @param renewalDueAt subscription renewal due date
-   * @return true when the projection was stored
-   */
+  /** Updates the local subscription projection; billing adapters supply the due date in UTC. */
   public boolean updateSubscriptionStatus(String clientId,
       EnvironmentAccessPolicy.SubscriptionStatus status, Instant renewalDueAt) {
     if (StringUtils.isBlank(clientId) || status == null) {
@@ -234,12 +213,6 @@ public class TenantEnvironmentLifecycleService {
   /**
    * Updates lifecycle values for the local development test tool. The HTTP caller must gate this
    * method with {@code DevLifecycleToolService.isEnabled()} and ownership validation.
-   * @param clientId environment client id
-   * @param type environment type
-   * @param trialStartedAt trial start instant for demo environments
-   * @param subscriptionStatus subscription status to store
-   * @param renewalDueAt renewal due date
-   * @return true when the state was stored
    */
   public boolean updateDevelopmentState(String clientId, EnvironmentAccessPolicy.EnvironmentType type,
       Instant trialStartedAt, EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus,
@@ -271,12 +244,7 @@ public class TenantEnvironmentLifecycleService {
     }
   }
 
-  /**
-   * Associates one owned demo with one newly created productive environment.
-   * @param demoClientId demo environment client id
-   * @param productiveClientId productive environment client id
-   * @return true when the association was stored
-   */
+  /** Associates one owned demo with one newly created productive environment. */
   public boolean associateDemoWithProductive(String demoClientId, String productiveClientId) {
     if (StringUtils.isBlank(demoClientId) || StringUtils.isBlank(productiveClientId)) {
       return false;
@@ -300,10 +268,6 @@ public class TenantEnvironmentLifecycleService {
   /**
    * Evaluates tenant access without contacting a payment provider. A null result means the tenant
    * predates lifecycle metadata and must be handled by the controlled legacy transition flow.
-   * @param clientId environment client id
-   * @param activeMembership whether the caller belongs to the environment
-   * @param now current instant
-   * @return access decision, or null when lifecycle metadata is unavailable
    */
   public EnvironmentAccessPolicy.Decision evaluateAccess(String clientId, boolean activeMembership,
       Instant now) {
@@ -361,7 +325,6 @@ public class TenantEnvironmentLifecycleService {
     return preference == null ? null : StringUtils.trimToNull(preference.getSearchKey());
   }
 
-  /** Immutable lifecycle projection returned to access-policy callers. */
   public static final class EnvironmentSnapshot {
     private final EnvironmentAccessPolicy.EnvironmentType type;
     private final Instant trialStartedAt;
@@ -392,7 +355,6 @@ public class TenantEnvironmentLifecycleService {
       return renewalDueAt;
     }
 
-    /** Converts the stored projection to the provider-neutral policy input. */
     public EnvironmentAccessPolicy.Environment toPolicyEnvironment() {
       return type == EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE
           ? EnvironmentAccessPolicy.Environment.productive(renewalDueAt)

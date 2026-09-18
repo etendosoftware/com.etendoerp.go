@@ -48,9 +48,6 @@ public class CheckoutRequestStore {
   private static final String ZERO_ID = "0";
   /** Name of the correlation-id parameter bound by every query keyed on {@code REQUEST_ID}. */
   private static final String PARAM_REQUEST_ID = "requestId";
-  private static final String PARAM_ACCOUNT_EMAIL = "accountEmail";
-  private static final String HQL_UPDATE = "update ";
-  private static final String HQL_PROVISIONING = "provisioning";
 
   static final String STATUS_CREATING = "CREATING";
   static final String STATUS_CREATED = "CREATED";
@@ -207,7 +204,7 @@ public class CheckoutRequestStore {
       OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
           "as cr where cr.request = :requestId and lower(cr.accountEmail) = lower(:accountEmail)");
       query.setNamedParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId));
-      query.setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail));
+      query.setNamedParameter("accountEmail", StringUtils.trimToEmpty(accountEmail));
       query.setFilterOnReadableClients(false);
       query.setFilterOnReadableOrganization(false);
       query.setMaxResult(1);
@@ -217,11 +214,7 @@ public class CheckoutRequestStore {
     }
   }
 
-  /**
-   * Lists recent purchase attempts for one account without exposing provider fields.
-   * @param accountEmail authenticated account email
-   * @return recent checkout requests for the account
-   */
+  /** Lists recent purchase attempts for one account without exposing provider fields. */
   public List<CheckoutRequest> findForAccount(String accountEmail) {
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
     OBContext.setAdminMode(true);
@@ -241,12 +234,7 @@ public class CheckoutRequestStore {
     }
   }
 
-  /**
-   * Finds an unfinished or paid purchase for the same account and environment name.
-   * @param accountEmail authenticated account email
-   * @param clientName requested environment name
-   * @return the newest matching request, or null when none exists
-   */
+  /** Finds an unfinished or paid purchase for the same account and environment name. */
   public CheckoutRequest findActiveForAccountAndClientName(String accountEmail, String clientName) {
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
     OBContext.setAdminMode(true);
@@ -259,7 +247,7 @@ public class CheckoutRequestStore {
               + " and lower(cr.clientName) = lower(:clientName)"
               + " and cr.checkoutRequestStatus in ('CREATING', 'CREATED', 'PAID', 'PROVISIONING')"
               + " order by cr.creationDate desc");
-      query.setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail));
+      query.setNamedParameter("accountEmail", StringUtils.trimToEmpty(accountEmail));
       query.setNamedParameter("clientName", StringUtils.trimToEmpty(clientName));
       query.setFilterOnReadableClients(false);
       query.setFilterOnReadableOrganization(false);
@@ -325,36 +313,36 @@ public class CheckoutRequestStore {
       Date now = new Date();
       int claimed = OBDal.getInstance()
           .getSession()
-          .createQuery(HQL_UPDATE + CheckoutRequest.ENTITY_NAME + " cr"
+          .createQuery("update " + CheckoutRequest.ENTITY_NAME + " cr"
               + "   set cr.checkoutRequestStatus = :provisioning,"
               + "       cr.provisioningAt = coalesce(cr.provisioningAt, :now),"
               + "       cr.provisioningAttempts = cr.provisioningAttempts + 1,"
               + "       cr.updated = :now"
               + " where cr.request = :requestId"
-              + "   and lower(cr.accountEmail) = lower(:" + PARAM_ACCOUNT_EMAIL + ")"
+              + "   and lower(cr.accountEmail) = lower(:accountEmail)"
               + "   and cr.checkoutRequestStatus = :paid")
           .setParameter("provisioning", STATUS_PROVISIONING)
           .setParameter("paid", STATUS_PAID)
           .setParameter("now", now)
           .setParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId))
-          .setParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail))
+          .setParameter("accountEmail", StringUtils.trimToEmpty(accountEmail))
           .executeUpdate();
       if (claimed == 0) {
         Date staleBefore = new Date(now.getTime() - provisioningLeaseMillis());
         claimed = OBDal.getInstance().getSession()
-            .createQuery(HQL_UPDATE + CheckoutRequest.ENTITY_NAME + " cr"
+            .createQuery("update " + CheckoutRequest.ENTITY_NAME + " cr"
                 + "   set cr.provisioningAt = :now,"
                 + "       cr.provisioningAttempts = cr.provisioningAttempts + 1,"
                 + "       cr.updated = :now"
                 + " where cr.request = :requestId"
-                + "   and lower(cr.accountEmail) = lower(:" + PARAM_ACCOUNT_EMAIL + ")"
-                + "   and cr.checkoutRequestStatus = :" + HQL_PROVISIONING
+                + "   and lower(cr.accountEmail) = lower(:accountEmail)"
+                + "   and cr.checkoutRequestStatus = :provisioning"
                 + "   and cr.provisioningAt <= :staleBefore")
-            .setParameter(HQL_PROVISIONING, STATUS_PROVISIONING)
+            .setParameter("provisioning", STATUS_PROVISIONING)
             .setParameter("now", now)
             .setParameter("staleBefore", staleBefore)
             .setParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId))
-            .setParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail))
+            .setParameter("accountEmail", StringUtils.trimToEmpty(accountEmail))
             .executeUpdate();
       }
       flushAndCommit();
@@ -364,12 +352,7 @@ public class CheckoutRequestStore {
     }
   }
 
-  /**
-   * Returns the current fencing token for a provisioning claim owned by the account.
-   * @param requestId checkout request id
-   * @param accountEmail authenticated account email
-   * @return current claim attempt, or null when no active claim exists
-   */
+  /** Returns the current fencing token for a provisioning claim owned by the account. */
   public Long findProvisioningAttempt(String requestId, String accountEmail) {
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
     OBContext.setAdminMode(true);
@@ -395,12 +378,7 @@ public class CheckoutRequestStore {
     recordProvisioned(requestId, createdClientId, null);
   }
 
-  /**
-   * Records completion only for the claim that performed the work.
-   * @param requestId checkout request id
-   * @param createdClientId provisioned client id
-   * @param claimAttempt fencing token that performed the work
-   */
+  /** Records completion only for the claim that performed the work. */
   public void recordProvisioned(String requestId, String createdClientId, Long claimAttempt) {
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
     OBContext.setAdminMode(true);

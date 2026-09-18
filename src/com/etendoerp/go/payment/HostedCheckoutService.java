@@ -48,14 +48,6 @@ public class HostedCheckoutService {
    * provider redirect can leave that request in CREATED while the checkout URL is no longer in
    * the browser. Reusing the request id lets the buyer continue without creating a second purchase
    * row or a second webhook correlation key.
-   *
-   * @param requestId existing checkout request id
-   * @param accountEmail authenticated account email
-   * @param clientName requested environment name
-   * @param origin public application origin for return URLs
-   * @return checkout request id, URL, and mode
-   * @throws IOException when the provider cannot be reached or rejects the request
-   * @throws JSONException when the provider response is not valid JSON
    */
   public JSONObject reopenSession(String requestId, String accountEmail, String clientName,
       String origin) throws IOException, JSONException {
