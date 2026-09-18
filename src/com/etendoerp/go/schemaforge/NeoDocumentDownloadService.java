@@ -205,8 +205,10 @@ final class NeoDocumentDownloadService {
    */
   private static void deleteTempFile(File file) {
     Path parent = file.toPath().getParent();
-    if (!file.delete()) {
-      log.warn("Could not delete temporary attachment file {}", file.getPath());
+    try {
+      Files.delete(file.toPath());
+    } catch (IOException e) {
+      log.warn("Could not delete temporary attachment file {}: {}", file.getPath(), e.getMessage());
     }
     if (parent == null || parent.equals(Paths.get(System.getProperty("java.io.tmpdir")))) {
       return;
