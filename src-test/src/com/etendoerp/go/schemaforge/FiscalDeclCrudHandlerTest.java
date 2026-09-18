@@ -20,6 +20,7 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -821,6 +822,183 @@ public class FiscalDeclCrudHandlerTest {
 
     verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMISSION_METHOD), any());
     verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "submitted_ack");
+    assertEquals("{\"ok\":true}", sw.toString());
+  }
+
+  // ── handleDeclPut (Reactivar declaración / reject aeat_telematic, ETP-5338) ─
+  // Reverting a declaration to draft ("Reactivar declaración") goes through this same PUT path
+  // (status: "draft"). The guard reads the declaration's CURRENTLY STORED submissionMethod (not
+  // whatever the request body says) — the frontend never sends submissionMethod on a reactivate
+  // call at all (see FmListPage.jsx's handleConfirmReactivate), so the guard must work purely off
+  // the persisted value.
+
+  /**
+   * A declaration whose stored {@code submissionMethod} is {@code aeat_telematic} must be
+   * rejected with 409 when the PUT tries to revert it to draft — reactivating a declaration that
+   * was genuinely filed with the AEAT would desync this table from what Hacienda has on record.
+   * The declaration record itself must be left completely unchanged: no status write, no commit.
+   */
+  @Test
+  public void testHandleDeclPutReactivateAeatTelematicReturns409AndLeavesRecordUnchanged()
+      throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"draft\"}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMISSION_METHOD)).thenReturn("aeat_telematic");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT), anyString());
+      verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS), any());
+      verify(obDal, never()).commitAndClose();
+    }
+  }
+
+  /**
+   * A declaration filed with {@code manual_ack} (a manual submission with AEAT acknowledgment,
+   * not a real telematic one) must be allowed to reactivate — the status is persisted as
+   * {@code draft} and the PUT succeeds normally.
+   */
+  @Test
+  public void testHandleDeclPutReactivateManualAckSucceeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"draft\"}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMISSION_METHOD)).thenReturn("manual_ack");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+    }
+
+    verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "draft");
+    assertEquals("{\"ok\":true}", sw.toString());
+  }
+
+  /**
+   * A declaration filed with {@code manual_no_receipt} must also be allowed to reactivate — the
+   * guard only special-cases {@code aeat_telematic}, every other submissionMethod (including this
+   * one) is unaffected.
+   */
+  @Test
+  public void testHandleDeclPutReactivateManualNoReceiptSucceeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"draft\"}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMISSION_METHOD))
+        .thenReturn("manual_no_receipt");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+    }
+
+    verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "draft");
+    assertEquals("{\"ok\":true}", sw.toString());
+  }
+
+  /**
+   * A declaration with NO stored {@code submissionMethod} at all (null — predates the feature, or
+   * was never set) must not be swallowed by the guard: {@code asString(null)} yields {@code ""},
+   * which is not equal to {@code aeat_telematic}, so the reactivate must succeed exactly like the
+   * manual_ack/manual_no_receipt cases. Guards against a regression where the null case is
+   * accidentally treated as "unknown, so block it".
+   */
+  @Test
+  public void testHandleDeclPutReactivateNullSubmissionMethodSucceeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"draft\"}")));
+
+    // declOwnedBy leaves PROPERTY_SUBMISSION_METHOD unstubbed → Mockito's default null return,
+    // which is the exact "never set" case this test targets.
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+    }
+
+    verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "draft");
+    assertEquals("{\"ok\":true}", sw.toString());
+  }
+
+  /**
+   * The guard must only fire when the target status is {@code draft} — a PUT that changes
+   * {@code aeat_telematic}'s OTHER fields (e.g. {@code fileExternal}) without touching status must
+   * not be rejected. Confirms the guard is scoped to the reactivate transition specifically, not
+   * to "any PUT on an aeat_telematic declaration".
+   */
+  @Test
+  public void testHandleDeclPutOnAeatTelematicWithoutStatusChangeIsNotRejected() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"fileExternal\":true}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMISSION_METHOD)).thenReturn("aeat_telematic");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+    }
+
+    verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_FILE_EXTERNAL, true);
     assertEquals("{\"ok\":true}", sw.toString());
   }
 

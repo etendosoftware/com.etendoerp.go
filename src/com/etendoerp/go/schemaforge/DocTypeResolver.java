@@ -67,6 +67,11 @@ public class DocTypeResolver {
       }
       if (shouldSkipDocTypeReapply(ctx, adTab, clientSubmittedFields)) {
         log.debug("Skipping doctype reapply — client submitted explicit doc type choice");
+        // The user's target choice is preserved, but C_DocType_ID must still follow it: the
+        // document number is generated from the sequence of the EFFECTIVE doctype, so leaving a
+        // stale default there numbers the record from the wrong sequence. Classic keeps this
+        // invariant through the SL_Invoice_Legacy callout.
+        syncDocumentTypeToSubmittedTarget(body, adTab);
         return;
       }
       String correctId = resolveDefaultDocTypeId(docTypeTargetCol, ctx);
@@ -75,6 +80,46 @@ public class DocTypeResolver {
       }
     } catch (Exception e) {
       log.debug("Error reapplying doctype: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Propagate the doc-type target the client submitted into the effective {@code C_DocType_ID}
+   * property, keeping both columns in sync. The effective doctype must follow the target chosen by
+   * the user: the document number comes from the effective doctype's sequence, so a stale value
+   * numbers the record from the wrong sequence. Classic enforces this via SL_Invoice_Legacy.
+   *
+   * <p>No-op (and never throwing) when the table has no doc-type pair or the body carries no
+   * target value.
+   *
+   * @param body  the JSON request body (modified in place); DAL property names expected
+   * @param adTab the AD tab whose table holds the doc-type columns
+   */
+  public static void syncDocumentTypeToSubmittedTarget(JSONObject body, Tab adTab) {
+    if (body == null || adTab == null || adTab.getTable() == null) {
+      return;
+    }
+    try {
+      Entity dalEntity = ModelProvider.getInstance().getEntityByTableId(adTab.getTable().getId());
+      if (dalEntity == null) {
+        return;
+      }
+      Property targetProp = dalEntity.getPropertyByColumnName(COL_DOC_TYPE_TARGET_ID);
+      Property typeProp = dalEntity.getPropertyByColumnName("C_DocType_ID");
+      if (targetProp == null || typeProp == null) {
+        return;
+      }
+      if (body.isNull(targetProp.getName())) {
+        return;
+      }
+      String submittedTarget = body.optString(targetProp.getName(), null);
+      if (submittedTarget == null || submittedTarget.trim().isEmpty()) {
+        return;
+      }
+      body.put(typeProp.getName(), submittedTarget);
+      log.debug("Synced documentType={} from submitted transactionDocument", submittedTarget);
+    } catch (Exception e) {
+      log.debug("Could not sync documentType to submitted target: {}", e.getMessage());
     }
   }
 
