@@ -2637,10 +2637,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             + "not be closed", onboardingRequest.clientName, clientId, e);
       }
     }
-    // Activate the bank statement-sync schedule now that its row is committed and therefore
-    // visible to the scheduler's own DB connection. Best-effort: internally swallows failures
-    // and the SCH row is still picked up on the next scheduler initialization.
-    onboardingBankConnectionSyncService.activateSchedule(clientId);
     Account account = findAccountForCommittedOnboarding(token, accountEmail);
     clearOnboardingDraftBestEffort(account);
     String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
