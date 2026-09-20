@@ -123,38 +123,33 @@ public class TenantPaywallServiceTest {
         + "the request for free", outcome.isProductive());
   }
 
-  // --- Converting the environment the user is currently in ---
+  // --- In-place conversion was removed in ETP-5396 ---
 
   @Test
-  public void convertingTheCurrentEnvironmentWithAConfirmedPaymentIsAllowedAndProductive() {
-    // The web client preselects this: upgradeAction=convert-demo against the environment the
-    // session is already inside, so the requested name resolves to an environment the account
-    // owns. That makes it a resume as far as client lookup is concerned, and a paid state
-    // transition as far as the plan is concerned.
+  public void convertingTheCurrentEnvironmentIsNotSupportedEvenWithAConfirmedPayment() {
+    // A stale browser or direct caller can still submit the legacy indicator. It must not reach
+    // payment confirmation or turn the existing demo into a productive environment.
     Outcome outcome = service.evaluate(true, true, true,
         confirmedPaymentFor(BUYER, ENVIRONMENT), BUYER, ENVIRONMENT);
 
-    assertEquals(Decision.ALLOWED, outcome.getDecision());
-    assertTrue("converting the current environment is the paid transition this feature exists "
-        + "for", outcome.isProductive());
-  }
-
-  @Test
-  public void convertingTheCurrentEnvironmentWithoutAPaymentIsRefused() {
-    // Conversion must not be reachable as a free retry of interrupted onboarding: without a
-    // payment there is nothing to convert, so the request is refused rather than silently
-    // re-provisioning the same environment on the free plan.
-    Outcome outcome = service.evaluate(true, true, true, null, BUYER, ENVIRONMENT);
-
-    assertEquals(Decision.PAYMENT_REQUIRED, outcome.getDecision());
+    assertEquals(Decision.CONVERSION_NOT_SUPPORTED, outcome.getDecision());
     assertFalse(outcome.isProductive());
   }
 
   @Test
-  public void convertingWithATokenNobodyConfirmedIsDeclined() {
+  public void convertingTheCurrentEnvironmentWithoutAPaymentIsNotSupported() {
+    // The result is independent of payment state because the operation itself is unsupported.
+    Outcome outcome = service.evaluate(true, true, true, null, BUYER, ENVIRONMENT);
+
+    assertEquals(Decision.CONVERSION_NOT_SUPPORTED, outcome.getDecision());
+    assertFalse(outcome.isProductive());
+  }
+
+  @Test
+  public void convertingWithAnUnconfirmedTokenIsNotSupported() {
     Outcome outcome = service.evaluate(true, true, true, MOCK_SHAPED_TOKEN, BUYER, ENVIRONMENT);
 
-    assertEquals(Decision.PAYMENT_DECLINED, outcome.getDecision());
+    assertEquals(Decision.CONVERSION_NOT_SUPPORTED, outcome.getDecision());
     assertFalse(outcome.isProductive());
   }
 

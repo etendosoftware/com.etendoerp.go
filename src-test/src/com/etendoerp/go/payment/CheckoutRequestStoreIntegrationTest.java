@@ -343,10 +343,9 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
   }
 
   /**
-   * {@code PROVISIONING_AT} answers "since when has this been stuck", so a retry must not reset
-   * it — if it did, a request wedged for an hour would look freshly started at every retry and no
-   * staleness threshold could ever fire. The retry count lives in {@code PROVISIONING_ATTEMPTS}
-   * instead, which is the value that is supposed to move.
+   * {@code PROVISIONING_AT} answers "since when has this been stuck", so an ordinary duplicate
+   * retry must not reset it. A stale lease is the explicit exception and is covered below. The
+   * retry count lives in {@code PROVISIONING_ATTEMPTS}, which is the value that moves for a retry.
    *
    * <p>The row is pushed back to {@code PAID} with native SQL because that is the only way to
    * reach the "a second claim actually matches" state deterministically — in production it is a
@@ -375,6 +374,23 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     assertEquals("PROVISIONING_AT is first-write-wins via coalesce — a retry must not reset the "
         + "clock the staleness thresholds are measured against", DISTANT_PAST,
         rawTimestamp(requestId, "PROVISIONING_AT"));
+  }
+
+  /** A crashed worker leaves a lease that a later retry may reclaim after the configured window. */
+  @Test
+  public void testAStaleProvisioningClaimCanBeReclaimedWithANewAttemptToken() {
+    String email = newEmail("claim-stale");
+    String accountId = createAccount(email);
+    String requestId = createPaidRequest(accountId, email);
+
+    assertTrue(store.claimForProvisioning(requestId, email));
+    forceTimestamp(requestId, "PROVISIONING_AT", DISTANT_PAST);
+
+    assertTrue("A stale provisioning lease must be recoverable after a process interruption",
+        store.claimForProvisioning(requestId, email));
+    assertEquals("Reclaiming must advance the fencing token", 2L, rawAttempts(requestId));
+    assertTrue("Reclaiming must renew the lease timestamp",
+        rawTimestamp(requestId, "PROVISIONING_AT").after(DISTANT_PAST));
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -557,12 +573,24 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     store.find(requestId, email);
     assertSame("find must give the caller's context back", caller, OBContext.getOBContext());
 
+    store.findForAccount(email);
+    assertSame("findForAccount must give the caller's context back", caller,
+        OBContext.getOBContext());
+
+    store.findActiveForAccountAndClientName(email, ENVIRONMENT);
+    assertSame("findActiveForAccountAndClientName must give the caller's context back", caller,
+        OBContext.getOBContext());
+
     store.isPaidFor(requestId, email, ENVIRONMENT);
     assertSame("isPaidFor must give the caller's context back", caller,
         OBContext.getOBContext());
 
     store.claimForProvisioning(requestId, email);
     assertSame("claimForProvisioning must give the caller's context back", caller,
+        OBContext.getOBContext());
+
+    store.findProvisioningAttempt(requestId, email);
+    assertSame("findProvisioningAttempt must give the caller's context back", caller,
         OBContext.getOBContext());
 
     store.recordProvisioned(requestId, null);

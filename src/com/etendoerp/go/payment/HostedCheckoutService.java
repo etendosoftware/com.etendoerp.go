@@ -13,6 +13,7 @@ import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
+import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.schemaforge.data.Plan;
 
 /** Small provider adapter for Stripe Checkout Sessions. Pricing is always selected server-side. */
@@ -70,6 +71,52 @@ public class HostedCheckoutService {
     // it is the evidence that someone tried to buy something, and it is always safe to expire
     // because the checkoutUrl only reaches the browser once this method returns.
     checkoutRequestStore.recordRequested(requestId, accountId, accountEmail, clientName, plan);
+    return createProviderSession(requestId, accountEmail, clientName, origin, plan);
+  }
+
+  /**
+   * Reopens the provider checkout for an existing unpaid request.
+   *
+   * <p>The durable request is the idempotency boundary for the purchase. A browser refresh or a
+   * provider redirect can leave that request in CREATED while the checkout URL is no longer in
+   * the browser. Reusing the request id lets the buyer continue without creating a second purchase
+   * row or a second webhook correlation key.
+   *
+   * <p>The plan is read back off the request rather than resolved again, so a reopened checkout
+   * charges what the buyer was originally shown even if the catalog has been re-priced since. A
+   * request carrying no plan cannot be reopened: it predates the plan catalog, and choosing a plan
+   * on the buyer's behalf here would charge for something nobody selected.
+   *
+   * @param requestId existing checkout request id
+   * @param accountEmail authenticated account email
+   * @param clientName requested environment name
+   * @param origin public application origin for return URLs
+   * @return checkout request id, URL, and mode
+   * @throws IllegalStateException when checkout has no credentials, when the request names no
+   *     plan, or when that plan carries no provider price id
+   * @throws IOException when the provider cannot be reached or rejects the request
+   * @throws JSONException when the provider response is not valid JSON
+   */
+  public JSONObject reopenSession(String requestId, String accountEmail, String clientName,
+      String origin) throws IOException, JSONException {
+    if (!CheckoutConfiguration.isConfigured()) {
+      throw new IllegalStateException("Checkout is not configured");
+    }
+    CheckoutRequest request = checkoutRequestStore.find(requestId, accountEmail);
+    Plan plan = request == null ? null : request.getPlan();
+    if (plan == null) {
+      throw new IllegalStateException(
+          "Checkout request '" + requestId + "' names no plan and cannot be reopened");
+    }
+    if (!planCatalogService.hasProviderPrice(plan)) {
+      throw new IllegalStateException(
+          "Plan '" + plan.getSearchKey() + "' has no provider price id and cannot be charged for");
+    }
+    return createProviderSession(requestId, accountEmail, clientName, origin, plan);
+  }
+
+  private JSONObject createProviderSession(String requestId, String accountEmail, String clientName,
+      String origin, Plan plan) throws IOException, JSONException {
     String form = buildSessionForm(requestId, accountEmail, clientName, origin,
         plan.getProviderPriceID(), plan.getSearchKey());
     StripeResponse response = stripeApiClient.postForm("/v1/checkout/sessions", form);

@@ -63,6 +63,7 @@ import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.Invitation;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -455,6 +456,18 @@ class EtendoGoJwtDalHelperTest {
   @DisplayName("buildEnvironmentJson")
   class BuildEnvironmentJson {
 
+    private MockedStatic<OwnerSupport> ownerSupportMock;
+
+    @BeforeEach
+    void isolateOwnerLookup() {
+      ownerSupportMock = mockStatic(OwnerSupport.class);
+    }
+
+    @AfterEach
+    void restoreOwnerLookup() {
+      ownerSupportMock.close();
+    }
+
     @Mock private Client client;
     @Mock private Organization organization;
     @Mock private User environmentUser;
@@ -519,9 +532,9 @@ class EtendoGoJwtDalHelperTest {
       JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser,
           EnvironmentPlanCache.empty());
 
-      // Seven original fields, the plan badge added by ETP-4686, and the plan key and
-      // subscription status added by ETP-5046.
-      assertEquals(10, result.length());
+          // Seven original fields, the plan badge (ETP-4686), the plan key (ETP-5046) and
+          // the relationship marker. Lifecycle fields are conditional and absent here.
+          assertEquals(10, result.length());
     }
 
     @Test

@@ -52,6 +52,7 @@ import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
@@ -701,6 +702,174 @@ public class NeoAccessHelperTest {
 
     assertTrue(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
     assertTrue(NeoAccessHelper.hasReportSpecAccess(spec, "POST"));
+  }
+
+  // ── hasReportSpecAccess — handler-declared tier (ETP-5335) ────────────────
+
+  /**
+   * An {@code SFEntity} of a report spec: no {@code AD_TAB_ID} (so the constituent-window tier
+   * has nothing to check and answers permissively, which is the shape of every report spec) and
+   * the {@code Java_Qualifier} naming the handler that owns the real rule.
+   */
+  private static SFEntity reportEntity(String javaQualifier) {
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getADTab()).thenReturn(null);
+    when(entity.getJavaQualifier()).thenReturn(javaQualifier);
+    return entity;
+  }
+
+  /** Wires the DAL so the spec's entity lookups return {@code entities}. */
+  @SuppressWarnings("unchecked")
+  private void givenSpecEntities(List<SFEntity> entities) {
+    OBCriteria<SFEntity> entityCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(SFEntity.class)).thenReturn(entityCriteria);
+    when(entityCriteria.add(any())).thenReturn(entityCriteria);
+    when(entityCriteria.list()).thenReturn(entities);
+  }
+
+  private static SFSpec reportSpec(String id) {
+    SFSpec spec = mock(SFSpec.class);
+    when(spec.getProcess()).thenReturn(null);
+    when(spec.getId()).thenReturn(id);
+    when(spec.getName()).thenReturn(id);
+    return spec;
+  }
+
+  /**
+   * The tier this ticket adds. The constituent-window check passes (no tab data at all, so it
+   * has nothing to deny with) and the handler's own declaration is what refuses — which is the
+   * whole point: without it, {@code neo_discover} advertised a report that answered 403 when
+   * called, and the report tool was published to a role that could not use it.
+   */
+  @Test
+  public void hasReportSpecAccess_handlerDeclaresNoAccess_returnsFalseThoughWindowTierPassed() {
+    when(role.getId()).thenReturn("role-id-report-handler-denies");
+    SFSpec spec = reportSpec("spec-report-handler-denies");
+    givenSpecEntities(Collections.singletonList(reportEntity("taxReportHandler")));
+
+    NeoHandler handler = mock(NeoHandler.class);
+    when(handler.isAccessibleForCurrentRole()).thenReturn(false);
+
+    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+      lookupMock.when(() -> NeoHandlerLookup.byQualifierQuietly("taxReportHandler"))
+          .thenReturn(handler);
+
+      assertFalse(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
+    }
+  }
+
+  @Test
+  public void hasReportSpecAccess_handlerDeclaresAccess_returnsTrue() {
+    when(role.getId()).thenReturn("role-id-report-handler-allows");
+    SFSpec spec = reportSpec("spec-report-handler-allows");
+    givenSpecEntities(Collections.singletonList(reportEntity("taxReportHandler")));
+
+    NeoHandler handler = mock(NeoHandler.class);
+    when(handler.isAccessibleForCurrentRole()).thenReturn(true);
+
+    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+      lookupMock.when(() -> NeoHandlerLookup.byQualifierQuietly("taxReportHandler"))
+          .thenReturn(handler);
+
+      assertTrue(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
+    }
+  }
+
+  /**
+   * A handler that does not override {@code isAccessibleForCurrentRole} answers the interface
+   * default, {@code true} — this is what keeps every pre-existing handler behaving exactly as it
+   * did. The handler here is a real, undeclaring implementation rather than a mock, so the test
+   * reads the actual default instead of a stub that could agree with a default that changed.
+   */
+  @Test
+  public void hasReportSpecAccess_handlerDoesNotDeclare_changesNothing() {
+    when(role.getId()).thenReturn("role-id-report-handler-silent");
+    SFSpec spec = reportSpec("spec-report-handler-silent");
+    givenSpecEntities(Collections.singletonList(reportEntity("someUiHandler")));
+
+    NeoHandler undeclaring = neoContext -> null;
+
+    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+      lookupMock.when(() -> NeoHandlerLookup.byQualifierQuietly("someUiHandler"))
+          .thenReturn(undeclaring);
+
+      assertTrue(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
+    }
+  }
+
+  /** No {@code Java_Qualifier} on any entity: there is no handler to ask, so nothing changes. */
+  @Test
+  public void hasReportSpecAccess_specWithoutQualifier_returnsTrue() {
+    when(role.getId()).thenReturn("role-id-report-no-qualifier");
+    SFSpec spec = reportSpec("spec-report-no-qualifier");
+    givenSpecEntities(Collections.singletonList(reportEntity(null)));
+
+    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+      assertTrue(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
+      lookupMock.verifyNoInteractions();
+    }
+  }
+
+  /** A qualifier naming a handler that is not deployed: no answer to consult, so allow. */
+  @Test
+  public void hasReportSpecAccess_qualifierWithNoDeployedHandler_returnsTrue() {
+    when(role.getId()).thenReturn("role-id-report-handler-missing");
+    SFSpec spec = reportSpec("spec-report-handler-missing");
+    givenSpecEntities(Collections.singletonList(reportEntity("goneHandler")));
+
+    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+      lookupMock.when(() -> NeoHandlerLookup.byQualifierQuietly("goneHandler")).thenReturn(null);
+
+      assertTrue(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
+    }
+  }
+
+  /**
+   * The handler tier runs AFTER the constituent-window tier and only when that tier allowed: a
+   * spec already denied by its windows must not become reachable because a handler says yes.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void hasReportSpecAccess_windowTierDenies_handlerIsNotConsulted() {
+    when(role.getId()).thenReturn("role-id-report-window-denied");
+    SFSpec spec = reportSpec("spec-report-window-denied");
+
+    SFEntity entity = entityForWindow("window-inaccessible");
+    when(entity.getJavaQualifier()).thenReturn("taxReportHandler");
+    givenSpecEntities(Collections.singletonList(entity));
+
+    OBCriteria<WindowAccess> windowAccessCriteria = mock(OBCriteria.class);
+    when(dal.createCriteria(WindowAccess.class)).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.add(any())).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.setMaxResults(1)).thenReturn(windowAccessCriteria);
+    when(windowAccessCriteria.list()).thenReturn(Collections.emptyList());
+
+    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+      assertFalse(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
+      lookupMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * A handler whose declaration blows up must not take the spec down with it. The tier is
+   * fail-open here on purpose — it was added to tighten specific reports, not to become a new way
+   * for every report to disappear — and that choice is asserted rather than left implicit.
+   */
+  @Test
+  public void hasReportSpecAccess_handlerThrows_fallsBackToAllow() {
+    when(role.getId()).thenReturn("role-id-report-handler-throws");
+    SFSpec spec = reportSpec("spec-report-handler-throws");
+    givenSpecEntities(Collections.singletonList(reportEntity("brokenHandler")));
+
+    NeoHandler handler = mock(NeoHandler.class);
+    when(handler.isAccessibleForCurrentRole()).thenThrow(new IllegalStateException("no OBContext"));
+
+    try (MockedStatic<NeoHandlerLookup> lookupMock = mockStatic(NeoHandlerLookup.class)) {
+      lookupMock.when(() -> NeoHandlerLookup.byQualifierQuietly("brokenHandler"))
+          .thenReturn(handler);
+
+      assertTrue(NeoAccessHelper.hasReportSpecAccess(spec, "GET"));
+    }
   }
 
   // ── hasProcessAccess ──────────────────────────────────────────────────────

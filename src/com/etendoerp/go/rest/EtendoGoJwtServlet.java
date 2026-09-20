@@ -65,11 +65,13 @@ import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.JwtAuthUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPaywallService;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.payment.HostedCheckoutService;
 import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.BillingEventStore;
+import com.etendoerp.go.payment.BillingOfferConfiguration;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.PlanCatalogService;
@@ -120,6 +122,10 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *   GET  /sws/go/environments — List environments for the account (requires session token),
  *                               each carrying its plan ("free" | "productive"), plan key and
  *                               subscription status
+ *   GET  /sws/go/billing/overview — Account-level purchase projection (requires session token)
+ *   GET  /sws/go/billing/offers — Server-owned billing offer projection
+ *   POST /sws/go/billing/purchases — Start a new owner-authorized purchase
+ *   GET  /sws/go/billing/purchases/{id} — Read one account-scoped purchase projection
  *   GET  /sws/go/login?userId=X — Get an Etendo JWT for an AD_User (requires session token + ownership)
  *
  * Auth model: session token in Authorization header ("Bearer <token>").
@@ -161,6 +167,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String CODE_CHECKOUT_NOT_CONFIGURED = "CHECKOUT_NOT_CONFIGURED";
   private static final String CHECKOUT_NOT_CONFIGURED_MESSAGE = "Checkout is not configured";
   private static final String FIELD_ACCOUNT_EMAIL = "accountEmail";
+  private static final String FIELD_CURRENCY = "currency";
+  private static final String HEADER_ORIGIN = "Origin";
+  private static final String BILLING_OWNER_REQUIRED = "BILLING_OWNER_REQUIRED";
+  private static final String BILLING_OWNER_MESSAGE = "Only the environment owner can manage billing";
+  private static final String CLIENT_NAME_REQUIRED = "clientName is required";
+  private static final String CHECKOUT_NOT_CONFIGURED = "CHECKOUT_NOT_CONFIGURED";
+  private static final String CHECKOUT_NOT_CONFIGURED_MESSAGE = "Checkout is not configured";
   private static final String FIELD_ERROR = "error";
   private static final String ERROR_PAYMENT_REQUIRED = "payment_required";
   // javax.servlet.http.HttpServletResponse predates RFC 7231 and has no 402 constant.
@@ -254,7 +267,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_FULL_NAME = "fullName";
   private static final String FIELD_ADDRESS = "address";
   private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { FIELD_FULL_NAME, "businessType",
-      FIELD_CLIENT_NAME, "currency", FIELD_LANGUAGE, FIELD_COUNTRY_CODE, "fiscalIdType",
+      FIELD_CLIENT_NAME, FIELD_CURRENCY, FIELD_LANGUAGE, FIELD_COUNTRY_CODE, "fiscalIdType",
       "fiscalIdValue", FIELD_ADDRESS, "sector" };
   private static final String PATH_ONBOARDING_FIRST_STEPS = "/onboarding/first-steps";
   private static final String FIELD_FIRST_STEPS = "firstSteps";
@@ -300,6 +313,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   OnboardingCostingScheduleService onboardingCostingScheduleService =
       new OnboardingCostingScheduleService();
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
+  TenantEnvironmentLifecycleService tenantEnvironmentLifecycleService =
+      new TenantEnvironmentLifecycleService();
+  DevLifecycleToolService devLifecycleToolService = new DevLifecycleToolService();
   TenantPlanService tenantPlanService = new TenantPlanService();
   SubscriptionService subscriptionService = new SubscriptionService();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
@@ -348,7 +364,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
-    if (isPath(path, "/me")) {
+    if (routePrimaryGet(path, request, response) || routeBillingGet(path, request, response)
+        || routeAccountGet(path, request, response) || routeCheckoutGet(path, request, response)) {
+      return;
+    }
+    writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
+  }
+
+  private boolean routePrimaryGet(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (isPath(path, "/dev/lifecycle") && DevLifecycleToolService.isEnabled()) {
+      handleDevLifecycleGet(request, response);
+    } else if (isPath(path, "/me")) {
       handleMe(request, response);
     } else if (isPath(path, PATH_ONBOARDING_DRAFT)) {
       handleGetOnboardingDraft(request, response);
@@ -358,7 +385,29 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleGetCompanyData(request, response);
     } else if (isPath(path, "/environments")) {
       handleEnvironments(request, response);
-    } else if (isPath(path, "/login")) {
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  private boolean routeBillingGet(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (isPath(path, "/billing/offers")) {
+      handleBillingOffers(request, response);
+    } else if (isPath(path, "/billing/overview")) {
+      handleBillingOverview(request, response);
+    } else if (path != null && path.startsWith("/billing/purchases/")) {
+      handleBillingPurchase(request, response);
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  private boolean routeAccountGet(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (isPath(path, "/login")) {
       handleEnvironmentLogin(request, response);
     } else if (isPath(path, "/company-invitations/mine")) {
       handleCompanyInvitationMine(request, response);
@@ -366,16 +415,29 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleCompanyInvitationResolve(request, response);
     } else if (isPath(path, "/plans")) {
       handlePlans(request, response);
-    } else if (path != null && path.startsWith("/checkout/sessions/")) {
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  private boolean routeCheckoutGet(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (path != null && path.startsWith("/checkout/sessions/")) {
       handleCheckoutStatus(request, response);
     } else {
-      writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
+      return false;
     }
+    return true;
   }
 
   @Override
   public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
+    if (isPath(path, "/dev/lifecycle") && DevLifecycleToolService.isEnabled()) {
+      handleDevLifecyclePost(request, response);
+      return;
+    }
     if (isPath(path, "/checkout/webhook")) {
       handleCheckoutWebhook(request, response);
       return;
@@ -387,6 +449,24 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
     routeOnboardingPost(path, request, response);
+  }
+
+  /** Local-only ETP-5396 lifecycle test controls. Disabled deployments answer the normal 404. */
+  private void handleDevLifecycleGet(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "dev-lifecycle-read", account ->
+        writeResponse(response, HttpServletResponse.SC_OK,
+            devLifecycleToolService.read(account.getEmail())));
+  }
+
+  private void handleDevLifecyclePost(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "dev-lifecycle-update", account -> {
+      JSONObject body = readJsonBodyOrBadRequest(request, response);
+      if (body == null) return;
+      writeResponse(response, HttpServletResponse.SC_OK,
+          devLifecycleToolService.update(account.getEmail(), body));
+    });
   }
 
   /**
@@ -430,6 +510,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleSaveFirstSteps(request, response);
     } else if (isPath(path, "/onboarding")) {
       handleOnboarding(request, response);
+    } else if (isPath(path, "/billing/purchases")) {
+      handleBillingPurchaseCreate(request, response);
     } else if (isPath(path, "/checkout/sessions")) {
       handleCheckoutSession(request, response);
     } else if (isPath(path, "/company-invitations")) {
@@ -533,12 +615,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void handleCheckoutSession(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     runWithAuthenticatedAccount(request, response, "checkout-session", account -> {
+      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+      OBContext.setAdminMode(true);
+      boolean billingOwner;
+      try {
+        billingOwner = EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(account.getEmail());
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+      if (!billingOwner) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, BILLING_OWNER_REQUIRED,
+            BILLING_OWNER_MESSAGE, BILLING_OWNER_MESSAGE);
+        return;
+      }
       JSONObject body = readJsonBodyOrBadRequest(request, response);
       if (body == null) return;
       String clientName = body.optString(FIELD_CLIENT_NAME, "").trim();
       if (clientName.isEmpty()) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
-            "clientName is required", "clientName is required");
+            CLIENT_NAME_REQUIRED, CLIENT_NAME_REQUIRED);
         return;
       }
       String planKey = body.optString(FIELD_PLAN_KEY, "").trim();
@@ -547,7 +642,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             "planKey is required", "planKey is required");
         return;
       }
-      String requestOrigin = request.getHeader("Origin");
+      String requestOrigin = request.getHeader(HEADER_ORIGIN);
       final String origin = StringUtils.isBlank(requestOrigin)
           ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
       try {
@@ -572,6 +667,87 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     });
   }
 
+  /**
+   * Creates a new account-level purchase. The local contract is provider-neutral; the existing
+   * hosted checkout service is only the first adapter behind this boundary.
+   */
+  private void handleBillingPurchaseCreate(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    runWithAuthenticatedAccount(request, response, "billing-purchase-create", account -> {
+      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+      OBContext.setAdminMode(true);
+      boolean billingOwner;
+      try {
+        billingOwner = EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(account.getEmail());
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+      if (!billingOwner) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, BILLING_OWNER_REQUIRED,
+            BILLING_OWNER_MESSAGE, BILLING_OWNER_MESSAGE);
+        return;
+      }
+      JSONObject body = readJsonBodyOrBadRequest(request, response);
+      if (body == null) return;
+      String clientName = body.optString(FIELD_CLIENT_NAME, "").trim();
+      if (clientName.isEmpty()) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+            CLIENT_NAME_REQUIRED, CLIENT_NAME_REQUIRED);
+        return;
+      }
+      CheckoutRequest activePurchase = checkoutRequestStore
+          .findActiveForAccountAndClientName(account.getEmail(), clientName);
+      if (activePurchase != null) {
+        handleExistingBillingPurchase(request, response, account, activePurchase);
+        return;
+      }
+      String requestOrigin = request.getHeader(HEADER_ORIGIN);
+      final String origin = StringUtils.isBlank(requestOrigin)
+          ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+      try {
+        JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
+            clientName, origin);
+        writeResponse(response, HttpServletResponse.SC_CREATED, result);
+      } catch (IllegalStateException e) {
+        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
+            CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
+      } catch (Exception e) {
+        log.error("Could not create account billing purchase", e);
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
+            "Unable to create billing purchase", "Unable to create billing purchase");
+      }
+    });
+  }
+
+  private void handleExistingBillingPurchase(HttpServletRequest request,
+      HttpServletResponse response, Account account, CheckoutRequest activePurchase)
+      throws IOException, JSONException {
+    String status = activePurchase.getCheckoutRequestStatus();
+    if ("CREATING".equals(status) || "CREATED".equals(status)) {
+      String requestOrigin = request.getHeader(HEADER_ORIGIN);
+      final String origin = StringUtils.isBlank(requestOrigin)
+          ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+      try {
+        JSONObject result = hostedCheckoutService.reopenSession(activePurchase.getRequest(),
+            account.getEmail(), activePurchase.getClientName(), origin);
+        writeResponse(response, HttpServletResponse.SC_OK, result);
+      } catch (IllegalStateException e) {
+        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
+            CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
+      } catch (Exception e) {
+        log.error("Could not reopen account billing purchase", e);
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
+            "Unable to reopen billing purchase", "Unable to reopen billing purchase");
+      }
+      return;
+    }
+    JSONObject result = new JSONObject();
+    result.put("purchaseId", activePurchase.getRequest());
+    result.put(FIELD_STATUS, status);
+    result.put(FIELD_CLIENT_NAME, activePurchase.getClientName());
+    writeResponse(response, HttpServletResponse.SC_CONFLICT, result);
+  }
+
   private void handleCheckoutStatus(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     String prefix = "/checkout/sessions/";
@@ -590,6 +766,86 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (paid) result.put(FIELD_CLIENT_NAME, checkoutRequest.getClientName());
       writeResponse(response, HttpServletResponse.SC_OK, result);
     });
+  }
+
+  /** Account-level billing overview; it remains available when every ERP environment is blocked. */
+  private void handleBillingOverview(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "billing-overview", account -> {
+      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+      OBContext.setAdminMode(true);
+      try {
+        JSONObject result = new JSONObject();
+        result.put(FIELD_ACCOUNT_EMAIL, account.getEmail());
+        result.put("canManageBilling",
+            EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(account.getEmail()));
+        org.codehaus.jettison.json.JSONArray purchases = new org.codehaus.jettison.json.JSONArray();
+        for (CheckoutRequest purchase : checkoutRequestStore.findForAccount(account.getEmail())) {
+          purchases.put(buildBillingPurchaseJson(purchase));
+        }
+        result.put("purchases", purchases);
+        writeResponse(response, HttpServletResponse.SC_OK, result);
+      } catch (JSONException e) {
+        log.error("JSON error building billing overview", e);
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    });
+  }
+
+  /** Returns the server-owned offer projection used by the account billing UI. */
+  private void handleBillingOffers(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "billing-offers", account -> {
+      try {
+        BillingOfferConfiguration.Offer offer = BillingOfferConfiguration.current();
+        JSONObject result = new JSONObject();
+        result.put("code", "productive-tenant");
+        result.put("amountMinor", offer.getAmountMinor());
+        result.put(FIELD_CURRENCY, offer.getCurrency());
+        result.put("interval", offer.getInterval());
+        writeResponse(response, HttpServletResponse.SC_OK, result);
+      } catch (JSONException e) {
+        log.error("JSON error building billing offer", e);
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+      }
+    });
+  }
+
+  /** Returns one account-scoped purchase projection, with foreign IDs kept indistinguishable. */
+  private void handleBillingPurchase(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String prefix = "/billing/purchases/";
+    String purchaseId = request.getPathInfo().substring(prefix.length());
+    runWithAuthenticatedAccount(request, response, "billing-purchase", account -> {
+      CheckoutRequest purchase = checkoutRequestStore.find(purchaseId, account.getEmail());
+      if (purchase == null) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, "PURCHASE_NOT_FOUND",
+            "Purchase not found", "Purchase not found");
+        return;
+      }
+      try {
+        writeResponse(response, HttpServletResponse.SC_OK, buildBillingPurchaseJson(purchase));
+      } catch (JSONException e) {
+        log.error("JSON error building billing purchase", e);
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+      }
+    });
+  }
+
+  private JSONObject buildBillingPurchaseJson(CheckoutRequest purchase) throws JSONException {
+    JSONObject result = new JSONObject();
+    result.put("purchaseId", purchase.getRequest());
+    result.put(FIELD_STATUS, StringUtils.defaultString(purchase.getCheckoutRequestStatus(), "UNKNOWN"));
+    result.put(FIELD_CLIENT_NAME, StringUtils.defaultString(purchase.getClientName()));
+    if (purchase.getCreatedClient() != null) {
+      result.put("createdClientId", purchase.getCreatedClient().getId());
+    }
+    if (purchase.getFailureReason() != null) {
+      result.put("failureReason", purchase.getFailureReason());
+    }
+    return result;
   }
 
   /**
@@ -743,7 +999,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     String email = body.optString(FIELD_EMAIL, "").trim();
     String language = body.optString(FIELD_LANGUAGE, "").trim();
-    String requestOrigin = request.getHeader("Origin");
+    String requestOrigin = request.getHeader(HEADER_ORIGIN);
     String origin = StringUtils.isBlank(requestOrigin)
         ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
     runWithAuthenticatedAccount(request, response, "create company invitation", account -> {
@@ -2154,6 +2410,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             maskEmail(accountEmail), TenantPlanService.PLAN_PRODUCTIVE);
       }
     }
+
+    // develop's lifecycle projection is a separate concern from the subscription row: the
+    // ETGO_SUBSCRIPTION table says whether the tenant is paying, but it does not carry
+    // DEMO-vs-PRODUCTIVE, so this marker is still what classifies the environment. Run it
+    // whichever way the payment was recorded above.
+    if (!tenantEnvironmentLifecycleService.markProductive(clientId)) {
+      log.error("Paid environment '{}' (client {}) could not be marked in the lifecycle "
+          + "projection", clientName, clientId);
+    }
+    String demoClientId = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail);
+    if (demoClientId != null && !tenantEnvironmentLifecycleService
+        .associateDemoWithProductive(demoClientId, clientId)) {
+      log.error("Paid environment '{}' (client {}) could not be associated with demo {}",
+          clientName, clientId, demoClientId);
+    }
+
     if (productiveRecorded) {
       revertTestModeForProductiveTenantBestEffort(clientId);
     }
@@ -2440,46 +2712,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleOnboarding(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    String token = extractBearerToken(request);
-    if (token == null) {
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
-          INVALID_AUTHORIZATION_HEADER);
+    OnboardingPreparation preparation = prepareOnboarding(request, response);
+    if (preparation == null) {
       return;
     }
-
-    String accountEmail = resolveOnboardingAccountEmail(token, response);
-    if (accountEmail == null) {
-      return;
-    }
-
-    // ETP-4798. Sits beside the paywall below, for the same reason: before the NDJSON stream opens
-    // and before any provisioning runs, so a refused request answers with plain JSON and leaves no
-    // half-created tenant behind.
-    if (rejectWhenEmailNotVerified(token, response)) {
-      return;
-    }
-
-    OnboardingRequestData onboardingRequest = parseOnboardingRequest(request, response);
-    if (onboardingRequest == null) {
-      return;
-    }
-
-    String currencyId = resolveCurrencyId(onboardingRequest.currencyIso, response);
-    if (currencyId == null) {
-      return;
-    }
-
-    PaywallOutcome paywallOutcome =
-        resolveOnboardingPaywall(accountEmail, onboardingRequest, response);
-    if (paywallOutcome == PaywallOutcome.REFUSED) {
-      return;
-    }
-    boolean paidUpgrade = paywallOutcome == PaywallOutcome.PAID;
-
-    if (rejectWhenProvisioningAlreadyClaimed(paidUpgrade, onboardingRequest, accountEmail,
-        response)) {
-      return;
-    }
+    String token = preparation.token;
+    String accountEmail = preparation.accountEmail;
+    OnboardingRequestData onboardingRequest = preparation.request;
+    String currencyId = preparation.currencyId;
+    boolean paidUpgrade = preparation.paidUpgrade;
+    Long provisioningClaim = preparation.provisioningClaim;
 
     // Tracked across the try/catch/finally below. Provisioning has many graceful exits that
     // `return` after writing a result line rather than throwing, so the catch block alone would
@@ -2548,8 +2790,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
+      if (!paidUpgrade && !tenantEnvironmentLifecycleService.markDemoReady(clientId, Instant.now())) {
+        throw new IllegalStateException("Could not initialize demo trial lifecycle");
+      }
+
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
-      completeCommittedOnboarding(token, accountEmail, onboardingRequest, clientId, paidUpgrade);
+      completeCommittedOnboarding(token, accountEmail, onboardingRequest, clientId, paidUpgrade,
+          provisioningClaim);
+      // Activate the costing schedule now that its row is committed and therefore visible to the
+      // scheduler's own DB connection. Best-effort: internally swallows failures, and the SCH row
+      // is still picked up on the next scheduler initialization.
+      onboardingCostingScheduleService.activateSchedule(clientId);
 
       sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
       sendProgress(writer, "finalize", "done", "Environment ready");
@@ -2574,6 +2825,41 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
+  private OnboardingPreparation prepareOnboarding(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    String token = extractBearerToken(request);
+    if (token == null) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
+      return null;
+    }
+    String accountEmail = resolveOnboardingAccountEmail(token, response);
+    if (accountEmail == null || rejectWhenEmailNotVerified(token, response)) {
+      return null;
+    }
+    OnboardingRequestData onboardingRequest = parseOnboardingRequest(request, response);
+    if (onboardingRequest == null) {
+      return null;
+    }
+    String currencyId = resolveCurrencyId(onboardingRequest.currencyIso, response);
+    if (currencyId == null
+        || rejectWhenPaidOnboardingIsNotOwned(accountEmail, onboardingRequest, response)) {
+      return null;
+    }
+    PaywallOutcome paywallOutcome =
+        resolveOnboardingPaywall(accountEmail, onboardingRequest, response);
+    if (paywallOutcome == PaywallOutcome.REFUSED) {
+      return null;
+    }
+    boolean paidUpgrade = paywallOutcome == PaywallOutcome.PAID;
+    Long provisioningClaim = claimPaidProvisioning(paidUpgrade, onboardingRequest, accountEmail,
+        response);
+    if (paidUpgrade && provisioningClaim == null) {
+      return null;
+    }
+    return new OnboardingPreparation(token, accountEmail, onboardingRequest, currencyId,
+        paidUpgrade, provisioningClaim);
+  }
+
   /**
    * Claims the paid request for provisioning, refusing the call when another already holds it.
    *
@@ -2589,18 +2875,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * @param response response the refusal is written to
    * @return true when the request was refused and the caller must stop
    */
-  private boolean rejectWhenProvisioningAlreadyClaimed(boolean paidUpgrade,
+  private Long claimPaidProvisioning(boolean paidUpgrade,
       OnboardingRequestData onboardingRequest, String accountEmail, HttpServletResponse response)
       throws IOException {
-    if (!paidUpgrade
-        || checkoutRequestStore.claimForProvisioning(onboardingRequest.paymentToken,
-            accountEmail)) {
-      return false;
+    if (!paidUpgrade) {
+      return null;
+    }
+    if (checkoutRequestStore.claimForProvisioning(onboardingRequest.paymentToken, accountEmail)) {
+      Long attempt = checkoutRequestStore.findProvisioningAttempt(onboardingRequest.paymentToken,
+          accountEmail);
+      // A successful conditional update always has a persisted attempt. Keep the success path
+      // recoverable even if a legacy database omits that value.
+      return attempt == null ? 0L : attempt;
     }
     writeError(response, HttpServletResponse.SC_CONFLICT, "PROVISIONING_ALREADY_IN_PROGRESS",
         "This environment is already being created",
         "This environment is already being created. Please wait for it to finish.");
-    return true;
+    return null;
   }
 
   /**
@@ -2640,19 +2931,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * @param paidUpgrade whether this environment was bought rather than free
    */
   private void completeCommittedOnboarding(String token, String accountEmail,
-      OnboardingRequestData onboardingRequest, String clientId, boolean paidUpgrade) {
+      OnboardingRequestData onboardingRequest, String clientId, boolean paidUpgrade,
+      Long provisioningClaim) {
     if (paidUpgrade) {
       try {
-        checkoutRequestStore.recordProvisioned(onboardingRequest.paymentToken, clientId);
+        checkoutRequestStore.recordProvisioned(onboardingRequest.paymentToken, clientId,
+            provisioningClaim);
       } catch (RuntimeException e) {
         log.error("Environment '{}' (client {}) was provisioned but its checkout request could "
             + "not be closed", onboardingRequest.clientName, clientId, e);
       }
     }
-    // Activate the costing schedule now that its row is committed and therefore visible to the
-    // scheduler's own DB connection. Best-effort: internally swallows failures, and the SCH row
-    // is still picked up on the next scheduler initialization.
-    onboardingCostingScheduleService.activateSchedule(clientId);
     Account account = findAccountForCommittedOnboarding(token, accountEmail);
     clearOnboardingDraftBestEffort(account);
     String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
@@ -2707,6 +2996,30 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
       return PaywallOutcome.REFUSED;
     }
+  }
+
+  /** Paid retries are billing mutations too and require a server-marked environment owner. */
+  private boolean rejectWhenPaidOnboardingIsNotOwned(String accountEmail,
+      OnboardingRequestData onboardingRequest, HttpServletResponse response) throws IOException {
+    if (StringUtils.isBlank(onboardingRequest.paymentToken)) {
+      return false;
+    }
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    boolean hasEnvironments;
+    boolean billingOwner;
+    try {
+      hasEnvironments = EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail(accountEmail) > 0;
+      billingOwner = EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(accountEmail);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    if (hasEnvironments && !billingOwner) {
+      writeError(response, HttpServletResponse.SC_FORBIDDEN, BILLING_OWNER_REQUIRED,
+          BILLING_OWNER_MESSAGE, BILLING_OWNER_MESSAGE);
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -2787,8 +3100,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       boolean ownsEnvironment = EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail(accountEmail) > 0;
       boolean resuming = isResumingOwnedTenant(onboardingRequest.clientName, accountEmail);
-      boolean convertingDemo = "convert-demo".equalsIgnoreCase(onboardingRequest.upgradeAction);
-      return tenantPaywallService.evaluate(ownsEnvironment, resuming, convertingDemo,
+      return tenantPaywallService.evaluate(ownsEnvironment, resuming, false,
           onboardingRequest.paymentToken, accountEmail, onboardingRequest.clientName);
     } finally {
       OBContext.restorePreviousMode();
@@ -2882,7 +3194,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
       OnboardingRequestData data = new OnboardingRequestData();
       data.clientName = clientName;
-      data.currencyIso = body.optString("currency", "EUR").trim();
+      data.currencyIso = body.optString(FIELD_CURRENCY, "EUR").trim();
       data.language = body.optString(FIELD_LANGUAGE, "en_US").trim();
       // Country drives the org's tax resolution; default to Spain (ES) when the form omits it.
       data.countryCode = body.optString(FIELD_COUNTRY_CODE, "ES").trim();
@@ -2896,6 +3208,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.taxId = body.optString("fiscalIdValue", "").trim();
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
       data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
+      if ("convert-demo".equalsIgnoreCase(data.upgradeAction)) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+            "Demo environments cannot be converted; create a new productive environment");
+        return null;
+      }
       // ETP-4665: validate before the NDJSON stream opens. Past this point a length overflow
       // surfaces as a DAL ValidationException halfway through tenant creation, which rolls the
       // transaction back and reports the opaque "@CreateClientFailed@".
@@ -4026,6 +4343,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (JSONException e) {
       log.error("JSON error building field-too-long response", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    }
+  }
+
+  private static final class OnboardingPreparation {
+    private final String token;
+    private final String accountEmail;
+    private final OnboardingRequestData request;
+    private final String currencyId;
+    private final boolean paidUpgrade;
+    private final Long provisioningClaim;
+
+    private OnboardingPreparation(String token, String accountEmail, OnboardingRequestData request,
+        String currencyId, boolean paidUpgrade, Long provisioningClaim) {
+      this.token = token;
+      this.accountEmail = accountEmail;
+      this.request = request;
+      this.currencyId = currencyId;
+      this.paidUpgrade = paidUpgrade;
+      this.provisioningClaim = provisioningClaim;
     }
   }
 

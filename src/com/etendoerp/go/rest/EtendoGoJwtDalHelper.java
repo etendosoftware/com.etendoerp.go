@@ -16,6 +16,7 @@
  */
 package com.etendoerp.go.rest;
 
+import java.time.Instant;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
@@ -36,12 +37,17 @@ import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.common.GoAccountResolver;
+import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.SubscriptionService;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
+import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
+@SuppressWarnings("java:S1448")
 final class EtendoGoJwtDalHelper {
 
   private static final Logger log = LogManager.getLogger();
@@ -70,7 +76,14 @@ final class EtendoGoJwtDalHelper {
   private static final String FIELD_ADMIN_USER_NAME = "adminUserName";
   private static final String FIELD_PLAN = "plan";
   private static final String FIELD_PLAN_KEY = "planKey";
+  private static final String FIELD_ENVIRONMENT_TYPE = "environmentType";
+  private static final String FIELD_TRIAL_STARTED_AT = "trialStartedAt";
+  private static final String FIELD_TRIAL_EXPIRES_AT = "trialExpiresAt";
+  private static final String FIELD_TRIAL_DAYS_REMAINING = "trialDaysRemaining";
+  private static final String FIELD_ACCESS_STATE = "accessState";
   private static final String FIELD_SUBSCRIPTION_STATUS = "subscriptionStatus";
+  private static final String FIELD_RENEWAL_DUE_AT = "renewalDueAt";
+  private static final String FIELD_RELATIONSHIP = "relationship";
   private static final String PROPERTY_PASSWORD_CHANGED = Account.PROPERTY_PASSWORDCHANGED;
   private static final String PROPERTY_RESET_TOKEN_CONSUMED = Account.PROPERTY_RESETTOKENCONSUMED;
   private static final String PROPERTY_RESET_TOKEN_EXPIRES = Account.PROPERTY_RESETTOKENEXPIRES;
@@ -88,6 +101,9 @@ final class EtendoGoJwtDalHelper {
   // of those columns. The columns themselves stay as the migration fallback and are read only by
   // AccountIdentityDalHelper, through Account's own generated property names.
   private static final SubscriptionService SUBSCRIPTION_SERVICE = new SubscriptionService();
+  private static final TenantPlanService TENANT_PLAN_SERVICE = new TenantPlanService();
+  private static final TenantEnvironmentLifecycleService ENVIRONMENT_LIFECYCLE_SERVICE =
+      new TenantEnvironmentLifecycleService();
   // ETP-4829: STATUS distinguishes an account that already owns a usable local password
   // ("active", the default for self-registration/SSO) from one an admin created on a user's
   // behalf, awaiting the ETP-4830 invite-email flow to set a password ("pending"). No login is
@@ -507,6 +523,31 @@ final class EtendoGoJwtDalHelper {
     return clientIds.size();
   }
 
+  /** Returns true only when the account has a server-marked owner in at least one environment. */
+  static boolean hasOwnedEnvironmentForAccountEmail(String accountEmail) {
+    for (User environmentUser : findEnvironmentUsersByAccountEmail(accountEmail)) {
+      if (OwnerSupport.isOwner(environmentUser.getId())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Returns the account's only free tenant when it is unambiguous, for demo/productive linking.
+   * Multiple free tenants are deliberately treated as unresolved rather than guessed.
+   */
+  static String findOnlyFreeTenantIdByAccountEmail(String accountEmail) {
+    Set<String> freeClientIds = new HashSet<>();
+    for (User environmentUser : findEnvironmentUsersByAccountEmail(accountEmail)) {
+      String clientId = environmentUser.getClient().getId();
+      if (TenantPlanService.PLAN_FREE.equals(TENANT_PLAN_SERVICE.resolvePlan(clientId))) {
+        freeClientIds.add(clientId);
+      }
+    }
+    return freeClientIds.size() == 1 ? freeClientIds.iterator().next() : null;
+  }
+
   /**
    * Serialises one environment for a caller that has no plan cache — a single-environment path,
    * which can afford the one query the cache exists to avoid.
@@ -569,10 +610,40 @@ final class EtendoGoJwtDalHelper {
     // Additive since ETP-4686 so the environment picker can badge the plan. Older clients that
     // ignore the field keep working, and a tenant with no subscription reads back as free.
     env.put(FIELD_PLAN, planView.legacyPlan());
+    // ETP-5046: the catalog key of the plan behind the subscription. JSON null (never the string
+    // "free") for a tenant with no subscription — a plan key names a catalog row, and a free
+    // tenant has none, so reporting "free" would invent an entry nothing could look up.
     env.put(FIELD_PLAN_KEY,
         planView.planKey() == null ? JSONObject.NULL : planView.planKey());
-    env.put(FIELD_SUBSCRIPTION_STATUS,
-        planView.status() == null ? JSONObject.NULL : planView.status());
+    env.put(FIELD_RELATIONSHIP, OwnerSupport.isOwner(environmentUser.getId()) ? "OWNER" : "INVITED");
+    TenantEnvironmentLifecycleService.EnvironmentSnapshot lifecycle =
+        ENVIRONMENT_LIFECYCLE_SERVICE.resolve(client.getId());
+    if (lifecycle != null) {
+      env.put(FIELD_ENVIRONMENT_TYPE, lifecycle.getType().name());
+      // ETP-5046: ONE subscription status for the whole product. The snapshot derives it
+      // from the open ETGO_SUBSCRIPTION row, so the access policy and the plan catalog
+      // can never disagree about whether a tenant is paying.
+      env.put(FIELD_SUBSCRIPTION_STATUS, lifecycle.getSubscriptionStatus().name());
+      if (lifecycle.getRenewalDueAt() != null) {
+        env.put(FIELD_RENEWAL_DUE_AT, lifecycle.getRenewalDueAt().toString());
+      }
+      EnvironmentAccessPolicy.Decision access = ENVIRONMENT_LIFECYCLE_SERVICE
+          .evaluateAccess(client.getId(), true, Instant.now());
+      if (access != null) {
+        env.put(FIELD_ACCESS_STATE, access.name());
+      }
+      if (lifecycle.getType() == EnvironmentAccessPolicy.EnvironmentType.DEMO) {
+        Instant now = Instant.now();
+        EnvironmentAccessPolicy policy = new EnvironmentAccessPolicy();
+        EnvironmentAccessPolicy.Configuration configuration =
+            ENVIRONMENT_LIFECYCLE_SERVICE.configuration();
+        EnvironmentAccessPolicy.Environment environment = lifecycle.toPolicyEnvironment();
+        env.put(FIELD_TRIAL_STARTED_AT, lifecycle.getTrialStartedAt().toString());
+        env.put(FIELD_TRIAL_EXPIRES_AT, policy.trialExpiresAt(environment, configuration).toString());
+        env.put(FIELD_TRIAL_DAYS_REMAINING,
+            policy.remainingTrialDays(environment, now, configuration));
+      }
+    }
     return env;
   }
 
