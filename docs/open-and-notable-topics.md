@@ -108,6 +108,32 @@ A re-run after an unrelated change silently executes zero tests while printing `
 Delete `build/test-results/{test,goIsolatedDalTest}` and pass `--rerun`, then read the task outcome
 lines — not just the build result. This produced a false "verified" claim once during ETP-5046.
 
+### 🟠 2.7 `Hooks-Verified` seals do NOT survive a rebase, despite claiming to
+
+The trailer carries two fingerprints: one over the commit's tree, and — in `v2` — one over its
+patch-id, so that *"a rebase/cherry-pick that replays the SAME diff onto another base keeps a valid
+seal"*. In practice the patch-id half is broken for most existing commits.
+
+Observed while merging the ETP-5045 fix through the chain: **four ETP-5050 commits carry the
+identical fp2, `f99dd62f8d62`.** A patch-id fingerprint must be unique per diff; these were sealed
+from a proof file whose patch-id was not refreshed between commits. Only the two newest ETP-5050
+commits have correct values.
+
+The consequence is invisible until someone rebases, because while the tree fingerprint matches the
+fallback is never exercised. A rebase of `feature/ETP-5050` left **26 of 28 commits unverified**,
+which `pre-push` rejects — forcing either `--no-verify` (which also skips the test/coverage/Sonar
+gate) or re-sealing every commit through the hook.
+
+**Practical guidance until it is fixed: merge rather than rebase when propagating a fix down a
+chain of already-sealed branches.** A merge commit is explicitly exempt from verification
+(`hooks_verify_commit` returns 0 for anything with more than one parent), rewrites nothing, and
+needs no force-push. That is how the ETP-5045 context fix reached ETP-5050 and ETP-5046.
+
+**Caveat that applies to either strategy:** a clean textual merge is not a working one. Merging
+ETP-5045 into ETP-5046 produced zero conflicts in the test file and then failed to compile —
+ETP-5045's new tests call `recordRequested` with four arguments, ETP-5046 widened it to five, and
+the two edits sat in different regions so git saw no conflict. Always build after propagating.
+
 ---
 
 ## 3. Legacy plans and the cutover
@@ -190,19 +216,35 @@ superseded by a new dated file, never modified in place.
 
 ---
 
-## 4. Known issues, worked around rather than fixed
+## 4. Known issues — one fixed, the rest live
 
-### 🟡 4.1 `CheckoutRequestStore` leaks its `OBContext`
+### 🟢 4.1 `CheckoutRequestStore` leaked its `OBContext` — FIXED on ETP-5045
 
-Every method sets `OBContext.setOBContext("0","0","0","0")` + admin mode, but its `finally` calls
+Every method set `OBContext.setOBContext("0","0","0","0")` + admin mode, but its `finally` called
 only `restorePreviousMode()` — which pops the **admin-mode stack, not the context**. The caller's
-`OBContext` is silently replaced and never restored.
+`OBContext` was silently replaced and never restored.
 
-Harmless on the pre-ETP-5046 callers; **not** harmless from `applyPaidUpgradeSideEffects`, which
-runs after `prepareAdminContext` mid-onboarding where later steps depend on that context. ETP-5046
-works around it (a helper that captures and restores the caller's context, and
-`SubscriptionService` opening a system context only when there is none). **The store itself should
-still be fixed** — the workaround protects this ticket's callers, not the next one's.
+Harmless for the callers that existed when it was written (the webhook path holds no context at
+all); **not** harmless from `applyPaidUpgradeSideEffects`, which runs after `prepareAdminContext`
+mid-onboarding where every later provisioning step depends on the context it was given.
+
+Fixed in `Feature ETP-5045: Restore the caller OBContext in CheckoutRequestStore`. All seven entry
+points now run through one private `runAsSystem(...)` wrapper that captures the caller's context
+and restores it in the `finally`. Two details worth keeping:
+
+- **Admin mode is restored BEFORE the context, and the order is load-bearing.**
+  `restorePreviousMode()` pops the stack and then inspects whichever context is current at that
+  moment; if the stack empties while the *caller's* context is installed, it would clear it —
+  reintroducing the same leak from the other end.
+- **`null` is a legitimate previous context** and must survive as `null`. A contextless caller is
+  left contextless, never upgraded to a system one.
+
+Neither restorer can throw, so a restore failure cannot mask the body's exception.
+
+**ETP-5046's caller-side workaround is now redundant but still correct** — the helper that captures
+the context around the store call, and `SubscriptionService` opening a system context only when
+there is none. Left in place deliberately: it is defensive rather than wrong, and unpicking it
+during a merge would be churn. Remove it whenever that file is next touched for its own reasons.
 
 ### 🟡 4.2 `ETGO_SF_FIELD` rows with a dangling `AD_COLUMN` break `update.database`
 
@@ -267,6 +309,30 @@ information.
 **Suggested shape:** ~4 unit cases plus 3–4 call-site spot checks, down from ~30. Low risk, no
 behaviour change — the cost being paid is maintenance drag and reviewer attention, not correctness.
 Raised by Martin on 2026-09-18; not yet actioned.
+
+### 🟡 4.5 `BillingEventStore` has the identical `OBContext` leak
+
+Same package, same shape, and its javadoc says it follows `CheckoutRequestStore`'s conventions —
+which, since §4.1 was fixed, it no longer does. Nothing calls it mid-transaction today, so it does
+not bite yet. Worth its own ticket rather than a drive-by fix: the same `runAsSystem` treatment
+applies almost verbatim.
+
+### 🟡 4.6 `recordRequested` accepts a null plan that production cannot produce
+
+`CheckoutRequestStore.recordRequested(..., Plan plan)` records the catalog row being bought, so the
+subscription opened after payment reflects **what the buyer actually saw** rather than whatever the
+plan says by then. `ETGO_CHECKOUT_REQUEST.ETGO_PLAN_ID` is nullable because rows predating ETP-5046
+have no plan.
+
+But the production path cannot pass null: `HostedCheckoutService` resolves the plan with
+`orElseThrow` and then rejects one with no provider price. Null is therefore a **test-only** value —
+six fixtures pass it — and the parameter currently accepts the one thing it exists to prevent. A
+change that dropped the plan on the way in would write a row that is indistinguishable from a legacy
+one, and the subscription would open not knowing what was bought.
+
+**Suggested fix:** `Objects.requireNonNull(plan, ...)` and give the fixtures a real `Plan`.
+`GrandfatheredSubscriptionIntegrationTest` already creates one, so the pattern exists. Not done
+during the ETP-5045 merge because changing a method contract mid-merge is the wrong moment.
 
 ## 5. Handed forward to later tickets
 
