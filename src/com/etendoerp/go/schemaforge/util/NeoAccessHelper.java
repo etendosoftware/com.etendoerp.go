@@ -21,6 +21,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -35,6 +36,7 @@ import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
 
+import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 
@@ -44,6 +46,12 @@ import com.etendoerp.go.schemaforge.data.SFSpec;
 public final class NeoAccessHelper {
 
   private static final Logger log = LogManager.getLogger(NeoAccessHelper.class);
+
+  /**
+   * Spec names already reported as reaching the permissive fallback, so the warning is emitted
+   * once per spec per JVM run instead of on every request. Never read to decide anything.
+   */
+  private static final Set<String> UNANCHORED_SPECS_REPORTED = ConcurrentHashMap.newKeySet();
 
   private static final String DEFAULT_POST_PROCESS_ID = "57496FB9CF9E4E8F847224017941570E";
 
@@ -154,7 +162,7 @@ public final class NeoAccessHelper {
    *   <li><b>Spec has a directly linked {@code AD_Window}</b> → delegates straight to
    *       {@link #hasWindowAccess(String, String)} for that window.</li>
    *   <li><b>Windowless spec ({@code spec.getADWindow() == null}):</b> delegates to
-   *       {@link #hasAccessToConstituentWindows(SFSpec, String)} — see that method for the
+   *       {@link #allConstituentWindowsAllow(List, String)} — see that method for the
    *       "combination of windows" mechanism and its permissive fallback. As of ETP-4596
    *       the only specs still relying on that fallback here (no {@code AD_Process}, no
    *       constituent {@code AD_TAB_ID} data) are the windowless {@code "W"}-type specs
@@ -176,7 +184,23 @@ public final class NeoAccessHelper {
     if (window != null) {
       return hasWindowAccess(window.getId(), httpMethod);
     }
-    return hasAccessToConstituentWindows(spec, httpMethod);
+    List<String> constituentWindowIds = resolveConstituentWindowIds(spec);
+    if (constituentWindowIds.isEmpty()) {
+      // No windows to evaluate. Ask the handler before falling through: a windowless "W" spec can
+      // still carry a rule of its own, and NotPostedDocumentsHandler does. Without this the rule
+      // stayed invisible to the catalogue and the spec was advertised to roles its own handle()
+      // then answered 403 - the same catalogue/execution disagreement the report specs had.
+      HandlerRule rule = handlerRule(spec);
+      if (rule == HandlerRule.DENIED) {
+        return false;
+      }
+      if (rule == HandlerRule.NONE) {
+        reportUnanchoredAccess(spec, httpMethod,
+            "windowless \"W\" spec, no constituent tabs, no handler rule");
+      }
+      return true;
+    }
+    return allConstituentWindowsAllow(constituentWindowIds, httpMethod);
   }
 
   /**
@@ -200,7 +224,7 @@ public final class NeoAccessHelper {
    *       {@code tax-report}/{@code inventory-stock-report} get a confirmed, FK-verified
    *       {@code AD_Process} linked, they gate here with zero further code changes.</li>
    *   <li><b>No linked {@code AD_Process}</b> — delegates to the same
-   *       {@link #hasAccessToConstituentWindows(SFSpec, String)} "combination of windows"
+   *       {@link #allConstituentWindowsAllow(List, String)} "combination of windows"
    *       check used by {@link #hasWindowAccessForSpec(SFSpec, String)} for windowless
    *       {@code "W"} specs, keyed off each active/included {@code SFEntity}'s
    *       {@code AD_TAB_ID}: {@code financial-accounts-page},
@@ -225,7 +249,153 @@ public final class NeoAccessHelper {
     if (process != null) {
       return hasProcessAccess(process.getId());
     }
-    return hasAccessToConstituentWindows(spec, httpMethod);
+    List<String> constituentWindowIds = resolveConstituentWindowIds(spec);
+    if (!constituentWindowIds.isEmpty()
+        && !allConstituentWindowsAllow(constituentWindowIds, httpMethod)) {
+      return false;
+    }
+    HandlerRule rule = handlerRule(spec);
+    if (rule == HandlerRule.DENIED) {
+      return false;
+    }
+    if (constituentWindowIds.isEmpty() && rule == HandlerRule.NONE) {
+      // No windows to evaluate AND no handler rule: nothing authorized this, the permissive
+      // fallback did. A handler that declared and allowed is NOT reported here - that is a rule
+      // answering, not an absence.
+      reportUnanchoredAccess(spec, httpMethod, "report spec, no process, no constituent tabs,"
+          + " no handler rule");
+    }
+    return true;
+  }
+
+  /**
+   * Asks the spec's own report handler whether the current role may use it.
+   *
+   * <p>This is the tier that makes the catalogue and the execution agree. A report whose grant
+   * lives somewhere {@link #allConstituentWindowsAllow(List, String)} cannot evaluate — a classic
+   * {@code AD_Process}, an OBUIAPP process definition, or a tab-less window — reaches that check
+   * with nothing to compare against, and it answers permissively. Before this method, that meant
+   * {@code neo_discover} and the report-tool publication advertised reports the handler then
+   * refused with a 403 when they were called.</p>
+   *
+   * <p>A handler that does not override {@link NeoHandler#isAccessibleForCurrentRole} answers
+   * {@code true}, so nothing that worked before changes. What the tier buys is that a report
+   * which DOES own a rule now states it once, and all three call sites resolve through it.</p>
+   *
+   * @param spec the report spec
+   * @return the handler's answer, or {@code true} when the spec has no handler to ask
+   */
+  private static HandlerRule handlerRule(SFSpec spec) {
+    try {
+      String qualifier = NeoReportCallability.resolveReportHandlerQualifier(spec);
+      if (qualifier == null || qualifier.isBlank()) {
+        return HandlerRule.NONE;
+      }
+      NeoHandler handler = NeoHandlerLookup.byQualifierQuietly(qualifier);
+      if (handler == null) {
+        return HandlerRule.NONE;
+      }
+      boolean allowed = handler.isAccessibleForCurrentRole();
+      if (!allowed) {
+        return HandlerRule.DENIED;
+      }
+      // An allow from a handler that never overrode the method is the inherited default, not a
+      // decision. Told apart by reflection because it is used for the log line only - the answer
+      // is the same either way, so a reflection failure costs nothing but a missed report.
+      return declaresOwnAccessRule(handler) ? HandlerRule.ALLOWED : HandlerRule.NONE;
+    } catch (Exception e) {
+      log.debug("Could not ask the handler of spec {} for its access rule: {}",
+          spec.getName(), e.getMessage());
+      return HandlerRule.NONE;
+    }
+  }
+
+  /**
+   * Whether this handler's own class hierarchy declares {@code isAccessibleForCurrentRole},
+   * rather than inheriting {@link NeoHandler}'s permissive default.
+   *
+   * <p>{@code getDeclaredMethod} does not see interface default methods, which is exactly the
+   * distinction wanted: a handler that never wrote the method is indistinguishable from one that
+   * wrote {@code return true} by its answer alone. Used for reporting only, never to decide.</p>
+   *
+   * @param handler the resolved handler
+   * @return {@code true} when a concrete class in the hierarchy declares the method
+   */
+  private static boolean declaresOwnAccessRule(NeoHandler handler) {
+    for (Class<?> type = handler.getClass(); type != null && type != Object.class;
+        type = type.getSuperclass()) {
+      try {
+        type.getDeclaredMethod("isAccessibleForCurrentRole");
+        return true;
+      } catch (NoSuchMethodException ignored) {
+        // keep walking up
+      }
+    }
+    return false;
+  }
+
+  /**
+   * What a report handler answered about the current role, distinguishing an actual decision from
+   * the absence of one.
+   */
+  private enum HandlerRule {
+    /** A handler declared its own rule and it allows the current role. */
+    ALLOWED,
+    /** A handler declared its own rule and it refuses the current role. */
+    DENIED,
+    /** No handler, no qualifier, or a handler that never declared a rule. */
+    NONE
+  }
+
+  /**
+   * Record that a spec was allowed because there was nothing to check, not because a rule allowed
+   * it.
+   *
+   * <p>This is the ETP-4596 permissive fallback, reached when a spec has no {@code AD_Window}, no
+   * linked {@code AD_Process} and no {@code AD_TAB_ID} on any entity. It is deliberately left in
+   * place for now: flipping it is proposed separately, and doing so blind would take down specs
+   * nobody has counted. This method exists to produce that count from real traffic, on both front
+   * doors - the REST layer the SPA uses and the MCP - since both resolve access through this
+   * class.</p>
+   *
+   * <p><b>It changes no answer.</b> The caller has already decided; this only writes it down.</p>
+   *
+   * <p>Logged at {@code WARN} once per spec per JVM run, and at {@code DEBUG} on every hit with
+   * the role. Report specs are re-evaluated on every discovery call, so an unconditional warning
+   * would bury the inventory it is meant to build.</p>
+   *
+   * @param spec       the spec that was allowed by fallback
+   * @param httpMethod the HTTP method of the request
+   * @param shape      a short description of why there was nothing to evaluate
+   */
+  private static void reportUnanchoredAccess(SFSpec spec, String httpMethod, String shape) {
+    try {
+      // The de-duplication key must never be null: ConcurrentHashMap refuses one, and a spec with
+      // no name is exactly the kind of degenerate record this reporting exists to notice. Falling
+      // back to the id, then to a placeholder, keeps such a spec countable instead of fatal.
+      String reportKey = spec.getName();
+      if (reportKey == null) {
+        reportKey = spec.getId() == null ? "(unnamed spec)" : "id:" + spec.getId();
+      }
+      Role role = resolveCurrentRole();
+      String roleName = role == null ? "(no role)" : role.getName();
+      if (UNANCHORED_SPECS_REPORTED.add(reportKey)) {
+        log.warn(
+            "Access to spec '{}' was granted by the permissive fallback, not by a rule ({}). "
+                + "Method {}, first seen for role '{}'. Nothing denies this spec today; it is "
+                + "reported so the fallback can be closed against real usage rather than a guess. "
+                + "See schema_forge docs/plans/2026-09-16-report-spec-access-fail-open.md",
+            reportKey, shape, httpMethod, roleName);
+      } else {
+        log.debug("Permissive fallback allowed spec '{}' ({}) for role '{}', method {}",
+            reportKey, shape, roleName, httpMethod);
+      }
+    } catch (Exception e) {
+      // Observation must not change the answer. The caller has already decided to allow, and a
+      // failure to write that down cannot be allowed to turn the allow into an error - which is
+      // precisely what a null spec name did here before this guard existed.
+      log.debug("Could not report the permissive fallback for a spec: {}", e.getMessage());
+    }
   }
 
   /**
@@ -248,11 +418,8 @@ public final class NeoAccessHelper {
    * @return {@code true} when every constituent window is accessible for {@code httpMethod},
    *         or when the spec has no combination data at all
    */
-  private static boolean hasAccessToConstituentWindows(SFSpec spec, String httpMethod) {
-    List<String> constituentWindowIds = resolveConstituentWindowIds(spec);
-    if (constituentWindowIds.isEmpty()) {
-      return true;
-    }
+  private static boolean allConstituentWindowsAllow(List<String> constituentWindowIds,
+      String httpMethod) {
     for (String windowId : constituentWindowIds) {
       if (!hasWindowAccess(windowId, httpMethod)) {
         return false;
@@ -267,7 +434,7 @@ public final class NeoAccessHelper {
    * {@code AD_TAB_ID} is populated, mapped to its {@link Tab#getWindow()}. Shared by
    * {@link #hasWindowAccessForSpec(SFSpec, String)} and
    * {@link #hasReportSpecAccess(SFSpec, String)} via
-   * {@link #hasAccessToConstituentWindows(SFSpec, String)}.
+   * {@link #allConstituentWindowsAllow(List, String)}.
    *
    * @param spec the spec whose constituent windows are needed
    * @return the distinct window IDs (insertion order), or an empty list when no entity of

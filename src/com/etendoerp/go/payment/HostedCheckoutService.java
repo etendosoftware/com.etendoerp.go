@@ -38,6 +38,33 @@ public class HostedCheckoutService {
     // it is the evidence that someone tried to buy something, and it is always safe to expire
     // because the checkoutUrl only reaches the browser once this method returns.
     checkoutRequestStore.recordRequested(requestId, accountId, accountEmail, clientName);
+    return createProviderSession(requestId, accountEmail, clientName, origin);
+  }
+
+  /**
+   * Reopens the provider checkout for an existing unpaid request.
+   *
+   * <p>The durable request is the idempotency boundary for the purchase. A browser refresh or a
+   * provider redirect can leave that request in CREATED while the checkout URL is no longer in
+   * the browser. Reusing the request id lets the buyer continue without creating a second purchase
+   * row or a second webhook correlation key.
+   *
+   * @param requestId existing checkout request id
+   * @param accountEmail authenticated account email
+   * @param clientName requested environment name
+   * @param origin public application origin for return URLs
+   * @return checkout request id, URL, and mode
+   * @throws IOException when the provider cannot be reached or rejects the request
+   * @throws JSONException when the provider response is not valid JSON
+   */
+  public JSONObject reopenSession(String requestId, String accountEmail, String clientName,
+      String origin) throws IOException, JSONException {
+    if (!CheckoutConfiguration.isConfigured()) throw new IllegalStateException("Checkout is not configured");
+    return createProviderSession(requestId, accountEmail, clientName, origin);
+  }
+
+  private JSONObject createProviderSession(String requestId, String accountEmail, String clientName,
+      String origin) throws IOException, JSONException {
     String form = buildSessionForm(requestId, accountEmail, clientName, origin);
     HttpURLConnection connection = (HttpURLConnection) new URL(CheckoutConfiguration.apiBaseUrl() + "/v1/checkout/sessions").openConnection();
     connection.setRequestMethod("POST");

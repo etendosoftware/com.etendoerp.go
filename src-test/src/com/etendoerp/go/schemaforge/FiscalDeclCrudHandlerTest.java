@@ -20,6 +20,7 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -724,6 +725,220 @@ public class FiscalDeclCrudHandlerTest {
     assertEquals("{\"ok\":true}", sw.toString());
   }
 
+  // ── handleDeclPut (negative box111/box77 rejection, ETP-5393 Bug C) ─
+  // The classic AEAT303Report engine hard-rejects a negative value for box 111
+  // (AEAT303Report2024.java:276-278, @AEAT303_Negative_Not_Allowed_For_111@) and box 77
+  // (AEAT303Report2015.java:149-162, @AEAT303_Negative_IVA_IMPORT_ADUANA@). The GO
+  // manualOverrides PUT had no equivalent server-side check at all. Unlike a malformed
+  // manualData blob (tolerated, see the tests above), a negative value on either box is a real
+  // business-rule violation and must reject the whole PUT with 400, leaving the record untouched.
+
+  /**
+   * A negative box 111 in {@code manualData.manualOverrides} must reject the PUT with 400 and
+   * leave the declaration record completely unwritten — no status/manualData set, no commit.
+   */
+  @Test
+  public void testHandleDeclPutWithNegativeBox111Returns400AndLeavesRecordUnchanged()
+      throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":{\"111\":-500}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+      verify(decl, never()).set(any(), any());
+      verify(obDal, never()).commitAndClose();
+    }
+  }
+
+  /**
+   * A negative box 77 in {@code manualData.manualOverrides} must also reject the PUT with 400 —
+   * mirrors the box 111 case above, the other classic-engine negative-not-allowed box.
+   */
+  @Test
+  public void testHandleDeclPutWithNegativeBox77Returns400() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":{\"77\":-12.34}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+      verify(decl, never()).set(any(), any());
+    }
+  }
+
+  /**
+   * A negative value on a box OTHER than 111/77 (e.g. box 27, a normal accrued-VAT box that can
+   * legitimately be negative — credit notes) must NOT be rejected: the guard only watches the
+   * two classic-engine "negative not allowed" boxes, everything else passes through unchanged.
+   */
+  @Test
+  public void testHandleDeclPutWithNegativeOtherBoxSucceeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":{\"27\":-100}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet, never()).sendError(any(), anyInt(), anyString());
+      verify(decl).set(eq(FiscalDeclCrudHandler.PROPERTY_MANUAL_DATA), any());
+    }
+  }
+
+  /**
+   * A positive box 111 must be accepted normally — the guard only fires on a negative value.
+   */
+  @Test
+  public void testHandleDeclPutWithPositiveBox111Succeeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":{\"111\":250}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    }
+  }
+
+  /**
+   * QA edge case (ETP-5393 Bug C): the negative-value guard reads {@code manualOverrides} via
+   * {@code JSONObject#optDouble}, which also coerces a JSON STRING value (not just a JSON
+   * number) — this endpoint is a generic PUT body, not exclusively fed by the frontend's own
+   * numeric serializer, so a string-encoded negative box 111 (e.g. {@code "111": "-12"}) must be
+   * rejected exactly like a numeric one, not silently pass through as a non-numeric default.
+   */
+  @Test
+  public void testHandleDeclPutWithStringEncodedNegativeBox111Returns400() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":{\"111\":\"-12\"}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+      verify(decl, never()).set(any(), any());
+    }
+  }
+
+  /**
+   * QA edge case (ETP-5393 Bug C): box 111 exactly {@code 0} (the boundary, not just a clearly
+   * positive value) must be accepted — the guard's condition is strictly {@code < 0}.
+   */
+  @Test
+  public void testHandleDeclPutWithZeroBox111Succeeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":{\"111\":0}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    }
+  }
+
+  /**
+   * QA edge case (ETP-5393 Bug C): boxes 111 AND 77 both negative in the SAME PUT body must
+   * still reject with a single 400 (the loop returns on the first offending box found) — no
+   * partial application, no double-write.
+   */
+  @Test
+  public void testHandleDeclPutWithBothBoxesNegativeReturns400Once() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
+        "{\"status\":\"draft\",\"manualData\":{\"manualOverrides\":{\"111\":-1,\"77\":-2}}}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet, times(1)).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
+      verify(decl, never()).set(any(), any());
+    }
+  }
+
   // ── handleDeclPut (submissionMethod, ETP-4755) ──────────────────────
   // Mirrors the manualData tests above exactly: submissionMethod follows the same
   // "explicit null means not sent" precedent (see handleDeclPut's javadoc comment), not
@@ -821,6 +1036,183 @@ public class FiscalDeclCrudHandlerTest {
 
     verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMISSION_METHOD), any());
     verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "submitted_ack");
+    assertEquals("{\"ok\":true}", sw.toString());
+  }
+
+  // ── handleDeclPut (Reactivar declaración / reject aeat_telematic, ETP-5338) ─
+  // Reverting a declaration to draft ("Reactivar declaración") goes through this same PUT path
+  // (status: "draft"). The guard reads the declaration's CURRENTLY STORED submissionMethod (not
+  // whatever the request body says) — the frontend never sends submissionMethod on a reactivate
+  // call at all (see FmListPage.jsx's handleConfirmReactivate), so the guard must work purely off
+  // the persisted value.
+
+  /**
+   * A declaration whose stored {@code submissionMethod} is {@code aeat_telematic} must be
+   * rejected with 409 when the PUT tries to revert it to draft — reactivating a declaration that
+   * was genuinely filed with the AEAT would desync this table from what Hacienda has on record.
+   * The declaration record itself must be left completely unchanged: no status write, no commit.
+   */
+  @Test
+  public void testHandleDeclPutReactivateAeatTelematicReturns409AndLeavesRecordUnchanged()
+      throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"draft\"}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMISSION_METHOD)).thenReturn("aeat_telematic");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT), anyString());
+      verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS), any());
+      verify(obDal, never()).commitAndClose();
+    }
+  }
+
+  /**
+   * A declaration filed with {@code manual_ack} (a manual submission with AEAT acknowledgment,
+   * not a real telematic one) must be allowed to reactivate — the status is persisted as
+   * {@code draft} and the PUT succeeds normally.
+   */
+  @Test
+  public void testHandleDeclPutReactivateManualAckSucceeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"draft\"}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMISSION_METHOD)).thenReturn("manual_ack");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+    }
+
+    verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "draft");
+    assertEquals("{\"ok\":true}", sw.toString());
+  }
+
+  /**
+   * A declaration filed with {@code manual_no_receipt} must also be allowed to reactivate — the
+   * guard only special-cases {@code aeat_telematic}, every other submissionMethod (including this
+   * one) is unaffected.
+   */
+  @Test
+  public void testHandleDeclPutReactivateManualNoReceiptSucceeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"draft\"}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMISSION_METHOD))
+        .thenReturn("manual_no_receipt");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+    }
+
+    verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "draft");
+    assertEquals("{\"ok\":true}", sw.toString());
+  }
+
+  /**
+   * A declaration with NO stored {@code submissionMethod} at all (null — predates the feature, or
+   * was never set) must not be swallowed by the guard: {@code asString(null)} yields {@code ""},
+   * which is not equal to {@code aeat_telematic}, so the reactivate must succeed exactly like the
+   * manual_ack/manual_no_receipt cases. Guards against a regression where the null case is
+   * accidentally treated as "unknown, so block it".
+   */
+  @Test
+  public void testHandleDeclPutReactivateNullSubmissionMethodSucceeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"draft\"}")));
+
+    // declOwnedBy leaves PROPERTY_SUBMISSION_METHOD unstubbed → Mockito's default null return,
+    // which is the exact "never set" case this test targets.
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+    }
+
+    verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "draft");
+    assertEquals("{\"ok\":true}", sw.toString());
+  }
+
+  /**
+   * The guard must only fire when the target status is {@code draft} — a PUT that changes
+   * {@code aeat_telematic}'s OTHER fields (e.g. {@code fileExternal}) without touching status must
+   * not be rejected. Confirms the guard is scoped to the reactivate transition specifically, not
+   * to "any PUT on an aeat_telematic declaration".
+   */
+  @Test
+  public void testHandleDeclPutOnAeatTelematicWithoutStatusChangeIsNotRejected() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"fileExternal\":true}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMISSION_METHOD)).thenReturn("aeat_telematic");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+    }
+
+    verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_FILE_EXTERNAL, true);
     assertEquals("{\"ok\":true}", sw.toString());
   }
 

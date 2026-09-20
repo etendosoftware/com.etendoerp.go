@@ -34,12 +34,13 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
  * so every read disables the readable-client and readable-organization filters explicitly and
  * carries its own account predicate instead.
  *
- * <p><b>The lifecycle only ever moves forward.</b> Statuses are ranked and a transition to an
- * equal or lower rank is silently ignored as a duplicate, never applied. Phase timestamps are first-write-wins
- * for the same reason: {@code PAID_AT} must keep meaning "when the payment was confirmed", not
- * "when we last heard about it", or the staleness thresholds behind {@code DERIVED_STATUS} become
- * meaningless. Stripe re-delivers events freely and the browser can re-enter the flow on reload,
- * so both are ordinary occurrences rather than error cases.
+ * <p><b>The lifecycle only ever moves forward, except for a fenced provisioning retry.</b> Statuses
+ * are ranked and a transition to an equal or lower rank is silently ignored as a duplicate. A
+ * stale {@code PROVISIONING} claim may be renewed in place, but its attempt token changes before
+ * any retry can complete. Phase timestamps are first-write-wins except for that lease renewal:
+ * {@code PAID_AT} must keep meaning "when the payment was confirmed", while
+ * {@code PROVISIONING_AT} identifies the current lease. Stripe re-delivers events freely and the
+ * browser can re-enter the flow on reload, so both are ordinary occurrences rather than errors.
  */
 public class CheckoutRequestStore {
   private static final Logger log = LogManager.getLogger();
@@ -47,12 +48,21 @@ public class CheckoutRequestStore {
   private static final String ZERO_ID = "0";
   /** Name of the correlation-id parameter bound by every query keyed on {@code REQUEST_ID}. */
   private static final String PARAM_REQUEST_ID = "requestId";
+  private static final String PARAM_ACCOUNT_EMAIL = "accountEmail";
+  private static final String HQL_UPDATE = "update ";
+  private static final String HQL_PROVISIONING = "provisioning";
 
   static final String STATUS_CREATING = "CREATING";
   static final String STATUS_CREATED = "CREATED";
   static final String STATUS_PAID = "PAID";
   static final String STATUS_PROVISIONING = "PROVISIONING";
   static final String STATUS_PROVISIONED = "PROVISIONED";
+
+  private static final String PROVISIONING_LEASE_MINUTES_PROPERTY =
+      "etendo.go.billing.provisioning.lease.minutes";
+  private static final String PROVISIONING_LEASE_MINUTES_ENV =
+      "ETGO_BILLING_PROVISIONING_LEASE_MINUTES";
+  private static final long DEFAULT_PROVISIONING_LEASE_MINUTES = 30L;
 
   /** Lifecycle order. A request may only move to a strictly later element. */
   private static final List<String> LIFECYCLE = Arrays.asList(STATUS_CREATING, STATUS_CREATED,
@@ -197,7 +207,60 @@ public class CheckoutRequestStore {
       OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
           "as cr where cr.request = :requestId and lower(cr.accountEmail) = lower(:accountEmail)");
       query.setNamedParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId));
-      query.setNamedParameter("accountEmail", StringUtils.trimToEmpty(accountEmail));
+      query.setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail));
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setMaxResult(1);
+      return query.uniqueResult();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Lists recent purchase attempts for one account without exposing provider fields.
+   * @param accountEmail authenticated account email
+   * @return recent checkout requests for the account
+   */
+  public List<CheckoutRequest> findForAccount(String accountEmail) {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      if (StringUtils.isBlank(accountEmail)) {
+        return List.of();
+      }
+      OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
+          "as cr where lower(cr.accountEmail) = lower(:" + PARAM_ACCOUNT_EMAIL + ") order by cr.creationDate desc");
+      query.setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail));
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setMaxResult(20);
+      return query.list();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Finds an unfinished or paid purchase for the same account and environment name.
+   * @param accountEmail authenticated account email
+   * @param clientName requested environment name
+   * @return the newest matching request, or null when none exists
+   */
+  public CheckoutRequest findActiveForAccountAndClientName(String accountEmail, String clientName) {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      if (StringUtils.isBlank(accountEmail) || StringUtils.isBlank(clientName)) {
+        return null;
+      }
+      OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
+          "as cr where lower(cr.accountEmail) = lower(:accountEmail)"
+              + " and lower(cr.clientName) = lower(:clientName)"
+              + " and cr.checkoutRequestStatus in ('CREATING', 'CREATED', 'PAID', 'PROVISIONING')"
+              + " order by cr.creationDate desc");
+      query.setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail));
+      query.setNamedParameter("clientName", StringUtils.trimToEmpty(clientName));
       query.setFilterOnReadableClients(false);
       query.setFilterOnReadableOrganization(false);
       query.setMaxResult(1);
@@ -242,10 +305,11 @@ public class CheckoutRequestStore {
    * refers to nothing and throws at runtime — which lets both callers fall through into
    * provisioning and deadlock against each other, the exact outcome this method exists to prevent.
    *
-   * <p>The {@code = PAID} predicate is itself the monotonic guard: a request already
-   * {@code PROVISIONING} or {@code PROVISIONED} matches nothing and cannot be re-claimed.
-   * {@code PROVISIONING_AT} is first-write-wins via {@code coalesce} so it keeps meaning "since
-   * when has this been stuck"; {@code PROVISIONING_ATTEMPTS} carries the retry count instead.
+   * <p>The {@code = PAID} predicate is the normal monotonic guard. A request already
+   * {@code PROVISIONED} matches nothing; a {@code PROVISIONING} request matches only when its
+   * lease is stale. {@code PROVISIONING_AT} is first-write-wins for the initial claim and is
+   * renewed only by that stale-lease branch; {@code PROVISIONING_ATTEMPTS} carries the fencing
+   * token.
    *
    * @param requestId correlation id
    * @param accountEmail authenticated account email
@@ -258,24 +322,64 @@ public class CheckoutRequestStore {
       if (StringUtils.isBlank(requestId) || StringUtils.isBlank(accountEmail)) {
         return false;
       }
+      Date now = new Date();
       int claimed = OBDal.getInstance()
           .getSession()
-          .createQuery("update " + CheckoutRequest.ENTITY_NAME + " cr"
-              + "   set cr.checkoutRequestStatus = :provisioning,"
+          .createQuery(HQL_UPDATE + CheckoutRequest.ENTITY_NAME + " cr"
+              + "   set cr.checkoutRequestStatus = :" + HQL_PROVISIONING + ","
               + "       cr.provisioningAt = coalesce(cr.provisioningAt, :now),"
               + "       cr.provisioningAttempts = cr.provisioningAttempts + 1,"
               + "       cr.updated = :now"
               + " where cr.request = :requestId"
-              + "   and lower(cr.accountEmail) = lower(:accountEmail)"
+              + "   and lower(cr.accountEmail) = lower(:" + PARAM_ACCOUNT_EMAIL + ")"
               + "   and cr.checkoutRequestStatus = :paid")
-          .setParameter("provisioning", STATUS_PROVISIONING)
+          .setParameter(HQL_PROVISIONING, STATUS_PROVISIONING)
           .setParameter("paid", STATUS_PAID)
-          .setParameter("now", new Date())
+          .setParameter("now", now)
           .setParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId))
-          .setParameter("accountEmail", StringUtils.trimToEmpty(accountEmail))
+          .setParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail))
           .executeUpdate();
+      if (claimed == 0) {
+        Date staleBefore = new Date(now.getTime() - provisioningLeaseMillis());
+        claimed = OBDal.getInstance().getSession()
+            .createQuery(HQL_UPDATE + CheckoutRequest.ENTITY_NAME + " cr"
+                + "   set cr.provisioningAt = :now,"
+                + "       cr.provisioningAttempts = cr.provisioningAttempts + 1,"
+                + "       cr.updated = :now"
+                + " where cr.request = :requestId"
+                + "   and lower(cr.accountEmail) = lower(:" + PARAM_ACCOUNT_EMAIL + ")"
+                + "   and cr.checkoutRequestStatus = :" + HQL_PROVISIONING
+                + "   and cr.provisioningAt <= :staleBefore")
+            .setParameter(HQL_PROVISIONING, STATUS_PROVISIONING)
+            .setParameter("now", now)
+            .setParameter("staleBefore", staleBefore)
+            .setParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId))
+            .setParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail))
+            .executeUpdate();
+      }
       flushAndCommit();
       return claimed == 1;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Returns the current fencing token for a provisioning claim owned by the account.
+   * @param requestId checkout request id
+   * @param accountEmail authenticated account email
+   * @return current claim attempt, or null when no active claim exists
+   */
+  public Long findProvisioningAttempt(String requestId, String accountEmail) {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      CheckoutRequest request = find(requestId, accountEmail);
+      if (request == null || !StringUtils.equals(STATUS_PROVISIONING,
+          request.getCheckoutRequestStatus())) {
+        return null;
+      }
+      return request.getProvisioningAttempts();
     } finally {
       OBContext.restorePreviousMode();
     }
@@ -288,6 +392,16 @@ public class CheckoutRequestStore {
    * @param createdClientId {@code AD_CLIENT_ID} of the provisioned environment
    */
   public void recordProvisioned(String requestId, String createdClientId) {
+    recordProvisioned(requestId, createdClientId, null);
+  }
+
+  /**
+   * Records completion only for the claim that performed the work.
+   * @param requestId checkout request id
+   * @param createdClientId provisioned client id
+   * @param claimAttempt fencing token that performed the work
+   */
+  public void recordProvisioned(String requestId, String createdClientId, Long claimAttempt) {
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
     OBContext.setAdminMode(true);
     try {
@@ -295,6 +409,31 @@ public class CheckoutRequestStore {
       if (request == null) {
         log.error("No checkout request found for '{}' while recording a provisioned environment",
             requestId);
+        return;
+      }
+      if (claimAttempt != null) {
+        int completed = OBDal.getInstance().getSession()
+            .createQuery(HQL_UPDATE + CheckoutRequest.ENTITY_NAME + " cr"
+                + "   set cr.checkoutRequestStatus = :provisioned,"
+                + "       cr.createdClient = :createdClient,"
+                + "       cr.provisionedAt = :now,"
+                + "       cr.updated = :now"
+                + " where cr.request = :requestId"
+                + "   and cr.checkoutRequestStatus = :" + HQL_PROVISIONING
+                + "   and cr.provisioningAttempts = :claimAttempt")
+            .setParameter("provisioned", STATUS_PROVISIONED)
+            .setParameter(HQL_PROVISIONING, STATUS_PROVISIONING)
+            .setParameter("createdClient", StringUtils.isBlank(createdClientId)
+                ? null : OBDal.getInstance().get(Client.class, createdClientId))
+            .setParameter("now", new Date())
+            .setParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId))
+            .setParameter("claimAttempt", claimAttempt)
+            .executeUpdate();
+        if (completed != 1) {
+          log.warn("Ignoring stale provisioning completion for checkout request '{}'", requestId);
+          return;
+        }
+        flushAndCommit();
         return;
       }
       if (request.getCreatedClient() == null && StringUtils.isNotBlank(createdClientId)) {
@@ -307,6 +446,19 @@ public class CheckoutRequestStore {
       flushAndCommit();
     } finally {
       OBContext.restorePreviousMode();
+    }
+  }
+
+  private long provisioningLeaseMillis() {
+    String configured = StringUtils.trimToNull(System.getProperty(PROVISIONING_LEASE_MINUTES_PROPERTY));
+    if (configured == null) {
+      configured = StringUtils.trimToNull(System.getenv(PROVISIONING_LEASE_MINUTES_ENV));
+    }
+    try {
+      long minutes = configured == null ? DEFAULT_PROVISIONING_LEASE_MINUTES : Long.parseLong(configured);
+      return Math.max(1L, minutes) * 60_000L;
+    } catch (NumberFormatException e) {
+      return DEFAULT_PROVISIONING_LEASE_MINUTES * 60_000L;
     }
   }
 

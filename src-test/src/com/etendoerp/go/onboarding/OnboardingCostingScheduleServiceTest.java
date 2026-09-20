@@ -56,11 +56,16 @@ import org.openbravo.model.common.enterprise.Organization;
  * swallowing of {@link OnboardingCostingScheduleService#activateSchedule(String)}.
  *
  * <p>The field assertions are the point of this class, not ceremony. Timing {@code 'S'} plus
- * frequency {@code '2'} is the {@code "S2"} key core's {@code TriggerProvider} maps to
- * {@code repeatMinutelyForever}, and it reads {@code MINUTELY_INTERVAL} — not the secondly or daily
+ * frequency {@code '1'} is the {@code "S1"} key core's {@code TriggerProvider} maps to
+ * {@code repeatSecondlyForever}, and it reads {@code SECONDLY_INTERVAL} — not the minutely or daily
  * interval — for the period. Getting any one of the three wrong yields a row that looks scheduled in
  * the Process Request window and either never fires or fires on the wrong cadence, which is exactly
  * the class of bug that leaves a tenant's costs uncalculated with nothing visibly broken.
+ *
+ * <p>ETP-5370 lowered the cadence from 5 minutes ({@code '2'} + {@code MINUTELY_INTERVAL=5}) to 30
+ * seconds, which swapped which interval column has to be written and which ones have to stay empty.
+ * That inversion is what the assertions below pin down; the corrective half of the same ticket
+ * ({@code realignCadence}) is covered by {@link OnboardingCostingScheduleRealignTest}.
  */
 @RunWith(MockitoJUnitRunner.Silent.class)
 public class OnboardingCostingScheduleServiceTest {
@@ -122,15 +127,15 @@ public class OnboardingCostingScheduleServiceTest {
   }
 
   /**
-   * A fresh schedule carries the minutely/5 trigger fields, and is saved and flushed once.
+   * A fresh schedule carries the secondly/30 trigger fields, and is saved and flushed once.
    *
-   * <p>The interval is asserted on {@code intervalInMinutes} AND the two neighbouring interval
-   * columns are asserted null: a stray {@code secondlyInterval} is precisely what the GOClient
-   * sampledata dump carries (30s), and writing both would leave which one wins up to the trigger
-   * generator.
+   * <p>The interval is asserted on {@code intervalInSeconds} AND the two neighbouring interval
+   * columns are asserted null: a leftover {@code minutelyInterval} from the pre-ETP-5370 5-minute
+   * shape is inert (the scheduler reads only the column matching {@code FREQUENCY}) but it produces
+   * a row that matches no hand-made one, which is the hard part to diagnose later.
    */
   @Test
-  public void scheduleCostingBackgroundCreatesRequestWithMinutelySchedulingFields() {
+  public void scheduleCostingBackgroundCreatesRequestWithSecondlySchedulingFields() {
     OnboardingCostingScheduleService service = spy(new OnboardingCostingScheduleService());
     Process process = mock(Process.class);
     doReturn(process).when(service)
@@ -169,11 +174,11 @@ public class OnboardingCostingScheduleServiceTest {
 
       assertEquals(NEW_REQUEST_ID, result);
       assertEquals("S", request.getTiming());
-      assertEquals("2", request.getFrequency());
-      assertEquals(Long.valueOf(5L), request.getIntervalInMinutes());
-      assertNull("a secondly interval would compete with the minutely one",
-          request.getIntervalInSeconds());
-      assertNull("an hourly interval would compete with the minutely one",
+      assertEquals("1", request.getFrequency());
+      assertEquals(Long.valueOf(30L), request.getIntervalInSeconds());
+      assertNull("a minutely interval would compete with the secondly one",
+          request.getIntervalInMinutes());
+      assertNull("an hourly interval would compete with the secondly one",
           request.getHourlyInterval());
       assertNull("no repetition cap — the schedule must repeat forever",
           request.getNumRepetitions());
@@ -190,11 +195,11 @@ public class OnboardingCostingScheduleServiceTest {
     }
   }
 
-  /** The start instant is spread inside the 5-minute cadence, so a bulk fix cannot phase-align tenants. */
+  /** The start instant is spread inside the 30-second cadence, so a bulk fix cannot phase-align tenants. */
   @Test
   public void spreadStartTimeStaysWithinTheCadence() {
     OnboardingCostingScheduleService service = new OnboardingCostingScheduleService();
-    long cadenceMillis = 5L * 60L * 1000L;
+    long cadenceMillis = 30L * 1000L;
 
     // Sampled rather than asserted once: the offset is random, so a single draw proves nothing
     // about the bound it is supposed to respect.
@@ -204,7 +209,7 @@ public class OnboardingCostingScheduleServiceTest {
       long offset = start - before;
       assertTrue("start instant must not be in the past, was " + offset + "ms off",
           offset > -1000L);
-      assertTrue("start instant must stay inside the 5-minute cadence, was " + offset + "ms off",
+      assertTrue("start instant must stay inside the 30-second cadence, was " + offset + "ms off",
           offset < cadenceMillis);
     }
   }

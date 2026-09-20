@@ -1932,8 +1932,18 @@ public class EtendoGoJwtServletTest {
           .thenReturn(List.of(environmentUser));
       dalMock.when(() -> EtendoGoJwtDalHelper.findNonStarOrganizations("CLIENT-1"))
           .thenReturn(List.of(firstOrg, secondOrg));
+      // Not thenCallRealMethod(): the real implementation now also resolves the tenant plan
+      // and lifecycle snapshot through private static OBDal-backed services (ETP-4686), which
+      // this unit test has no DB context for. Only orgId/orgName are asserted below, so a
+      // minimal fixture built from the same arguments is enough.
       dalMock.when(() -> EtendoGoJwtDalHelper.buildEnvironmentJson(any(Client.class),
-          any(Organization.class), any(User.class))).thenCallRealMethod();
+          any(Organization.class), any(User.class))).thenAnswer(invocation -> {
+            Organization org = invocation.getArgument(1);
+            JSONObject env = new JSONObject();
+            env.put("orgId", org.getId());
+            env.put("orgName", org.getName());
+            return env;
+          });
 
       servlet.doGet(req, resp.response);
     }

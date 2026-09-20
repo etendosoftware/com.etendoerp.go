@@ -242,6 +242,43 @@ provision) and `isProductive()` (does what it provisions become productive).
 Ownership is counted with `EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail`, which reuses the
 same username-match rule as `GET /sws/go/environments`.
 
+The hosted checkout entry point also requires a server-marked owner. `POST
+/sws/go/checkout/sessions` returns HTTP 403 with `BILLING_OWNER_REQUIRED` when the authenticated
+account only has invited memberships or has no owner record. The check reads `AD_User.EM_ETGO_Is_Owner`
+through `OwnerSupport`; an administrator role name or an email match is not sufficient. Invitation
+access remains independent because environment discovery and NEO entry continue to evaluate the
+destination membership separately.
+
+For legacy free tenants, enforcement is opt-in through `etendo.go.demo.transition.activation.at`
+(`ETGO_DEMO_TRANSITION_ACTIVATION_AT`), an ISO-8601 UTC instant selected during rollout. The first
+lifecycle read persists that instant per tenant as `ETGO_LegacyTransitionStartedAt`; the configured
+trial duration then determines the deadline. With no activation instant configured, legacy tenants
+remain unresolved for a deliberate, reviewable rollout rather than receiving a guessed deadline.
+
+The account-level billing projection is available at `GET /sws/go/billing/overview`, and an
+individual purchase can be read at `GET /sws/go/billing/purchases/{purchaseId}`. Both responses are
+scoped to the authenticated account and expose only the local purchase status, environment name,
+and safe provisioning reference. They do not expose Stripe customer/session identifiers or create
+a second payment ledger.
+
+`GET /sws/go/billing/offers` supplies the display offer from the server-owned billing configuration
+(`etendo.go.billing.offer.amount.minor`, currency, and interval). The initial default is 4900 minor
+units in EUR per month. The browser uses this projection for display; the purchase boundary remains
+the authority for validation and checkout selection.
+
+`POST /sws/go/billing/purchases` also checks the durable request table for an active purchase with
+the same account and environment name. A duplicate submission returns HTTP 409 with the existing
+purchase ID and status, so a retry cannot create a second provider checkout. An unresolved `CREATING`
+row therefore remains visible for reconciliation rather than being silently replaced.
+
+Paid onboarding uses `PROVISIONING_ATTEMPTS` as a durable fencing token. The claim is normally
+taken from `PAID`; if the row has remained `PROVISIONING` longer than
+`etendo.go.billing.provisioning.lease.minutes` (`ETGO_BILLING_PROVISIONING_LEASE_MINUTES`), it is
+reclaimed, its attempt number is incremented, and its timestamp is renewed. The initial lease is
+30 minutes. Completion is an atomic status update guarded by that attempt number, so an old worker
+cannot close a request after a retry has taken over. This makes browser refreshes, process restarts,
+and stale workers recoverable without a schema migration or a second payment.
+
 ### The plan is derived from the payment, not from the decision
 
 `isProductive()` is `true` when — and only when — the request was not refused **and** the payment
