@@ -17,7 +17,9 @@
 
 package com.etendoerp.go.schemaforge.util;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -128,6 +130,35 @@ public class OwnerSupportTest {
   public void clientHasOwnerReturnsFalseForBlankOrNullIdWithoutQueryingTheDb() {
     assertFalse(OwnerSupport.clientHasOwner(null));
     assertFalse(OwnerSupport.clientHasOwner(""));
+    obDalMock.verify(OBDal::getInstance, never());
+  }
+
+  // ── findOwnerUserId (ETP-5411) ────────────────────────────────────────────
+
+  @Test
+  public void findOwnerUserIdReturnsIdWhenOwnerExists() {
+    stubQuery(Collections.singletonList("user-1"));
+    assertEquals("user-1", OwnerSupport.findOwnerUserId("client-1"));
+  }
+
+  @Test
+  public void findOwnerUserIdReturnsNullWhenNoOwnerExists() {
+    stubQuery(Collections.emptyList());
+    assertNull(OwnerSupport.findOwnerUserId("client-1"));
+  }
+
+  @Test
+  public void findOwnerUserIdReturnsNullWhenRowIsNotAString() {
+    // AD_User_ID is VARCHAR, so this should never happen in practice — defensive only, same
+    // "never trust the native-query result shape blindly" reasoning as isOwner's Character check.
+    stubQuery(Collections.singletonList(Integer.valueOf(1)));
+    assertNull(OwnerSupport.findOwnerUserId("client-1"));
+  }
+
+  @Test
+  public void findOwnerUserIdReturnsNullForBlankOrNullIdWithoutQueryingTheDb() {
+    assertNull(OwnerSupport.findOwnerUserId(null));
+    assertNull(OwnerSupport.findOwnerUserId("  "));
     obDalMock.verify(OBDal::getInstance, never());
   }
 

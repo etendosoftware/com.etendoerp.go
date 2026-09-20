@@ -25,6 +25,7 @@ import static com.etendoerp.go.mcp.McpJsonSchema.numericProp;
 import static com.etendoerp.go.mcp.McpJsonSchema.objectArrayProp;
 import static com.etendoerp.go.mcp.McpJsonSchema.objectProp;
 import static com.etendoerp.go.mcp.McpJsonSchema.stringArrayProp;
+import static com.etendoerp.go.mcp.McpJsonSchema.stringEnumArrayProp;
 import static com.etendoerp.go.mcp.McpJsonSchema.stringProp;
 
 import java.util.ArrayList;
@@ -32,6 +33,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import org.apache.logging.log4j.LogManager;
@@ -42,6 +44,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.ui.Process;
 
+import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -264,7 +267,12 @@ public class ToolRegistry {
       if (!deletableWindowSpecs.isEmpty()) {
         tools.add(buildDeleteTool(deletableWindowSpecs));
       }
-      tools.add(buildBatchTool());
+      // ETP-5335: published only while the flag is on. See McpConstants#BATCH_TOOL_ENABLED for
+      // why it is off — neo_batch is a second create implementation that had drifted from
+      // neo_create in both directions, and one correct write path beats two out of step.
+      if (McpConstants.BATCH_TOOL_ENABLED) {
+        tools.add(buildBatchTool());
+      }
       tools.add(buildActionTool(accessibleWindowSpecs));
     }
   }
@@ -331,14 +339,14 @@ public class ToolRegistry {
   public static boolean isCrudTool(String toolName) {
     switch (toolName) {
       case "neo_discover":
-      case "neo_list":
-      case "neo_get":
-      case "neo_create":
-      case "neo_update":
-      case "neo_delete":
-      case "neo_selectors":
-      case "neo_defaults":
-      case "neo_schema":
+      case McpConstants.TOOL_NEO_LIST:
+      case McpConstants.TOOL_NEO_GET:
+      case McpConstants.TOOL_NEO_CREATE:
+      case McpConstants.TOOL_NEO_UPDATE:
+      case McpConstants.TOOL_NEO_DELETE:
+      case McpConstants.TOOL_NEO_SELECTORS:
+      case McpConstants.TOOL_NEO_DEFAULTS:
+      case McpConstants.TOOL_NEO_SCHEMA:
       case "neo_batch":
       case "neo_action":
       case McpConstants.TOOL_NEO_WIDGET:
@@ -567,23 +575,95 @@ public class ToolRegistry {
 
   /** Build the read-only DB Extended semantic-search tool. */
   McpToolDefinition buildVectorSearchTool() {
+    return buildVectorSearchTool(
+        NeoVectorSearchEndpoint.configuredTargetKeys().orElse(List.of()));
+  }
+
+  /**
+   * IMP-41: {@code targets} carries the configured keys as an enum instead of being a free string
+   * array. Nothing on the MCP surface used to name a single legal key — not the input schema, not
+   * {@code neo_discover} — so guessing was the only strategy available, and a wrong guess came back
+   * as {@code 403 "Access denied"}, which reads as "not for you" rather than "not that name".
+   *
+   * <p>An empty catalogue deliberately keeps the free-form array: an empty {@code enum} makes the
+   * parameter impossible to satisfy, which would turn "nothing is configured" into a tool no model
+   * can call at all. The endpoint answers that case honestly on its own.</p>
+   *
+   * @param targetKeys the configured search-target keys; {@code null} or empty leaves the
+   *                   parameter free-form
+   * @return the tool definition
+   */
+  McpToolDefinition buildVectorSearchTool(List<String> targetKeys) {
     Map<String, Object> props = new LinkedHashMap<>();
     props.put(McpConstants.PARAM_QUERY,
         stringProp("Natural-language search query"));
-    props.put("targets", stringArrayProp(
-        "DB Extended search-target keys to query"));
+    props.put("targets", targetKeys == null || targetKeys.isEmpty()
+        ? stringArrayProp("DB Extended search-target keys to query. No search target is configured "
+            + "on this instance, so semantic search is unavailable here.")
+        : stringEnumArrayProp("Optional. Which indexes to search. These are the only valid values — "
+            + "a key that is not listed here does not exist, however plausible it looks. Each one "
+            + "is the name of the spec that owns it, so a match found in target X is read with "
+            + "neo_get(spec:X, entity:<that spec's primaryEntity, from neo_discover>, "
+            + "id:<match.id>) — the match itself carries no pointer to where its record lives. "
+            + "Omit it to search every "
+            + "index you have access to, which is the right choice when you do not already know "
+            + "where the answer lives.", targetKeys));
     props.put("topK", numericProp(TYPE_INTEGER, "Maximum results (default 10, maximum 50)"));
     props.put("minScore", numericProp("number", "Minimum similarity score from 0 to 1 (default 0.60)"));
     props.put("maxScore", numericProp("number", "Maximum similarity score from 0 to 1 (default 1.0)"));
     return new McpToolDefinition(
         McpConstants.TOOL_NEO_VECTOR_SEARCH,
         "Search indexed business records by semantic similarity using DB Extended. "
-            + "Targets are authorized against their physical source entity for the current role. "
-            + "Scores are ranking signals, not confidence probabilities.",
-        buildObjectSchema(props, List.of(McpConstants.PARAM_QUERY, "targets")));
+            + "Only 'query' is required: with no 'targets' it searches every index the current role "
+            + "can read. Targets are authorized against their physical source entity for the "
+            + "current role. Scores are ranking signals, not confidence probabilities.",
+        buildObjectSchema(props, List.of(McpConstants.PARAM_QUERY)));
   }
 
   // ── CRUD tools (registered once with spec enum) ───────────────────────
+
+  /**
+   * The argument names a fixed-shape tool declares, for the unknown-argument guard (IMP-40).
+   *
+   * <p>Derived from the very builders that produce the published schema, never from a
+   * hand-maintained list: a second copy of an argument set is how the guard and the contract drift
+   * apart, and a guard that disagrees with the schema is worse than none — it would refuse calls
+   * the tool documents.</p>
+   *
+   * <p>The spec enum is irrelevant here (only the property KEYS are read), so the builders are
+   * invoked with an empty spec list. Tools whose argument set is spec-dependent — the process and
+   * report tools, whose parameters come from the AD process definition — are deliberately absent
+   * and are therefore not guarded.</p>
+   *
+   * @param toolName the tool being called
+   * @return the declared argument names, or {@link Optional#empty()} when this tool is not guarded.
+   *     Empty and absent are different answers here: an empty set would mean "this tool declares no
+   *     arguments, so reject every one", which is the opposite of "do not check this tool".
+   */
+  static Optional<Set<String>> declaredArgumentNames(String toolName) {
+    ToolRegistry registry = new ToolRegistry();
+    McpToolDefinition definition;
+    switch (toolName) {
+      case McpConstants.TOOL_NEO_LIST: definition = registry.buildListTool(List.of()); break;
+      case McpConstants.TOOL_NEO_GET: definition = registry.buildGetTool(List.of()); break;
+      case McpConstants.TOOL_NEO_CREATE: definition = registry.buildCreateTool(List.of()); break;
+      case McpConstants.TOOL_NEO_UPDATE: definition = registry.buildUpdateTool(List.of()); break;
+      case McpConstants.TOOL_NEO_DELETE: definition = registry.buildDeleteTool(List.of()); break;
+      case McpConstants.TOOL_NEO_SELECTORS: definition = registry.buildSelectorsTool(List.of()); break;
+      case McpConstants.TOOL_NEO_DEFAULTS: definition = registry.buildDefaultsTool(List.of()); break;
+      case McpConstants.TOOL_NEO_SCHEMA: definition = registry.buildSchemaTool(List.of()); break;
+      default: return Optional.empty();
+    }
+    Object props = definition.getInputSchema().get(McpConstants.KEY_PROPERTIES);
+    if (!(props instanceof Map)) {
+      return Optional.empty();
+    }
+    Set<String> names = new java.util.LinkedHashSet<>();
+    for (Object key : ((Map<?, ?>) props).keySet()) {
+      names.add(String.valueOf(key));
+    }
+    return Optional.of(names);
+  }
 
   private McpToolDefinition buildListTool(List<String> specNames) {
     Map<String, Object> props = new LinkedHashMap<>();
@@ -595,8 +675,18 @@ public class ToolRegistry {
             + "(2) range operators {\"column\": {\"gt\"|\"gte\"|\"lt\"|\"lte\": value}} or "
             + "{\"column\": {\"between\": [from, to]}} (dates as \"YYYY-MM-DD\"); "
             + "(3) named business filter {\"status\": \"<name>\"} — the spec's own hand-authored "
-            + "statuses (e.g. \"pending\", \"partial\", \"completed\"). Call neo_schema to see the "
-            + "named filters available for a given spec; an unknown name returns the valid list."));
+            + "statuses (e.g. \"pending\", \"partial\", \"completed\"). Call neo_schema with "
+            + "view:\"full\" to see the named filters available for a given spec; an unknown name "
+            + "returns the valid list."));
+    // IMP-40: neo_discover already advertises "parentRequiredFor":["list",...] on every child
+    // entity, and until now this tool had no argument that could satisfy it — so the only way to
+    // scope a list to one parent was a filter on a field name the agent had to work out itself.
+    props.put(McpConstants.PARAM_PARENT_ID, stringProp(
+        "Parent record ID — REQUIRED for a child/line entity (e.g. the order ID when listing that "
+            + "order's lines). A child's records are read through their parent: there is no global "
+            + "list of them. Omit it on a child entity and the call is refused, naming the parent "
+            + "entity to fetch first. Not needed for a spec's top-level entity, and equivalent to "
+            + "filtering on the parent field yourself."));
     props.put("limit", numericProp(TYPE_INTEGER, "Maximum number of records to return (default 100)"));
     props.put("offset", numericProp(TYPE_INTEGER, "Number of records to skip for pagination"));
     props.put("orderBy", stringProp("Column name to sort by, prefix with '-' for descending"));
@@ -612,7 +702,7 @@ public class ToolRegistry {
             + "full row.", List.of(McpFieldProjection.VIEW_SUMMARY)));
 
     return new McpToolDefinition(
-        "neo_list",
+        McpConstants.TOOL_NEO_LIST,
         "List records from a NEO Headless API spec. "
             + "Supports filtering (exact match, range operators, named document status), "
             + "pagination, sorting, and field projection (`fields` / view:\"summary\").",
@@ -636,7 +726,7 @@ public class ToolRegistry {
         List.of(McpFieldProjection.VIEW_SUMMARY)));
 
     return new McpToolDefinition(
-        "neo_get",
+        McpConstants.TOOL_NEO_GET,
         "Get a single record by ID from a NEO Headless API spec. Supports field projection "
             + "(`fields` / view:\"summary\"). "
             + McpConstants.RECORD_URL_NOTE,
@@ -644,27 +734,64 @@ public class ToolRegistry {
   }
 
   private McpToolDefinition buildCreateTool(List<String> specNames) {
+    // IMP-18: the write verbs used to drop an unrecognised key in silence, so a create carrying a
+    // misspelt field returned 201 and no later read could contradict it. They now name it in
+    // `unknownFields`, the way neo_schema/neo_list/neo_get already did - and the description says
+    // so, because a warning nobody is told to look for is only marginally better than silence.
+    String unknownFieldsNote = "A name this entity does not recognise comes back in "
+        + "\"unknownFields\" on the response - check it if a value you sent is not on the record, "
+        + "because the write still succeeds without it. ";
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
     props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
     props.put(McpConstants.PARAM_FIELDS, objectProp("Field values for the new record"));
+    // IMP-40: parentId was accepted ONLY inside `fields` and was declared nowhere. Every other
+    // parent-aware tool (neo_defaults, neo_list, neo_get) takes it as a top-level argument and
+    // says so at length, so an agent learns that shape from three tools and applies it to this
+    // one — where it was silently discarded. Nothing errored: the parent link simply never
+    // arrived, so parent-derived values (a line's order date, its price-list version, its running
+    // line number) could not resolve, and the create was refused for "missing" fields the server
+    // was supposed to derive. Declared here so the contract is uniform; `fields.parentId` still
+    // works, and this argument wins when both are present.
+    props.put(McpConstants.PARAM_PARENT_ID, stringProp(
+        "Parent record ID — REQUIRED when creating a child/line record (e.g. the order ID when "
+            + "creating an order line). It links the new record to its parent AND is what lets the "
+            + "server derive the parent-dependent values for you (the line's date, its price-list "
+            + "version, its line number). Omit it on a child entity and those values cannot be "
+            + "resolved, so the create is refused for fields you were never asked to supply. "
+            + "Not needed for a spec's top-level entity."));
 
     return new McpToolDefinition(
-        "neo_create",
+        McpConstants.TOOL_NEO_CREATE,
         "Create a new record in a NEO Headless API spec. "
+            + "Creating a child/line record? Pass parentId with the parent's id — without it the "
+            + "server cannot derive the values it inherits from the parent. "
             + "Recommended: call neo_defaults first to get the initial/base set of field values "
             + "for this record type, then build the fields object by overriding only the values "
             + "the user actually wants to change on top of that base — instead of asking the "
             + "user for every field or guessing values that already have a sensible default "
-            + "(document number, dates, prices, etc.). "
+            + "(document number, dates, prices, etc.). Send back only what the user chose or what "
+            + "you need on the record: a value you send is deliberate, and it is protected from "
+            + "the callouts that would otherwise derive it from this record's real context — a "
+            + "generic default echoed back can pin the wrong one (neo_defaults resolves before "
+            + "there is a business partner). Any field where that happened comes back in "
+            + "\"supersededDefaults\" with the value the callout had resolved. "
             + "Dates must be ISO-8601: 'YYYY-MM-DD' for date fields and "
             + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported. "
+            + unknownFieldsNote
             + McpConstants.RECORD_URL_NOTE,
         buildObjectSchema(props,
           List.of("spec", McpConstants.PARAM_ENTITY, McpConstants.PARAM_FIELDS)));
   }
 
   private McpToolDefinition buildUpdateTool(List<String> specNames) {
+    // IMP-18: the write verbs used to drop an unrecognised key in silence, so a create carrying a
+    // misspelt field returned 201 and no later read could contradict it. They now name it in
+    // `unknownFields`, the way neo_schema/neo_list/neo_get already did - and the description says
+    // so, because a warning nobody is told to look for is only marginally better than silence.
+    String unknownFieldsNote = "A name this entity does not recognise comes back in "
+        + "\"unknownFields\" on the response - check it if a value you sent is not on the record, "
+        + "because the write still succeeds without it. ";
     Map<String, Object> props = new LinkedHashMap<>();
     props.put("spec", enumProp(McpConstants.LABEL_SPEC_NAME, specNames));
     props.put(McpConstants.PARAM_ENTITY, stringProp(McpConstants.LABEL_ENTITY_NAME));
@@ -680,14 +807,15 @@ public class ToolRegistry {
             + "— do not reformat, round or invent it. If you do not have it, call neo_get first."));
 
     return new McpToolDefinition(
-        "neo_update",
+        McpConstants.TOOL_NEO_UPDATE,
         "Update an existing record in a NEO Headless API spec. "
             + "Read the record with neo_get first: its 'updated' value is a required argument and "
             + "guards against overwriting somebody else's concurrent edit. A 409 with "
             + "error 'stale_record' means the record changed since that read — re-read it, reapply "
             + "your changes and retry; re-sending the same payload will fail identically. "
             + "Dates must be ISO-8601: 'YYYY-MM-DD' for date fields and "
-            + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported.",
+            + "'YYYY-MM-DDTHH:MM:SS' for datetime fields. No other format is supported. "
+            + unknownFieldsNote,
         buildObjectSchema(props,
           List.of("spec", McpConstants.PARAM_ENTITY, "id", McpConstants.PARAM_FIELDS,
             McpConstants.PARAM_UPDATED)));
@@ -700,7 +828,7 @@ public class ToolRegistry {
     props.put("id", stringProp("Record ID to delete"));
 
     return new McpToolDefinition(
-        "neo_delete",
+        McpConstants.TOOL_NEO_DELETE,
         "Delete a record from a NEO Headless API spec.",
           buildObjectSchema(props, List.of("spec", McpConstants.PARAM_ENTITY, "id")));
   }
@@ -713,7 +841,9 @@ public class ToolRegistry {
       stringProp("Field name (e.g. 'businessPartner') or DB column name (e.g. 'C_BPartner_ID') to get selector values for"));
     props.put(McpConstants.PARAM_FIELD,
         stringProp("Compatibility-only field name alias; use column for selector lookup"));
-    props.put(McpConstants.PARAM_QUERY, stringProp("Search query to filter selector values"));
+    props.put(McpConstants.PARAM_QUERY, stringProp(
+        "Optional search text, matched case-insensitively against the item label, whole or "
+            + "as a substring. Omit it to list unfiltered."));
     props.put(McpConstants.PARAM_RECORD_CONTEXT, objectProp(
         "Optional context from the current record to resolve dependent selectors. "
             + "For example: {\"businessPartner\": \"<id>\"} for partnerAddress, "
@@ -724,13 +854,15 @@ public class ToolRegistry {
             + "\"priceList\": \"<id>\"} when resolving line selectors."));
 
     return new McpToolDefinition(
-        "neo_selectors",
+        McpConstants.TOOL_NEO_SELECTORS,
         "Get foreign-key selector values for a column. "
             + "Use this to discover valid values for FK reference fields. "
             + "Pass recordContext when the selector depends on other field values "
             + "(e.g. partnerAddress requires businessPartner). "
             + "Pass parentContext for line selectors that depend on header values "
-            + "(e.g. tax requires orderDate/invoiceDate and priceList).",
+            + "(e.g. tax requires orderDate/invoiceDate and priceList). "
+            + "Returns {items:[{id,label}], totalCount, hasMore}, capped at 50 items with no "
+            + "paging: when hasMore is true, narrow with query.",
         buildObjectSchema(props,
           List.of("spec", McpConstants.PARAM_ENTITY, McpConstants.PARAM_COLUMN)));
   }
@@ -764,7 +896,7 @@ public class ToolRegistry {
             McpDefaultsView.VIEW_MINIMAL)));
 
     return new McpToolDefinition(
-        "neo_defaults",
+        McpConstants.TOOL_NEO_DEFAULTS,
         "Get the initial/base set of field values for a new record — field types, which fields "
             + "are required vs optional, and computed/system defaults (document number, dates, "
             + "prices, etc.). Recommended: call this BEFORE neo_create, then use its result as "
@@ -773,9 +905,16 @@ public class ToolRegistry {
             + "what it needs to satisfy a NOT-NULL column or a computed value (sequence numbers, "
             + "dates, currency, ...) — an optional field this call resolved (a price list, payment "
             + "terms, a financial account, ...) is NOT copied into the record unless you send it "
-            + "explicitly in fields, even though it showed a value here. Copy across every field "
+            + "explicitly in fields, even though it showed a value here. Copy across the fields "
             + "from this result you want on the record; do not assume omitting one lets neo_create "
-            + "fill it in the same way. When entity is a child/line tab (not the spec's top-level "
+            + "fill it in the same way. BUT these values are resolved with no business partner and "
+            + "no record context, so a value here can be superseded the moment you choose one: on "
+            + "sales-order/header this call answers paymentTerms \"30 Días\" and the partner you "
+            + "pick may imply \"Inmediato\". A value you send is treated as deliberate and is "
+            + "protected from the callout that would have corrected it, so re-send a value from "
+            + "here only when the user actually chose it — not as a blanket echo. neo_create "
+            + "reports anything your value displaced in \"supersededDefaults\"; read it. "
+            + "When entity is a child/line tab (not the spec's top-level "
             + "entity), pass parentId with the parent record's id — omitting it does not resolve "
             + "parent-dependent fields (a storage bin scoped to the parent's warehouse, a "
             + "price-list version, a running line number); they are silently absent rather than "
@@ -879,30 +1018,42 @@ public class ToolRegistry {
     props.put("spec", enumProp("Spec name (use neo_discover to find available specs)", specNames));
     props.put(McpConstants.PARAM_ENTITY,
       stringProp("Entity name within the spec (e.g. 'Header', 'Lines')"));
+    // IMP-44: REQUIRED, and "full" is now a value you ask for rather than what you get for not
+    // choosing. The full dump is 39.5 kB on sales-order/header against 5.4 kB for "create", and
+    // the caller used to be told about the cheaper projection by a hint at the bottom of the
+    // response it had already paid for. Recommending "create" here is not new — that wording has
+    // shipped since 2026-08-06 and three independent blind agents still took the full route, so
+    // the lever is the argument, not more prose.
     props.put(McpActionsView.PARAM_VIEW, enumProp(
-        "Optional response shape. Omit for the full field dump (default, unchanged) — but note it "
-            + "can exceed 60 kB on compliance-heavy windows and may not fit your context. "
-            + "\"create\" returns ONLY the fields you may send to neo_create, split into "
-            + "required/optional — this is what you want before a create. "
-            + "\"actions\" returns only the buttons/processes ({name, label, action, processName, "
-            + "processId, ...}) — use it when you only need to know what can be triggered on this "
+        "REQUIRED — which projection you want. \"create\": ONLY the fields you may send to "
+            + "neo_create/neo_update, split into required/optional. This is the one you want "
+            + "before a write, and it is by far the smallest (~5 kB on sales-order/header). "
+            + "\"actions\": only the buttons/processes ({name, label, action, processName, "
+            + "processId, ...}) — use it when you need to know what can be triggered on this "
             + "entity, not every column. Fire only the ones carrying invokeVia:\"neo_action\"; the "
             + "rest report invokable:false plus a notInvokableReason, and \"invokableCount\" next "
-            + "to \"actionCount\" tells you the split up front.",
-        List.of(McpSchemaCreateView.VIEW_CREATE, McpActionsView.VIEW_ACTIONS)));
+            + "to \"actionCount\" tells you the split up front. \"full\": every field, including "
+            + "read-only and system ones — ~40 kB on sales-order/header and more on "
+            + "compliance-heavy windows, where it may not fit your context. Ask for it when you "
+            + "are reading, filtering or projecting, not when you are about to write.",
+        List.of(McpSchemaCreateView.VIEW_CREATE, McpActionsView.VIEW_ACTIONS,
+            McpSchemaCreateView.VIEW_FULL)));
     props.put(McpSchemaCreateView.PARAM_FIELDS, stringArrayProp(
         "Optional whitelist of field names to describe (e.g. [\"businessPartner\",\"invoiceDate\"]). "
             + "Returns only those descriptors instead of all of them. Names that match nothing come "
-            + "back in \"unknownFields\" — check it if a field you expected is missing. Ignored when "
-            + "\"view\" is set."));
+            + "back in \"unknownFields\" — check it if a field you expected is missing. Applies to "
+            + "view:\"full\" only; ignored under view:\"create\" and view:\"actions\", which "
+            + "already define their own projection."));
 
     return new McpToolDefinition(
-        "neo_schema",
+        McpConstants.TOOL_NEO_SCHEMA,
         "Get the field schema for an entity: field names, types, required flag, "
             + "read-only flag, default values, visibility (editable/readOnly/system/discarded), "
             + "and which fields have FK selectors. Call this BEFORE neo_create to know which "
-            + "fields exist and which are required — and prefer view:\"create\", which returns "
-            + "only the fields you may send, already split into required/optional. Only fields "
+            + "fields exist and which are required. \"view\" is REQUIRED and decides the size of "
+            + "the answer: use view:\"create\" before a write — only the fields you may send, "
+            + "already split into required/optional, and several times smaller than the full "
+            + "dump. Only fields "
             + "with userRequired=true need to be provided: a field that is mandatory but that the "
             + "server can already resolve a value for — from an AD default, a session preference, "
             + "the business partner's configuration, or a callout — is filled by the server, so it "
@@ -912,8 +1063,10 @@ public class ToolRegistry {
             + "from elsewhere; view:\"create\" cross-checks against the real defaults and is the "
             + "authoritative answer to \"must I ask the user for this?\". System fields are "
             + "auto-derived by Etendo callouts. Pass view:\"actions\" for the callable "
-            + "buttons/processes instead.",
-        buildObjectSchema(props, List.of("spec", "entity")));
+            + "buttons/processes instead, and view:\"full\" when you are reading or filtering "
+            + "and genuinely need every column.",
+        buildObjectSchema(props,
+            List.of("spec", "entity", McpActionsView.PARAM_VIEW)));
   }
 
   // ── Action tool ────────────────────────────────────────────────────────
@@ -932,7 +1085,8 @@ public class ToolRegistry {
     return new McpToolDefinition(
         "neo_action",
         "Fire a type:button action on a record and return the process result. "
-            + "Call neo_schema first: each button field carries 'action' (the name to pass "
+            + "Call neo_schema with view:\"actions\" first: each button field carries 'action' "
+            + "(the name to pass "
             + "here), and list-backed buttons also carry 'actionValues' (the values it "
             + "accepts, e.g. CO=Book / VO=Void / RE=Reactivate for documentAction) and "
             + "'actionParameter' (the key to put the chosen value under in 'parameters'). "
@@ -1064,11 +1218,15 @@ public class ToolRegistry {
         OBCriteria<SFField> fieldCriteria = OBDal.getInstance().createCriteria(SFField.class);
         fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entity.getId()));
         fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
-        fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
         List<SFField> fields = fieldCriteria.list();
 
         for (SFField field : fields) {
-          if (field.getADColumn() != null) {
+          // Field inclusion goes through McpFieldView, never a criteria: the MCP_CONFIG
+          // fields.included override lives in JSON the database does not join, so a restriction
+          // here would advertise a different parameter set than neo_schema reports. The entity
+          // restriction above stays a criteria on purpose - MCP_CONFIG overrides field inclusion
+          // only, so there is nothing for a resolver to add at the entity level.
+          if (field.getADColumn() != null && McpFieldView.of(field).isIncluded()) {
             String fieldName = field.getADColumn().getDBColumnName();
             String label = field.getADColumn().getName();
             paramProps.put(fieldName, stringProp(label));

@@ -79,18 +79,101 @@ class McpFieldViewSingleResolverCallSiteTest {
       new String[] { "com/etendoerp/go/mcp/McpSchemaFieldBuilder.java", "loadFieldMetadata" },
       new String[] { "com/etendoerp/go/mcp/McpQuerySupport.java", "editablePropertyNames" },
       new String[] { "com/etendoerp/go/mcp/McpQuerySupport.java", "summaryFields" },
-      new String[] { "com/etendoerp/go/mcp/McpResourceProvider.java", "buildFieldsArray" });
+      new String[] { "com/etendoerp/go/mcp/McpResourceProvider.java", "buildFieldsArray" },
+      // IMP-39 added two more, and they are the ones that decide whether a write lands and
+      // whether a filter key is accepted. Both read inclusion, which is why isIncluded joined
+      // CURATION_PROPERTIES below.
+      new String[] { "com/etendoerp/go/mcp/McpQuerySupport.java", "writeGate" },
+      new String[] { "com/etendoerp/go/mcp/McpQuerySupport.java", "filterablePropertyNames" });
+
+  /**
+   * The readers whose subject is <b>inclusion</b>, guarded a second way.
+   *
+   * <p>A raw {@code row.isIncluded()} is not the only bypass available to them, and it is not the
+   * one they actually had: both of these used to answer the question with a
+   * {@code Restrictions.eq(PROPERTY_ISINCLUDED, true)} in their own criteria. A criteria runs in
+   * the database and an {@code MCP_CONFIG} {@code fields.included} override lives in a JSON column
+   * nobody joins, so the override would have been honoured by {@code neo_schema} and silently
+   * ignored by {@code neo_list} and both write verbs — rebuilding the exact three-way disagreement
+   * IMP-39 exists to end, with no raw property read anywhere for the check above to catch.</p>
+   *
+   * <p>{@code activeFields} is listed because it is the shared query the other two draw from: a
+   * predicate reintroduced there would bypass both at once.</p>
+   *
+   * <p>The last two joined after the same bypass was found in the MCP's two <b>advertised</b>
+   * surfaces: {@code buildFieldsArray} backs the {@code schemaforge://} resource listing and
+   * {@code buildProcessParamSchema} backs a process tool's declared parameter set. Both filtered
+   * with a criteria, so a field reclaimed by a {@code fields.included} override was named by
+   * {@code neo_schema} and absent from the resource and from the tool's own schema — with no error
+   * and no log. {@code buildFieldsArray} is the sharper case, because it was already resolving
+   * {@code readOnly} through the view in the same loop: one property honoured the override and the
+   * other did not, inside one method.</p>
+   */
+  private static final List<String[]> INCLUSION_READERS = List.of(
+      new String[] { "com/etendoerp/go/mcp/McpQuerySupport.java", "writeGate" },
+      new String[] { "com/etendoerp/go/mcp/McpQuerySupport.java", "filterablePropertyNames" },
+      new String[] { "com/etendoerp/go/mcp/McpQuerySupport.java", "activeFields" },
+      new String[] { "com/etendoerp/go/mcp/McpResourceProvider.java", "buildFieldsArray" },
+      new String[] { "com/etendoerp/go/mcp/ToolRegistry.java", "buildProcessParamSchema" });
+
+  /** An {@code ISINCLUDED} predicate pushed into a criteria — the bypass a JSON override survives. */
+  private static final Pattern ISINCLUDED_CRITERIA = Pattern.compile("ISINCLUDED");
+
+  /**
+   * The one {@code ISINCLUDED} predicate that is <b>correct</b> in a criteria: the entity-level
+   * one.
+   *
+   * <p>{@code MCP_CONFIG} overrides the inclusion of <b>fields</b> and nothing else —
+   * {@link McpFieldsSection#included} is the only inclusion key, {@link McpConfigSections}
+   * registers exactly two sections ({@code parent} and {@code fields}), and there is no
+   * {@code McpEntityView} for a resolver to route an entity through. So
+   * {@code SFEntity.PROPERTY_ISINCLUDED} in a criteria cannot be out of step with an override:
+   * there is no override for it to be out of step with. {@code buildProcessParamSchema} carries
+   * one and must keep it.</p>
+   *
+   * <p><b>What exempting it costs.</b> The check below subtracts this shape and then scans for
+   * {@code ISINCLUDED} in what is left, so it still catches an unqualified
+   * {@code PROPERTY_ISINCLUDED} (static import), a bare {@code "ISINCLUDED"} column literal in
+   * hand-written SQL, and the constant reached through any other type name. It does <b>not</b>
+   * catch a field-inclusion predicate spelled in a way that never contains the uppercase token —
+   * a lowercase HQL property literal ({@code Restrictions.eq("isIncluded", true)}) or a name built
+   * by concatenation. That gap predates the exemption: the original pattern is case-sensitive
+   * precisely so the legitimate {@code McpFieldView.of(field).isIncluded()} call is not flagged,
+   * and no case-insensitive pattern can tell those two apart. The day it matters, add a shape,
+   * do not widen the case.</p>
+   */
+  private static final Pattern ENTITY_ISINCLUDED =
+      Pattern.compile("SFEntity\\s*\\.\\s*PROPERTY_ISINCLUDED");
+
+  /**
+   * Whether {@code body} pushes a <b>field</b>-inclusion predicate into a criteria.
+   *
+   * <p>Subtractive rather than narrow on purpose. Matching only
+   * {@code SFField\.PROPERTY_ISINCLUDED} would be the obvious way to spare the entity restriction,
+   * and it would also spare every other spelling of the same bypass — this keeps the broad token
+   * scan and removes the one shape that is known-good.</p>
+   *
+   * @param body the method body, comments already stripped
+   * @return {@code true} when an {@code ISINCLUDED} token survives the entity exemption
+   */
+  private static boolean restrictsOnFieldInclusion(String body) {
+    String withoutEntityCheck = ENTITY_ISINCLUDED.matcher(body).replaceAll(" ");
+    return ISINCLUDED_CRITERIA.matcher(withoutEntityCheck).find();
+  }
 
   /** The one resolver every reader must go through. */
   private static final Pattern RESOLVER_CALL =
       Pattern.compile("McpFieldView\\s*\\.\\s*of\\s*\\(");
 
   /**
-   * The three curated properties. {@link McpFieldView} exposes these under exactly the same names
+   * The curated properties. {@code isIncluded} joined them with IMP-39: the override may now
+   * reclaim a field the shared curation excluded, or exclude one it exposes, so inclusion stopped
+   * being a property of the row alone. {@link McpFieldView} exposes these under the same names
    * as {@code SFField} does, so the method name cannot tell a raw row read from a resolved-view
    * read — only the <b>receiver's declared type</b> can.
    */
-  private static final String CURATION_PROPERTIES = "getVisibility|isReadOnly|isBusinessCritical";
+  private static final String CURATION_PROPERTIES =
+      "getVisibility|isReadOnly|isBusinessCritical|isIncluded";
 
   /**
    * Every variable of type {@code SFField} declared inside a body — the enhanced-for loop
@@ -188,7 +271,9 @@ class McpFieldViewSingleResolverCallSiteTest {
   @DisplayName("the scan still finds every reader — a guard that finds nothing is mute, "
       + "not passing")
   void theScanStillResolvesEveryReader() {
-    assertEquals(4, READERS.size(), "ETP-5184 unified exactly four readers");
+    assertEquals(6, READERS.size(),
+        "ETP-5184 unified four readers and IMP-39 added two more (writeGate,"
+            + " filterablePropertyNames)");
     for (String[] reader : READERS) {
       String method = reader[1];
       String body = McpSourceScanner.methodBody(McpSourceScanner.read(reader[0]), method);
@@ -231,10 +316,160 @@ class McpFieldViewSingleResolverCallSiteTest {
         "reading through a resolved view — held in a local or chained — is the correct shape and"
             + " must never be flagged, whatever the variables are called");
 
-    // A property that is not curated is not this guard's business either.
+    // IMP-39 reversed this case, and the reversal is the point. isIncluded used to be read off
+    // the row legitimately — "deliberately not overridable" is what this assertion said — and now
+    // fields.included can reclaim an excluded field or exclude an exposed one for the MCP alone.
+    // A reader still reading the column decides a write and a filter on the pre-override answer
+    // while neo_schema reports the override, which is the disagreement, not a style nit.
     String included = "{ for (SFField row : crit.list()) { boolean i = row.isIncluded(); } }";
-    assertTrue(rawReadViolations("synthetic", included).isEmpty(),
-        "isIncluded is deliberately not overridable, so reading it off the row is correct");
+    assertFalse(rawReadViolations("synthetic", included).isEmpty(),
+        "since IMP-39 fields.included is overridable, so a raw row read of it must be flagged");
+
+    // And the resolved-view read of the same property must not be.
+    String viaView = "{ for (SFField row : crit.list()) {"
+        + " boolean i = McpFieldView.of(row).isIncluded(); } }";
+    assertTrue(rawReadViolations("synthetic", viaView).isEmpty(),
+        "reading inclusion through the resolver is the correct shape");
+  }
+
+  /**
+   * The second bypass, and the one the two IMP-39 readers actually had: answering "is this field
+   * included" with a {@code Restrictions.eq} instead of a property read.
+   *
+   * <p>Nothing in the raw-read check above can see it — a criteria contains no property read at
+   * all — and it is strictly worse than the raw read, because it is resolved in the database where
+   * the {@code MCP_CONFIG} JSON is not joined. {@code excludedPropertyNames} and
+   * {@code filterablePropertyNames} both queried {@code ISINCLUDED = 'Y'} before the fix, so an
+   * override would have moved {@code neo_schema} and left {@code neo_list}, {@code neo_create} and
+   * {@code neo_update} on the old answer.</p>
+   */
+  @Test
+  @DisplayName("no inclusion reader pushes ISINCLUDED into a criteria, where an override cannot "
+      + "reach it")
+  void noInclusionReaderQueriesTheColumn() {
+    assertEquals(5, INCLUSION_READERS.size(),
+        "IMP-39 guarded three readers and the resource/tool surfaces added two more"
+            + " (buildFieldsArray, buildProcessParamSchema)");
+    List<String> violations = new ArrayList<>();
+    for (String[] reader : INCLUSION_READERS) {
+      String method = reader[1];
+      String body = McpSourceScanner.methodBody(McpSourceScanner.read(reader[0]), method);
+      assertTrue(body.length() > 40,
+          method + " resolved to a " + body.length() + "-char body — the scanner matched the"
+              + " wrong thing. Fix this test, not the source");
+      if (restrictsOnFieldInclusion(body)) {
+        violations.add(method + " restricts on ISINCLUDED in its own criteria");
+      }
+    }
+    assertTrue(violations.isEmpty(),
+        "An ISINCLUDED predicate is evaluated in the database, where the MCP_CONFIG"
+            + " fields.included override does not exist: " + violations
+            + ". Resolve inclusion with McpFieldView.of(sfField).isIncluded() over the entity's"
+            + " active rows instead, as writeGate does.");
+  }
+
+  /**
+   * Prove the criteria check fires, so it is not another guard that passes because it looks at
+   * nothing — and, since the check now carries an exemption, that the exemption is not a hole the
+   * regression fits through.
+   */
+  @Test
+  @DisplayName("the criteria check flags a field ISINCLUDED restriction and spares the entity one")
+  void theCriteriaCheckIsNotMute() {
+    assertTrue(restrictsOnFieldInclusion(
+        "{ crit.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true)); }"),
+        "a field-inclusion predicate is the bypass this guard exists for");
+    assertFalse(restrictsOnFieldInclusion(
+        "{ crit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true)); }"),
+        "ISACTIVE is not overridable by MCP_CONFIG and belongs in a criteria");
+
+    // The exemption: entity inclusion carries no override, so restricting on it is correct.
+    assertFalse(restrictsOnFieldInclusion(
+        "{ crit.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true)); }"),
+        "MCP_CONFIG overrides field inclusion only, so the entity restriction must not be flagged");
+
+    // And the exemption must not swallow a field predicate standing beside it — which is exactly
+    // buildProcessParamSchema's shape, and the case a naive substring pattern got wrong in the
+    // other direction.
+    assertTrue(restrictsOnFieldInclusion(
+        "{ entityCriteria.add(Restrictions.eq(SFEntity.PROPERTY_ISINCLUDED, true));"
+            + " fieldCriteria.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true)); }"),
+        "an exempt entity restriction must not hide a field restriction in the same body");
+
+    // Still broad where it can afford to be: a hand-written column literal is not spelled through
+    // SFField at all, and is the same bypass.
+    assertTrue(restrictsOnFieldInclusion("{ String sql = \"AND ISINCLUDED = 'Y'\"; }"),
+        "the token scan must survive the exemption for spellings that never name SFField");
+  }
+
+  /**
+   * The behavioural half of IMP-39 at the {@link McpFieldView} seam: an {@code included} override
+   * moves in both directions, and the row still decides when the override is silent.
+   *
+   * <p>Both directions matter and for different reasons. Reclaiming an excluded field is what
+   * makes the override useful; <b>excluding an exposed one is what makes the write gate's answer
+   * depend on it</b> — {@code writeGate} puts exactly this field in {@code excluded} and
+   * {@code neo_create} refuses it with {@code field_not_allowed}. Every fixture has the row and
+   * the override disagree, so a passing assertion can only be reading the override; the third is
+   * the control that proves the row is still read at all.</p>
+   */
+  @Test
+  @DisplayName("an included override is honoured in both directions, and the row stands when it "
+      + "is silent")
+  void anIncludedOverrideIsHonoured() {
+    // Row excludes, override reclaims: a true answer can only have come from the override.
+    assertTrue(McpFieldView.of(inclusionField(Boolean.FALSE, Boolean.TRUE)).isIncluded());
+
+    // Row exposes, override excludes — the direction the write gate turns into a refusal.
+    assertFalse(McpFieldView.of(inclusionField(Boolean.TRUE, Boolean.FALSE)).isIncluded());
+
+    // Control: override silent, so the row's own value must come through, both ways.
+    assertTrue(McpFieldView.of(inclusionField(Boolean.TRUE, null)).isIncluded());
+    assertFalse(McpFieldView.of(inclusionField(Boolean.FALSE, null)).isIncluded());
+  }
+
+  /**
+   * An excluded field is not editable however the exclusion was decided — the two axes stay
+   * wired together, which is what keeps {@code neo_selectors} from offering a field the write
+   * gate refuses.
+   */
+  @Test
+  @DisplayName("an excluded field is never editable, override or row")
+  void anExcludedFieldIsNeverEditable() {
+    assertFalse(McpFieldView.of(inclusionField(Boolean.TRUE, Boolean.FALSE)).isEditable(),
+        "the override excluded it, so nothing may be sent for it");
+    assertFalse(McpFieldView.of(inclusionField(Boolean.FALSE, null)).isEditable(),
+        "the row excluded it and no override says otherwise");
+    assertTrue(McpFieldView.of(inclusionField(Boolean.FALSE, Boolean.TRUE)).isEditable(),
+        "reclaimed by the override, not read-only, and carrying no narrowing visibility");
+  }
+
+  /**
+   * A field whose inclusion is decided on the row, on the override, or on both.
+   *
+   * @param rowIncluded      the {@code ISINCLUDED} column on the row itself
+   * @param overrideIncluded the value the override declares, or {@code null} to leave the key out
+   *                         — which is not the same as a declared {@code false}
+   */
+  private SFField inclusionField(Boolean rowIncluded, Boolean overrideIncluded) {
+    String id = "incl-" + rowIncluded + "-" + overrideIncluded;
+    SFField field = mock(SFField.class);
+    when(field.getId()).thenReturn("call-site-field-" + id);
+    when(field.getVisibility()).thenReturn(null);
+    when(field.isIncluded()).thenReturn(rowIncluded);
+    when(field.isReadOnly()).thenReturn(Boolean.FALSE);
+    when(field.isBusinessCritical()).thenReturn(Boolean.FALSE);
+
+    StringBuilder keys = new StringBuilder();
+    if (overrideIncluded != null) {
+      keys.append("\"included\":").append(overrideIncluded).append(',');
+    }
+    SFEntity entity = mock(SFEntity.class);
+    when(entity.getId()).thenReturn("call-site-entity-" + id);
+    when(entity.get(SFEntity.PROPERTY_MCPCONFIG)).thenReturn(
+        "{\"fields\":{" + keys + "\"reason\":\"call-site inclusion fixture\"}}");
+    when(field.getETGOSFEntity()).thenReturn(entity);
+    return field;
   }
 
   /**

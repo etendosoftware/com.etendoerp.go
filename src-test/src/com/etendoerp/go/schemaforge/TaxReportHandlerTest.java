@@ -55,6 +55,8 @@ import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.ad.system.Language;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+
 /**
  * Unit tests for {@link TaxReportHandler}.
  *
@@ -62,6 +64,12 @@ import org.openbravo.model.common.enterprise.Organization;
  * POST with valid params (purchase only, sales only, both), method guard (405),
  * exception handling (500), buildSection with showDetails true/false and groupByBp
  * true/false, nullSafe and sum via the full flow, and resolveCurrencySymbol fallback.
+ *
+ * <p>Since ETP-5335 the handler refuses before it does anything else unless the role holds the
+ * grant on the report's own {@code AD_Process}, so every test below runs as a granted role —
+ * otherwise each one would assert its own subject against a 403. The refusal itself is asserted
+ * here ({@link #testPostWithoutTheProcessGrantIsRefused()}) and in
+ * {@code ReportHandlerAccessGateTest}.</p>
  */
 @ExtendWith(MockitoExtension.class)
 @MockitoSettings(strictness = Strictness.LENIENT)
@@ -88,12 +96,17 @@ class TaxReportHandlerTest {
 
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBContext> obContextMock;
+  private MockedStatic<NeoAccessHelper> accessMock;
 
   @BeforeEach
   void setUp() throws SQLException {
     handler = new TaxReportHandler();
     obDalMock = mockStatic(OBDal.class);
     obContextMock = mockStatic(OBContext.class);
+    // ETP-5335: the report is gated on its AD_Process. These tests are about what the report
+    // returns, so they run as a role that holds the grant; the gate is asserted on its own below.
+    accessMock = mockStatic(NeoAccessHelper.class);
+    accessMock.when(() -> NeoAccessHelper.hasProcessAccess(anyString())).thenReturn(true);
 
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
     obContextMock.when(OBContext::getOBContext).thenReturn(obContext);
@@ -111,6 +124,25 @@ class TaxReportHandlerTest {
   void tearDown() {
     obDalMock.close();
     obContextMock.close();
+    accessMock.close();
+  }
+
+  /**
+   * The defect this gate closes (ETP-5335): with no grant of any kind, a POST returned invoices,
+   * amounts, VAT rates and every contact's tax id. It must be refused, and refused before the
+   * query runs.
+   */
+  @Test
+  void testPostWithoutTheProcessGrantIsRefused() throws Exception {
+    accessMock.when(() -> NeoAccessHelper.hasProcessAccess(anyString())).thenReturn(false);
+    JSONObject body = new JSONObject();
+    body.put("dateFrom", "2026-01-01");
+    body.put("dateTo", "2026-12-31");
+
+    NeoResponse response = handler.handle(buildPostContext(body));
+
+    assertEquals(403, response.getHttpStatus());
+    verify(connection, org.mockito.Mockito.never()).prepareStatement(anyString());
   }
 
   // ---- Helper methods -------------------------------------------------------

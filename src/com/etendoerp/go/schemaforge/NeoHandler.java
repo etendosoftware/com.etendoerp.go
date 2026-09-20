@@ -80,6 +80,30 @@ public interface NeoHandler {
   }
 
   /**
+   * Whether the current role may reach the surface this handler serves.
+   *
+   * <p>Only meaningful for handlers that own their own access rule — today the report handlers,
+   * whose grant lives in a place the shared spec gate cannot evaluate: a classic
+   * {@code AD_Process}, an OBUIAPP process definition, or a tab-less window. A spec of type
+   * {@code R} with no linked process and no {@code AD_TAB_ID} reaches
+   * {@code NeoAccessHelper.hasReportSpecAccess} with nothing to check, and the default there is
+   * permissive, so without this declaration the catalogue advertises a report the role is then
+   * refused when it calls it.</p>
+   *
+   * <p>Overriding it puts the answer in ONE place: {@code neo_discover}, the publication of the
+   * report tool and the execution itself all resolve through the same method, so a role that
+   * cannot run a report no longer sees it offered. Implementations must answer for the surface
+   * as a whole; a rule that varies per request (the aging report's receivables/payables split)
+   * answers "may the role use this at all" here and keeps the exact check where it executes.</p>
+   *
+   * @return {@code true} when the current role may use this handler's surface; the default
+   *     {@code true} preserves today's behaviour for every handler that does not gate
+   */
+  default boolean isAccessibleForCurrentRole() {
+    return true;
+  }
+
+  /**
    * Declares DAL property names that the create-time callout cascade must not populate or
    * overwrite for this entity. The default is empty so handlers opt in only when a legacy
    * callout differs from the entity's NEO contract.
