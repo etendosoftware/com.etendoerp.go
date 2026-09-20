@@ -14,6 +14,7 @@ package com.etendoerp.go.payment;
 
 import java.time.Instant;
 import java.util.Locale;
+import java.util.Optional;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -25,6 +26,7 @@ import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.system.Client;
 
 import com.etendoerp.go.common.GoRuntimeProperties;
+import com.etendoerp.go.schemaforge.data.Subscription;
 
 /**
  * Persists the minimum lifecycle metadata needed to enforce demo access.
@@ -60,14 +62,21 @@ public class TenantEnvironmentLifecycleService {
   private static final Logger log = LogManager.getLogger(TenantEnvironmentLifecycleService.class);
 
   private final TenantPlanService tenantPlanService;
+  private final SubscriptionService subscriptionService;
 
   /** Creates a lifecycle service backed by the default plan resolver. */
   public TenantEnvironmentLifecycleService() {
-    this(new TenantPlanService());
+    this(new TenantPlanService(), new SubscriptionService());
   }
 
   TenantEnvironmentLifecycleService(TenantPlanService tenantPlanService) {
+    this(tenantPlanService, new SubscriptionService());
+  }
+
+  TenantEnvironmentLifecycleService(TenantPlanService tenantPlanService,
+      SubscriptionService subscriptionService) {
     this.tenantPlanService = tenantPlanService;
+    this.subscriptionService = subscriptionService;
   }
 
   /**
@@ -134,13 +143,7 @@ public class TenantEnvironmentLifecycleService {
       String type = readPreference(ENVIRONMENT_TYPE_ATTRIBUTE, clientId);
       if (TYPE_PRODUCTIVE.equalsIgnoreCase(type)
           || TenantPlanService.PLAN_PRODUCTIVE.equals(tenantPlanService.resolvePlan(clientId))) {
-        String status = readPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, clientId);
-        EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus = parseSubscriptionStatus(
-            status, EnvironmentAccessPolicy.SubscriptionStatus.LEGACY_ENTITLEMENT);
-        Instant renewalDueAt = parseInstant(
-            readPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE, clientId));
-        return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, null,
-            subscriptionStatus, renewalDueAt);
+        return productiveSnapshot(clientId);
       }
       String startedAt = readPreference(DEMO_TRIAL_STARTED_ATTRIBUTE, clientId);
       if (StringUtils.isBlank(startedAt)
@@ -168,6 +171,62 @@ public class TenantEnvironmentLifecycleService {
       log.warn("Could not resolve environment lifecycle for client {}", clientId, e);
       return null;
     }
+  }
+
+  /**
+   * Builds the productive snapshot, reading the billing state from the subscription row.
+   *
+   * <p>ETP-5046 made {@code ETGO_SUBSCRIPTION} the single source of truth for whether a tenant is
+   * paying and until when. The {@code ETGO_SubscriptionStatus} and {@code ETGO_SubscriptionDueAt}
+   * preferences survive only as a transitional fallback for a tenant the R37 backfill has not
+   * reached yet. The order matters: consulting the preferences first would let the access policy
+   * and the plan catalog disagree about the same tenant, which is precisely what this unification
+   * exists to prevent.
+   *
+   * @param clientId environment client id, already known to be productive
+   * @return the productive snapshot, never null
+   */
+  private EnvironmentSnapshot productiveSnapshot(String clientId) {
+    Optional<Subscription> openSubscription = subscriptionService.findOpen(clientId);
+    if (openSubscription.isPresent()) {
+      Subscription subscription = openSubscription.get();
+      Instant renewalDueAt = subscription.getCurrentPeriodEnd() == null ? null
+          : subscription.getCurrentPeriodEnd().toInstant();
+      return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, null,
+          subscriptionStatusOf(subscription.getSubscriptionStatus()), renewalDueAt);
+    }
+    // ETP-5046-TRANSITIONAL-FALLBACK — no subscription row for this tenant yet. Delete this block
+    // together with the rest of the fallback in Phase F, once every productive tenant has one.
+    EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus = parseSubscriptionStatus(
+        readPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, clientId),
+        EnvironmentAccessPolicy.SubscriptionStatus.LEGACY_ENTITLEMENT);
+    Instant renewalDueAt = parseInstant(readPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE, clientId));
+    return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, null,
+        subscriptionStatus, renewalDueAt);
+  }
+
+  /**
+   * Maps an {@code ETGO_SUBSCRIPTION.STATUS} value onto the access policy's vocabulary.
+   *
+   * <p>An unrecognised status degrades to {@code LEGACY_ENTITLEMENT}, never to {@code NONE}: the
+   * tenant demonstrably holds an open subscription row, so the safe reading of a status this build
+   * does not know about is "entitled", not "locked out of the product".
+   *
+   * @param status the stored subscription status, may be null or blank
+   * @return the matching access-policy status
+   */
+  private static EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatusOf(String status) {
+    String normalized = StringUtils.lowerCase(StringUtils.trimToEmpty(status), Locale.ROOT);
+    if (SubscriptionService.STATUS_ACTIVE.equals(normalized)) {
+      return EnvironmentAccessPolicy.SubscriptionStatus.CURRENT;
+    }
+    if (SubscriptionService.STATUS_PAST_DUE.equals(normalized)) {
+      return EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE;
+    }
+    if (SubscriptionService.STATUS_CANCELED.equals(normalized)) {
+      return EnvironmentAccessPolicy.SubscriptionStatus.EXPIRED;
+    }
+    return EnvironmentAccessPolicy.SubscriptionStatus.LEGACY_ENTITLEMENT;
   }
 
   /**
