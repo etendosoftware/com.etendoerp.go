@@ -78,7 +78,7 @@ public class NeoDefaultsCascadeHelperTest {
         JSONObject.class, JSONObject.class, JSONObject.class,
         Set.class, Tab.class,
         NeoDefaultsService.CalloutCascadeResult.class,
-        Set.class, Set.class);
+        Set.class, Set.class, Set.class);
   }
 
   private static Method wouldClearExistingValueMethod() throws Exception {
@@ -91,13 +91,13 @@ public class NeoDefaultsCascadeHelperTest {
 
   private static Method shouldKeepExistingValueMethod() throws Exception {
     return getPrivateMethod("shouldKeepExistingValue",
-        JSONObject.class, String.class, Set.class);
+        JSONObject.class, String.class, Set.class, Set.class);
   }
 
   private static Method mergeCalloutCombosMethod() throws Exception {
     return getPrivateMethod("mergeCalloutCombos",
         JSONObject.class, JSONObject.class, JSONObject.class,
-        NeoDefaultsService.CalloutCascadeResult.class, Set.class);
+        NeoDefaultsService.CalloutCascadeResult.class, Set.class, Set.class);
   }
 
   private static Method propagateIdentifierMethod() throws Exception {
@@ -146,7 +146,7 @@ public class NeoDefaultsCascadeHelperTest {
     Set<String> protectedFields = new HashSet<>();
     return mergeCalloutUpdatesMethod().invoke(null,
         calloutBody, formState, defaults, seqFields,
-        null, result, nextPending, protectedFields);
+        null, result, nextPending, protectedFields, Collections.emptySet());
   }
 
   private static Tab mockTabWithTable(String tableId) {
@@ -304,7 +304,7 @@ public class NeoDefaultsCascadeHelperTest {
 
       mergeCalloutUpdatesMethod().invoke(null,
           calloutBody, formState, defaults, new HashSet<>(),
-          null, result, new HashSet<>(), protectedFields);
+          null, result, new HashSet<>(), protectedFields, Collections.emptySet());
 
       assertEquals("Protected field must not be overwritten",
           "1000001", defaults.get("documentNo"));
@@ -329,7 +329,7 @@ public class NeoDefaultsCascadeHelperTest {
 
       mergeCalloutUpdatesMethod().invoke(null,
           calloutBody, formState, defaults, new HashSet<>(),
-          null, result, new HashSet<>(), protectedFields);
+          null, result, new HashSet<>(), protectedFields, Collections.emptySet());
 
       assertEquals("Protected field with null current should accept update",
           "NEW_VALUE", defaults.get("documentNo"));
@@ -354,7 +354,7 @@ public class NeoDefaultsCascadeHelperTest {
 
       mergeCalloutUpdatesMethod().invoke(null,
           calloutBody, formState, defaults, new HashSet<>(),
-          null, result, new HashSet<>(), protectedFields);
+          null, result, new HashSet<>(), protectedFields, Collections.emptySet());
 
       assertEquals("Protected field with blank string should accept update",
           "NEW_VALUE", defaults.get("documentNo"));
@@ -379,7 +379,7 @@ public class NeoDefaultsCascadeHelperTest {
     NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
 
     mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result,
-        Collections.emptySet());
+        Collections.emptySet(), Collections.emptySet());
 
     assertEquals("VAL1", defaults.get("paymentMethod"));
     assertEquals("VAL1", formState.get("paymentMethod"));
@@ -399,7 +399,7 @@ public class NeoDefaultsCascadeHelperTest {
     NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
 
     mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result,
-        Collections.emptySet());
+        Collections.emptySet(), Collections.emptySet());
 
     assertFalse("Null selected should not be applied",
         defaults.has("paymentMethod"));
@@ -419,7 +419,7 @@ public class NeoDefaultsCascadeHelperTest {
     NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
 
     mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result,
-        Collections.emptySet());
+        Collections.emptySet(), Collections.emptySet());
 
     assertFalse(defaults.has("paymentMethod"));
   }
@@ -432,7 +432,7 @@ public class NeoDefaultsCascadeHelperTest {
     NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
 
     mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result,
-        Collections.emptySet());
+        Collections.emptySet(), Collections.emptySet());
 
     assertEquals(0, defaults.length());
   }
@@ -459,7 +459,7 @@ public class NeoDefaultsCascadeHelperTest {
     protectedFields.add("warehouse");
 
     mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result,
-        protectedFields);
+        protectedFields, Collections.emptySet());
 
     assertEquals("Protected combo field must keep the user-submitted value",
         "USER_CHOSEN_WAREHOUSE", defaults.get("warehouse"));
@@ -485,7 +485,7 @@ public class NeoDefaultsCascadeHelperTest {
     NeoDefaultsService.CalloutCascadeResult result = new NeoDefaultsService.CalloutCascadeResult();
 
     mergeCalloutCombosMethod().invoke(null, calloutBody, formState, defaults, result,
-        Collections.emptySet());
+        Collections.emptySet(), Collections.emptySet());
 
     assertEquals("Unprotected combo field must be updated with the recalculated default",
         "RECALCULATED_DEFAULT", defaults.get("warehouse"));
@@ -560,7 +560,7 @@ public class NeoDefaultsCascadeHelperTest {
     JSONObject defaults = new JSONObject();
     defaults.put("field1", "val");
     assertFalse((Boolean) shouldKeepExistingValueMethod().invoke(null,
-        defaults, "field1", null));
+        defaults, "field1", null, Collections.emptySet()));
   }
 
   @Test
@@ -570,7 +570,7 @@ public class NeoDefaultsCascadeHelperTest {
     Set<String> protectedFields = new HashSet<>();
     protectedFields.add("otherField");
     assertFalse((Boolean) shouldKeepExistingValueMethod().invoke(null,
-        defaults, "field1", protectedFields));
+        defaults, "field1", protectedFields, Collections.emptySet()));
   }
 
   @Test
@@ -580,7 +580,7 @@ public class NeoDefaultsCascadeHelperTest {
     Set<String> protectedFields = new HashSet<>();
     protectedFields.add("field1");
     assertTrue((Boolean) shouldKeepExistingValueMethod().invoke(null,
-        defaults, "field1", protectedFields));
+        defaults, "field1", protectedFields, Collections.emptySet()));
   }
 
   @Test
@@ -590,7 +590,7 @@ public class NeoDefaultsCascadeHelperTest {
     Set<String> protectedFields = new HashSet<>();
     protectedFields.add("field1");
     assertFalse((Boolean) shouldKeepExistingValueMethod().invoke(null,
-        defaults, "field1", protectedFields));
+        defaults, "field1", protectedFields, Collections.emptySet()));
   }
 
   @Test
@@ -601,7 +601,7 @@ public class NeoDefaultsCascadeHelperTest {
     protectedFields.add("field1");
     assertFalse("Blank string should not count as a kept value",
         (Boolean) shouldKeepExistingValueMethod().invoke(null,
-            defaults, "field1", protectedFields));
+            defaults, "field1", protectedFields, Collections.emptySet()));
   }
 
   @Test
@@ -612,7 +612,7 @@ public class NeoDefaultsCascadeHelperTest {
     protectedFields.add("field1");
     assertTrue("Non-string objects should be kept",
         (Boolean) shouldKeepExistingValueMethod().invoke(null,
-            defaults, "field1", protectedFields));
+            defaults, "field1", protectedFields, Collections.emptySet()));
   }
 
   // ===================================================================
