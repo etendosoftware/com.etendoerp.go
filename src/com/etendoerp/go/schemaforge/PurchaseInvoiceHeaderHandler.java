@@ -118,10 +118,10 @@ public class PurchaseInvoiceHeaderHandler extends AbstractInvoiceHeaderHandler i
     if (posting != null) {
       return posting;
     }
-    NeoResponse lineQtyError = validateLineQtyBeforeComplete(context);
-    if (lineQtyError != null) {
-      return lineQtyError;
-    }
+    // ETP-5381: the invoice quantity is NOT capped against the receipt any more. The order is the
+    // commitment; a receipt — especially an unconfirmed one — is not. See
+    // AbstractInvoiceHeaderHandler's "removed" note for the full rationale. Over-invoicing relative
+    // to the ORDER is still rejected, by the core, in C_INVOICE_POST (@QtyInvoicedHigherOrdered@).
     // Must run BEFORE completeInvoiceIfNeeded: the discount line has to reflect the final set of
     // product lines before ProcessInvoiceUtil.process() completes/posts the document (ETP-4388).
     AbstractOrderHeaderHandler.applyTotalDiscountBeforeComplete(context, totalDiscountService, true);
