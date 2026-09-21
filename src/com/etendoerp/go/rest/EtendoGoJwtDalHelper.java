@@ -537,6 +537,10 @@ final class EtendoGoJwtDalHelper {
   /**
    * Returns the account's only free tenant when it is unambiguous, for demo/productive linking.
    * Multiple free tenants are deliberately treated as unresolved rather than guessed.
+   *
+   * @param accountEmail authenticated platform account email
+   * @return the only free client id, or {@code null} when the account has zero or multiple free
+   *     tenants
    */
   public static String findOnlyFreeTenantIdByAccountEmail(String accountEmail) {
     Set<String> freeClientIds = new HashSet<>();
