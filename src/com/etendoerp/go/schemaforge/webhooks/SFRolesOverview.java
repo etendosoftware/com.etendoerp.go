@@ -1064,7 +1064,7 @@ public class SFRolesOverview extends BaseWebhookService {
    * ETP-5402 — builds {@code reportsMatrix}: every {@link ReportAccessCatalog#ROWS} row, grouped
    * by its own hardcoded {@link ReportAccessCatalog.Row#category} (a report row's category cannot
    * be resolved via the classic {@code AD_Menu} tree the way {@link #buildMatrix(Map, Map)}
-   * resolves a real window's — none of the 9 rows is a window row in that tree's sense, so there
+   * resolves a real window's — none of the 10 rows is a window row in that tree's sense, so there
    * is no SQL fallback here, unlike {@code buildMatrix}), each with a per-role tri-state {@code
    * access} map built from {@code reportTierMapsByRoleId} — same shape, same {@link #NONE}
    * fallback, same category-sort and row-sort conventions as {@link #buildMatrix(Map, Map)}, so

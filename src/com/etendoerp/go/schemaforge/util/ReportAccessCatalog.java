@@ -30,13 +30,14 @@ import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.ui.Window;
 
 /**
- * ETP-5402 — the "Informes" (Reports) subsection catalog: the 9 {@code SPEC_TYPE = 'R'} report
- * rows and the shared tier-resolution logic for them, factored out so BOTH {@code
- * SFRolesOverview} ("Configuración &gt; Roles") and {@code SFSystemRoleTemplates} (the User
- * window's "Roles del usuario" tab matrix columns) resolve a role's Informes access identically —
- * the two webhooks must never drift on which anchor id/category/kind backs a given report row.
+ * ETP-5402 — the "Informes" (Reports) subsection catalog: 9 {@code SPEC_TYPE = 'R'} report
+ * specs, expressed as 10 {@link Row}s ({@code aging-receivable} split into 2 rows, see below),
+ * and the shared tier-resolution logic for them, factored out so BOTH {@code SFRolesOverview}
+ * ("Configuración &gt; Roles") and {@code SFSystemRoleTemplates} (the User window's "Roles del
+ * usuario" tab matrix columns) resolve a role's Informes access identically — the two webhooks
+ * must never drift on which anchor id/category/kind backs a given report row.
  *
- * <p>None of the 9 rows is a candidate for either webhook's own {@code SPEC_TYPE = 'W'}
+ * <p>None of the 10 rows is a candidate for either webhook's own {@code SPEC_TYPE = 'W'}
  * window-resolution query (windowless by construction), so each row's real access is resolved via
  * whichever ad-hoc mechanism its own NEO handler actually gates on today — see
  * {@code santo_ETP-5402-analysis-and-plan.md}'s Part A DB-verified inventory in
@@ -118,7 +119,7 @@ public final class ReportAccessCatalog {
   /** Hardcoded Informes category for the Inventory-family report rows. */
   public static final String INVENTORY_CATEGORY = "Inventory";
 
-  /** The 9 Informes-subsection report rows, in declaration order. */
+  /** The 10 Informes-subsection report rows, in declaration order. */
   public static final List<Row> ROWS = List.of(
       new Row("tax-report", "Tax Report",
           Kind.CLASSIC_PROCESS, TAX_REPORT_PROCESS_ID, FINANCE_CATEGORY),
@@ -142,7 +143,7 @@ public final class ReportAccessCatalog {
           Kind.WINDOW, FINANCIAL_ACCOUNT_WINDOW_ID, FINANCE_CATEGORY));
 
   /**
-   * Resolves the 9-row Informes tier map for {@code role}, one entry per {@link #ROWS} id,
+   * Resolves the 10-row Informes tier map for {@code role}, one entry per {@link #ROWS} id,
    * dispatching per row on {@link Row#kind}. {@code knownWindowTiers} is an OPTIONAL
    * already-resolved real-window tier map (id → tier, e.g. the caller's own {@code
    * resolveWindowTierMap(role, goWindowsById.keySet())} result); when non-null, the 6 rows

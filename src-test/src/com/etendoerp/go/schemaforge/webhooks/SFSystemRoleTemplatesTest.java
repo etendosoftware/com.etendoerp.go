@@ -21,6 +21,8 @@ import static com.etendoerp.go.schemaforge.TestConstants.RESULT;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -28,9 +30,12 @@ import static org.mockito.Mockito.when;
 
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.SimpleExpression;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -394,6 +399,150 @@ class SFSystemRoleTemplatesTest extends BaseWebhookTest {
         // Sorted by name: "A Full Window" before "B Read Only Window".
         assertEquals("full", windows.getJSONObject(0).getString("tier"));
         assertEquals("read-only", windows.getJSONObject(1).getString("tier"));
+    }
+
+    // ── ETP-5402: Informes subsection (reports) ──────────────────────────
+
+    private static final String TAX_REPORT_PROCESS_ID = "8C1331B9EC14CED7E040007F010119A0";
+    private static final String FINANCIAL_ACCOUNT_WINDOW_ID = "94EAA455D2644E04AB25D93BE5157B6D";
+
+    /** Builds a mock classic {@link org.openbravo.model.ad.ui.Process} with the given id. */
+    private org.openbravo.model.ad.ui.Process mockClassicProcess(String id) {
+        org.openbravo.model.ad.ui.Process process = mock(org.openbravo.model.ad.ui.Process.class);
+        when(process.getId()).thenReturn(id);
+        return process;
+    }
+
+    /** Builds a mock classic {@code AD_Process_Access} row for {@code process}. */
+    private org.openbravo.model.ad.access.ProcessAccess mockClassicProcessAccessRow(
+            org.openbravo.model.ad.ui.Process process, boolean editable) {
+        org.openbravo.model.ad.access.ProcessAccess row =
+                mock(org.openbravo.model.ad.access.ProcessAccess.class);
+        when(row.getProcess()).thenReturn(process);
+        when(row.isEditableField()).thenReturn(editable);
+        return row;
+    }
+
+    /**
+     * Keys the classic {@code AD_Process_Access} criteria's {@code list()} by the {@code
+     * ProcessAccess.role.id} restriction {@code ReportAccessCatalog}'s classic-process resolution
+     * adds — same convention as {@code SFRolesOverviewTest}'s own keyed-by-role stubs.
+     */
+    private void stubClassicProcessAccessCriteriaKeyedByRole(
+            Map<String, List<org.openbravo.model.ad.access.ProcessAccess>> rowsByRoleId) {
+        OBCriteria<org.openbravo.model.ad.access.ProcessAccess> criteria =
+                mockCriteria(org.openbravo.model.ad.access.ProcessAccess.class);
+        AtomicReference<String> currentRoleId = new AtomicReference<>();
+        doAnswer(invocation -> {
+            Object restriction = invocation.getArgument(0);
+            if (restriction instanceof SimpleExpression) {
+                SimpleExpression expr = (SimpleExpression) restriction;
+                if ((org.openbravo.model.ad.access.ProcessAccess.PROPERTY_ROLE + ".id")
+                        .equals(expr.getPropertyName())) {
+                    currentRoleId.set((String) expr.getValue());
+                }
+            }
+            return criteria;
+        }).when(criteria).add(any());
+        when(criteria.list()).thenAnswer(invocation ->
+                rowsByRoleId.getOrDefault(currentRoleId.get(), Collections.emptyList()));
+    }
+
+    /**
+     * Keys the {@code WindowAccess} criteria's {@code list()} by the {@code
+     * WindowAccess.role.id} restriction — same convention as {@code SFRolesOverviewTest}'s own
+     * keyed-by-role stub, needed here because {@code ReportAccessCatalog#resolveTierMap} (called
+     * with a {@code null} {@code knownWindowTiers} from this webhook, see {@code
+     * SFSystemRoleTemplates#buildReportsJson}) issues one FRESH single-anchor {@code
+     * WindowAccess} query per {@code WINDOW}-kind report row, on top of {@link
+     * #stubEmptyWindowAccess}'s own real-window query — a fixed positional sequence would
+     * misalign across roles the moment any of those extra per-row queries fires.
+     */
+    private void stubWindowAccessCriteriaKeyedByRole(Map<String, List<WindowAccess>> rowsByRoleId) {
+        OBCriteria<WindowAccess> criteria = mockCriteria(WindowAccess.class);
+        AtomicReference<String> currentRoleId = new AtomicReference<>();
+        doAnswer(invocation -> {
+            Object restriction = invocation.getArgument(0);
+            if (restriction instanceof SimpleExpression) {
+                SimpleExpression expr = (SimpleExpression) restriction;
+                if ((WindowAccess.PROPERTY_ROLE + ".id").equals(expr.getPropertyName())) {
+                    currentRoleId.set((String) expr.getValue());
+                }
+            }
+            return criteria;
+        }).when(criteria).add(any());
+        when(criteria.list()).thenAnswer(invocation ->
+                rowsByRoleId.getOrDefault(currentRoleId.get(), Collections.emptyList()));
+    }
+
+    @Test
+    @DisplayName("ETP-5402: every role has an empty reports array when no grants exist")
+    void testReportsEmptyWhenNoGrants() throws Exception {
+        givenSystemAdminCallerRole();
+        stubAllFourTemplatesResolve();
+        stubEmptyWindowAccess(Collections.emptyList());
+
+        webhook.get(parameters, responseVars);
+
+        JSONArray roles = new JSONObject(responseVars.get(RESULT)).getJSONArray("roles");
+        for (int i = 0; i < roles.length(); i++) {
+            assertEquals(0, roles.getJSONObject(i).getJSONArray("reports").length());
+        }
+    }
+
+    @Test
+    @DisplayName("ETP-5402: a classic AD_Process_Access grant on tax-report surfaces it as 'full' on the Finance template only")
+    void testClassicProcessGrantSurfacesTaxReportOnFinanceOnly() throws Exception {
+        givenSystemAdminCallerRole();
+        stubAllFourTemplatesResolve();
+        stubEmptyWindowAccess(Collections.emptyList());
+
+        org.openbravo.model.ad.ui.Process taxReportProcess = mockClassicProcess(TAX_REPORT_PROCESS_ID);
+        stubClassicProcessAccessCriteriaKeyedByRole(Map.of(
+                SystemRoleTemplates.FINANCE_ROLE_ID,
+                List.of(mockClassicProcessAccessRow(taxReportProcess, false))));
+
+        webhook.get(parameters, responseVars);
+
+        JSONArray roles = new JSONObject(responseVars.get(RESULT)).getJSONArray("roles");
+        JSONObject finance = roles.getJSONObject(0);
+        assertEquals(SystemRoleTemplates.FINANCE_ROLE_ID, finance.getString("id"));
+        JSONArray financeReports = finance.getJSONArray("reports");
+        assertEquals(1, financeReports.length());
+        assertEquals("tax-report", financeReports.getJSONObject(0).getString("id"));
+        assertEquals("full", financeReports.getJSONObject(0).getString("tier"),
+                "classic process access is binary — never 'read-only' even though the grant itself is not editable");
+
+        for (int i = 1; i < roles.length(); i++) {
+            assertEquals(0, roles.getJSONObject(i).getJSONArray("reports").length(),
+                    "Sales/Purchasing/Inventory must not see the Finance-only tax-report grant");
+        }
+    }
+
+    @Test
+    @DisplayName("ETP-5402: a Financial Account window grant surfaces all 6 financial-family reports")
+    void testFinancialAccountWindowGrantSurfacesSixFinancialReports() throws Exception {
+        givenSystemAdminCallerRole();
+        stubAllFourTemplatesResolve();
+        OBCriteria<SFSpec> specCriteria = mockCriteria(SFSpec.class);
+        when(specCriteria.list()).thenReturn(Collections.emptyList());
+
+        Window financialAccount = mockWindow(FINANCIAL_ACCOUNT_WINDOW_ID, "Financial Account");
+        stubWindowAccessCriteriaKeyedByRole(Map.of(
+                SystemRoleTemplates.FINANCE_ROLE_ID,
+                List.of(mockWindowAccessRow(financialAccount, true))));
+
+        webhook.get(parameters, responseVars);
+
+        JSONArray roles = new JSONObject(responseVars.get(RESULT)).getJSONArray("roles");
+        JSONObject finance = roles.getJSONObject(0);
+        JSONArray financeReports = finance.getJSONArray("reports");
+        assertEquals(6, financeReports.length(),
+                "bank-statements, bank-reconciliation, cash-close, financial-account-transactions, "
+                        + "financial-account-bank-connection, financial-accounts-page");
+        for (int i = 0; i < financeReports.length(); i++) {
+            assertEquals("full", financeReports.getJSONObject(i).getString("tier"));
+        }
     }
 
     // ── exception handling ───────────────────────────────────────────────
