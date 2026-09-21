@@ -809,21 +809,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * @return non-empty list of shipment IDs to invoice
    */
   protected List<String> parseShipmentIds(JSONObject body, String recordId) {
-    List<String> ids = new java.util.ArrayList<>();
-    if (body != null && body.has(PARAM_SHIPMENT_IDS)) {
-      try {
-        JSONArray arr = body.getJSONArray(PARAM_SHIPMENT_IDS);
-        for (int i = 0; i < arr.length(); i++) {
-          ids.add(arr.getString(i));
-        }
-      } catch (Exception e) {
-        log.warn("Failed to parse shipmentIds: {}", e.getMessage());
-      }
-    }
-    if (ids.isEmpty()) {
-      ids.add(recordId);
-    }
-    return ids;
+    return MultiDocumentInvoiceSupport.parseDocumentIds(body, PARAM_SHIPMENT_IDS, recordId, log);
   }
 
   /**
@@ -988,25 +974,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     if any ID is not found or shipments span multiple BPs
    */
   protected List<ShipmentInOut> loadAndValidateShipments(List<String> shipmentIds) {
-    List<ShipmentInOut> shipments = new java.util.ArrayList<>();
-    for (String id : shipmentIds) {
-      ShipmentInOut s = OBDal.getInstance().get(ShipmentInOut.class, id);
-      if (s == null) {
-        throw new OBException("Shipment not found: " + id);
-      }
-      shipments.add(s);
-    }
-    if (shipments.isEmpty()) {
-      throw new OBException("No shipments provided");
-    }
-
-    BusinessPartner bp = shipments.get(0).getBusinessPartner();
-    for (ShipmentInOut s : shipments) {
-      if (!s.getBusinessPartner().getId().equals(bp.getId())) {
-        throw new OBException("All shipments must belong to the same Business Partner");
-      }
-    }
-    return shipments;
+    return MultiDocumentInvoiceSupport.loadAndValidateSameBusinessPartner(shipmentIds, "Shipment not found: ",
+        "No shipments provided", "All shipments must belong to the same Business Partner");
   }
 
   /**
@@ -1184,28 +1153,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    */
   protected BigDecimal resolveShipmentLineQty(ShipmentInOutLine sl, boolean hasOverrides,
       Map<String, BigDecimal> lineOverrides, Map<String, BigDecimal> pendingQtyMap) {
-    if (!sl.isActive() || (hasOverrides && !lineOverrides.containsKey(sl.getId()))) {
-      return null;
-    }
-    BigDecimal movementQty = sl.getMovementQuantity();
-    if (movementQty == null || movementQty.compareTo(BigDecimal.ZERO) == 0) {
-      return null;
-    }
-    int sign = movementQty.signum();
-    BigDecimal movementQtyAbs = movementQty.abs();
-    // Fall back to movement qty magnitude when map is absent (backward-compat / no-DB path).
-    BigDecimal pendingQtyAbs = pendingQtyMap.getOrDefault(sl.getId(), movementQtyAbs)
-        .min(movementQtyAbs);
-    if (pendingQtyAbs.compareTo(BigDecimal.ZERO) <= 0) {
-      return null; // already fully invoiced
-    }
-    BigDecimal qtyAbs = hasOverrides
-        ? lineOverrides.get(sl.getId()).abs().min(pendingQtyAbs)
-        : pendingQtyAbs;
-    if (qtyAbs.compareTo(BigDecimal.ZERO) <= 0) {
-      return null;
-    }
-    return sign < 0 ? qtyAbs.negate() : qtyAbs;
+    return MultiDocumentInvoiceSupport.resolveInOutLineQty(sl, hasOverrides, lineOverrides, pendingQtyMap);
   }
 
   /**
