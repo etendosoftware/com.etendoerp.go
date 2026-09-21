@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -32,6 +33,7 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
 
 /**
@@ -376,14 +378,15 @@ public class NeoInvoiceSupportTest {
     }
   }
 
-  // ─── ETP-5334: computePendingQtyPerOrderLine ──────────────────────────────
+  // ─── ETP-5381: computePendingQtyPerLineOrThrow ─────────────────────────────
 
   /**
-   * ETP-5334: an order line received as 4 + 6 with nothing invoiced yet yields an aggregate
-   * pending of 10 — the quantity the invoice line created from the order is entitled to.
+   * The throwing variant differs from the swallowing one ONLY in how it reports failure: on a
+   * successful query both must produce the exact same pending map, so a caller can switch to it
+   * for the duplicate-invoice guards without changing what gets invoiced.
    */
   @Test
-  public void computePendingQtyPerOrderLine_splitReception_aggregatesAcrossReceipts()
+  public void computePendingQtyPerLineOrThrow_success_returnsSameMapAsSwallowingVariant()
       throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
@@ -394,98 +397,67 @@ public class NeoInvoiceSupportTest {
       when(conn.prepareStatement(Mockito.anyString())).thenReturn(ps);
       when(ps.executeQuery()).thenReturn(rs);
 
-      when(rs.next()).thenReturn(true, false);
-      when(rs.getString(1)).thenReturn("ol-1");
-      when(rs.getBigDecimal(2)).thenReturn(BigDecimal.valueOf(10.0));  // 4 + 6 received
-      when(rs.getBigDecimal(3)).thenReturn(BigDecimal.ZERO);           // nothing invoiced yet
+      // One row per invocation: the first two values drive the swallowing call, the last two the
+      // throwing one.
+      when(rs.next()).thenReturn(true, false, true, false);
+      when(rs.getString(1)).thenReturn("line-1");
+      when(rs.getBigDecimal(2)).thenReturn(BigDecimal.valueOf(9.0));
+      when(rs.getBigDecimal(3)).thenReturn(BigDecimal.valueOf(2.0));
 
-      Map<String, BigDecimal> result = NeoInvoiceSupport.computePendingQtyPerOrderLine("inv-1");
+      Map<String, BigDecimal> swallowing =
+          NeoInvoiceSupport.computePendingQtyPerLine("inout-parity", true);
+      Map<String, BigDecimal> throwing =
+          NeoInvoiceSupport.computePendingQtyPerLineOrThrow("inout-parity", true);
 
-      assertEquals("Expected one order line in the result map", 1, result.size());
-      assertEquals("Aggregate pending for ol-1 must be 10",
-          0, result.get("ol-1").compareTo(BigDecimal.valueOf(10.0)));
+      assertEquals("Both variants must compute the same pending map", swallowing, throwing);
+      assertEquals("Pending must be 7",
+          0, throwing.get("line-1").compareTo(BigDecimal.valueOf(7.0)));
     }
   }
 
   /**
-   * ETP-5334: unlike {@code computePendingQtyPerLine}, an exhausted order line is KEPT in the map
-   * with a pending of zero — its presence is what tells the guard "this order line is split, use
-   * the aggregate", so dropping it would silently fall back to the per-inout-line comparison.
+   * A DB failure must propagate as an {@link OBException}. This is the whole point of the
+   * variant: the duplicate-invoice guards decide on the map being empty, so an outage that
+   * returned an empty map would read as "already fully invoiced" and reject a legitimate invoice
+   * with a message describing something that never happened.
    */
   @Test
-  public void computePendingQtyPerOrderLine_fullyInvoiced_keptWithZeroPending() throws Exception {
+  public void computePendingQtyPerLineOrThrow_dbError_throwsOBException() {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
-      Connection conn = stubDalConnection(obDalMock, dal);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenThrow(new RuntimeException("DB connection failed"));
 
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(conn.prepareStatement(Mockito.anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-
-      // received=10, invoiced=12 → clamped to 0 but still returned
-      when(rs.next()).thenReturn(true, false);
-      when(rs.getString(1)).thenReturn("ol-done");
-      when(rs.getBigDecimal(2)).thenReturn(BigDecimal.valueOf(10.0));
-      when(rs.getBigDecimal(3)).thenReturn(BigDecimal.valueOf(12.0));
-
-      Map<String, BigDecimal> result = NeoInvoiceSupport.computePendingQtyPerOrderLine("inv-2");
-
-      assertEquals("Exhausted order line must stay in the map", 1, result.size());
-      assertEquals("Pending must be clamped to zero, never negative",
-          0, result.get("ol-done").compareTo(BigDecimal.ZERO));
+      try {
+        NeoInvoiceSupport.computePendingQtyPerLineOrThrow("inout-throw-err", true);
+        fail("A DB failure must not be reported as an empty pending map");
+      } catch (OBException e) {
+        assertEquals("Could not determine pending quantities to invoice", e.getMessage());
+      }
     }
   }
 
   /**
-   * ETP-5334: a DB error must not block completion — the method fails open with an empty map,
-   * which sends every invoice line back to the unchanged per-inout-line path.
+   * The divergence, asserted against one and the same failure: the swallowing variant keeps
+   * returning an empty map (correct for the read-only billing-status badge, which must not blow
+   * up a list request), while the throwing variant refuses to answer.
    */
   @Test
-  public void computePendingQtyPerOrderLine_dbError_returnsEmptyMap() throws Exception {
+  public void pendingQtyVariants_sameDbError_swallowReturnsEmptyWhileThrowRaises() {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       OBDal dal = mock(OBDal.class);
-      Connection conn = stubDalConnection(obDalMock, dal);
-      when(conn.prepareStatement(Mockito.anyString()))
-          .thenThrow(new java.sql.SQLException("boom"));
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenThrow(new RuntimeException("DB down"));
 
-      Map<String, BigDecimal> result = NeoInvoiceSupport.computePendingQtyPerOrderLine("inv-err");
+      assertTrue("The badge path must degrade silently",
+          NeoInvoiceSupport.computePendingQtyPerLine("inout-diverge", true).isEmpty());
 
-      assertTrue("DB error must return an empty map", result.isEmpty());
-    }
-  }
-
-  /**
-   * ETP-5334: the query binds the invoice id to every {@code ORDER_LINE_SCOPE} placeholder — one
-   * per derived table. A mismatch between the placeholder count and the bind loop would only blow
-   * up against a real database, where a mocked PreparedStatement stays silent. Also pins the two
-   * clauses the fix depends on: the split-only filter and the exclusion of draft/voided/closed
-   * invoices from the already-invoiced quantity.
-   */
-  @Test
-  public void computePendingQtyPerOrderLine_bindsInvoiceIdToEveryScopePlaceholder()
-      throws Exception {
-    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      OBDal dal = mock(OBDal.class);
-      Connection conn = stubDalConnection(obDalMock, dal);
-
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
-      when(conn.prepareStatement(sqlCaptor.capture())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(false);
-
-      NeoInvoiceSupport.computePendingQtyPerOrderLine("inv-bind");
-
-      String sql = sqlCaptor.getValue();
-      int placeholders = sql.length() - sql.replace("?", "").length();
-      assertEquals("Every ? must be bound by the 4-iteration loop", 4, placeholders);
-      Mockito.verify(ps, Mockito.times(4)).setString(Mockito.anyInt(), Mockito.eq("inv-bind"));
-      assertTrue("Only order lines with several inout lines may be returned",
-          sql.contains("HAVING COUNT(*) > 1"));
-      assertTrue("Draft/voided/closed invoices must never count as invoiced",
-          sql.contains("NOT IN ('VO','CL','DR')"));
+      try {
+        NeoInvoiceSupport.computePendingQtyPerLineOrThrow("inout-diverge", true);
+        fail("The guard path must not degrade silently");
+      } catch (OBException expected) {
+        // Expected: an infrastructure failure must stay distinguishable from "nothing pending".
+      }
     }
   }
 }

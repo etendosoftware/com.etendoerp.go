@@ -20,11 +20,13 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
 
 /**
@@ -35,132 +37,6 @@ final class NeoInvoiceSupport {
   private static final Logger log = LogManager.getLogger(NeoInvoiceSupport.class);
 
   private NeoInvoiceSupport() {
-  }
-
-  /**
-   * Restricts a derived table to the order lines referenced by the invoice under validation.
-   * Consumes one {@code ?} parameter (the C_Invoice_ID).
-   */
-  private static final String ORDER_LINE_SCOPE =
-      " IN (SELECT ils.c_orderline_id FROM c_invoiceline ils "
-      + "WHERE ils.c_invoice_id = ? AND ils.isactive = 'Y' "
-      + "  AND ils.c_orderline_id IS NOT NULL)";
-
-  /**
-   * Returns the pending (not yet invoiced) quantity aggregated at ORDER-LINE level, for the order
-   * lines referenced by the given invoice that were received/shipped across <b>more than one</b>
-   * inout line (ETP-5334 — split reception / partial shipments).
-   *
-   * <p>Why this exists: {@code InvoiceLineLinker} can only pin an invoice line to a SINGLE
-   * {@code M_InOutLine_ID} (the column is a plain FK), so an invoice line created from the ORDER
-   * carrying the full pending order quantity ends up linked to one arbitrary receipt line. The
-   * per-inout-line guard then compares the full order quantity against that one receipt's
-   * quantity and blocks completion forever. At order-line level the comparison is against
-   * everything actually received for the order line, which is the quantity the invoice line is
-   * genuinely entitled to.
-   *
-   * <p>Aggregation, mirroring {@link #computePendingQtyPerLine(String, boolean)}:
-   * <ul>
-   *   <li>{@code received} = SUM(ABS(movementqty)) over the order line's active inout lines whose
-   *       shipment/receipt is neither draft nor voided — goods not yet received never become
-   *       invoiceable quantity.</li>
-   *   <li>{@code invoiced} = GREATEST(m_matchsi, invoice lines linked by {@code m_inoutline_id})
-   *       + invoice lines of the same order line with a NULL {@code m_inoutline_id}. The GREATEST
-   *       is the same anti-double-counting used per line (a matched line is also a linked line);
-   *       the unlinked set is disjoint from the linked one, so it is ADDED rather than folded into
-   *       the GREATEST — folding it in would under-count what is already invoiced and could let a
-   *       real over-invoice through.</li>
-   *   <li>Only non-draft, non-voided, non-closed invoices count as invoiced — identical to the
-   *       per-line query, and it also means the draft being completed never counts against
-   *       itself.</li>
-   * </ul>
-   *
-   * <p>Unlike {@link #computePendingQtyPerLine(String, boolean)}, order lines whose pending
-   * quantity is zero ARE returned (clamped at zero). Presence in the map is what tells the caller
-   * "this order line was split, use the aggregate"; omitting the exhausted ones would silently
-   * send a fully-invoiced order line back to the per-inout-line path.
-   *
-   * @param invoiceId the C_Invoice_ID of the draft invoice being completed
-   * @return map of C_OrderLine_ID → aggregate pending quantity, containing ONLY order lines with
-   *         two or more inout lines; never {@code null} (empty on error)
-   */
-  // SQL is a compile-time constant; every value is bound as a parameter.
-  @SuppressWarnings("java:S2077")
-  static Map<String, BigDecimal> computePendingQtyPerOrderLine(String invoiceId) {
-    String sql =
-        "SELECT ol.c_orderline_id, ol.received_qty, "
-        + "  COALESCE(GREATEST("
-        + "    COALESCE(msi_qty.qtymatched, 0), "
-        + "    COALESCE(direct_qty.qtyinvoiced, 0) "
-        + "  ), 0) + COALESCE(ol_qty.qtyinvoiced, 0) AS invoiced_qty "
-        // Received across ALL the inout lines of the order line. HAVING COUNT(*) > 1 keeps the
-        // single-receipt case on the untouched per-inout-line path (no behaviour change there).
-        + "FROM ("
-        + "  SELECT iol.c_orderline_id, SUM(ABS(iol.movementqty)) AS received_qty "
-        + "  FROM m_inoutline iol "
-        + "  JOIN m_inout io ON io.m_inout_id = iol.m_inout_id "
-        + "  WHERE iol.isactive = 'Y' AND io.isactive = 'Y' "
-        + "    AND io.docstatus NOT IN ('VO','DR') "
-        + "    AND iol.c_orderline_id" + ORDER_LINE_SCOPE + " "
-        + "  GROUP BY iol.c_orderline_id "
-        + "  HAVING COUNT(*) > 1"
-        + ") ol "
-        + "LEFT JOIN ("
-        + "  SELECT iol2.c_orderline_id, SUM(ABS(msi.qty)) AS qtymatched "
-        + "  FROM m_matchsi msi "
-        + "  JOIN m_inoutline iol2 ON iol2.m_inoutline_id = msi.m_inoutline_id "
-        + "  JOIN c_invoiceline il ON il.c_invoiceline_id = msi.c_invoiceline_id "
-        + "  JOIN c_invoice i ON i.c_invoice_id = il.c_invoice_id "
-        + "  WHERE i.docstatus NOT IN ('VO','CL','DR') AND i.isactive = 'Y' "
-        + "    AND iol2.c_orderline_id" + ORDER_LINE_SCOPE + " "
-        + "  GROUP BY iol2.c_orderline_id "
-        + ") msi_qty ON msi_qty.c_orderline_id = ol.c_orderline_id "
-        + "LEFT JOIN ("
-        + "  SELECT iol3.c_orderline_id, SUM(ABS(il2.qtyinvoiced)) AS qtyinvoiced "
-        + "  FROM c_invoiceline il2 "
-        + "  JOIN c_invoice i2 ON i2.c_invoice_id = il2.c_invoice_id "
-        + "  JOIN m_inoutline iol3 ON iol3.m_inoutline_id = il2.m_inoutline_id "
-        + "  WHERE i2.docstatus NOT IN ('VO','CL','DR') AND i2.isactive = 'Y' "
-        + "    AND iol3.c_orderline_id" + ORDER_LINE_SCOPE + " "
-        + "  GROUP BY iol3.c_orderline_id "
-        + ") direct_qty ON direct_qty.c_orderline_id = ol.c_orderline_id "
-        // Invoiced straight off the order, never linked to any inout line — disjoint from
-        // direct_qty (m_inoutline_id IS NULL), hence added, not folded into the GREATEST.
-        + "LEFT JOIN ("
-        + "  SELECT il3.c_orderline_id, SUM(ABS(il3.qtyinvoiced)) AS qtyinvoiced "
-        + "  FROM c_invoiceline il3 "
-        + "  JOIN c_invoice i3 ON i3.c_invoice_id = il3.c_invoice_id "
-        + "  WHERE i3.docstatus NOT IN ('VO','CL','DR') AND i3.isactive = 'Y' "
-        + "    AND il3.m_inoutline_id IS NULL "
-        + "    AND il3.c_orderline_id" + ORDER_LINE_SCOPE + " "
-        + "  GROUP BY il3.c_orderline_id "
-        + ") ol_qty ON ol_qty.c_orderline_id = ol.c_orderline_id";
-
-    Map<String, BigDecimal> result = new HashMap<>();
-    try {
-      // Same session connection as computePendingQtyPerLine: the scope subquery reads the
-      // invoice's own lines, which may still be uncommitted in the current transaction.
-      Connection conn = OBDal.getInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        for (int i = 1; i <= 4; i++) {  // four ORDER_LINE_SCOPE occurrences
-          ps.setString(i, invoiceId);
-        }
-        try (ResultSet rs = ps.executeQuery()) {
-          while (rs.next()) {
-            String orderLineId = rs.getString(1);
-            BigDecimal received = rs.getBigDecimal(2);
-            BigDecimal invoiced = rs.getBigDecimal(3);
-            BigDecimal pending = (received != null ? received : BigDecimal.ZERO)
-                .subtract(invoiced != null ? invoiced : BigDecimal.ZERO)
-                .max(BigDecimal.ZERO);
-            result.put(orderLineId, pending);
-          }
-        }
-      }
-    } catch (Exception e) {
-      log.error("DB error computing pending qty per order line for invoice {}", invoiceId, e);
-    }
-    return result;
   }
 
   /**
@@ -180,9 +56,40 @@ final class NeoInvoiceSupport {
     return computePendingQtyPerLine(inOutId, false);
   }
 
+  /**
+   * Same computation as {@link #computePendingQtyPerLine(String, boolean)} but propagating DB
+   * failures instead of swallowing them (ETP-5381).
+   *
+   * <p>The swallowing variant returns an empty map both when nothing is pending AND when the query
+   * blew up, which is harmless for the billing-status badge but not for a duplicate-invoice guard:
+   * a transient DB error would read as "already fully invoiced" and block a legitimate invoice
+   * with a misleading message. Callers that make a decision on emptiness must use this one, so an
+   * infrastructure failure surfaces as a 500 rather than a bogus 409.
+   *
+   * @throws OBException if the pending-quantity query cannot be executed
+   */
+  static Map<String, BigDecimal> computePendingQtyPerLineOrThrow(String inOutId, boolean includeDrafts) {
+    try {
+      return queryPendingQtyPerLine(inOutId, includeDrafts);
+    } catch (Exception e) {
+      log.error("DB error computing pending qty per line for inout {}", inOutId, e);
+      throw new OBException("Could not determine pending quantities to invoice", e);
+    }
+  }
+
+  static Map<String, BigDecimal> computePendingQtyPerLine(String inOutId, boolean includeDrafts) {
+    try {
+      return queryPendingQtyPerLine(inOutId, includeDrafts);
+    } catch (Exception e) {
+      log.error("DB error computing pending qty per line for inout {}", inOutId, e);
+      return new HashMap<>();
+    }
+  }
+
   // SQL literals derived from trusted booleans — no injection risk.
   @SuppressWarnings("java:S2077")
-  static Map<String, BigDecimal> computePendingQtyPerLine(String inOutId, boolean includeDrafts) {
+  private static Map<String, BigDecimal> queryPendingQtyPerLine(String inOutId, boolean includeDrafts)
+      throws SQLException {
     // includeDrafts=false: three paths — m_matchsi, direct m_inoutline_id, and ol_qty (invoice
     // created from the ORDER: m_inoutline_id IS NULL, joined via c_orderline_id scoped to this
     // shipment). Used for the billing-status badge and for blocking duplicate invoice creation.
@@ -278,28 +185,24 @@ final class NeoInvoiceSupport {
     }
 
     Map<String, BigDecimal> result = new HashMap<>();
-    try {
-      Connection conn = OBDal.getInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        for (int i = 1; i <= paramCount; i++) {
-          ps.setString(i, inOutId);
-        }
-        try (ResultSet rs = ps.executeQuery()) {
-          while (rs.next()) {
-            String lineId = rs.getString(1);
-            BigDecimal movQty = rs.getBigDecimal(2);
-            BigDecimal invQty = rs.getBigDecimal(3);
-            BigDecimal pending = (movQty != null ? movQty : BigDecimal.ZERO)
-                .subtract(invQty != null ? invQty : BigDecimal.ZERO)
-                .max(BigDecimal.ZERO);
-            if (pending.compareTo(BigDecimal.ZERO) > 0) {
-              result.put(lineId, pending);
-            }
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      for (int i = 1; i <= paramCount; i++) {
+        ps.setString(i, inOutId);
+      }
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String lineId = rs.getString(1);
+          BigDecimal movQty = rs.getBigDecimal(2);
+          BigDecimal invQty = rs.getBigDecimal(3);
+          BigDecimal pending = (movQty != null ? movQty : BigDecimal.ZERO)
+              .subtract(invQty != null ? invQty : BigDecimal.ZERO)
+              .max(BigDecimal.ZERO);
+          if (pending.compareTo(BigDecimal.ZERO) > 0) {
+            result.put(lineId, pending);
           }
         }
       }
-    } catch (Exception e) {
-      log.error("DB error computing pending qty per line for inout {}", inOutId, e);
     }
     return result;
   }

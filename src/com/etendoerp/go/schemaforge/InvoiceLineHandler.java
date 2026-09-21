@@ -32,6 +32,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.common.order.Order;
 
 /**
  * NeoHandler for invoice line entities (Sales Invoice, Purchase Invoice).
@@ -48,6 +49,11 @@ import org.openbravo.model.common.invoice.InvoiceLine;
  * {@code invoicedQuantity} and {@code lineNetAmount} when positive, so the
  * {@code C_Invoice_Post} validation ({@code @ReturnInvoiceNegativeQty@}) never fires
  * regardless of how the line was created (manual form or import modal).
+ *
+ * <p>On POST (ETP-5381): re-derives the parent invoice's {@code C_Order_ID} from its persisted
+ * lines, mirroring Classic's {@code Create Lines From} — see
+ * {@link #syncInvoiceOrderReferenceAfterLineSave(NeoContext)} for why this cannot be a frontend
+ * PATCH.
  *
  * <p>Registered via {@code javaQualifier = "invoiceLineHandler"} on the lines
  * entity of sales-invoice and purchase-invoice specs.
@@ -163,6 +169,7 @@ public class InvoiceLineHandler implements NeoHandler {
       syncConversionRateDocumentAfterLineSave(context);
       if ("POST".equals(method)) {
         persistSourceInvoiceLine(context);
+        syncInvoiceOrderReferenceAfterLineSave(context);
       }
       return autoFillExemptionCauseAfterLineSave(context);
     }
@@ -434,6 +441,116 @@ public class InvoiceLineHandler implements NeoHandler {
 
   private String extractCreatedLineIdFromPreviousResult(NeoContext context) {
     return NeoHandlerUtils.extractCreatedIdFromPreviousResult(context);
+  }
+
+  // ---------------------------------------------------------------------------
+  // ETP-5381 — invoice header order reference (C_Invoice.C_Order_ID)
+  // ---------------------------------------------------------------------------
+
+  /**
+   * After a line is created, re-derives the parent invoice's {@code C_Order_ID} from the
+   * invoice's persisted lines, mirroring Classic's {@code Create Lines From}
+   * ({@code UpdateInvoiceLineInformation#setOrderReferenceInInvoiceHeaderIfLinkedOnlyToTheSame
+   * OrderOrBlankIt}): the header points at the line's order, unless the invoice also holds lines
+   * from a DIFFERENT order, in which case it is blanked rather than left naming an arbitrary one.
+   *
+   * <p><b>Why this must live server-side.</b> {@code C_Order_ID} is {@code isreadonly='Y'} on the
+   * {@code header} entity of both invoice specs ({@code system} for sales, {@code readOnly} for
+   * purchase), so {@code NeoFieldFilter#filterWriteRequest} strips it from any PATCH: a frontend
+   * "set the header order after importing" call would be dropped silently — HTTP 200, nothing
+   * written — exactly the failure mode ETP-5381 fixed on the line FK. The goods-receipt import
+   * modal CAN do that PATCH only because {@code C_Order_ID} is {@code isreadonly='N'} there; the
+   * same code copied into an invoice window would be a no-op indistinguishable from working.
+   *
+   * <p>Derived from the persisted lines rather than from the set of documents the import popup
+   * happened to send, so it is correct for every path that reaches it — including importing from a
+   * SHIPMENT, whose invoice line still carries {@code salesOrderLine} when the shipment traces back
+   * to an order — and so a second import from another order self-corrects the header to null.
+   *
+   * <p>GO's own auto-generation path already set this ({@code CreateDraftInvoiceHandler} calls
+   * {@code invoice.setSalesOrder}); only the manual import-lines path left it empty, which is why
+   * the invoice showed "Sin documentos relacionados" while the same invoice built in Classic showed
+   * its order chip ({@code RelatedDocuments.jsx} reads the header's {@code salesOrder}).
+   *
+   * <p>Runs on POST only, matching Classic, which re-derives per copied line and not on delete: a
+   * line REMOVED from a multi-order invoice can therefore leave the header blanked. Removing a line
+   * cannot change {@code salesOrderLine} on the remaining ones, and the field is read-only on
+   * PATCH, so POST is the only moment the derivation can change.
+   *
+   * <p>Never fails the request: the line and its order are already persisted and the match rows
+   * ({@code M_MATCHSO}) do not depend on this column, so a failure here costs a UI chip, not
+   * document integrity.
+   *
+   * @param context the current NeoContext, positioned after the line create completed
+   */
+  private void syncInvoiceOrderReferenceAfterLineSave(NeoContext context) {
+    try {
+      InvoiceLine line = resolveSavedLine(context);
+      if (line == null || line.getSalesOrderLine() == null || line.getInvoice() == null) {
+        return;
+      }
+      Order relatedOrder = line.getSalesOrderLine().getSalesOrder();
+      if (relatedOrder == null) {
+        return;
+      }
+      Invoice invoice = line.getInvoice();
+      Order resolved = existsOtherOrdersLinkedToThisInvoice(invoice.getId(), relatedOrder.getId())
+          ? null
+          : relatedOrder;
+      String currentId = invoice.getSalesOrder() != null ? invoice.getSalesOrder().getId() : null;
+      String resolvedId = resolved != null ? resolved.getId() : null;
+      if (StringUtils.equals(currentId, resolvedId)) {
+        return;
+      }
+      invoice.setSalesOrder(resolved);
+      OBDal.getInstance().save(invoice);
+      OBDal.getInstance().flush();
+    } catch (Exception e) {
+      log.warn("[ETP-5381] Could not sync the invoice header order reference: {}", e.getMessage());
+    }
+  }
+
+  /**
+   * Resolves the {@code InvoiceLine} this request just saved. POST exposes the new line only
+   * through {@code getPreviousResult()}; PATCH/PUT carry it as the record id. Same resolution
+   * {@link #resolveParentInvoiceIdAfterSave(NeoContext)} performs, stopping at the line itself
+   * because the caller needs its {@code salesOrderLine}, not only its invoice.
+   *
+   * @param context the current NeoContext
+   * @return the saved line, or {@code null} if it could not be resolved
+   */
+  private InvoiceLine resolveSavedLine(NeoContext context) {
+    String lineId = context.getRecordId();
+    if (StringUtils.isBlank(lineId)) {
+      lineId = extractCreatedLineIdFromPreviousResult(context);
+    }
+    if (StringUtils.isBlank(lineId)) {
+      return null;
+    }
+    return OBDal.getInstance().get(InvoiceLine.class, lineId);
+  }
+
+  /**
+   * Whether this invoice holds any line linked to an order OTHER than the given one — Classic's
+   * {@code existsOtherOrdersLinkedToThisInvoice}, same HQL shape and same single-row probe.
+   *
+   * @param invoiceId the invoice being written
+   * @param orderId   the order of the line just saved
+   * @return {@code true} when a line of a different order exists, i.e. a multi-order invoice
+   */
+  private boolean existsOtherOrdersLinkedToThisInvoice(String invoiceId, String orderId) {
+    //@formatter:off
+    String hql =
+            "as il" +
+            " where il.invoice.id = :invId" +
+            "   and il.salesOrderLine.salesOrder.id <> :ordId";
+    //@formatter:on
+    return OBDal.getInstance()
+        .createQuery(InvoiceLine.class, hql)
+        .setNamedParameter("invId", invoiceId)
+        .setNamedParameter("ordId", orderId)
+        .setMaxResult(1)
+        .uniqueResult() != null;
   }
 
   /**
