@@ -455,13 +455,13 @@ public abstract class AbstractOrderHeaderHandler implements NeoHandler {
       for (int i = 0; i < dataArr.length(); i++) {
         applyTotalDiscountToRecord(dataArr.getJSONObject(i));
       }
-      applyCorrectedStatusPercentages(dataArr);
       if (context.getRecordId() != null) {
         dataArr.getJSONObject(0).put("hasLinkedDocuments", checkLinkedDocuments(context.getRecordId()));
       } else {
         annotateListWithLinkedDocuments(dataArr);
       }
       annotatePendingDocuments(dataArr);
+      applyCorrectedStatusPercentages(dataArr);
       return NeoResponse.ok(body);
     } catch (Exception e) {
       log.error("Error post-processing order header GET response (id={})", context.getRecordId(), e);
