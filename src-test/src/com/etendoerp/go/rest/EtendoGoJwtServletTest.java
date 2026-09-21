@@ -1990,6 +1990,10 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
+      // The checkout endpoint is owner-gated. mockStatic returns false for an unstubbed boolean,
+      // which would answer 403 before any of the plan behaviour below is reached.
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail("user@test.com"))
+          .thenReturn(true);
 
       servlet.doPost(req, resp.response);
     }
@@ -2021,6 +2025,10 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
+      // The checkout endpoint is owner-gated. mockStatic returns false for an unstubbed boolean,
+      // which would answer 403 before any of the plan behaviour below is reached.
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail("user@test.com"))
+          .thenReturn(true);
 
       servlet.doPost(req, resp.response);
     }
@@ -2054,6 +2062,10 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
+      // The checkout endpoint is owner-gated. mockStatic returns false for an unstubbed boolean,
+      // which would answer 403 before any of the plan behaviour below is reached.
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail("user@test.com"))
+          .thenReturn(true);
 
       servlet.doPost(req, resp.response);
     }
@@ -2093,6 +2105,10 @@ public class EtendoGoJwtServletTest {
          MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
       dalMock.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken("valid-token"))
           .thenReturn(account);
+      // The checkout endpoint is owner-gated. mockStatic returns false for an unstubbed boolean,
+      // which would answer 403 before any of the plan behaviour below is reached.
+      dalMock.when(() -> EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail("user@test.com"))
+          .thenReturn(true);
 
       servlet.doPost(req, resp.response);
     }
