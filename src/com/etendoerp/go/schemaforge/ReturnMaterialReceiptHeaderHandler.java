@@ -40,8 +40,6 @@ import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
 
-import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
-
 /**
  * Post-hook for the Return Material Receipt header entity.
  *
@@ -52,9 +50,12 @@ import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
  * <p>{@code issuerOrg} is additionally injected on detail GETs only (ETP-5124, mirroring the
  * ETP-4939 pattern), via the shared {@link NeoHandlerUtils#enrichIssuerOrg}, also used by
  * {@link GoodsShipmentHeaderHandler} and {@link ReturnToVendorShipmentHeaderHandler}.
+ *
+ * <p>Extends {@link AbstractReturnDocumentHeaderHandler}, which owns the {@code postingService}
+ * injection point and the {@code handle()} wiring shared with {@link ReturnToVendorShipmentHeaderHandler}.
  */
 @Named("returnMaterialReceiptHeaderHandler")
-public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
+public class ReturnMaterialReceiptHeaderHandler extends AbstractReturnDocumentHeaderHandler {
 
   private static final Logger log = LogManager.getLogger(ReturnMaterialReceiptHeaderHandler.class);
 
@@ -63,14 +64,6 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
 
   @Inject
   NeoCloneRecordHandler cloneRecordHandler;
-
-  @Inject
-  private DocumentPostingService postingService;
-
-  /** Package-private seam so unit tests can inject a mocked {@link DocumentPostingService}. */
-  void setPostingService(DocumentPostingService postingService) {
-    this.postingService = postingService;
-  }
 
   private static final String FIELD_SOURCE_SHIPMENT_DOC_NO = "sourceShipmentDocNo";
   private static final String FIELD_SOURCE_SHIPMENTS = "sourceShipments";
@@ -86,18 +79,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
   private static final String ERR_RECORD_ID_REQUIRED = "Record ID is required";
 
   @Override
-  public NeoResponse handle(NeoContext context) {
-    mirrorAccountingDate(context);
-    return NeoHandlerUtils.delegateToPostingServiceOrElse(context, postingService, this::continueHandling);
-  }
-
-  /**
-   * Everything {@link #handle(NeoContext)} used to do after its posting-delegation guard
-   * clause, now the continuation {@link NeoHandlerUtils#delegateToPostingServiceOrElse} calls
-   * when posting/unpost did not apply (ETP-5378 — see that method's javadoc for why the guard
-   * clause itself had to move out of this class entirely, not just its body).
-   */
-  private NeoResponse continueHandling(NeoContext context) {
+  protected NeoResponse continueHandling(NeoContext context) {
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())
         && "POST".equals(context.getHttpMethod())
         && context.getRecordId() == null) {
@@ -156,7 +138,8 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
    * falls back to whatever default the persistence layer applies instead of the document's own
    * movement date.
    */
-  static void mirrorAccountingDate(NeoContext context) {
+  @Override
+  protected void mirrorAccountingDate(NeoContext context) {
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())
         && NeoHandlerUtils.isWriteMethod(context.getHttpMethod())) {
       NeoHandlerUtils.mirrorFieldValue(context.getRequestBody(), FIELD_MOVEMENT_DATE, FIELD_ACCOUNTING_DATE);
