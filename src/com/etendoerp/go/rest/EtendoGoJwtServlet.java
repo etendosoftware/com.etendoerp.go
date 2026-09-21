@@ -726,25 +726,40 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         handleExistingBillingPurchase(request, response, account, activePurchase);
         return;
       }
-      final String origin = resolveRequestOrigin(request);
-      try {
-        JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
-            clientName, origin, planKey);
-        writeResponse(response, HttpServletResponse.SC_CREATED, result);
-      } catch (PlanNotAvailableException e) {
-        // Deliberately not distinguishing "unknown key" from "inactive plan": the endpoint must
-        // not confirm which catalog keys exist.
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_PLAN_NOT_AVAILABLE,
-            PLAN_NOT_AVAILABLE_MESSAGE, PLAN_NOT_AVAILABLE_MESSAGE);
-      } catch (IllegalStateException e) {
-        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CODE_CHECKOUT_NOT_CONFIGURED,
-            CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
-      } catch (Exception e) {
-        log.error("Could not create account billing purchase", e);
-        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
-            "Unable to create billing purchase", "Unable to create billing purchase");
-      }
+      openBillingPurchaseSession(response, account, clientName, planKey,
+          resolveRequestOrigin(request));
     });
+  }
+
+  /**
+   * Opens a provider checkout session for a new account-level purchase and answers the caller,
+   * translating each failure mode into the response the billing contract promises.
+   *
+   * @param response the response to answer on
+   * @param account the authenticated billing owner
+   * @param clientName the tenant name the purchase is for
+   * @param planKey the catalog key of the plan being bought
+   * @param origin the origin the provider must return the buyer to
+   */
+  private void openBillingPurchaseSession(HttpServletResponse response, Account account,
+      String clientName, String planKey, String origin) throws IOException {
+    try {
+      JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
+          clientName, origin, planKey);
+      writeResponse(response, HttpServletResponse.SC_CREATED, result);
+    } catch (PlanNotAvailableException e) {
+      // Deliberately not distinguishing "unknown key" from "inactive plan": the endpoint must
+      // not confirm which catalog keys exist.
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_PLAN_NOT_AVAILABLE,
+          PLAN_NOT_AVAILABLE_MESSAGE, PLAN_NOT_AVAILABLE_MESSAGE);
+    } catch (IllegalStateException e) {
+      writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CODE_CHECKOUT_NOT_CONFIGURED,
+          CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
+    } catch (Exception e) {
+      log.error("Could not create account billing purchase", e);
+      writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
+          "Unable to create billing purchase", "Unable to create billing purchase");
+    }
   }
 
   private void handleExistingBillingPurchase(HttpServletRequest request,
