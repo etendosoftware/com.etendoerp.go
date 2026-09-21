@@ -238,11 +238,16 @@ public class DocumentPostingService {
    * @return {@code true} when this is an {@code M_Inventory} document with at least one line
    *     transaction whose cost is not yet calculated (including a null/unset flag, treated as
    *     not calculated); {@code false} otherwise, including when the table is not {@code
-   *     M_Inventory}, the record cannot be resolved, or the lookup itself fails — this pre-check
-   *     is optional (a purely additive improvement over the generic error path), so it fails
-   *     closed on its own, same as {@link #resolveMissingAccountsDetail} and
-   *     {@link #resolveMissingProductAccountsDetail}, rather than blocking a post that would
-   *     otherwise have gone through {@code acct.post()} normally.
+   *     M_Inventory}, the record cannot be resolved, or the lookup itself fails. Unlike
+   *     {@link #resolveMissingAccountsDetail} and {@link #resolveMissingProductAccountsDetail} —
+   *     enrichment helpers called AFTER {@code acct.post()} has already failed, where a failure
+   *     here just omits extra detail text and the post stays blocked either way — this method is
+   *     a GATE called BEFORE {@code acct.post()}. On a lookup error it returns {@code false},
+   *     which lets the post PROCEED normally: this pre-check fails OPEN (permissive), not closed.
+   *     That is deliberate: the alternative (blocking on lookup failure) would risk breaking the
+   *     ~15 existing non-Inventory unit tests that exercise this path with an unmocked
+   *     {@code OBDal}, for a pre-check that is a purely additive improvement over the generic
+   *     error path in the first place.
    */
   private boolean isUncalculatedCostInventory(String adTableId, String recordId) {
     try {
@@ -263,7 +268,7 @@ public class DocumentPostingService {
       }
       return false;
     } catch (Exception e) {
-      log.debug("Could not evaluate cost-calculated pre-check for table {} record {}", adTableId, recordId, e);
+      log.warn("Could not evaluate cost-calculated pre-check for table {} record {}", adTableId, recordId, e);
       return false;
     }
   }
