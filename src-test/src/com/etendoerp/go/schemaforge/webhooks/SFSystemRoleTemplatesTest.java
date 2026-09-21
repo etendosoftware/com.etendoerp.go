@@ -404,7 +404,7 @@ class SFSystemRoleTemplatesTest extends BaseWebhookTest {
     // ── ETP-5402: Informes subsection (reports) ──────────────────────────
 
     private static final String TAX_REPORT_PROCESS_ID = "8C1331B9EC14CED7E040007F010119A0";
-    private static final String FINANCIAL_ACCOUNT_WINDOW_ID = "94EAA455D2644E04AB25D93BE5157B6D";
+    private static final String FINANCIAL_REPORTS_WINDOW_ID = "D647D118F5014D00AF47A636B2CD0DD3";
 
     /** Builds a mock classic {@link org.openbravo.model.ad.ui.Process} with the given id. */
     private org.openbravo.model.ad.ui.Process mockClassicProcess(String id) {
@@ -451,12 +451,10 @@ class SFSystemRoleTemplatesTest extends BaseWebhookTest {
     /**
      * Keys the {@code WindowAccess} criteria's {@code list()} by the {@code
      * WindowAccess.role.id} restriction — same convention as {@code SFRolesOverviewTest}'s own
-     * keyed-by-role stub, needed here because {@code ReportAccessCatalog#resolveTierMap} (called
-     * with a {@code null} {@code knownWindowTiers} from this webhook, see {@code
-     * SFSystemRoleTemplates#buildReportsJson}) issues one FRESH single-anchor {@code
-     * WindowAccess} query per {@code WINDOW}-kind report row, on top of {@link
-     * #stubEmptyWindowAccess}'s own real-window query — a fixed positional sequence would
-     * misalign across roles the moment any of those extra per-row queries fires.
+     * keyed-by-role stub, needed here because {@code ReportAccessCatalog#resolveTierMap} issues
+     * one FRESH single-anchor {@code WindowAccess} query per {@code WINDOW}-kind report row, on
+     * top of {@link #stubEmptyWindowAccess}'s own real-window query — a fixed positional
+     * sequence would misalign across roles the moment any of those extra per-row queries fires.
      */
     private void stubWindowAccessCriteriaKeyedByRole(Map<String, List<WindowAccess>> rowsByRoleId) {
         OBCriteria<WindowAccess> criteria = mockCriteria(WindowAccess.class);
@@ -520,26 +518,26 @@ class SFSystemRoleTemplatesTest extends BaseWebhookTest {
     }
 
     @Test
-    @DisplayName("ETP-5402: a Financial Account window grant surfaces all 6 financial-family reports")
-    void testFinancialAccountWindowGrantSurfacesSixFinancialReports() throws Exception {
+    @DisplayName("ETP-5402: a Financial Reports pseudo-window grant surfaces all 5 financial-family reports")
+    void testFinancialReportsWindowGrantSurfacesFiveFinancialReports() throws Exception {
         givenSystemAdminCallerRole();
         stubAllFourTemplatesResolve();
         OBCriteria<SFSpec> specCriteria = mockCriteria(SFSpec.class);
         when(specCriteria.list()).thenReturn(Collections.emptyList());
 
-        Window financialAccount = mockWindow(FINANCIAL_ACCOUNT_WINDOW_ID, "Financial Account");
+        Window financialReports = mockWindow(FINANCIAL_REPORTS_WINDOW_ID, "Financial Reports");
         stubWindowAccessCriteriaKeyedByRole(Map.of(
                 SystemRoleTemplates.FINANCE_ROLE_ID,
-                List.of(mockWindowAccessRow(financialAccount, true))));
+                List.of(mockWindowAccessRow(financialReports, true))));
 
         webhook.get(parameters, responseVars);
 
         JSONArray roles = new JSONObject(responseVars.get(RESULT)).getJSONArray("roles");
         JSONObject finance = roles.getJSONObject(0);
         JSONArray financeReports = finance.getJSONArray("reports");
-        assertEquals(6, financeReports.length(),
-                "bank-statements, bank-reconciliation, cash-close, financial-account-transactions, "
-                        + "financial-account-bank-connection, financial-accounts-page");
+        assertEquals(5, financeReports.length(),
+                "balance-sheet, profit-loss, report-general-ledger, report-journal-entries, "
+                        + "report-trial-balance");
         for (int i = 0; i < financeReports.length(); i++) {
             assertEquals("full", financeReports.getJSONObject(i).getString("tier"));
         }

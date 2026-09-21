@@ -1755,11 +1755,11 @@ class SFRolesOverviewTest extends BaseWebhookTest {
 
     // ── ETP-5402: Informes subsection (reports / reportCount / reportsMatrix) ───────────
 
-    // Mirror ReportAccessCatalog's own (private) constants — same convention this file already
+    // Mirror ReportAccessCatalog's own (public) constants — same convention this file already
     // uses for the ETP-5071 proxy ids above.
     private static final String TAX_REPORT_PROCESS_ID = "8C1331B9EC14CED7E040007F010119A0";
     private static final String AGING_RECEIVABLE_PROCESS_ID = "0D37A9F6109549DEB058373EF2DAEB6A";
-    private static final String FINANCIAL_ACCOUNT_WINDOW_ID = "94EAA455D2644E04AB25D93BE5157B6D";
+    private static final String FINANCIAL_REPORTS_WINDOW_ID = "D647D118F5014D00AF47A636B2CD0DD3";
     private static final String INVENTORY_STOCK_REPORT_WINDOW_ID = "6346B88619F948F9A42224BDB0B239FA";
 
     /** Builds a mock classic {@link org.openbravo.model.ad.ui.Process} with the given id. */
@@ -1870,23 +1870,26 @@ class SFRolesOverviewTest extends BaseWebhookTest {
     }
 
     @Test
-    @DisplayName("ETP-5402: full access to the Financial Account window surfaces all 6 financial-family reports without a separate grant")
-    void testFinancialAccountWindowGrantSurfacesAllSixFinancialReports() throws Exception {
+    @DisplayName("ETP-5402: full access to the Financial Reports pseudo-window surfaces all 5 financial-family reports without a separate grant")
+    void testFinancialReportsWindowGrantSurfacesAllFiveFinancialReports() throws Exception {
         givenSystemAdminCallerRole();
+        // The Financial Reports pseudo-window is NOT itself an active Etendo-GO spec (0 tabs,
+        // never opened directly — see ReportAccessCatalog's own javadoc) — goWindows stays
+        // empty, matching how it's genuinely resolved in production.
+        stubBaselineQueries(standardTenantRoles(), Collections.emptyList());
 
-        Window financialAccount = mockWindow(FINANCIAL_ACCOUNT_WINDOW_ID, "Financial Account");
-        stubBaselineQueries(standardTenantRoles(), Collections.singletonList(financialAccount));
+        Window financialReports = mockWindow(FINANCIAL_REPORTS_WINDOW_ID, "Financial Reports");
         stubWindowAccessCriteriaKeyedByRole(Map.of(
-                ADMIN_ROLE_ID, List.of(mockWindowAccessRow(financialAccount, true))));
+                ADMIN_ROLE_ID, List.of(mockWindowAccessRow(financialReports, true))));
 
         invokeWebhookWithNoTemplateComposition();
 
         JSONObject result = new JSONObject(responseVars.get(RESULT));
         JSONObject adminCard = result.getJSONArray("roles").getJSONObject(0);
         JSONArray reports = adminCard.getJSONArray("reports");
-        assertEquals(6, reports.length(),
-                "bank-statements, bank-reconciliation, cash-close, financial-account-transactions, "
-                        + "financial-account-bank-connection, financial-accounts-page");
+        assertEquals(5, reports.length(),
+                "balance-sheet, profit-loss, report-general-ledger, report-journal-entries, "
+                        + "report-trial-balance");
         for (int i = 0; i < reports.length(); i++) {
             assertEquals("full", reports.getJSONObject(i).getString("tier"));
         }
@@ -1932,14 +1935,14 @@ class SFRolesOverviewTest extends BaseWebhookTest {
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
         JSONArray categories = result.getJSONObject("reportsMatrix").getJSONArray("categories");
-        // "Finance" (9 rows: tax-report + both aging schedules + 6 financial-family) and
+        // "Finance" (8 rows: tax-report + both aging schedules + 5 financial-family) and
         // "Inventory" (1 row: inventory-stock-report), sorted case-insensitively.
         assertEquals(2, categories.length());
 
         JSONObject finance = categories.getJSONObject(0);
         assertEquals("Finance", finance.getString("name"));
         JSONArray financeReports = finance.getJSONArray("reports");
-        assertEquals(9, financeReports.length());
+        assertEquals(8, financeReports.length());
 
         JSONObject inventory = categories.getJSONObject(1);
         assertEquals("Inventory", inventory.getString("name"));

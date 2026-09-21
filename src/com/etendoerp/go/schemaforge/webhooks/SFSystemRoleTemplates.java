@@ -190,12 +190,8 @@ public class SFSystemRoleTemplates extends BaseWebhookService {
     roleJson.put(WINDOWS, buildWindowsJson(role, goWindowIds));
     // ETP-5402 — Informes reports array, via the shared ReportAccessCatalog resolution/JSON
     // builder (same one SFRolesOverview uses, so the two webhooks can never drift on which
-    // anchor id/category/kind backs a report row, or on how that tier map becomes JSON). No
-    // pre-resolved real-window tier map exists here (unlike SFRolesOverview, this class never
-    // builds one as a standalone map — see buildWindowsJson below), so null is passed for
-    // knownWindowTiers — the 6 financial-family rows just each resolve via their own fresh
-    // query instead of reusing an already-resolved tier, same as any other WINDOW-kind row.
-    roleJson.put(REPORTS, ReportAccessCatalog.reportsJson(ReportAccessCatalog.resolveTierMap(role, null)));
+    // anchor id/category/kind backs a report row, or on how that tier map becomes JSON).
+    roleJson.put(REPORTS, ReportAccessCatalog.reportsJson(ReportAccessCatalog.resolveTierMap(role)));
     return roleJson;
   }
 

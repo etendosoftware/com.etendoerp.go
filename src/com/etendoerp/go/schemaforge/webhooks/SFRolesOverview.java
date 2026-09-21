@@ -399,17 +399,17 @@ public class SFRolesOverview extends BaseWebhookService {
   private static final String OTHER_CATEGORY = "Other";
 
   /**
-   * ETP-5402 — the "Informes" (Reports) subsection: 9 {@code SPEC_TYPE = 'R'} report specs, none
-   * of which are candidates for {@link #resolveActiveEtendoGoWindowsById()} (windowless by
-   * construction — it only ever queries {@code SPEC_TYPE = 'W'}), so a role's real access to each
-   * one is resolved via whichever ad-hoc mechanism its own NEO handler actually gates on today —
-   * see {@code santo_ETP-5402-analysis-and-plan.md}'s Part A DB-verified inventory. Deliberately a
-   * PARALLEL {@code reports}/{@code reportCount}/{@code reportsMatrix} addition — never merged
-   * into {@code windows}/{@code windowCount}/{@code matrix} — so no existing consumer's contract
-   * changes.
+   * ETP-5402 — the "Informes" (Reports) subsection: the exact 9 reports the real
+   * `report-viewer` gallery shows (8 Finance, 1 Inventory — see {@link ReportAccessCatalog}'s own
+   * class javadoc for the corrected, live-QA-verified inventory; only 4 of the 9 even have an
+   * {@code ETGO_SF_SPEC} row at all, so none is a candidate for {@link
+   * #resolveActiveEtendoGoWindowsById()}, which only ever queries {@code SPEC_TYPE = 'W'}).
+   * Deliberately a PARALLEL {@code reports}/{@code reportCount}/{@code reportsMatrix} addition —
+   * never merged into {@code windows}/{@code windowCount}/{@code matrix} — so no existing
+   * consumer's contract changes.
    *
    * <p>The row catalog itself ({@link ReportAccessCatalog#ROWS}) and its tier-resolution logic
-   * ({@link ReportAccessCatalog#resolveTierMap(Role, Map)}) live in the shared {@link
+   * ({@link ReportAccessCatalog#resolveTierMap(Role)}) live in the shared {@link
    * ReportAccessCatalog} utility, NOT duplicated here — {@code SFSystemRoleTemplates} (the User
    * window's "Roles del usuario" tab matrix columns) needs the exact same Informes resolution, and
    * the two webhooks must never be allowed to drift on which anchor id/category/kind backs a given
@@ -563,7 +563,7 @@ public class SFRolesOverview extends BaseWebhookService {
     Map<String, String> tiers = resolveWindowTierMap(role, goWindowsById.keySet());
     mergeProxyAccessTiers(role, tiers);
     tierMapsByRoleId.put(role.getId(), tiers);
-    Map<String, String> reportTiers = ReportAccessCatalog.resolveTierMap(role, tiers);
+    Map<String, String> reportTiers = ReportAccessCatalog.resolveTierMap(role);
     reportTierMapsByRoleId.put(role.getId(), reportTiers);
     roleCards.add(buildRoleCardJson(role, tiers, reportTiers, goWindowsById, SOURCE_TENANT,
         resolveActiveUserIds(role).size()));
@@ -604,7 +604,7 @@ public class SFRolesOverview extends BaseWebhookService {
     Map<String, String> tiers = resolveWindowTierMap(tenantRole, goWindowsById.keySet());
     mergeProxyAccessTiers(tenantRole, tiers);
     tierMapsByRoleId.put(tenantRole.getId(), tiers);
-    Map<String, String> reportTiers = ReportAccessCatalog.resolveTierMap(tenantRole, tiers);
+    Map<String, String> reportTiers = ReportAccessCatalog.resolveTierMap(tenantRole);
     reportTierMapsByRoleId.put(tenantRole.getId(), reportTiers);
 
     Set<String> userIds = new LinkedHashSet<>(resolveActiveUserIds(tenantRole));
@@ -654,7 +654,7 @@ public class SFRolesOverview extends BaseWebhookService {
     Map<String, String> tiers = resolveWindowTierMap(templateRole, goWindowsById.keySet());
     mergeProxyAccessTiers(templateRole, tiers);
     tierMapsByRoleId.put(templateRole.getId(), tiers);
-    Map<String, String> reportTiers = ReportAccessCatalog.resolveTierMap(templateRole, tiers);
+    Map<String, String> reportTiers = ReportAccessCatalog.resolveTierMap(templateRole);
     reportTierMapsByRoleId.put(templateRole.getId(), reportTiers);
     roleCards.add(buildRoleCardJson(templateRole, tiers, reportTiers, goWindowsById,
         SOURCE_SYSTEM_TEMPLATE, userCount));
@@ -1027,7 +1027,7 @@ public class SFRolesOverview extends BaseWebhookService {
    * ETP-5402 — builds {@code reportsMatrix}: every {@link ReportAccessCatalog#ROWS} row, grouped
    * by its own hardcoded {@link ReportAccessCatalog.Row#category} (a report row's category cannot
    * be resolved via the classic {@code AD_Menu} tree the way {@link #buildMatrix(Map, Map)}
-   * resolves a real window's — none of the 10 rows is a window row in that tree's sense, so there
+   * resolves a real window's — none of the 9 rows is a window row in that tree's sense, so there
    * is no SQL fallback here, unlike {@code buildMatrix}), each with a per-role tri-state {@code
    * access} map built from {@code reportTierMapsByRoleId} — same shape, same {@link #NONE}
    * fallback, same category-sort and row-sort conventions as {@link #buildMatrix(Map, Map)}, so

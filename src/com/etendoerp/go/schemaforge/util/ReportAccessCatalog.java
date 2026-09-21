@@ -34,18 +34,35 @@ import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.ui.Window;
 
 /**
- * ETP-5402 — the "Informes" (Reports) subsection catalog: 9 {@code SPEC_TYPE = 'R'} report
- * specs, expressed as 10 {@link Row}s ({@code aging-receivable} split into 2 rows, see below),
- * and the shared tier-resolution logic for them, factored out so BOTH {@code SFRolesOverview}
- * ("Configuración &gt; Roles") and {@code SFSystemRoleTemplates} (the User window's "Roles del
- * usuario" tab matrix columns) resolve a role's Informes access identically — the two webhooks
- * must never drift on which anchor id/category/kind backs a given report row.
+ * ETP-5402 — the "Informes" (Reports) subsection catalog: the exact 9 reports the real
+ * `report-viewer` gallery shows (`ReportViewerPage.jsx`'s own `REPORT_PREVIEW_IMAGES` keys /
+ * each report's `artifacts/&lt;id&gt;/report-contract.json` — 8 under Finance, 1 under
+ * Inventory), and the shared tier-resolution logic for them, factored out so BOTH {@code
+ * SFRolesOverview} ("Configuración &gt; Roles") and {@code SFSystemRoleTemplates} (the User
+ * window's "Roles del usuario" tab matrix columns) resolve a role's Informes access identically
+ * — the two webhooks must never drift on which anchor id/category/kind backs a given row.
  *
- * <p>None of the 10 rows is a candidate for either webhook's own {@code SPEC_TYPE = 'W'}
- * window-resolution query (windowless by construction), so each row's real access is resolved via
- * whichever ad-hoc mechanism its own NEO handler actually gates on today — see
- * {@code santo_ETP-5402-analysis-and-plan.md}'s Part A DB-verified inventory in
- * {@code etendo_schema_forge}.
+ * <p><b>Corrected inventory (2026-09-21, live QA against a running environment) — this is NOT
+ * the same 10-row list an earlier pass of this class shipped with.</b> The original inventory
+ * mistakenly included 6 rows tied to {@code ETGO_SF_ENTITY.ad_tab_id} pointing at the
+ * "Financial Account" window ({@code bank-statements}, {@code bank-reconciliation}, {@code
+ * cash-close}, {@code financial-account-transactions}, {@code financial-account-bank-connection},
+ * {@code financial-accounts-page}) — none of which is an actual report-viewer gallery card
+ * (confirmed live: the "Informes" sidebar link only ever renders 9 cards, and only one of those
+ * 6 ids — {@code financial-accounts-page} — even exists as an {@code ETGO_SF_SPEC} row at all).
+ * It also completely missed 5 real gallery cards that have NO {@code ETGO_SF_SPEC} row of their
+ * own — {@code balance-sheet}, {@code profit-loss}, {@code report-general-ledger}, {@code
+ * report-journal-entries}, {@code report-trial-balance} — served entirely outside the
+ * Schema-Forge spec pipeline. Confirmed via direct DB query (2026-09-21): only {@code
+ * tax-report}, {@code aging-receivable}, {@code inventory-stock-report} and {@code
+ * financial-accounts-page} exist as {@code ETGO_SF_SPEC} rows at all; the 5 new reports have
+ * none. Their only real access gate is the SAME coarse, category-level pseudo-window
+ * {@code ReportViewerPage.jsx}'s own {@code REPORT_CATEGORY_WINDOW_IDS.finance} already uses to
+ * gate the whole "Informes" sidebar link for Finance — {@link #FINANCIAL_REPORTS_WINDOW_ID}
+ * ("Informes financieros" / Financial Reports, {@code D647D118F5014D00AF47A636B2CD0DD3}, 0 tabs,
+ * never opened directly, already granted Financiero-only per {@code
+ * TemplateRoleWindowAccess#financeGrants()}) — so these 5 rows resolve through it too, at
+ * per-row granularity (there being nothing finer-grained to resolve against).
  *
  * <p>{@code aging-receivable} is represented as TWO rows ({@code aging-receivable} / {@code
  * aging-payable}) even though both are served by the single {@code aging-receivable} spec and
@@ -71,13 +88,14 @@ public final class ReportAccessCatalog {
   public enum Kind { WINDOW, OBUIAPP_PROCESS, CLASSIC_PROCESS }
 
   /**
-   * A single Informes-subsection report row: its stable id (matches the {@code ETGO_SF_SPEC.name}
-   * / artifact spec name, except for the {@code aging-receivable}/{@code aging-payable} split
-   * above), a fallback display name (the frontend's {@code menu.json} is expected to override it,
-   * same convention as {@code SFRolesOverview}'s {@code PROXY_MATRIX_ROWS}), which access
-   * mechanism to resolve it through, the anchor id in that mechanism's own id-space, and the
-   * hardcoded category it belongs to (a report row's category cannot be derived from the classic
-   * {@code AD_Menu} tree the way a real window's can, so it is a human-assigned constant here).
+   * A single Informes-subsection report row: its stable id (matches the report's {@code
+   * artifacts/} directory name / {@code REPORT_PREVIEW_IMAGES} key, except for the {@code
+   * aging-receivable}/{@code aging-payable} split above), a fallback display name (the
+   * frontend's {@code menu.json} is expected to override it, same convention as {@code
+   * SFRolesOverview}'s {@code PROXY_MATRIX_ROWS}), which access mechanism to resolve it
+   * through, the anchor id in that mechanism's own id-space, and the hardcoded category it
+   * belongs to (a report row's category cannot be derived from the classic {@code AD_Menu}
+   * tree the way a real window's can, so it is a human-assigned constant here).
    */
   public static final class Row {
     public final String id;
@@ -95,16 +113,6 @@ public final class ReportAccessCatalog {
     }
   }
 
-  /**
-   * {@code AD_Window_ID} of the "Financial Account" window — the constituent window every one of
-   * the 6 financial-family report specs below resolves through (each spec's {@code ad_tab_id}
-   * lands on one of this window's own tabs). Already a real, separately-exposed Etendo GO window,
-   * so a caller that has ALREADY resolved this window's tier for the role (passed as {@code
-   * knownWindowTiers} to {@link #resolveTierMap(Role, Map)}) gets it read straight from that map
-   * for these 6 rows instead of a fresh query.
-   */
-  public static final String FINANCIAL_ACCOUNT_WINDOW_ID = "94EAA455D2644E04AB25D93BE5157B6D";
-
   /** Classic {@code AD_Process_ID} gating {@code tax-report} — mirrors {@code TaxReportHandler}. */
   public static final String TAX_REPORT_PROCESS_ID = "8C1331B9EC14CED7E040007F010119A0";
 
@@ -117,49 +125,57 @@ public final class ReportAccessCatalog {
   /** {@code AD_Window_ID} of the tab-less pseudo-window gating {@code inventory-stock-report}. */
   public static final String INVENTORY_STOCK_REPORT_WINDOW_ID = "6346B88619F948F9A42224BDB0B239FA";
 
+  /**
+   * {@code AD_Window_ID} of "Informes financieros" / Financial Reports — a real, active,
+   * tab-less pseudo-window (confirmed live) with NO backing {@code ETGO_SF_SPEC}, granted
+   * Financiero-only (see {@code TemplateRoleWindowAccess#financeGrants()}). This is the SAME
+   * anchor {@code ReportViewerPage.jsx}'s own {@code REPORT_CATEGORY_WINDOW_IDS.finance} uses
+   * to gate the whole Finance "Informes" sidebar link — the 5 reports below have no
+   * finer-grained access control of their own to resolve against (see the class javadoc's
+   * "Corrected inventory" note), so this coarse, category-level gate is genuinely their only
+   * real access boundary.
+   */
+  public static final String FINANCIAL_REPORTS_WINDOW_ID = "D647D118F5014D00AF47A636B2CD0DD3";
+
   /** Hardcoded Informes category for the Finance-family report rows. */
   public static final String FINANCE_CATEGORY = "Finance";
 
   /** Hardcoded Informes category for the Inventory-family report rows. */
   public static final String INVENTORY_CATEGORY = "Inventory";
 
-  /** The 10 Informes-subsection report rows, in declaration order. */
+  /** The 9 Informes-subsection report rows, in declaration order. */
   public static final List<Row> ROWS = List.of(
       new Row("tax-report", "Tax Report",
           Kind.CLASSIC_PROCESS, TAX_REPORT_PROCESS_ID, FINANCE_CATEGORY),
-      new Row("aging-receivable", "Informe Antiguedad de Cobros",
+      new Row("aging-receivable", "Aging Report (Receivables)",
           Kind.OBUIAPP_PROCESS, AGING_RECEIVABLE_PROCESS_ID, FINANCE_CATEGORY),
-      new Row("aging-payable", "Informe Antiguedad de Pagos",
+      new Row("aging-payable", "Aging Report (Payables)",
           Kind.OBUIAPP_PROCESS, AGING_PAYABLE_PROCESS_ID, FINANCE_CATEGORY),
-      new Row("inventory-stock-report", "Informes de inventario",
-          Kind.WINDOW, INVENTORY_STOCK_REPORT_WINDOW_ID, INVENTORY_CATEGORY),
-      new Row("bank-statements", "Bank Statements",
-          Kind.WINDOW, FINANCIAL_ACCOUNT_WINDOW_ID, FINANCE_CATEGORY),
-      new Row("bank-reconciliation", "Bank Reconciliation",
-          Kind.WINDOW, FINANCIAL_ACCOUNT_WINDOW_ID, FINANCE_CATEGORY),
-      new Row("cash-close", "Cash Close",
-          Kind.WINDOW, FINANCIAL_ACCOUNT_WINDOW_ID, FINANCE_CATEGORY),
-      new Row("financial-account-transactions", "Account Transactions",
-          Kind.WINDOW, FINANCIAL_ACCOUNT_WINDOW_ID, FINANCE_CATEGORY),
-      new Row("financial-account-bank-connection", "Bank Connections",
-          Kind.WINDOW, FINANCIAL_ACCOUNT_WINDOW_ID, FINANCE_CATEGORY),
-      new Row("financial-accounts-page", "Financial Accounts",
-          Kind.WINDOW, FINANCIAL_ACCOUNT_WINDOW_ID, FINANCE_CATEGORY));
+      new Row("balance-sheet", "Balance Sheet",
+          Kind.WINDOW, FINANCIAL_REPORTS_WINDOW_ID, FINANCE_CATEGORY),
+      new Row("profit-loss", "Profit & Loss",
+          Kind.WINDOW, FINANCIAL_REPORTS_WINDOW_ID, FINANCE_CATEGORY),
+      new Row("report-general-ledger", "General Ledger",
+          Kind.WINDOW, FINANCIAL_REPORTS_WINDOW_ID, FINANCE_CATEGORY),
+      new Row("report-journal-entries", "Journal Entries",
+          Kind.WINDOW, FINANCIAL_REPORTS_WINDOW_ID, FINANCE_CATEGORY),
+      new Row("report-trial-balance", "Trial Balance",
+          Kind.WINDOW, FINANCIAL_REPORTS_WINDOW_ID, FINANCE_CATEGORY),
+      new Row("inventory-stock-report", "Stock Report",
+          Kind.WINDOW, INVENTORY_STOCK_REPORT_WINDOW_ID, INVENTORY_CATEGORY));
 
   /**
-   * Resolves the 10-row Informes tier map for {@code role}, one entry per {@link #ROWS} id,
-   * dispatching per row on {@link Row#kind}. {@code knownWindowTiers} is an OPTIONAL
-   * already-resolved real-window tier map (id → tier, e.g. the caller's own {@code
-   * resolveWindowTierMap(role, goWindowsById.keySet())} result); when non-null, the 6 rows
-   * anchored on {@link #FINANCIAL_ACCOUNT_WINDOW_ID} read that window's tier straight out of it
-   * instead of re-querying. Pass {@code null} when no such map exists yet (e.g. {@code
-   * SFSystemRoleTemplates}, which never builds one as a standalone map) — those 6 rows then each
-   * resolve via their own fresh query, same as any other {@code WINDOW}-kind row.
+   * Resolves the 9-row Informes tier map for {@code role}, one entry per {@link #ROWS} id,
+   * dispatching per row on {@link Row#kind}. Every {@code WINDOW}-kind row's anchor is a
+   * tab-less pseudo-window with no backing {@code ETGO_SF_SPEC} of its own (never a real,
+   * already-exposed window a caller might have separately resolved), so — unlike an earlier
+   * revision of this method — there is no "reuse an already-resolved tier" shortcut to take:
+   * every row always does its own single-anchor query.
    *
    * @return report id → tier, one entry per {@link #ROWS} row (never omitted, {@link #NONE}
    *     included)
    */
-  public static Map<String, String> resolveTierMap(Role role, Map<String, String> knownWindowTiers) {
+  public static Map<String, String> resolveTierMap(Role role) {
     Map<String, String> reportTiers = new LinkedHashMap<>();
     for (Row row : ROWS) {
       String tier;
@@ -172,20 +188,12 @@ public final class ReportAccessCatalog {
           break;
         case WINDOW:
         default:
-          tier = resolveWindowKindTier(role, row.anchorId, knownWindowTiers);
+          tier = resolveWindowTierMap(role, Set.of(row.anchorId)).getOrDefault(row.anchorId, NONE);
           break;
       }
       reportTiers.put(row.id, tier);
     }
     return reportTiers;
-  }
-
-  private static String resolveWindowKindTier(Role role, String anchorId,
-      Map<String, String> knownWindowTiers) {
-    if (knownWindowTiers != null && FINANCIAL_ACCOUNT_WINDOW_ID.equals(anchorId)) {
-      return knownWindowTiers.getOrDefault(anchorId, NONE);
-    }
-    return resolveWindowTierMap(role, Set.of(anchorId)).getOrDefault(anchorId, NONE);
   }
 
   /**
@@ -275,13 +283,13 @@ public final class ReportAccessCatalog {
   }
 
   /**
-   * Turns a report-id → tier map (from {@link #resolveTierMap(Role, Map)}) into the
-   * sorted-by-name {@code {id, name, tier}} JSON array both {@code SFRolesOverview} (a role
-   * card's own {@code reports}) and {@code SFSystemRoleTemplates} (same shape, its own {@code
-   * reports}) need identically — extracted here, alongside {@link #resolveTierMap}, so the two
-   * webhooks can never drift on this shape either. Only accessible rows appear: a row whose
-   * tier is {@link #NONE} is skipped, matching {@code windowsJsonFromTierMap}'s own "only
-   * accessible rows appear" convention in both webhooks for real windows.
+   * Turns a report-id → tier map (from {@link #resolveTierMap(Role)}) into the sorted-by-name
+   * {@code {id, name, tier}} JSON array both {@code SFRolesOverview} (a role card's own {@code
+   * reports}) and {@code SFSystemRoleTemplates} (same shape, its own {@code reports}) need
+   * identically — extracted here, alongside {@link #resolveTierMap}, so the two webhooks can
+   * never drift on this shape either. Only accessible rows appear: a row whose tier is {@link
+   * #NONE} is skipped, matching {@code windowsJsonFromTierMap}'s own "only accessible rows
+   * appear" convention in both webhooks for real windows.
    */
   public static JSONArray reportsJson(Map<String, String> reportTiers) throws JSONException {
     List<JSONObject> reportJsons = new ArrayList<>();
