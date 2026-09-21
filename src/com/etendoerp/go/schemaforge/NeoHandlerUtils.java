@@ -24,6 +24,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -970,16 +971,9 @@ final class NeoHandlerUtils {
    * button column literally named "post", finds none, and answers 404 "Action not found: post"
    * ({@code NeoButtonActionHelper#executeButtonActionCore}).
    *
-   * <p>Called directly from {@code handle(NeoContext)} on {@code ReturnMaterialReceiptHeaderHandler}
-   * and {@code ReturnToVendorShipmentHeaderHandler} — NOT through a private per-handler wrapper.
-   * An earlier revision gave each handler its own one-line {@code handlePostingAction} wrapper
-   * around this same call (to keep {@code handle()}'s cognitive complexity down, java:S3776);
-   * that wrapper was itself then flagged as duplicated-lines-on-new-code a second time (3.23%
-   * vs. the 3% gate), since the two handlers' wrappers were byte-identical to each other. A
-   * plain static call costs {@code handle()} nothing in Sonar's complexity model — no ternary,
-   * no branch — so inlining the call directly removes the wrapper (and the duplication) without
-   * reopening the complexity finding. Same class of fix {@link #enrichIssuerOrg} above already
-   * applied to these same two handlers once before (PR #972).</p>
+   * <p>Package-visible only so {@link #delegateToPostingServiceOrElse} (below) — the entry
+   * point every caller actually uses — can reuse it; kept separate purely so that method has
+   * something to unit-test/compose against a bare {@code null} continuation.</p>
    *
    * @param context        the current NEO request context
    * @param postingService the handler's own injected instance; may be {@code null} in a test
@@ -989,5 +983,45 @@ final class NeoHandlerUtils {
    */
   static NeoResponse delegateToPostingService(NeoContext context, DocumentPostingService postingService) {
     return postingService != null ? postingService.handleAction(context) : null;
+  }
+
+  /**
+   * Runs the posting delegation above and, only when it declines (returns {@code null}), calls
+   * {@code continuation} with the same context — the null-check-and-early-return itself never
+   * appears in the caller.
+   *
+   * <p>ETP-5378 — this replaces what used to be the literal call site in each return-window
+   * handler's own {@code handle(NeoContext)}:
+   * <pre>{@code
+   * NeoResponse posting = NeoHandlerUtils.delegateToPostingService(context, postingService);
+   * if (posting != null) {
+   *   return posting;
+   * }
+   * }</pre>
+   * Those four lines were byte-identical between {@code ReturnMaterialReceiptHeaderHandler} and
+   * {@code ReturnToVendorShipmentHeaderHandler} and kept tripping SonarQube's
+   * duplicated-lines-on-new-code gate (3%) across two prior remediation attempts — moving the
+   * delegation's own BODY out (this class's earlier fix) and then removing a private wrapper
+   * method around it (a later fix) both still left this exact guard-clause SHAPE typed out at
+   * each call site, which is what CPD was actually matching. A guard clause that early-returns
+   * cannot be extracted into a plain callee — the caller always needs its own {@code if}/
+   * {@code return} — so the only way to remove it from the caller is to invert control: the
+   * caller hands over "what to do if posting didn't apply" as a continuation, and this method
+   * owns the one copy of the check. Each handler's own {@code handle()} is now just
+   * {@code mirrorAccountingDate(context); return delegateToPostingServiceOrElse(context,
+   * postingService, this::continueHandling);} — two lines with no branching of their own, well
+   * under whatever token threshold made the previous four-line shape register as a duplicate.
+   *
+   * @param context        the current NEO request context
+   * @param postingService the handler's own injected instance; may be {@code null} in a test
+   *                        that never called its {@code setPostingService} seam
+   * @param continuation   invoked with {@code context} when posting declined the action;
+   *                        typically a {@code this::someMethod} reference into the caller
+   * @return the posting service's response, or whatever {@code continuation} returns
+   */
+  static NeoResponse delegateToPostingServiceOrElse(NeoContext context, DocumentPostingService postingService,
+      Function<NeoContext, NeoResponse> continuation) {
+    NeoResponse posting = delegateToPostingService(context, postingService);
+    return posting != null ? posting : continuation.apply(context);
   }
 }

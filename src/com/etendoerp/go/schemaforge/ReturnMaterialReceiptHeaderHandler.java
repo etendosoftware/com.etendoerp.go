@@ -88,11 +88,16 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
   @Override
   public NeoResponse handle(NeoContext context) {
     mirrorAccountingDate(context);
-    NeoResponse posting = NeoHandlerUtils.delegateToPostingService(context, postingService);
-    if (posting != null) {
-      return posting;
-    }
+    return NeoHandlerUtils.delegateToPostingServiceOrElse(context, postingService, this::continueHandling);
+  }
 
+  /**
+   * Everything {@link #handle(NeoContext)} used to do after its posting-delegation guard
+   * clause, now the continuation {@link NeoHandlerUtils#delegateToPostingServiceOrElse} calls
+   * when posting/unpost did not apply (ETP-5378 — see that method's javadoc for why the guard
+   * clause itself had to move out of this class entirely, not just its body).
+   */
+  private NeoResponse continueHandling(NeoContext context) {
     if (NeoEndpointType.CRUD.equals(context.getEndpointType())
         && "POST".equals(context.getHttpMethod())
         && context.getRecordId() == null) {
