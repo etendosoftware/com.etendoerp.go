@@ -466,9 +466,9 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     if (general.has(FIELD_DESCRIPTION)) {
       state.schema.setDescription(trimmedOrNull(general.optString(FIELD_DESCRIPTION, null)));
     }
-    if (general.has(FIELD_ACCRUAL)) {
-      state.schema.setAccrual(general.optBoolean(FIELD_ACCRUAL));
-    }
+    // FIELD_ACCRUAL is intentionally NOT applied here: Etendo Go doesn't support Caja
+    // (cash-basis) for taxes, so accrual must stay fixed to Devengo (ETP-5372). The
+    // constant is still used by buildGeneral() to report the current persisted value.
     if (general.has(FIELD_ALLOW_NEGATIVE)) {
       state.schema.setAllowNegative(general.optBoolean(FIELD_ALLOW_NEGATIVE));
     }
