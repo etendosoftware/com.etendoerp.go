@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import static com.etendoerp.go.schemaforge.util.NeoMessageTranslator.extractMessageKeys;
 import static com.etendoerp.go.schemaforge.util.NeoMessageTranslator.safeParseTranslation;
 
 import java.lang.reflect.InvocationTargetException;
@@ -81,6 +82,11 @@ public class NeoProcessService {
   private static final String UI_PATTERN_STANDARD = "S";
 
   public static final String MESSAGE = "message";
+  /**
+   * ETP-5316 — response field carrying the AD_Message search keys behind {@link #MESSAGE},
+   * extracted BEFORE translation. See {@link #translatePInstanceResult}.
+   */
+  public static final String MESSAGE_KEYS = "messageKeys";
   public static final String PROCESS_TYPE = "processType";
   public static final String INP_RECORD_ID = "inpRecordId";
   public static final String RECORD_ID = "recordId";
@@ -886,11 +892,21 @@ public class NeoProcessService {
 
     if (resultCode == 0L) {
       // Error
-      String cleanMsg = errorMsg != null
-          ? safeParseTranslation(errorMsg.replaceFirst("@ERROR=", ""))
-          : "Process failed";
+      String rawMsg = errorMsg != null ? errorMsg.replaceFirst("@ERROR=", "") : null;
       result.put(STATUS, ERROR);
-      result.put(MESSAGE, cleanMsg);
+      result.put(MESSAGE, rawMsg != null ? safeParseTranslation(rawMsg) : "Process failed");
+      // ETP-5316 — also publish the AD_Message search keys the raw message carried, taken from
+      // `rawMsg` BEFORE safeParseTranslation() replaces them with prose. A core document-action
+      // failure arrives as e.g. "@Inline@ 10, 20, 30, @ProductNotNullAndMovementQtyZero@": once
+      // translated, the only thing left to key off is a sentence containing AD line numbers
+      // (numbered in tens, unrelated to the row position the user sees), which is neither
+      // matchable nor actionable. The keys give the client a stable identity for the failure so
+      // it can render its own wording; the translated `message` stays exactly as before, so a
+      // client that ignores this field is unaffected.
+      List<String> messageKeys = extractMessageKeys(rawMsg);
+      if (!messageKeys.isEmpty()) {
+        result.put(MESSAGE_KEYS, new JSONArray(messageKeys));
+      }
       return new NeoResponse(400, result);
     }
 

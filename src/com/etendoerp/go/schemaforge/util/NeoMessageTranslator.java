@@ -17,6 +17,14 @@
 
 package com.etendoerp.go.schemaforge.util;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 
 /**
@@ -36,6 +44,13 @@ import org.openbravo.erpCommon.utility.OBMessageUtils;
  * reason to turn a handled error into an unhandled one.
  */
 public final class NeoMessageTranslator {
+
+  /**
+   * Matches a single {@code @AD_Message_SearchKey@} token. An AD_Message search key is
+   * {@code \w}-only, so the class is closed and cannot swallow the {@code @} delimiter: the
+   * pattern is unambiguous and has no backtracking surface (java:S5852) even on a long message.
+   */
+  private static final Pattern MESSAGE_KEY_TOKEN = Pattern.compile("@(\\w+)@");
 
   private NeoMessageTranslator() {
   }
@@ -60,5 +75,37 @@ public final class NeoMessageTranslator {
     } catch (Exception e) {
       return text;
     }
+  }
+
+  /**
+   * Extracts, in order of appearance, the AD_Message <em>search keys</em> a raw message carries as
+   * {@code @Key@} tokens — the stable identity of the failure, before {@link
+   * #safeParseTranslation(String)} replaces them with prose.
+   *
+   * <p>ETP-5316: a core PL/SQL document-action failure is assembled as a mix of message keys and
+   * run-time data, e.g. {@code "@Inline@ 10, 20, 30, @ProductNotNullAndMovementQtyZero@"}. Once
+   * translated, the only thing left to key off is the sentence itself, whose embedded AD line
+   * numbers (10, 20, 30 — not the position the user sees) make it both unmappable and unhelpful.
+   * Returning the keys alongside the translated text lets a client resolve the failure by identity
+   * and author its own wording, instead of pattern-matching translated prose.
+   *
+   * <p>Ordering is preserved and duplicates are dropped, so a caller can take the first key it
+   * recognises. Tokens that are not real AD_Message keys (there is no catalog lookup here) are
+   * returned too — a client matches against its own allow-list, so an unknown token is inert.
+   *
+   * @param text
+   *          the raw, untranslated message; may be {@code null}
+   * @return the distinct keys in order of appearance, or an empty list when there are none
+   */
+  public static List<String> extractMessageKeys(String text) {
+    if (text == null || text.isEmpty()) {
+      return Collections.emptyList();
+    }
+    Set<String> keys = new LinkedHashSet<>();
+    Matcher matcher = MESSAGE_KEY_TOKEN.matcher(text);
+    while (matcher.find()) {
+      keys.add(matcher.group(1));
+    }
+    return new ArrayList<>(keys);
   }
 }
