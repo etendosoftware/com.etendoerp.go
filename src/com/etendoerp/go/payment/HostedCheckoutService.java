@@ -34,7 +34,7 @@ public class HostedCheckoutService {
    * Creates a provider-hosted Checkout Session bound to the authenticated account.
    *
    * <p>The price is never an argument. The caller names a <em>plan key</em>, this method resolves
-   * it against the catalog, and the provider price id comes off the resolved row. There is
+   * it against the Subscription Plan Catalog, and the provider price id comes off that row. There is
    * deliberately no configured fallback price: a fallback is a price nobody reviewed, selected
    * exactly when the intended configuration is missing.
    *
@@ -42,9 +42,9 @@ public class HostedCheckoutService {
    * @param accountEmail authenticated account email
    * @param clientName requested client name
    * @param origin public application origin for return URLs
-   * @param planKey catalog key of the plan being bought; required, with no default
+   * @param planKey plan catalog key of the plan being bought; required, with no default
    * @return checkout request id, URL, and mode
-   * @throws PlanNotAvailableException when the key names no active catalog row
+   * @throws PlanNotAvailableException when the key names no active plan catalog row
    * @throws IllegalStateException when checkout has no credentials, or the plan carries no
    *     provider price id and therefore cannot be charged for
    * @throws IOException when the provider cannot be reached or rejects the request
@@ -58,7 +58,7 @@ public class HostedCheckoutService {
     Plan plan = planCatalogService.findPurchasablePlan(planKey)
         .orElseThrow(() -> new PlanNotAvailableException(planKey));
     if (!planCatalogService.hasProviderPrice(plan)) {
-      // The catalog is fine; the deployment is not. A real price id is environment-specific (test
+      // The plan catalog is fine; the deployment is not. A real price id is environment-specific (test
       // vs live provider account) and cannot ship as sourcedata, so this is the state of a plan
       // nobody has attached one to yet — and of the grandfathered legacy plan, which is not sold.
       throw new IllegalStateException(
@@ -83,9 +83,9 @@ public class HostedCheckoutService {
    * row or a second webhook correlation key.
    *
    * <p>The plan is read back off the request rather than resolved again, so a reopened checkout
-   * charges what the buyer was originally shown even if the catalog has been re-priced since. A
-   * request carrying no plan cannot be reopened: it predates the plan catalog, and choosing a plan
-   * on the buyer's behalf here would charge for something nobody selected.
+   * charges what the buyer was originally shown even if the plan catalog has been re-priced since. A
+   * request carrying no plan cannot be reopened: it predates the Subscription Plan Catalog, and
+   * choosing a plan on the buyer's behalf here would charge for something nobody selected.
    *
    * @param requestId existing checkout request id
    * @param accountEmail authenticated account email
@@ -149,7 +149,7 @@ public class HostedCheckoutService {
    * @param clientName requested environment name
    * @param origin public application origin for return URLs
    * @param priceId provider price id resolved from the plan catalog, never from the browser
-   * @param planKey catalog key of the resolved plan, echoed as metadata for ETP-5047
+   * @param planKey plan catalog key of the resolved plan, echoed as metadata for ETP-5047
    * @return the form-encoded request body
    * @throws UnsupportedEncodingException never in practice; UTF-8 is always available
    */

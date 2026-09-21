@@ -579,13 +579,14 @@ final class EtendoGoJwtDalHelper {
    *
    * <p>{@code planKey} and {@code subscriptionStatus} are JSON null for a tenant with no
    * subscription, deliberately <b>not</b> the string {@code "free"}: a plan key names a row in the
-   * catalog, and a free tenant has no such row. Reporting {@code "free"} there would invent a
-   * catalog entry that does not exist and that nothing could ever look up.
+   * Subscription Plan Catalog, and a free tenant has no such row. Reporting {@code "free"} there
+   * would invent a plan catalog entry that does not exist and that nothing could ever look up.
    *
    * <p><b>TRANSITIONAL (ETP-5046-TRANSITIONAL-FALLBACK).</b> One tenant shape carries
    * {@code plan = "productive"} with both {@code planKey} and {@code subscriptionStatus} JSON
    * null: a tenant still answered for by the retired {@code ETGO_TenantPlan} preference because
-   * the R37 backfill has not reached it. The nulls are the honest answer — there is no catalog row
+   * the R37 backfill has not reached it. The nulls are the honest answer — there is no plan catalog
+   * row
    * and no subscription — and they keep the gap visible to anyone reading the payload. This shape
    * disappears with the fallback in Phase F.
    *
@@ -610,9 +611,9 @@ final class EtendoGoJwtDalHelper {
     // Additive since ETP-4686 so the environment picker can badge the plan. Older clients that
     // ignore the field keep working, and a tenant with no subscription reads back as free.
     env.put(FIELD_PLAN, planView.legacyPlan());
-    // ETP-5046: the catalog key of the plan behind the subscription. JSON null (never the string
-    // "free") for a tenant with no subscription — a plan key names a catalog row, and a free
-    // tenant has none, so reporting "free" would invent an entry nothing could look up.
+    // ETP-5046: the Subscription Plan Catalog key of the plan behind the subscription. JSON null
+    // (never "free") for a tenant with no subscription — a plan key names a plan catalog row,
+    // and a free tenant has none, so reporting "free" would invent an entry nothing could look up.
     env.put(FIELD_PLAN_KEY,
         planView.planKey() == null ? JSONObject.NULL : planView.planKey());
     env.put(FIELD_RELATIONSHIP, OwnerSupport.isOwner(environmentUser.getId()) ? "OWNER" : "INVITED");
@@ -621,7 +622,7 @@ final class EtendoGoJwtDalHelper {
     if (lifecycle != null) {
       env.put(FIELD_ENVIRONMENT_TYPE, lifecycle.getType().name());
       // ETP-5046: ONE subscription status for the whole product. The snapshot derives it
-      // from the open ETGO_SUBSCRIPTION row, so the access policy and the plan catalog
+      // from the open ETGO_SUBSCRIPTION row, so the access policy and the Subscription Plan Catalog
       // can never disagree about whether a tenant is paying.
       env.put(FIELD_SUBSCRIPTION_STATUS, lifecycle.getSubscriptionStatus().name());
       if (lifecycle.getRenewalDueAt() != null) {

@@ -49,7 +49,7 @@ import com.etendoerp.go.schemaforge.data.Subscription;
  * by looking at its plan's provider price id.</b>
  *
  * <p>The {@code legacy-productive} plan exists precisely so that tenants provisioned before
- * provider billing have a catalog row to point at. It predates Stripe, so it has NO
+ * provider billing have a plan catalog row to point at. It predates Stripe, so it has NO
  * {@code PROVIDER_PRICE_ID}, no {@code DISPLAY_PRICE} and no {@code CURRENCY_CODE} — the table's
  * own {@code ETGO_PLAN_PRICED_CHK} allows exactly that combination. A {@code resolvePlan} keyed on
  * "does this plan have a price id" would therefore flip EVERY backfilled tenant to {@code free}

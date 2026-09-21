@@ -98,7 +98,7 @@ class EnvironmentPlanCacheTest {
 
     assertFalse(cache.isProductive(FREE_CLIENT));
     assertEquals(TenantPlanService.PLAN_FREE, cache.viewFor(FREE_CLIENT).legacyPlan());
-    // A plan KEY names a catalog row, and a free tenant has none. Reporting "free" here would
+    // A plan KEY names a plan catalog row, and a free tenant has none. Reporting "free" here would
     // invent an entry nothing could ever look up.
     assertNull(cache.planKey(FREE_CLIENT));
     assertNull(cache.status(FREE_CLIENT));
@@ -157,7 +157,7 @@ class EnvironmentPlanCacheTest {
     assertEquals(PLAN_KEY, cache.planKey(PAID_CLIENT));
     assertEquals(SubscriptionService.STATUS_ACTIVE, cache.status(PAID_CLIENT));
     // The tenant the backfill has not reached reads back productive — the whole point — but with
-    // planKey and status null. There is genuinely no catalog row and no subscription; inventing a
+    // planKey and status null. There is genuinely no plan catalog row and no subscription; inventing a
     // key such as "legacy-productive" would claim a row that does not exist and would make the gap
     // invisible to anyone reading the payload.
     assertTrue(cache.isProductive(LEGACY_CLIENT));

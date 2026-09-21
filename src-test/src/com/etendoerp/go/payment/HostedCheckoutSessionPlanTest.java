@@ -33,10 +33,10 @@ import com.etendoerp.go.schemaforge.data.Plan;
 /**
  * Specs for how a Checkout Session decides what it charges (ETP-5046).
  *
- * <p>Before this ticket the price came from a deployment property. It now comes from the plan
- * catalog row named by the {@code planKey} the browser sent, and there is deliberately <b>no
- * fallback</b>: a fallback price is a price nobody reviewed, selected exactly when the intended
- * configuration is missing.
+ * <p>Before this ticket the price came from a deployment property. It now comes from the
+ * Subscription Plan Catalog row named by the {@code planKey} the browser sent, and there is
+ * deliberately <b>no fallback</b>: a fallback price is a price nobody reviewed, selected exactly
+ * when the intended configuration is missing.
  *
  * <p>Two refusals must stay distinguishable, because they mean opposite things to the person on
  * the other end — "your request named something that is not for sale" versus "this deployment has
@@ -128,14 +128,14 @@ class HostedCheckoutSessionPlanTest {
     service.createSession(ACCOUNT_ID, ACCOUNT_EMAIL, CLIENT_NAME, ORIGIN, PLAN_KEY);
 
     // The subscription opened after payment reads its plan off this row, so it records what the
-    // buyer actually saw rather than whatever the catalog holds by the time provisioning runs.
+    // buyer actually saw rather than whatever the plan catalog holds by the time provisioning runs.
     verify(checkoutRequestStore).recordRequested(anyString(), any(), any(), any(), any(Plan.class));
   }
 
   @Test
   void refusesAPlanKeyThatNamesNoActiveCatalogRow() {
     // A tampered or stale key. Unknown and inactive are one outcome on purpose: the endpoint must
-    // not let a caller enumerate the catalog by probing keys.
+    // not let a caller enumerate the plan catalog by probing keys.
     when(planCatalogService.findPurchasablePlan("tampered-key")).thenReturn(Optional.empty());
 
     assertThrows(PlanNotAvailableException.class, () -> service.createSession(ACCOUNT_ID,

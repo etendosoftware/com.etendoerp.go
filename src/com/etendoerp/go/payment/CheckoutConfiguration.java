@@ -70,7 +70,8 @@ public final class CheckoutConfiguration {
    *
    * <p>This used to also require a configured price id, so a true answer additionally proved that
    * <em>a purchasable thing existed</em>. That guarantee has moved: what is purchasable now comes
-   * from the plan catalog — a plan row carrying a non-null provider price id — and there is
+   * from the Subscription Plan Catalog — a plan row carrying a non-null provider price id —
+   * and there is
    * deliberately no configured fallback price, because a fallback is a price nobody reviewed,
    * selected exactly when the intended configuration is missing. The two conditions map onto the
    * same {@code CHECKOUT_NOT_CONFIGURED} response for that reason: from the caller's side

@@ -180,8 +180,8 @@ public class TenantEnvironmentLifecycleService {
    * paying and until when. The {@code ETGO_SubscriptionStatus} and {@code ETGO_SubscriptionDueAt}
    * preferences survive only as a transitional fallback for a tenant the R37 backfill has not
    * reached yet. The order matters: consulting the preferences first would let the access policy
-   * and the plan catalog disagree about the same tenant, which is precisely what this unification
-   * exists to prevent.
+   * and the Subscription Plan Catalog disagree about the same tenant, which is precisely what
+   * this unification exists to prevent.
    *
    * @param clientId environment client id, already known to be productive
    * @return the productive snapshot, never null

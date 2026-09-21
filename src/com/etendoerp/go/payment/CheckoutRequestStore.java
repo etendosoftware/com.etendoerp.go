@@ -86,8 +86,9 @@ public class CheckoutRequestStore {
    * @param accountId {@code ETGO_ACCOUNT_ID} of the authenticated account
    * @param accountEmail authenticated account email, denormalised for the tenancy check
    * @param clientName requested environment name
-   * @param plan the catalog row being bought, kept so the subscription opened after payment
-   *     records the plan the buyer actually saw rather than whatever is current by then
+   * @param plan the Subscription Plan Catalog row being bought, kept so the subscription opened
+   *     after payment records the plan the buyer actually saw rather than whatever is current by
+   *     then
    */
   public void recordRequested(String requestId, String accountId, String accountEmail,
       String clientName, Plan plan) {

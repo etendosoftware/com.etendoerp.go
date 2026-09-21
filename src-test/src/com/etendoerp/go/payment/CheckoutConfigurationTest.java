@@ -24,11 +24,11 @@ import org.openbravo.base.session.OBPropertiesProvider;
  * Specs for what "checkout is configured" means now that there is no configured price.
  *
  * <p>{@code isConfigured()} used to require a price id as well, so a true answer additionally
- * proved that <em>a purchasable thing existed</em>. That guarantee moved to the plan catalog, and
- * deliberately did not acquire a fallback: a fallback price is a price nobody reviewed, selected
- * exactly at the moment the intended configuration is missing — the one moment it must not be
- * charged. These specs pin that the price setting is gone rather than merely unused, because a
- * lingering read of it would quietly reintroduce exactly that.
+ * proved that <em>a purchasable thing existed</em>. That guarantee moved to the Subscription Plan
+ * Catalog, and deliberately did not acquire a fallback: a fallback price is a price nobody
+ * reviewed, selected exactly at the moment the intended configuration is missing — the one moment
+ * it must not be charged. These specs pin that the price setting is gone rather than merely
+ * unused, because a lingering read of it would quietly reintroduce exactly that.
  */
 class CheckoutConfigurationTest {
 
@@ -76,7 +76,7 @@ class CheckoutConfigurationTest {
   @DisplayName("the retired price setting is not consulted, even when it is present")
   void theRetiredPriceSettingIsIgnored() {
     // Set to a value that would once have been used. What is purchasable comes from the plan
-    // catalog now; a read of this key sneaking back in is exactly the fallback the ticket forbids.
+    // plan catalog now; a read of this key sneaking back in is exactly the fallback the ticket forbids.
     System.setProperty(RETIRED_PRICE_PROPERTY, "price_LEFTOVER");
     System.setProperty(SECRET_KEY_PROPERTY, "sk_test_abc");
     System.setProperty(WEBHOOK_SECRET_PROPERTY, "whsec_abc");

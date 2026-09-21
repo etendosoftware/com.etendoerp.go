@@ -348,8 +348,8 @@ public class SubscriptionServiceIntegrationTest extends OBBaseTest {
   /**
    * Creates a plan through the DAL and commits it.
    *
-   * @param providerPriceId the provider price id, unique across the catalog
-   * @param displayPrice the catalog price
+   * @param providerPriceId the provider price id, unique across the plan catalog
+   * @param displayPrice the plan catalog price
    * @param currencyCode ISO currency code
    * @return the new {@code ETGO_PLAN_ID}
    */
@@ -486,7 +486,7 @@ public class SubscriptionServiceIntegrationTest extends OBBaseTest {
    *
    * @param planId the plan to re-price
    * @param providerPriceId the new provider price id
-   * @param displayPrice the new catalog price
+   * @param displayPrice the new plan catalog price
    * @param currencyCode the new currency
    */
   private void repriceCommitted(String planId, String providerPriceId, BigDecimal displayPrice,

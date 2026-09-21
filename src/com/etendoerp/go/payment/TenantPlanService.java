@@ -217,7 +217,7 @@ public class TenantPlanService {
    * <p><b>Productive means an open subscription row exists. Full stop.</b> It does NOT mean the
    * tenant's plan carries a provider price id. The grandfathered {@code legacy-productive} plan
    * has none by design — it predates provider billing and exists so backfilled tenants have a
-   * catalog row to point at — so keying this on a price id would flip every backfilled tenant to
+   * plan catalog row to point at — so keying this on a price id would flip every backfilled tenant to
    * free the instant it shipped, silently. That is the most dangerous possible mis-implementation
    * of this feature; do not reintroduce it.
    *

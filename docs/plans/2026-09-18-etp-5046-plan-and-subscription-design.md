@@ -19,12 +19,19 @@ Now there is a **Subscription Plan Catalog** (`ETGO_PLAN` + its `ETGO_PLAN_QUOTA
 commercial edits from Etendo Classic, and a per-tenant subscription record (`ETGO_SUBSCRIPTION`)
 that says who is on which plan, in which status, for which period, at which price.
 
-> **Always write "Subscription Plan Catalog" in full, never a bare "catalog".** This module has
-> more than one catalog and the short form is ambiguous: ETP-5050's `ETGO_BILLING_RESOURCE` is the
-> *billing resource catalog* (what can be **metered**), while `ETGO_PLAN` is the Subscription Plan
-> Catalog (what can be **bought**). `ETGO_PLAN_QUOTA` is the join between the two. The data-fix
-> runner's ordered set of `.sql` files is also called a catalog in `run.js`. In code the name is
-> already explicit — `PlanCatalogService`, `planCatalog` — and prose should match it.
+> **Never write a bare "catalog" for `ETGO_PLAN`.** This module has *four* of them and the short
+> form is ambiguous:
+>
+> | Catalog | What it holds |
+> |---|---|
+> | **Subscription Plan Catalog** (`ETGO_PLAN`) | what can be **bought** |
+> | billing resource catalog (`ETGO_BILLING_RESOURCE`, ETP-5050) | what can be **metered** |
+> | message catalog (`AD_MESSAGE`) | translated user-facing copy |
+> | data-fix catalog (`run.js`) | the ordered set of `.sql` fixes |
+>
+> `ETGO_PLAN_QUOTA` joins the first two. Write **"Subscription Plan Catalog"** at the defining
+> mention in a document, class or javadoc block and **"plan catalog"** thereafter — in prose and in
+> javadoc alike. In code the identifiers already say it: `PlanCatalogService`, `planCatalogService`.
 
 ---
 

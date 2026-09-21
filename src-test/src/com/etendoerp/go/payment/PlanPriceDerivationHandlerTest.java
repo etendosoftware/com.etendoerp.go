@@ -129,8 +129,8 @@ class PlanPriceDerivationHandlerTest {
 
   /**
    * Stubs the message catalog so the assertions can name the AD_MESSAGE value that was chosen.
-   * The catalog itself needs an Openbravo runtime, and which message is picked — not its wording
-   * — is what these specs are about.
+   * The message catalog itself needs an Openbravo runtime, and which message is picked — not
+   * its wording — is what these specs are about.
    */
   private static void givenAMessageCatalog(MockedStatic<OBMessageUtils> messages) {
     messages.when(() -> OBMessageUtils.messageBD(anyString()))

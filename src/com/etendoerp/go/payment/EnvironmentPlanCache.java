@@ -50,8 +50,8 @@ public final class EnvironmentPlanCache {
    * R37 backfill has not reached yet, which still carries the retired {@code ETGO_TenantPlan}
    * preference.
    *
-   * <p>{@code planKey} and {@code status} stay null on purpose. There is genuinely no catalog row
-   * and no subscription behind this tenant; inventing a key such as {@code "legacy-productive"}
+   * <p>{@code planKey} and {@code status} stay null on purpose. There is genuinely no plan catalog
+   * row and no subscription behind this tenant; inventing a key such as {@code "legacy-productive"}
    * would claim a row that does not exist and would make the gap invisible to anyone reading the
    * payload. The coarse {@code plan} is what live clients branch on, and that is what the fallback
    * restores. Delete with {@link TenantPlanPreferenceFallback} in Phase F.
@@ -183,7 +183,7 @@ public final class EnvironmentPlanCache {
   }
 
   /**
-   * Returns the catalog key of the tenant's plan.
+   * Returns the Subscription Plan Catalog key of the tenant's plan.
    *
    * @param clientId {@code AD_CLIENT_ID} of the tenant
    * @return the plan's {@code VALUE}, or null when the tenant has no subscription
@@ -215,7 +215,8 @@ public final class EnvironmentPlanCache {
    * (ETP-5046-TRANSITIONAL-FALLBACK): {@code legacyPlan = "productive"} with a null
    * {@code planKey} and a null {@code status} — "productive but unsubscribed", a tenant the R37
    * backfill has not reached yet. It is expressible precisely because the three fields are
-   * independent; nulls there state truthfully that no catalog row and no subscription exist.
+   * independent; nulls there state truthfully that no plan catalog row and no subscription
+   * exist.
    */
   public static final class PlanView {
 
@@ -230,7 +231,7 @@ public final class EnvironmentPlanCache {
     }
 
     /**
-     * Returns the catalog key of the plan.
+     * Returns the Subscription Plan Catalog key of the plan.
      *
      * @return the plan's {@code VALUE}, or null when there is no subscription
      */

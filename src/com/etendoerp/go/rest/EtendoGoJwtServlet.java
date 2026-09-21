@@ -525,15 +525,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * GET /sws/go/plans — the read-only plan catalog, so the browser can name a plan.
+   * GET /sws/go/plans — the read-only Subscription Plan Catalog, so the browser can name a plan.
    *
    * <p>Header: {@code Authorization: Bearer <session token>}, the same credential the checkout
    * endpoints take, resolved by the same {@link #runWithAuthenticatedAccount} template. The
-   * catalog is not secret, but it is only ever needed by someone about to buy, and inventing a
+   * plan catalog is not secret, but it is only ever needed by someone about to buy, and inventing a
    * second, public auth path for it would be a new surface to get wrong.
    *
    * <p>Returns {@code 200} with {@code { "plans": [ { planKey, name, description, displayPrice,
-   * currency, billingInterval } ] }}. An empty catalog is an empty array and a {@code 200}: "there
+   * currency, billingInterval } ] }}. An empty plan catalog is an empty array and a {@code 200}: "there
    * is nothing on sale" is an answer, not a failure, and the caller has to render the same
    * "checkout unavailable" state for it either way.
    *
@@ -556,7 +556,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Projects a catalog row onto the browser's view of it.
+   * Projects a Subscription Plan Catalog row onto the browser's view of it.
    *
    * <p><b>{@code PROVIDER_PRICE_ID} is deliberately absent, and must stay absent.</b> The browser
    * names a plan, never a price: {@link #handleCheckoutSession} has no request field for a price
@@ -566,9 +566,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    *
    * <p>A row with no display price or no currency is dropped rather than sent with nulls: the
    * client cannot quote it, so offering it would produce a purchase whose price the buyer was
-   * never shown. That is a catalog-data defect, hence the warning.
+   * never shown. That is a plan catalog data defect, hence the warning.
    *
-   * @param plan an active, sellable catalog row
+   * @param plan an active, sellable plan catalog row
    * @return the JSON view, or null when the row cannot be quoted and must not be offered
    */
   private JSONObject buildPlanJson(Plan plan) throws JSONException {
@@ -576,7 +576,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String currency = plan.getCurrencyCode();
     if (displayPrice == null || StringUtils.isBlank(currency)) {
       log.warn("Plan '{}' is sellable but carries no display price or currency; "
-          + "leaving it out of the catalog response", plan.getSearchKey());
+          + "leaving it out of the plan catalog response", plan.getSearchKey());
       return null;
     }
     JSONObject item = new JSONObject();
@@ -592,7 +592,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * POST /sws/go/checkout/sessions — starts a provider-hosted checkout for a catalog plan.
+   * POST /sws/go/checkout/sessions — starts a provider-hosted checkout for a plan catalog plan.
    *
    * <p><b>The browser names a plan, never a price.</b> {@code planKey} is required and has no
    * default: there is no fallback price property to fall back to, because a fallback is a price
@@ -603,7 +603,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    *
    * <p>Two refusals, deliberately different:
    * <ul>
-   *   <li>{@code 400 PLAN_NOT_AVAILABLE} — the key names no active catalog row. Unknown and
+   *   <li>{@code 400 PLAN_NOT_AVAILABLE} — the key names no active plan catalog row. Unknown and
    *       inactive are answered identically, because the endpoint must not confirm which keys
    *       exist; same non-disclosure discipline as {@link #handleCheckoutStatus}.</li>
    *   <li>{@code 503 CHECKOUT_NOT_CONFIGURED} — checkout has no credentials, or the plan exists
@@ -686,7 +686,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         writeResponse(response, HttpServletResponse.SC_CREATED, result);
       } catch (PlanNotAvailableException e) {
         // Logged with the key, answered without it: the caller learns that this key is not usable
-        // and nothing about the rest of the catalog.
+        // and nothing about the rest of the plan catalog.
         log.warn("Rejected a checkout for an unavailable plan: {}", e.getMessage());
         writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_PLAN_NOT_AVAILABLE,
             PLAN_NOT_AVAILABLE_MESSAGE, PLAN_NOT_AVAILABLE_MESSAGE);
@@ -738,7 +738,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * @param response the response to answer on
    * @param account the authenticated billing owner
    * @param clientName the tenant name the purchase is for
-   * @param planKey the catalog key of the plan being bought
+   * @param planKey the plan catalog key of the plan being bought
    * @param origin the origin the provider must return the buyer to
    */
   private void openBillingPurchaseSession(HttpServletResponse response, Account account,
@@ -749,7 +749,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeResponse(response, HttpServletResponse.SC_CREATED, result);
     } catch (PlanNotAvailableException e) {
       // Deliberately not distinguishing "unknown key" from "inactive plan": the endpoint must
-      // not confirm which catalog keys exist.
+      // not confirm which plan catalog keys exist.
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_PLAN_NOT_AVAILABLE,
           PLAN_NOT_AVAILABLE_MESSAGE, PLAN_NOT_AVAILABLE_MESSAGE);
     } catch (IllegalStateException e) {
@@ -2611,9 +2611,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * <ul>
    *   <li>{@code plan} — the original coarse {@code "free" | "productive"} value, unchanged since
    *       ETP-4686 and still what live clients branch on. Never null.</li>
-   *   <li>{@code planKey} — the catalog key of the subscribed plan, or JSON null. A plan
-   *       <em>key</em> names a catalog row and a free tenant has none, so this is null rather than
-   *       {@code "free"}.</li>
+   *   <li>{@code planKey} — the Subscription Plan Catalog key of the subscribed plan, or JSON
+   *       null. A plan <em>key</em> names a plan catalog row and a free tenant has none, so this
+   *       is null rather than {@code "free"}.</li>
    *   <li>{@code subscriptionStatus} — {@code active}, {@code past_due} or {@code canceled}, or
    *       JSON null when there is no subscription.</li>
    * </ul>
