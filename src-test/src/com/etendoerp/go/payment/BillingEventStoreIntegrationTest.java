@@ -21,6 +21,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -67,6 +68,13 @@ import com.etendoerp.go.schemaforge.data.Account;
  * <p>{@link BillingEventStore#summarize} and {@link BillingEventStore#isUniqueEventViolation} are
  * pure functions and need no database, but they are the store's two guards (what may reach the
  * summary column, what counts as a duplicate) and belong next to the behaviour they protect.
+ *
+ * <p><b>Group 9 pins a property that is not about the table at all: the caller's
+ * {@link OBContext} survives a store call.</b> It did not. Every entry point swapped in the system
+ * context and unwound with {@link OBContext#restorePreviousMode()} alone, which pops the
+ * admin-mode stack and leaves the context swap in place — so the caller silently continued as
+ * system. The same defect {@code CheckoutRequestStore} carried (ETP-5045), fixed here the same
+ * way, and pinned here by the same three specs.
  */
 public class BillingEventStoreIntegrationTest extends OBBaseTest {
 
@@ -777,6 +785,145 @@ public class BillingEventStoreIntegrationTest extends OBBaseTest {
     assertTrue("And the row is re-claimable again, which is why it is not locked",
         store.claim(eventId, COMPLETED, null, null));
     assertEquals(RECEIVED, rawResult(eventId));
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Group 9 — the caller's execution context survives a store call
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * The leak, stated as the property that was missing: a caller that hands the store a context
+   * gets that same context back.
+   *
+   * <p>Every entry point used to install the system context and unwind with
+   * {@link OBContext#restorePreviousMode()} alone, which pops the admin-mode stack and leaves the
+   * context swap in place — so the caller silently continued as system. Invisible while the only
+   * caller was the Stripe webhook, which is matched before the authentication chain and has no
+   * context to lose, and not invisible at all for any caller that is in the middle of a unit of
+   * work: everything it ran afterwards would run as system instead of as the identity it had
+   * established.
+   *
+   * <p>Asserted with {@code assertSame} rather than by comparing client or user ids, because
+   * identity is the only assertion the old code could not have satisfied by accident: the store
+   * installs {@code (0,0,0,0)} through
+   * {@link OBContext#setOBContext(String, String, String, String)}, which builds a <em>new</em>
+   * {@link OBContext} every time. An equal-looking context would therefore still be the wrong
+   * object, and a caller whose context happened to be {@code (0,0,0,0)} too would make an id-based
+   * assertion pass over a store that restored nothing.
+   *
+   * <p>All five entry points are exercised in one test on purpose. The capture/restore lives in a
+   * single wrapper, so five separate tests would assert the same line five times; what is worth
+   * pinning is that no entry point was left out of the wrapper. The claim is called twice on the
+   * same id so both of its branches are covered — the insert that wins and the duplicate that is
+   * merely counted — because they return from different places inside the wrapped body.
+   */
+  @Test
+  public void testEveryStoreMethodGivesTheCallersContextBack() {
+    String eventId = newEventId();
+    String idOnlyEventId = newEventId();
+
+    // Installed last: the fixture helpers in this class open the (0,0,0,0) context they need and
+    // do not restore it, so a context captured before them would not be the one on the thread.
+    setTestUserContext();
+    OBContext caller = OBContext.getOBContext();
+    assertNotNull("Sanity: the caller must actually hold a context to lose", caller);
+
+    assertTrue(store.claim(eventId, COMPLETED, null, null));
+    assertSame("claim(id, type, request, summary) must give the caller's context back", caller,
+        OBContext.getOBContext());
+
+    assertFalse(store.claim(eventId, COMPLETED, null, null));
+    assertSame("The duplicate branch of the claim returns from a different place inside the "
+        + "wrapper, and must give the caller's context back too", caller, OBContext.getOBContext());
+
+    assertTrue(store.claim(idOnlyEventId));
+    assertSame("claim(id) must give the caller's context back", caller, OBContext.getOBContext());
+
+    store.markIgnored(eventId, "ETP-5046 context round-trip");
+    assertSame("markIgnored must give the caller's context back", caller,
+        OBContext.getOBContext());
+
+    store.markFailed(eventId, "ETP-5046 context round-trip");
+    assertSame("markFailed must give the caller's context back", caller, OBContext.getOBContext());
+
+    store.markApplied(eventId);
+    assertSame("markApplied must give the caller's context back", caller, OBContext.getOBContext());
+
+    assertEquals("Sanity: giving the context back must not have stopped the work happening as "
+        + "system — the row still walked the whole lifecycle", APPLIED, rawResult(eventId));
+    assertEquals("Sanity: and the redelivery was still counted on it", 1L,
+        rawDuplicateCount(eventId));
+  }
+
+  /**
+   * {@code null} is a real previous context, not a missing one, and restoring it means restoring
+   * <em>no</em> context.
+   *
+   * <p>This is not a contrived state: the Stripe webhook endpoint is matched before the
+   * authentication chain, so on the one path this store was written for there is genuinely no
+   * {@link OBContext} on the thread. A restore that turned that into a system context would leave
+   * the thread more privileged after the call than before it — the leak inverted, and strictly
+   * worse than the leak, because it would look deliberate.
+   */
+  @Test
+  public void testAContextlessCallerIsLeftContextlessRatherThanSystem() {
+    String eventId = newEventId();
+
+    OBContext.setOBContext((OBContext) null);
+    assertNull("Sanity: this test is about a caller with no context at all",
+        OBContext.getOBContext());
+
+    assertTrue("The store must still do its work without a caller context",
+        store.claim(eventId, COMPLETED, null, null));
+    assertNull("The claim must not hand a contextless caller a system context",
+        OBContext.getOBContext());
+
+    store.markApplied(eventId);
+    assertNull("A result write must not hand a contextless caller a system context either",
+        OBContext.getOBContext());
+
+    assertEquals("Sanity: the contextless writes must still have been applied", APPLIED,
+        rawResult(eventId));
+  }
+
+  /**
+   * The restore lives in a {@code finally}, so it must hold on the failure path too — and that is
+   * the path where it matters most. A caller whose store call throws goes on to handle the
+   * failure: it rolls back, annotates the event, answers the provider. Doing that as system
+   * instead of as itself is how a recoverable error turns into a second, unrelated one.
+   *
+   * <p>The failure is provoked the same way Group 7's twin spec provokes it, and with no
+   * scaffolding: {@code EVENT_ID} is {@code VARCHAR(255)} and the claim does not abbreviate it, so
+   * an overlong id fails on flush — inside the wrapped body, well past the point where the
+   * context has already been swapped.
+   *
+   * <p>Also pins that the restore cannot mask the failure: the exception the body raised is the
+   * one that reaches the caller.
+   */
+  @Test
+  public void testTheCallersContextIsRestoredWhenTheStoreCallThrows() {
+    StringBuilder overlong = new StringBuilder(EVENT_MARKER);
+    while (overlong.length() <= 255) {
+      overlong.append('x');
+    }
+
+    setTestUserContext();
+    OBContext caller = OBContext.getOBContext();
+    assertNotNull("Sanity: the caller must actually hold a context to lose", caller);
+
+    RuntimeException failure = null;
+    try {
+      store.claim(overlong.toString(), COMPLETED, null, null);
+    } catch (RuntimeException e) {
+      failure = e;
+    }
+    // Read before anything else touches the thread: nothing but the store itself may be what puts
+    // the context right.
+    OBContext contextAfterFailure = OBContext.getOBContext();
+
+    assertNotNull("The fixture must genuinely fail, or this test asserts nothing at all", failure);
+    assertSame("A store call that throws must still give the caller's context back — the caller "
+        + "handles the failure next, and it must do so as itself", caller, contextAfterFailure);
   }
 
   // ---------------------------------------------------------------------------------------------

@@ -3,6 +3,7 @@ package com.etendoerp.go.payment;
 
 import java.sql.SQLException;
 import java.util.Date;
+import java.util.function.Supplier;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
@@ -143,9 +144,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
       throw new IllegalArgumentException("A billing event cannot be claimed without an event id");
     }
     Date now = new Date();
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
+    return runAsSystem(() -> {
       RuntimeException insertFailure = insertReceived(id, eventType, requestId, summary, now);
       if (insertFailure == null) {
         return true;
@@ -156,9 +155,7 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
       }
       recordDuplicate(id, now, insertFailure);
       return false;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   /**
@@ -323,44 +320,42 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
     if (id == null) {
       return;
     }
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    OBContext.setAdminMode(true);
-    try {
-      String trimmedReason = StringUtils.abbreviate(StringUtils.trimToNull(reason), REASON_WIDTH);
-      String setReason = trimmedReason == null ? "" : ", be.failureReason = :reason";
-      boolean guardApplied = !RESULT_APPLIED.equals(result);
-      org.hibernate.query.Query<?> update = OBDal.getInstance()
-          .getSession()
-          .createQuery(UPDATE_BILLING_EVENT
-              + "   set be.eventResult = :result,"
-              + "       be.processedAt = coalesce(be.processedAt, :now),"
-              + "       be.updated = :now"
-              + setReason
-              + " where be.event = :eventId"
-              + (guardApplied ? "   and be.eventResult <> :applied" : ""))
-          .setParameter("result", result)
-          .setParameter("now", new Date())
-          .setParameter(PARAM_EVENT_ID, id);
-      if (trimmedReason != null) {
-        update.setParameter("reason", trimmedReason);
+    runAsSystem(() -> {
+      try {
+        String trimmedReason = StringUtils.abbreviate(StringUtils.trimToNull(reason), REASON_WIDTH);
+        String setReason = trimmedReason == null ? "" : ", be.failureReason = :reason";
+        boolean guardApplied = !RESULT_APPLIED.equals(result);
+        org.hibernate.query.Query<?> update = OBDal.getInstance()
+            .getSession()
+            .createQuery(UPDATE_BILLING_EVENT
+                + "   set be.eventResult = :result,"
+                + "       be.processedAt = coalesce(be.processedAt, :now),"
+                + "       be.updated = :now"
+                + setReason
+                + " where be.event = :eventId"
+                + (guardApplied ? "   and be.eventResult <> :applied" : ""))
+            .setParameter("result", result)
+            .setParameter("now", new Date())
+            .setParameter(PARAM_EVENT_ID, id);
+        if (trimmedReason != null) {
+          update.setParameter("reason", trimmedReason);
+        }
+        if (guardApplied) {
+          update.setParameter("applied", RESULT_APPLIED);
+        }
+        int updated = update.executeUpdate();
+        flushAndCommit();
+        if (updated == 0) {
+          // Either there is no such row, or it is already APPLIED and the guard refused the write.
+          // Both are ordinary on a redelivery, and neither is actionable for the caller.
+          log.warn("No billing event row was updated for '{}' while marking it {} — the row is "
+              + "missing or already {}", id, result, RESULT_APPLIED);
+        }
+      } catch (RuntimeException e) {
+        OBDal.getInstance().rollbackAndClose();
+        throw e;
       }
-      if (guardApplied) {
-        update.setParameter("applied", RESULT_APPLIED);
-      }
-      int updated = update.executeUpdate();
-      flushAndCommit();
-      if (updated == 0) {
-        // Either there is no such row, or it is already APPLIED and the guard refused the write.
-        // Both are ordinary on a redelivery, and neither is actionable for the caller.
-        log.warn("No billing event row was updated for '{}' while marking it {} — the row is "
-            + "missing or already {}", id, result, RESULT_APPLIED);
-      }
-    } catch (RuntimeException e) {
-      OBDal.getInstance().rollbackAndClose();
-      throw e;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
+    });
   }
 
   /**
@@ -387,6 +382,88 @@ public class BillingEventStore implements CheckoutWebhookProcessor.EventStore {
       }
     }
     return false;
+  }
+
+  /**
+   * Runs {@code body} as the system user ({@code "0","0","0","0"}) with admin mode on, and hands
+   * the caller back exactly the execution context it arrived with.
+   *
+   * <p>Restoring is the part that is easy to get wrong, and this class got it wrong until this
+   * change, exactly as {@code CheckoutRequestStore} did (ETP-5045):
+   * {@link OBContext#restorePreviousMode()} pops the <em>admin-mode stack</em>, it does not undo
+   * {@link OBContext#setOBContext(String, String, String, String)}. So every method used to leave
+   * the system context installed on the calling thread.
+   *
+   * <p>It was invisible while the only caller was the Stripe webhook, which is matched before the
+   * authentication chain and has no context to lose. It stops being invisible for any caller that
+   * is in the middle of a unit of work: everything it ran afterwards would silently continue as
+   * system instead of as the identity it had established.
+   *
+   * <p><b>{@code null} is a legitimate previous context, not a missing one.</b> The webhook
+   * genuinely has none, so "no context" must be restored as no context;
+   * {@link OBContext#setOBContext(OBContext)} clears the thread-local when handed {@code null},
+   * which is the wanted behaviour — substituting a system context would leave the thread more
+   * privileged than it was found.
+   *
+   * @param body the work to run as system
+   * @param <T> the body's result type
+   * @return whatever the body returned
+   */
+  private <T> T runAsSystem(Supplier<T> body) {
+    OBContext previousContext = OBContext.getOBContext();
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      return body.get();
+    } finally {
+      // Order is load-bearing. Admin mode was entered on top of the system context, so it has to
+      // be left before that context is taken away: restorePreviousMode() pops the admin-mode stack
+      // and then looks at whichever context is current at that moment, clearing it outright when
+      // the stack empties on the shared admin context. Putting the caller's context back first
+      // would expose that context to the check and could null it out.
+      exitAdminModeQuietly();
+      restoreContextQuietly(previousContext);
+    }
+  }
+
+  /**
+   * Void form of {@link #runAsSystem(Supplier)}, for the methods that only write.
+   *
+   * @param body the work to run as system
+   */
+  private void runAsSystem(Runnable body) {
+    runAsSystem(() -> {
+      body.run();
+      return null;
+    });
+  }
+
+  /**
+   * Leaves admin mode without ever throwing: this runs in a {@code finally}, and an exception here
+   * would replace the real failure from the body with a misleading one.
+   */
+  private void exitAdminModeQuietly() {
+    try {
+      OBContext.restorePreviousMode();
+    } catch (RuntimeException e) {
+      log.error("Could not leave admin mode after a billing-event store operation", e);
+    }
+  }
+
+  /**
+   * Reinstates the caller's context without ever throwing, for the same reason as
+   * {@link #exitAdminModeQuietly()}.
+   *
+   * @param previousContext the context captured on entry; {@code null} is a real value and is
+   *     restored as "no context"
+   */
+  private void restoreContextQuietly(OBContext previousContext) {
+    try {
+      OBContext.setOBContext(previousContext);
+    } catch (RuntimeException e) {
+      log.error("Could not restore the caller's OBContext after a billing-event store operation",
+          e);
+    }
   }
 
   private void flushAndCommit() {
