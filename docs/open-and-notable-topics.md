@@ -216,6 +216,69 @@ superseded by a new dated file, never modified in place.
 
 ---
 
+### 🟠 3.5 An unrecognised subscription status means ENTITLED, never locked out
+
+**Context — two models met in the merge.** While ETP-5046 was putting subscription state into
+`ETGO_SUBSCRIPTION`, `develop` shipped a parallel model for the same concept:
+`EnvironmentAccessPolicy` + `TenantEnvironmentLifecycleService`, persisting to an
+`ETGO_SubscriptionStatus` AD_Preference (its own javadoc calls preferences *"a compatibility-first
+persistence adapter"* — the exact design ETP-5046 exists to retire). Both emitted a
+`subscriptionStatus` field in the environment payload, with **different value vocabularies**.
+Martin's call (2026-09-21): unify on the table. `TenantEnvironmentLifecycleService.productiveSnapshot()`
+now reads the open subscription row, and `subscriptionStatusOf()` maps its `STATUS` onto the
+access policy's enum.
+
+| `ETGO_SUBSCRIPTION.STATUS` | `EnvironmentAccessPolicy.SubscriptionStatus` |
+|---|---|
+| `active` | `CURRENT` |
+| `past_due` | `PAST_DUE` |
+| `canceled` | `EXPIRED` |
+| **anything else, including null/blank** | **`LEGACY_ENTITLEMENT`** |
+
+**The default is the load-bearing part, and it is deliberately fail-OPEN.** This value reaches
+`EnvironmentAccessPolicy`, which decides whether a user may enter the product at all. A tenant
+reaching this mapping demonstrably holds an *open* subscription row, so the only safe reading of a
+status the deployed build does not recognise is "entitled". `NONE` would lock a paying customer
+out of their own environment purely because someone added a status value this build predates. The
+asymmetry justifies it: a wrongly-admitted tenant is a billing discrepancy, a wrongly-excluded
+paying tenant is an outage.
+
+**The cost of that choice, and the trap:** a new `STATUS` value is **invisible** — no error, no
+warning, no log line, it simply reads as `LEGACY_ENTITLEMENT` and the tenant keeps working. Any
+ticket that adds a value to `ETGO_SUBSCRIPTION.STATUS` (ETP-5053's plan changes are the likely
+first) **MUST extend `subscriptionStatusOf()` in the same change**, and the DDL check constraint
+`ETGO_SUB_STATUS_CHK` is the place to notice it — the constraint and the mapping must be edited
+together or they drift apart in silence.
+
+**Two things deliberately NOT moved to the table:**
+
+- `ENVIRONMENT_TYPE` stays a preference. It records DEMO versus PRODUCTIVE, which the subscription
+  table does not carry, so `applyPaidUpgradeSideEffects` still marks the lifecycle projection
+  whichever way the payment itself was recorded.
+- The `ETGO_SubscriptionStatus` / `ETGO_SubscriptionDueAt` preferences are still read **when the
+  tenant has no subscription row at all** (`ETP-5046-TRANSITIONAL-FALLBACK`). The order matters:
+  consulting them first would let the access policy and the plan catalog disagree about the same
+  tenant, which is the whole point of the unification. That block goes in Phase F with the rest of
+  the fallback, once R37 has given every productive tenant a row.
+
+**Asymmetry on the WRITE path, recorded rather than fixed.** `applyPaidUpgradeSideEffects` now
+touches three stores: it opens the `ETGO_SUBSCRIPTION` row (the record), *deletes* the
+`ETGO_TenantPlan` preference when that succeeds, and then calls
+`tenantEnvironmentLifecycleService.markProductive()` **unconditionally**, which writes both
+`ETGO_EnvironmentType` and `ETGO_SubscriptionStatus = CURRENT`. So the happy path retires one
+preference while still writing another that, after the unification, is only ever *read* when no
+subscription row exists.
+
+That is defensible — it seeds the fallback, so a tenant whose subscription row is later lost reads
+`CURRENT` rather than being locked out — but it is a side effect of the merge, not a designed
+behaviour, and it means **`ETGO_SubscriptionStatus` can go stale against the table**: nothing
+updates it when a subscription moves to `past_due` or `canceled`. Harmless while the table wins
+every read that matters; actively misleading to anyone who inspects the preference to answer "is
+this tenant paying". Either stop writing it on the subscription path, or keep it in step — the
+Phase F cleanup should settle which.
+
+---
+
 ## 4. Known issues — one fixed, the rest live
 
 ### 🟢 4.1 `CheckoutRequestStore` leaked its `OBContext` — FIXED on ETP-5045
