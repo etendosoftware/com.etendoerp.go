@@ -74,6 +74,7 @@ import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.SubscriptionService;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
@@ -1360,12 +1361,23 @@ public class EtendoGoJwtServletCoverageTest {
     servlet.subscriptionService = fixture.subscriptionService;
     servlet.tenantPlanService = fixture.tenantPlanService;
     servlet.onboardingForceTestModeService = fixture.forceTestModeService;
+    // The lifecycle projection is a separate concern from the payment record and has its own
+    // specs; stubbed to succeed so it contributes no ERROR lines to the assertions below.
+    when(fixture.lifecycleService.markProductive(anyString())).thenReturn(true);
+    servlet.tenantEnvironmentLifecycleService = fixture.lifecycleService;
     return fixture;
   }
 
   private void applyPaidUpgrade() {
-    servlet.applyPaidUpgradeSideEffects(PAID_CLIENT_ID, PAID_STAR_ORG_ID, "Acme S.L.",
-        "user@test.com", PAID_TOKEN);
+    // findOnlyFreeTenantIdByAccountEmail reads through OBDal, which this unit test has no context
+    // for. Left real it throws, the best-effort guard catches it, and the extra ERROR line breaks
+    // the log assertions below — so it is stubbed to "no lone demo tenant to link".
+    try (MockedStatic<EtendoGoJwtDalHelper> dalMock = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dalMock.when(() -> EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(anyString()))
+          .thenReturn(null);
+      servlet.applyPaidUpgradeSideEffects(PAID_CLIENT_ID, PAID_STAR_ORG_ID, "Acme S.L.",
+          "user@test.com", PAID_TOKEN);
+    }
   }
 
   @Test
@@ -1465,6 +1477,8 @@ public class EtendoGoJwtServletCoverageTest {
     final TenantPlanService tenantPlanService = mock(TenantPlanService.class);
     final OnboardingForceTestModeService forceTestModeService =
         mock(OnboardingForceTestModeService.class);
+    final TenantEnvironmentLifecycleService lifecycleService =
+        mock(TenantEnvironmentLifecycleService.class);
   }
 
   /**

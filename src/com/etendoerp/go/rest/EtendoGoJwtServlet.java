@@ -172,8 +172,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String BILLING_OWNER_REQUIRED = "BILLING_OWNER_REQUIRED";
   private static final String BILLING_OWNER_MESSAGE = "Only the environment owner can manage billing";
   private static final String CLIENT_NAME_REQUIRED = "clientName is required";
-  private static final String CHECKOUT_NOT_CONFIGURED = "CHECKOUT_NOT_CONFIGURED";
-  private static final String CHECKOUT_NOT_CONFIGURED_MESSAGE = "Checkout is not configured";
   private static final String FIELD_ERROR = "error";
   private static final String ERROR_PAYMENT_REQUIRED = "payment_required";
   // javax.servlet.http.HttpServletResponse predates RFC 7231 and has no 402 constant.
@@ -695,6 +693,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             CLIENT_NAME_REQUIRED, CLIENT_NAME_REQUIRED);
         return;
       }
+      String planKey = body.optString(FIELD_PLAN_KEY, "").trim();
+      if (planKey.isEmpty()) {
+        // ETP-5046 removed the configured fallback price, so there is nothing to charge against
+        // when the caller names no plan. Rejecting is the only honest answer: picking a plan on
+        // the buyer's behalf would charge for something nobody selected.
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+            "planKey is required", "planKey is required");
+        return;
+      }
       CheckoutRequest activePurchase = checkoutRequestStore
           .findActiveForAccountAndClientName(account.getEmail(), clientName);
       if (activePurchase != null) {
@@ -706,10 +713,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
       try {
         JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
-            clientName, origin);
+            clientName, origin, planKey);
         writeResponse(response, HttpServletResponse.SC_CREATED, result);
+      } catch (PlanNotAvailableException e) {
+        // Deliberately not distinguishing "unknown key" from "inactive plan": the endpoint must
+        // not confirm which catalog keys exist.
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_PLAN_NOT_AVAILABLE,
+            PLAN_NOT_AVAILABLE_MESSAGE, PLAN_NOT_AVAILABLE_MESSAGE);
       } catch (IllegalStateException e) {
-        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
+        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CODE_CHECKOUT_NOT_CONFIGURED,
             CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
       } catch (Exception e) {
         log.error("Could not create account billing purchase", e);
@@ -732,7 +744,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             account.getEmail(), activePurchase.getClientName(), origin);
         writeResponse(response, HttpServletResponse.SC_OK, result);
       } catch (IllegalStateException e) {
-        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
+        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CODE_CHECKOUT_NOT_CONFIGURED,
             CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
       } catch (Exception e) {
         log.error("Could not reopen account billing purchase", e);
@@ -2411,23 +2423,51 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
     }
 
-    // develop's lifecycle projection is a separate concern from the subscription row: the
-    // ETGO_SUBSCRIPTION table says whether the tenant is paying, but it does not carry
-    // DEMO-vs-PRODUCTIVE, so this marker is still what classifies the environment. Run it
-    // whichever way the payment was recorded above.
-    if (!tenantEnvironmentLifecycleService.markProductive(clientId)) {
-      log.error("Paid environment '{}' (client {}) could not be marked in the lifecycle "
-          + "projection", clientName, clientId);
-    }
-    String demoClientId = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail);
-    if (demoClientId != null && !tenantEnvironmentLifecycleService
-        .associateDemoWithProductive(demoClientId, clientId)) {
-      log.error("Paid environment '{}' (client {}) could not be associated with demo {}",
-          clientName, clientId, demoClientId);
-    }
+    applyLifecycleProjectionBestEffort(clientId, clientName, accountEmail);
 
     if (productiveRecorded) {
       revertTestModeForProductiveTenantBestEffort(clientId);
+    }
+  }
+
+  /**
+   * Records the environment in the lifecycle projection, and links a lone demo tenant to it.
+   *
+   * <p>Separate from the subscription row rather than redundant with it: {@code ETGO_SUBSCRIPTION}
+   * says whether the tenant is paying, but it does not carry DEMO-versus-PRODUCTIVE, so this
+   * marker is still what classifies the environment. It therefore runs whichever way the payment
+   * itself was recorded — subscription row or fallback preference.
+   *
+   * <p><b>It can never throw.</b> The caller commits this inside the onboarding transaction and
+   * deliberately does not guard it: the documented contract there is that a tenant may commit
+   * unmarked rather than have provisioning rolled back over a plan record. So an exception escaping
+   * here would turn "paid but unclassified" into "paid and nothing provisioned" — strictly worse,
+   * and the exact shape ETP-4966 was reported as. {@code markProductive} and
+   * {@code associateDemoWithProductive} already swallow their own failures, but
+   * {@link EtendoGoJwtDalHelper#findOnlyFreeTenantIdByAccountEmail} reads through OBDal unguarded,
+   * so the whole block is wrapped rather than trusting each part.
+   *
+   * @param clientId the tenant just paid for
+   * @param clientName onboarding request's client name, used only in the failure log lines
+   * @param accountEmail the account driving onboarding, used to find a lone demo tenant to link
+   */
+  private void applyLifecycleProjectionBestEffort(String clientId, String clientName,
+      String accountEmail) {
+    try {
+      if (!tenantEnvironmentLifecycleService.markProductive(clientId)) {
+        log.error("Paid environment '{}' (client {}) could not be marked in the lifecycle "
+            + "projection", clientName, clientId);
+      }
+      String demoClientId = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail);
+      if (demoClientId != null && !tenantEnvironmentLifecycleService
+          .associateDemoWithProductive(demoClientId, clientId)) {
+        log.error("Paid environment '{}' (client {}) could not be associated with demo {}",
+            clientName, clientId, demoClientId);
+      }
+    } catch (RuntimeException e) {
+      log.error("Paid environment '{}' (client {}) could not be projected into the environment "
+          + "lifecycle; the payment itself is recorded and provisioning continues", clientName,
+          clientId, e);
     }
   }
 
