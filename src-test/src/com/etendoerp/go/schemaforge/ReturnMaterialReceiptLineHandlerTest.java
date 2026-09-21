@@ -87,6 +87,19 @@ public class ReturnMaterialReceiptLineHandlerTest {
         new JSONObject().put("data", new JSONArray().put(line)));
   }
 
+  /**
+   * Builds a minimal response body wrapping a single line record carrying a
+   * {@code movementQuantity} field — the field {@link ReturnLineQuantityPolicy} actually reads
+   * (unlike {@link #lineBody(String)}'s {@code movementQty}, which only feeds the unrelated
+   * SQL-enrichment tests below).
+   */
+  private static JSONObject lineBodyWithMovementQuantity(String lineId, double qty)
+      throws Exception {
+    JSONObject line = new JSONObject().put("id", lineId).put("movementQuantity", qty);
+    return new JSONObject().put("response",
+        new JSONObject().put("data", new JSONArray().put(line)));
+  }
+
   // ── handle() ──────────────────────────────────────────────────────────────
 
   /**
@@ -182,6 +195,136 @@ public class ReturnMaterialReceiptLineHandlerTest {
       assertEquals("loc-explicit", body.getString("storageBin"));
       Mockito.verify(dal, Mockito.never()).createCriteria(Locator.class);
     }
+  }
+
+  // ── afterCallout() — strip stock-derived movementQuantity (ETP-5336) ─────
+
+  /**
+   * The classic {@code SL_InOutLine_Product} callout echoes back the product's on-hand
+   * quantity as {@code updates.movementQuantity} on product selection. For a return line that
+   * must never overwrite what the user typed, so afterCallout strips just that one key.
+   */
+  @Test
+  public void testAfterCalloutStripsMovementQuantityFromUpdates() throws Exception {
+    JSONObject updates = new JSONObject().put("movementQuantity", 12.0).put("otherField", "x");
+    JSONObject body = new JSONObject().put("updates", updates);
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.CALLOUT)
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    assertNull(HANDLER.afterCallout(ctx));
+
+    assertFalse("movementQuantity must be stripped from the callout updates",
+        updates.has("movementQuantity"));
+    assertEquals("other updates keys must be left untouched", "x",
+        updates.getString("otherField"));
+  }
+
+  /**
+   * A non-CALLOUT endpoint (e.g. the CRUD write itself) must leave any "updates"-shaped body
+   * completely alone — stripping is scoped to the callout response only.
+   */
+  @Test
+  public void testAfterCalloutNoOpWhenEndpointIsNotCallout() throws Exception {
+    JSONObject updates = new JSONObject().put("movementQuantity", 12.0);
+    JSONObject body = new JSONObject().put("updates", updates);
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    assertNull(HANDLER.afterCallout(ctx));
+
+    assertTrue("a non-CALLOUT endpoint must leave the updates object untouched",
+        updates.has("movementQuantity"));
+  }
+
+  /**
+   * A callout response with no "updates" object at all (or no previous result) must be a
+   * silent no-op, never an exception.
+   */
+  @Test
+  public void testAfterCalloutNoOpWhenUpdatesIsNull() throws Exception {
+    JSONObject body = new JSONObject().put("someOtherKey", "x");
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.CALLOUT)
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    assertNull(HANDLER.afterCallout(ctx));
+  }
+
+  @Test
+  public void testAfterCalloutNoOpWhenNoPreviousResult() {
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.CALLOUT)
+        .build();
+    assertNull(HANDLER.afterCallout(ctx));
+  }
+
+  // ── afterHandle() — write-response sign flip, GET-only enrichment (ETP-5336) ──
+
+  /**
+   * ETP-5336's actual repro: a PATCH echoing the updated line must ALSO get the stored
+   * NEGATIVE quantity flipped to POSITIVE — not just a GET. {@code afterHandle} returns
+   * {@code null} on a write (the dispatcher keeps using the caller's own previousResult), but
+   * the flip is applied in place on the SAME JSONObject, so it must be visible on {@code body}.
+   * The GET-only source-document SQL enrichment (orderQuantity/productCode) must NOT run — if
+   * it did, it would blow up on {@code OBDal.getInstance()} with no active session/mock here.
+   */
+  @Test
+  public void testAfterHandlePatchResponseFlipsSignInPlaceAndSkipsSourceEnrichment()
+      throws Exception {
+    JSONObject body = lineBodyWithMovementQuantity("line-patch", -12.0);
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    NeoResponse result = HANDLER.afterHandle(ctx);
+
+    assertNull("a write response returns null — the mutation happens in place on "
+        + "previousResult, the caller keeps its own reference", result);
+    JSONObject rec = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    assertEquals("the stored NEGATIVE sign must flip to POSITIVE on a PATCH echo too, not "
+        + "just on GET", 12.0, rec.getDouble("movementQuantity"), 0.0001);
+    assertFalse("GET-only source-document enrichment must not run on a write response",
+        rec.has("orderQuantity"));
+    assertFalse("GET-only source-document enrichment must not run on a write response",
+        rec.has("productCode"));
+  }
+
+  @Test
+  public void testAfterHandlePostResponseFlipsSignInPlace() throws Exception {
+    JSONObject body = lineBodyWithMovementQuantity("line-post", -6.0);
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+        .previousResult(NeoResponse.ok(body))
+        .build();
+
+    assertNull(HANDLER.afterHandle(ctx));
+
+    JSONObject rec = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    assertEquals(6.0, rec.getDouble("movementQuantity"), 0.0001);
+  }
+
+  @Test
+  public void testAfterHandlePutResponseFlipsSignAndPreservesOriginalStatus() throws Exception {
+    JSONObject body = lineBodyWithMovementQuantity("line-put", -3.5);
+    NeoResponse previous = new NeoResponse(200, body);
+    NeoContext ctx = NeoContext.builder()
+        .httpMethod("PUT").endpointType(NeoEndpointType.CRUD)
+        .previousResult(previous)
+        .build();
+
+    assertNull(HANDLER.afterHandle(ctx));
+
+    assertSame("the caller's previousResult reference must be untouched by a null return",
+        previous, ctx.getPreviousResult());
+    assertEquals(200, ctx.getPreviousResult().getHttpStatus());
+    JSONObject rec = body.getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    assertEquals(3.5, rec.getDouble("movementQuantity"), 0.0001);
   }
 
   // ── afterHandle() guard conditions ────────────────────────────────────────

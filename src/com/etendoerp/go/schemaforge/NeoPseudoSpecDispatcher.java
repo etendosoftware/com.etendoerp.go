@@ -23,6 +23,7 @@ import javax.servlet.http.HttpServletResponse;
 
 import com.etendoerp.go.common.GoRuntimeProperties;
 import com.etendoerp.go.schemaforge.webhooks.SFAcctProcessMonitor;
+import com.etendoerp.go.schemaforge.webhooks.SFCostingCadence;
 import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
 import com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistory;
@@ -187,6 +188,14 @@ class NeoPseudoSpecDispatcher {
       case "acctprocessmonitor":
         return dispatchGoWebhook("Acctprocessmonitor", method, request, response,
             new SFAcctProcessMonitor());
+
+      // ETP-5370 — one-shot remediation that leaves exactly ONE active CostingBackground schedule
+      // per client, firing every 30s, and RE-ARMS its Quartz trigger. It is a webhook rather than a
+      // data-fix .sql because production does not restart Tomcat and an UPDATE to AD_PROCESS_REQUEST
+      // is invisible to an already-armed trigger; see SFCostingCadence's class javadoc.
+      case "costingcadence":
+        return dispatchGoWebhook("Costingcadence", method, request, response,
+            new SFCostingCadence());
 
       // ETP-5267 — the internal-user side of the Business Partner self-service portal: does this
       // Business Partner have a live portal link, and revoke it. Deliberately NOT behind the

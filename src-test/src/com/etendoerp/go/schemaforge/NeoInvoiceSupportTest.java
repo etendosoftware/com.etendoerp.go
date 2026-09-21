@@ -30,6 +30,7 @@ import java.sql.ResultSet;
 import java.util.Map;
 
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 import org.openbravo.base.exception.OBException;

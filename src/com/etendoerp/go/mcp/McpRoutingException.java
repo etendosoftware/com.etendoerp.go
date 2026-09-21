@@ -46,6 +46,9 @@ class McpRoutingException extends OBException {
   /** Repeated by three factories; Sonar java:S1192 and one place to reword it. */
   private static final String RETRY_WITH_AVAILABLE = "Retry with one of the names in 'available'.";
 
+  /** Opens every message that names the offending field, so the three read the same way. */
+  private static final String FIELD_PREFIX = "Field '";
+
   private final int status;
   private final String errorCode;
   private final String field;
@@ -214,11 +217,18 @@ class McpRoutingException extends OBException {
       names = names.subList(0, McpConstants.MAX_AVAILABLE_NAMES);
     }
     return new McpRoutingException(
-        "Unknown filter field '" + key + "' on entity '" + entityName + "'",
+        // IMP-39: deliberately says "not available", never "unknown". The same refusal answers a
+        // name that does not exist and a name the spec excludes, because two distinguishable
+        // answers would let a caller enumerate the underlying AD table by probing keys and reading
+        // which refusal came back. The message neither asserts nor denies that such a column
+        // exists; 'available' says what this entity does expose, which is what the caller is
+        // entitled to know.
+        FIELD_PREFIX + key + "' is not available for filtering on entity '" + entityName + "'",
         McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_UNKNOWN_FILTER_FIELD, key, names,
         truncated
             ? "Retry with one of the names in 'available'. That list is truncated — call "
-                + "neo_schema for this entity to see every filterable field."
+                + "neo_schema with view:\"full\" for this entity to see every filterable "
+                + "field."
             : RETRY_WITH_AVAILABLE,
         McpConstants.SEE_ALSO_READING);
   }
@@ -235,6 +245,132 @@ class McpRoutingException extends OBException {
    * @param available the recognized operator keys
    * @return the exception to throw
    */
+  /**
+   * A tool call carried a top-level argument the tool does not declare (IMP-40).
+   *
+   * <p>Such an argument used to be dropped in silence, and on a read tool that is the dangerous
+   * direction: an argument the caller believed was narrowing the result — a {@code parentId} on
+   * {@code neo_list}, say — simply vanished, and the unnarrowed answer came back looking exactly
+   * like a correct one. A caller cannot detect that from the response, so it acts on rows it never
+   * asked for. Refusing costs one retry; the silence cost correctness.</p>
+   *
+   * @param argument  the argument name that is not declared
+   * @param toolName  the tool it was sent to
+   * @param available the argument names the tool does declare
+   * @return the exception to throw
+   */
+  /**
+   * A write carried a field the spec does not expose on this entity (IMP-39).
+   *
+   * <p>The write path used to map the caller's keys straight onto the DAL model and pass anything
+   * it could not map through untouched, with an explicit comment saying the MCP deliberately
+   * accepts "all valid table columns from AI agents, not just SF-configured ones". That is what
+   * let {@code orderReference} — curated out of the sales-order window — be written and filtered
+   * while {@code neo_get} denied it existed: three tools, three answers, and a caller that sets a
+   * value, receives 200, and can never read it back.</p>
+   *
+   * <p><b>The wording is the security property.</b> It says the field is not allowed here and
+   * stops. It does not say the field exists, does not say it was curated out, and does not say it
+   * is unknown — because a caller able to tell those apart could enumerate the columns of the
+   * underlying AD table by sending keys and reading which refusal came back. {@code available}
+   * carries what this entity does expose, which is the only part the caller is entitled to.</p>
+   *
+   * @param field      the field name that is not allowed
+   * @param entityName the entity the write was aimed at
+   * @param available  the field names this entity does expose; need not be pre-sorted or truncated
+   * @return the exception to throw
+   */
+  /**
+   * A write carried a value for a field the spec exposes as read-only (IMP-48).
+   *
+   * <p>The MCP write path had no read-only gate at all. {@code NeoFieldFilter.filterCreateRequest}
+   * has rejected these since IMP-28 — its javadoc argues the case: <em>"an agent that had just been
+   * told that this field is read-only should never send it in the first place; if it does anyway,
+   * the honest response is a rejection, not a silent no-op"</em> — but {@code McpToolRouter} builds
+   * a {@code NeoFieldFilter} only to project GET responses and never calls it on a write. So the
+   * protection existed and the MCP was outside it, and whether a caller's value was dropped or
+   * persisted was decided by AD's {@code isUpdatable} alone: on {@code sales-order/header} five of
+   * the seven curated read-only fields are barred by AD, while {@code DocumentNo} and
+   * {@code InvoiceStatus} are not.</p>
+   *
+   * <p>Unlike {@link #fieldNotAllowed}, this names the reason. That costs nothing: the field is
+   * published by {@code neo_schema} carrying {@code readOnly: true}, so the refusal repeats what
+   * the caller was already told rather than revealing anything the surface hid.</p>
+   *
+   * @param field      the field name the caller tried to write
+   * @param entityName the entity the write was aimed at
+   * @return the exception to throw
+   */
+  static McpRoutingException readOnlyField(String field, String entityName) {
+    return new McpRoutingException(
+        FIELD_PREFIX + field + "' is read-only on entity '" + entityName + "' and cannot be written",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_READ_ONLY_FIELD, field, List.of(),
+        "Remove it from 'fields' and retry. neo_schema reports this field with readOnly:true; the "
+            + "server maintains its value.",
+        McpConstants.SEE_ALSO_WRITING);
+  }
+
+  static McpRoutingException fieldNotAllowed(String field, String entityName,
+      List<String> available) {
+    List<String> names = available == null ? List.of() : available;
+    boolean truncated = names.size() > McpConstants.MAX_AVAILABLE_NAMES;
+    if (truncated) {
+      names = names.subList(0, McpConstants.MAX_AVAILABLE_NAMES);
+    }
+    return new McpRoutingException(
+        FIELD_PREFIX + field + "' is not allowed on entity '" + entityName + "'",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_FIELD_NOT_ALLOWED, field, names,
+        truncated
+            ? "Send only fields listed in 'available'. That list is truncated — call neo_schema "
+                + "with view:\"create\" for this entity to see every field you may send."
+            : "Send only fields listed in 'available'.",
+        McpConstants.SEE_ALSO_WRITING);
+  }
+
+  /**
+   * IMP-44: {@code neo_schema} requires an explicit {@code view}. The default used to be the full
+   * field dump — 39.5 kB on {@code sales-order/header} against 5.4 kB for {@code view:"create"} —
+   * and the caller learned of the cheaper projection from a hint at the bottom of the response it
+   * had already paid for. The tool description has recommended {@code view:"create"} since
+   * 2026-08-06 and three independent blind agents still took the full route, so the projection is
+   * now a decision the caller states rather than one it inherits.
+   *
+   * <p>The same refusal covers an unrecognised value. {@code view:"summary"} is a real view on
+   * neo_list and neo_get and was silently ignored here, returning the full dump to a caller that
+   * had explicitly asked for less.</p>
+   *
+   * @param supplied the value the caller sent, or {@code null}/blank when the argument was absent
+   * @return the exception to throw
+   */
+  static McpRoutingException schemaViewRequired(String supplied) {
+    boolean absent = supplied == null || supplied.trim().isEmpty();
+    return new McpRoutingException(
+        absent
+            ? "neo_schema requires a 'view'"
+            : "Unknown view '" + supplied + "' for neo_schema",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VIEW_REQUIRED,
+        McpActionsView.PARAM_VIEW,
+        List.of(McpSchemaCreateView.VIEW_CREATE, McpSchemaCreateView.VIEW_FULL,
+            McpActionsView.VIEW_ACTIONS),
+        "Pick one: view:\"create\" before neo_create/neo_update (only the fields you may send, "
+            + "split required/optional — the smallest and the one you want most of the time); "
+            + "view:\"actions\" for the callable buttons/processes; view:\"full\" for every "
+            + "field including read-only and system ones, which is several times larger.",
+        McpConstants.SEE_ALSO_READING);
+  }
+
+  static McpRoutingException unknownArgument(String argument, String toolName,
+      List<String> available) {
+    return new McpRoutingException(
+        "Unknown argument '" + argument + "' for tool '" + toolName + "'",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_UNKNOWN_ARGUMENT, argument,
+        available == null ? List.of() : available,
+        "This argument was ignored, not applied — if you meant it to narrow or change the result, "
+            + "the result you would have got is not the one you asked for. Retry using only the "
+            + "names in 'available'.",
+        McpConstants.SEE_ALSO_READING);
+  }
+
   static McpRoutingException unknownFilterOperator(String key, String operator,
       List<String> available) {
     return new McpRoutingException(

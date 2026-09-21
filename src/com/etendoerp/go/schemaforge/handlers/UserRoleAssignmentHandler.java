@@ -16,11 +16,15 @@
  */
 package com.etendoerp.go.schemaforge.handlers;
 
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import javax.inject.Named;
 
@@ -50,6 +54,7 @@ import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.data.Invitation;
 import com.etendoerp.go.schemaforge.util.NeoCrudHelper;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.etendoerp.go.schemaforge.util.UserRoleSyncSupport;
@@ -213,6 +218,33 @@ public class UserRoleAssignmentHandler implements NeoHandler {
   /** {@code AD_User_ID} of the System-client "Admin" and "System" bootstrap accounts. */
   private static final Set<String> HIDDEN_BOOTSTRAP_USER_IDS = Set.of("0", "100");
 
+  /**
+   * ETP-5188 — query params for the "Rol" advanced filter on the {@code user} list. See {@link
+   * #applyRoleFilter(NeoContext)}'s javadoc for the full contract.
+   */
+  private static final String QUERY_PARAM_ROLE_IDS = "RoleIds";
+  private static final String QUERY_PARAM_NO_ROLE = "NoRole";
+  /**
+   * ETP-5188 — negates the ENTIRE {@code RoleIds}/{@code NoRole} predicate {@link
+   * #applyRoleFilter(NeoContext)} builds, wrapping it in an HQL {@code not (...)}. Backs the
+   * "No es" ({@code RoleIds} + negate) and "No está vacío" ({@code NoRole} + negate) advanced-
+   * filter operators — see {@link #applyRoleFilter(NeoContext)}'s javadoc for the full contract.
+   */
+  private static final String QUERY_PARAM_ROLE_FILTER_NEGATE = "RoleFilterNegate";
+  private static final String TRUE_STRING = "true";
+
+  /**
+   * ETP-5188 — every {@code AD_Role_ID} this handler inlines into an HQL {@code _neoWhere}
+   * predicate (see {@link #applyRoleFilter(NeoContext)}) MUST match this shape before being
+   * concatenated into the predicate string: {@link NeoCrudHelper#NEO_WHERE_PARAM} has no
+   * bind-parameter mechanism (confirmed by reading {@code NeoCrudHelper#buildWhereClause} — the
+   * predicate is spliced into the HQL text as-is), so a literal id is the only way to express
+   * this filter, and this regex is the substitute for parameterization. Etendo AD ids are 32
+   * hex chars (see {@code CLAUDE.md}'s "Generating new Etendo UUIDs" section); case-insensitive
+   * since the frontend echoes back whatever case the DB already stores the id in.
+   */
+  private static final Pattern ROLE_ID_PATTERN = Pattern.compile("^[A-Fa-f0-9]{32}$");
+
   private static final String FIELD_TOTAL_ROWS = "totalRows";
   private static final String FIELD_ID = "id";
   private static final String FIELD_USERNAME = "username";
@@ -237,7 +269,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * ETP-4830 write-path-guards concern; on a {@code user} {@code DELETE}, guards against the
    * self/last-admin/owner deletes described in the class javadoc's ETP-5195 delete-guards
    * concern; on a {@code user} list {@code GET}, excludes contact-only rows (see {@link
-   * #excludeContactOnlyUsers}, ETP-5019). No-op for every other method/endpoint.
+   * #excludeContactOnlyUsers}, ETP-5019/ETP-5411). No-op for every other method/endpoint.
    */
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -256,6 +288,7 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     }
     if (METHOD_GET.equalsIgnoreCase(method) && context.getRecordId() == null) {
       excludeContactOnlyUsers(context);
+      applyRoleFilter(context);
     }
     return null;
   }
@@ -267,15 +300,33 @@ public class UserRoleAssignmentHandler implements NeoHandler {
    * Users window's list ("Default Customer Contact" rows for every client, plus assorted named
    * BP-contact rows) even though they are not real application users.
    *
-   * <p>Structural signal, confirmed by direct DB query rather than a name match on "Contact":
-   * EVERY genuinely login-capable {@code AD_User} — admin-created via this window's own {@link
-   * #handleCreate}, or provisioned by {@code InitialSetupUtility#insertUser} at client onboarding
-   * — always gets a non-blank {@code username} (this handler itself derives one from {@code
-   * email} on every create, see the class javadoc's concern (3)). A BP-contact-only row never
-   * has one. This holds even for a real user with zero roles assigned yet (confirmed: 42 of 185
-   * real users in this sandbox have zero {@code AD_User_Roles} rows but all 185 have a
-   * non-blank {@code username}) — so filtering on role count, unlike {@code username}, would
-   * wrongly hide legitimate not-yet-assigned users.
+   * <p><b>ETP-5411 — {@code username}-based filtering superseded.</b> The original signal
+   * ({@code username is not null}) relied on every genuinely login-capable user getting a
+   * non-blank username and every BP-contact row never getting one. That second half broke: a
+   * Contact created from the CLASSIC backend's Contacts tab (bypassing this handler's {@link
+   * #handleCreate} entirely) can end up with a non-blank {@code Username} — the classic UI
+   * doesn't leave it blank the way the original ETP-5019 sampling assumed. The new structural
+   * signal is {@code ETGO_INVITATION.AD_USER_ID}: every real user created through the Go SPA
+   * goes through {@link CompanyInvitationService#createInvitationForNewlyCreatedUser}, which
+   * persists an {@link Invitation} row with {@code invitation.setUser(invitedUser)} — i.e. the
+   * FK is set at invite-creation time, not at acceptance. A classic-backend Contact never goes
+   * through this path, so it never gets a matching {@code Invitation} row regardless of what its
+   * {@code username} contains.
+   *
+   * <p>One exception: the ONE user per client flagged {@code EM_ETGO_Is_Owner} (see {@link
+   * OwnerSupport}) is provisioned by the self-service onboarding flow, not {@link
+   * CompanyInvitationService} — the owner never gets an {@code Invitation} row either, so it
+   * needs its own clause or it would wrongly disappear from the list. {@code
+   * EM_ETGO_Is_Owner} is NOT a mapped entity property ({@link OwnerSupport}'s own javadoc — read
+   * via native SQL only), so it cannot be referenced as {@code e.emEtgoIsOwner} in this HQL
+   * predicate; instead {@link OwnerSupport#findOwnerUserId} resolves the current client's owner
+   * id via native SQL, and — validated against {@link #ROLE_ID_PATTERN} before being inlined,
+   * the same "no bind parameters for {@code _neoWhere}" precedent {@link #applyRoleFilter} already
+   * uses for {@code RoleIds} — it is spliced in as a literal {@code e.id = '<ownerId>'} branch.
+   *
+   * <p>Role count (a real user can have zero {@code AD_User_Roles} rows) remains ruled out for
+   * the same reason ETP-5019 originally ruled it out: 42 of 185 real users sampled had zero roles
+   * assigned yet.
    *
    * <p>Injects the exclusion as a {@code _neoWhere} HQL predicate (see {@link
    * NeoCrudHelper#NEO_WHERE_PARAM}) BEFORE the default CRUD list fetch runs, rather than
@@ -291,10 +342,270 @@ public class UserRoleAssignmentHandler implements NeoHandler {
     if (queryParams == null) {
       return;
     }
-    String predicate = "e.username is not null and e.username <> ''";
+    String ownerId = resolveCurrentClientOwnerId(context.getObContext());
+    StringBuilder predicate = new StringBuilder();
+    if (ownerId != null) {
+      predicate.append("e.id = '").append(ownerId).append("' or ");
+    }
+    predicate.append("exists (select 1 from ETGO_Invitation i where i.user = e)");
+    String existing = queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM);
+    queryParams.put(NeoCrudHelper.NEO_WHERE_PARAM, StringUtils.isBlank(existing)
+        ? predicate.toString()
+        : "(" + existing + ") and (" + predicate + ")");
+  }
+
+  /**
+   * Resolves the current request's client's owner {@code AD_User_ID} (see {@link
+   * OwnerSupport#findOwnerUserId}), validated against {@link #ROLE_ID_PATTERN} before ever being
+   * eligible for inlining into an HQL {@code _neoWhere} predicate — same defense used for
+   * {@code RoleIds} in {@link #applyRoleFilter}, since {@code _neoWhere} has no bind-parameter
+   * mechanism. Returns {@code null} whenever there is no client, no owner, or the resolved id
+   * unexpectedly fails the shape check (fails closed: no owner clause is added, so the owner
+   * would simply be excluded from this list rather than the predicate ever carrying an
+   * unvalidated value).
+   */
+  private String resolveCurrentClientOwnerId(OBContext obContext) {
+    if (obContext == null || obContext.getCurrentClient() == null) {
+      return null;
+    }
+    String ownerId = OwnerSupport.findOwnerUserId(obContext.getCurrentClient().getId());
+    if (ownerId == null || !ROLE_ID_PATTERN.matcher(ownerId).matches()) {
+      return null;
+    }
+    return ownerId;
+  }
+
+  /**
+   * ETP-5188 — server-side half of the Users window's "Rol" advanced filter. The frontend's
+   * generic {@code criteria=} query-param mechanism cannot express this (confirmed empirically,
+   * 500 error): it builds a naive dotted HQL property path through the {@code
+   * aDUserRolesList} collection, which is invalid HQL for a one-to-many association. So the
+   * frontend instead sends two DEDICATED query params on this same {@code user} list {@code GET}:
+   *
+   * <ul>
+   *   <li>{@code RoleIds=<id1>,<id2>,...} — comma-separated {@code AD_Role_ID}s of the fixed
+   *   system role templates ({@link com.etendoerp.go.roles.SystemRoleTemplates#byName()}) and/or
+   *   the caller's own client's admin ("Administrador") role id.</li>
+   *   <li>{@code NoRole=true} — users with no composed role at all (and not the admin).</li>
+   * </ul>
+   *
+   * <p>Since ETP-4906, a user's actual access is never a direct {@code Default_Ad_Role_ID} match
+   * against a template — it is expressed via that user's PERSONAL role (see {@link
+   * com.etendoerp.go.roles.UserRoleCompositionService}'s own class javadoc), which COMPOSES 1+
+   * templates through an active {@code AD_Role_Inheritance} row. The one exception is the
+   * client-admin "Admin" role, which {@code UserRoleCompositionService} never lets a personal
+   * role compose — it is always a DIRECT {@code Default_Ad_Role_ID} assignment (see that class's
+   * "Never touches the Admin role" javadoc section). {@link #buildComposedOrDirectPredicate}
+   * covers both shapes with a single OR: a direct {@code Default_Ad_Role_ID} match (the only way
+   * the admin id can ever match, but harmless to check for a template id too — no personal role's
+   * id is ever equal to a template's own id) OR an active inheritance from one of the requested
+   * template ids.
+   *
+   * <p>Injected as an HQL {@code _neoWhere} predicate (see {@link
+   * NeoCrudHelper#NEO_WHERE_PARAM}), the exact same mechanism {@link
+   * #excludeContactOnlyUsers(NeoContext)} already uses on this same list {@code GET} — combined
+   * with that method's own predicate (and any other existing one) via {@code and}, while
+   * {@code RoleIds} and {@code NoRole} are combined with {@code or} between themselves: they are
+   * two chips of the SAME multi-select filter ("match any of the selected options"), not two
+   * independent filters.
+   *
+   * <p><b>No bind-parameter mechanism exists for {@code _neoWhere}</b> (confirmed by reading
+   * {@link NeoCrudHelper#buildWhereClause} in full — the predicate string is spliced verbatim
+   * into the HQL text). Every {@code AD_Role_ID} inlined into the predicate is therefore first
+   * validated against {@link #ROLE_ID_PATTERN} in {@link #sanitizeRoleIds(String)} — anything
+   * that doesn't match a 32-char hex id is dropped (logged, not rejected with an error, so one
+   * malformed entry doesn't 500 the whole list) rather than ever reaching the HQL string
+   * unescaped. This is the same literal-string-only precedent {@link #excludeContactOnlyUsers}
+   * already sets for this file (its predicate has no dynamic values at all, so it never needed
+   * this sanitization step), used here in the substitute-for-parameterization sense CLAUDE.md's
+   * NeoHandler guidance calls for.
+   *
+   * <p><b>ETP-5188 negation ({@code RoleFilterNegate=true}).</b> The frontend's "Rol" filter
+   * offers four operators — "Es", "No es", "Está vacío", "No está vacío" — but only needs the two
+   * primitives above ({@code RoleIds}, {@code NoRole}) plus this one boolean flag to express all
+   * four; no new query semantics are needed:
+   * <ul>
+   *   <li>"Es" — {@code RoleIds} alone, no negate (unchanged, pre-ETP-5188 behavior).</li>
+   *   <li>"No es" — {@code RoleIds} + {@code RoleFilterNegate=true}: NOT the same predicate "Es"
+   *   builds — "this user has none of the selected roles".</li>
+   *   <li>"Está vacío" — {@code NoRole=true} alone, no negate (unchanged "Sin rol" behavior).</li>
+   *   <li>"No está vacío" — {@code NoRole=true} + {@code RoleFilterNegate=true}: NOT "Sin rol" —
+   *   "this user has some role, whichever it is".</li>
+   * </ul>
+   * When present, {@code RoleFilterNegate} wraps the ENTIRE {@code or}-joined combination of
+   * whichever branches ({@code RoleIds}/{@code NoRole}) are present in one outer HQL
+   * {@code not (...)}, applied AFTER that combination is built and BEFORE it is merged into any
+   * existing {@code _neoWhere} predicate — so it composes with an already-present filter exactly
+   * like the un-negated predicate always did. Parsed with the same strict {@code
+   * TRUE_STRING.equalsIgnoreCase(StringUtils.trimToNull(...))} convention {@code NoRole} already
+   * uses (see {@link #isRoleFilterNegated(Map)}): anything other than a case-insensitive
+   * {@code "true"} is treated as absent/false, so this is a pure additive change — behavior is
+   * byte-for-byte unchanged whenever {@code RoleFilterNegate} is absent.
+   *
+   * <p>A no-op when neither {@code RoleIds} nor {@code NoRole} is present, regardless of {@code
+   * RoleFilterNegate} — negating an empty/no-op filter would otherwise wrongly match every user.
+   */
+  private void applyRoleFilter(NeoContext context) {
+    Map<String, String> queryParams = context.getQueryParams();
+    if (queryParams == null) {
+      return;
+    }
+    Set<String> roleIds = sanitizeRoleIds(queryParams.get(QUERY_PARAM_ROLE_IDS));
+    boolean noRole = TRUE_STRING.equalsIgnoreCase(
+        StringUtils.trimToNull(queryParams.get(QUERY_PARAM_NO_ROLE)));
+    if (roleIds.isEmpty() && !noRole) {
+      return;
+    }
+
+    List<String> predicates = new ArrayList<>();
+    if (!roleIds.isEmpty()) {
+      predicates.add(buildComposedOrDirectPredicate(roleIds));
+    }
+    if (noRole) {
+      predicates.add(buildNoRolePredicate(resolveClientAdminRoleId(context.getObContext())));
+    }
+
+    String predicate = "(" + String.join(") or (", predicates) + ")";
+    if (isRoleFilterNegated(queryParams)) {
+      predicate = "not (" + predicate + ")";
+    }
     String existing = queryParams.get(NeoCrudHelper.NEO_WHERE_PARAM);
     queryParams.put(NeoCrudHelper.NEO_WHERE_PARAM,
         StringUtils.isBlank(existing) ? predicate : "(" + existing + ") and (" + predicate + ")");
+  }
+
+  /**
+   * ETP-5188 — whether the current request asked to negate the whole {@code RoleIds}/{@code
+   * NoRole} predicate via {@link #QUERY_PARAM_ROLE_FILTER_NEGATE}. Same strict, case-insensitive
+   * {@code "true"}-only parsing convention {@code NoRole} already uses one line above in {@link
+   * #applyRoleFilter(NeoContext)} — anything else (missing, blank, {@code "1"}, {@code "yes"},
+   * mixed case aside from {@code true}/{@code TRUE}/{@code True}-style variants, ...) is treated
+   * as absent/false. Carries no id/value of its own, so it needs no {@link #ROLE_ID_PATTERN}-style
+   * sanitization before being inlined — it never reaches the HQL string itself, only decides
+   * whether to prepend the literal {@code "not "} wrapper.
+   */
+  private boolean isRoleFilterNegated(Map<String, String> queryParams) {
+    return TRUE_STRING.equalsIgnoreCase(
+        StringUtils.trimToNull(queryParams.get(QUERY_PARAM_ROLE_FILTER_NEGATE)));
+  }
+
+  /**
+   * Splits {@code rawRoleIds} on {@code ,}, trims each entry, and keeps only the ones matching
+   * {@link #ROLE_ID_PATTERN} — see {@link #applyRoleFilter(NeoContext)}'s javadoc for why this
+   * validation stands in for a bind-parameter mechanism {@code _neoWhere} does not have. A
+   * malformed entry is logged at WARN and silently dropped rather than failing the whole request.
+   *
+   * @param rawRoleIds the raw {@code RoleIds} query param value, possibly {@code null}/blank
+   * @return the validated, deduplicated (insertion-order) set of role ids; empty if {@code
+   *     rawRoleIds} is blank or every entry was malformed
+   */
+  private Set<String> sanitizeRoleIds(String rawRoleIds) {
+    Set<String> result = new LinkedHashSet<>();
+    if (StringUtils.isBlank(rawRoleIds)) {
+      return result;
+    }
+    for (String candidate : rawRoleIds.split(",")) {
+      String trimmed = StringUtils.trimToNull(candidate);
+      if (trimmed == null) {
+        continue;
+      }
+      if (ROLE_ID_PATTERN.matcher(trimmed).matches()) {
+        result.add(trimmed);
+      } else {
+        log.warn("UserRoleAssignmentHandler.applyRoleFilter: rejected malformed RoleIds entry "
+            + "'{}' — not a 32-char hex AD_Role_ID", trimmed);
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Builds the OR of the two ways a user can match one of {@code roleIds} — see {@link
+   * #applyRoleFilter(NeoContext)}'s javadoc for why both branches are needed. {@code roleIds} is
+   * already sanitized by {@link #sanitizeRoleIds(String)} (32-char hex only), so inlining it
+   * directly into the HQL literal list is safe.
+   *
+   * @param roleIds a non-empty, pre-sanitized set of {@code AD_Role_ID}s
+   * @return an HQL boolean expression, not yet wrapped in an outer paren by the caller
+   */
+  private String buildComposedOrDirectPredicate(Set<String> roleIds) {
+    String literalIdList = toHqlLiteralList(roleIds);
+    return "(e.defaultRole.id in (" + literalIdList + ")) or "
+        + "(exists (select 1 from ADRoleInheritance ri where ri.role = e.defaultRole and "
+        + "ri.active = true and ri.inheritFrom.id in (" + literalIdList + ")))";
+  }
+
+  /**
+   * Builds the "Sin rol" predicate: no active composed template inheritance from the user's
+   * personal role, AND the user's {@code Default_Ad_Role_ID} is not the client's admin role
+   * (admin is a real, direct role assignment — never "no role" — see {@link
+   * #applyRoleFilter(NeoContext)}'s javadoc). The {@code exists} subquery correlates on {@code
+   * ri.role = e.defaultRole} — an entity/FK comparison, not a dotted property-value read — so a
+   * {@code null} {@code e.defaultRole} simply makes the correlation (and therefore the {@code
+   * exists}) false, with no join required; the same safe pattern {@link
+   * #buildComposedOrDirectPredicate} already relies on.
+   *
+   * @param adminRoleId the caller's client's admin role id, or {@code null} if it could not be
+   *     resolved (e.g. no {@code OBContext}/client on this request) — the admin-exclusion clause
+   *     is simply omitted in that case, never inlined as a literal {@code null}
+   * @return an HQL boolean expression, not yet wrapped in an outer paren by the caller
+   */
+  private String buildNoRolePredicate(String adminRoleId) {
+    StringBuilder predicate = new StringBuilder(
+        "not exists (select 1 from ADRoleInheritance ri where ri.role = e.defaultRole and "
+            + "ri.active = true)");
+    if (adminRoleId != null) {
+      predicate.append(" and (e.defaultRole is null or e.defaultRole.id <> '")
+          .append(adminRoleId).append("')");
+    }
+    return predicate.toString();
+  }
+
+  /**
+   * Resolves the caller's own client's active client-admin ({@code IsClientAdmin = 'Y'}) role
+   * id, following the exact same {@code OBCriteria} shape {@code SFRolesOverview#resolveTenantRoles}
+   * already uses to find a tenant's admin role — see that method for the precedent. Wrapped in
+   * {@code OBContext.setAdminMode(true)} like every other DB read in this class that isn't
+   * scoped to the acting user's own default client/org (e.g. {@link #attachOwnerFlag}), since
+   * this runs during a plain list {@code GET} under the acting user's own (non-admin) context.
+   *
+   * @param obContext the request's resolved {@code OBContext}, or {@code null}
+   * @return the client-admin role id, or {@code null} if {@code obContext}/its current client is
+   *     unavailable, or the client genuinely has no active admin role
+   */
+  private String resolveClientAdminRoleId(OBContext obContext) {
+    String clientId = obContext != null && obContext.getCurrentClient() != null
+        ? obContext.getCurrentClient().getId() : null;
+    if (clientId == null) {
+      return null;
+    }
+    OBContext.setAdminMode(true);
+    try {
+      OBCriteria<Role> criteria = OBDal.getInstance().createCriteria(Role.class);
+      criteria.setFilterOnReadableClients(false);
+      criteria.setFilterOnReadableOrganization(false);
+      criteria.add(Restrictions.eq(Role.PROPERTY_CLIENT + ".id", clientId));
+      criteria.add(Restrictions.eq(Role.PROPERTY_ACTIVE, true));
+      criteria.add(Restrictions.eq(Role.PROPERTY_CLIENTADMIN, true));
+      criteria.setMaxResults(1);
+      List<Role> results = criteria.list();
+      return results.isEmpty() ? null : results.get(0).getId();
+    } catch (Exception e) {
+      log.warn("UserRoleAssignmentHandler.resolveClientAdminRoleId error for client {}: {}",
+          clientId, e.getMessage(), e);
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Joins {@code ids} into a comma-separated, single-quoted HQL literal list — e.g. {@code
+   * 'ID1','ID2'} — for splicing into an {@code in (...)} clause. Callers are responsible for
+   * ensuring every id is already safe to inline (see {@link #sanitizeRoleIds(String)}).
+   */
+  private static String toHqlLiteralList(Set<String> ids) {
+    return ids.stream().map(id -> "'" + id + "'").collect(Collectors.joining(","));
   }
 
   /**

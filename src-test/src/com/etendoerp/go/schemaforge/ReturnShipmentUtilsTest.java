@@ -402,11 +402,17 @@ public class ReturnShipmentUtilsTest {
 
   // ── addReturnInvoiceLines (ETP-4737) — Sales-vs-Purchase sign asymmetry ──────
   //
-  // Sales-side return receipts (RFC Receipt) store movementQuantity POSITIVE; Purchase-side
-  // return shipments (RTV Shipment) already store it NEGATIVE. The rectificative invoice line
-  // must ALWAYS come out negative regardless of the source's own sign convention. The old
-  // `.negate()` was correct for Sales but flipped Purchase-side quantities back to positive
-  // (confirmed live on REC-1000007) — fixed to `.abs().negate()`.
+  // When ETP-4737 was written, Sales-side return receipts (RFC Receipt) stored movementQuantity
+  // POSITIVE while Purchase-side return shipments (RTV Shipment) already stored it NEGATIVE. The
+  // rectificative invoice line must ALWAYS come out negative regardless of the source's own sign
+  // convention. The old `.negate()` was correct for Sales but flipped Purchase-side quantities
+  // back to positive (confirmed live on REC-1000007) — fixed to `.abs().negate()`.
+  //
+  // ETP-5313 moved Sales onto the same stored-NEGATIVE convention (see ReturnLineQuantityPolicy),
+  // so both sides now arrive negative. Both cases below are kept on purpose: the positive one is
+  // no longer what a freshly created sales return looks like, but it is still what every return
+  // document created BEFORE ETP-5313 holds, and it pins the sign-agnosticism this method
+  // guarantees.
 
   /**
    * Builds the minimal mock graph for {@code addReturnInvoiceLines} / {@code buildAndSaveInvoiceLine}
@@ -451,16 +457,19 @@ public class ReturnShipmentUtilsTest {
     }
   }
 
-  /** Sales-side: source movementQuantity is POSITIVE → invoice line qty must come out negative. */
+  /**
+   * Legacy sales-side (pre-ETP-5313) document: source movementQuantity is POSITIVE → invoice
+   * line qty must still come out negative.
+   */
   @Test
   public void addReturnInvoiceLines_salesPositiveMovementQty_producesNegativeInvoicedQty() {
     assertAddReturnInvoiceLinesProducesQty(new BigDecimal("5"), new BigDecimal("-5"));
   }
 
   /**
-   * Purchase-side regression: source movementQuantity is already NEGATIVE (RTV Shipment
-   * convention) → invoice line qty must STILL come out negative. Before the fix
-   * ({@code .negate()} instead of {@code .abs().negate()}), this flipped back to positive.
+   * Source movementQuantity is already NEGATIVE — the RTV Shipment convention, and since
+   * ETP-5313 the sales-side one too → invoice line qty must STILL come out negative. Before the
+   * fix ({@code .negate()} instead of {@code .abs().negate()}), this flipped back to positive.
    */
   @Test
   public void addReturnInvoiceLines_purchaseNegativeMovementQty_stillProducesNegativeInvoicedQty() {

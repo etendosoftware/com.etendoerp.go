@@ -16,7 +16,6 @@
  */
 package com.etendoerp.go.schemaforge;
 
-import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 
@@ -26,7 +25,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.openbravo.dal.service.OBDal;
 
 /**
  * Post-hook for the Return Material Receipt line entity.
@@ -43,6 +41,11 @@ import org.openbravo.dal.service.OBDal;
  * This class implements {@link NeoHandler} directly rather than extending {@link
  * AbstractInOutLineHandler} — same shape as {@link ReturnToVendorShipmentLineHandler} — so the
  * locator default is applied directly here via the shared helper instead of inheriting it.
+ *
+ * <p>Write/read quantity sign (ETP-5313): {@code movementQuantity} is persisted NEGATIVE and
+ * echoed back POSITIVE, exactly like {@link ReturnToVendorShipmentLineHandler}. Both delegate to
+ * {@link ReturnLineQuantityPolicy}, which documents why core {@code M_INOUT_POST} leaves no other
+ * option. Before this, a completed sales return DECREASED stock instead of restoring it.
  */
 @Named("returnMaterialReceiptLineHandler")
 public class ReturnMaterialReceiptLineHandler implements NeoHandler {
@@ -51,7 +54,10 @@ public class ReturnMaterialReceiptLineHandler implements NeoHandler {
 
   @Override
   public NeoResponse handle(NeoContext context) {
-    if (context != null && NeoEndpointType.CRUD.equals(context.getEndpointType())
+    if (context == null) {
+      return null;
+    }
+    if (NeoEndpointType.CRUD.equals(context.getEndpointType())
         && "POST".equalsIgnoreCase(context.getHttpMethod())) {
       try {
         NeoHandlerUtils.injectDefaultLocatorIfMissing(context.getRequestBody(), log);
@@ -60,15 +66,45 @@ public class ReturnMaterialReceiptLineHandler implements NeoHandler {
             e.getMessage(), e);
       }
     }
+    String method = context.getHttpMethod();
+    if ("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)) {
+      ReturnLineQuantityPolicy.applyStoredSignToWriteBody(context.getRequestBody(), log);
+    }
     return null;
   }
 
+  /**
+   * Strips the stock-derived {@code movementQuantity} the classic {@code SL_InOutLine_Product}
+   * callout echoes back on product selection — the same protection {@link GoodsReceiptLineHandler}
+   * (ETP-4671) and {@link GoodsShipmentLineHandler} (ETP-5062) already had and this window did
+   * not (ETP-5336). On a return line the product's on-hand quantity is meaningless: the quantity
+   * is what the customer is sending back, so a callout must never overwrite what the user typed.
+   * See {@link NeoHandlerUtils#stripStockDerivedMovementQuantity} for the full rationale.
+   */
+  @Override
+  public NeoResponse afterCallout(NeoContext context) {
+    NeoHandlerUtils.stripStockDerivedMovementQuantity(context, log);
+    return null;
+  }
+
+  /**
+   * ETP-5336: the quantity sign flip runs on EVERY response that carries a line — a
+   * {@code POST}/{@code PUT}/{@code PATCH} echo included — because it describes the record
+   * itself. The source-document enrichment below stays GET-only on purpose: it is a batch SQL
+   * lookup for the grid, and running it per write would add a query to every keystroke-sized
+   * save. Returns {@code null} on a write so the original response (and its status code) is
+   * kept — the body is mutated in place, so the flip still reaches the client.
+   */
   @Override
   public NeoResponse afterHandle(NeoContext context) {
     try {
       NeoResponse previousResult = context.getPreviousResult();
-      JSONArray dataArr = NeoHandlerUtils.extractGetDataArray(context);
+      JSONArray dataArr = NeoHandlerUtils.extractResponseDataArray(context);
       if (dataArr == null || previousResult == null) {
+        return null;
+      }
+      ReturnLineQuantityPolicy.applyDisplaySignToRecords(dataArr, log);
+      if (!"GET".equals(context.getHttpMethod())) {
         return null;
       }
       JSONObject body = previousResult.getBody();

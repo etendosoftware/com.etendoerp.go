@@ -33,6 +33,46 @@ public class OAuth2ClientPolicyTest {
   private static final Set<String> VALID_SCOPES = new HashSet<>(
       Arrays.asList("neo:read", "neo:write", "neo:process", "neo:report", "neo:*"));
 
+  @Test
+  public void publicApiKeyNamesAreNormalizedAndBounded() {
+    assertEquals("Production key", PublicApiKeyPolicy.normalizeName("  Production   key "));
+    try {
+      PublicApiKeyPolicy.normalizeName("x".repeat(PublicApiKeyPolicy.MAX_NAME_LENGTH + 1));
+      throw new AssertionError("expected an overlong name to be rejected");
+    } catch (PublicApiKeyPolicy.InvalidRequestException expected) {
+      assertTrue(expected.getMessage().contains("at most"));
+    }
+  }
+
+  @Test
+  public void publicApiKeyCapabilitiesMapToInternalScopesWithoutWildcard() {
+    Set<String> capabilities = PublicApiKeyPolicy.normalizeCapabilities(
+        new String[] { PublicApiKeyPolicy.CAPABILITY_READ, PublicApiKeyPolicy.CAPABILITY_WRITE });
+    assertEquals("neo:read neo:write", PublicApiKeyPolicy.toInternalScopes(capabilities));
+    assertFalse(PublicApiKeyPolicy.toInternalScopes(capabilities).contains("neo:*"));
+  }
+
+  @Test
+  public void publicApiKeyStorageAddsPrivateMarkerWithoutExposingItAsCapability() {
+    Set<String> capabilities = Collections.singleton(PublicApiKeyPolicy.CAPABILITY_READ);
+    String storedScopes = PublicApiKeyPolicy.toStoredScopes(capabilities);
+    assertTrue(storedScopes.startsWith(PublicApiKeyPolicy.PUBLIC_KEY_SCOPE_MARKER + " "));
+    assertEquals(capabilities, PublicApiKeyPolicy.capabilitiesForScopes(storedScopes));
+  }
+
+  @Test
+  public void publicApiKeyStorageKeepsOwnerOrganizationPrivateAndRecoverable() {
+    String marker = PublicApiKeyPolicy.ownerOrganizationMarker("ORG-123");
+    assertEquals("ORG-123", PublicApiKeyPolicy.ownerOrganizationId(
+        "neo:public-api-key neo:read " + marker));
+    assertEquals("ORG-123", PublicApiKeyPolicy.ownerOrganizationId(marker));
+  }
+
+  @Test(expected = PublicApiKeyPolicy.InvalidCapabilityException.class)
+  public void publicApiKeyRejectsUnknownAndWildcardCapabilities() {
+    PublicApiKeyPolicy.normalizeCapabilities(new String[] { "neo:*" });
+  }
+
   /** Empty requested scopes mean caller is requesting the client default scope set. */
   @Test
   public void hasUnsupportedScopesAcceptsBlankScopeRequest() {

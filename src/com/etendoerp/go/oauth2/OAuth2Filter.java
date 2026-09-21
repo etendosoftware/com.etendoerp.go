@@ -58,9 +58,11 @@ public class OAuth2Filter implements Filter {
   private static final String TOKEN_LOOKUP_SQL =
       "SELECT t.etgo_oauth2_token_id, t.scopes AS token_scopes, t.expires_at, t.is_revoked, "
           + "c.ad_user_id, c.ad_role_id, c.scopes AS client_scopes, c.isactive AS client_active, "
-          + "c.ad_client_id AS etendo_client_id "
+          + "COALESCE(o.ad_client_id, c.ad_client_id) AS etendo_client_id, "
+          + "t.ad_org_id AS etendo_org_id "
           + "FROM etgo_oauth2_token t "
           + "JOIN etgo_oauth2_client c ON t.etgo_oauth2_client_id = c.etgo_oauth2_client_id "
+          + "LEFT JOIN ad_org o ON t.ad_org_id = o.ad_org_id "
           + "WHERE t.access_token_hash = ?";
 
   // Request attribute keys for downstream consumption
@@ -69,8 +71,6 @@ public class OAuth2Filter implements Filter {
   public static final String ATTR_CLIENT_ID = "oauth2.clientId";
   public static final String ATTR_ORG_ID = "oauth2.orgId";
   public static final String ATTR_SCOPES = "oauth2.scopes";
-
-  private static final String DEFAULT_ORG_ID = "0";
 
   @Override
   public void init(FilterConfig filterConfig) throws ServletException {
@@ -126,7 +126,7 @@ public class OAuth2Filter implements Filter {
       httpReq.setAttribute(ATTR_USER_ID, tokenInfo.userId);
       httpReq.setAttribute(ATTR_ROLE_ID, tokenInfo.roleId);
       httpReq.setAttribute(ATTR_CLIENT_ID, tokenInfo.clientId);
-      httpReq.setAttribute(ATTR_ORG_ID, DEFAULT_ORG_ID);
+      httpReq.setAttribute(ATTR_ORG_ID, tokenInfo.orgId);
       httpReq.setAttribute(ATTR_SCOPES, tokenInfo.scopes);
 
       log.debug("OAuth2 token validated. userId={}, roleId={}, scopes={}",
@@ -186,6 +186,7 @@ public class OAuth2Filter implements Filter {
               rs.getString("ad_user_id"),
               rs.getString("ad_role_id"),
               rs.getString("etendo_client_id"),
+              rs.getString("etendo_org_id"),
               effectiveScopes);
         }
       }
@@ -216,7 +217,7 @@ public class OAuth2Filter implements Filter {
       identity.put(ATTR_USER_ID, info.userId);
       identity.put(ATTR_ROLE_ID, info.roleId);
       identity.put(ATTR_CLIENT_ID, info.clientId);
-      identity.put(ATTR_ORG_ID, DEFAULT_ORG_ID);
+      identity.put(ATTR_ORG_ID, info.orgId);
       identity.put(ATTR_SCOPES, info.scopes);
       return identity;
     } catch (Exception e) {
@@ -267,14 +268,20 @@ public class OAuth2Filter implements Filter {
     final String userId;
     final String roleId;
     final String clientId;
+    final String orgId;
     final String scopes;
     final String errorCode;
     final String errorDesc;
 
     TokenInfo(String userId, String roleId, String clientId, String scopes) {
+      this(userId, roleId, clientId, "0", scopes);
+    }
+
+    TokenInfo(String userId, String roleId, String clientId, String orgId, String scopes) {
       this.userId = userId;
       this.roleId = roleId;
       this.clientId = clientId;
+      this.orgId = orgId;
       this.scopes = scopes;
       this.errorCode = null;
       this.errorDesc = null;
@@ -284,6 +291,7 @@ public class OAuth2Filter implements Filter {
       this.userId = null;
       this.roleId = null;
       this.clientId = null;
+      this.orgId = null;
       this.scopes = null;
       this.errorCode = errorCode;
       this.errorDesc = errorDesc;
