@@ -188,50 +188,15 @@ public class SFSystemRoleTemplates extends BaseWebhookService {
     roleJson.put(ID, role.getId());
     roleJson.put(NAME, role.getName());
     roleJson.put(WINDOWS, buildWindowsJson(role, goWindowIds));
-    roleJson.put(REPORTS, buildReportsJson(role));
+    // ETP-5402 — Informes reports array, via the shared ReportAccessCatalog resolution/JSON
+    // builder (same one SFRolesOverview uses, so the two webhooks can never drift on which
+    // anchor id/category/kind backs a report row, or on how that tier map becomes JSON). No
+    // pre-resolved real-window tier map exists here (unlike SFRolesOverview, this class never
+    // builds one as a standalone map — see buildWindowsJson below), so null is passed for
+    // knownWindowTiers — the 6 financial-family rows just each resolve via their own fresh
+    // query instead of reusing an already-resolved tier, same as any other WINDOW-kind row.
+    roleJson.put(REPORTS, ReportAccessCatalog.reportsJson(ReportAccessCatalog.resolveTierMap(role, null)));
     return roleJson;
-  }
-
-  /**
-   * ETP-5402 — builds the Informes {@code reports} array for {@code role}, reusing the shared
-   * {@link ReportAccessCatalog} catalog/resolution (same one {@code SFRolesOverview} uses, so
-   * the two webhooks can never drift on which anchor id/category/kind backs a report row). No
-   * pre-resolved real-window tier map is available here (unlike {@code SFRolesOverview}, this
-   * class never builds one as a standalone map — see {@link #buildWindowsJson(Role, Set)}), so
-   * {@code null} is passed for {@code knownWindowTiers} — the 6 financial-family rows just each
-   * resolve via their own fresh query instead of reusing an already-resolved tier, same as any
-   * other {@code WINDOW}-kind row. Same "only accessible rows appear" semantics as {@link
-   * #buildWindowsJson(Role, Set)}: a row with tier {@code NONE} is skipped.
-   */
-  private JSONArray buildReportsJson(Role role) throws JSONException {
-    Map<String, String> reportTiers = ReportAccessCatalog.resolveTierMap(role, null);
-
-    List<JSONObject> reportJsons = new ArrayList<>();
-    for (ReportAccessCatalog.Row row : ReportAccessCatalog.ROWS) {
-      String tier = reportTiers.getOrDefault(row.id, ReportAccessCatalog.NONE);
-      if (ReportAccessCatalog.NONE.equals(tier)) {
-        continue;
-      }
-      JSONObject reportJson = new JSONObject();
-      reportJson.put(ID, row.id);
-      reportJson.put(NAME, row.name);
-      reportJson.put(TIER, tier);
-      reportJsons.add(reportJson);
-    }
-
-    reportJsons.sort((a, b) -> {
-      try {
-        return a.getString(NAME).compareToIgnoreCase(b.getString(NAME));
-      } catch (JSONException e) {
-        return 0;
-      }
-    });
-
-    JSONArray reports = new JSONArray();
-    for (JSONObject reportJson : reportJsons) {
-      reports.put(reportJson);
-    }
-    return reports;
   }
 
   /**

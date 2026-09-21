@@ -707,7 +707,7 @@ public class SFRolesOverview extends BaseWebhookService {
     JSONArray windows = windowsJsonFromTierMap(tiers, goWindowsById);
     roleJson.put(WINDOWS, windows);
     roleJson.put(WINDOW_COUNT, windows.length());
-    JSONArray reports = reportsJsonFromTierMap(reportTiers);
+    JSONArray reports = ReportAccessCatalog.reportsJson(reportTiers);
     roleJson.put(REPORTS, reports);
     roleJson.put(REPORT_COUNT, reports.length());
     return roleJson;
@@ -907,43 +907,6 @@ public class SFRolesOverview extends BaseWebhookService {
       windows.put(windowJson);
     }
     return windows;
-  }
-
-  /**
-   * ETP-5402 — turns a report-id → tier map (from {@link ReportAccessCatalog#resolveTierMap(Role,
-   * Map)}) into the sorted-by-name {@code reports} JSON array a role card carries — the {@code
-   * reports} counterpart of {@link #windowsJsonFromTierMap(Map, Map)}. Same "only accessible rows
-   * appear" semantics as that method: a row whose tier is {@link #NONE} is skipped here too, so
-   * {@code reportCount} means "reports this role can actually reach," matching {@code
-   * windowCount}'s own meaning.
-   */
-  private JSONArray reportsJsonFromTierMap(Map<String, String> reportTiers) throws JSONException {
-    List<JSONObject> reportJsons = new ArrayList<>();
-    for (ReportAccessCatalog.Row row : ReportAccessCatalog.ROWS) {
-      String tier = reportTiers.getOrDefault(row.id, NONE);
-      if (NONE.equals(tier)) {
-        continue;
-      }
-      JSONObject reportJson = new JSONObject();
-      reportJson.put(ID, row.id);
-      reportJson.put(NAME, row.name);
-      reportJson.put(TIER, tier);
-      reportJsons.add(reportJson);
-    }
-
-    reportJsons.sort((a, b) -> {
-      try {
-        return a.getString(NAME).compareToIgnoreCase(b.getString(NAME));
-      } catch (JSONException e) {
-        return 0;
-      }
-    });
-
-    JSONArray reports = new JSONArray();
-    for (JSONObject reportJson : reportJsons) {
-      reports.put(reportJson);
-    }
-    return reports;
   }
 
   /**

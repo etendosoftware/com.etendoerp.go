@@ -17,11 +17,15 @@
 
 package com.etendoerp.go.schemaforge.util;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONException;
+import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -268,5 +272,43 @@ public final class ReportAccessCatalog {
       tiers.put(classicProcessId, FULL);
     }
     return tiers;
+  }
+
+  /**
+   * Turns a report-id → tier map (from {@link #resolveTierMap(Role, Map)}) into the
+   * sorted-by-name {@code {id, name, tier}} JSON array both {@code SFRolesOverview} (a role
+   * card's own {@code reports}) and {@code SFSystemRoleTemplates} (same shape, its own {@code
+   * reports}) need identically — extracted here, alongside {@link #resolveTierMap}, so the two
+   * webhooks can never drift on this shape either. Only accessible rows appear: a row whose
+   * tier is {@link #NONE} is skipped, matching {@code windowsJsonFromTierMap}'s own "only
+   * accessible rows appear" convention in both webhooks for real windows.
+   */
+  public static JSONArray reportsJson(Map<String, String> reportTiers) throws JSONException {
+    List<JSONObject> reportJsons = new ArrayList<>();
+    for (Row row : ROWS) {
+      String tier = reportTiers.getOrDefault(row.id, NONE);
+      if (NONE.equals(tier)) {
+        continue;
+      }
+      JSONObject reportJson = new JSONObject();
+      reportJson.put("id", row.id);
+      reportJson.put("name", row.name);
+      reportJson.put("tier", tier);
+      reportJsons.add(reportJson);
+    }
+
+    reportJsons.sort((a, b) -> {
+      try {
+        return a.getString("name").compareToIgnoreCase(b.getString("name"));
+      } catch (JSONException e) {
+        return 0;
+      }
+    });
+
+    JSONArray reports = new JSONArray();
+    for (JSONObject reportJson : reportJsons) {
+      reports.put(reportJson);
+    }
+    return reports;
   }
 }
