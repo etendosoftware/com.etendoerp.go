@@ -77,6 +77,7 @@ import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
+import com.etendoerp.go.onboarding.OnboardingDataTransferService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
@@ -274,6 +275,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_COMPANY_DATA = "companyData";
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
+  OnboardingDataTransferService onboardingDataTransferService =
+      new OnboardingDataTransferService();
   OnboardingCompanyDataService onboardingCompanyDataService = new OnboardingCompanyDataService();
   OnboardingAccountingWiringService onboardingAccountingWiringService =
       new OnboardingAccountingWiringService();
@@ -508,7 +511,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private void handleCheckoutSession(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    runWithAuthenticatedAccount(request, response, "checkout-session", account -> {
+    runWithPlatformAccount(request, response, "checkout-session", account -> {
       OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
       OBContext.setAdminMode(true);
       boolean billingOwner;
@@ -530,9 +533,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             CLIENT_NAME_REQUIRED, CLIENT_NAME_REQUIRED);
         return;
       }
-      String requestOrigin = request.getHeader(HEADER_ORIGIN);
-      final String origin = StringUtils.isBlank(requestOrigin)
-          ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+      // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
+      final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
       try {
         JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
             clientName, origin);
@@ -554,7 +556,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleBillingPurchaseCreate(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
-    runWithAuthenticatedAccount(request, response, "billing-purchase-create", account -> {
+    runWithPlatformAccount(request, response, "billing-purchase-create", account -> {
       OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
       OBContext.setAdminMode(true);
       boolean billingOwner;
@@ -577,14 +579,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
       CheckoutRequest activePurchase = checkoutRequestStore
-          .findActiveForAccountAndClientName(account.getEmail(), clientName);
+          .findActiveForAccountAndClientName(account.getId(), account.getEmail(), clientName);
       if (activePurchase != null) {
         handleExistingBillingPurchase(request, response, account, activePurchase);
         return;
       }
-      String requestOrigin = request.getHeader(HEADER_ORIGIN);
-      final String origin = StringUtils.isBlank(requestOrigin)
-          ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+      // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
+      final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
       try {
         JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
             clientName, origin);
@@ -605,9 +606,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       throws IOException, JSONException {
     String status = activePurchase.getCheckoutRequestStatus();
     if ("CREATING".equals(status) || "CREATED".equals(status)) {
-      String requestOrigin = request.getHeader(HEADER_ORIGIN);
-      final String origin = StringUtils.isBlank(requestOrigin)
-          ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+      // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
+      final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
       try {
         JSONObject result = hostedCheckoutService.reopenSession(activePurchase.getRequest(),
             account.getEmail(), activePurchase.getClientName(), origin);
@@ -634,13 +634,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String prefix = "/checkout/sessions/";
     String path = request.getPathInfo();
     String requestId = path != null && path.startsWith(prefix) ? path.substring(prefix.length()) : "";
-    runWithAuthenticatedAccount(request, response, "checkout-status", account -> {
-      CheckoutRequest checkoutRequest = checkoutRequestStore.find(requestId, account.getEmail());
+    runWithPlatformAccount(request, response, "checkout-status", account -> {
+      CheckoutRequest checkoutRequest = checkoutRequestStore.find(requestId, account.getId(),
+          account.getEmail());
       // Answers "pending" for an unknown request id, for another account's request id, and for a
       // genuinely unpaid one alike. That is deliberate: the endpoint must never confirm that a
       // request id exists, and the account predicate inside find() is what enforces it.
       boolean paid = checkoutRequest != null
-          && checkoutRequestStore.isPaidFor(requestId, account.getEmail(), null);
+          && checkoutRequestStore.isPaidFor(requestId, account.getId(), account.getEmail(), null);
       JSONObject result = new JSONObject();
       result.put("requestId", requestId);
       result.put(FIELD_STATUS, paid ? "paid" : "pending");
@@ -652,7 +653,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /** Account-level billing overview; it remains available when every ERP environment is blocked. */
   private void handleBillingOverview(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    runWithAuthenticatedAccount(request, response, "billing-overview", account -> {
+    runWithPlatformAccount(request, response, "billing-overview", account -> {
       OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
       OBContext.setAdminMode(true);
       try {
@@ -661,7 +662,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         result.put("canManageBilling",
             EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(account.getEmail()));
         org.codehaus.jettison.json.JSONArray purchases = new org.codehaus.jettison.json.JSONArray();
-        for (CheckoutRequest purchase : checkoutRequestStore.findForAccount(account.getEmail())) {
+        for (CheckoutRequest purchase : checkoutRequestStore.findForAccount(account.getId(),
+            account.getEmail())) {
           purchases.put(buildBillingPurchaseJson(purchase));
         }
         result.put("purchases", purchases);
@@ -678,7 +680,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /** Returns the server-owned offer projection used by the account billing UI. */
   private void handleBillingOffers(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    runWithAuthenticatedAccount(request, response, "billing-offers", account -> {
+    runWithPlatformAccount(request, response, "billing-offers", account -> {
       try {
         BillingOfferConfiguration.Offer offer = BillingOfferConfiguration.current();
         JSONObject result = new JSONObject();
@@ -699,8 +701,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       throws IOException {
     String prefix = "/billing/purchases/";
     String purchaseId = request.getPathInfo().substring(prefix.length());
-    runWithAuthenticatedAccount(request, response, "billing-purchase", account -> {
-      CheckoutRequest purchase = checkoutRequestStore.find(purchaseId, account.getEmail());
+    runWithPlatformAccount(request, response, "billing-purchase", account -> {
+      CheckoutRequest purchase = checkoutRequestStore.find(purchaseId, account.getId(),
+          account.getEmail());
       if (purchase == null) {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, "PURCHASE_NOT_FOUND",
             "Purchase not found", "Purchase not found");
@@ -1866,6 +1869,19 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * in their finally block) and writes the 401 response when the header is
    * missing or the token does not match an active account, returning null.
    */
+  private Account resolvePlatformAccount(HttpServletRequest request, HttpServletResponse response) throws IOException {
+    OBContext.setOBContext("0", "0", "0", "0");
+    OBContext.setAdminMode(true);
+    String token = extractBearerToken(request);
+    if (token == null) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
+      return null;
+    }
+    Account account = EtendoGoJwtDalHelper.findActiveAccountByPlatformToken(token);
+    if (account == null) writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+    return account;
+  }
+
   private Account resolveAuthenticatedAccount(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     OBContext.setOBContext("0", "0", "0", "0");
@@ -1892,6 +1908,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * runs the action, and maps failures to the standard 500 responses with a
    * DAL rollback. Keeps the per-endpoint logic free of boilerplate.
    */
+  private void runWithPlatformAccount(HttpServletRequest request,
+      HttpServletResponse response, String actionLabel, AuthenticatedAccountAction action)
+      throws IOException {
+    try {
+      Account account = resolvePlatformAccount(request, response);
+      if (account == null) return;
+      action.execute(account);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges(actionLabel, e, log);
+      log.error("Platform request failed: {}", actionLabel, e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("Platform request JSON error: {}", actionLabel, e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
   private void runWithAuthenticatedAccount(HttpServletRequest request,
       HttpServletResponse response, String actionLabel, AuthenticatedAccountAction action)
       throws IOException {
@@ -2485,6 +2520,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
+      if (paidUpgrade && (onboardingRequest.transferProducts || onboardingRequest.transferContacts)) {
+        sendProgress(writer, "data-transfer", PROGRESS_IN_PROGRESS, "Transferring selected demo data...");
+        String sourceClientId = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail);
+        OnboardingDataTransferService.TransferResult transferResult = onboardingDataTransferService.transfer(
+            sourceClientId, clientId, orgId, onboardingRequest.transferProducts,
+            onboardingRequest.transferContacts);
+        sendProgress(writer, "data-transfer", "done",
+            "Selected demo data transferred (products=" + transferResult.productsCopied()
+                + ", contacts=" + transferResult.contactsCopied() + ")");
+      }
       if (!paidUpgrade && !tenantEnvironmentLifecycleService.markDemoReady(clientId, Instant.now())) {
         throw new IllegalStateException("Could not initialize demo trial lifecycle");
       }
@@ -2528,7 +2573,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return null;
     }
     String accountEmail = resolveOnboardingAccountEmail(token, response);
-    if (accountEmail == null || rejectWhenEmailNotVerified(token, response)) {
+    String accountId = resolveOnboardingAccountId(token);
+    if (accountEmail == null || accountId == null || rejectWhenEmailNotVerified(token, response)) {
       return null;
     }
     OnboardingRequestData onboardingRequest = parseOnboardingRequest(request, response);
@@ -2546,8 +2592,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return null;
     }
     boolean paidUpgrade = paywallOutcome == PaywallOutcome.PAID;
-    Long provisioningClaim = claimPaidProvisioning(paidUpgrade, onboardingRequest, accountEmail,
-        response);
+    Long provisioningClaim = claimPaidProvisioning(paidUpgrade, onboardingRequest, accountId,
+        accountEmail, response);
     if (paidUpgrade && provisioningClaim == null) {
       return null;
     }
@@ -2571,14 +2617,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * @return true when the request was refused and the caller must stop
    */
   private Long claimPaidProvisioning(boolean paidUpgrade,
-      OnboardingRequestData onboardingRequest, String accountEmail, HttpServletResponse response)
+      OnboardingRequestData onboardingRequest, String accountId, String accountEmail,
+      HttpServletResponse response)
       throws IOException {
     if (!paidUpgrade) {
       return null;
     }
-    if (checkoutRequestStore.claimForProvisioning(onboardingRequest.paymentToken, accountEmail)) {
+    if (checkoutRequestStore.claimForProvisioning(onboardingRequest.paymentToken, accountId,
+        accountEmail)) {
       Long attempt = checkoutRequestStore.findProvisioningAttempt(onboardingRequest.paymentToken,
-          accountEmail);
+          accountId, accountEmail);
       // A successful conditional update always has a persisted attempt. Keep the success path
       // recoverable even if a legacy database omits that value.
       return attempt == null ? 0L : attempt;
@@ -2831,13 +2879,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     writeResponse(response, SC_PAYMENT_REQUIRED, body);
   }
 
+  private String resolveOnboardingAccountId(String token) {
+    Account account = EtendoGoJwtDalHelper.findActiveAccountByPlatformToken(token);
+    return account == null ? null : account.getId();
+  }
+
+  private String resolveOnboardingAccountIdFromEmail(String accountEmail) {
+    Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(accountEmail);
+    return account == null ? null : account.getId();
+  }
+
   private String resolveOnboardingAccountEmail(String token, HttpServletResponse response)
       throws IOException {
     String accountEmail = null;
     try {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
-      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
+      Account account = EtendoGoJwtDalHelper.findActiveAccountByPlatformToken(token);
       String resolvedEmail = account == null ? null : account.getEmail();
       if (resolvedEmail == null) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
@@ -2903,6 +2961,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.taxId = body.optString("fiscalIdValue", "").trim();
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
       data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
+      JSONObject transfer = body.optJSONObject("dataTransfer");
+      data.transferProducts = transfer != null && transfer.optBoolean("products", false);
+      data.transferContacts = transfer != null && transfer.optBoolean("contacts", false);
       if ("convert-demo".equalsIgnoreCase(data.upgradeAction)) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST,
             "Demo environments cannot be converted; create a new productive environment");
@@ -4075,6 +4136,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // makes the resulting environment productive (ETP-4966, durable since ETP-5045).
     private String paymentToken;
     private String upgradeAction;
+    private boolean transferProducts;
+    private boolean transferContacts;
   }
 
   private static class AdminContextData {

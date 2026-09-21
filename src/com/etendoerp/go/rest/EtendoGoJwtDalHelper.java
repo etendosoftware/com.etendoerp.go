@@ -131,6 +131,11 @@ final class EtendoGoJwtDalHelper {
     return query.uniqueResult();
   }
 
+  /** Resolves only an account session token; environment JWTs are rejected for billing mutations. */
+  static Account findActiveAccountByPlatformToken(String token) {
+    return findActiveAccountByToken(token);
+  }
+
   /** Resolves either an account session token or the active environment JWT to its account. */
   static Account findActiveAccountByBearerToken(String token) {
     Account account = findActiveAccountByToken(token);
@@ -533,7 +538,7 @@ final class EtendoGoJwtDalHelper {
    * Returns the account's only free tenant when it is unambiguous, for demo/productive linking.
    * Multiple free tenants are deliberately treated as unresolved rather than guessed.
    */
-  static String findOnlyFreeTenantIdByAccountEmail(String accountEmail) {
+  public static String findOnlyFreeTenantIdByAccountEmail(String accountEmail) {
     Set<String> freeClientIds = new HashSet<>();
     for (User environmentUser : findEnvironmentUsersByAccountEmail(accountEmail)) {
       String clientId = environmentUser.getClient().getId();
