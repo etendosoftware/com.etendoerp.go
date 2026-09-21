@@ -469,9 +469,9 @@ public class GeneralLedgerConfigurationHandler implements NeoHandler {
     if (general.has(FIELD_ACCRUAL)) {
       state.schema.setAccrual(general.optBoolean(FIELD_ACCRUAL));
     }
-    if (general.has(FIELD_ALLOW_NEGATIVE)) {
-      state.schema.setAllowNegative(general.optBoolean(FIELD_ALLOW_NEGATIVE));
-    }
+    // FIELD_ALLOW_NEGATIVE is intentionally NOT applied here: the "Permitir negativos"
+    // checkbox was removed entirely from the General tab (ETP-4947). The constant is
+    // still used by buildGeneral() to report the current persisted value on GET.
     if (general.has(FIELD_CURRENCY) && !general.isNull(FIELD_CURRENCY)) {
       String currencyId = trimmedOrNull(general.optString(FIELD_CURRENCY, null));
       if (currencyId != null) {
