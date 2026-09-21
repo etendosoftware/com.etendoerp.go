@@ -65,8 +65,9 @@ import org.openbravo.model.materialmgmt.transaction.InternalMovementLine;
  * ({@code M_Movement_Post}/{@code M_Check_Stock}, both left untouched by this fix): returning a
  * non-null {@link NeoResponse} here short-circuits {@code NeoHookDispatcher}'s default action,
  * so the classic PL/pgSQL functions are never invoked when this guard rejects. Mirrors
- * {@code AbstractInvoiceHeaderHandler#validateLineQtyBeforeComplete} /
- * {@code InvoiceCalloutHelper#isInvoiceCompleteAction}.
+ * {@code InvoiceCalloutHelper#isInvoiceCompleteAction}. (It used to cite
+ * {@code AbstractInvoiceHeaderHandler#validateLineQtyBeforeComplete} as the other example; that
+ * guard was removed in ETP-5381 — see the note in its place for why.)
  */
 final class GoodsMovementProcessGuard {
 
