@@ -28,6 +28,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -50,13 +51,17 @@ import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.advpaymentmngt.ProcessInvoiceUtil;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.weld.WeldUtils;
 import org.openbravo.common.actionhandler.createlinesfromprocess.CreateInvoiceLinesFromProcess;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.DocumentType;
@@ -93,10 +98,25 @@ public class CreatePurchaseInvoiceHandlerTest {
     DocumentType docTypeToReturn;
     JSONArray selectedLinesToReturn;
     Invoice copiedDiscountsInvoice;
+    /** ETP-5381: the quantity map createFromReceipt ended up using, explicit or seeded. */
+    Map<String, BigDecimal> receivedReceiptOverrides;
+    /** The selectedLines that map produced — what actually drives the invoice line quantities. */
+    JSONArray capturedReceiptSelectedLines;
 
     @Override
     protected DocumentType resolveAPInvoiceDocType(Order order) {
       return docTypeToReturn;
+    }
+
+    // Capture-and-delegate (not a stub): the real line-building logic must keep running so the
+    // assertion is about the quantities that reach the invoice, not about a mocked hand-off.
+    @Override
+    protected JSONArray buildSelectedLinesFromReceipt(ShipmentInOut receipt,
+        Map<String, BigDecimal> qtyOverrides, Order linkedOrder) {
+      receivedReceiptOverrides = qtyOverrides;
+      capturedReceiptSelectedLines =
+          super.buildSelectedLinesFromReceipt(receipt, qtyOverrides, linkedOrder);
+      return capturedReceiptSelectedLines;
     }
 
     @Override
@@ -288,7 +308,13 @@ public class CreatePurchaseInvoiceHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
         MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
         MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class);
         MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+
+      // ETP-5381: with no explicit "lines" in the body, createFromReceipt now seeds the
+      // quantities from the receipt's pending qty. Stubbed to the full movement qty (3) so this
+      // test keeps exercising exactly the line set it did before the guard was added.
+      stubPendingQtyPerLine(supportMock, "receipt-linked-discount", "rl-1", BigDecimal.valueOf(3));
 
       OBDal dal = mock(OBDal.class);
       Session session = mock(Session.class);
@@ -517,6 +543,20 @@ public class CreatePurchaseInvoiceHandlerTest {
     when(rl.getMovementQuantity()).thenReturn(movementQty);
     when(rl.getSalesOrderLine()).thenReturn(salesOrderLine);
     return rl;
+  }
+
+  /**
+   * Stubs the ETP-5381 pending-quantity seeding for a receipt: {@code createFromReceipt} calls
+   * {@code computePendingQtyPerLineOrThrow(receiptId, true)} whenever the request body carries no
+   * explicit {@code lines}, and uses the resulting map as the per-line quantities.
+   *
+   * @param lineId the receipt line that still has something pending
+   * @param qty    the pending quantity for that line
+   */
+  private static void stubPendingQtyPerLine(MockedStatic<NeoInvoiceSupport> supportMock,
+      String receiptId, String lineId, BigDecimal qty) {
+    supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLineOrThrow(eq(receiptId), eq(true)))
+        .thenReturn(Collections.singletonMap(lineId, qty));
   }
 
   private static ShipmentInOut receiptWith(ShipmentInOutLine... lines) {
@@ -1189,7 +1229,11 @@ public class CreatePurchaseInvoiceHandlerTest {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
         MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
         MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class);
         MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+
+      // ETP-5381: see testCreateFromReceiptLinkedPoDelegatesToCopyLineDiscountsFromSupport.
+      stubPendingQtyPerLine(supportMock, "receipt-linked-po", "rl-1", BigDecimal.valueOf(3));
 
       OBDal dal = mock(OBDal.class);
       Session session = mock(Session.class);
@@ -1245,5 +1289,261 @@ public class CreatePurchaseInvoiceHandlerTest {
       verify(session).evict(rl);
       verify(session).evict(receipt);
     }
+  }
+
+  // ─── ETP-5381: create-and-confirm + duplicate-receipt guard ────────────────
+
+  /**
+   * Test double for the {@code handle()} entry point: stubs order-based creation and the
+   * document-number fallback so the test can focus on the create-and-confirm sequence.
+   */
+  @Vetoed // not a CDI bean: a discoverable subclass makes @Inject of the real handler ambiguous
+  private static class CompletingHandler extends CreatePurchaseInvoiceHandler {
+    Invoice createdInvoice;
+
+    @Override
+    protected Invoice createFromOrder(String orderId) {
+      return createdInvoice;
+    }
+
+    @Override
+    protected void ensureDocumentNo(Invoice invoice) {
+      // no-op: the real implementation resolves an AD sequence
+    }
+  }
+
+  /**
+   * Stubs the ETP-5381 atomic confirmation so {@code handle()} can run without a CDI container.
+   * Must be opened inside the caller's {@code MockedStatic<OBDal>} scope, since it stubs the
+   * already-created {@code dal} mock for AD_Process 111.
+   */
+  private static final class CompletionMocks implements AutoCloseable {
+    private final MockedStatic<NeoDefaultsService> defaultsMock;
+    private final MockedStatic<WeldUtils> weldMock;
+    final ProcessInvoiceUtil processInvoiceUtil;
+
+    CompletionMocks(OBDal dal, OBError processResult) {
+      defaultsMock = Mockito.mockStatic(NeoDefaultsService.class);
+      weldMock = Mockito.mockStatic(WeldUtils.class);
+      processInvoiceUtil = mock(ProcessInvoiceUtil.class);
+      defaultsMock.when(() -> NeoDefaultsService.buildVariablesSecureApp(any()))
+          .thenReturn(new VariablesSecureApp("u", "c", "o", "r", "en_US"));
+      weldMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(ProcessInvoiceUtil.class))
+          .thenReturn(processInvoiceUtil);
+      when(processInvoiceUtil.process(
+          anyString(), eq("CO"), anyString(), anyString(), anyString(), any(), any()))
+          .thenReturn(processResult);
+      when(dal.get(eq(Process.class), eq("111"))).thenReturn(mock(Process.class));
+    }
+
+    @Override
+    public void close() {
+      weldMock.close();
+      defaultsMock.close();
+    }
+  }
+
+  /** A completion result meaning "the invoice was confirmed". */
+  private static OBError completionSuccess() {
+    OBError result = new OBError();
+    result.setType("Success");
+    result.setTitle("Success");
+    result.setMessage("Document completed");
+    return result;
+  }
+
+  /**
+   * ETP-5381 (the behavioral fix) — when the request carries no explicit {@code lines}, which is
+   * what the UI always sends, the quantities are seeded from the receipt's PENDING quantities.
+   *
+   * <p>Before this change {@code resolveReceiptLineQty} fell back to the full
+   * {@code movementQuantity}, so a partially-invoiced receipt was re-invoiced in full and a
+   * fully-invoiced one could be invoiced again from scratch. The assertion is therefore on the
+   * quantity that reaches the invoice line (4, the pending qty) and NOT 10, the movement qty —
+   * and on the fully-invoiced line being dropped entirely.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void createFromReceipt_noExplicitLines_seedsQuantitiesFromPending() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+
+      // rl-1 has 4 of its 10 units left to invoice; rl-2 is fully invoiced (absent from the map).
+      stubPendingQtyPerLine(supportMock, "receipt-seed", "rl-1", new BigDecimal("4"));
+
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+
+      Order linkedOrder = mockOrderWithHeaderData();
+      when(linkedOrder.getId()).thenReturn("po-seed");
+
+      OrderLine ol1 = mock(OrderLine.class);
+      when(ol1.getId()).thenReturn("ol-1");
+      OrderLine ol2 = mock(OrderLine.class);
+      when(ol2.getId()).thenReturn("ol-2");
+      ShipmentInOutLine rl1 = mockReceiptLine("rl-1", true, mock(Product.class),
+          BigDecimal.valueOf(10), ol1);
+      ShipmentInOutLine rl2 = mockReceiptLine("rl-2", true, mock(Product.class),
+          BigDecimal.valueOf(5), ol2);
+
+      ShipmentInOut receipt = mock(ShipmentInOut.class);
+      when(receipt.getSalesOrder()).thenReturn(linkedOrder);
+      when(receipt.getMaterialMgmtShipmentInOutLineList()).thenReturn(Arrays.asList(rl1, rl2));
+      when(receipt.getEtgoCurrency()).thenReturn(mock(Currency.class));
+      when(dal.get(eq(ShipmentInOut.class), eq("receipt-seed"))).thenReturn(receipt);
+
+      stubInvoiceCreationCollaborators(session, obContextMock, obProviderMock, weldUtilsMock,
+          "user-seed", "AP-SEED-1");
+
+      TestableHandler handler = new TestableHandler();
+      handler.docTypeToReturn = mock(DocumentType.class);
+
+      handler.createFromReceipt("receipt-seed", null);
+
+      assertEquals("The seeded map must be the pending quantities, not the movement quantities",
+          Collections.singletonMap("rl-1", new BigDecimal("4")), handler.receivedReceiptOverrides);
+      JSONArray selected = handler.capturedReceiptSelectedLines;
+      assertEquals("The fully-invoiced line must be dropped", 1, selected.length());
+      assertEquals("ol-1", selected.getJSONObject(0).getString("id"));
+      assertEquals("The invoiced qty must be the pending 4, never the full movement qty 10",
+          "4", selected.getJSONObject(0).getString("orderedQuantity"));
+    }
+  }
+
+  /**
+   * ETP-5381 — the seeding is a FALLBACK: an explicit per-line quantity in the request body wins
+   * and the pending-quantity query is never issued. A user invoicing 2 of 10 units must get 2.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void createFromReceipt_explicitLines_doesNotSeedFromPending() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> obProviderMock = Mockito.mockStatic(OBProvider.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class);
+        MockedStatic<WeldUtils> weldUtilsMock = Mockito.mockStatic(WeldUtils.class)) {
+
+      OBDal dal = mock(OBDal.class);
+      Session session = mock(Session.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(session);
+
+      Order linkedOrder = mockOrderWithHeaderData();
+      when(linkedOrder.getId()).thenReturn("po-explicit");
+
+      OrderLine ol1 = mock(OrderLine.class);
+      when(ol1.getId()).thenReturn("ol-1");
+      ShipmentInOutLine rl1 = mockReceiptLine("rl-1", true, mock(Product.class),
+          BigDecimal.valueOf(10), ol1);
+
+      ShipmentInOut receipt = mock(ShipmentInOut.class);
+      when(receipt.getSalesOrder()).thenReturn(linkedOrder);
+      when(receipt.getMaterialMgmtShipmentInOutLineList()).thenReturn(Collections.singletonList(rl1));
+      when(receipt.getEtgoCurrency()).thenReturn(mock(Currency.class));
+      when(dal.get(eq(ShipmentInOut.class), eq("receipt-explicit"))).thenReturn(receipt);
+
+      stubInvoiceCreationCollaborators(session, obContextMock, obProviderMock, weldUtilsMock,
+          "user-explicit", "AP-EXPLICIT-1");
+
+      TestableHandler handler = new TestableHandler();
+      handler.docTypeToReturn = mock(DocumentType.class);
+
+      JSONObject body = new JSONObject().put("lines", new JSONArray()
+          .put(new JSONObject().put("receiptLineId", "rl-1").put("quantity", "2")));
+
+      handler.createFromReceipt("receipt-explicit", body);
+
+      assertEquals("Explicit overrides must be used verbatim",
+          Collections.singletonMap("rl-1", new BigDecimal("2")), handler.receivedReceiptOverrides);
+      assertEquals("2",
+          handler.capturedReceiptSelectedLines.getJSONObject(0).getString("orderedQuantity"));
+      supportMock.verifyNoInteractions();
+    }
+  }
+
+  /**
+   * ETP-5381 — the response now carries {@code documentStatus}. It was not sent before this
+   * ticket (only {@code id} and {@code documentNo}), and the frontend needs it to render the
+   * resulting state of a document that is created already confirmed.
+   */
+  @Test
+  public void handle_purchaseOrder_responseIncludesDocumentStatus() throws JSONException {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+
+      obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+
+      Invoice created = mock(Invoice.class);
+      when(created.getId()).thenReturn("ap-inv-1");
+
+      // Re-read from the session reopened by ProcessInvoiceUtil: the handler must report THIS
+      // instance, not the detached one it created.
+      Invoice completed = mock(Invoice.class);
+      when(completed.getDocumentNo()).thenReturn("AP-0001");
+      when(completed.getDocumentStatus()).thenReturn("CO");
+      when(dal.get(eq(Invoice.class), eq("ap-inv-1"))).thenReturn(completed);
+
+      CompletingHandler handler = new CompletingHandler();
+      handler.createdInvoice = created;
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        NeoResponse response = handler.handle(NeoContext.builder()
+            .endpointType(NeoEndpointType.ACTION)
+            .httpMethod("POST")
+            .fieldName("createPurchaseInvoice")
+            .specName("purchase-order")
+            .recordId("po-1")
+            .build());
+
+        assertNotNull(response);
+        assertEquals(201, response.getHttpStatus());
+        JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+        assertEquals("ap-inv-1", data.getString("id"));
+        assertEquals("AP-0001", data.getString("documentNo"));
+        assertEquals("CO", data.getString("documentStatus"));
+        verify(completion.processInvoiceUtil, times(1)).process(
+            eq("ap-inv-1"), eq("CO"), eq(""), eq(""), eq(""), any(), any());
+      }
+    }
+  }
+
+  /**
+   * Shared mock graph for the collaborators {@code createFromReceipt} reaches after the quantity
+   * map is resolved: the line-link native query, the current user, the invoice instance produced
+   * by {@code OBProvider}, and the CDI-managed line-creation process.
+   */
+  @SuppressWarnings("unchecked")
+  private static void stubInvoiceCreationCollaborators(Session session,
+      MockedStatic<OBContext> obContextMock, MockedStatic<OBProvider> obProviderMock,
+      MockedStatic<WeldUtils> weldUtilsMock, String userId, String documentNo) {
+    NativeQuery linkQuery = mock(NativeQuery.class);
+    when(session.createNativeQuery(anyString())).thenReturn(linkQuery);
+    when(linkQuery.setParameter(anyString(), any())).thenReturn(linkQuery);
+    when(linkQuery.executeUpdate()).thenReturn(1);
+
+    OBContext ctx = mock(OBContext.class);
+    org.openbravo.model.ad.access.User user = mock(org.openbravo.model.ad.access.User.class);
+    when(user.getId()).thenReturn(userId);
+    when(ctx.getUser()).thenReturn(user);
+    obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
+
+    OBProvider provider = mock(OBProvider.class);
+    Invoice invoice = mock(Invoice.class);
+    when(invoice.getDocumentNo()).thenReturn(documentNo);
+    obProviderMock.when(OBProvider::getInstance).thenReturn(provider);
+    when(provider.get(Invoice.class)).thenReturn(invoice);
+
+    weldUtilsMock.when(() -> WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class))
+        .thenReturn(mock(CreateInvoiceLinesFromProcess.class));
   }
 }
