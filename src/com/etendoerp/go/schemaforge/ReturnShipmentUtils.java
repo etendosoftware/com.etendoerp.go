@@ -23,11 +23,14 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 import org.apache.logging.log4j.LogManager;
@@ -37,6 +40,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.businessUtility.Tax;
@@ -48,6 +52,7 @@ import org.openbravo.model.common.enterprise.Locator;
 import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.common.invoice.ReversedInvoice;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
@@ -64,8 +69,21 @@ final class ReturnShipmentUtils {
   private static final Logger log = LogManager.getLogger(ReturnShipmentUtils.class);
 
   private static final String KEY_RESPONSE = "response";
-  private static final String FIELD_DOCUMENT_NO = "documentNo";
+  // Package-private: also read by RectifiableInvoiceUtils, split out for java:S1448.
+  static final String FIELD_DOCUMENT_NO = "documentNo";
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
+  /** Request-body key carrying the ids of the invoices to rectify (ETP-5381). */
+  static final String PARAM_ORIGIN_INVOICES = "originInvoices";
+  /**
+   * Rows per batch of the {@code rectifiableInvoices} picker when the caller does not say
+   * (ETP-5381). 80 rather than {@code useEntity}'s 75 only because that is the figure the window
+   * was specified with; nothing depends on the two matching.
+   */
+  static final int DEFAULT_RECTIFIABLE_PAGE_SIZE = 80;
+  // English literal on purpose: localized by tools/app-shell/src/lib/backendErrors.js.
+  static final String ERR_RECTIFIED_INVOICE_REQUIRED =
+      "Select at least one invoice to rectify: a rectificative invoice cannot be confirmed "
+          + "without it.";
   private static final String FIELD_INVOICE_STATUS = "invoiceStatus";
 
   private ReturnShipmentUtils() {}
@@ -592,19 +610,110 @@ final class ReturnShipmentUtils {
   // Invoice finalization – shared between both return header handlers
   // ---------------------------------------------------------------------------
 
+  /**
+   * Builds the rectificative invoice's lines, links it to the invoice(s) it rectifies, and
+   * completes it — in that order (ETP-5381).
+   *
+   * <p><b>The order is not stylistic.</b> The {@code C_INVOICE_REVERSE_TRG} database trigger
+   * rejects any insert into {@code C_Invoice_Reverse} once the invoice is {@code Processed='Y'},
+   * so the link can only be created while the invoice is still a draft. And the link must exist
+   * before completing, because {@code ETSG_CHECK_RECTIF_INV_DOC} rejects a rectificative document
+   * type with no rectified invoices attached ("El tipo de documento es rectificativo, pero no se
+   * han asociado facturas a rectificar"). Complete first and the invoice can never be confirmed
+   * nor linked — a permanently stuck document.
+   *
+   * @param originInvoiceIds ids of the invoices being rectified; must not be empty
+   */
   static NeoResponse finalizeReturnInvoice(Invoice invoice, List<ShipmentInOutLine> lines,
-      CreateDraftInvoiceHandler createDraftInvoiceHandler) throws Exception {
+      CreateDraftInvoiceHandler createDraftInvoiceHandler, List<String> originInvoiceIds,
+      OBContext obContext) throws Exception {
     addReturnInvoiceLines(invoice, lines, createDraftInvoiceHandler);
     OBDal.getInstance().flush();
     OBDal.getInstance().getSession().refresh(invoice);
     createDraftInvoiceHandler.ensureDocumentNo(invoice);
     createDraftInvoiceHandler.getSupport().ensureLineGrossAmounts(invoice);
     createDraftInvoiceHandler.recalculateTotals(invoice);
+    linkRectifiedInvoices(invoice, originInvoiceIds);
     OBDal.getInstance().flush();
+
+    String invoiceId = invoice.getId();
+    InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, obContext);
+    Invoice completed = OBDal.getInstance().get(Invoice.class, invoiceId);
+
     JSONObject data = new JSONObject();
-    data.put("id", invoice.getId());
-    data.put(FIELD_DOCUMENT_NO, invoice.getDocumentNo());
+    data.put("id", invoiceId);
+    data.put(FIELD_DOCUMENT_NO, completed.getDocumentNo());
+    data.put(FIELD_DOCUMENT_STATUS, completed.getDocumentStatus());
     return wrapOkData(data);
+  }
+
+  /**
+   * Creates the {@code C_Invoice_Reverse} rows tying a rectificative invoice to the invoices it
+   * rectifies, skipping any link that already exists.
+   *
+   * <p>Note the DB trigger also requires both invoices to share a business partner; candidates are
+   * sourced from the return document's own origin invoices, so that holds by construction.
+   */
+  static void linkRectifiedInvoices(Invoice invoice, List<String> originInvoiceIds) {
+    if (originInvoiceIds == null || originInvoiceIds.isEmpty()) {
+      throw new OBException(ERR_RECTIFIED_INVOICE_REQUIRED);
+    }
+    for (String originId : originInvoiceIds) {
+      Invoice origin = OBDal.getInstance().get(Invoice.class, originId);
+      if (origin == null) {
+        throw new OBException("Invoice to rectify not found: " + originId);
+      }
+      OBCriteria<ReversedInvoice> existing = OBDal.getInstance().createCriteria(ReversedInvoice.class);
+      existing.add(Restrictions.eq(ReversedInvoice.PROPERTY_INVOICE, invoice));
+      existing.add(Restrictions.eq(ReversedInvoice.PROPERTY_REVERSEDINVOICE, origin));
+      if (!existing.list().isEmpty()) {
+        continue;
+      }
+      ReversedInvoice link = OBProvider.getInstance().get(ReversedInvoice.class);
+      link.setClient(invoice.getClient());
+      link.setOrganization(invoice.getOrganization());
+      link.setInvoice(invoice);
+      link.setReversedInvoice(origin);
+      OBDal.getInstance().save(link);
+    }
+  }
+
+  /**
+   * Resolves which invoices a rectificative invoice will rectify: the ones the caller explicitly
+   * picked, or — when the caller picked none — the newest invoice auto-detected from the return
+   * lines.
+   *
+   * <p>The fallback reads from {@link RectifiableInvoiceUtils#fetchAutoDetectedInvoices}, NOT from
+   * the broader selectable
+   * list: that list is every confirmed invoice of the flow, so falling back to its first entry
+   * would silently rectify an arbitrary unrelated invoice. Only the document chain
+   * (return line → original line → its invoice) is a safe automatic answer.
+   *
+   * <p>Never returns empty: a rectificative invoice with no rectified invoice cannot be confirmed,
+   * so failing here — before anything is written — is strictly better than creating a document
+   * that is stuck in draft forever.
+   */
+  static List<String> resolveRectifiedInvoiceIds(JSONObject body, String inOutId) {
+    List<String> ids = new ArrayList<>();
+    JSONArray requested = body != null ? body.optJSONArray(PARAM_ORIGIN_INVOICES) : null;
+    if (requested != null) {
+      for (int i = 0; i < requested.length(); i++) {
+        String id = requested.optString(i, null);
+        if (id != null && !id.isBlank() && !ids.contains(id)) {
+          ids.add(id);
+        }
+      }
+    }
+    if (ids.isEmpty()) {
+      List<JSONObject> detected = RectifiableInvoiceUtils.fetchAutoDetectedInvoices(inOutId);
+      if (!detected.isEmpty()) {
+        ids.add(detected.get(0).optString("id"));
+      }
+    }
+    if (ids.isEmpty()) {
+      throw new OBException(ERR_RECTIFIED_INVOICE_REQUIRED);
+    }
+    return ids;
   }
 
   // ---------------------------------------------------------------------------
