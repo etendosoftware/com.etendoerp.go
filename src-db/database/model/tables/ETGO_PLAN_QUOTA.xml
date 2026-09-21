@@ -81,8 +81,8 @@
       </unique>
       <check name="ETGO_PLNQTA_ISACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
       <check name="ETGO_PLNQTA_MODE_CHK"><![CDATA[ENFORCEMENT_MODE IN ('warn', 'block', 'off')]]></check>
-      <check name="ETGO_PLNQTA_SOURCE_CHK"><![CDATA[CONSUMPTION_SOURCE IS NULL OR CONSUMPTION_SOURCE IN ('sum')]]></check>
       <check name="ETGO_PLNQTA_QTY_CHK"><![CDATA[INCLUDED_QTY >= 0]]></check>
+      <check name="ETGO_PLNQTA_SOURCE_CHK"><![CDATA[CONSUMPTION_SOURCE IS NULL OR CONSUMPTION_SOURCE = 'sum']]></check>
       <check name="ETGO_PLNQTA_THRESHOLD_CHK"><![CDATA[WARNING_THRESHOLD IS NULL OR WARNING_THRESHOLD > 0 AND WARNING_THRESHOLD <= 100]]></check>
     </table>
   </database>
