@@ -230,60 +230,104 @@ public class NeoAccessStartup extends SessionAwareStartup {
     for (ReportAccessCatalog.Row row : ReportAccessCatalog.ROWS) {
       switch (row.kind) {
         case WINDOW:
-          if (!existingWindowIds.contains(row.anchorId)) {
-            Window window = OBDal.getInstance().get(Window.class, row.anchorId);
-            if (window != null) {
-              WindowAccess wa = OBProvider.getInstance().get(WindowAccess.class);
-              wa.setNewOBObject(true);
-              wa.setClient(role.getClient());
-              wa.setOrganization(orgZero);
-              wa.setRole(role);
-              wa.setWindow(window);
-              wa.setEditableField(true);
-              OBDal.getInstance().save(wa);
-              existingWindowIds.add(row.anchorId);
-              granted++;
-            }
-          }
+          granted += grantWindowAnchor(role, orgZero, row.anchorId, existingWindowIds);
           break;
         case CLASSIC_PROCESS:
-          if (!existingProcessIds.contains(row.anchorId)) {
-            Process process = OBDal.getInstance().get(Process.class, row.anchorId);
-            if (process != null) {
-              ProcessAccess pa = OBProvider.getInstance().get(ProcessAccess.class);
-              pa.setNewOBObject(true);
-              pa.setClient(role.getClient());
-              pa.setOrganization(orgZero);
-              pa.setRole(role);
-              pa.setProcess(process);
-              OBDal.getInstance().save(pa);
-              existingProcessIds.add(row.anchorId);
-              granted++;
-            }
-          }
+          granted += grantClassicProcessAnchor(role, orgZero, row.anchorId, existingProcessIds);
           break;
         case OBUIAPP_PROCESS:
         default:
-          if (!existingObuiappProcessIds.contains(row.anchorId)) {
-            org.openbravo.client.application.Process obuiappProcess = OBDal.getInstance()
-                .get(org.openbravo.client.application.Process.class, row.anchorId);
-            if (obuiappProcess != null) {
-              org.openbravo.client.application.ProcessAccess opa = OBProvider.getInstance()
-                  .get(org.openbravo.client.application.ProcessAccess.class);
-              opa.setNewOBObject(true);
-              opa.setClient(role.getClient());
-              opa.setOrganization(orgZero);
-              opa.setRole(role);
-              opa.setObuiappProcess(obuiappProcess);
-              OBDal.getInstance().save(opa);
-              existingObuiappProcessIds.add(row.anchorId);
-              granted++;
-            }
-          }
+          granted += grantObuiappProcessAnchor(role, orgZero, row.anchorId, existingObuiappProcessIds);
           break;
       }
     }
     return granted;
+  }
+
+  /**
+   * Grants {@code role} an {@code AD_Window_Access} row for {@code windowId} unless it already
+   * has one or the window itself does not resolve (see {@link #grantReportAccess} javadoc for
+   * the permissive-skip convention). One guard-clause branch of that method's per-{@link
+   * ReportAccessCatalog.Kind} dispatch, split out to keep each branch's own complexity low.
+   *
+   * @return {@code 1} if a new grant was created, {@code 0} otherwise
+   */
+  private int grantWindowAnchor(Role role, Organization orgZero, String windowId,
+      Set<String> existingWindowIds) {
+    if (existingWindowIds.contains(windowId)) {
+      return 0;
+    }
+    Window window = OBDal.getInstance().get(Window.class, windowId);
+    if (window == null) {
+      return 0;
+    }
+    WindowAccess wa = OBProvider.getInstance().get(WindowAccess.class);
+    wa.setNewOBObject(true);
+    wa.setClient(role.getClient());
+    wa.setOrganization(orgZero);
+    wa.setRole(role);
+    wa.setWindow(window);
+    wa.setEditableField(true);
+    OBDal.getInstance().save(wa);
+    existingWindowIds.add(windowId);
+    return 1;
+  }
+
+  /**
+   * Grants {@code role} an {@code AD_Process_Access} row for {@code processId} unless it already
+   * has one or the classic process itself does not resolve. See {@link #grantWindowAnchor}'s
+   * javadoc for the shared rationale — this is the {@code CLASSIC_PROCESS} branch counterpart.
+   *
+   * @return {@code 1} if a new grant was created, {@code 0} otherwise
+   */
+  private int grantClassicProcessAnchor(Role role, Organization orgZero, String processId,
+      Set<String> existingProcessIds) {
+    if (existingProcessIds.contains(processId)) {
+      return 0;
+    }
+    Process process = OBDal.getInstance().get(Process.class, processId);
+    if (process == null) {
+      return 0;
+    }
+    ProcessAccess pa = OBProvider.getInstance().get(ProcessAccess.class);
+    pa.setNewOBObject(true);
+    pa.setClient(role.getClient());
+    pa.setOrganization(orgZero);
+    pa.setRole(role);
+    pa.setProcess(process);
+    OBDal.getInstance().save(pa);
+    existingProcessIds.add(processId);
+    return 1;
+  }
+
+  /**
+   * Grants {@code role} an {@code obuiapp_process_access} row for {@code obuiappProcessId}
+   * unless it already has one or the OBUIAPP process itself does not resolve. See {@link
+   * #grantWindowAnchor}'s javadoc for the shared rationale — this is the {@code OBUIAPP_PROCESS}
+   * branch counterpart.
+   *
+   * @return {@code 1} if a new grant was created, {@code 0} otherwise
+   */
+  private int grantObuiappProcessAnchor(Role role, Organization orgZero, String obuiappProcessId,
+      Set<String> existingObuiappProcessIds) {
+    if (existingObuiappProcessIds.contains(obuiappProcessId)) {
+      return 0;
+    }
+    org.openbravo.client.application.Process obuiappProcess = OBDal.getInstance()
+        .get(org.openbravo.client.application.Process.class, obuiappProcessId);
+    if (obuiappProcess == null) {
+      return 0;
+    }
+    org.openbravo.client.application.ProcessAccess opa = OBProvider.getInstance()
+        .get(org.openbravo.client.application.ProcessAccess.class);
+    opa.setNewOBObject(true);
+    opa.setClient(role.getClient());
+    opa.setOrganization(orgZero);
+    opa.setRole(role);
+    opa.setObuiappProcess(obuiappProcess);
+    OBDal.getInstance().save(opa);
+    existingObuiappProcessIds.add(obuiappProcessId);
+    return 1;
   }
 
   /** Every {@code obuiapp_process_id} {@code role} already has active access to. */

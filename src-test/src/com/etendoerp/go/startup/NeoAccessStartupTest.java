@@ -91,10 +91,11 @@ class NeoAccessStartupTest {
     client = mock(Client.class);
     when(obDal.get(Organization.class, "0")).thenReturn(orgZero);
 
-    // ETP-5402 QA follow-up — grantReportAccess() (called for every non-system-client target
-    // role) always queries the OBUIAPP process-access criteria via existingObuiappProcessIds();
-    // an unstubbed OBDal#createCriteria(Class) call returns null by default (Mockito), which
-    // NPEs on the immediate .add(Restrictions...) call. Same default-stub fix as
+    // ETP-5402 QA follow-up: the report-access grant pass runs for every non-system-client
+    // target role and always reads the OBUIAPP process-access criteria as part of resolving
+    // which anchors are already granted. Leaving that criteria class unstubbed makes Mockito
+    // hand back a null criteria object, which throws a NullPointerException the moment the
+    // production code tries to add a restriction to it. Same default-stub fix as
     // BaseWebhookTest's own ETP-5402 regression fix — every test gets a safe empty-list default
     // here, so only a test asserting real report-access behavior needs to override it.
     stubEmptyObuiappProcessAccessCriteria();

@@ -85,6 +85,7 @@ public final class ReportAccessCatalog {
   /** Access-tier value for a report a role cannot reach at all. */
   public static final String NONE = "none";
 
+  /** Which access-control mechanism a {@link Row} resolves its tier through. */
   public enum Kind { WINDOW, OBUIAPP_PROCESS, CLASSIC_PROCESS }
 
   /**
@@ -98,10 +99,15 @@ public final class ReportAccessCatalog {
    * tree the way a real window's can, so it is a human-assigned constant here).
    */
   public static final class Row {
+    /** Stable id, matching the report's {@code artifacts/} directory name. */
     public final String id;
+    /** Fallback display name, expected to be overridden by the frontend's {@code menu.json}. */
     public final String name;
+    /** Which access-control mechanism this row resolves its tier through. */
     public final Kind kind;
+    /** The anchor id in {@link #kind}'s own id-space (window/OBUIAPP-process/classic-process id). */
     public final String anchorId;
+    /** Hardcoded Informes category this row belongs to (see {@link #FINANCE_CATEGORY}/{@link #INVENTORY_CATEGORY}). */
     public final String category;
 
     Row(String id, String name, Kind kind, String anchorId, String category) {
@@ -172,6 +178,7 @@ public final class ReportAccessCatalog {
    * revision of this method — there is no "reuse an already-resolved tier" shortcut to take:
    * every row always does its own single-anchor query.
    *
+   * @param role the role to resolve every {@link #ROWS} row's tier against
    * @return report id → tier, one entry per {@link #ROWS} row (never omitted, {@link #NONE}
    *     included)
    */
@@ -290,6 +297,11 @@ public final class ReportAccessCatalog {
    * never drift on this shape either. Only accessible rows appear: a row whose tier is {@link
    * #NONE} is skipped, matching {@code windowsJsonFromTierMap}'s own "only accessible rows
    * appear" convention in both webhooks for real windows.
+   *
+   * @param reportTiers report id → tier, as returned by {@link #resolveTierMap(Role)}
+   * @return the sorted-by-name {@code {id, name, tier}} JSON array, one entry per accessible row
+   * @throws JSONException if building one of the row objects fails (never expected in practice —
+   *     every key/value written here is a plain string)
    */
   public static JSONArray reportsJson(Map<String, String> reportTiers) throws JSONException {
     List<JSONObject> reportJsons = new ArrayList<>();
