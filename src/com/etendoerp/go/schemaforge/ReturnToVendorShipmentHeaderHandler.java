@@ -89,7 +89,7 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
   @Override
   public NeoResponse handle(NeoContext context) {
     mirrorAccountingDate(context);
-    NeoResponse posting = handlePostingAction(context);
+    NeoResponse posting = NeoHandlerUtils.delegateToPostingService(context, postingService);
     if (posting != null) {
       return posting;
     }
@@ -398,17 +398,6 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
   // ---------------------------------------------------------------------------
   // Storage bin fill (pre-completion safety net)
   // ---------------------------------------------------------------------------
-
-  /**
-   * Extracted out of {@link #handle(NeoContext)} (Sonar java:S3776 — inlining this as a
-   * ternary there pushed that method's cognitive complexity to 16) and delegating to
-   * {@link NeoHandlerUtils#delegateToPostingService} (Sonar java:S1871/duplication — the
-   * one-line body was byte-identical to this same method on the sibling return-window
-   * handler; see that method's javadoc for the "post"/"unpost" rationale).
-   */
-  private NeoResponse handlePostingAction(NeoContext context) {
-    return NeoHandlerUtils.delegateToPostingService(context, postingService);
-  }
 
   /**
    * Mirrors the single visible {@code movementDate} field into the hidden

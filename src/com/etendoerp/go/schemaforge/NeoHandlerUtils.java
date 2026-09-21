@@ -970,11 +970,16 @@ final class NeoHandlerUtils {
    * button column literally named "post", finds none, and answers 404 "Action not found: post"
    * ({@code NeoButtonActionHelper#executeButtonActionCore}).
    *
-   * <p>Shared implementation behind {@code ReturnMaterialReceiptHeaderHandler} and
-   * {@code ReturnToVendorShipmentHeaderHandler}'s own {@code handlePostingAction} methods, each
-   * an identical one-line delegation SonarQube flagged as duplicated-lines-on-new-code (3.51%
-   * vs. the 3% gate) — the same class of finding {@link #enrichIssuerOrg} above already fixed
-   * for these two handlers once (PR #972).</p>
+   * <p>Called directly from {@code handle(NeoContext)} on {@code ReturnMaterialReceiptHeaderHandler}
+   * and {@code ReturnToVendorShipmentHeaderHandler} — NOT through a private per-handler wrapper.
+   * An earlier revision gave each handler its own one-line {@code handlePostingAction} wrapper
+   * around this same call (to keep {@code handle()}'s cognitive complexity down, java:S3776);
+   * that wrapper was itself then flagged as duplicated-lines-on-new-code a second time (3.23%
+   * vs. the 3% gate), since the two handlers' wrappers were byte-identical to each other. A
+   * plain static call costs {@code handle()} nothing in Sonar's complexity model — no ternary,
+   * no branch — so inlining the call directly removes the wrapper (and the duplication) without
+   * reopening the complexity finding. Same class of fix {@link #enrichIssuerOrg} above already
+   * applied to these same two handlers once before (PR #972).</p>
    *
    * @param context        the current NEO request context
    * @param postingService the handler's own injected instance; may be {@code null} in a test
