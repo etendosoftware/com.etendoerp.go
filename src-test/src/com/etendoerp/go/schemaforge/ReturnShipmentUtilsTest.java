@@ -1231,7 +1231,7 @@ public class ReturnShipmentUtilsTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       stubReturnInvoiceQueries(dal, true, Collections.<String>emptyList());
 
-      assertTrue(ReturnShipmentUtils.hasNonVoidedReturnInvoice("ret-1"));
+      assertTrue(RectifiableInvoiceUtils.hasNonVoidedReturnInvoice("ret-1"));
     }
   }
 
@@ -1242,7 +1242,7 @@ public class ReturnShipmentUtilsTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       stubReturnInvoiceQueries(dal, false, Collections.<String>emptyList());
 
-      assertFalse(ReturnShipmentUtils.hasNonVoidedReturnInvoice("ret-1"));
+      assertFalse(RectifiableInvoiceUtils.hasNonVoidedReturnInvoice("ret-1"));
     }
   }
 
@@ -1259,7 +1259,7 @@ public class ReturnShipmentUtilsTest {
       when(dal.getConnection()).thenThrow(new RuntimeException("DB down"));
 
       try {
-        ReturnShipmentUtils.hasNonVoidedReturnInvoice("ret-1");
+        RectifiableInvoiceUtils.hasNonVoidedReturnInvoice("ret-1");
         fail("A DB failure must not be reported as 'no invoice'");
       } catch (OBException e) {
         assertEquals("Could not verify existing invoices for this return document",
@@ -1429,7 +1429,7 @@ public class ReturnShipmentUtilsTest {
       assertNull(conn.getWarnings());
 
       NeoResponse response =
-          ReturnShipmentUtils.buildRectifiableInvoicesResponse("ret-1", 0, PAGE, null);
+          RectifiableInvoiceUtils.buildRectifiableInvoicesResponse("ret-1", 0, PAGE, null);
 
       JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
       JSONArray invoices = data.getJSONArray("invoices");
@@ -1454,7 +1454,7 @@ public class ReturnShipmentUtilsTest {
       stubReturnInvoiceQueries(dal);
 
       NeoResponse response =
-          ReturnShipmentUtils.buildRectifiableInvoicesResponse("ret-1", 0, PAGE, null);
+          RectifiableInvoiceUtils.buildRectifiableInvoicesResponse("ret-1", 0, PAGE, null);
 
       JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
       assertEquals(0, data.getJSONArray("invoices").length());
@@ -1481,7 +1481,7 @@ public class ReturnShipmentUtilsTest {
           Arrays.asList("inv-a", "inv-b", "inv-c"));
 
       NeoResponse response =
-          ReturnShipmentUtils.buildRectifiableInvoicesResponse("ret-1", 0, PAGE, null);
+          RectifiableInvoiceUtils.buildRectifiableInvoicesResponse("ret-1", 0, PAGE, null);
 
       JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
       JSONArray invoices = data.getJSONArray("invoices");
@@ -1509,7 +1509,7 @@ public class ReturnShipmentUtilsTest {
           Arrays.asList("inv-new", "inv-old", "inv-unrelated"));
 
       NeoResponse response =
-          ReturnShipmentUtils.buildRectifiableInvoicesResponse("ret-1", 0, PAGE, null);
+          RectifiableInvoiceUtils.buildRectifiableInvoicesResponse("ret-1", 0, PAGE, null);
 
       JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
       assertEquals("Both chain-detected invoices must be preselected, not just the newest",
@@ -1547,7 +1547,7 @@ public class ReturnShipmentUtilsTest {
       when(conn.prepareStatement(anyString())).thenReturn(ps);
 
       List<JSONObject> invoices =
-          ReturnShipmentUtils.fetchSelectableInvoices("ret-1", 0, PAGE, null);
+          RectifiableInvoiceUtils.fetchSelectableInvoices("ret-1", 0, PAGE, null);
 
       assertEquals(2, invoices.size());
       assertEquals("inv-a", invoices.get(0).getString("id"));
@@ -1608,7 +1608,7 @@ public class ReturnShipmentUtilsTest {
       ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
       when(conn.prepareStatement(anyString())).thenReturn(ps);
 
-      ReturnShipmentUtils.fetchSelectableInvoices("ret-1", 0, PAGE, null);
+      RectifiableInvoiceUtils.fetchSelectableInvoices("ret-1", 0, PAGE, null);
 
       verify(conn).prepareStatement(sqlCaptor.capture());
       String sql = sqlCaptor.getValue();
@@ -1645,7 +1645,7 @@ public class ReturnShipmentUtilsTest {
       ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
       when(conn.prepareStatement(anyString())).thenReturn(ps);
 
-      List<JSONObject> invoices = ReturnShipmentUtils.fetchAutoDetectedInvoices("ret-1");
+      List<JSONObject> invoices = RectifiableInvoiceUtils.fetchAutoDetectedInvoices("ret-1");
 
       assertEquals(Collections.singletonList("inv-new"),
           Collections.singletonList(invoices.get(0).getString("id")));
@@ -1666,13 +1666,13 @@ public class ReturnShipmentUtilsTest {
       when(dal.getConnection()).thenThrow(new RuntimeException("DB down"));
 
       try {
-        ReturnShipmentUtils.fetchSelectableInvoices("ret-1", 0, PAGE, null);
+        RectifiableInvoiceUtils.fetchSelectableInvoices("ret-1", 0, PAGE, null);
         fail("An unreadable database must not look like 'no invoice to rectify'");
       } catch (OBException e) {
         assertEquals("Could not load the invoices available to rectify", e.getMessage());
       }
       try {
-        ReturnShipmentUtils.fetchAutoDetectedInvoices("ret-1");
+        RectifiableInvoiceUtils.fetchAutoDetectedInvoices("ret-1");
         fail("An unreadable database must not look like 'nothing detected'");
       } catch (OBException e) {
         assertEquals("Could not load the invoices detected for this return", e.getMessage());
@@ -1858,7 +1858,7 @@ public class ReturnShipmentUtilsTest {
           Arrays.asList("inv-a", "inv-b"));
 
       JSONObject first = dataOf(
-          ReturnShipmentUtils.buildRectifiableInvoicesResponse("ret-1", 0, PAGE, null));
+          RectifiableInvoiceUtils.buildRectifiableInvoicesResponse("ret-1", 0, PAGE, null));
 
       assertEquals("The detected invoice is prepended so it can be reached from the picker",
           Arrays.asList("inv-auto", "inv-a", "inv-b"), idsOfInvoices(first));
@@ -1872,7 +1872,7 @@ public class ReturnShipmentUtilsTest {
           Arrays.asList("inv-a", "inv-b"));
 
       JSONObject later = dataOf(
-          ReturnShipmentUtils.buildRectifiableInvoicesResponse("ret-1", PAGE, PAGE, null));
+          RectifiableInvoiceUtils.buildRectifiableInvoicesResponse("ret-1", PAGE, PAGE, null));
 
       assertEquals("A later batch carries its own rows only — re-merging would duplicate the "
               + "detected invoice further down the list",
@@ -1895,7 +1895,7 @@ public class ReturnShipmentUtilsTest {
             Arrays.asList("inv-a", "inv-b"));
 
         JSONObject data = dataOf(
-            ReturnShipmentUtils.buildRectifiableInvoicesResponse("ret-1", startRow, PAGE, null));
+            RectifiableInvoiceUtils.buildRectifiableInvoicesResponse("ret-1", startRow, PAGE, null));
 
         assertEquals("Batch at offset " + startRow + " must still carry the full suggestion",
             Arrays.asList("inv-auto-1", "inv-auto-2"), idsOf(data, "suggestedInvoiceIds"));
@@ -2065,7 +2065,7 @@ public class ReturnShipmentUtilsTest {
     when(dal.getConnection()).thenReturn(conn);
     when(conn.prepareStatement(anyString())).thenReturn(ps);
 
-    ReturnShipmentUtils.fetchSelectableInvoices(inOutId, startRow, pageSize, search);
+    RectifiableInvoiceUtils.fetchSelectableInvoices(inOutId, startRow, pageSize, search);
 
     ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
     verify(conn).prepareStatement(sqlCaptor.capture());
@@ -2112,7 +2112,7 @@ public class ReturnShipmentUtilsTest {
       stubAndCaptureSelectableStatement(dal, Collections.<String>emptyList(),
           Arrays.asList("inv-a", "inv-b"));
       return dataOf(
-          ReturnShipmentUtils.buildRectifiableInvoicesResponse("ret-1", startRow, pageSize, null));
+          RectifiableInvoiceUtils.buildRectifiableInvoicesResponse("ret-1", startRow, pageSize, null));
     }
   }
 
@@ -2123,7 +2123,7 @@ public class ReturnShipmentUtilsTest {
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       PreparedStatement selectablePs = stubAndCaptureSelectableStatement(dal,
           Collections.<String>emptyList(), Collections.singletonList("inv-a"));
-      ReturnShipmentUtils.buildRectifiableInvoicesResponse(context, "ret-1");
+      RectifiableInvoiceUtils.buildRectifiableInvoicesResponse(context, "ret-1");
       return selectablePs;
     }
   }
