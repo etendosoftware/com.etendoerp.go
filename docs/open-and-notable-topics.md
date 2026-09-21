@@ -373,12 +373,20 @@ information.
 behaviour change — the cost being paid is maintenance drag and reviewer attention, not correctness.
 Raised by Martin on 2026-09-18; not yet actioned.
 
-### 🟡 4.5 `BillingEventStore` has the identical `OBContext` leak
+### 🟢 4.5 `BillingEventStore` had the identical `OBContext` leak — FIXED
 
-Same package, same shape, and its javadoc says it follows `CheckoutRequestStore`'s conventions —
-which, since §4.1 was fixed, it no longer does. Nothing calls it mid-transaction today, so it does
-not bite yet. Worth its own ticket rather than a drive-by fix: the same `runAsSystem` treatment
-applies almost verbatim.
+`claim(...)` and `updateResult(...)` installed the system context and unwound with
+`restorePreviousMode()` alone, exactly as §4.1 did. Fixed on ETP-5046 with the same `runAsSystem`
+helper copied from `CheckoutRequestStore`, so the two classes now behave identically rather than
+one merely claiming in its javadoc to follow the other.
+
+Pinned by three specs in `BillingEventStoreIntegrationTest` ("Group 9"), mirroring Group 6 of the
+`CheckoutRequestStore` suite: every entry point hands back the **same** `OBContext` instance
+(`assertSame`, not an id comparison — `setOBContext(String,String,String,String)` builds a new
+object each call, so an equal-looking context is still the wrong one), a contextless caller is left
+contextless rather than upgraded to system, and a call that throws still restores. Each carries a
+sanity assertion on committed state, so a store that "restored the context" by doing no work would
+still fail.
 
 ### 🟡 4.6 `recordRequested` accepts a null plan that production cannot produce
 
@@ -396,6 +404,46 @@ one, and the subscription would open not knowing what was bought.
 **Suggested fix:** `Objects.requireNonNull(plan, ...)` and give the fixtures a real `Plan`.
 `GrandfatheredSubscriptionIntegrationTest` already creates one, so the pattern exists. Not done
 during the ETP-5045 merge because changing a method contract mid-merge is the wrong moment.
+
+### 🟠 4.7 The rest of the `OBContext` survey — one real, one false alarm, one unread
+
+Chasing §4.1 and §4.5 raised the obvious question: how many more of these are there? A module-wide
+survey of every class that installs a system context, with the verdict for each. **The grep alone
+lies in both directions** — it flags comments as calls and cannot see a guarded install — so each
+line below is the result of reading the code, not of counting matches.
+
+| Class | Verdict |
+|---|---|
+| `payment/CheckoutRequestStore` | ✅ fixed (§4.1) |
+| `payment/BillingEventStore` | ✅ fixed (§4.5) |
+| `payment/SubscriptionService` | ✅ correct by design — `openSystemContextWhenAbsent()` sets a context only when there is none, and its javadoc already spells out this hazard |
+| `rest/TransactionalAuthEmailSender` | ✅ captures and restores |
+| `rest/CompanyInvitationService` | ❌ **real, unfixed** — see below |
+| `roles/RoleInheritanceReconciliationService` | ⚪ **false positive** — its only `setOBContext` match is prose in a comment (line 358) describing a *caller* that runs as system; there is no call |
+| `rest/EtendoGoJwtServlet` | ❓ **unaudited** — 22 raw installs against a single capture/restore pair |
+
+**`CompanyInvitationService` — the real one.** Two sites, both `restorePreviousMode()`-only:
+
+- `resolveInvitation(...)` — installs at **509–510**, unwinds at **553–555**
+- `withAdminMode(...)` — installs at **755–756**, unwinds at **759–761**
+
+It is the cheapest of the three to fix, because `withAdminMode` is *already* the `runAsSystem`
+shape — a wrapper every accept path funnels through (`acceptExistingAccountInAdminMode` at 576,
+`registerAndAcceptInAdminMode` at 661). It simply never captures. `resolveInvitation` is the only
+method opening the context inline, so routing it through `withAdminMode` would collapse the class
+to one context site and fix both at once. The case to care about is
+`registerAndAcceptInAdminMode`, which creates a user and accepts an invitation: anything continuing
+on that thread afterwards runs as system. That is the shape of the hazard; no exploit has been
+traced.
+
+**`EtendoGoJwtServlet` — deliberately left as a question.** 22 installs and one capture/restore is
+not evidence of 21 leaks, and it is not evidence of none either. A heuristic marked it "OK" on the
+strength of that single site; nobody has read the other 21. Whoever picks this up should treat the
+verdict as unknown rather than inherit an unearned pass.
+
+**Left unfixed on purpose.** Neither belongs to ETP-5046, and widening an already large merge to
+carry them would make it harder to review, not safer. They want their own ticket — and the fix is
+mechanical once the pattern is recognised, which is the entire reason this section exists.
 
 ## 5. Handed forward to later tickets
 
