@@ -45,6 +45,8 @@ import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.service.db.DalConnectionProvider;
 
+import com.etendoerp.go.schemaforge.handlers.DocumentPostingService;
+
 /**
  * Shared helpers for {@link NeoHandler} implementations.
  */
@@ -958,5 +960,29 @@ final class NeoHandlerUtils {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Delegates to {@code postingService.handleAction(context)}, null-safe. ETP-5378: a return
+   * window's own handler owns the {@code JAVA_QUALIFIER} slot, so the shared
+   * {@code @Named("document-posting")} handler can never be reached for it — without this
+   * delegation "post"/"unpost" fall through to the generic AD-button path, which looks for a
+   * button column literally named "post", finds none, and answers 404 "Action not found: post"
+   * ({@code NeoButtonActionHelper#executeButtonActionCore}).
+   *
+   * <p>Shared implementation behind {@code ReturnMaterialReceiptHeaderHandler} and
+   * {@code ReturnToVendorShipmentHeaderHandler}'s own {@code handlePostingAction} methods, each
+   * an identical one-line delegation SonarQube flagged as duplicated-lines-on-new-code (3.51%
+   * vs. the 3% gate) — the same class of finding {@link #enrichIssuerOrg} above already fixed
+   * for these two handlers once (PR #972).</p>
+   *
+   * @param context        the current NEO request context
+   * @param postingService the handler's own injected instance; may be {@code null} in a test
+   *                        that never called its {@code setPostingService} seam
+   * @return the service's response for {@code post}/{@code unpost}, or {@code null} when the
+   *     service declined the action (or is absent)
+   */
+  static NeoResponse delegateToPostingService(NeoContext context, DocumentPostingService postingService) {
+    return postingService != null ? postingService.handleAction(context) : null;
   }
 }

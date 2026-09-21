@@ -141,17 +141,14 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
   }
 
   /**
-   * ETP-5378: this window's own handler owns the JAVA_QUALIFIER slot, so the shared
-   * {@code @Named("document-posting")} handler can never be reached for it. Without this
-   * delegation "post"/"unpost" fall through to the generic AD-button path, which looks
-   * for a button column literally named "post", finds none, and answers
-   * 404 "Action not found: post" ({@code NeoButtonActionHelper#executeButtonActionCore}).
-   *
-   * <p>Extracted out of {@link #handle(NeoContext)} (Sonar java:S3776) rather than inlined
-   * as a ternary there, which pushed that method's cognitive complexity to 16.</p>
+   * Extracted out of {@link #handle(NeoContext)} (Sonar java:S3776 — inlining this as a
+   * ternary there pushed that method's cognitive complexity to 16) and delegating to
+   * {@link NeoHandlerUtils#delegateToPostingService} (Sonar java:S1871/duplication — the
+   * one-line body was byte-identical to this same method on the sibling return-window
+   * handler; see that method's javadoc for the "post"/"unpost" rationale).
    */
   private NeoResponse handlePostingAction(NeoContext context) {
-    return postingService != null ? postingService.handleAction(context) : null;
+    return NeoHandlerUtils.delegateToPostingService(context, postingService);
   }
 
   /**
