@@ -29,7 +29,6 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
-import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -62,7 +61,6 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.utility.OBError;
-import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.model.ad.ui.Window;
@@ -681,66 +679,11 @@ public class PurchaseInvoiceHeaderHandlerTest {
     assertSame(sentinel, h.handle(ctx));
   }
 
-  // ── handle() — validateLineQtyBeforeComplete integration ─────────────────
+  // ── handle() — validateDocTypeLock integration ───────────────────────────
 
   /**
-   * When validateLineQtyBeforeComplete returns an error (over-invoiced line), handle()
-   * must return that error immediately without proceeding to CRUD validation.
-   */
-  @Test
-  public void handle_lineQtyValidationBlocked_returns400() throws Exception {
-    JSONObject body = new JSONObject().put("documentAction", "CO");
-    NeoContext ctx = NeoContext.builder()
-        .httpMethod("PATCH")
-        .endpointType(NeoEndpointType.CRUD)
-        .recordId("inv-block")
-        .requestBody(body)
-        .build();
-
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
-         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
-         MockedStatic<NeoInvoiceSupport> supportMock =
-             Mockito.mockStatic(NeoInvoiceSupport.class);
-         MockedStatic<OBMessageUtils> msgMock =
-             Mockito.mockStatic(OBMessageUtils.class)) {
-      ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
-      ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
-
-      OBDal dal = mock(OBDal.class);
-      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
-      Connection conn = mock(Connection.class);
-      PreparedStatement ps = mock(PreparedStatement.class);
-      ResultSet rs = mock(ResultSet.class);
-      when(dal.getConnection()).thenReturn(conn);
-      when(conn.prepareStatement(anyString())).thenReturn(ps);
-      when(ps.executeQuery()).thenReturn(rs);
-
-      // draftQty=8, pending=2 → over-invoiced
-      when(rs.next()).thenReturn(true, false);
-      when(rs.getString(1)).thenReturn("line-blk");
-      when(rs.getBigDecimal(2)).thenReturn(new BigDecimal("8"));
-      when(rs.getString(3)).thenReturn("inout-blk");
-      when(rs.getString(4)).thenReturn("R-BLK");
-
-      Map<String, BigDecimal> pendingMap = new HashMap<>();
-      pendingMap.put("line-blk", new BigDecimal("2"));
-      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLine(
-          Mockito.eq("inout-blk"), Mockito.eq(false))).thenReturn(pendingMap);
-
-      msgMock.when(() -> OBMessageUtils.messageBD("ETGO_InvoiceLineAlreadyInvoiced"))
-          .thenReturn("Over-invoiced: @docNo@ qty @invoiced@ pending @pending@");
-
-      NeoResponse result = handler.handle(ctx);
-
-      assertNotNull(result);
-      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
-    }
-  }
-
-  /**
-   * When validateLineQtyBeforeComplete passes (no over-invoiced lines), handle() proceeds
-   * to validateDocTypeLock. A PUT that attempts to change doc type on a saved invoice
-   * must return 400 from validateDocTypeLock.
+   * handle() reaches validateDocTypeLock for a plain PUT. A PUT that attempts to change the
+   * doc type on a saved invoice must return 400 from validateDocTypeLock.
    */
   @Test
   public void handle_lineQtyPassesButDocTypeLocked_returns400() throws Exception {
@@ -753,7 +696,6 @@ public class PurchaseInvoiceHeaderHandlerTest {
         .requestBody(body)
         .build();
 
-    // validateLineQtyBeforeComplete: no documentAction=CO → passes (returns null) immediately.
     // validateDocTypeLock: invoice exists with docNo assigned, different doc type → 400.
 
     try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
@@ -783,9 +725,9 @@ public class PurchaseInvoiceHeaderHandlerTest {
    * deliberately removed this exact save-time block, until a later shared-code refactor
    * (ETP-4035) accidentally reintroduced it.
    *
-   * <p>With that call gone, the request falls through validateLineQtyBeforeComplete (no
-   * documentAction=CO), applyTotalDiscountBeforeComplete/completeInvoiceIfNeeded (same reason),
-   * and validateDocTypeLock (not a PUT), reaching {@code NeoHeaderActionRouter.dispatch}, where
+   * <p>With that call gone, the request falls through applyTotalDiscountBeforeComplete and
+   * completeInvoiceIfNeeded (no documentAction=CO) and validateDocTypeLock (not a PUT),
+   * reaching {@code NeoHeaderActionRouter.dispatch}, where
    * none of the mocked downstream handlers answer — proving handle() never short-circuits with
    * a 400 from origin invoice validation.
    */
@@ -1007,7 +949,6 @@ public class PurchaseInvoiceHeaderHandlerTest {
       obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
       obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
 
-      // validateLineQtyBeforeComplete guard: no linked shipment lines → passes.
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
@@ -1098,7 +1039,6 @@ public class PurchaseInvoiceHeaderHandlerTest {
       obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
       obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
 
-      // validateLineQtyBeforeComplete guard: no linked shipment lines → passes.
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);

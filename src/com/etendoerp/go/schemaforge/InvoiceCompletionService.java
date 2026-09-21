@@ -55,12 +55,15 @@ import org.openbravo.service.db.DalConnectionProvider;
  * fire correctly from the classic UI. This service restores that behavior for NEO.
  *
  * <p><b>Ordering contract for the header handlers.</b> {@code AbstractInvoiceHeaderHandler} must
- * call this AFTER {@code validateLineQtyBeforeComplete} AND AFTER
- * {@code AbstractOrderHeaderHandler#applyTotalDiscountBeforeComplete}, so (1) pre-completion
- * validation can still block the request before the real process runs, and (2) the total-discount
- * line already reflects the final set of product lines before it is read/posted by
+ * call this AFTER {@code AbstractOrderHeaderHandler#applyTotalDiscountBeforeComplete}, so the
+ * total-discount line already reflects the final set of product lines before it is read/posted by
  * {@link ProcessInvoiceUtil#process}. Completing BEFORE the discount recalculation would complete
  * the document with a stale or missing discount line (ETP-4388).
+ *
+ * <p>This contract used to name {@code validateLineQtyBeforeComplete} as a second predecessor.
+ * That guard capped the invoice against the shipment's quantity and was removed in ETP-5381 — the
+ * order is the commitment, not the shipment, and over-invoicing the ORDER is still rejected by the
+ * core in {@code C_INVOICE_POST}. Nothing else needs to run before completion on that account.
  *
  * <p><b>Ordering contract for the creation handlers.</b> Anything that must be written on the
  * invoice itself — notably the {@code C_Invoice_Reverse} link of a rectificative invoice, whose

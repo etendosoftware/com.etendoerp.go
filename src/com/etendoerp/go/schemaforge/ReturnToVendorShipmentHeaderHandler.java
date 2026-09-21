@@ -293,7 +293,7 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
     try {
       OBContext.setAdminMode(true);
       try {
-        return ReturnShipmentUtils.buildRectifiableInvoicesResponse(returnId);
+        return ReturnShipmentUtils.buildRectifiableInvoicesResponse(context, returnId);
       } finally {
         OBContext.restorePreviousMode();
       }

@@ -73,6 +73,12 @@ final class ReturnShipmentUtils {
   private static final String FIELD_DOCUMENT_STATUS = "documentStatus";
   /** Request-body key carrying the ids of the invoices to rectify (ETP-5381). */
   static final String PARAM_ORIGIN_INVOICES = "originInvoices";
+  /**
+   * Rows per batch of the {@code rectifiableInvoices} picker when the caller does not say
+   * (ETP-5381). 80 rather than {@code useEntity}'s 75 only because that is the figure the window
+   * was specified with; nothing depends on the two matching.
+   */
+  static final int DEFAULT_RECTIFIABLE_PAGE_SIZE = 80;
   // English literal on purpose: localized by tools/app-shell/src/lib/backendErrors.js.
   static final String ERR_RECTIFIED_INVOICE_REQUIRED =
       "Select at least one invoice to rectify: a rectificative invoice cannot be confirmed "
@@ -703,31 +709,107 @@ final class ReturnShipmentUtils {
   }
 
   /**
+   * Request-facing overload: reads the paging window off the request body and delegates.
+   *
+   * <p><b>Read from the REQUEST BODY, not the query string</b>, even though the list windows page
+   * with {@code _startRow}/{@code _endRow} query parameters. An action endpoint reaches its handler
+   * through {@code NeoHookDispatcher#buildHookContext}, which populates {@code recordId} and
+   * {@code requestBody} but NOT {@code queryParams} — only {@code NeoRequestRouter} does that. So
+   * {@code context.getQueryParams()} is null here, and a query-string implementation would have
+   * silently served the first batch forever: no error, no log, just a picker that never paged.
+   * The action is already a POST carrying a JSON body, so the body is where the window belongs.
+   *
+   * <p>Absent keys mean "first batch", which keeps any caller that sends {@code {}} working.
+   *
+   * @param context the action request, read for {@code startRow}, {@code pageSize} and
+   *                {@code search}
+   * @param inOutId the return document
+   */
+  static NeoResponse buildRectifiableInvoicesResponse(NeoContext context, String inOutId)
+      throws Exception {
+    JSONObject body = context != null ? context.getRequestBody() : null;
+    int startRow = parseIntFromBody(body, "startRow", 0);
+    int pageSize = parseIntFromBody(body, "pageSize", DEFAULT_RECTIFIABLE_PAGE_SIZE);
+    String search = body != null ? body.optString("search", null) : null;
+    return buildRectifiableInvoicesResponse(inOutId, startRow, pageSize, search);
+  }
+
+  /**
+   * Reads a non-negative integer from the request body, falling back to {@code fallback} when it is
+   * absent or not a number. A malformed value is treated as absent rather than as an error: the
+   * caller is asking for a page of a picker, and failing the whole action over a bad offset would
+   * hide the list instead of showing its first batch.
+   *
+   * <p>Reads through {@code optString} rather than {@code optInt} so a value sent as a JSON string
+   * ({@code "80"}) is accepted too — the frontend builds this body from state that may hold either.
+   */
+  private static int parseIntFromBody(JSONObject body, String name, int fallback) {
+    String raw = body != null ? body.optString(name, null) : null;
+    if (raw == null || raw.isBlank()) {
+      return fallback;
+    }
+    try {
+      return Math.max(0, Integer.parseInt(raw.trim()));
+    } catch (NumberFormatException e) {
+      return fallback;
+    }
+  }
+
+  /**
    * Builds the {@code rectifiableInvoices} action payload: the candidate invoices, which one was
    * auto-detected (so the UI can preselect it), and whether this return document already has an
    * invoice (so the UI can disable the option instead of letting the user hit a 409).
    *
    * <p>Shared by both return header handlers — the logic is identical on the sales and purchase
    * sides, only the document type differs, and that is resolved elsewhere.
+   *
+   * <p><b>Paged and searched server-side (ETP-5381)</b>, mirroring how the invoice list window
+   * pages through {@code useEntity}: the caller asks for a window of rows and the response says
+   * whether more exist. A slow connection should not wait for the whole candidate set before the
+   * picker can open.
+   *
+   * <p>Two invariants the paging must not break:
+   * <ul>
+   *   <li><b>The detected rows ride on the FIRST batch only.</b> They are preselected, so a
+   *       suggested id whose row has not been fetched yet would render as a chip with no matching
+   *       row. Merging them on every batch instead would duplicate them down the list.</li>
+   *   <li><b>{@code suggestedInvoiceIds} ships on every batch.</b> It is small, it is the same
+   *       answer each time, and the client must not have to remember which batch defined it.</li>
+   * </ul>
+   *
+   * @param inOutId  the return document
+   * @param startRow first row to return, 0-based
+   * @param pageSize how many rows to return
+   * @param search   optional case-insensitive fragment matched against document number and partner
+   *                 name; blank means no filter. Applied in SQL, never client-side — the client
+   *                 only holds the batches it fetched, so filtering there would silently search a
+   *                 subset and report "no matches" for a row that exists further down.
    */
-  static NeoResponse buildRectifiableInvoicesResponse(String inOutId) throws Exception {
-    // The full selectable list, with the chain-detected ones flagged so the UI can float them to
-    // the top and preselect. The chain only limits the SUGGESTION, never the CHOICE: a return
-    // created standalone has no chain at all, and one covering two invoiced shipments needs both.
-    List<JSONObject> detected = fetchAutoDetectedInvoices(inOutId);
+  static NeoResponse buildRectifiableInvoicesResponse(String inOutId, int startRow, int pageSize,
+      String search) throws Exception {
+    boolean firstBatch = startRow <= 0;
+    // The chain-detected rows are flagged so the UI can float them to the top and preselect. The
+    // chain only limits the SUGGESTION, never the CHOICE: a return created standalone has no chain
+    // at all, and one covering two invoiced shipments needs both.
+    List<JSONObject> detected = firstBatch
+        ? fetchAutoDetectedInvoices(inOutId)
+        : Collections.emptyList();
     Set<String> detectedIds = new HashSet<>();
     for (JSONObject inv : detected) {
       detectedIds.add(inv.optString("id"));
     }
-    List<JSONObject> selectable = fetchSelectableInvoices(inOutId);
+    List<JSONObject> selectable = fetchSelectableInvoices(inOutId, startRow, pageSize, search);
+    // A full batch means "there may be more"; a short one is the end of the set. Same signal
+    // useEntity reads (`rows.length < BATCH_SIZE` → no more), so the client needs no total count
+    // and we avoid a second COUNT(*) per scroll.
+    boolean hasMore = selectable.size() >= pageSize;
     Set<String> selectableIds = new HashSet<>();
     for (JSONObject inv : selectable) {
       selectableIds.add(inv.optString("id"));
     }
-    // A detected invoice that falls outside the selectable page (it is capped at 500, newest
-    // first, so a late rectification of an old invoice would) must still be offered: otherwise its
-    // id ships in suggestedInvoiceIds, the frontend drops it for having no matching row, and the
-    // user sees an empty preselection with no error and no way to reach it from the picker.
+    // A detected invoice outside the first page must still be offered: otherwise its id ships in
+    // suggestedInvoiceIds, the frontend drops it for having no matching row, and the user sees an
+    // empty preselection with no error and no way to reach it from the picker.
     JSONArray arr = new JSONArray();
     for (JSONObject inv : detected) {
       if (!selectableIds.contains(inv.optString("id"))) {
@@ -741,12 +823,20 @@ final class ReturnShipmentUtils {
     }
     JSONObject data = new JSONObject();
     data.put("invoices", arr);
+    data.put("hasMore", hasMore);
+    data.put("startRow", Math.max(0, startRow));
     data.put("hasReturnInvoice", hasNonVoidedReturnInvoice(inOutId));
-    // Every chain-detected invoice is preselected, not just the newest: a return covering two
-    // shipments billed on two invoices must rectify BOTH, and making the user re-find the second
-    // one by hand is exactly the friction this list exists to remove.
+    // EVERY chain-detected invoice is reported, not just the newest — what the client does with
+    // them is the client's call, and this field is also what badges the rows as related.
+    //
+    // The client no longer preselects them all (ETP-5381): one detected invoice is preselected,
+    // two or more are not. An order billed across two invoices and returned once makes the chain
+    // find both, and the chain does not know which the user means to rectify. That decision lives
+    // in `useRectifiableInvoices`, deliberately — the backend reports what it found, it does not
+    // decide what gets rectified. Recomputed rather than carried on the first batch only, so the
+    // client never depends on batch order.
     JSONArray suggestedIds = new JSONArray();
-    for (JSONObject inv : detected) {
+    for (JSONObject inv : firstBatch ? detected : fetchAutoDetectedInvoices(inOutId)) {
       suggestedIds.put(inv.optString("id"));
     }
     data.put("suggestedInvoiceIds", suggestedIds);
@@ -822,8 +912,10 @@ final class ReturnShipmentUtils {
   }
 
   /**
-   * Lists every invoice the user may pick to rectify: all confirmed invoices of the same flow
-   * (sales or purchase) as the return document, newest first.
+   * Lists one batch of the invoices the user may pick to rectify: the confirmed invoices of the
+   * same flow (sales or purchase) AND the same business partner as the return document, ordered by
+   * document number then invoice date, newest first, windowed by {@code startRow}/{@code pageSize}
+   * and optionally narrowed by {@code search}.
    *
    * <p>Deliberately NOT restricted to the return document's own chain. A return can be created
    * standalone — no order, no source invoice — and then the chain yields nothing even though
@@ -831,10 +923,22 @@ final class ReturnShipmentUtils {
    * invoices has to be able to name both. The chain still drives the suggestion, but it must not
    * limit the choice.
    *
-   * <p>No business-partner filter, matching the picker in the rectificative-invoice window: the
-   * {@code C_Invoice_Reverse} trigger enforces same-BP only where it applies (Verifactu orgs
-   * permit cross-BP rectifications), and any rejection surfaces as a save error. Filtering here
-   * would hide rows the database would have accepted.
+   * <p><b>Business partner IS filtered</b> — only invoices of the return document's own partner.
+   * An earlier revision of this method deliberately did NOT filter, on the stated grounds that
+   * "{@code C_Invoice_Reverse} enforces same-BP only where it applies (Verifactu orgs permit
+   * cross-BP rectifications)" and that filtering "would hide rows the database would have
+   * accepted". <b>That rationale was wrong.</b> Read the trigger: its own title is "Check the
+   * introduced BP is the same as the Invoice", and the check
+   * ({@code IF v_bpheader_id <> v_bpreversed_id THEN RAISE_APPLICATION_ERROR('@NotEqualBPartner@')})
+   * is unconditional — Openbravo core, no Verifactu branch, no module gate. So the unfiltered list
+   * did the opposite of what the comment claimed: it offered rows the database ALWAYS rejects, and
+   * the user only found out on save. Filtering removes impossible choices, it does not remove
+   * legitimate ones.
+   *
+   * <p>The same reasoning applies to {@link #fetchAutoDetectedInvoices}, which is NOT filtered here
+   * because its chain (return line → cancelled shipment line → invoice line) can only reach another
+   * partner's invoice through anomalous data. If that ever happens the suggestion would preselect an
+   * invoice whose link insert is guaranteed to fail — worth revisiting if it is ever observed.
    *
    * <p>Organization IS filtered, unlike business partner. This is raw JDBC, so none of DAL's
    * implicit org scoping applies; without the clause the picker would offer invoices belonging to
@@ -842,7 +946,8 @@ final class ReturnShipmentUtils {
    * link insert) or not at all.
    */
   @SuppressWarnings("java:S2077")
-  static List<JSONObject> fetchSelectableInvoices(String inOutId) {
+  static List<JSONObject> fetchSelectableInvoices(String inOutId, int startRow, int pageSize,
+      String search) {
     // No context means we are outside a request and have nothing to scope by, so the clause is
     // dropped rather than guessed. A context WITH no readable organizations is a different case
     // and stays fail-closed: an empty IN () matches nothing, which is the correct answer for a
@@ -856,6 +961,18 @@ final class ReturnShipmentUtils {
           : String.join(",", Collections.nCopies(readableOrgs.length, "?"));
       orgFilter = "  AND i.AD_Org_ID IN (" + placeholders + ") ";
     }
+    // Search runs in SQL because the client only holds the batches it has fetched: filtering there
+    // would search a subset and answer "no matches" for an invoice that exists further down the
+    // set. Matched against the two fields the picker actually renders as text — document number and
+    // partner name — so what the user types corresponds to what they can see.
+    boolean hasSearch = search != null && !search.isBlank();
+    String searchParam = hasSearch ? "%" + search.trim().toLowerCase() + "%" : null;
+    String searchFilter = hasSearch
+        ? "  AND (LOWER(i.DocumentNo) LIKE ? OR LOWER(COALESCE(bp.Name, '')) LIKE ?) "
+        : "";
+    // A non-positive page size would turn LIMIT into a silent empty result, so it is clamped rather
+    // than trusted; the ceiling keeps a hand-crafted request from asking for the whole table.
+    int safePageSize = Math.min(Math.max(1, pageSize), 500);
     String sql =
         "SELECT i.C_Invoice_ID, i.DocumentNo, i.DateInvoiced, i.GrandTotal, " +
         "  cur.ISO_Code, bp.Name " +
@@ -867,14 +984,34 @@ final class ReturnShipmentUtils {
         orgFilter +
         "  AND i.IsSOTrx = ret.IsSOTrx " +
         "  AND i.AD_Client_ID = ret.AD_Client_ID " +
+        "  AND i.C_BPartner_ID = ret.C_BPartner_ID " +
         "  AND i.IsActive = 'Y' " +
-        "ORDER BY i.DateInvoiced DESC, i.DocumentNo DESC " +
-        "LIMIT 500";
-    List<String> params = new ArrayList<>();
+        searchFilter +
+        // Document number first, invoice date second, as the window asks. Note DocumentNo is a
+        // VARCHAR, so this is a STRING sort: '9999' sorts after '10000099'. Within one partner and
+        // one numbering series the widths match and the order reads naturally, which is the case
+        // this picker is for; across series of different widths it can look odd. Kept DESC on both
+        // so the newest invoice stays at the top, which is what the list has always done.
+        //
+        // The ORDER BY is what makes paging correct, not just pretty: OFFSET/LIMIT over an
+        // unordered set may repeat or skip rows between batches. C_Invoice_ID is appended as a
+        // tie-break so two invoices sharing a number and a date can never straddle a batch
+        // boundary in a different order each time.
+        "ORDER BY i.DocumentNo DESC, i.DateInvoiced DESC, i.C_Invoice_ID DESC " +
+        "LIMIT ? OFFSET ?";
+    List<Object> params = new ArrayList<>();
     params.add(inOutId);
     if (readableOrgs != null) {
       params.addAll(Arrays.asList(readableOrgs));
     }
+    if (hasSearch) {
+      params.add(searchParam);
+      params.add(searchParam);
+    }
+    // Integers, NOT String.valueOf(...): see the binding loop in runInvoiceQuery — a stringified
+    // LIMIT/OFFSET is rejected by PostgreSQL outright.
+    params.add(safePageSize);
+    params.add(Math.max(0, startRow));
     return runInvoiceQuery(sql, params, "selectable", "Could not load the invoices available to rectify");
   }
 
@@ -885,13 +1022,23 @@ final class ReturnShipmentUtils {
    *     single generic log line would not say which one blew up
    */
   @SuppressWarnings("java:S2077")
-  private static List<JSONObject> runInvoiceQuery(String sql, List<String> params, String queryName,
+  private static List<JSONObject> runInvoiceQuery(String sql, List<Object> params, String queryName,
       String errorMessage) {
     List<JSONObject> result = new ArrayList<>();
     // getConnection() inside the try — see hasNonVoidedReturnInvoice for why.
     try (PreparedStatement ps = OBDal.getInstance().getConnection().prepareStatement(sql)) {
       for (int i = 0; i < params.size(); i++) {
-        ps.setString(i + 1, params.get(i));
+        Object p = params.get(i);
+        // Bind by TYPE, not everything as a string. PostgreSQL types a `setString` parameter as
+        // varchar, and `LIMIT`/`OFFSET` demand bigint: binding "80" there fails the whole statement
+        // with "argument of OFFSET must be type bigint, not type character varying", before a
+        // single row is read. That is not an edge case — the paging clause is unconditional, so it
+        // broke every call until this loop learned to bind an Integer with setInt.
+        if (p instanceof Integer) {
+          ps.setInt(i + 1, (Integer) p);
+        } else {
+          ps.setString(i + 1, (String) p);
+        }
       }
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {

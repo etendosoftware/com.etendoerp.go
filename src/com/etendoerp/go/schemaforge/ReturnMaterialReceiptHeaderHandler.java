@@ -288,7 +288,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
     try {
       OBContext.setAdminMode(true);
       try {
-        return ReturnShipmentUtils.buildRectifiableInvoicesResponse(receiptId);
+        return ReturnShipmentUtils.buildRectifiableInvoicesResponse(context, receiptId);
       } finally {
         OBContext.restorePreviousMode();
       }

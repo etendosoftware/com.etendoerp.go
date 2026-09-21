@@ -23,7 +23,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -31,7 +30,6 @@ import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
-import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -817,104 +815,42 @@ public abstract class AbstractInvoiceHeaderHandler {
   }
 
   // ---------------------------------------------------------------------------
-  // Pre-completion invoice line quantity validation
+  // Pre-completion invoice line quantity validation — REMOVED (ETP-5381)
   // ---------------------------------------------------------------------------
+  //
+  // `validateLineQtyBeforeComplete` and `checkInoutEntryForOverInvoicing` used to cap each invoice
+  // line at the pending quantity of the shipment/receipt line it pointed at, rejecting completion
+  // with ETGO_InvoiceLineAlreadyInvoiced. It is gone, deliberately. Do not reinstate it.
+  //
+  // WHY: the shipment must not constrain what the invoice may say. The commitment is the ORDER.
+  // The guard measured the invoice against the wrong document, and did so even when that document
+  // had delivered nothing: `NeoInvoiceSupport.queryPendingQtyPerLine` takes its ceiling from
+  // `ABS(sil.movementqty)` under `WHERE sil.m_inout_id = ? AND sil.isactive = 'Y'` — no docstatus
+  // filter on the shipment at all (every docstatus clause in that query filters INVOICES). So a
+  // DRAFT shipment capped the invoice.
+  //
+  // The reported case: order for 15, shipment created from it and edited down to 10 but left in
+  // draft, invoice created from the ORDER, reactivated and set to 12. Completion was refused with
+  // "quantity to invoice (12) exceeds pending quantity (10). It may already be invoiced in another
+  // document." Both halves of that sentence were false — 15 were pending on the order, and no other
+  // invoice existed. `InvoiceLineLinker` had attached the invoice line to the draft shipment line
+  // (its query matches on C_OrderLine_ID and does not look at the shipment's status either), which
+  // is what handed the guard the wrong ceiling.
+  //
+  // WHAT STILL PROTECTS THIS: the core, in C_INVOICE_POST — for every invoice line carrying a
+  // C_OrderLine_ID it computes `ABS(ol.qtyordered) - ABS(ol.qtyinvoiced + qty)` and raises
+  // @QtyInvoicedHigherOrdered@ when it goes negative. That is the ceiling that belongs here, it is
+  // measured against the order, and it is Classic's own behaviour.
+  //
+  // KNOWN GAP, accepted: an invoice line with no C_OrderLine_ID (invoiced straight from a shipment
+  // that has no order behind it) now has no quantity ceiling at all, because the core check is
+  // conditional on that column. Flagged rather than papered over.
+  //
+  // `NeoInvoiceSupport.computePendingQtyPerLine` itself stays — the billing-status badge and the
+  // "no lines left to invoice" check at creation time still use it.
 
   // Package-private: also used by InvoiceCalloutHelper (S1448 extraction)
   static final String FIELD_DOCUMENT_ACTION_INV = "documentAction";
-
-  /**
-   * Blocks invoice completion when any invoice line would over-invoice a shipment or receipt line.
-   * For each invoice line with {@code m_inoutline_id}, computes the pending (uninvoiced) quantity
-   * on the referenced shipment/receipt line (excluding other drafts) and rejects if the draft
-   * quantity exceeds what is still available.
-   *
-   * <p>Call at the top of {@code handle()} in both AR and AP invoice header subclasses, after the
-   * exchange-rate check.
-   *
-   * @param context the current NeoContext
-   * @return a NeoResponse error to block completion, or {@code null} to proceed
-   */
-  @SuppressWarnings("java:S2077")
-  static NeoResponse validateLineQtyBeforeComplete(NeoContext context) {
-    if (!InvoiceCalloutHelper.isInvoiceCompleteAction(context)) {
-      return null;
-    }
-    String invoiceId = context.getRecordId();
-    if (invoiceId == null || invoiceId.isEmpty()) {
-      return null;
-    }
-    OBContext.setAdminMode(true);
-    try {
-      Map<String, String> docNoByInout = new LinkedHashMap<>();
-      Map<String, Map<String, BigDecimal>> linesByInout = new LinkedHashMap<>();
-
-      String sql =
-          "SELECT il.m_inoutline_id, ABS(il.qtyinvoiced), io.m_inout_id, io.documentno "
-          + "FROM c_invoiceline il "
-          + "JOIN m_inoutline iol ON iol.m_inoutline_id = il.m_inoutline_id "
-          + "JOIN m_inout io ON io.m_inout_id = iol.m_inout_id "
-          + "WHERE il.c_invoice_id = ? AND il.isactive = 'Y' AND il.m_inoutline_id IS NOT NULL";
-      Connection conn = OBDal.getReadOnlyInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        ps.setString(1, invoiceId);
-        try (ResultSet rs = ps.executeQuery()) {
-          while (rs.next()) {
-            String lineId = rs.getString(1);
-            BigDecimal qty = rs.getBigDecimal(2);
-            String inoutId = rs.getString(3);
-            String docNo = rs.getString(4);
-            docNoByInout.put(inoutId, docNo);
-            linesByInout.computeIfAbsent(inoutId, k -> new LinkedHashMap<>()).put(lineId, qty);
-          }
-        }
-      }
-      if (linesByInout.isEmpty()) {
-        return null;
-      }
-      for (Map.Entry<String, Map<String, BigDecimal>> inoutEntry : linesByInout.entrySet()) {
-        NeoResponse error = checkInoutEntryForOverInvoicing(
-            inoutEntry.getKey(), inoutEntry.getValue(), docNoByInout, invoiceId);
-        if (error != null) {
-          return error;
-        }
-      }
-      return null;
-    } catch (Exception e) {
-      log.error("Error validating invoice lines before complete for invoice {}", invoiceId, e);
-      return null;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-  }
-
-  private static NeoResponse checkInoutEntryForOverInvoicing(String inoutId,
-      Map<String, BigDecimal> draftLines, Map<String, String> docNoByInout,
-      String invoiceId) throws Exception {
-    Map<String, BigDecimal> pendingMap = NeoInvoiceSupport.computePendingQtyPerLine(inoutId, false);
-    for (Map.Entry<String, BigDecimal> lineEntry : draftLines.entrySet()) {
-      String lineId = lineEntry.getKey();
-      BigDecimal draftQty = lineEntry.getValue();
-      if (draftQty == null || draftQty.compareTo(BigDecimal.ZERO) <= 0) {
-        continue;
-      }
-      BigDecimal pendingQty = pendingMap.getOrDefault(lineId, BigDecimal.ZERO);
-      if (pendingQty.compareTo(draftQty) < 0) {
-        String docNo = docNoByInout.get(inoutId);
-        String template = OBMessageUtils.messageBD("ETGO_InvoiceLineAlreadyInvoiced");
-        String msg = template
-            .replace("@docNo@", docNo)
-            .replace("@invoiced@", draftQty.toPlainString())
-            .replace("@pending@", pendingQty.toPlainString());
-        log.warn("Blocking invoice completion id={}: {}", invoiceId, msg);
-        JSONObject body = new JSONObject();
-        body.put("status", "error");
-        body.put("message", msg);
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
-      }
-    }
-    return null;
-  }
 
   // ---------------------------------------------------------------------------
   // Currency / exchange-rate hooks (ETP-4029)
