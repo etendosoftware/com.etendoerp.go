@@ -3124,8 +3124,8 @@ class NeoCrudHandlerTest {
 
       invokePrivate(handler, "executePostCalloutCascade",
           new Class<?>[] { JSONObject.class, Tab.class, NeoContext.class,
-              String.class, java.util.Set.class, java.util.Set.class },
-          body, null, context, null, Collections.emptySet(), Collections.emptySet());
+              java.util.Set.class, java.util.Set.class },
+          body, null, context, Collections.emptySet(), Collections.emptySet());
       // no exception = success
     }
 
@@ -3156,8 +3156,8 @@ class NeoCrudHandlerTest {
 
         invokePrivate(handler, "executePostCalloutCascade",
             new Class<?>[] { JSONObject.class, Tab.class, NeoContext.class,
-                String.class, java.util.Set.class, java.util.Set.class },
-            body, adTab, context, null, new HashSet<>(), new HashSet<>());
+                java.util.Set.class, java.util.Set.class },
+            body, adTab, context, new HashSet<>(), new HashSet<>());
 
         // Verify cascade was called (no exception)
         cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
@@ -3189,8 +3189,8 @@ class NeoCrudHandlerTest {
         // Pass null for protectedFields
         invokePrivate(handler, "executePostCalloutCascade",
             new Class<?>[] { JSONObject.class, Tab.class, NeoContext.class,
-                String.class, java.util.Set.class, java.util.Set.class },
-            body, adTab, context, null, (Set<String>) null, (Set<String>) null);
+                java.util.Set.class, java.util.Set.class },
+            body, adTab, context, (Set<String>) null, (Set<String>) null);
 
         // Should not throw NPE
         cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
@@ -3213,8 +3213,8 @@ class NeoCrudHandlerTest {
                Mockito.mockStatic(DocTypeResolver.class)) {
         invokePrivate(handler, "executePostCalloutCascade",
             new Class<?>[] { JSONObject.class, Tab.class, NeoContext.class,
-                String.class, java.util.Set.class, java.util.Set.class },
-            body, adTab, context, null, Collections.emptySet(), Collections.emptySet());
+                java.util.Set.class, java.util.Set.class },
+            body, adTab, context, Collections.emptySet(), Collections.emptySet());
 
         docTypeMock.verify(() -> DocTypeResolver.reapplyDocTypeFromTabFilter(
             body, adTab, context, Collections.emptySet()));

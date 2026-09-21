@@ -174,7 +174,13 @@ public class NeoDefaultsCascadeHelper {
    * Two different business partners each having a "Juan Perez" is ordinary data, so the
    * constraint was never the thing to satisfy — the username should not have existed.
    *
+   * @param ctx the NEO request context used to resolve callouts
+   * @param adTab the tab whose columns may trigger dependent callouts
+   * @param defaults the current defaults payload, updated in place during the cascade
+   * @param seqFields fields that should be skipped because they are sequence previews
+   * @param protectedFields keys the caller submitted, whose existing value must not be overwritten
    * @param suppressedFields DAL property names the cascade may neither populate nor overwrite
+   * @return the aggregated cascade result with merged updates, combos, and messages
    */
   public static NeoDefaultsService.CalloutCascadeResult executeCalloutCascade(NeoContext ctx, Tab adTab,
       JSONObject defaults, Set<String> seqFields, Set<String> protectedFields,
