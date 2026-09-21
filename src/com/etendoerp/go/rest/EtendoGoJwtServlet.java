@@ -77,6 +77,7 @@ import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
+import com.etendoerp.go.onboarding.OnboardingDataTransferService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
@@ -274,6 +275,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_COMPANY_DATA = "companyData";
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
+  OnboardingDataTransferService onboardingDataTransferService =
+      new OnboardingDataTransferService();
   OnboardingCompanyDataService onboardingCompanyDataService = new OnboardingCompanyDataService();
   OnboardingAccountingWiringService onboardingAccountingWiringService =
       new OnboardingAccountingWiringService();
@@ -2517,6 +2520,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
+      if (paidUpgrade && (onboardingRequest.transferProducts || onboardingRequest.transferContacts)) {
+        sendProgress(writer, "data-transfer", PROGRESS_IN_PROGRESS, "Transferring selected demo data...");
+        String sourceClientId = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail);
+        OnboardingDataTransferService.TransferResult transferResult = onboardingDataTransferService.transfer(
+            sourceClientId, clientId, orgId, onboardingRequest.transferProducts,
+            onboardingRequest.transferContacts);
+        sendProgress(writer, "data-transfer", "done",
+            "Selected demo data transferred (products=" + transferResult.productsCopied()
+                + ", contacts=" + transferResult.contactsCopied() + ")");
+      }
       if (!paidUpgrade && !tenantEnvironmentLifecycleService.markDemoReady(clientId, Instant.now())) {
         throw new IllegalStateException("Could not initialize demo trial lifecycle");
       }
@@ -2567,14 +2580,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     OnboardingRequestData onboardingRequest = parseOnboardingRequest(request, response);
     if (onboardingRequest == null) {
       return null;
-    }
-    if (StringUtils.isNotBlank(onboardingRequest.paymentToken)) {
-      CheckoutRequest storedRequest = checkoutRequestStore.find(onboardingRequest.paymentToken,
-          accountId, accountEmail);
-      if (storedRequest == null) {
-        writeError(response, HttpServletResponse.SC_PAYMENT_REQUIRED, ERROR_PAYMENT_REQUIRED);
-        return null;
-      }
     }
     String currencyId = resolveCurrencyId(onboardingRequest.currencyIso, response);
     if (currencyId == null
@@ -2879,6 +2884,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return account == null ? null : account.getId();
   }
 
+  private String resolveOnboardingAccountIdFromEmail(String accountEmail) {
+    Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(accountEmail);
+    return account == null ? null : account.getId();
+  }
+
   private String resolveOnboardingAccountEmail(String token, HttpServletResponse response)
       throws IOException {
     String accountEmail = null;
@@ -2951,6 +2961,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.taxId = body.optString("fiscalIdValue", "").trim();
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
       data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
+      JSONObject transfer = body.optJSONObject("dataTransfer");
+      data.transferProducts = transfer != null && transfer.optBoolean("products", false);
+      data.transferContacts = transfer != null && transfer.optBoolean("contacts", false);
       if ("convert-demo".equalsIgnoreCase(data.upgradeAction)) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST,
             "Demo environments cannot be converted; create a new productive environment");
@@ -4123,6 +4136,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // makes the resulting environment productive (ETP-4966, durable since ETP-5045).
     private String paymentToken;
     private String upgradeAction;
+    private boolean transferProducts;
+    private boolean transferContacts;
   }
 
   private static class AdminContextData {

@@ -538,7 +538,7 @@ final class EtendoGoJwtDalHelper {
    * Returns the account's only free tenant when it is unambiguous, for demo/productive linking.
    * Multiple free tenants are deliberately treated as unresolved rather than guessed.
    */
-  static String findOnlyFreeTenantIdByAccountEmail(String accountEmail) {
+  public static String findOnlyFreeTenantIdByAccountEmail(String accountEmail) {
     Set<String> freeClientIds = new HashSet<>();
     for (User environmentUser : findEnvironmentUsersByAccountEmail(accountEmail)) {
       String clientId = environmentUser.getClient().getId();

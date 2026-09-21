@@ -440,11 +440,12 @@ public class CheckoutRequestStore {
             .createQuery(HQL_UPDATE + CheckoutRequest.ENTITY_NAME + " cr"
                 + "   set cr.provisioningAt = :now,"
                 + "       cr.provisioningAttempts = cr.provisioningAttempts + 1,"
+                + "       cr.failureReason = null,"
                 + "       cr.updated = :now"
                 + " where cr.request = :requestId"
                 + "   and lower(cr.accountEmail) = lower(:" + PARAM_ACCOUNT_EMAIL + ")"
                 + "   and cr.checkoutRequestStatus = :" + HQL_PROVISIONING
-                + "   and cr.provisioningAt <= :staleBefore")
+                + "   and (cr.failureReason is not null or cr.provisioningAt <= :staleBefore)")
             .setParameter(HQL_PROVISIONING, STATUS_PROVISIONING)
             .setParameter("now", now)
             .setParameter("staleBefore", staleBefore)
