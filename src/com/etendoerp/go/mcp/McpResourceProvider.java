@@ -398,19 +398,28 @@ public class McpResourceProvider {
   /**
    * Build the fields array for a given entity, resolving AD_Column metadata
    * to provide type information, selector hints, and default values.
+   *
+   * <p>Inclusion is resolved with {@link McpFieldView}, never with a {@code Restrictions.eq} on
+   * {@code ISINCLUDED}: a criteria is evaluated in the database, where the {@code MCP_CONFIG}
+   * JSON is not joined, so a {@code fields.included} override cannot reach it. This method used
+   * to filter in the criteria while already resolving {@code readOnly} through the view one loop
+   * below — so a field reclaimed by an override was reported by {@code neo_schema} and silently
+   * missing here, which is the exact disagreement IMP-39 exists to end.</p>
    */
   private JSONArray buildFieldsArray(String entityId) throws Exception {
     OBCriteria<SFField> criteria = OBDal.getInstance().createCriteria(SFField.class);
     criteria.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", entityId));
     criteria.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
-    criteria.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
     criteria.addOrder(Order.asc(SFField.PROPERTY_SEQNO));
     List<SFField> fields = criteria.list();
 
     JSONArray arr = new JSONArray();
     for (SFField field : fields) {
       Column column = field.getADColumn();
-      if (column == null) {
+      McpFieldView view = McpFieldView.of(field);
+      // A row with no column and a row the effective curation excludes are the same non-answer:
+      // neither produces an entry. Kept as one guard so the loop has a single exit.
+      if (column == null || !view.isIncluded()) {
         continue;
       }
 
@@ -423,7 +432,7 @@ public class McpResourceProvider {
       fieldObj.put("type", McpSchemaFieldBuilder.mapColumnType(refId));
       // Effective curation via the one resolver (ETP-5184), so this list cannot report a field as
       // writable that neo_schema reports as read-only, or the other way round.
-      fieldObj.put("readOnly", McpFieldView.of(field).isReadOnly());
+      fieldObj.put("readOnly", view.isReadOnly());
       fieldObj.put("required", column.isMandatory());
 
       // Include default value if present

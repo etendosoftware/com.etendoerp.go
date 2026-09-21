@@ -164,7 +164,10 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
               ? OBDal.getInstance().get(ShipmentInOutLine.class, sourceLineId) : null;
           if (sourceLineId == null || qty.compareTo(BigDecimal.ZERO) <= 0 || sourceLine == null) continue;
 
-          ReturnShipmentUtils.buildAndSaveReturnLine(returnDoc, sourceLine, nextLineNo, qty.negate());
+          // ETP-5313: the stored sign is owned by ReturnLineQuantityPolicy, applied inside
+          // buildAndSaveReturnLine — pass the user-facing POSITIVE quantity, same as the sales
+          // side, instead of negating here. The normalisation is idempotent either way.
+          ReturnShipmentUtils.buildAndSaveReturnLine(returnDoc, sourceLine, nextLineNo, qty);
           nextLineNo += 10;
           imported++;
         }

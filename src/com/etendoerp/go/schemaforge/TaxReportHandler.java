@@ -38,6 +38,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportParam;
 
 /**
@@ -55,6 +56,19 @@ import com.etendoerp.go.schemaforge.util.NeoReportParam;
 public class TaxReportHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(TaxReportHandler.class);
+
+  /**
+   * {@code AD_Process} this report is the NEO surface of ("Multidimensional Tax Report").
+   *
+   * <p>Report specs of type {@code R} are NOT gated by the shared spec check: with no linked
+   * {@code AD_Process} and no {@code AD_TAB_ID} on any entity, {@code hasReportSpecAccess}
+   * falls through to a permissive allow (ETP-4596), which is a fail-open default. Every report
+   * handler therefore carries its own check — {@code InventoryStockReportHandler} gates on its
+   * window, {@code AgingReportHandler} on its OBUIAPP process — and this one carried none, so a
+   * role with no window grants at all could read invoices, amounts, VAT rates and every
+   * contact's tax id.</p>
+   */
+  private static final String TAX_REPORT_PROCESS_ID = "8C1331B9EC14CED7E040007F010119A0";
 
   // ---- Parameter name constants ----
   private static final String PARAM_DATE_FROM    = "dateFrom";
@@ -136,7 +150,15 @@ public class TaxReportHandler implements NeoHandler {
   }
 
   @Override
+  public boolean isAccessibleForCurrentRole() {
+    return NeoAccessHelper.hasProcessAccess(TAX_REPORT_PROCESS_ID);
+  }
+
+  @Override
   public NeoResponse handle(NeoContext context) {
+    if (!isAccessibleForCurrentRole()) {
+      return NeoResponse.error(403, "Access denied");
+    }
     if ("GET".equals(context.getHttpMethod())) {
       return describeReport();
     }

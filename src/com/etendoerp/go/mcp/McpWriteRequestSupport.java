@@ -19,6 +19,7 @@ package com.etendoerp.go.mcp;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -35,7 +36,9 @@ import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.service.json.JsonConstants;
 
+import com.etendoerp.go.schemaforge.NeoServerOwnedFields;
 import com.etendoerp.go.schemaforge.data.SFEntity;
+import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoErrorSanitizer;
 import com.etendoerp.go.schemaforge.util.NeoListReferenceError;
 
@@ -89,32 +92,307 @@ final class McpWriteRequestSupport {
    */
   static JSONObject mapFieldsToDalProperties(JSONObject fields, Tab adTab)
       throws JSONException {
+    return mapFieldsToDalProperties(fields, adTab, null);
+  }
+
+  /**
+   * Maps the caller's field names onto DAL properties, refusing any the spec excludes.
+   *
+   * <p><b>IMP-39 — this reverses a deliberate earlier decision, and the reversal is the point.</b>
+   * Both write call sites carried the comment <em>"MCP: accept all valid table columns from AI
+   * agents, not just SF-configured ones. filterWriteRequest strips fields not in ETGO_SF_FIELD
+   * writableFields, which is too restrictive for MCP where AI agents need to set any valid
+   * column."</em> The cost of that openness was measured: {@code orderReference}, curated out of
+   * the sales-order window, could be written and filtered while {@code neo_get} refused to project
+   * it — so an agent could set a value, be told 200, and never read it back. The three tools now
+   * answer the same question the same way.</p>
+   *
+   * <p><b>IMP-48 — and refusing what it exposes as read-only.</b> The same pass rejects a value
+   * sent for a field the spec publishes with {@code readOnly: true}. That gate existed only on the
+   * REST path ({@code NeoFieldFilter.filterCreateRequest}, IMP-28 clause 2); the MCP built a
+   * {@code NeoFieldFilter} solely to project GET responses, so nothing stopped the write and AD's
+   * {@code isUpdatable} alone decided whether the value was dropped or persisted. The exemptions
+   * are copied from that predicate rather than reinvented — see {@link McpQuerySupport#writeGate}.
+   * It applies to {@code neo_create} and {@code neo_update} alike: a field is read-only or it is
+   * not, and which verb is asking does not change the answer.</p>
+   *
+   * <p><b>What it does not do.</b> A key that resolves to no property at all still passes through
+   * untouched: that is <b>IMP-18</b> (an unknown field accepted in silence on write) and it is not
+   * fixed here. The excluded set is only the one the spec explicitly excluded — a field with
+   * no {@code ETGO_SF_FIELD} row is uncurated, and absence of curation is not a decision. Nor does
+   * either gate touch the server's own injected keys: the injectors run downstream of this
+   * mapping, on the body it returns, so a derived read-only value is unaffected.</p>
+   *
+   * @param fields   the caller's field map
+   * @param adTab    the tab whose table the fields belong to
+   * @param sfEntity the SchemaForge entity; {@code null} skips the check, which is what the
+   *                 two-argument overload preserves for callers that have no spec in hand
+   * @return the body keyed by DAL property name
+   * @throws JSONException       if the body cannot be read
+   * @throws McpRoutingException 422 {@code field_not_allowed} naming what may be sent instead, or
+   *                             422 {@code read_only_field} for a field the surface publishes as
+   *                             read-only
+   */
+  static JSONObject mapFieldsToDalProperties(JSONObject fields, Tab adTab, SFEntity sfEntity)
+      throws JSONException {
+    return mapFieldsToDalProperties(fields, adTab, sfEntity, new java.util.TreeSet<>());
+  }
+
+  /**
+   * As {@link #mapFieldsToDalProperties(JSONObject, Tab, SFEntity)}, also collecting the keys that
+   * matched no field of the entity.
+   *
+   * <p><b>IMP-18 — the write verbs report, they do not refuse.</b> {@code neo_schema},
+   * {@code neo_list} and {@code neo_get} have answered an unrecognised name with
+   * {@code unknownFields} since 2026-08-10; the write verbs dropped it in silence, so a create
+   * carrying a misspelt field returned 201 and no later read could contradict it. The obvious
+   * symmetry with the two gates above — refuse it — was measured and rejected: of the 73 handler
+   * qualifiers reachable by an MCP write, at least eight read request keys that are <b>not AD
+   * columns anywhere in the instance</b> ({@code formState}, {@code lines}, {@code shipmentId},
+   * {@code receiptId}, {@code fieldValues}, {@code includeZeroStock}, {@code destinationAccountId},
+   * {@code paymentRemoval} …). Those keys travel through exactly this branch today. Unlike an
+   * excluded or read-only field, "unknown" here is not a set anything declares, so a refusal could
+   * not tell a caller's typo from a handler's own protocol — and the reporting is what will produce
+   * the inventory a refusal would need.</p>
+   *
+   * @param fields   the caller's field map
+   * @param adTab    the tab whose table the fields belong to
+   * @param sfEntity the SchemaForge entity; {@code null} skips the two gates
+   * @param unknown  collects, in order, the keys that matched no property; never {@code null}
+   * @return the body keyed by DAL property name
+   * @throws JSONException if the body cannot be read
+   */
+  static JSONObject mapFieldsToDalProperties(JSONObject fields, Tab adTab, SFEntity sfEntity,
+      Set<String> unknown) throws JSONException {
+    return mapFieldsToDalProperties(fields, adTab, sfEntity, unknown, new JSONObject());
+  }
+
+  /**
+   * As {@link #mapFieldsToDalProperties(JSONObject, Tab, SFEntity, Set)}, also collecting the
+   * server-owned fields the caller sent whose value was not its own session's.
+   *
+   * @param serverOwned collects the discarded tenant fields worth reporting; never {@code null}
+   * @return the body with DAL property names, and without any server-owned key
+   * @throws JSONException if the body cannot be read
+   */
+  static JSONObject mapFieldsToDalProperties(JSONObject fields, Tab adTab, SFEntity sfEntity,
+      Set<String> unknown, JSONObject serverOwned) throws JSONException {
     Entity dalEntity = ModelProvider.getInstance()
         .getEntityByTableId(adTab.getTable().getId());
+    McpQuerySupport.WriteGate gate = McpQuerySupport.writeGate(sfEntity, dalEntity);
+    // ETP-5368: resolved once for the whole body rather than per unresolved key — it is a DB read.
+    Set<String> virtualFieldNames = virtualFieldNames(sfEntity);
     JSONObject mapped = new JSONObject();
 
     Iterator<String> keys = fields.keys();
     while (keys.hasNext()) {
       String key = keys.next();
       Object value = fields.get(key);
-      String mappedKey = key;
+      Property prop = resolveProperty(dalEntity, key);
+      String mappedKey = mappedKeyFor(dalEntity, key, prop);
 
-      // Try as DAL property name first
-      Property prop = dalEntity.getProperty(key, false);
-      if (prop != null) {
-        mappedKey = key;
-      } else {
-        // Try as DB column name
-        prop = dalEntity.getPropertyByColumnName(key, false);
-        if (prop != null) {
-          mappedKey = prop.getName();
-        }
+      // Tenant ownership outranks curation: client and organization are resolved from the
+      // session on every write, so the caller's value is dropped here and never reaches the
+      // body. Neither column has an ETGO_SF_FIELD row, so both gates below would let it
+      // through - which is how a create could land in another tenant and answer 200 OK.
+      if (NeoServerOwnedFields.isServerOwned(mappedKey)) {
+        NeoServerOwnedFields.recordIfDifferent(serverOwned, mappedKey, value);
+        continue;
       }
 
-      // Pass through unknown keys (parentId, etc.)
+      if (prop == null) {
+        // parentId is a declared argument of the write tools, not a stray key - see
+        // resolveParentFK. Every other unresolved key is reported, not refused (IMP-18).
+        // ETP-5368: a wrapper entity's virtual fields resolve against a second table, so they are
+        // not properties of this one - but neo_schema now publishes them and the handler writes
+        // them, and a key the schema advertises must not come back labelled unrecognised.
+        if (!McpConstants.PARAM_PARENT_ID.equals(key) && !virtualFieldNames.contains(key)) {
+          unknown.add(key);
+        }
+      } else {
+        applyWriteGates(gate, key, mappedKey, value, sfEntity, dalEntity);
+      }
       mapped.put(mappedKey, value);
     }
     return mapped;
+  }
+
+  /**
+   * The caller-facing names of the virtual fields the entity's wrapper policy publishes.
+   *
+   * <p>ETP-5368. Compared against the backing table's own DAL property names, resolved the same
+   * way {@code neo_schema} resolves them, so the two answers come from one source rather than from
+   * two hand-kept lists.
+   */
+  private static Set<String> virtualFieldNames(SFEntity sfEntity) {
+    Set<String> names = new HashSet<>();
+    for (Column col : NeoSelectorPolicy.resolveVirtualColumns(sfEntity)) {
+      names.add(col.getDBColumnName());
+      Entity backing = ModelProvider.getInstance()
+          .getEntityByTableName(col.getTable().getDBTableName());
+      Property prop = backing == null
+          ? null
+          : backing.getPropertyByColumnName(col.getDBColumnName(), false);
+      if (prop != null) {
+        names.add(prop.getName());
+      }
+    }
+    return names;
+  }
+
+  /**
+   * The DAL property a caller's key names: its property name first, its DB column name second.
+   *
+   * @param dalEntity the entity being written to
+   * @param key       the caller's own key
+   * @return the resolved property, or {@code null} when the key names neither
+   */
+  private static Property resolveProperty(Entity dalEntity, String key) {
+    Property byPropertyName = dalEntity.getProperty(key, false);
+    return byPropertyName != null ? byPropertyName
+        : dalEntity.getPropertyByColumnName(key, false);
+  }
+
+  /**
+   * The key the caller's value travels under from here on.
+   *
+   * <p>The caller's own key when it already named a property, or when it resolved to nothing at
+   * all - an unresolved key is passed through untouched, which is how {@code parentId} and the
+   * handler-read keys reach their handlers. The property name only when the caller named a DB
+   * column, since that is the one case where the two spellings differ.</p>
+   *
+   * @param dalEntity the entity being written to
+   * @param key       the caller's own key
+   * @param prop      the property {@link #resolveProperty} found, may be {@code null}
+   * @return the key to write under
+   */
+  private static String mappedKeyFor(Entity dalEntity, String key, Property prop) {
+    if (prop == null || dalEntity.getProperty(key, false) != null) {
+      return key;
+    }
+    return prop.getName();
+  }
+
+  /**
+   * Apply the two curation gates to one key that resolved to a property.
+   *
+   * <p>IMP-39 / IMP-48: two gates, two answers. The unresolved case is not handled here - it is
+   * not a refusal but a report (IMP-18), and it stays at the call site so this method has one
+   * job and the caller keeps the parameter count honest.</p>
+   *
+   * @param gate       the entity's write gate
+   * @param key        the caller's own key, used in the refusal so it reads back what it sent
+   * @param mappedKey  the key the gates are keyed by
+   * @param value      the value sent, needed to tell a default echo from an override
+   * @param sfEntity   the SchemaForge entity, may be {@code null}
+   * @param dalEntity  the DAL entity being written to
+   * @throws McpRoutingException when the field is excluded or read-only
+   */
+  private static void applyWriteGates(McpQuerySupport.WriteGate gate, String key,
+      String mappedKey, Object value, SFEntity sfEntity, Entity dalEntity) {
+    String entityName = sfEntity == null ? dalEntity.getName() : sfEntity.getName();
+    if (gate.excluded.contains(mappedKey)) {
+      throw McpRoutingException.fieldNotAllowed(key, entityName,
+          McpQuerySupport.filterablePropertyNames(sfEntity, dalEntity));
+    }
+    if (gate.readOnlyRejectable.contains(mappedKey)
+        || gate.rejectsDefaultOverride(mappedKey, value)) {
+      throw McpRoutingException.readOnlyField(key, entityName);
+    }
+  }
+
+  /**
+   * Attach the keys a write did not recognise to the body handed back to the agent (IMP-18).
+   *
+   * <p>Mirrors the {@code unknownFields} array {@code neo_list}, {@code neo_get} and
+   * {@code neo_schema} already return, so the same word means the same thing on every tool. The
+   * accompanying hint is worded to be <b>true even when a {@code NeoHandler} consumed the key</b>:
+   * it says the name was not mapped to a field of this entity and no field of the record holds the
+   * value, which is exactly what happened in both cases. Claiming the key was ignored would be a
+   * lie on the eight-odd entities whose handlers read their own request keys.</p>
+   *
+   * @param body    the flattened response body handed to the agent, mutated in place
+   * @param unknown the unrecognised keys, in the order collected
+   */
+  static void reportUnknownFields(JSONObject body, Set<String> unknown) {
+    if (body == null || unknown == null || unknown.isEmpty()) {
+      return;
+    }
+    try {
+      body.put(McpFieldProjection.KEY_UNKNOWN_FIELDS, new JSONArray(unknown));
+      body.put("unknownFieldsHint", "These names were not mapped to a field of this entity, and "
+          + "no field of the record holds their value. Call neo_schema with view:\"create\" for "
+          + "the names this entity accepts.");
+    } catch (JSONException ignored) {
+      // Reporting is an aid, never the answer. The write already succeeded; a body that cannot
+      // carry the warning is still a valid result, and failing the call over it would be a worse
+      // outcome than the silence IMP-18 exists to end. Nothing to recover, nothing to report.
+    }
+  }
+
+  /**
+   * Attach the callout-vs-caller divergences a create left behind (IMP-45).
+   *
+   * <p>{@code neo_defaults} tells an agent to use its result as the starting point for
+   * {@code neo_create}, and {@code neo_create} repeats the advice. Follow it literally and every
+   * value handed over becomes a value the caller sent, which ETP-4784 protects from being
+   * recomputed by a callout that knows the record's real context. The measured case:
+   * {@code neo_defaults(sales-order/header)} answers {@code paymentTerms: "30 Días"} with no
+   * business partner in sight, and the partner chosen a moment later implies {@code "Inmediato"} —
+   * an agent that echoed the default has pinned the wrong one, and the 201 says nothing.</p>
+   *
+   * <p>The value the caller sent still wins. Overriding it would be worse: on this path the server
+   * cannot tell an echoed default from a value a human deliberately chose, and silently replacing
+   * the second is a harder failure than reporting the first. So this reports, as IMP-18 does for
+   * unrecognised names — the write succeeded, and now the caller can see what its own value
+   * displaced.</p>
+   *
+   * @param body       the flattened response body handed to the agent, mutated in place
+   * @param superseded field → {sent, callout}, or {@code null}/empty when nothing diverged
+   */
+  static void reportSupersededDefaults(JSONObject body, JSONObject superseded) {
+    if (body == null || superseded == null || superseded.length() == 0) {
+      return;
+    }
+    try {
+      body.put("supersededDefaults", superseded);
+      body.put("supersededDefaultsHint", "For each field listed, the value you sent was kept and a "
+          + "callout had resolved a different one from this record's own context (the business "
+          + "partner's configuration, for one). That is correct if the value was chosen "
+          + "deliberately. If you copied it from neo_defaults, it was a generic default resolved "
+          + "before this record had a business partner: omit that field and let the server resolve "
+          + "it, or send the value under \"callout\" instead.");
+    } catch (JSONException ignored) {
+      // Same reasoning as reportUnknownFields: the record is written and correct as far as the
+      // caller asked; losing a diagnostic must never turn a successful create into a failure.
+    }
+  }
+
+  /**
+   * Reports the server-owned fields this write discarded, when the value differed from the
+   * session's own.
+   *
+   * <p>The write is not refused. {@code client} and {@code organization} are resolved from the
+   * session whatever the caller sent, so the record is always created in the caller's own
+   * tenant; what this adds is the caller being told, instead of finding out from a 404 on the
+   * record it believes it just created somewhere else.</p>
+   *
+   * @param body the response body, modified in place
+   * @param serverOwned the report built by {@link NeoServerOwnedFields}; empty means silence
+   */
+  static void reportServerOwnedFields(JSONObject body, JSONObject serverOwned) {
+    if (body == null || serverOwned == null || serverOwned.length() == 0) {
+      return;
+    }
+    try {
+      body.put("serverOwnedFields", serverOwned);
+      body.put("serverOwnedFieldsHint", "These fields are owned by the server and were resolved "
+          + "from your session, not from the values you sent. They identify the tenant you are "
+          + "working in and cannot be chosen per request. Read them back from the record; do not "
+          + "send them.");
+    } catch (JSONException ignored) {
+      // Reporting is best-effort: a write that succeeded is never failed by its own report.
+    }
   }
 
   /**
@@ -122,20 +400,36 @@ final class McpWriteRequestSupport {
    * Returns a JSONArray of missing fields using the same structure as neo_schema
    * (name, column, type, hasSelector) so the model knows exactly what to provide.
    *
+   * <p><b>ETP-5368 — a field the server resolves is not a field the caller omitted.</b> This walk
+   * reads {@code col.isMandatory()} straight off AD, which describes the ROW, not the payload. On
+   * {@code contacts/locationAddress} that made the create mode the SPA always uses impossible
+   * through the MCP: {@code C_BPartner_Location.C_Location_ID} is NOT NULL, so a body carrying a
+   * country, a street and a province was refused with "Missing required fields" naming
+   * {@code locationAddress} — the very record {@code ContactsLocationAddressHandler} was about to
+   * create from those fields. Skipping the names the wrapper policy declares server-resolved is
+   * the same declaration {@code neo_schema} uses to demote them to {@code optional}, so the
+   * catalogue and the write agree instead of contradicting each other.
+   *
    * @param systemColumns system/audit columns excluded from schema (auto-managed by Etendo)
    * @param selectorRefs  AD_Reference IDs for OBUISEL selectors (extends the base FK refs from
    *                      NeoSelectorService)
+   * @param sfEntity      the Schema Forge entity, consulted for handler-resolved fields; may be
+   *                      {@code null}
    */
   static JSONArray validateMandatoryFields(JSONObject body, Tab adTab, Entity dalEntity,
-      Set<String> systemColumns, Set<String> selectorRefs, Logger log) {
+      Set<String> systemColumns, Set<String> selectorRefs, SFEntity sfEntity, Logger log) {
     JSONArray missing = new JSONArray();
     if (dalEntity == null) {
       return missing;
     }
+    Set<String> serverResolved = NeoSelectorPolicy.serverResolvedFieldNames(sfEntity);
 
     for (Column col : adTab.getTable().getADColumnList()) {
       Property prop = McpToolRouterSupport.resolveMandatoryProperty(adTab, dalEntity, col,
           systemColumns);
+      if (prop != null && serverResolved.contains(prop.getName())) {
+        continue;
+      }
       if (prop != null && McpToolRouterSupport.isMandatoryValueMissing(body, prop.getName())) {
         try {
           missing.put(McpToolRouterSupport.buildMissingFieldInfo(col, prop.getName(),
@@ -485,8 +779,8 @@ final class McpWriteRequestSupport {
     } else {
       envelope.put(McpConstants.KEY_DETAIL, "Field validation rejected the request, and named no "
           + "field");
-      envelope.put(McpConstants.KEY_HINT, "Call neo_schema for this entity to check the type and "
-          + "allowed values of every field sent.");
+      envelope.put(McpConstants.KEY_HINT, "Call neo_schema with view:\"create\" for this entity "
+          + "to check the type and allowed values of every field sent.");
     }
     envelope.put(McpConstants.KEY_SEE_ALSO, seeAlso);
     return envelope;

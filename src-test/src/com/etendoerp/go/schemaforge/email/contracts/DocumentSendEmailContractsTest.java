@@ -73,13 +73,17 @@ public class DocumentSendEmailContractsTest {
         .map(EmailContract::getName)
         .collect(Collectors.toSet());
 
-    // ETP-5124: the provider now also registers the Return Material Receipt send contract.
-    assertEquals(2, contracts.size());
+    // ETP-5124: the provider now also registers the Return Material Receipt send contract and
+    // the Return to Vendor Shipment send contract.
+    assertEquals(3, contracts.size());
     assertTrue(contractNames.contains("goods-shipment-send"));
     assertTrue(contractNames.contains("return-material-receipt-send"));
+    assertTrue(contractNames.contains("return-to-vendor-shipment-send"));
     assertTrue(contracts.stream().anyMatch(GoodsShipmentSendEmailContract.class::isInstance));
     assertTrue(contracts.stream()
         .anyMatch(ReturnMaterialReceiptSendEmailContract.class::isInstance));
+    assertTrue(contracts.stream()
+        .anyMatch(ReturnToVendorShipmentSendEmailContract.class::isInstance));
   }
 
   @Test
@@ -629,6 +633,199 @@ public class DocumentSendEmailContractsTest {
       when(obDal.get(ShipmentInOut.class, "receipt-1")).thenReturn(receipt);
 
       Optional<EmailDocumentRecord> result = resolver.resolve("receipt-1");
+
+      assertTrue(result.isPresent());
+      assertNull(result.get().getRecipientEmail());
+    }
+  }
+
+  // ── ETP-5124: DalReturnToVendorShipmentEmailDocumentResolver ────────────────
+  // Return to Vendor Shipment lives on the very same M_InOut table as Goods Receipt, with the
+  // same IsSOTrx='N' and MovementType. The ONLY discriminator is C_DocType.IsReturn, so these
+  // tests pin that behavior directly at the resolver level, mirroring the sibling
+  // DalReturnMaterialReceiptEmailDocumentResolver tests above but for the purchase-side polarity
+  // (isSalesTransaction() must be false, not true).
+
+  @Test
+  public void returnShipmentResolverResolvesPurchaseReturnShipment() {
+    DalReturnToVendorShipmentEmailDocumentResolver resolver =
+        new DalReturnToVendorShipmentEmailDocumentResolver();
+
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("0");
+    BusinessPartner businessPartner = mock(BusinessPartner.class);
+    when(businessPartner.getEtgoEmail()).thenReturn("vendor@example.com");
+    DocumentType documentType = mock(DocumentType.class);
+    when(documentType.isReturn()).thenReturn(Boolean.TRUE);
+
+    ShipmentInOut shipment = mock(ShipmentInOut.class);
+    when(shipment.isActive()).thenReturn(Boolean.TRUE);
+    when(shipment.isSalesTransaction()).thenReturn(Boolean.FALSE);
+    when(shipment.getDocumentType()).thenReturn(documentType);
+    when(shipment.getClient()).thenReturn(client);
+    when(shipment.getBusinessPartner()).thenReturn(businessPartner);
+
+    OBDal obDal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(ShipmentInOut.class, "shipment-1")).thenReturn(shipment);
+
+      Optional<EmailDocumentRecord> result = resolver.resolve("shipment-1");
+
+      assertTrue(result.isPresent());
+      assertEquals("vendor@example.com", result.get().getRecipientEmail());
+    }
+  }
+
+  @Test
+  public void returnShipmentResolverReturnsEmptyForGoodsReceiptDocument() {
+    // The critical discriminator case: same table, same IsSOTrx, same MovementType as a Goods
+    // Receipt — but IsReturn is false, so this record belongs to the OTHER window and must not
+    // resolve here.
+    DalReturnToVendorShipmentEmailDocumentResolver resolver =
+        new DalReturnToVendorShipmentEmailDocumentResolver();
+
+    DocumentType documentType = mock(DocumentType.class);
+    when(documentType.isReturn()).thenReturn(Boolean.FALSE);
+
+    ShipmentInOut receipt = mock(ShipmentInOut.class);
+    when(receipt.isActive()).thenReturn(Boolean.TRUE);
+    when(receipt.isSalesTransaction()).thenReturn(Boolean.FALSE);
+    when(receipt.getDocumentType()).thenReturn(documentType);
+
+    OBDal obDal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(ShipmentInOut.class, "receipt-1")).thenReturn(receipt);
+
+      assertFalse(resolver.resolve("receipt-1").isPresent());
+    }
+  }
+
+  @Test
+  public void returnShipmentResolverReturnsEmptyForNullDocumentType() {
+    DalReturnToVendorShipmentEmailDocumentResolver resolver =
+        new DalReturnToVendorShipmentEmailDocumentResolver();
+
+    ShipmentInOut shipment = mock(ShipmentInOut.class);
+    when(shipment.isActive()).thenReturn(Boolean.TRUE);
+    when(shipment.isSalesTransaction()).thenReturn(Boolean.FALSE);
+    when(shipment.getDocumentType()).thenReturn(null);
+
+    OBDal obDal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(ShipmentInOut.class, "shipment-1")).thenReturn(shipment);
+
+      assertFalse(resolver.resolve("shipment-1").isPresent());
+    }
+  }
+
+  @Test
+  public void returnShipmentResolverReturnsEmptyForSalesTransaction() {
+    // The purchase-side polarity: unlike DalReturnMaterialReceiptEmailDocumentResolver (which
+    // requires isSalesTransaction() == true), this resolver must reject a SALES transaction.
+    DalReturnToVendorShipmentEmailDocumentResolver resolver =
+        new DalReturnToVendorShipmentEmailDocumentResolver();
+
+    ShipmentInOut shipment = mock(ShipmentInOut.class);
+    when(shipment.isActive()).thenReturn(Boolean.TRUE);
+    when(shipment.isSalesTransaction()).thenReturn(Boolean.TRUE);
+
+    OBDal obDal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(ShipmentInOut.class, "shipment-1")).thenReturn(shipment);
+
+      assertFalse(resolver.resolve("shipment-1").isPresent());
+    }
+  }
+
+  @Test
+  public void returnShipmentResolverReturnsEmptyForInactiveShipment() {
+    DalReturnToVendorShipmentEmailDocumentResolver resolver =
+        new DalReturnToVendorShipmentEmailDocumentResolver();
+
+    ShipmentInOut shipment = mock(ShipmentInOut.class);
+    when(shipment.isActive()).thenReturn(Boolean.FALSE);
+
+    OBDal obDal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(ShipmentInOut.class, "shipment-1")).thenReturn(shipment);
+
+      assertFalse(resolver.resolve("shipment-1").isPresent());
+    }
+  }
+
+  @Test
+  public void returnShipmentResolverReturnsEmptyForNullClient() {
+    DalReturnToVendorShipmentEmailDocumentResolver resolver =
+        new DalReturnToVendorShipmentEmailDocumentResolver();
+
+    DocumentType documentType = mock(DocumentType.class);
+    when(documentType.isReturn()).thenReturn(Boolean.TRUE);
+
+    ShipmentInOut shipment = mock(ShipmentInOut.class);
+    when(shipment.isActive()).thenReturn(Boolean.TRUE);
+    when(shipment.isSalesTransaction()).thenReturn(Boolean.FALSE);
+    when(shipment.getDocumentType()).thenReturn(documentType);
+    when(shipment.getClient()).thenReturn(null);
+
+    OBDal obDal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(ShipmentInOut.class, "shipment-1")).thenReturn(shipment);
+
+      assertFalse(resolver.resolve("shipment-1").isPresent());
+    }
+  }
+
+  @Test
+  public void returnShipmentResolverReturnsEmptyForNullId() {
+    DalReturnToVendorShipmentEmailDocumentResolver resolver =
+        new DalReturnToVendorShipmentEmailDocumentResolver();
+
+    assertFalse(resolver.resolve(null).isPresent());
+  }
+
+  @Test
+  public void returnShipmentResolverReturnsEmptyWhenRecordMissing() {
+    DalReturnToVendorShipmentEmailDocumentResolver resolver =
+        new DalReturnToVendorShipmentEmailDocumentResolver();
+
+    OBDal obDal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(ShipmentInOut.class, "missing")).thenReturn(null);
+
+      assertFalse(resolver.resolve("missing").isPresent());
+    }
+  }
+
+  @Test
+  public void returnShipmentResolverResolvesShipmentWithoutBusinessPartner() {
+    DalReturnToVendorShipmentEmailDocumentResolver resolver =
+        new DalReturnToVendorShipmentEmailDocumentResolver();
+
+    Client client = mock(Client.class);
+    when(client.getId()).thenReturn("0");
+    DocumentType documentType = mock(DocumentType.class);
+    when(documentType.isReturn()).thenReturn(Boolean.TRUE);
+
+    ShipmentInOut shipment = mock(ShipmentInOut.class);
+    when(shipment.isActive()).thenReturn(Boolean.TRUE);
+    when(shipment.isSalesTransaction()).thenReturn(Boolean.FALSE);
+    when(shipment.getDocumentType()).thenReturn(documentType);
+    when(shipment.getClient()).thenReturn(client);
+    when(shipment.getBusinessPartner()).thenReturn(null);
+
+    OBDal obDal = mock(OBDal.class);
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(ShipmentInOut.class, "shipment-1")).thenReturn(shipment);
+
+      Optional<EmailDocumentRecord> result = resolver.resolve("shipment-1");
 
       assertTrue(result.isPresent());
       assertNull(result.get().getRecipientEmail());
