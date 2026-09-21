@@ -85,12 +85,7 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
   @Override
   public NeoResponse handle(NeoContext context) {
     mirrorAccountingDate(context);
-    // ETP-5378: this window's own handler owns the JAVA_QUALIFIER slot, so the shared
-    // @Named("document-posting") handler can never be reached for it. Without this
-    // delegation "post"/"unpost" fall through to the generic AD-button path, which looks
-    // for a button column literally named "post", finds none, and answers
-    // 404 "Action not found: post" (NeoButtonActionHelper#executeButtonActionCore).
-    NeoResponse posting = postingService != null ? postingService.handleAction(context) : null;
+    NeoResponse posting = handlePostingAction(context);
     if (posting != null) {
       return posting;
     }
@@ -126,6 +121,20 @@ public class ReturnMaterialReceiptHeaderHandler implements NeoHandler {
       return null; // let NEO native process handle completion
     }
     return null;
+  }
+
+  /**
+   * ETP-5378: this window's own handler owns the JAVA_QUALIFIER slot, so the shared
+   * {@code @Named("document-posting")} handler can never be reached for it. Without this
+   * delegation "post"/"unpost" fall through to the generic AD-button path, which looks
+   * for a button column literally named "post", finds none, and answers
+   * 404 "Action not found: post" ({@code NeoButtonActionHelper#executeButtonActionCore}).
+   *
+   * <p>Extracted out of {@link #handle(NeoContext)} (Sonar java:S3776) rather than inlined
+   * as a ternary there, which pushed that method's cognitive complexity to 16.</p>
+   */
+  private NeoResponse handlePostingAction(NeoContext context) {
+    return postingService != null ? postingService.handleAction(context) : null;
   }
 
   /**
