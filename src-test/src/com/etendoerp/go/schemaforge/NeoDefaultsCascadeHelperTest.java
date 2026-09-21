@@ -916,6 +916,124 @@ public class NeoDefaultsCascadeHelperTest {
     }
   }
 
+  /**
+   * Builds the callout stub the three ETP-5350 tests below share: one trigger field whose
+   * callout proposes a value for {@code username}, which is what the core callout
+   * {@code SL_User_Name} really does (it derives a username from first + last name and always
+   * emits it).
+   */
+  private void stubUsernameDerivingCallout(MockedStatic<NeoCalloutService> calloutMock,
+      MockedStatic<ModelProvider> providerMock) throws Exception {
+    NeoCalloutService.CalloutInfo info = new NeoCalloutService.CalloutInfo(
+        "org.openbravo.erpCommon.ad_callouts.SL_User_Name", "inpfirstname", "Firstname");
+    calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("firstName")))
+        .thenReturn(info);
+    calloutMock.when(() -> NeoCalloutService.resolveCallout(any(), eq("username")))
+        .thenReturn(null);
+
+    JSONObject updateEntry = new JSONObject();
+    updateEntry.put("value", "Juan Perez");
+    JSONObject responseUpdates = new JSONObject();
+    responseUpdates.put("username", updateEntry);
+    JSONObject calloutResponseBody = new JSONObject();
+    calloutResponseBody.put("updates", responseUpdates);
+    calloutMock.when(() -> NeoCalloutService.executeCallout(any(), any()))
+        .thenReturn(NeoResponse.ok(calloutResponseBody));
+
+    ModelProvider mockProvider = mock(ModelProvider.class);
+    providerMock.when(ModelProvider::getInstance).thenReturn(mockProvider);
+    when(mockProvider.getEntityByTableId(anyString())).thenReturn(null);
+  }
+
+  /**
+   * ETP-5350 — the defect itself. The body snapshot cannot express "never populate this":
+   * {@code shouldKeepExistingValue} asks whether there is a value worth keeping, and for a
+   * field absent from the body the answer is no. That is CORRECT for a caller snapshot, and
+   * this test pins it so the fix below is not mistaken for a change to this set's meaning.
+   */
+  @Test
+  public void testProtectedFieldAbsentFromBodyIsStillPopulated() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      stubUsernameDerivingCallout(calloutMock, providerMock);
+
+      Tab adTab = mockTabWithTable("100");
+      NeoContext ctx = mock(NeoContext.class);
+      JSONObject defaults = new JSONObject();
+      defaults.put("firstName", "Juan");
+
+      Set<String> protectedFields = new HashSet<>();
+      protectedFields.add("username");
+
+      NeoDefaultsCascadeHelper.executeCalloutCascade(
+          ctx, adTab, defaults, new HashSet<>(), protectedFields);
+
+      assertEquals("A caller snapshot cannot protect a field that was never sent",
+          "Juan Perez", defaults.opt("username"));
+    }
+  }
+
+  /**
+   * ETP-5350 — the fix. {@code NeoHandler#protectedCreateCalloutFields} declares fields the
+   * cascade "must not populate or overwrite", so they travel in their own set and are refused
+   * whether or not the body already carries them.
+   *
+   * <p>The live consequence: {@code ContactHandler} declares {@code username} so a contact
+   * keeps {@code AD_User.Username} null, the way Classic leaves it. While the declaration was
+   * folded into the caller snapshot it did nothing, every imported contact got a username
+   * derived from its person name, and the second "Juan Perez" in a tenant collided on
+   * {@code AD_USER_UN_USERNAME}. Two business partners each having a contact of that name is
+   * ordinary data; the username was what should never have been written.
+   */
+  @Test
+  public void testSuppressedFieldIsNeverPopulated() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      stubUsernameDerivingCallout(calloutMock, providerMock);
+
+      Tab adTab = mockTabWithTable("100");
+      NeoContext ctx = mock(NeoContext.class);
+      JSONObject defaults = new JSONObject();
+      defaults.put("firstName", "Juan");
+
+      Set<String> suppressed = new HashSet<>();
+      suppressed.add("username");
+
+      NeoDefaultsCascadeHelper.executeCalloutCascade(
+          ctx, adTab, defaults, new HashSet<>(), new HashSet<>(), suppressed);
+
+      assertFalse("A suppressed field must not be populated by the cascade",
+          defaults.has("username"));
+    }
+  }
+
+  /**
+   * ETP-5350 — the "or overwrite" half of the same contract: a suppressed field that DOES
+   * arrive with a value keeps it, so the declaration is not merely a create-time blank-out.
+   */
+  @Test
+  public void testSuppressedFieldIsNeverOverwritten() throws Exception {
+    try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<ModelProvider> providerMock = mockStatic(ModelProvider.class)) {
+      stubUsernameDerivingCallout(calloutMock, providerMock);
+
+      Tab adTab = mockTabWithTable("100");
+      NeoContext ctx = mock(NeoContext.class);
+      JSONObject defaults = new JSONObject();
+      defaults.put("firstName", "Juan");
+      defaults.put("username", "jperez");
+
+      Set<String> suppressed = new HashSet<>();
+      suppressed.add("username");
+
+      NeoDefaultsCascadeHelper.executeCalloutCascade(
+          ctx, adTab, defaults, new HashSet<>(), new HashSet<>(), suppressed);
+
+      assertEquals("A suppressed field must keep the value it arrived with",
+          "jperez", defaults.get("username"));
+    }
+  }
+
   @Test
   public void testExecuteCalloutCascadeOverloadWithoutProtectedFields() throws Exception {
     try (MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class)) {

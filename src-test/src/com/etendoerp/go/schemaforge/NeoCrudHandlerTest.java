@@ -3124,8 +3124,8 @@ class NeoCrudHandlerTest {
 
       invokePrivate(handler, "executePostCalloutCascade",
           new Class<?>[] { JSONObject.class, Tab.class, NeoContext.class,
-              String.class, java.util.Set.class },
-          body, null, context, null, Collections.emptySet());
+              String.class, java.util.Set.class, java.util.Set.class },
+          body, null, context, null, Collections.emptySet(), Collections.emptySet());
       // no exception = success
     }
 
@@ -3148,7 +3148,7 @@ class NeoCrudHandlerTest {
            MockedStatic<DocTypeResolver> docTypeMock =
                Mockito.mockStatic(DocTypeResolver.class)) {
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any())).then(invocation -> null);
+            any(), any(), any(), any(), any(), any())).then(invocation -> null);
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.removeEmptyFkValues(
             any(), any())).then(invocation -> null);
         docTypeMock.when(() -> DocTypeResolver.reapplyDocTypeFromTabFilter(
@@ -3156,12 +3156,12 @@ class NeoCrudHandlerTest {
 
         invokePrivate(handler, "executePostCalloutCascade",
             new Class<?>[] { JSONObject.class, Tab.class, NeoContext.class,
-                String.class, java.util.Set.class },
-            body, adTab, context, null, new HashSet<>());
+                String.class, java.util.Set.class, java.util.Set.class },
+            body, adTab, context, null, new HashSet<>(), new HashSet<>());
 
         // Verify cascade was called (no exception)
         cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any()));
+            any(), any(), any(), any(), any(), any()));
       }
     }
 
@@ -3180,7 +3180,7 @@ class NeoCrudHandlerTest {
            MockedStatic<DocTypeResolver> docTypeMock =
                Mockito.mockStatic(DocTypeResolver.class)) {
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any())).then(invocation -> null);
+            any(), any(), any(), any(), any(), any())).then(invocation -> null);
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.removeEmptyFkValues(
             any(), any())).then(invocation -> null);
         docTypeMock.when(() -> DocTypeResolver.reapplyDocTypeFromTabFilter(
@@ -3189,12 +3189,12 @@ class NeoCrudHandlerTest {
         // Pass null for protectedFields
         invokePrivate(handler, "executePostCalloutCascade",
             new Class<?>[] { JSONObject.class, Tab.class, NeoContext.class,
-                String.class, java.util.Set.class },
-            body, adTab, context, null, (Set<String>) null);
+                String.class, java.util.Set.class, java.util.Set.class },
+            body, adTab, context, null, (Set<String>) null, (Set<String>) null);
 
         // Should not throw NPE
         cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any()));
+            any(), any(), any(), any(), any(), any()));
       }
     }
 
@@ -3213,8 +3213,8 @@ class NeoCrudHandlerTest {
                Mockito.mockStatic(DocTypeResolver.class)) {
         invokePrivate(handler, "executePostCalloutCascade",
             new Class<?>[] { JSONObject.class, Tab.class, NeoContext.class,
-                String.class, java.util.Set.class },
-            body, adTab, context, null, Collections.emptySet());
+                String.class, java.util.Set.class, java.util.Set.class },
+            body, adTab, context, null, Collections.emptySet(), Collections.emptySet());
 
         docTypeMock.verify(() -> DocTypeResolver.reapplyDocTypeFromTabFilter(
             body, adTab, context, Collections.emptySet()));

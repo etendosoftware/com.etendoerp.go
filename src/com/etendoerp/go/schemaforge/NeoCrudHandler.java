@@ -835,6 +835,12 @@ class NeoCrudHandler {
     long perfInjectDefaults = System.nanoTime();
     Set<String> protectedCalloutFields = NeoCrudHelper.snapshotMandatoryBodyFields(filteredBody, adTab);
     protectedCalloutFields.addAll(userSubmittedFields);
+    // ETP-5350: kept OUT of protectedCalloutFields. That set is a snapshot of keys the caller
+    // actually sent, and "protected" there means "do not overwrite what is already here" - a
+    // test a field absent from the body always fails. NeoHandler#protectedCreateCalloutFields
+    // declares the stronger "must not populate or overwrite", and its fields are precisely the
+    // ones NOT in the body, so merging the two made every such declaration a silent no-op.
+    Set<String> suppressedCalloutFields = new HashSet<>();
     String javaQualifier = context.getSfEntity() != null
         ? context.getSfEntity().getJavaQualifier() : null;
     if (StringUtils.isNotBlank(javaQualifier)) {
@@ -847,10 +853,11 @@ class NeoCrudHandler {
       // (same precedent as NeoActionSurface's CDI_RESOLVER).
       NeoHandler handler = NeoServletSupport.lookupHandler(javaQualifier);
       if (handler != null) {
-        protectedCalloutFields.addAll(handler.protectedCreateCalloutFields(context));
+        suppressedCalloutFields.addAll(handler.protectedCreateCalloutFields(context));
       }
     }
-    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, protectedCalloutFields);
+    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, protectedCalloutFields,
+        suppressedCalloutFields);
     long perfCalloutCascade = System.nanoTime();
     // checkIfNotExists=false: a name the runtime model does not know must not blow up the create —
     // the policy simply abstains on a null entity.
@@ -898,7 +905,8 @@ class NeoCrudHandler {
   }
 
   private void executePostCalloutCascade(JSONObject filteredBody, Tab adTab,
-      NeoContext context, String parentIdValue, Set<String> protectedFields) {
+      NeoContext context, String parentIdValue, Set<String> protectedFields,
+      Set<String> suppressedFields) {
     if (adTab == null) {
       return;
     }
@@ -927,8 +935,11 @@ class NeoCrudHandler {
         ? protectedFields
         : java.util.Collections.emptySet();
     long t0 = System.nanoTime();
+    Set<String> effectiveSuppressed = suppressedFields != null
+        ? suppressedFields
+        : java.util.Collections.emptySet();
     NeoDefaultsCascadeHelper.executeCalloutCascade(context, adTab, filteredBody, seqFields,
-        effectiveProtected);
+        effectiveProtected, effectiveSuppressed);
     long t1 = System.nanoTime();
     DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, context, effectiveProtected);
     NeoDefaultsCascadeHelper.removeEmptyFkValues(filteredBody, adTab);
