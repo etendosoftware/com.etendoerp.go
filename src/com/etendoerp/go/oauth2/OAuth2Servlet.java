@@ -183,7 +183,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private static final String SQL_FIND_BY_REFRESH_TOKEN =
       "SELECT t.etgo_oauth2_token_id, t.etgo_oauth2_client_id, t.scopes, t.is_revoked, t.validity_seconds, "
       + "c.ad_user_id, c.ad_role_id, COALESCE(o.ad_client_id, c.ad_client_id) AS etendo_client_id, "
-      + "c.isactive AS client_active "
+      + "c.isactive AS client_active, t.ad_org_id AS token_org_id "
       + "FROM etgo_oauth2_token t "
       + "JOIN etgo_oauth2_client c ON t.etgo_oauth2_client_id = c.etgo_oauth2_client_id "
       + "LEFT JOIN ad_org o ON t.ad_org_id = o.ad_org_id "
@@ -236,7 +236,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
   private static final String SQL_FIND_CLIENT_BY_IDENTIFIER =
       "SELECT etgo_oauth2_client_id, name, client_identifier, client_secret_hash, "
-      + "ad_user_id, ad_role_id, scopes, redirect_uris, isactive "
+      + "ad_client_id, ad_org_id, ad_user_id, ad_role_id, scopes, redirect_uris, isactive "
       + "FROM etgo_oauth2_client WHERE client_identifier = ?";
 
   private static final String SQL_INSERT_DCR_CLIENT =
@@ -1573,7 +1573,13 @@ public class OAuth2Servlet extends HttpBaseServlet {
         try (ResultSet rs = ps.executeQuery()) {
           if (rs.next()) {
             tokenClient.id = rs.getString(DB_OAUTH2_CLIENT_ID);
-            tokenClient.adClientId = "0";
+            tokenClient.adClientId = rs.getString("ad_client_id");
+            // ad_org_id is NOT NULL on etgo_oauth2_token, so the organization has to be
+            // resolved here exactly as loadClient() does it: the owner_org scope wins,
+            // otherwise the organization the client itself belongs to.
+            tokenClient.adOrgId = rs.getString("ad_org_id");
+            tokenClient.ownerOrgId = StringUtils.defaultIfEmpty(
+                PublicApiKeyPolicy.ownerOrganizationId(codeData.scopes), tokenClient.adOrgId);
           }
         }
       }
@@ -1668,6 +1674,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String adUserId = null;
       String adRoleId = null;
       String adClientId = null;
+      String adOrgId = null;
       boolean revoked = false;
       boolean clientActive = false;
       long validitySeconds = OAuth2ValidityPolicy.DEFAULT_AUTHORIZE_VALIDITY_SECONDS;
@@ -1687,6 +1694,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
           adUserId = rs.getString(FIELD_DB_AD_USER_ID);
           adRoleId = rs.getString(FIELD_DB_AD_ROLE_ID);
           adClientId = rs.getString("etendo_client_id");
+          adOrgId = rs.getString("token_org_id");
           clientActive = "Y".equals(rs.getString("client_active"));
           long storedValiditySeconds = rs.getLong("validity_seconds");
           // Legacy rows predating this feature store NULL; getLong() returns 0 for NULL,
@@ -1717,6 +1725,9 @@ public class OAuth2Servlet extends HttpBaseServlet {
       ClientRecord client = new ClientRecord();
       client.id = oauth2ClientId;
       client.adClientId = adClientId;
+      client.adOrgId = adOrgId;
+      client.ownerOrgId = StringUtils.defaultIfEmpty(
+          PublicApiKeyPolicy.ownerOrganizationId(scopes), adOrgId);
       client.adUserId = adUserId;
       client.adRoleId = adRoleId;
 

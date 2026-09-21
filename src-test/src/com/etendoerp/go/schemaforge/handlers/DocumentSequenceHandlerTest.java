@@ -280,7 +280,7 @@ class DocumentSequenceHandlerTest {
     }
 
     @Test
-    @DisplayName("narrows a list GET to the seven sequence names, as an inSet clause")
+    @DisplayName("narrows a list GET to the five sequence names, as an inSet clause")
     void narrowsListByName() throws JSONException {
       // A provisioned tenant has 242 sequences; all but these are record-ID and internal
       // counters. Injected as criteria rather than filtered out of the response so the
@@ -299,14 +299,41 @@ class DocumentSequenceHandlerTest {
     }
 
     @Test
-    @DisplayName("carries the exact seven names the product asked for")
+    @DisplayName("carries the exact five names the product asked for")
     void allowlistContentIsTheAgreedList() {
       // Verified against the instance: every one of these exists, by this exact name, in a
       // provisioned client. Renaming or dropping one is a product change, not a refactor.
+      // ETP-5285 cut this from seven to five: AP Payment, AR Receipt, MM Shipment and
+      // Secuencia TICKETBAI are not document series a tenant configures on this screen.
       assertEquals(java.util.List.of(
-          "AR Invoice", "AP Payment", "AR Receipt", "MM Shipment", "Standard Order",
-          "Purchase Order", "Secuencia TICKETBAI"),
+          "Purchase Order", "Standard Order", "AR Invoice",
+          "Factura Rectificativa (Ventas)", "Factura Rectificativa (Compras)"),
           DocumentSequenceHandler.VISIBLE_SEQUENCE_NAMES);
+    }
+
+    @Test
+    @DisplayName("holds no sequence ETP-5285 removed from the product's six series")
+    void allowlistExcludesTheNamesEtp5285Dropped() {
+      // REGRESSION GUARD. These four were visible before ETP-5285 and were dropped on purpose:
+      // they are not document series. Re-adding one is a product change, so it must break here
+      // first rather than quietly reappear in the list through an unrelated edit.
+      for (String dropped : java.util.List.of(
+          "AP Payment", "AR Receipt", "MM Shipment", "Secuencia TICKETBAI")) {
+        assertFalse(DocumentSequenceHandler.VISIBLE_SEQUENCE_NAMES.contains(dropped),
+            dropped + " is no longer a document series this window configures");
+      }
+    }
+
+    @Test
+    @DisplayName("holds no purchase-invoice series, which has no sequence to point at")
+    void allowlistExcludesPurchaseInvoiceSeries() {
+      // ETP-5285 asked for six series; only five are here. "Factura de compra" (FC) has no
+      // AD_Sequence to expose: AP Invoice carries IsDocNoControlled='N' and no sequence in
+      // 76 of 76 doctypes, so its number comes from the supplier, not from a series. Adding
+      // one means flipping that doctype — a product decision tracked separately.
+      assertEquals(5, DocumentSequenceHandler.VISIBLE_SEQUENCE_NAMES.size());
+      assertFalse(DocumentSequenceHandler.VISIBLE_SEQUENCE_NAMES.contains("AP Invoice"),
+          "AP Invoice is numbered by the supplier, not by a configurable series");
     }
 
     @Test
