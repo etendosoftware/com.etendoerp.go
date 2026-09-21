@@ -49,6 +49,7 @@ import com.etendoerp.go.roles.SystemRoleTemplates;
 import com.etendoerp.go.roles.UserRoleCompositionService;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.ReportAccessCatalog;
 import com.etendoerp.webhookevents.services.BaseWebhookService;
 
 /**
@@ -398,6 +399,36 @@ public class SFRolesOverview extends BaseWebhookService {
   private static final String OTHER_CATEGORY = "Other";
 
   /**
+   * ETP-5402 — the "Informes" (Reports) subsection: 9 {@code SPEC_TYPE = 'R'} report specs, none
+   * of which are candidates for {@link #resolveActiveEtendoGoWindowsById()} (windowless by
+   * construction — it only ever queries {@code SPEC_TYPE = 'W'}), so a role's real access to each
+   * one is resolved via whichever ad-hoc mechanism its own NEO handler actually gates on today —
+   * see {@code santo_ETP-5402-analysis-and-plan.md}'s Part A DB-verified inventory. Deliberately a
+   * PARALLEL {@code reports}/{@code reportCount}/{@code reportsMatrix} addition — never merged
+   * into {@code windows}/{@code windowCount}/{@code matrix} — so no existing consumer's contract
+   * changes.
+   *
+   * <p>The row catalog itself ({@link ReportAccessCatalog#ROWS}) and its tier-resolution logic
+   * ({@link ReportAccessCatalog#resolveTierMap(Role, Map)}) live in the shared {@link
+   * ReportAccessCatalog} utility, NOT duplicated here — {@code SFSystemRoleTemplates} (the User
+   * window's "Roles del usuario" tab matrix columns) needs the exact same Informes resolution, and
+   * the two webhooks must never be allowed to drift on which anchor id/category/kind backs a given
+   * report row.</p>
+   */
+
+  /** JSON key for a role's assigned-reports array (ETP-5402, parallel to {@link #WINDOWS}). */
+  private static final String REPORTS = "reports";
+
+  /** JSON key for a role's report count (ETP-5402, parallel to {@link #WINDOW_COUNT}). */
+  private static final String REPORT_COUNT = "reportCount";
+
+  /**
+   * JSON key for the full report × role permission matrix (ETP-5402, sibling of {@link #MATRIX},
+   * deliberately not nested inside it — see the class's Informes design note above).
+   */
+  private static final String REPORTS_MATRIX = "reportsMatrix";
+
+  /**
    * The 4 fixed non-admin role names every tenant gets (ETP-4515/4516), in the display order
    * this endpoint returns them (after the client-admin role, which always sorts first). Mirrors
    * the now-deleted {@code OnboardingRoleProvisioningService.ROLE_NAMES} / R16's role list in
@@ -486,9 +517,10 @@ public class SFRolesOverview extends BaseWebhookService {
 
     List<JSONObject> roleCards = new ArrayList<>();
     Map<String, Map<String, String>> tierMapsByRoleId = new LinkedHashMap<>();
+    Map<String, Map<String, String>> reportTierMapsByRoleId = new LinkedHashMap<>();
 
     if (adminRole != null) {
-      addTenantRoleCard(adminRole, goWindowsById, roleCards, tierMapsByRoleId);
+      addTenantRoleCard(adminRole, goWindowsById, roleCards, tierMapsByRoleId, reportTierMapsByRoleId);
     }
 
     // Lazily resolved on the first fixed-name role that actually needs composition data — either
@@ -500,11 +532,11 @@ public class SFRolesOverview extends BaseWebhookService {
       if (tenantRole != null) {
         composedTemplateUserIdsByUserId = addTenantRoleCardWithTemplateOverlap(tenantRole,
             fixedRole.getValue(), clientId, goWindowsById, roleCards, tierMapsByRoleId,
-            composedTemplateUserIdsByUserId);
+            reportTierMapsByRoleId, composedTemplateUserIdsByUserId);
       } else {
         composedTemplateUserIdsByUserId = addSystemTemplateRoleCardIfResolvable(
             fixedRole.getValue(), clientId, goWindowsById, roleCards, tierMapsByRoleId,
-            composedTemplateUserIdsByUserId);
+            reportTierMapsByRoleId, composedTemplateUserIdsByUserId);
       }
     }
 
@@ -516,6 +548,7 @@ public class SFRolesOverview extends BaseWebhookService {
     JSONObject result = new JSONObject();
     result.put(ROLES, roles);
     result.put(MATRIX, buildMatrix(goWindowsById, tierMapsByRoleId));
+    result.put(REPORTS_MATRIX, buildReportsMatrix(reportTierMapsByRoleId));
     return result;
   }
 
@@ -525,11 +558,14 @@ public class SFRolesOverview extends BaseWebhookService {
    * of the fixed-name loop in {@link #buildRolesOverview(String)}.
    */
   private void addTenantRoleCard(Role role, Map<String, Window> goWindowsById,
-      List<JSONObject> roleCards, Map<String, Map<String, String>> tierMapsByRoleId) throws JSONException {
+      List<JSONObject> roleCards, Map<String, Map<String, String>> tierMapsByRoleId,
+      Map<String, Map<String, String>> reportTierMapsByRoleId) throws JSONException {
     Map<String, String> tiers = resolveWindowTierMap(role, goWindowsById.keySet());
     mergeProxyAccessTiers(role, tiers);
     tierMapsByRoleId.put(role.getId(), tiers);
-    roleCards.add(buildRoleCardJson(role, tiers, goWindowsById, SOURCE_TENANT,
+    Map<String, String> reportTiers = ReportAccessCatalog.resolveTierMap(role, tiers);
+    reportTierMapsByRoleId.put(role.getId(), reportTiers);
+    roleCards.add(buildRoleCardJson(role, tiers, reportTiers, goWindowsById, SOURCE_TENANT,
         resolveActiveUserIds(role).size()));
   }
 
@@ -563,10 +599,13 @@ public class SFRolesOverview extends BaseWebhookService {
   private Map<String, List<String>> addTenantRoleCardWithTemplateOverlap(Role tenantRole,
       String templateId, String clientId, Map<String, Window> goWindowsById,
       List<JSONObject> roleCards, Map<String, Map<String, String>> tierMapsByRoleId,
+      Map<String, Map<String, String>> reportTierMapsByRoleId,
       Map<String, List<String>> composedTemplateUserIdsByUserId) throws JSONException {
     Map<String, String> tiers = resolveWindowTierMap(tenantRole, goWindowsById.keySet());
     mergeProxyAccessTiers(tenantRole, tiers);
     tierMapsByRoleId.put(tenantRole.getId(), tiers);
+    Map<String, String> reportTiers = ReportAccessCatalog.resolveTierMap(tenantRole, tiers);
+    reportTierMapsByRoleId.put(tenantRole.getId(), reportTiers);
 
     Set<String> userIds = new LinkedHashSet<>(resolveActiveUserIds(tenantRole));
     Map<String, List<String>> composed = composedTemplateUserIdsByUserId != null
@@ -578,7 +617,8 @@ public class SFRolesOverview extends BaseWebhookService {
       }
     }
 
-    roleCards.add(buildRoleCardJson(tenantRole, tiers, goWindowsById, SOURCE_TENANT, userIds.size()));
+    roleCards.add(buildRoleCardJson(tenantRole, tiers, reportTiers, goWindowsById, SOURCE_TENANT,
+        userIds.size()));
     return composed;
   }
 
@@ -598,6 +638,7 @@ public class SFRolesOverview extends BaseWebhookService {
   private Map<String, List<String>> addSystemTemplateRoleCardIfResolvable(String templateId,
       String clientId, Map<String, Window> goWindowsById, List<JSONObject> roleCards,
       Map<String, Map<String, String>> tierMapsByRoleId,
+      Map<String, Map<String, String>> reportTierMapsByRoleId,
       Map<String, List<String>> composedTemplateUserIdsByUserId) throws JSONException {
     Role templateRole = OBDal.getInstance().get(Role.class, templateId);
     if (templateRole == null || !Boolean.TRUE.equals(templateRole.isActive())) {
@@ -613,7 +654,10 @@ public class SFRolesOverview extends BaseWebhookService {
     Map<String, String> tiers = resolveWindowTierMap(templateRole, goWindowsById.keySet());
     mergeProxyAccessTiers(templateRole, tiers);
     tierMapsByRoleId.put(templateRole.getId(), tiers);
-    roleCards.add(buildRoleCardJson(templateRole, tiers, goWindowsById, SOURCE_SYSTEM_TEMPLATE, userCount));
+    Map<String, String> reportTiers = ReportAccessCatalog.resolveTierMap(templateRole, tiers);
+    reportTierMapsByRoleId.put(templateRole.getId(), reportTiers);
+    roleCards.add(buildRoleCardJson(templateRole, tiers, reportTiers, goWindowsById,
+        SOURCE_SYSTEM_TEMPLATE, userCount));
     return composed;
   }
 
@@ -651,7 +695,8 @@ public class SFRolesOverview extends BaseWebhookService {
    * Builds a single role card's JSON entry.
    */
   private JSONObject buildRoleCardJson(Role role, Map<String, String> tiers,
-      Map<String, Window> goWindowsById, String roleSource, int userCount) throws JSONException {
+      Map<String, String> reportTiers, Map<String, Window> goWindowsById, String roleSource,
+      int userCount) throws JSONException {
     JSONObject roleJson = new JSONObject();
     roleJson.put(ID, role.getId());
     roleJson.put(NAME, role.getName());
@@ -662,6 +707,9 @@ public class SFRolesOverview extends BaseWebhookService {
     JSONArray windows = windowsJsonFromTierMap(tiers, goWindowsById);
     roleJson.put(WINDOWS, windows);
     roleJson.put(WINDOW_COUNT, windows.length());
+    JSONArray reports = reportsJsonFromTierMap(reportTiers);
+    roleJson.put(REPORTS, reports);
+    roleJson.put(REPORT_COUNT, reports.length());
     return roleJson;
   }
 
@@ -862,6 +910,43 @@ public class SFRolesOverview extends BaseWebhookService {
   }
 
   /**
+   * ETP-5402 — turns a report-id → tier map (from {@link ReportAccessCatalog#resolveTierMap(Role,
+   * Map)}) into the sorted-by-name {@code reports} JSON array a role card carries — the {@code
+   * reports} counterpart of {@link #windowsJsonFromTierMap(Map, Map)}. Same "only accessible rows
+   * appear" semantics as that method: a row whose tier is {@link #NONE} is skipped here too, so
+   * {@code reportCount} means "reports this role can actually reach," matching {@code
+   * windowCount}'s own meaning.
+   */
+  private JSONArray reportsJsonFromTierMap(Map<String, String> reportTiers) throws JSONException {
+    List<JSONObject> reportJsons = new ArrayList<>();
+    for (ReportAccessCatalog.Row row : ReportAccessCatalog.ROWS) {
+      String tier = reportTiers.getOrDefault(row.id, NONE);
+      if (NONE.equals(tier)) {
+        continue;
+      }
+      JSONObject reportJson = new JSONObject();
+      reportJson.put(ID, row.id);
+      reportJson.put(NAME, row.name);
+      reportJson.put(TIER, tier);
+      reportJsons.add(reportJson);
+    }
+
+    reportJsons.sort((a, b) -> {
+      try {
+        return a.getString(NAME).compareToIgnoreCase(b.getString(NAME));
+      } catch (JSONException e) {
+        return 0;
+      }
+    });
+
+    JSONArray reports = new JSONArray();
+    for (JSONObject reportJson : reportJsons) {
+      reports.put(reportJson);
+    }
+    return reports;
+  }
+
+  /**
    * Resolves every distinct {@code AD_Window} backing an active, {@code SPEC_TYPE = 'W'}
    * {@code ETGO_SF_SPEC} — i.e. every window Etendo GO actually exposes today, keyed by id for
    * O(1) lookups while building both the per-role {@code windows} arrays and the {@code matrix}
@@ -973,6 +1058,56 @@ public class SFRolesOverview extends BaseWebhookService {
     JSONObject matrix = new JSONObject();
     matrix.put(CATEGORIES, categories);
     return matrix;
+  }
+
+  /**
+   * ETP-5402 — builds {@code reportsMatrix}: every {@link ReportAccessCatalog#ROWS} row, grouped
+   * by its own hardcoded {@link ReportAccessCatalog.Row#category} (a report row's category cannot
+   * be resolved via the classic {@code AD_Menu} tree the way {@link #buildMatrix(Map, Map)}
+   * resolves a real window's — none of the 9 rows is a window row in that tree's sense, so there
+   * is no SQL fallback here, unlike {@code buildMatrix}), each with a per-role tri-state {@code
+   * access} map built from {@code reportTierMapsByRoleId} — same shape, same {@link #NONE}
+   * fallback, same category-sort and row-sort conventions as {@link #buildMatrix(Map, Map)}, so
+   * the frontend can reuse its existing matrix-adapter code path unchanged for this sibling key.
+   */
+  private JSONObject buildReportsMatrix(Map<String, Map<String, String>> reportTierMapsByRoleId)
+      throws JSONException {
+    Map<String, List<ReportAccessCatalog.Row>> rowsByCategory = new LinkedHashMap<>();
+    for (ReportAccessCatalog.Row row : ReportAccessCatalog.ROWS) {
+      rowsByCategory.computeIfAbsent(row.category, k -> new ArrayList<>()).add(row);
+    }
+
+    List<String> sortedCategories = new ArrayList<>(rowsByCategory.keySet());
+    sortedCategories.sort(String.CASE_INSENSITIVE_ORDER);
+
+    JSONArray categories = new JSONArray();
+    for (String category : sortedCategories) {
+      List<ReportAccessCatalog.Row> rowsInCategory = rowsByCategory.get(category);
+      rowsInCategory.sort((a, b) -> a.name.compareToIgnoreCase(b.name));
+
+      JSONArray reportsJson = new JSONArray();
+      for (ReportAccessCatalog.Row row : rowsInCategory) {
+        JSONObject reportJson = new JSONObject();
+        reportJson.put(ID, row.id);
+        reportJson.put(NAME, row.name);
+
+        JSONObject access = new JSONObject();
+        for (Map.Entry<String, Map<String, String>> roleEntry : reportTierMapsByRoleId.entrySet()) {
+          access.put(roleEntry.getKey(), roleEntry.getValue().getOrDefault(row.id, NONE));
+        }
+        reportJson.put(ACCESS, access);
+        reportsJson.put(reportJson);
+      }
+
+      JSONObject categoryJson = new JSONObject();
+      categoryJson.put(NAME, category);
+      categoryJson.put(REPORTS, reportsJson);
+      categories.put(categoryJson);
+    }
+
+    JSONObject reportsMatrix = new JSONObject();
+    reportsMatrix.put(CATEGORIES, categories);
+    return reportsMatrix;
   }
 
   /**
