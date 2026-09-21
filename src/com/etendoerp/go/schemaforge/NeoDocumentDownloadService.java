@@ -17,10 +17,13 @@
 
 package com.etendoerp.go.schemaforge;
 
-import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Map;
 import java.util.Optional;
 
@@ -30,6 +33,8 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.session.OBPropertiesProvider;
+import org.openbravo.client.application.attachment.AttachImplementation;
 import org.openbravo.model.ad.utility.Attachment;
 
 import com.etendoerp.go.schemaforge.email.DocumentDownloadTokenService;
@@ -46,6 +51,9 @@ final class NeoDocumentDownloadService {
   private static final String DEFAULT_FILE_NAME = "document.pdf";
   private static final String APPLICATION_PDF = "application/pdf";
   private static final int MAX_DOWNLOAD_BYTES = 12 * 1024 * 1024;
+  private static final String DEFAULT_ATTACH_METHOD = "Default";
+  private static final String ERR_INVALID_FILE = "Stored document file is invalid";
+  private static final String PROP_ATTACH_PATH = "attach.path";
 
   private static final String TABLE_C_INVOICE = "C_Invoice";
   private static final String TABLE_C_ORDER = "C_Order";
@@ -81,15 +89,34 @@ final class NeoDocumentDownloadService {
       writePlainError(response, HttpServletResponse.SC_NOT_FOUND, "Document file not found");
       return;
     }
+    AttachImplementation handler = null;
+    File file;
     try {
-      ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-      NeoAttachmentsHelper.getAttachManager().download(attachment.getId(), buffer);
-      byte[] fileData = buffer.toByteArray();
-      if (fileData.length > MAX_DOWNLOAD_BYTES) {
+      if (attachment.getAttachmentConf() == null) {
+        file = resolveDefaultStorageFile(attachment);
+      } else {
+        handler = resolveHandler(attachment);
+        file = handler.downloadFile(attachment);
+      }
+    } catch (OBException e) {
+      log.error("Could not resolve the stored file for spec={} record={} attachment={}",
+          validated.getSpecName(), validated.getRecordId(), attachment.getId(), e);
+      writePlainError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERR_INVALID_FILE);
+      return;
+    }
+    try {
+      if (!file.exists()) {
+        log.error("Stored file missing on disk for spec={} record={} attachment={}: {}",
+            validated.getSpecName(), validated.getRecordId(), attachment.getId(), file.getPath());
+        writePlainError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERR_INVALID_FILE);
+        return;
+      }
+      if (file.length() > MAX_DOWNLOAD_BYTES) {
         writePlainError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
             "Stored document file is too large");
         return;
       }
+      byte[] fileData = Files.readAllBytes(file.toPath());
       response.setStatus(HttpServletResponse.SC_OK);
       response.setContentType(StringUtils.defaultIfBlank(attachment.getDataType(),
           APPLICATION_PDF));
@@ -97,11 +124,99 @@ final class NeoDocumentDownloadService {
       response.setContentLength(fileData.length);
       response.getOutputStream().write(fileData);
       response.getOutputStream().flush();
-    } catch (OBException e) {
-      log.error("Could not stream main attachment for spec={} record={}",
-          validated.getSpecName(), validated.getRecordId(), e);
-      writePlainError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "Stored document file is invalid");
+    } finally {
+      if (handler != null && handler.isTempFile()) {
+        deleteTempFile(file);
+      }
+    }
+  }
+
+  /**
+   * Resolves the on-disk file for an attachment stored by the default (filesystem) method,
+   * without going through {@code CoreAttachImplementation#downloadFile}.
+   * <p>
+   * ETP-5304 — that method calls {@code getAttachmentDirectory}, which re-queries the attachment
+   * row through an {@link org.openbravo.dal.service.OBCriteria} only to read back its
+   * {@code path}. The criteria filters on {@code OBContext#getReadableClients()} (a filter admin
+   * mode does not lift, and which that code never disables — it only disables the organization
+   * one), so under this endpoint's anonymous context it matches nothing, returns no error, and
+   * silently falls back to the flat {@code <tableId>-<recordId>} layout. For any attachment
+   * uploaded by current code — which always records a nested {@code path} — that directory does
+   * not exist and the download fails as a missing file.
+   * <p>
+   * The re-query exists only to fetch a field of the very row the caller already holds:
+   * {@link #resolveMainAttachment} resolved it by native SQL, which no client filter can blind.
+   * So this reproduces the same two branches the core would apply (recorded {@code path} when
+   * present, flat layout otherwise) while reading the value instead of looking it up again.
+   * <p>
+   * Attachments bound to an explicit {@code AttachmentConf} keep going through their own
+   * handler: a non-filesystem backend does not use this layout at all.
+   */
+  private static File resolveDefaultStorageFile(Attachment attachment) {
+    String attachRoot = StringUtils.trimToNull(OBPropertiesProvider.getInstance()
+        .getOpenbravoProperties().getProperty(PROP_ATTACH_PATH));
+    if (attachRoot == null) {
+      throw new OBException("Property '" + PROP_ATTACH_PATH + "' is not configured");
+    }
+    // Built lazily on purpose: StringUtils.defaultIfBlank would evaluate the fallback even
+    // when a path is recorded (Java argument evaluation is eager), forcing a proxy load of
+    // AD_Table on every download and turning a null table into an NPE — which escapes the
+    // caller's catch, since that only covers OBException, and takes the servlet down
+    // instead of answering the controlled 500.
+    String recordedPath = StringUtils.trimToNull(attachment.getPath());
+    String relativeDir = recordedPath != null ? recordedPath
+        : attachment.getTable().getId() + "-" + attachment.getRecord();
+    return new File(attachRoot + File.separator + relativeDir, attachment.getName());
+  }
+
+  /**
+   * Resolves the storage handler for the attachment, deliberately bypassing
+   * {@code AttachImplementationManager#download}.
+   * <p>
+   * ETP-5304 — that entry point calls {@code checkReadableAccess}, an organization check
+   * that does <em>not</em> honour admin mode: {@code SecurityChecker} compares the record's
+   * organization against {@code OBContext#getReadableOrganizations()} unconditionally, and
+   * the manager re-enters admin mode itself, so no wrapping from this side can affect it.
+   * This endpoint is anonymous by design, so its context never holds the document's
+   * organization and the check always failed with {@code OBSecurityException} — surfaced to
+   * the recipient as a misleading "invalid file" 500.
+   * <p>
+   * Authorization here is the signed token, not the session: the HMAC binds the link to one
+   * client and record, and {@link #resolveMainAttachment} already rejects an attachment whose
+   * client differs from the signed one. The handler layer is public API and carries no
+   * session assumptions, so it is called directly; the caller owns the temp-file cleanup that
+   * the manager would otherwise do (see {@link #deleteTempFile}).
+   */
+  private static AttachImplementation resolveHandler(Attachment attachment) {
+    String method = attachment.getAttachmentConf() == null ? DEFAULT_ATTACH_METHOD
+        : attachment.getAttachmentConf().getAttachmentMethod().getValue();
+    AttachImplementation handler = NeoAttachmentsHelper.getAttachManager().getHandler(method);
+    if (handler == null) {
+      throw new OBException("No attachment handler registered for method '" + method + "'");
+    }
+    return handler;
+  }
+
+  /**
+   * Mirrors {@code AttachImplementationManager#deleteTempFile} (private there): removes the
+   * temporary copy a non-filesystem handler produced, plus its containing directory when the
+   * handler created one outside the system temp dir. A failure here is logged, never fatal —
+   * the file has already been served.
+   */
+  private static void deleteTempFile(File file) {
+    Path parent = file.toPath().getParent();
+    try {
+      Files.delete(file.toPath());
+    } catch (IOException e) {
+      log.warn("Could not delete temporary attachment file {}: {}", file.getPath(), e.getMessage());
+    }
+    if (parent == null || parent.equals(Paths.get(System.getProperty("java.io.tmpdir")))) {
+      return;
+    }
+    try {
+      Files.delete(parent);
+    } catch (IOException e) {
+      log.warn("Could not delete temporary attachment directory {}: {}", parent, e.getMessage());
     }
   }
 

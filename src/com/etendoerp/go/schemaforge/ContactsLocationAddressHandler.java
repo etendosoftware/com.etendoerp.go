@@ -700,6 +700,13 @@ public class ContactsLocationAddressHandler implements NeoHandler {
       locationJson.put(FIELD_REGION,           JSONObject.NULL);
       locationJson.put("region$_identifier",   JSONObject.NULL);
     }
+    // ETP-5368: echo the free-text province too. Without it an Argentine address read back as
+    // having no province at all — region and region$_identifier are both null there by design,
+    // and RegionName, the column that actually holds the answer, was never in the response. A
+    // caller that sent it had no way to confirm it landed, which is the same silence this field
+    // was added to end.
+    locationJson.put(FIELD_REGION_NAME,
+        geoLoc.getRegionName() != null ? geoLoc.getRegionName() : JSONObject.NULL);
   }
 
   private static JSONObject buildRecord(org.openbravo.model.common.businesspartner.Location bpLoc,
