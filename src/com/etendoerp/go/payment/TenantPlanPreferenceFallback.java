@@ -74,6 +74,8 @@ public class TenantPlanPreferenceFallback {
   private static final Logger log = LogManager.getLogger(TenantPlanPreferenceFallback.class);
 
   private static final String PARAM_ATTRIBUTE = "attribute";
+  /** HQL fragment prefix; the alias is fixed by the queries below. */
+  private static final String AND_PREF = " and pref.";
   private static final String PARAM_CLIENT_ID = "clientId";
   private static final String PARAM_CLIENT_IDS = "clientIds";
 
@@ -84,7 +86,7 @@ public class TenantPlanPreferenceFallback {
           + " tenant — run it and this line disappears.";
 
   private static final String ACTIVE_PREFERENCE_PREDICATE =
-      " and pref." + Preference.PROPERTY_ACTIVE + " = true";
+      AND_PREF + Preference.PROPERTY_ACTIVE + " = true";
 
   /**
    * TRANSITIONAL (ETP-5046-TRANSITIONAL-FALLBACK) — whether one tenant carries the retired
@@ -106,7 +108,7 @@ public class TenantPlanPreferenceFallback {
       // VISIBLEAT_CLIENT_ID, never AD_CLIENT_ID (the row itself lives at client '0').
       OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
           "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :" + PARAM_ATTRIBUTE
-              + " and pref." + Preference.PROPERTY_VISIBLEATCLIENT + ".id = :" + PARAM_CLIENT_ID
+              + AND_PREF + Preference.PROPERTY_VISIBLEATCLIENT + ".id = :" + PARAM_CLIENT_ID
               + ACTIVE_PREFERENCE_PREDICATE);
       query.setNamedParameter(PARAM_ATTRIBUTE, TenantPlanService.PREFERENCE_ATTRIBUTE);
       query.setNamedParameter(PARAM_CLIENT_ID, StringUtils.trimToEmpty(clientId));
@@ -152,7 +154,7 @@ public class TenantPlanPreferenceFallback {
     try {
       OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
           "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :" + PARAM_ATTRIBUTE
-              + " and pref." + Preference.PROPERTY_VISIBLEATCLIENT + ".id in (:"
+              + AND_PREF + Preference.PROPERTY_VISIBLEATCLIENT + ".id in (:"
               + PARAM_CLIENT_IDS + ")" + ACTIVE_PREFERENCE_PREDICATE);
       query.setNamedParameter(PARAM_ATTRIBUTE, TenantPlanService.PREFERENCE_ATTRIBUTE);
       query.setNamedParameter(PARAM_CLIENT_IDS, List.copyOf(ids));

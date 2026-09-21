@@ -52,6 +52,7 @@ public class PlanPriceDerivationHandler extends EntityPersistenceEventObserver {
   private static final Logger log = LogManager.getLogger(PlanPriceDerivationHandler.class);
 
   private static final String MSG_NOT_FOUND = "ETGO_PlanPriceNotFound";
+  private static final String FIELD_UNIT_AMOUNT = "unit_amount";
   private static final String MSG_UNAUTHORIZED = "ETGO_PlanPriceUnauthorized";
   private static final String MSG_REJECTED = "ETGO_PlanPriceRejected";
   private static final String MSG_UNREACHABLE = "ETGO_PlanPriceUnreachable";
@@ -293,10 +294,10 @@ public class PlanPriceDerivationHandler extends EntityPersistenceEventObserver {
         return null;
       }
     }
-    if (!price.has("unit_amount") || price.isNull("unit_amount")) {
+    if (!price.has(FIELD_UNIT_AMOUNT) || price.isNull(FIELD_UNIT_AMOUNT)) {
       return null;
     }
-    return BigDecimal.valueOf(price.optLong("unit_amount", 0L)).movePointLeft(exponent);
+    return BigDecimal.valueOf(price.optLong(FIELD_UNIT_AMOUNT, 0L)).movePointLeft(exponent);
   }
 
   /** Reads a string field, treating an absent field and a JSON null alike. */

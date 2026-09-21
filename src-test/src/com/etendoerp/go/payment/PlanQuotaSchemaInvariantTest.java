@@ -208,10 +208,10 @@ public class PlanQuotaSchemaInvariantTest {
   private Element adColumnRecord(Path adColumn, String columnName) throws Exception {
     NodeList records = parse(adColumn).getElementsByTagName("AD_COLUMN");
     for (int i = 0; i < records.getLength(); i++) {
-      Element record = (Element) records.item(i);
-      if (columnName.equalsIgnoreCase(childText(record, "COLUMNNAME"))
-          && PLAN_QUOTA_TABLE_ID.equalsIgnoreCase(childText(record, "AD_TABLE_ID"))) {
-        return record;
+      Element columnRecord = (Element) records.item(i);
+      if (columnName.equalsIgnoreCase(childText(columnRecord, "COLUMNNAME"))
+          && PLAN_QUOTA_TABLE_ID.equalsIgnoreCase(childText(columnRecord, "AD_TABLE_ID"))) {
+        return columnRecord;
       }
     }
     fail("No AD_COLUMN record for " + columnName + " of table ETGO_PLAN_QUOTA ("

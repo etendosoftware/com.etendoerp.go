@@ -172,6 +172,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String BILLING_OWNER_REQUIRED = "BILLING_OWNER_REQUIRED";
   private static final String BILLING_OWNER_MESSAGE = "Only the environment owner can manage billing";
   private static final String CLIENT_NAME_REQUIRED = "clientName is required";
+  private static final String PLAN_KEY_REQUIRED = "planKey is required";
   private static final String FIELD_ERROR = "error";
   private static final String ERROR_PAYMENT_REQUIRED = "payment_required";
   // javax.servlet.http.HttpServletResponse predates RFC 7231 and has no 402 constant.
@@ -585,7 +586,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // A plain string, not a double: the amount crosses to a client that formats it, and a
     // binary float would quietly re-round a price on the way.
     item.put("displayPrice", displayPrice.toPlainString());
-    item.put("currency", currency);
+    item.put(FIELD_CURRENCY, currency);
     item.put("billingInterval", StringUtils.defaultString(plan.getBillingInterval()));
     return item;
   }
@@ -610,39 +611,75 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    *       deployment state rather than a bad request.</li>
    * </ul>
    */
+  /**
+   * Answers {@code 403} and returns true when the account owns no environment.
+   *
+   * <p>Billing is owner-only, and both purchase entry points open with this same check. Extracted
+   * so each reads as a short list of guards instead of repeating the context dance inline — which
+   * also gives that dance exactly one home. {@code handleBillingOverview} deliberately does not use
+   * this: there the same lookup is a reported value ({@code canManageBilling}), not a gate.
+   *
+   * @param response the response to answer on when the check fails
+   * @param accountEmail the authenticated account's e-mail
+   * @return true when the caller was rejected and the handler must stop
+   */
+  private boolean rejectWhenNotBillingOwner(HttpServletResponse response, String accountEmail)
+      throws IOException {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    boolean billingOwner;
+    try {
+      billingOwner = EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(accountEmail);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    if (billingOwner) {
+      return false;
+    }
+    writeError(response, HttpServletResponse.SC_FORBIDDEN, BILLING_OWNER_REQUIRED,
+        BILLING_OWNER_MESSAGE, BILLING_OWNER_MESSAGE);
+    return true;
+  }
+
+  /**
+   * Reads a required non-blank body field, answering {@code 400 INVALID_REQUEST} and returning
+   * {@code null} when it is missing.
+   *
+   * @param body the parsed request body
+   * @param field the field name to read
+   * @param message the operator-facing message naming the missing field
+   * @param response the response to answer on when the field is absent
+   * @return the trimmed value, or null when the caller has already been answered
+   */
+  private String requiredBodyField(JSONObject body, String field, String message,
+      HttpServletResponse response) throws IOException {
+    String value = body.optString(field, "").trim();
+    if (!value.isEmpty()) {
+      return value;
+    }
+    writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST, message, message);
+    return null;
+  }
+
+  /** The caller's {@code Origin} when it sent one, else this deployment's public base URL. */
+  private static String resolveRequestOrigin(HttpServletRequest request) {
+    String requestOrigin = request.getHeader(HEADER_ORIGIN);
+    return StringUtils.isBlank(requestOrigin)
+        ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+  }
+
   private void handleCheckoutSession(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     runWithAuthenticatedAccount(request, response, "checkout-session", account -> {
-      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-      OBContext.setAdminMode(true);
-      boolean billingOwner;
-      try {
-        billingOwner = EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(account.getEmail());
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-      if (!billingOwner) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN, BILLING_OWNER_REQUIRED,
-            BILLING_OWNER_MESSAGE, BILLING_OWNER_MESSAGE);
-        return;
-      }
+      if (rejectWhenNotBillingOwner(response, account.getEmail())) return;
       JSONObject body = readJsonBodyOrBadRequest(request, response);
       if (body == null) return;
-      String clientName = body.optString(FIELD_CLIENT_NAME, "").trim();
-      if (clientName.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
-            CLIENT_NAME_REQUIRED, CLIENT_NAME_REQUIRED);
-        return;
-      }
-      String planKey = body.optString(FIELD_PLAN_KEY, "").trim();
-      if (planKey.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
-            "planKey is required", "planKey is required");
-        return;
-      }
-      String requestOrigin = request.getHeader(HEADER_ORIGIN);
-      final String origin = StringUtils.isBlank(requestOrigin)
-          ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+      String clientName = requiredBodyField(body, FIELD_CLIENT_NAME, CLIENT_NAME_REQUIRED,
+          response);
+      if (clientName == null) return;
+      String planKey = requiredBodyField(body, FIELD_PLAN_KEY, PLAN_KEY_REQUIRED, response);
+      if (planKey == null) return;
+      final String origin = resolveRequestOrigin(request);
       try {
         JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
             clientName, origin, planKey);
@@ -672,45 +709,24 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void handleBillingPurchaseCreate(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     runWithAuthenticatedAccount(request, response, "billing-purchase-create", account -> {
-      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-      OBContext.setAdminMode(true);
-      boolean billingOwner;
-      try {
-        billingOwner = EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(account.getEmail());
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-      if (!billingOwner) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN, BILLING_OWNER_REQUIRED,
-            BILLING_OWNER_MESSAGE, BILLING_OWNER_MESSAGE);
-        return;
-      }
+      if (rejectWhenNotBillingOwner(response, account.getEmail())) return;
       JSONObject body = readJsonBodyOrBadRequest(request, response);
       if (body == null) return;
-      String clientName = body.optString(FIELD_CLIENT_NAME, "").trim();
-      if (clientName.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
-            CLIENT_NAME_REQUIRED, CLIENT_NAME_REQUIRED);
-        return;
-      }
-      String planKey = body.optString(FIELD_PLAN_KEY, "").trim();
-      if (planKey.isEmpty()) {
-        // ETP-5046 removed the configured fallback price, so there is nothing to charge against
-        // when the caller names no plan. Rejecting is the only honest answer: picking a plan on
-        // the buyer's behalf would charge for something nobody selected.
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
-            "planKey is required", "planKey is required");
-        return;
-      }
+      String clientName = requiredBodyField(body, FIELD_CLIENT_NAME, CLIENT_NAME_REQUIRED,
+          response);
+      if (clientName == null) return;
+      // ETP-5046 removed the configured fallback price, so there is nothing to charge against
+      // when the caller names no plan. Rejecting is the only honest answer: picking a plan on
+      // the buyer's behalf would charge for something nobody selected.
+      String planKey = requiredBodyField(body, FIELD_PLAN_KEY, PLAN_KEY_REQUIRED, response);
+      if (planKey == null) return;
       CheckoutRequest activePurchase = checkoutRequestStore
           .findActiveForAccountAndClientName(account.getEmail(), clientName);
       if (activePurchase != null) {
         handleExistingBillingPurchase(request, response, account, activePurchase);
         return;
       }
-      String requestOrigin = request.getHeader(HEADER_ORIGIN);
-      final String origin = StringUtils.isBlank(requestOrigin)
-          ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+      final String origin = resolveRequestOrigin(request);
       try {
         JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
             clientName, origin, planKey);
@@ -736,9 +752,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       throws IOException, JSONException {
     String status = activePurchase.getCheckoutRequestStatus();
     if ("CREATING".equals(status) || "CREATED".equals(status)) {
-      String requestOrigin = request.getHeader(HEADER_ORIGIN);
-      final String origin = StringUtils.isBlank(requestOrigin)
-          ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+      final String origin = resolveRequestOrigin(request);
       try {
         JSONObject result = hostedCheckoutService.reopenSession(activePurchase.getRequest(),
             account.getEmail(), activePurchase.getClientName(), origin);

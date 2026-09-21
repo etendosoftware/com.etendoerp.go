@@ -443,8 +443,9 @@ class TenantPlanServiceTest {
 
     @Test
     void neverReachesThePreferenceFallbackForAnOpenButCanceledSubscription() {
-      // An open row exists and says the entitlement is gone. That IS the subscription's answer;
-      // the retired preference must not resurrect a tenant the new source of truth has closed.
+      // An open row exists and says the entitlement is gone. That IS the subscription's answer,
+      // so the retired preference must not resurrect a tenant that the new source of truth has
+      // already closed.
       givenOpenSubscription(SubscriptionService.STATUS_CANCELED);
 
       assertEquals(TenantPlanService.PLAN_FREE, service.resolvePlan(CLIENT_ID));

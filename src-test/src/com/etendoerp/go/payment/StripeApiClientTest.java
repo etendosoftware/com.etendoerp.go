@@ -19,6 +19,8 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.Properties;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -66,6 +68,13 @@ class StripeApiClientTest {
   private final AtomicInteger callCount = new AtomicInteger();
 
   /**
+   * Holds the server thread inside a slow exchange until the test is done with it. Counted down in
+   * {@link #restore()}, so the exchange is released deterministically instead of after a fixed
+   * sleep that is either flaky or gratuitously slow.
+   */
+  private final CountDownLatch releaseSlowExchange = new CountDownLatch(1);
+
+  /**
    * Isolates the configuration from whatever a developer has in their own
    * {@code Openbravo.properties}; same reasoning as {@code HostedCheckoutServiceTest}.
    */
@@ -80,6 +89,7 @@ class StripeApiClientTest {
 
   @AfterEach
   void restore() {
+    releaseSlowExchange.countDown();
     if (server != null) {
       server.stop(0);
       server = null;
@@ -213,17 +223,30 @@ class StripeApiClientTest {
     // save path would do to a user's browser.
     System.setProperty(READ_TIMEOUT_PROPERTY, "200");
     givenProviderBehaves(exchange -> {
-      try {
-        Thread.sleep(3000);
-      } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-      }
+      // The provider accepts the request and then never answers, until this test lets it go.
+      awaitSlowExchangeRelease();
       respond(exchange, 200, PRICE_BODY);
     });
 
     StripeApiClient client = new HttpUrlConnectionStripeApiClient();
 
     assertThrows(StripeTransportException.class, () -> client.get("/v1/prices/price_123"));
+  }
+
+  /**
+   * Blocks the server thread until {@link #restore()} releases it. In practice the client gives up
+   * after its 200 ms read timeout and the latch is counted down moments later, during teardown.
+   * The wait is bounded so that a regression — a gateway that no longer applies a read timeout —
+   * fails the build instead of hanging it: the exchange is released, the late 200 arrives, and the
+   * {@code assertThrows} below fails. That bound must stay far above the 200 ms read timeout, or a
+   * loaded machine could release the exchange before the timeout has had a chance to fire.
+   */
+  private void awaitSlowExchangeRelease() {
+    try {
+      releaseSlowExchange.await(5, TimeUnit.SECONDS);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+    }
   }
 
   @Test
