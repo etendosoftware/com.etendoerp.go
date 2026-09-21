@@ -120,6 +120,15 @@ public class NeoDefaultsCascadeHelper {
         log.info("[NEO-CREATE] Callout cascade derived {} field updates",
             cascadeResult.updatedFieldCount());
       }
+      // IMP-45: hand the divergences to the context so the caller can be told. The REST path
+      // never reads it — there the protected value came from a form a person filled in, so there
+      // is nothing to warn about. The MCP path is the one that invites an agent to re-send what
+      // neo_defaults handed it, which is how a generic default gets pinned over the one the
+      // business partner actually implies.
+      if (ctx != null && cascadeResult != null
+          && cascadeResult.getSupersededDefaults().length() > 0) {
+        ctx.setSupersededDefaults(cascadeResult.getSupersededDefaults());
+      }
     } catch (Exception e) {
       log.warn("[NEO-CREATE] Callout cascade failed (non-fatal): {}", e.getMessage());
     }
@@ -444,6 +453,12 @@ public class NeoDefaultsCascadeHelper {
         continue;
       }
       if (shouldKeepExistingValue(defaults, updatedField, protectedFields)) {
+        // IMP-45: the caller's value wins, as it always has — but this is the exact point where a
+        // callout that knows the record's real context (the business partner's payment terms, for
+        // one) is told to stand down in favour of a value the caller may simply have echoed back
+        // from neo_defaults. Recorded so the divergence can be reported; nothing here changes what
+        // gets persisted.
+        recordSupersededDefault(result, defaults, updatedField, updateObj);
         continue;
       }
       Object newValue = updateObj.get(FIELD_VALUE);
@@ -581,6 +596,34 @@ public class NeoDefaultsCascadeHelper {
       filtered.put(key, source.get(key));
     }
     return filtered;
+  }
+
+  /**
+   * IMP-45: note that a protected field kept the caller's value over a callout-derived one.
+   *
+   * <p>Only a genuine divergence is recorded. A callout that re-proposes the value already on the
+   * record has superseded nothing, and an identifier companion key ({@code x$_identifier}) is the
+   * label of a field already reported under its own name.</p>
+   *
+   * @param result       the cascade result collecting the divergences
+   * @param defaults     the in-progress payload, holding the caller's value
+   * @param fieldName    the protected field
+   * @param updateObj    the callout's proposed update for that field
+   */
+  private static void recordSupersededDefault(NeoDefaultsService.CalloutCascadeResult result,
+      JSONObject defaults, String fieldName, JSONObject updateObj) {
+    if (result == null || fieldName.endsWith(IDENTIFIER_SUFFIX)) {
+      return;
+    }
+    Object kept = defaults.opt(fieldName);
+    Object proposed = updateObj.opt(FIELD_VALUE);
+    if (proposed == null || JSONObject.NULL.equals(proposed)) {
+      return;
+    }
+    if (kept != null && String.valueOf(kept).equals(String.valueOf(proposed))) {
+      return;
+    }
+    result.recordSuperseded(fieldName, kept, proposed);
   }
 
   private static boolean shouldKeepExistingValue(JSONObject defaults, String fieldName,

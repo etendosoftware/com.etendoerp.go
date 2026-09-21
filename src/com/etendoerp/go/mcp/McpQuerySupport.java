@@ -19,6 +19,7 @@ package com.etendoerp.go.mcp;
 
 import java.util.Optional;
 
+import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
@@ -79,6 +80,10 @@ final class McpQuerySupport {
       return null;
     }
 
+    // IMP-39: resolved once per request, not once per key - it costs one query, and the previous
+    // contract was that the happy path pays nothing for the failure path's `available` list.
+    java.util.Set<String> excluded = excludedPropertyNames(sfEntity, dalEntity);
+
     StringBuilder where = new StringBuilder();
     java.util.Iterator<String> keys = filters.keys();
     while (keys.hasNext()) {
@@ -89,9 +94,9 @@ final class McpQuerySupport {
         continue;
       }
       if (value instanceof JSONObject) {
-        appendOperatorConditions(where, dalEntity, sfEntity, key, (JSONObject) value);
+        appendOperatorConditions(where, dalEntity, sfEntity, excluded, key, (JSONObject) value);
       } else {
-        appendEqualityCondition(where, dalEntity, sfEntity, key, value);
+        appendEqualityCondition(where, dalEntity, sfEntity, excluded, key, value);
       }
     }
     return where.length() > 0 ? where.toString() : null;
@@ -109,22 +114,246 @@ final class McpQuerySupport {
    *
    * @param dalEntity the DAL entity the filter is aimed at
    * @param sfEntity  the SchemaForge entity, used to list the filterable names on the failure path
+   * @param excluded  the property names the spec excluded, resolved once per request by
+   *                  {@link #excludedPropertyNames}
    * @param key       the filter key as the caller spelled it
    * @return the resolved property, never {@code null}
    * @throws McpRoutingException 422 {@code unknown_filter_field}, naming the keys that would work
    */
-  private static Property resolveFilterProperty(Entity dalEntity, SFEntity sfEntity, String key) {
-    Property byColumn = dalEntity.getPropertyByColumnName(key, false);
-    if (byColumn != null) {
-      return byColumn;
+  private static Property resolveFilterProperty(Entity dalEntity, SFEntity sfEntity,
+      java.util.Set<String> excluded, String key) {
+    Property resolved = dalEntity.getPropertyByColumnName(key, false);
+    if (resolved == null) {
+      try {
+        resolved = dalEntity.getProperty(key);
+      } catch (Exception ignored) {
+        throw unknownFilterField(key, dalEntity, sfEntity);
+      }
     }
-    try {
-      return dalEntity.getProperty(key);
-    } catch (Exception ignored) {
-      throw McpRoutingException.unknownFilterField(key,
-          sfEntity == null ? dalEntity.getName() : sfEntity.getName(),
-          filterablePropertyNames(sfEntity, dalEntity));
+    // IMP-39: resolving against the DAL model is not the same question as "may this be filtered".
+    // It used to be the only check, so a field the spec excluded filtered perfectly well while the
+    // `available` list below - which has always been scoped to the included rows - did not name it
+    // and neo_get did not project it. The set that is enforced and the set that is advertised must
+    // be one set.
+    if (excluded.contains(resolved.getName())) {
+      throw unknownFilterField(key, dalEntity, sfEntity);
     }
+    return resolved;
+  }
+
+  /**
+   * The one refusal for a filter key that may not be used, whatever the reason.
+   *
+   * <p><b>Deliberately identical for a name that does not exist and a name the spec excludes.</b>
+   * Two distinguishable answers would let any caller enumerate the columns of the underlying AD
+   * table by probing keys and reading which refusal came back — the response itself would confirm
+   * the existence of every field the spec was curated to hide. The wording says the key is not
+   * available on this entity and stops there: it neither asserts nor denies that a column of that
+   * name exists. What the caller is entitled to know is in {@code available}, which lists exactly
+   * the fields this entity does expose.</p>
+   *
+   * @param key       the filter key as the caller spelled it
+   * @param dalEntity the DAL entity, for mapping columns to property names
+   * @param sfEntity  the SchemaForge entity, or {@code null}
+   * @return the exception to throw
+   */
+  private static McpRoutingException unknownFilterField(String key, Entity dalEntity,
+      SFEntity sfEntity) {
+    return McpRoutingException.unknownFilterField(key,
+        sfEntity == null ? dalEntity.getName() : sfEntity.getName(),
+        filterablePropertyNames(sfEntity, dalEntity));
+  }
+
+  /**
+   * The property names the spec deliberately excluded from this entity's surface — the one set
+   * both the filter path and the write path refuse, so the two cannot drift apart.
+   *
+   * <p><b>Excluded, not "not included".</b> Only a {@code ETGO_SF_FIELD} row that exists and says
+   * {@code ISINCLUDED = 'N'} bars a filter. A column with no row at all is uncurated, and absence
+   * of curation is not a decision to hide it — there are over a thousand such columns across the
+   * curated entities of a typical instance, and a handler-backed entity (dashboards, reports,
+   * reconciliation views) has no field rows whatsoever, so an "included-only" allowlist would
+   * reject every filter those entities were ever sent.</p>
+   *
+   * @param sfEntity  the SchemaForge entity, or {@code null} when none is in play
+   * @param dalEntity the DAL entity, for mapping columns to property names
+   * @return the excluded property names, possibly empty, never {@code null}
+   */
+  static java.util.Set<String> excludedPropertyNames(SFEntity sfEntity, Entity dalEntity) {
+    return writeGate(sfEntity, dalEntity).excluded;
+  }
+
+  /**
+   * The two sets a write must clear, built in one pass over the entity's curated rows.
+   *
+   * <p>They are disjoint by construction: {@link #excluded} is what the spec does not expose at
+   * all, {@link #readOnlyRejectable} is what it exposes and marks unwritable. A field cannot be
+   * both, and the two refusals say different things on purpose — see
+   * {@link McpRoutingException#fieldNotAllowed} and {@link McpRoutingException#readOnlyField}.</p>
+   */
+  static final class WriteGate {
+    /** Property names the spec excludes from the agent surface (IMP-39). */
+    final java.util.Set<String> excluded;
+    /** Property names the spec exposes as read-only and no one else could be supplying (IMP-48). */
+    final java.util.Set<String> readOnlyRejectable;
+    /**
+     * IMP-30 (second half): read-only properties exempted because their AD column carries a
+     * literal configured default, mapped to that default. The exemption exists so an agent that
+     * echoes back what {@code neo_defaults} handed it is not refused for following the documented
+     * sequence — so it should cover the echo and nothing else. It used to cover any value at all,
+     * which is how {@code documentStatus} (default {@code 'DR'}) still accepted {@code "CO"} and
+     * created a completed order with no lines, the exact state IMP-30's 2026-08-13 probe reached.
+     * A value equal to the default is an echo; a different one is an override of a field the
+     * surface publishes as read-only.
+     */
+    final java.util.Map<String, String> readOnlyDefaults;
+
+    private WriteGate(java.util.Set<String> excluded, java.util.Set<String> readOnlyRejectable,
+        java.util.Map<String, String> readOnlyDefaults) {
+      this.excluded = excluded;
+      this.readOnlyRejectable = readOnlyRejectable;
+      this.readOnlyDefaults = readOnlyDefaults;
+    }
+
+    /**
+     * @param property the mapped DAL property name
+     * @param value    the value the caller sent for it
+     * @return {@code true} when this write must be refused as a read-only override
+     */
+    boolean rejectsDefaultOverride(String property, Object value) {
+      String configured = readOnlyDefaults.get(property);
+      return configured != null && !configured.equals(String.valueOf(value));
+    }
+  }
+
+  /**
+   * Build the write gate for an entity.
+   *
+   * <p><b>The read-only predicate is {@code NeoFieldFilter}'s {@code rejectableOnCreateFields}
+   * (IMP-28 clause 2); one of its two exemptions is deliberately <em>not</em> carried over, and the
+   * reason is structural rather than a difference of opinion about what read-only means.</b></p>
+   *
+   * <ul>
+   *   <li><b>Dropped: the entity-wide {@code Java_Qualifier} exemption.</b> On the REST path
+   *       {@code filterCreateRequest} runs <em>after</em> {@code NeoServletSupport.handleWithHooks}
+   *       has already invoked the entity's {@code NeoHandler} pre-hook, so by the time it inspects
+   *       the body it cannot tell a value the handler injected ({@code InventoryLineHandler} sets
+   *       {@code bookQuantity}) from one the client sent — and exempting the whole entity is the
+   *       only safe answer available to it. <b>On the MCP path that ambiguity does not exist:</b>
+   *       this mapping runs on the caller's own {@code fields} argument, and
+   *       {@code McpHookExecutor.runPreHook} fires further down {@code handleCreate}, on the body
+   *       this returns. Every key here is the caller's by construction. Keeping the exemption would
+   *       have cost most of the gate — <b>79 of the 128 writable entities declare a qualifier, and
+   *       783 curated read-only fields behind them are AD-updatable</b>, so the rejection would
+   *       have fired on under two fifths of the surface. It was kept in the first implementation
+   *       and a live probe caught it: {@code neo_update} on {@code sales-order/header}, whose
+   *       qualifier is {@code salesOrderHeaderHandler}, accepted {@code documentNo} and answered
+   *       200.</li>
+   *   <li><b>Kept: the configured-AD-default exemption.</b> The platform fills that column, and an
+   *       agent following {@code neo_defaults} is actively invited to send resolved values back in
+   *       {@code fields} (the subject of IMP-45), so a default echoed into a write is a shape the
+   *       recommended sequence produces rather than a mistake.</li>
+   * </ul>
+   *
+   * <p>Read-only-ness is resolved through {@link McpFieldView}, so a {@code MCP_CONFIG}
+   * {@code fields.readOnly: false} override reclaims a field for writing exactly the way
+   * {@code fields.included} reclaims an excluded one.</p>
+   *
+   * @param sfEntity  the SchemaForge entity; {@code null} yields two empty sets
+   * @param dalEntity the DAL entity, for mapping columns to property names
+   * @return the gate, never {@code null}
+   */
+  static WriteGate writeGate(SFEntity sfEntity, Entity dalEntity) {
+    java.util.Set<String> excluded = new java.util.HashSet<>();
+    java.util.Set<String> readOnly = new java.util.HashSet<>();
+    java.util.Map<String, String> readOnlyDefaults = new java.util.HashMap<>();
+    if (sfEntity == null) {
+      return new WriteGate(excluded, readOnly, readOnlyDefaults);
+    }
+    for (SFField sfField : activeFields(sfEntity)) {
+      Column col = sfField.getADColumn();
+      // A row with no column, and a column the DAL does not map, are the same non-answer here:
+      // there is no property to put in either set.
+      Property prop = col == null ? null
+          : dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
+      if (prop == null) {
+        continue;
+      }
+      // Through McpFieldView, never a Restrictions.eq on ISINCLUDED/ISREADONLY: the MCP_CONFIG
+      // overrides are invisible to a criteria, and a reader that ignored them would drift from
+      // neo_schema - which is the disagreement IMP-39 exists to end.
+      McpFieldView view = McpFieldView.of(sfField);
+      if (!view.isIncluded()) {
+        excluded.add(prop.getName());
+      } else if (view.isReadOnly()) {
+        String literalDefault = literalDefault(col);
+        if (literalDefault == null) {
+          readOnly.add(prop.getName());
+        } else {
+          readOnlyDefaults.put(prop.getName(), literalDefault);
+        }
+      }
+    }
+    return new WriteGate(excluded, readOnly, readOnlyDefaults);
+  }
+
+  /**
+   * @param adColumn the AD column
+   * @return whether AD itself fills this column, which exempts it from the read-only rejection
+   */
+  private static boolean hasConfiguredDefault(Column adColumn) {
+    return adColumn != null && StringUtils.isNotBlank(adColumn.getDefaultValue());
+  }
+
+  /**
+   * The column's AD default when it is a plain literal a caller could echo back, else {@code null}.
+   *
+   * <p>An Etendo default is only sometimes a value: {@code @#AD_Org_ID@} and {@code @SQL=…} are
+   * session/context expressions and {@code now()} is evaluated per request, so none of them can be
+   * compared against what the caller sent.</p>
+   *
+   * <p>Returning {@code null} for those puts the property in the gate's strict {@code readOnly}
+   * set, so sending the column is <b>refused</b> rather than echo-exempted. That is deliberate:
+   * the echo exemption exists to forgive a caller that read the schema and sent the value back
+   * unchanged, and it can only forgive what it can verify. With an expression there is nothing to
+   * compare against, so accepting would not be forgiving a known-harmless echo — it would be
+   * waving through an unexamined value. A refusal costs the caller a 422 it can act on; the other
+   * side of the mistake is silent.</p>
+   *
+   * <p><b>Corrected 2026-09-16 (ETP-5335).</b> This paragraph previously claimed those columns
+   * "keep the blanket exemption they have had since IMP-48" and warned that narrowing it would
+   * refuse legitimate echoes. The code has always done the opposite of what that described, and
+   * the code is the behaviour we want; the text was wrong, not the branch. The strongest evidence
+   * is {@code @#AD_Org_ID@} itself: it was the default behind the cross-tenant write reported in
+   * the 2026-09-16 security review, and the conclusion there was that those columns are resolved
+   * from the session and never from the payload — see {@code NeoServerOwnedFields}, which now
+   * strips {@code client} and {@code organization} before a write ever reaches this gate.</p>
+   *
+   * @param adColumn the AD column
+   * @return the literal default, or {@code null} when there is none or it is an expression
+   */
+  private static String literalDefault(Column adColumn) {
+    if (!hasConfiguredDefault(adColumn)) {
+      return null;
+    }
+    String value = adColumn.getDefaultValue().trim();
+    if (value.startsWith("@") || value.contains("(")) {
+      return null;
+    }
+    return value;
+  }
+
+  /**
+   * Every active {@code SFField} row of an entity, in one query.
+   *
+   * @param sfEntity the SchemaForge entity
+   * @return the rows, possibly empty
+   */
+  private static java.util.List<SFField> activeFields(SFEntity sfEntity) {
+    OBCriteria<SFField> crit = OBDal.getInstance().createCriteria(SFField.class);
+    crit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
+    crit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
+    return crit.list();
   }
 
   /**
@@ -141,7 +370,7 @@ final class McpQuerySupport {
    * @param dalEntity the DAL entity, for mapping columns to property names
    * @return the sorted filterable names, possibly empty, never {@code null}
    */
-  private static java.util.List<String> filterablePropertyNames(SFEntity sfEntity,
+  static java.util.List<String> filterablePropertyNames(SFEntity sfEntity,
       Entity dalEntity) {
     java.util.SortedSet<String> names = new java.util.TreeSet<>();
     if (sfEntity == null) {
@@ -150,13 +379,11 @@ final class McpQuerySupport {
       }
       return new java.util.ArrayList<>(names);
     }
-    OBCriteria<SFField> crit = OBDal.getInstance().createCriteria(SFField.class);
-    crit.add(Restrictions.eq(SFField.PROPERTY_ETGOSFENTITY + ".id", sfEntity.getId()));
-    crit.add(Restrictions.eq(SFField.PROPERTY_ISACTIVE, true));
-    crit.add(Restrictions.eq(SFField.PROPERTY_ISINCLUDED, true));
-    for (SFField sfField : crit.list()) {
+    for (SFField sfField : activeFields(sfEntity)) {
       Column col = sfField.getADColumn();
-      if (col == null) {
+      // Same resolver as the exclusion set above, so what is advertised and what is enforced
+      // cannot disagree - including when MCP_CONFIG reclaims a field.
+      if (col == null || !McpFieldView.of(sfField).isIncluded()) {
         continue;
       }
       Property prop = dalEntity.getPropertyByColumnName(col.getDBColumnName(), false);
@@ -169,8 +396,8 @@ final class McpQuerySupport {
 
   /** Append {@code e.prop = value} (or {@code e.prop.id = 'value'} for a FK), type-aware. */
   private static void appendEqualityCondition(StringBuilder where, Entity dalEntity,
-      SFEntity sfEntity, String key, Object value) {
-    Property prop = resolveFilterProperty(dalEntity, sfEntity, key);
+      SFEntity sfEntity, java.util.Set<String> excluded, String key, Object value) {
+    Property prop = resolveFilterProperty(dalEntity, sfEntity, excluded, key);
     appendAnd(where);
     if (!prop.isPrimitive()) {
       where.append("e.").append(prop.getName()).append(".id=")
@@ -183,8 +410,9 @@ final class McpQuerySupport {
 
   /** Append one HQL comparison per range operator found in {@code operators}. */
   private static void appendOperatorConditions(StringBuilder where, Entity dalEntity,
-      SFEntity sfEntity, String key, JSONObject operators) throws JSONException {
-    Property prop = resolveFilterProperty(dalEntity, sfEntity, key);
+      SFEntity sfEntity, java.util.Set<String> excluded, String key,
+      JSONObject operators) throws JSONException {
+    Property prop = resolveFilterProperty(dalEntity, sfEntity, excluded, key);
     Class<?> type = prop.isPrimitive() ? prop.getPrimitiveObjectType() : String.class;
     java.util.Iterator<String> ops = operators.keys();
     while (ops.hasNext()) {

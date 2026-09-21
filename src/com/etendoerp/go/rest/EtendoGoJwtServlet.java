@@ -31,6 +31,7 @@ import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
@@ -68,12 +69,16 @@ import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.JwtAuthUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
 import com.etendoerp.go.payment.TenantPaywallService;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.payment.HostedCheckoutService;
 import com.etendoerp.go.payment.CheckoutConfiguration;
-import com.etendoerp.go.payment.CheckoutPaymentRegistry;
-import com.etendoerp.go.payment.CheckoutWebhookVerifier;
+import com.etendoerp.go.payment.BillingEventStore;
+import com.etendoerp.go.payment.BillingOfferConfiguration;
+import com.etendoerp.go.payment.CheckoutRequestStore;
+import com.etendoerp.go.schemaforge.data.CheckoutRequest;
+import com.etendoerp.go.payment.CheckoutWebhookProcessor;
 import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
@@ -121,6 +126,10 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *   GET  /sws/go/me           — Get current account info (requires session token)
  *   GET  /sws/go/environments — List environments for the account (requires session token),
  *                               each carrying its plan ("free" | "productive")
+ *   GET  /sws/go/billing/overview — Account-level purchase projection (requires session token)
+ *   GET  /sws/go/billing/offers — Server-owned billing offer projection
+ *   POST /sws/go/billing/purchases — Start a new owner-authorized purchase
+ *   GET  /sws/go/billing/purchases/{id} — Read one account-scoped purchase projection
  *   GET  /sws/go/login?userId=X — Get an Etendo JWT for an AD_User (requires session token + ownership)
  *
  * Auth model: session token in Authorization header ("Bearer <token>").
@@ -169,6 +178,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String ERROR_UNKNOWN_ENDPOINT = "Unknown endpoint: ";
   private static final String FIELD_PAYMENT_TOKEN = "paymentToken";
   private static final String FIELD_ACCOUNT_EMAIL = "accountEmail";
+  private static final String FIELD_CURRENCY = "currency";
+  private static final String HEADER_ORIGIN = "Origin";
+  private static final String BILLING_OWNER_REQUIRED = "BILLING_OWNER_REQUIRED";
+  private static final String BILLING_OWNER_MESSAGE = "Only the environment owner can manage billing";
+  private static final String CLIENT_NAME_REQUIRED = "clientName is required";
+  private static final String CHECKOUT_NOT_CONFIGURED = "CHECKOUT_NOT_CONFIGURED";
+  private static final String CHECKOUT_NOT_CONFIGURED_MESSAGE = "Checkout is not configured";
   private static final String FIELD_ERROR = "error";
   private static final String ERROR_PAYMENT_REQUIRED = "payment_required";
   // javax.servlet.http.HttpServletResponse predates RFC 7231 and has no 402 constant.
@@ -253,6 +269,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String CONTRACT_NEW_ACCOUNT = "new-account";
   private static final String SSO_PREFIX = "/sso/";
   private static final String PATH_ONBOARDING_DRAFT = "/onboarding/draft";
+  /** Maximum accepted age of a Stripe-Signature timestamp, per the provider's guidance. */
+  private static final long CHECKOUT_WEBHOOK_TOLERANCE_SECONDS = 300;
+  /** The event types that confirm a hosted-checkout payment; every other type is ignored. */
+  private static final List<String> CHECKOUT_PAID_EVENT_TYPES = List.of(
+      "checkout.session.completed", "checkout.session.async_payment_succeeded");
   private static final String FIELD_DRAFT = "draft";
   private static final String FIELD_DRAFT_STEP = "step";
   private static final String FIELD_DRAFT_FORM = "form";
@@ -261,7 +282,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_FULL_NAME = "fullName";
   private static final String FIELD_ADDRESS = "address";
   private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { FIELD_FULL_NAME, "businessType",
-      FIELD_CLIENT_NAME, "currency", FIELD_LANGUAGE, FIELD_COUNTRY_CODE, "fiscalIdType",
+      FIELD_CLIENT_NAME, FIELD_CURRENCY, FIELD_LANGUAGE, FIELD_COUNTRY_CODE, "fiscalIdType",
       "fiscalIdValue", FIELD_ADDRESS, "sector" };
   private static final String PATH_ONBOARDING_FIRST_STEPS = "/onboarding/first-steps";
   private static final String FIELD_FIRST_STEPS = "firstSteps";
@@ -307,8 +328,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   OnboardingCostingScheduleService onboardingCostingScheduleService =
       new OnboardingCostingScheduleService();
   TenantPaywallService tenantPaywallService = new TenantPaywallService();
+  TenantEnvironmentLifecycleService tenantEnvironmentLifecycleService =
+      new TenantEnvironmentLifecycleService();
+  DevLifecycleToolService devLifecycleToolService = new DevLifecycleToolService();
   TenantPlanService tenantPlanService = new TenantPlanService();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
+  CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
+  BillingEventStore billingEventStore = new BillingEventStore();
+  CheckoutWebhookProcessor checkoutWebhookProcessor =
+      new CheckoutWebhookProcessor(billingEventStore, CHECKOUT_WEBHOOK_TOLERANCE_SECONDS);
   CompanyInvitationService companyInvitationService;
   private final TransactionalAuthEmailSender authEmailSender;
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
@@ -356,7 +384,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
-    if (isPath(path, "/me")) {
+    if (routePrimaryGet(path, request, response) || routeBillingGet(path, request, response)
+        || routeAccountGet(path, request, response) || routeCheckoutGet(path, request, response)) {
+      return;
+    }
+    writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
+  }
+
+  private boolean routePrimaryGet(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (isPath(path, "/dev/lifecycle") && DevLifecycleToolService.isEnabled()) {
+      handleDevLifecycleGet(request, response);
+    } else if (isPath(path, "/me")) {
       handleMe(request, response);
     } else if (isPath(path, PATH_ONBOARDING_DRAFT)) {
       handleGetOnboardingDraft(request, response);
@@ -366,7 +405,29 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleGetCompanyData(request, response);
     } else if (isPath(path, "/environments")) {
       handleEnvironments(request, response);
-    } else if (isPath(path, "/login")) {
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  private boolean routeBillingGet(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (isPath(path, "/billing/offers")) {
+      handleBillingOffers(request, response);
+    } else if (isPath(path, "/billing/overview")) {
+      handleBillingOverview(request, response);
+    } else if (path != null && path.startsWith("/billing/purchases/")) {
+      handleBillingPurchase(request, response);
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  private boolean routeAccountGet(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (isPath(path, "/login")) {
       handleEnvironmentLogin(request, response);
     } else if (isPath(path, PATH_SESSION)) {
       handleSessionRestore(request, response);
@@ -374,18 +435,32 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleCompanyInvitationMine(request, response);
     } else if (isPath(path, "/company-invitations/resolve")) {
       handleCompanyInvitationResolve(request, response);
-    } else if (path != null && path.startsWith("/checkout/sessions/")) {
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  private boolean routeCheckoutGet(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (path != null && path.startsWith("/checkout/sessions/")) {
       handleCheckoutStatus(request, response);
     } else {
-      writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_UNKNOWN_ENDPOINT + path);
+      return false;
     }
+    return true;
   }
 
   @Override
   public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
-    // Kept ahead of everything else: the provider calls this one unauthenticated,
-    // so it must not fall through any of the credential-bearing groups below.
+    if (isPath(path, "/dev/lifecycle") && DevLifecycleToolService.isEnabled()) {
+      handleDevLifecyclePost(request, response);
+      return;
+    }
+    // Kept ahead of every credential-bearing group below: the provider calls this one
+    // unauthenticated, so it must not fall through any of them. (The dev-lifecycle block
+    // above is an exact-path match on a different path, so it does not affect that.)
     if (isPath(path, "/checkout/webhook")) {
       handleCheckoutWebhook(request, response);
       return;
@@ -424,7 +499,32 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return true;
   }
 
-  /** The pre-session endpoints, still answering with a bearer token. */
+  /** Local-only ETP-5396 lifecycle test controls. Disabled deployments answer the normal 404. */
+  private void handleDevLifecycleGet(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "dev-lifecycle-read", account ->
+        writeResponse(response, HttpServletResponse.SC_OK,
+            devLifecycleToolService.read(account.getEmail())));
+  }
+
+  private void handleDevLifecyclePost(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "dev-lifecycle-update", account -> {
+      JSONObject body = readJsonBodyOrBadRequest(request, response);
+      if (body == null) return;
+      writeResponse(response, HttpServletResponse.SC_OK,
+          devLifecycleToolService.update(account.getEmail(), body));
+    });
+  }
+
+  /**
+   * The pre-session endpoints, still answering with a bearer token.
+   *
+   * <p>Keeps the ETP-4575 name: `doPost` above dispatches through it, and develop's rename to
+   * `routeAuthenticationPost` had no caller on this branch.
+   *
+   * @return true when the path matched one of them and the request was handled
+   */
   private boolean dispatchLegacyAuthPost(String path, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     String ssoProvider = extractSsoProvider(path);
@@ -470,6 +570,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleSaveFirstSteps(request, response);
     } else if (isPath(path, "/onboarding")) {
       handleOnboarding(request, response);
+    } else if (isPath(path, "/billing/purchases")) {
+      handleBillingPurchaseCreate(request, response);
     } else if (isPath(path, "/checkout/sessions")) {
       handleCheckoutSession(request, response);
     } else if (isPath(path, "/company-invitations")) {
@@ -497,23 +599,37 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void handleCheckoutSession(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     runWithAuthenticatedAccount(request, response, "checkout-session", account -> {
+      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+      OBContext.setAdminMode(true);
+      boolean billingOwner;
+      try {
+        billingOwner = EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(account.getEmail());
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+      if (!billingOwner) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, BILLING_OWNER_REQUIRED,
+            BILLING_OWNER_MESSAGE, BILLING_OWNER_MESSAGE);
+        return;
+      }
       JSONObject body = readJsonBodyOrBadRequest(request, response);
       if (body == null) return;
       String clientName = body.optString(FIELD_CLIENT_NAME, "").trim();
       if (clientName.isEmpty()) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
-            "clientName is required", "clientName is required");
+            CLIENT_NAME_REQUIRED, CLIENT_NAME_REQUIRED);
         return;
       }
-      String requestOrigin = request.getHeader("Origin");
+      String requestOrigin = request.getHeader(HEADER_ORIGIN);
       final String origin = StringUtils.isBlank(requestOrigin)
           ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
       try {
-        JSONObject result = hostedCheckoutService.createSession(account.getEmail(), clientName, origin);
+        JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
+            clientName, origin);
         writeResponse(response, HttpServletResponse.SC_CREATED, result);
       } catch (IllegalStateException e) {
-        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, "CHECKOUT_NOT_CONFIGURED",
-            "Checkout is not configured", "Checkout is not configured");
+        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
+            CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
       } catch (Exception e) {
         log.error("Could not create hosted checkout session", e);
         writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "CHECKOUT_PROVIDER_ERROR",
@@ -522,56 +638,317 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     });
   }
 
+  /**
+   * Creates a new account-level purchase. The local contract is provider-neutral; the existing
+   * hosted checkout service is only the first adapter behind this boundary.
+   */
+  private void handleBillingPurchaseCreate(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    runWithAuthenticatedAccount(request, response, "billing-purchase-create", account -> {
+      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+      OBContext.setAdminMode(true);
+      boolean billingOwner;
+      try {
+        billingOwner = EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(account.getEmail());
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+      if (!billingOwner) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, BILLING_OWNER_REQUIRED,
+            BILLING_OWNER_MESSAGE, BILLING_OWNER_MESSAGE);
+        return;
+      }
+      JSONObject body = readJsonBodyOrBadRequest(request, response);
+      if (body == null) return;
+      String clientName = body.optString(FIELD_CLIENT_NAME, "").trim();
+      if (clientName.isEmpty()) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+            CLIENT_NAME_REQUIRED, CLIENT_NAME_REQUIRED);
+        return;
+      }
+      CheckoutRequest activePurchase = checkoutRequestStore
+          .findActiveForAccountAndClientName(account.getEmail(), clientName);
+      if (activePurchase != null) {
+        handleExistingBillingPurchase(request, response, account, activePurchase);
+        return;
+      }
+      String requestOrigin = request.getHeader(HEADER_ORIGIN);
+      final String origin = StringUtils.isBlank(requestOrigin)
+          ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+      try {
+        JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
+            clientName, origin);
+        writeResponse(response, HttpServletResponse.SC_CREATED, result);
+      } catch (IllegalStateException e) {
+        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
+            CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
+      } catch (Exception e) {
+        log.error("Could not create account billing purchase", e);
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
+            "Unable to create billing purchase", "Unable to create billing purchase");
+      }
+    });
+  }
+
+  private void handleExistingBillingPurchase(HttpServletRequest request,
+      HttpServletResponse response, Account account, CheckoutRequest activePurchase)
+      throws IOException, JSONException {
+    String status = activePurchase.getCheckoutRequestStatus();
+    if ("CREATING".equals(status) || "CREATED".equals(status)) {
+      String requestOrigin = request.getHeader(HEADER_ORIGIN);
+      final String origin = StringUtils.isBlank(requestOrigin)
+          ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+      try {
+        JSONObject result = hostedCheckoutService.reopenSession(activePurchase.getRequest(),
+            account.getEmail(), activePurchase.getClientName(), origin);
+        writeResponse(response, HttpServletResponse.SC_OK, result);
+      } catch (IllegalStateException e) {
+        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
+            CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
+      } catch (Exception e) {
+        log.error("Could not reopen account billing purchase", e);
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
+            "Unable to reopen billing purchase", "Unable to reopen billing purchase");
+      }
+      return;
+    }
+    JSONObject result = new JSONObject();
+    result.put("purchaseId", activePurchase.getRequest());
+    result.put(FIELD_STATUS, status);
+    result.put(FIELD_CLIENT_NAME, activePurchase.getClientName());
+    writeResponse(response, HttpServletResponse.SC_CONFLICT, result);
+  }
+
   private void handleCheckoutStatus(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     String prefix = "/checkout/sessions/";
     String path = request.getPathInfo();
     String requestId = path != null && path.startsWith(prefix) ? path.substring(prefix.length()) : "";
     runWithAuthenticatedAccount(request, response, "checkout-status", account -> {
-      CheckoutPaymentRegistry.Payment payment = CheckoutPaymentRegistry.find(requestId,
-          account.getEmail());
+      CheckoutRequest checkoutRequest = checkoutRequestStore.find(requestId, account.getEmail());
+      // Answers "pending" for an unknown request id, for another account's request id, and for a
+      // genuinely unpaid one alike. That is deliberate: the endpoint must never confirm that a
+      // request id exists, and the account predicate inside find() is what enforces it.
+      boolean paid = checkoutRequest != null
+          && checkoutRequestStore.isPaidFor(requestId, account.getEmail(), null);
       JSONObject result = new JSONObject();
       result.put("requestId", requestId);
-      result.put(FIELD_STATUS, payment == null ? "pending" : "paid");
-      if (payment != null) result.put(FIELD_CLIENT_NAME, payment.clientName);
+      result.put(FIELD_STATUS, paid ? "paid" : "pending");
+      if (paid) result.put(FIELD_CLIENT_NAME, checkoutRequest.getClientName());
       writeResponse(response, HttpServletResponse.SC_OK, result);
     });
   }
 
+  /** Account-level billing overview; it remains available when every ERP environment is blocked. */
+  private void handleBillingOverview(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "billing-overview", account -> {
+      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+      OBContext.setAdminMode(true);
+      try {
+        JSONObject result = new JSONObject();
+        result.put(FIELD_ACCOUNT_EMAIL, account.getEmail());
+        result.put("canManageBilling",
+            EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(account.getEmail()));
+        org.codehaus.jettison.json.JSONArray purchases = new org.codehaus.jettison.json.JSONArray();
+        for (CheckoutRequest purchase : checkoutRequestStore.findForAccount(account.getEmail())) {
+          purchases.put(buildBillingPurchaseJson(purchase));
+        }
+        result.put("purchases", purchases);
+        writeResponse(response, HttpServletResponse.SC_OK, result);
+      } catch (JSONException e) {
+        log.error("JSON error building billing overview", e);
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    });
+  }
+
+  /** Returns the server-owned offer projection used by the account billing UI. */
+  private void handleBillingOffers(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    runWithAuthenticatedAccount(request, response, "billing-offers", account -> {
+      try {
+        BillingOfferConfiguration.Offer offer = BillingOfferConfiguration.current();
+        JSONObject result = new JSONObject();
+        result.put("code", "productive-tenant");
+        result.put("amountMinor", offer.getAmountMinor());
+        result.put(FIELD_CURRENCY, offer.getCurrency());
+        result.put("interval", offer.getInterval());
+        writeResponse(response, HttpServletResponse.SC_OK, result);
+      } catch (JSONException e) {
+        log.error("JSON error building billing offer", e);
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+      }
+    });
+  }
+
+  /** Returns one account-scoped purchase projection, with foreign IDs kept indistinguishable. */
+  private void handleBillingPurchase(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    String prefix = "/billing/purchases/";
+    String purchaseId = request.getPathInfo().substring(prefix.length());
+    runWithAuthenticatedAccount(request, response, "billing-purchase", account -> {
+      CheckoutRequest purchase = checkoutRequestStore.find(purchaseId, account.getEmail());
+      if (purchase == null) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, "PURCHASE_NOT_FOUND",
+            "Purchase not found", "Purchase not found");
+        return;
+      }
+      try {
+        writeResponse(response, HttpServletResponse.SC_OK, buildBillingPurchaseJson(purchase));
+      } catch (JSONException e) {
+        log.error("JSON error building billing purchase", e);
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+      }
+    });
+  }
+
+  private JSONObject buildBillingPurchaseJson(CheckoutRequest purchase) throws JSONException {
+    JSONObject result = new JSONObject();
+    result.put("purchaseId", purchase.getRequest());
+    result.put(FIELD_STATUS, StringUtils.defaultString(purchase.getCheckoutRequestStatus(), "UNKNOWN"));
+    result.put(FIELD_CLIENT_NAME, StringUtils.defaultString(purchase.getClientName()));
+    if (purchase.getCreatedClient() != null) {
+      result.put("createdClientId", purchase.getCreatedClient().getId());
+    }
+    if (purchase.getFailureReason() != null) {
+      result.put("failureReason", purchase.getFailureReason());
+    }
+    return result;
+  }
+
+  /**
+   * POST /sws/go/checkout/webhook — the provider's signed event delivery.
+   *
+   * <p>Signature, payload and idempotency are decided by {@link CheckoutWebhookProcessor} over the
+   * durable {@link BillingEventStore}, so a redelivery after a restart is answered as a duplicate.
+   * The wire contract:
+   *
+   * <ul>
+   *   <li>invalid signature → 400 {@code INVALID_CHECKOUT_SIGNATURE}, and unusable payload → 400
+   *       {@code INVALID_CHECKOUT_PAYLOAD}. The provider does not retry either, which is correct:
+   *       neither can succeed on a second attempt.
+   *   <li>duplicate → 200 {@code {"received":true}} with nothing applied.
+   *   <li>accepted → the event is applied and its row marked {@code APPLIED} or {@code IGNORED}.
+   * </ul>
+   *
+   * <p><b>Two deliberate changes from the pre-ETP-5045 contract</b>, both chosen so that no event
+   * can be acknowledged without being recorded:
+   *
+   * <ol>
+   *   <li>A payment-type event whose {@code data.object} is missing used to be a 400
+   *       {@code INVALID_CHECKOUT_PAYLOAD}; it is now 200 with the row marked {@code IGNORED}. The
+   *       claim has already committed by that point, so answering 400 would have left a recorded
+   *       event the provider stops retrying, with no explanation on the row.
+   *   <li>A {@link RuntimeException} while applying the event used to escape to the container as
+   *       an HTML 500; it is now a structured 500 {@code CHECKOUT_WEBHOOK_FAILED} with the row
+   *       marked {@code FAILED}. The status is what makes the provider retry, and the
+   *       {@code FAILED} row is what makes that retry re-claim rather than dismiss it.
+   * </ol>
+   */
   private void handleCheckoutWebhook(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     String payload = readRawBody(request);
     String signature = request.getHeader("Stripe-Signature");
-    if (!CheckoutWebhookVerifier.verify(payload, signature, CheckoutConfiguration.webhookSecret(),
-        Instant.now().getEpochSecond(), 300)) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "INVALID_CHECKOUT_SIGNATURE",
-          "Invalid checkout webhook signature", "Invalid checkout webhook signature");
+    CheckoutWebhookProcessor.Acceptance acceptance;
+    try {
+      acceptance = checkoutWebhookProcessor.evaluate(payload, signature,
+          CheckoutConfiguration.webhookSecret(), Instant.now().getEpochSecond());
+    } catch (RuntimeException e) {
+      // The claim itself failed, so nothing was recorded and there is no row to annotate. A 500
+      // is the only honest answer: it makes the provider redeliver an event we did not keep.
+      log.error("Checkout webhook event could not be claimed", e);
+      writeWebhookFailed(response);
       return;
     }
-    try {
-      JSONObject event = new JSONObject(payload);
-      String eventId = event.optString("id", "");
-      if (!CheckoutPaymentRegistry.claimEvent(eventId)) {
-        writeResponse(response, HttpServletResponse.SC_OK, new JSONObject().put("received", true));
+    switch (acceptance.result()) {
+      case INVALID_SIGNATURE:
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "INVALID_CHECKOUT_SIGNATURE",
+            "Invalid checkout webhook signature", "Invalid checkout webhook signature");
         return;
-      }
-      String type = event.optString("type", "");
-      if ("checkout.session.completed".equals(type)
-          || "checkout.session.async_payment_succeeded".equals(type)) {
-        JSONObject object = event.getJSONObject("data").getJSONObject("object");
-        JSONObject metadata = object.optJSONObject("metadata");
-        String requestId = metadata == null ? "" : metadata.optString("request_id", "");
-        String email = metadata == null ? "" : metadata.optString("account_email", "");
-        String clientName = metadata == null ? "" : metadata.optString("client_name", "");
-        if (!StringUtils.isBlank(requestId) && !StringUtils.isBlank(email)) {
-          CheckoutPaymentRegistry.recordPaid(requestId, email, clientName);
-        }
-      }
-      writeResponse(response, HttpServletResponse.SC_OK, new JSONObject().put("received", true));
-    } catch (JSONException e) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "INVALID_CHECKOUT_PAYLOAD",
-          "Invalid checkout webhook payload", "Invalid checkout webhook payload");
+      case INVALID_PAYLOAD:
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST, "INVALID_CHECKOUT_PAYLOAD",
+            "Invalid checkout webhook payload", "Invalid checkout webhook payload");
+        return;
+      case DUPLICATE:
+        writeWebhookReceived(response);
+        return;
+      default:
+        break;
     }
+    String eventId = acceptance.eventId();
+    String type = acceptance.event().optString("type", "");
+    try {
+      applyCheckoutEvent(eventId, type, acceptance.event());
+    } catch (RuntimeException e) {
+      // The full exception goes to the log; the audit column gets the class name and a fixed
+      // phrase only. A provider message can quote payload fragments, and FAILURE_REASON is
+      // required to stay operationally safe (no customer or card data) — see BillingEventStore.
+      log.error("Checkout webhook event '{}' ({}) could not be applied", eventId, type, e);
+      billingEventStore.markFailed(eventId,
+          "Handler failed while applying the event: " + e.getClass().getName());
+      writeWebhookFailed(response);
+      return;
+    }
+    writeWebhookReceived(response);
+  }
+
+  /**
+   * Applies one claimed event and records the outcome on its {@code ETGO_BILLING_EVENT} row.
+   *
+   * <p>Only the two payment-confirmation event types act; everything else is acknowledged and
+   * marked {@code IGNORED} with the reason, so the audit row says why nothing happened. An event
+   * whose correlation id names no checkout request is {@code IGNORED} too rather than
+   * {@code APPLIED}: nothing was recorded, and a row claiming otherwise would be a lie in the one
+   * place an operator goes to find out.
+   */
+  private void applyCheckoutEvent(String eventId, String type, JSONObject event) {
+    if (!CHECKOUT_PAID_EVENT_TYPES.contains(type)) {
+      billingEventStore.markIgnored(eventId, "unhandled event type");
+      return;
+    }
+    JSONObject data = event.optJSONObject("data");
+    JSONObject object = data == null ? null : data.optJSONObject("object");
+    JSONObject metadata = object == null ? null : object.optJSONObject("metadata");
+    String requestId = metadata == null ? "" : metadata.optString("request_id", "");
+    String email = metadata == null ? "" : metadata.optString("account_email", "");
+    if (StringUtils.isBlank(requestId) || StringUtils.isBlank(email)) {
+      billingEventStore.markIgnored(eventId, "missing correlation metadata");
+      return;
+    }
+    // The customer and subscription ids are read here and nowhere else: this is the only event
+    // that carries them alongside the correlation id, and every later subscription or invoice
+    // event arrives keyed by the subscription rather than by the request.
+    boolean recorded = checkoutRequestStore.recordPaid(requestId, object.optString("customer", ""),
+        object.optString("subscription", ""));
+    if (!recorded) {
+      billingEventStore.markIgnored(eventId, "unknown checkout request");
+      return;
+    }
+    billingEventStore.markApplied(eventId);
+    log.info("Checkout webhook event '{}' ({}) applied", eventId, type);
+  }
+
+  /**
+   * Acknowledges a webhook delivery the way the provider expects: 200 {@code {"received":true}}.
+   *
+   * <p>Built through the map constructor rather than {@code put}, which declares a
+   * {@link JSONException} that a one-key literal cannot raise — there is no failure here to
+   * handle, so there is no handler.
+   */
+  private void writeWebhookReceived(HttpServletResponse response) throws IOException {
+    writeResponse(response, HttpServletResponse.SC_OK, new JSONObject(Map.of("received", true)));
+  }
+
+  /**
+   * Refuses a webhook delivery with a structured 500, which is what makes the provider retry it.
+   */
+  private void writeWebhookFailed(HttpServletResponse response) throws IOException {
+    writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "CHECKOUT_WEBHOOK_FAILED",
+        "Checkout webhook event could not be applied",
+        "Checkout webhook event could not be applied");
   }
 
   // --- Endpoint handlers ---
@@ -593,7 +970,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     String email = body.optString(FIELD_EMAIL, "").trim();
     String language = body.optString(FIELD_LANGUAGE, "").trim();
-    String requestOrigin = request.getHeader("Origin");
+    String requestOrigin = request.getHeader(HEADER_ORIGIN);
     String origin = StringUtils.isBlank(requestOrigin)
         ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
     runWithAuthenticatedAccount(request, response, "create company invitation", account -> {
@@ -2108,6 +2485,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           + "'{}' and will read back as free", clientName, clientId,
           maskEmail(accountEmail), TenantPlanService.PLAN_PRODUCTIVE);
     } else {
+      if (!tenantEnvironmentLifecycleService.markProductive(clientId)) {
+        log.error("Paid environment '{}' (client {}) could not be marked in the lifecycle "
+            + "projection", clientName, clientId);
+      }
+      String demoClientId = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail);
+      if (demoClientId != null && !tenantEnvironmentLifecycleService
+          .associateDemoWithProductive(demoClientId, clientId)) {
+        log.error("Paid environment '{}' (client {}) could not be associated with demo {}",
+            clientName, clientId, demoClientId);
+      }
       revertTestModeForProductiveTenantBestEffort(clientId);
     }
   }
@@ -2253,48 +2640,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleOnboarding(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    if (!hasAnyCredential(request)) {
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
+    OnboardingPreparation preparation = prepareOnboarding(request, response);
+    if (preparation == null) {
       return;
     }
-    AuthenticatedAccount authenticated = null;
-    try {
-      authenticated = resolveAuthenticatedAccountContext(request, response);
-    } catch (RuntimeException e) {
-      log.error("Database error validating token for onboarding", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-    if (authenticated == null) {
-      return;
-    }
-    String accountId = authenticated.account.getId();
-    String accountEmail = authenticated.account.getEmail();
+    String accountId = preparation.accountId;
+    String accountEmail = preparation.accountEmail;
+    OnboardingRequestData onboardingRequest = preparation.request;
+    String currencyId = preparation.currencyId;
+    boolean paidUpgrade = preparation.paidUpgrade;
+    Long provisioningClaim = preparation.provisioningClaim;
 
-    // ETP-4798. Sits beside the paywall below, for the same reason: before the NDJSON stream opens
-    // and before any provisioning runs, so a refused request answers with plain JSON and leaves no
-    // half-created tenant behind.
-    if (rejectWhenEmailNotVerified(authenticated.account, response)) {
-      return;
-    }
-
-    OnboardingRequestData onboardingRequest = parseOnboardingRequest(request, response);
-    if (onboardingRequest == null) {
-      return;
-    }
-
-    String currencyId = resolveCurrencyId(onboardingRequest.currencyIso, response);
-    if (currencyId == null) {
-      return;
-    }
-
-    PaywallOutcome paywallOutcome =
-        resolveOnboardingPaywall(accountEmail, onboardingRequest, response);
-    if (paywallOutcome == PaywallOutcome.REFUSED) {
-      return;
-    }
-    boolean paidUpgrade = paywallOutcome == PaywallOutcome.PAID;
+    // Tracked across the try/catch/finally below. Provisioning has many graceful exits that
+    // `return` after writing a result line rather than throwing, so the catch block alone would
+    // miss most real failures — the dataset step is the common one.
+    boolean provisioningCompleted = false;
+    String failureReason = null;
 
     // Set up NDJSON streaming
     response.setStatus(HttpServletResponse.SC_OK);
@@ -2357,22 +2718,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
+      if (!paidUpgrade && !tenantEnvironmentLifecycleService.markDemoReady(clientId, Instant.now())) {
+        throw new IllegalStateException("Could not initialize demo trial lifecycle");
+      }
+
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
+      completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
+          provisioningClaim);
       // Activate the costing schedule now that its row is committed and therefore visible to the
       // scheduler's own DB connection. Best-effort: internally swallows failures, and the SCH row
       // is still picked up on the next scheduler initialization.
       onboardingCostingScheduleService.activateSchedule(clientId);
-      // ETP-4576: looked up by account id, not by bearer token - under the cookie session the
-      // request carries no token, and the id is already resolved from the authenticated session.
-      Account account = findAccountForCommittedOnboarding(accountId, accountEmail);
-      clearOnboardingDraftBestEffort(account);
-      String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
-      sendAuthEmailBestEffort("environment-ready",
-          () -> authEmailSender.sendEnvironmentReady(account, clientId, normalizedLanguage));
 
       sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
       sendProgress(writer, "finalize", "done", "Environment ready");
       sendFinalResult(writer, true, "Environment created successfully");
+      provisioningCompleted = true;
 
     } catch (Exception e) {
       log.error("Onboarding failed", e);
@@ -2380,28 +2741,182 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       sendProgress(writer, PROGRESS_ERROR, PROGRESS_ERROR,
           "Onboarding failed: " + e.getMessage());
       sendFinalResult(writer, false, "Onboarding failed: " + e.getMessage());
+      failureReason = e.getMessage();
     } finally {
+      recordProvisioningFailureReason(paidUpgrade, provisioningCompleted, onboardingRequest,
+          failureReason);
       // Stop the keepalive before the final flush so no heartbeat races the result line.
       heartbeat.shutdownNow();
       OBContext.restorePreviousMode();
       writer.flush();
-      warnIfOnboardingStreamLost(writer, accountEmail);
+      warnWhenOnboardingStreamWasLost(writer, accountEmail);
     }
   }
 
+  private OnboardingPreparation prepareOnboarding(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    // ETP-4575 — the credential is whatever the active scheme holds, not a bearer. develop's
+    // version opened with `extractBearerToken`, which is null under the cookie session, so every
+    // onboarding would have answered 401. `resolveAuthenticatedAccountContext` accepts the
+    // `__Host-` session and the legacy bearer alike, and hands back the resolved account, so the
+    // email and the id below come from the session rather than from decoding a token.
+    if (!hasAnyCredential(request)) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
+      return null;
+    }
+    AuthenticatedAccount authenticated;
+    try {
+      authenticated = resolveAuthenticatedAccountContext(request, response);
+    } catch (RuntimeException e) {
+      log.error("Database error validating the session for onboarding", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    if (authenticated == null) {
+      return null;
+    }
+    String accountId = authenticated.account.getId();
+    String accountEmail = authenticated.account.getEmail();
+    if (rejectWhenEmailNotVerified(authenticated.account, response)) {
+      return null;
+    }
+    OnboardingRequestData onboardingRequest = parseOnboardingRequest(request, response);
+    if (onboardingRequest == null) {
+      return null;
+    }
+    String currencyId = resolveCurrencyId(onboardingRequest.currencyIso, response);
+    if (currencyId == null
+        || rejectWhenPaidOnboardingIsNotOwned(accountEmail, onboardingRequest, response)) {
+      return null;
+    }
+    PaywallOutcome paywallOutcome =
+        resolveOnboardingPaywall(accountEmail, onboardingRequest, response);
+    if (paywallOutcome == PaywallOutcome.REFUSED) {
+      return null;
+    }
+    boolean paidUpgrade = paywallOutcome == PaywallOutcome.PAID;
+    Long provisioningClaim = claimPaidProvisioning(paidUpgrade, onboardingRequest, accountEmail,
+        response);
+    if (paidUpgrade && provisioningClaim == null) {
+      return null;
+    }
+    return new OnboardingPreparation(accountId, accountEmail, onboardingRequest, currencyId,
+        paidUpgrade, provisioningClaim);
+  }
+
   /**
-   * PrintWriter swallows IOExceptions (broken pipe): when CloudFront or any proxy hits its response
-   * timeout it silently drops the client mid-stream while the backend keeps running to completion
-   * (and commits). {@code checkError()} is the only way to detect it. Surface it explicitly so it
-   * stops being invisible in the logs.
+   * Claims the paid request for provisioning, refusing the call when another already holds it.
+   *
+   * <p>Claimed before the NDJSON stream opens, for the same reason the paywall is: a refusal must
+   * answer with plain JSON and leave nothing half-built. The claim is a conditional update, so of
+   * two concurrent calls for one payment exactly one proceeds — that is the
+   * reload-during-provisioning case, where the {@code ?checkout=success} URL stays live for the
+   * whole slow run. A free environment claims nothing and is never refused here.
+   *
+   * @param paidUpgrade whether this environment was bought rather than free
+   * @param onboardingRequest the parsed onboarding request
+   * @param accountEmail authenticated account email
+   * @param response response the refusal is written to
+   * @return true when the request was refused and the caller must stop
    */
-  private void warnIfOnboardingStreamLost(PrintWriter writer, String accountEmail) {
+  private Long claimPaidProvisioning(boolean paidUpgrade,
+      OnboardingRequestData onboardingRequest, String accountEmail, HttpServletResponse response)
+      throws IOException {
+    if (!paidUpgrade) {
+      return null;
+    }
+    if (checkoutRequestStore.claimForProvisioning(onboardingRequest.paymentToken, accountEmail)) {
+      Long attempt = checkoutRequestStore.findProvisioningAttempt(onboardingRequest.paymentToken,
+          accountEmail);
+      // A successful conditional update always has a persisted attempt. Keep the success path
+      // recoverable even if a legacy database omits that value.
+      return attempt == null ? 0L : attempt;
+    }
+    writeError(response, HttpServletResponse.SC_CONFLICT, "PROVISIONING_ALREADY_IN_PROGRESS",
+        "This environment is already being created",
+        "This environment is already being created. Please wait for it to finish.");
+    return null;
+  }
+
+  /**
+   * Logs an onboarding stream that was dropped before its result line reached the browser.
+   *
+   * <p>{@link PrintWriter} swallows {@code IOException} (broken pipe): when CloudFront or any
+   * proxy hits its response timeout it silently drops the client mid-stream while the backend
+   * keeps running to completion (and commits). {@code checkError()} is the only way to detect it.
+   * Surfaced explicitly so it stops being invisible in the logs.
+   *
+   * @param writer the NDJSON stream writer, already flushed
+   * @param accountEmail authenticated account email, masked before it is logged
+   */
+  private void warnWhenOnboardingStreamWasLost(PrintWriter writer, String accountEmail) {
     if (writer.checkError()) {
       log.warn("Onboarding stream to client was lost before the result line was delivered "
           + "(likely a CloudFront/proxy response timeout). The environment may have been "
           + "created successfully server-side, but the UI will report a false failure. "
           + "accountEmail={}", maskEmail(accountEmail));
     }
+  }
+
+  /**
+   * Bookkeeping that may only run once the tenant itself has committed.
+   *
+   * <p>Extracted from {@code handleOnboarding} to keep that method readable; the order of these
+   * steps is load-bearing and unchanged. Everything here is best-effort in the same spirit as
+   * {@link #applyPaidUpgradeSideEffects}: a tenant may commit with its checkout row unclosed
+   * rather than have provisioning rolled back over bookkeeping, and {@code DERIVED_STATUS}
+   * surfaces the gap as {@code STALLED} either way. Anything that does throw still reaches the
+   * caller's catch exactly as before.
+   *
+   * @param token bearer token of the onboarding request
+   * @param accountEmail authenticated account email
+   * @param onboardingRequest the parsed onboarding request
+   * @param clientId {@code AD_CLIENT_ID} of the environment just provisioned
+   * @param paidUpgrade whether this environment was bought rather than free
+   */
+  private void completeCommittedOnboarding(String accountId, String accountEmail,
+      OnboardingRequestData onboardingRequest, String clientId, boolean paidUpgrade,
+      Long provisioningClaim) {
+    if (paidUpgrade) {
+      try {
+        checkoutRequestStore.recordProvisioned(onboardingRequest.paymentToken, clientId,
+            provisioningClaim);
+      } catch (RuntimeException e) {
+        log.error("Environment '{}' (client {}) was provisioned but its checkout request could "
+            + "not be closed", onboardingRequest.clientName, clientId, e);
+      }
+    }
+    Account account = findAccountForCommittedOnboarding(accountId, accountEmail);
+    clearOnboardingDraftBestEffort(account);
+    String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
+    sendAuthEmailBestEffort("environment-ready",
+        () -> authEmailSender.sendEnvironmentReady(account, clientId, normalizedLanguage));
+  }
+
+  /**
+   * Annotates a paid checkout request that did not finish provisioning.
+   *
+   * <p>Annotation only, and deliberately never a status change: the row stays where provisioning
+   * left it so {@code DERIVED_STATUS} reports {@code STALLED}, rather than being marked terminal
+   * by a path that may itself be failing. {@code recordFailureReason} swallows its own errors for
+   * the same reason — a failed annotation must not turn one problem into two. Called from the
+   * onboarding {@code finally}, so it runs on every exit including the graceful ones that return
+   * after writing a result line.
+   *
+   * @param paidUpgrade whether this environment was bought rather than free
+   * @param provisioningCompleted whether provisioning reached its final result line
+   * @param onboardingRequest the parsed onboarding request
+   * @param failureReason the exception message when one was caught, otherwise null
+   */
+  private void recordProvisioningFailureReason(boolean paidUpgrade, boolean provisioningCompleted,
+      OnboardingRequestData onboardingRequest, String failureReason) {
+    if (!paidUpgrade || provisioningCompleted) {
+      return;
+    }
+    checkoutRequestStore.recordFailureReason(onboardingRequest.paymentToken,
+        failureReason != null ? failureReason : "Provisioning did not complete");
   }
 
   /**
@@ -2427,6 +2942,30 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
       return PaywallOutcome.REFUSED;
     }
+  }
+
+  /** Paid retries are billing mutations too and require a server-marked environment owner. */
+  private boolean rejectWhenPaidOnboardingIsNotOwned(String accountEmail,
+      OnboardingRequestData onboardingRequest, HttpServletResponse response) throws IOException {
+    if (StringUtils.isBlank(onboardingRequest.paymentToken)) {
+      return false;
+    }
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    boolean hasEnvironments;
+    boolean billingOwner;
+    try {
+      hasEnvironments = EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail(accountEmail) > 0;
+      billingOwner = EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(accountEmail);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    if (hasEnvironments && !billingOwner) {
+      writeError(response, HttpServletResponse.SC_FORBIDDEN, BILLING_OWNER_REQUIRED,
+          BILLING_OWNER_MESSAGE, BILLING_OWNER_MESSAGE);
+      return true;
+    }
+    return false;
   }
 
   /**
@@ -2507,8 +3046,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     try {
       boolean ownsEnvironment = EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail(accountEmail) > 0;
       boolean resuming = isResumingOwnedTenant(onboardingRequest.clientName, accountEmail);
-      boolean convertingDemo = "convert-demo".equalsIgnoreCase(onboardingRequest.upgradeAction);
-      return tenantPaywallService.evaluate(ownsEnvironment, resuming, convertingDemo,
+      return tenantPaywallService.evaluate(ownsEnvironment, resuming, false,
           onboardingRequest.paymentToken, accountEmail, onboardingRequest.clientName);
     } finally {
       OBContext.restorePreviousMode();
@@ -2580,7 +3118,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
       OnboardingRequestData data = new OnboardingRequestData();
       data.clientName = clientName;
-      data.currencyIso = body.optString("currency", "EUR").trim();
+      data.currencyIso = body.optString(FIELD_CURRENCY, "EUR").trim();
       data.language = body.optString(FIELD_LANGUAGE, "en_US").trim();
       // Country drives the org's tax resolution; default to Spain (ES) when the form omits it.
       data.countryCode = body.optString(FIELD_COUNTRY_CODE, "ES").trim();
@@ -2594,6 +3132,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.taxId = body.optString("fiscalIdValue", "").trim();
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
       data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
+      if ("convert-demo".equalsIgnoreCase(data.upgradeAction)) {
+        writeError(response, HttpServletResponse.SC_BAD_REQUEST,
+            "Demo environments cannot be converted; create a new productive environment");
+        return null;
+      }
       // ETP-4665: validate before the NDJSON stream opens. Past this point a length overflow
       // surfaces as a DAL ValidationException halfway through tenant creation, which rolls the
       // transaction back and reports the opaque "@CreateClientFailed@".
@@ -4176,6 +4719,26 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
   }
 
+  private static final class OnboardingPreparation {
+    private final String accountId;
+    private final String accountEmail;
+    private final OnboardingRequestData request;
+    private final String currencyId;
+    private final boolean paidUpgrade;
+    private final Long provisioningClaim;
+
+    private OnboardingPreparation(String accountId, String accountEmail,
+        OnboardingRequestData request, String currencyId, boolean paidUpgrade,
+        Long provisioningClaim) {
+      this.accountId = accountId;
+      this.accountEmail = accountEmail;
+      this.request = request;
+      this.currencyId = currencyId;
+      this.paidUpgrade = paidUpgrade;
+      this.provisioningClaim = provisioningClaim;
+    }
+  }
+
   private static class OnboardingRequestData {
     private String clientName;
     private String currencyIso;
@@ -4187,8 +4750,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // Same JSON key as ONBOARDING_DRAFT_FORM_FIELDS ("fiscalIdValue") for consistency.
     private String taxId;
     // Present only when the paid environment flow issued one (ETP-4686). Correlated against
-    // CheckoutPaymentRegistry: a token the Stripe webhook confirmed is what makes the resulting
-    // environment productive (ETP-4966).
+    // ETGO_CHECKOUT_REQUEST (CheckoutRequestStore): a token the Stripe webhook confirmed is what
+    // makes the resulting environment productive (ETP-4966, durable since ETP-5045).
     private String paymentToken;
     private String upgradeAction;
   }

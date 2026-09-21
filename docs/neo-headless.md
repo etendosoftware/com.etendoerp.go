@@ -1243,7 +1243,57 @@ comma-separated selection of active, compatible DB Extended sources. The browser
 tenant scope: DB Extended derives client and organization from `OBContext`; Go maps every requested
 namespace to its AD table and requires the active role to have entity read access before searching.
 
-Alternatively, pass `targets=sales-invoice` to select an active configured search target.
+Alternatively, pass `targets=sales-invoice` to select an active configured search target. The
+valid keys are the `Search Key` values of the active `ETARC_VECTOR_SEARCH_TARGET` rows.
+`NeoVectorSearchEndpoint.configuredTargetKeys()` returns them, and the MCP `neo_vector_search` tool
+publishes them as an `enum` on the `targets` parameter so an agent never has to guess one (IMP-41).
+
+**A target key IS the name of the spec that owns it (ETP-5335).** That is a convention, not a
+coincidence, and it is what lets a caller act on a result: a match found in target `X` is read with
+`neo_get(spec:"X", entity:<X's primaryEntity>, id:<match.id>)`. The entity comes from
+`neo_discover` — `neo_get` requires it and does not default to the primary one — so the convention
+removes the guess about *which spec*, not the lookup of which entity. It matters because a match carries
+`target`, `namespace`, `id`, `score` and `fields` — and **no** pointer to where the record lives, so
+without the convention the target name is the only clue and the caller is left guessing a spec from
+it. Three of the four targets already followed it; `contact`/`business-partner` did not, and reading
+one of its matches meant a failed `neo_get` first (the spec is `contacts`), so it was renamed to
+match.
+
+The convention is declared twice and enforced in neither place, which is the standing risk:
+`ETARC_VECTOR_SEARCH_TARGET.SEARCH_KEY` is what the server and the MCP answer with, while
+`artifacts/<spec>/decisions.json → window.vectorSearch.target` is what the React SPA sends — the
+contract is bundled into the app, and `ETGO_SF_*` carries no vector column at all, so neither side
+can see the other's value. Keep the two equal to each other and to the spec name. A pipeline
+validator rule (F11) enforcing exactly that is the open follow-up; until it exists, a one-sided
+rename makes the SPA send a key the server does not know, and the SPA renders that as *no results*
+rather than as an error (`useVectorSearch.js` maps any non-`ok` response to an empty match list).
+
+On the MCP surface `targets` is **optional**: omitted, the router substitutes every target the
+current role can read (`NeoVectorSearchEndpoint.authorizedTargetKeys()`, which filters per key so
+one unreadable index does not deny the whole search). That is the semantic-search equivalent of a
+global search box, and it is the right call when the caller does not already know which index holds
+the answer — which, for a natural-language question, is the normal case. A role that can read no
+index at all gets `no_searchable_vector_targets` with an explicit "do not retry" hint, rather than
+the bare 400 about a missing parameter that an empty target list would otherwise produce. The REST
+endpoint keeps its own contract unchanged: `query` plus either `targets` or `namespaces`.
+
+A requested key that is not in that set returns **`422 unknown_vector_target`**, not `403`. The body
+carries `unknownTargets` and `available` (capped at 20) so the caller can correct itself from the
+response alone:
+
+```json
+{ "error": { "status": 422, "code": "unknown_vector_target",
+             "message": "Unknown vector search target(s): sales-order. Retry with one of the keys in 'available'.",
+             "unknownTargets": ["sales-order"],
+             "available": ["contact", "product", "purchase-invoice", "sales-invoice"] } }
+```
+
+When DB Extended is not installed or not wired, the endpoint returns **`503`** and says so — again
+not `403`. Before IMP-41 all three conditions — module absent, key absent, role denied — returned
+the same `403 "Access denied to vector target"`, so a caller that had merely misspelled a key read
+it as a permission wall and stopped. Only a role that genuinely cannot read the target's source
+entity still gets `403`.
+
 Authorization resolves sources, targets, and included Schema Forge entities through OBDal.
 Metadata reads use `OBContext.setAdminMode(true)`, preserving client/organization filtering
 and allowing shared system-client configuration. The previous mode is restored in a
@@ -1253,9 +1303,10 @@ another client must remain denied. A matching window must be active and exposed 
 
 `query` and `namespaces` are required. `topK` defaults to `10` and is limited to `1..50`.
 `metadataFilter` is optional JSONB containment input for DB Extended. The response is its portable
-`{ namespaces, matches }` payload. Invalid request data returns `400`, unauthorized sources return
-`403`, controlled DB Extended capability/source failures return `422`, and provider failures return
-a sanitized `500`. Only `GET` is supported.
+`{ namespaces, matches }` payload. Invalid request data returns `400`, unauthorized sources and
+unauthorized targets return `403`, an unknown target key returns `422 unknown_vector_target`,
+controlled DB Extended capability/source failures return `422`, a missing DB Extended wiring returns
+`503`, and provider failures return a sanitized `500`. Only `GET` is supported.
 
 Schema Forge configures its consumer through the Vite contract
 `VITE_VECTOR_SEARCH_NAMESPACES`; leaving it empty disables semantic matches while normal page search
@@ -1611,6 +1662,10 @@ reference.
 
 #### 4.12.4 `neo_batch` failure envelope (IMP-15)
 
+> **`neo_batch` is switched off** since ETP-5335 (§4.12.9). This section describes the contract the
+> tool had, and the one it resumes if the flag is flipped back; the REST `/batch` endpoint it shares
+> `BatchService` with is unaffected and this envelope still applies there.
+
 `BatchService` serves both the REST `/batch` endpoint and `neo_batch`, and its failure body forwards
 the offending sub-response verbatim under `error.detail`. For a REST caller that is useful; for an
 agent it meant a raw DAL payload — `{"response":{"status":-4,"errors":{…}}}` — with no stable code to
@@ -1759,7 +1814,7 @@ metadata.
 | Section | Level | Purpose |
 |---|---|---|
 | `parent` | entity | How a child entity identifies its parent, and for which verbs the parent key is required (`field`, `entity`, `optionalFor`, `mode`, `reason`). See §6. |
-| `fields` | spec / entity / field | Reclassifies the MCP's view of field curation — `visibility`, `readOnly`, `businessCritical`, `reason`. |
+| `fields` | spec / entity / field | Reclassifies the MCP's view of field curation — `visibility`, `included`, `readOnly`, `businessCritical`, `reason`. |
 
 ##### The `fields` section
 
@@ -1767,6 +1822,7 @@ metadata.
 {
   "fields": {
     "visibility": "editable",
+    "included": true,
     "readOnly": false,
     "businessCritical": true,
     "reason": "why the shared curation is wrong for agent use"
@@ -1776,6 +1832,15 @@ metadata.
 
 - `visibility` — one of `editable`, `readOnly`, `system`, `discarded`. An unknown value is a
   validation error.
+- `included` — **the escape hatch for the exclusion gate of §4.12.10.** Since that change, a field
+  whose `ETGO_SF_FIELD` row says `ISINCLUDED = 'N'` is absent from `neo_schema` and refused by
+  `neo_list` and the write verbs. `included: true` reclaims it for the MCP and for the MCP only —
+  the REST and React layers read the row and never see this section. `included: false` does the
+  reverse: it removes from the agent surface a field the shared curation still exposes, without
+  touching what the UI shows. The default is right (`discarded` is a decision about the product
+  surface, and the agent surface should not quietly contradict it), but the two surfaces are not the
+  same surface, and a field a person never needs to see can be one an agent legitimately needs to
+  carry. Like `visibility`, it widens what is *offered*, never what is *allowed*.
 - `readOnly`, `businessCritical` — JSON booleans, unquoted. An absent key is *not* a configured
   `false`: it leaves the `ETGO_SF_FIELD` value standing.
 - `reason` — **mandatory** whenever the section is present, and non-blank. Every row of this section
@@ -1805,14 +1870,22 @@ gap. It was not taken here because that column is read by the REST and React lay
 backfill changes the shared contract for every existing consumer. The override is the deliberately
 low-risk path: MCP-only, blast radius of one entity. Only `bpLocation` carries it today.
 
-**One resolver, three readers.** `McpFieldView.of(SFField)` applies the resolved section and is the
-single source of `visibility` / `readOnly` / `businessCritical` / `isEditable` for all three places
+**One resolver, every reader.** `McpFieldView.of(SFField)` applies the resolved section and is the
+single source of `visibility` / `included` / `readOnly` / `businessCritical` / `isEditable` for the
+places
 that previously derived them independently — `McpSchemaFieldBuilder.loadFieldMetadata`
 (`neo_schema`), `McpQuerySupport.editablePropertyNames` (`neo_selectors`, which computed its own
 `isIncluded && !isReadOnly`) and `McpResourceProvider`. Without it an override honoured by only the
 first reader would have `neo_schema` and `neo_selectors` contradicting each other about the same
 field. A field that neither the row nor the override classifies still reports **no** `visibility`
 key, exactly as before.
+
+`included` is under the same rule and it matters more than the others: the exclusion gate of
+§4.12.10 is enforced by `neo_schema`, by `neo_list`'s filter resolution and by the write verbs, so a
+reader that queried `ISINCLUDED` in its own criteria would honour the override in one place and
+ignore it in the other two — reproducing exactly the three-way disagreement §4.12.10 exists to end.
+`McpQuerySupport.excludedPropertyNames` and `filterablePropertyNames` therefore load the rows and
+resolve through `McpFieldView`, never through a `Restrictions.eq` on the column.
 
 ##### Entity-level `AGENT_PROMPT` — a sibling column, not an `MCP_CONFIG` section
 
@@ -1895,6 +1968,465 @@ row. The construction rule is now declared once per session instead of paid for 
 `McpConstants.RECORD_REF_NOTE`, emitted in the `neo_schema` hint and as the `docs` preamble. That
 makes this an Agent Context Economy win as well as a fix (see the ACE index in
 `schema_forge/docs/mcp-evaluation/mcp-improvements-registry.md`).
+
+---
+
+#### 4.12.8 Server-derived mandatory fields on the MCP write path (ETP-5335)
+
+A column can be mandatory in AD, hidden from `neo_schema({view:"create"})` because Schema Forge
+classifies it `visibility:"system"`, and still have no working derivation behind it. The agent is
+then asked for a field it was never offered, in a 422 it cannot act on. Where the value is
+recoverable, the MCP derives it instead of refusing.
+
+**The case this exists for — `sales-order/header.invoiceAddress` (`C_Order.BillTo_ID`).**
+`SE_Order_BPartner` is the only writer of that column in the platform, and it writes it from one
+input, `inpcBpartnerId_LOC`. That is a selector auxiliary value, and NEO only produces those from
+OBUISEL selector fields flagged `isoutfield` **with a suffix**. The selector behind
+`C_Order.C_BPartner_ID` (reference `30` / `800057`) declares a single outfield, `identifier`, with a
+null suffix — so the aux value never exists and that branch of the callout never fires. The UI does
+not fill the column either: the only remaining producer of the `_LOC` suffix in core is the legacy
+Classic search popup (`SearchUniqueKeyResponse.html`), which reads a form field this version no
+longer has.
+
+What kept this invisible is an asymmetry in the *reach* of the mandatory check, not a derivation.
+`BillTo_ID` is `ismandatory='Y'` in AD while the physical column is nullable (`C_ORDER.xml`:
+`required="false"`), and the two create paths validate differently:
+
+| path | validator | scope |
+|---|---|---|
+| shared (React, REST, **`neo_batch`**) | `NeoMandatoryFieldValidator.findMissingMandatoryFields` | only properties the caller **submitted** (`userSubmittedFields`) — a mandatory field nobody mentions is never checked |
+| `neo_create` | `McpWriteRequestSupport.validateMandatoryFields` | **every** mandatory AD column, submitted or not |
+
+So the shared paths persist the null without complaint, and `neo_create` is the only caller that
+ever saw the problem.
+
+**Why the null is not harmless.** `C_INVOICE_CREATE` copies `Cur_Order.BillTo_ID` straight into
+`C_Invoice.C_BPartner_Location_ID` with no `COALESCE`, and that column *is* `NOT NULL` — so the
+order becomes one that cannot be invoiced through the PL/SQL path. The same address is what
+`C_GETTAX` reads `IsTaxExempt` and the partner tax category from, and one of the `InvoiceGrouping`
+keys.
+
+**Resolution order** (`McpBillToInjector`), most specific first:
+
+1. the ship-to already chosen for the document, when it belongs to the partner and is itself
+   flagged `IsBillTo` — keeps both addresses consistent, and is the whole story in a tenant where
+   each partner has one location;
+2. the partner's own active `IsBillTo` location;
+3. the ship-to as a last resort — the same fallback core applies in `SL_Order_Product` line 164.
+
+It abstains, leaving the body untouched, when the entity has no bill-to column, the column is not
+mandatory there (`C_Project.BillTo_ID` is optional and is deliberately not touched), the body
+already carries a value, the business partner is unknown or still a `$ref:` placeholder, or the
+partner exposes no usable location. The lookup runs in the caller's own DAL scope — no admin mode —
+so a location the role cannot read never becomes the invoicing address of a document it writes.
+
+**Where it runs.** `neo_create` runs it in `handleCreate`, before the mandatory check — this is the
+live call site. A second call site exists in the per-operation pre-pass `resolveBatchOpFkNames`,
+after the FK resolution so a partner given by name is already an id, but it is **dormant**:
+`neo_batch` is switched off (`McpConstants.BATCH_TOOL_ENABLED = false`, §4.12.9) and is neither
+published nor routable. It is kept wired so that flipping the flag back cannot silently reintroduce
+null bill-tos — on that path the missing value was never a 422 at all, because the shared
+`NeoCrudHandler` validator only checks submitted keys, so the document was simply persisted without
+one.
+
+**The REST `/sws/neo/batch` endpoint keeps the existing behaviour.** It shares `BatchService` but
+not the MCP pre-pass, and changing what the React frontend persists is out of scope for this fix.
+
+---
+
+#### 4.12.9 `neo_batch` is switched off (ETP-5335)
+
+`McpConstants.BATCH_TOOL_ENABLED` is `false`. The tool is not published in `tools/list`
+(`ToolRegistry`) **and** is refused if called by name (`McpToolRouter.route`) — withdrawing it from
+the listing alone would leave an agent that learned the name elsewhere reaching a code path we chose
+not to maintain, and a silent success there is worse than a refusal.
+
+**Why.** `neo_batch` and `neo_create` are two different implementations of "create".
+`neo_create` runs the MCP write pipeline in `handleCreate`; `neo_batch` delegates each operation to
+the shared REST path (`BatchService` → `NeoCrudHandler.handleDefault`). They had drifted apart in
+**both** directions:
+
+| | in `neo_create`, not in `neo_batch` |
+|---|---|
+| `validateMandatoryFields` | the full sweep of mandatory AD columns (the shared validator only checks keys the caller submitted) |
+| `coerceFieldTypes` + `buildInvalidDatesError` | the 422 for unreadable/ambiguous dates (ETP-4793 / IMP-24) |
+| `McpImageFieldSupport.validateImageFields` | which tool produces a valid image id (ETP-5184) |
+| `McpLinePriceInjector` | the unit price derived from the parent's price list |
+| `resolveFkSentinels` | the `"0"` sentinel cleanup |
+| entity pre-hook | `handleDefault` never goes through `handleWithHooks`, so `NeoHandler.handle()` does not run |
+
+| | in `neo_batch`, not in `neo_create` |
+|---|---|
+| `NeoCommercialLinePolicy.injectCommercialAmounts` | ETP-4855's net-before-gross ordering, reached only via `executePostCreate` |
+| `stripContactsPreCreateBillingDefaults` | — |
+| `handler.protectedCreateCalloutFields` | the fields each handler shields from the cascade |
+
+Keeping one write path correct is cheaper than keeping two in step, so the second is off until they
+converge.
+
+**What is given up.** Not the ability to create several records — an agent calls `neo_create` once
+per record — but **atomicity**. A batch was applied as a unit (IMP-23) and let a later operation
+reference an earlier one's id through `$ref:`. Without it, a run that fails halfway leaves the
+records already created in place, and the agent carries the parent id forward itself. The refusal
+says so, so an agent does not assume the two are equivalent:
+
+```json
+{
+  "status": 405,
+  "error": "tool_disabled",
+  "detail": "neo_batch is disabled on this server. Create the records one at a time with neo_create instead: create the parent first, then pass its returned id as parentId on each child create.",
+  "hint": "These are not equivalent in one respect: a batch was applied as a unit, so a failure undid the whole set. Separate creates are not undone — if one fails, the records already created stay. Check what exists before retrying.",
+  "seeAlso": "docs(topic:\"creating records\")"
+}
+```
+
+`tool_disabled` rather than `not_found` on purpose: the agent misspelled nothing and will not find a
+working variant by retrying.
+
+**Scope.** The flag governs the MCP tool only. The REST `/sws/neo/batch` endpoint is untouched and
+keeps serving its callers (the OCR purchase-invoice ingest), so `BatchService` stays live.
+`handleBatch` and the MCP-side pre-pass are kept as they are — flipping the flag to `true` restores
+the tool with nothing else to change.
+
+---
+
+#### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
+
+**A field the spec excludes is absent from `neo_schema`, refused by `neo_list` as a filter, and
+refused by `neo_create` / `neo_update` as a value.** Before this, only the read projection honoured
+the decision, and the three tools disagreed with one another about whether the same field existed.
+
+##### The defect
+
+`orderReference` (`C_Order.POReference`) is curated `visibility:"discarded"` on `sales-order/header`.
+Measured against a live instance:
+
+| Call | Answer |
+|---|---|
+| `neo_update(fields:{orderReference:"X"})` | `200`, value persisted |
+| `neo_get(id:…)` | field absent from the record |
+| `neo_list(filters:{orderReference:"X"})` | `200`, `totalRows: 1` |
+
+So an agent could set a value, be told the write succeeded, and then have no way to read it back —
+every read said empty while the database said otherwise. The same shape as a silent write failure,
+except the write actually worked.
+
+##### The cause, which was one cause and not three
+
+The MCP surface was built **from the AD table** and used the curated spec only as decoration. Only
+the read projection was built from the spec.
+
+- `McpSchemaFieldBuilder.buildSchemaFieldsArray` walked every active AD column and hung the curated
+  `visibility` on the result — it never filtered.
+- `McpQuerySupport.resolveFilterProperty` accepted any key that resolved against the **DAL model**,
+  while the `available` list it offered on refusal was scoped to the spec's **included rows**. The
+  set advertised and the set enforced were two different sets.
+- `McpWriteRequestSupport.mapFieldsToDalProperties` mapped names onto DAL properties and passed the
+  rest through, under an explicit comment stating that the MCP accepts *"all valid table columns
+  from AI agents, not just SF-configured ones"*.
+
+##### The rule now
+
+**Only an explicit exclusion excludes.** A field is refused when its `ETGO_SF_FIELD` row exists and
+carries `ISINCLUDED = 'N'` — which is what `push-to-neo.js` writes for the `discarded` decision.
+Read it through `McpFieldView.isIncluded()`, never off the row's `VISIBILITY` string: roughly half
+the excluded rows carry `ISINCLUDED = 'N'` with a **`NULL` visibility**, because the pipeline maps
+the decision to the booleans and leaves the string empty.
+
+**A column with no row at all is uncurated and stays exposed.** Absence of curation is not a
+decision — the same principle `addInvokability` already applies to buttons. There are ~1043 such
+columns across the curated entities of a typical instance (a column added to AD since the last
+`push-to-neo`, a table the spec never walked in full), and treating that silence as exclusion would
+remove them on nobody's authority. It also makes the ~21 handler-backed entities (dashboards,
+reports, reconciliation views), which have no field rows whatsoever, fall out correctly with no
+special case.
+
+**Buttons are exempt.** `IMP-21` settled that question the other way on measured evidence: an
+excluded action stays in the catalogue carrying `invokable:false` and a machine-readable
+`notInvokableReason`, because knowing an action exists but is out of scope is useful where being
+told it is callable when it is not is not. Filtering buttons here would silently revert it.
+
+##### The refusal says as little as possible
+
+Both refusals are deliberately **indistinguishable from the answer for a name that does not exist**:
+
+```
+neo_list   → 422 unknown_filter_field
+             "Field 'X' is not available for filtering on entity 'Y'"  + available[]
+neo_create → 422 field_not_allowed
+             "Field 'X' is not allowed on entity 'Y'"                  + available[]
+```
+
+Neither asserts nor denies that a column of that name exists. Two distinguishable answers would let
+any caller enumerate the columns of the underlying AD table by probing keys and reading which
+refusal came back — the response itself would confirm the existence of every field the spec was
+curated to hide. `available` carries what the entity does expose, which is the only part the caller
+is entitled to.
+
+##### The override
+
+The rule is a default, not a wall. `MCP_CONFIG → fields.included` (§4.12.6) reclaims an excluded
+field for the agent surface, or removes an exposed one, **for the MCP alone** — the REST and React
+layers read `ISINCLUDED` off the row and never see the section. It carries a mandatory `reason`, so
+every reclamation states on its own row why the shared curation was wrong for agent use, and like
+every other key in that section it widens what is *offered*, never what is *allowed*: a field
+reclaimed here still has to get past the DAL, AD's own `isUpdatable` and the caller's role.
+
+This is why the exclusion set is read through `McpFieldView` in all three paths rather than through a
+`Restrictions.eq` on `ISINCLUDED`. A criteria cannot see the override, so a reader using one would
+honour it in `neo_schema` and ignore it in `neo_list` and the write verbs — the same three-way
+disagreement this section exists to end, reintroduced by the fix for it.
+
+##### Scope and what is not fixed
+
+- **MCP only.** The REST layer keeps its own `NeoFieldFilter` and is untouched.
+- **`IMP-18` is not fixed here.** A key that resolves to no property at all still passes through the
+  write path in silence. The set refused here is only the explicitly excluded one.
+- **Injected values are unaffected.** The server's own injectors (`McpBillToInjector`,
+  `McpLinePriceInjector`, the mandatory-defaults pass) run *downstream* of the mapping, on the body
+  it returns, so they can still populate an excluded column when the platform requires it.
+
+---
+
+#### 4.12.11 A read-only field is refused on write, on both verbs (ETP-5335, IMP-48)
+
+**`neo_create` and `neo_update` reject a value sent for a field the spec publishes as
+`readOnly: true`.** Until this change the MCP write path had no read-only gate of any kind.
+
+##### The gap
+
+The rejection existed, and its reasoning was already written down — `NeoFieldFilter
+.filterCreateRequest` has thrown `ReadOnlyFieldRejectedException` since **IMP-28 clause 2**:
+
+> *"before this exception existed, such a field was silently dropped from the body — the request
+> returned 200 and the caller's value was discarded without any indication. An agent that had just
+> been told that this field is read-only should never send it in the first place; if it does anyway,
+> the honest response is a rejection, not a silent no-op."*
+
+`McpToolRouter` builds a `NeoFieldFilter` on all four CRUD routes — and calls it only for
+`filterGetResponse` and `applyProjection`, both read-side. `filterCreateRequest` appears nowhere in
+the `mcp` package. So the protection was built for REST and the MCP was outside it.
+
+##### What decided the outcome instead
+
+AD's `isUpdatable`, alone. On `sales-order/header`, of the seven curated read-only fields:
+
+| Field | Column | AD `isUpdatable` |
+|---|---|---|
+| `grandTotalAmount` | `GrandTotal` | N |
+| `documentStatus` | `DocStatus` | N |
+| `deliveryStatus` | `DeliveryStatus` | N |
+| `summedLineAmount` | `TotalLines` | N |
+| `processed` | `Processed` | N |
+| **`documentNo`** | `DocumentNo` | **Y** |
+| **`invoiceStatus`** | `InvoiceStatus` | **Y** |
+
+Five were barred by the platform. Two were not — so an agent told `readOnly: true` by `neo_schema`
+could rewrite an order's document number through `neo_update`, and nothing in the MCP said no.
+
+##### The rule
+
+A read-only field is rejected on **both** `neo_create` and `neo_update`. A field is read-only or it
+is not; which verb is asking does not change the answer, and `NeoFieldFilter`'s own javadoc already
+says there is no separate update-side set to consult.
+
+**The predicate is `rejectableOnCreateFields` (IMP-28 clause 2), but one of its two exemptions is
+deliberately not carried over** — and the reason is structural, not a difference of opinion about
+what read-only means.
+
+- **Dropped: the entity-wide `Java_Qualifier` exemption.** On REST, `filterCreateRequest` runs
+  *after* `handleWithHooks` has already invoked the entity's `NeoHandler` pre-hook, so it cannot
+  tell a value the handler injected (`InventoryLineHandler` sets `bookQuantity`) from one the client
+  sent — exempting the whole entity is the only safe answer available to it. **On the MCP path that
+  ambiguity does not exist:** the field mapping runs on the caller's own `fields` argument and
+  `McpHookExecutor.runPreHook` fires further down `handleCreate`, on the body the mapping returns.
+  Every key at the gate is the caller's by construction.
+- **Kept, but narrowed to the echo it exists for: the configured-AD-default exemption.** The
+  platform fills that column, and `neo_defaults` actively invites an agent to send resolved values
+  back in `fields` (the subject of IMP-45), so a default echoed into a write is a shape the
+  recommended sequence produces rather than a mistake. **It now covers the echo and nothing else:
+  a value equal to the column's literal default passes, a different one is refused.** As first
+  shipped it exempted any value at all, and a re-probe of IMP-30's 2026-08-13 body found the hole
+  still open — `documentStatus` carries the AD default `'DR'`, so `neo_create` accepted
+  `documentStatus: "CO"` and created a **completed order with zero lines and a grand total of 0**,
+  a state Etendo cannot otherwise reach. `grandTotalAmount`, which has no default, was correctly
+  refused in the same probe. A default that is an *expression* — `@#AD_Org_ID@`, `@SQL=…`,
+  `now()` — cannot be compared against what the caller sent, so those columns keep the blanket
+  exemption: narrowing one we cannot evaluate would refuse legitimate echoes with no way for the
+  caller to tell why.
+
+**Why the exemption mattered enough to measure.** 79 of the 128 writable entities declare a
+qualifier, and 783 curated read-only fields behind them are AD-updatable — keeping it would have
+left the rejection firing on under two fifths of the surface. The first implementation did keep it,
+and a live probe caught it: `neo_update` on `sales-order/header`, whose qualifier is
+`salesOrderHeaderHandler`, accepted `documentNo` and answered 200.
+
+Read-only-ness resolves through `McpFieldView`, so `MCP_CONFIG → fields.readOnly: false` reclaims a
+field for writing exactly as `fields.included` reclaims an excluded one (§4.12.6).
+
+##### The refusal names the reason, unlike §4.12.10's
+
+```
+422 read_only_field
+"Field 'documentNo' is read-only on entity 'header' and cannot be written"
+hint: "Remove it from 'fields' and retry. neo_schema reports this field with readOnly:true;
+       the server maintains its value."
+```
+
+This leaks nothing. `neo_schema` publishes the field carrying `readOnly: true`, so the refusal
+repeats what the caller was already told. The opaque wording of `field_not_allowed` is for a field
+the surface never named, where saying more would be saying too much.
+
+##### Server-injected values are unaffected
+
+The injectors (`McpBillToInjector`, `McpLinePriceInjector`, the mandatory-defaults pass) run
+*downstream* of the field mapping, on the body it returns. A derived read-only value the server
+fills for itself never passes through this gate — only a value the caller sent does.
+
+---
+
+#### 4.12.12 The write verbs report an unrecognised field instead of swallowing it (ETP-5335, IMP-18)
+
+**`neo_create` and `neo_update` return `unknownFields` for any key they could not map**, the same
+array `neo_schema`, `neo_list` and `neo_get` have returned since 2026-08-10.
+
+Before this, a body carrying a field that does not exist was created with `201`, no warning, and the
+value was never persisted — so no later read could contradict the success.
+
+```
+neo_create(sales-order/header, fields:{ reference:"X", … })
+→ 201 { …, "unknownFields": ["reference"],
+        "unknownFieldsHint": "These names were not mapped to a field of this entity, and no
+                              field of the record holds their value. Call neo_schema with
+                              view:\"create\" for the names this entity accepts." }
+```
+
+##### Why this reports rather than refuses, unlike §4.12.10 and §4.12.11
+
+The symmetry is tempting and it was measured and rejected. Of the **73 handler qualifiers reachable
+by an MCP write**, at least eight read request keys that are **not AD columns anywhere in the
+instance** — verified against `AD_COLUMN`, zero active rows for each:
+
+| Handler | Keys of its own |
+|---|---|
+| `InventoryLineHandler` | `formState`, `value` |
+| `ReturnMaterialReceiptHeaderHandler` | `lines`, `shipmentId` |
+| `ReturnToVendorShipmentHeaderHandler` | `lines`, `receiptId` |
+| `FinancialAccountTransactionsHandler` | `sourceAccountId`, `destinationAccountId`, `paymentRemoval`, `bankFee`, `transferDate` |
+| `GeneralLedgerConfigurationHandler` | `dimensions`, `general`, `generalAccounts` |
+| `GlJournalHeaderHandler` | `fieldValues`, `docAction` |
+| `InventoryStockReportHandler` | `includeZeroStock`, `M_Product_Category_ID` |
+| `MarkSubsanationHandler` | `isSubsanation` |
+
+Those keys travel through the exact branch a refusal would close. **This is the difference from the
+other two gates:** an excluded field and a read-only field are declared sets — `ETGO_SF_FIELD` says
+so, and the server can point at the row. "Unknown" is not a declared set, so a refusal could not
+tell a caller's typo from a handler's own protocol, and would break at least eight entities.
+
+The reporting is also the instrument that would make a refusal safe later: `unknownFields` in
+production is what produces the inventory of keys actually in use, which is the thing nobody has
+today. Refuse-by-declaration is the eventual shape; it needs that inventory first.
+
+##### The hint is worded to stay true when a handler did consume the key
+
+It says the name was not mapped to a field of this entity and no field of the record holds the
+value. Both halves are true whether the key was a typo or a handler's protocol. Saying the key was
+*ignored* would be a lie on the entities above, and a contract that lies in a knowable case is worse
+than one that says less.
+
+##### Not covered
+
+`parentId` is excluded from the report — it is a declared argument of both write tools, consumed by
+`resolveParentFK`, and naming it would make the warning noise on every child-record write.
+
+---
+
+#### 4.12.13 `neo_schema` requires an explicit `view` (ETP-5335, IMP-44)
+
+**`view` is a required argument of `neo_schema`,** with three values and no default:
+
+| `view` | What it returns | Size on `sales-order/header` |
+|---|---|---|
+| `"create"` | only the fields you may send, split required/optional | **5.4 kB** |
+| `"actions"` | only the callable buttons/processes | small |
+| `"full"` | every field, read-only and system ones included | **39.5 kB** |
+
+Before this, omitting `view` returned the full dump, and the response carried a hint at the bottom
+advising `view:"create"` instead — correct advice delivered after the bill was paid.
+
+##### Why the argument and not more wording
+
+The tool's own description has recommended `view:"create"` since **2026-08-06** (`6cc522f5`). On
+2026-09-15 three independent blind agents each called `neo_schema` with no `view`, paid the full
+dump, read the hint, and then called it again with `view:"create"`. One of them reported it
+unprompted, mid-task, while doing something else:
+
+> *"Buen hint, pero llega después de haberme cobrado los 47 KB. Debería estar en la descripción de
+> la tool, no en la respuesta."*
+
+It already was. So the default was the lever, not the prose: a projection nobody chooses is a
+projection everybody inherits.
+
+##### The same check closes a silent case
+
+`view:"summary"` is a real view on `neo_list` and `neo_get`. On `neo_schema` it was not recognised
+and fell through to the full dump — measured at the same 39 514 bytes as no `view` at all, so a
+caller asking for the *smallest* response received the *largest* one, with nothing to indicate the
+argument had been ignored. An unrecognised value now raises the same `422 view_required` as an
+absent one, listing the three that exist.
+
+```
+neo_schema(sales-order/header)                 → 422 view_required
+neo_schema(sales-order/header, view:"summary") → 422 view_required  (available: create, full, actions)
+neo_schema(sales-order/header, view:"create")  → 5.4 kB
+neo_schema(sales-order/header, view:"full")    → 39.5 kB
+```
+
+`fields:[…]` still narrows the dump, and now says so: it applies under `view:"full"` and is ignored
+by the two views that already define their own projection.
+
+---
+
+#### 4.12.14 `neo_create` reports a default your own value displaced (ETP-5335, IMP-45)
+
+**When a callout resolved a different value for a field the caller sent, the create returns
+`supersededDefaults`.** The caller's value still wins — nothing about which value is persisted has
+changed.
+
+```
+neo_defaults(sales-order/header)   → { paymentTerms: "…", paymentTerms$_identifier: "30 Días", … }
+neo_create(sales-order/header, fields:{ businessPartner:"…", paymentTerms:"…30 Días id…" })
+→ 201 { …, "supersededDefaults": { "paymentTerms": { "sent": "<30 Días id>",
+                                                     "callout": "<Inmediato id>" } },
+        "supersededDefaultsHint": "…" }
+```
+
+##### The trap this makes visible
+
+Both `neo_defaults` and `neo_create` tell an agent to call `neo_defaults` first and build on its
+result. `neo_defaults` resolves with **no business partner and no record context** — on
+`sales-order/header` it answers `paymentTerms: "30 Días"` from a generic default. The partner chosen
+a moment later implies `"Inmediato"`, and `SE_Order_BPartner` would resolve it during the create.
+
+But ETP-4784 protects a field the caller sent from being recomputed by a callout, deliberately and
+correctly: on the REST path that value came from a form a person filled in. An agent that followed
+the recommended sequence and echoed the whole defaults block back has, by that same rule, pinned a
+generic value over the partner-derived one — and the `201` says nothing.
+
+##### Why it reports rather than corrects
+
+The server cannot tell an echoed default from a value the user genuinely chose; both arrive as a
+key in `fields`. Silently overriding the second is a harder failure than reporting the first, so
+this follows §4.12.12: the write succeeds, and the divergence is named. The wording of both tools
+now asks for deliberate values rather than a blanket echo, and points at this key.
+
+##### Where it comes from
+
+`NeoDefaultsCascadeHelper.mergeCalloutUpdates` records the divergence at the exact point where
+`shouldKeepExistingValue` holds a callout back, so there are no false positives — a callout
+re-proposing the value already on the record records nothing, and `$_identifier` companion keys are
+skipped. It travels on `NeoContext.supersededDefaults`. **The REST path never reads it**: there the
+protected value came from a person, and there is nothing to warn about.
 
 ---
 
@@ -4413,3 +4945,103 @@ is exercised entirely through `UserRoleCompositionServiceOverlapIntegrationTest`
 **Callout endpoints.** Etendo callouts (field-change triggers) are not exposed through the API. A callout endpoint would allow clients to request server-side field recalculations when a field value changes.
 
 **Custom HQL selectors.** OBUISEL selectors with `isCustomQuery = true` are fully supported. The `executeCustomHqlQuery()` method handles custom HQL with org filtering, validation rules, search across searchable properties, and pagination.
+
+#### 4.12.15 `client` and `organization` are resolved from the session, never from the payload
+
+**The tenant a record belongs to is not a per-request choice.** `client` and `organization` are
+resolved from the caller's session on every write, on both verbs and on both the MCP and REST
+paths. A value supplied by the caller is discarded — never compared, never honoured.
+
+Etendo GO positions an account in one specific organization of one client, so selecting a
+different one is not a business act a caller can perform. It is either a client bug or an
+attempt to write into another tenant.
+
+**What this closes.** A `neo_create` carrying `organization` set to another org returned
+`200 OK`, and the record was then invisible to the session that created it (`404` on re-read):
+the write had landed in the other tenant. Neither column has an `ETGO_SF_FIELD` row, and the
+two write paths answered that absence in opposite ways:
+
+- **REST is a whitelist.** `NeoFieldFilter.filterCreateRequest` ends in
+  `filterBody(body, includedFields)`, built only from curated rows, so an uncurated key was
+  stripped. REST was safe **by accident, not by design** — curating `AD_Org_ID` as an included
+  field would have exposed it, and an inactive filter returns the body untouched.
+- **The MCP write gate is two deny-sets**, built from those same rows. `organization` resolves
+  to a real DAL property, so it was never "unknown"; it matched neither deny-set, passed both
+  gates, and reached `jsonService.add` with the caller's value intact.
+
+The policy is therefore stated once, in `NeoServerOwnedFields`, and both write paths call it.
+Implementing it separately on each side is how the same defect survived in two files after being
+closed (IMP-39).
+
+**Reading is unchanged.** Both fields stay in `neo_get`, `neo_list` and `neo_schema` responses.
+They are information the caller legitimately needs; only the write side changes.
+
+**The write is not refused.** The record is always created in the caller's own tenant, so there
+is nothing to fail. What the MCP path adds is telling the caller, when — and only when — the
+value it sent was not its own:
+
+```json
+{
+  "serverOwnedFields": {
+    "organization": { "sent": "1B8...E2", "session": "0F3...A9" }
+  },
+  "serverOwnedFieldsHint": "These fields are owned by the server and were resolved from your session, not from the values you sent. ..."
+}
+```
+
+Echoing back the value a read response handed you is silent, because nothing was taken from
+you. Sending a different tenant is reported, rather than discovered later from a `404` on the
+record you believe you just created — the failure shape §4.12.14 exists to avoid.
+
+REST does not report: its client is the SPA, which never sends these fields.
+
+**Update is in scope too.** An update that changed `organization` would relocate an existing
+record into another tenant — the same hole from the other direction.
+
+#### 4.12.16 The report catalogue answers the same question the execution does
+
+A report the role cannot run is no longer offered. `neo_discover` and the publication of the
+`generate_*` tool now resolve through the same rule that refuses the call, so the catalogue
+stops advertising what it will then deny.
+
+**What it looked like before.** Under a role holding no grant for it, `neo_discover` listed
+`tax-report` with `callable: true` and the `generate_tax_report` tool was published — and calling
+it answered `403`. Two surfaces asked the permissive shared gate (§4.12.15's fail-open, which a
+type-`R` spec with no linked process and no `AD_TAB_ID` falls through to), while the third asked
+the handler, which owns the real rule.
+
+**How they were joined.** `NeoHandler` gained an optional declaration:
+
+```java
+default boolean isAccessibleForCurrentRole() {
+  return true;
+}
+```
+
+The report handlers override it with the grant they already enforced, and
+`NeoAccessHelper.hasReportSpecAccess` consults it after the constituent-window tier. A handler
+that does not override answers `true`, so nothing that worked before changes.
+
+The declaration is deliberately coarser than the execution check where the two can differ: the
+aging report answers "may this role use it at all" (either the receivables or the payables
+grant), because a role granted one side must still see the report; the exact side-specific grant
+is enforced where the report runs and the requested side is known.
+
+**A role refusal is `403`, not `500`.** `authorizeSpecAccess` raises a `SecurityException`, which
+used to reach the router's generic handler and surface as `500 server_error`. A permanent
+authorization decision dressed as a server failure makes a client with a retry-on-5xx rule loop
+forever. Both refusal types are now mapped: `SecurityException` and Openbravo's own
+`OBSecurityException`, which does **not** extend it and therefore needs its own clause.
+
+```json
+{
+  "status": 403,
+  "error": "forbidden",
+  "detail": "Access denied to spec 'inventory-stock-report' for current role",
+  "hint": "Your role does not have access to this. The answer is the same every time, so do not retry: …"
+}
+```
+
+**The fail-open itself is not closed by this.** A report handler that declares nothing still
+passes. See `schema_forge docs/plans/2026-09-16-report-spec-access-fail-open.md` for the
+remaining work, including the guardrail test that would make the omission fail the build.
