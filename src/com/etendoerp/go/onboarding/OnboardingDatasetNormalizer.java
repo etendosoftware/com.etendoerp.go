@@ -448,6 +448,7 @@ public class OnboardingDatasetNormalizer {
     private final AccountElementTreeFilter accountElementTree = new AccountElementTreeFilter();
     private final DanglingCalendarFilter danglingCalendar = new DanglingCalendarFilter();
     private final DemoMasterDataFilter demoMasterData = new DemoMasterDataFilter();
+    private final TableCounterSequenceFilter tableCounterSequence = new TableCounterSequenceFilter();
 
     private boolean isExcludedRow(String tableName, Map<String, String> rawColumns) {
       // Sub-filters still operate on disjoint table sets, so a row excluded by one is never
@@ -455,9 +456,82 @@ public class OnboardingDatasetNormalizer {
       // untouched. Verified when DemoMasterDataFilter was added: its nine tables (financial
       // accounts, products, warehouses, locators, product categories and their four child tables)
       // overlap neither the account-element tables (C_ELEMENT*) nor the fiscal calendar ones.
+      // TableCounterSequenceFilter (ETP-5364) owns AD_SEQUENCE alone, which none of the other
+      // three touches.
       return accountElementTree.isExcludedRow(tableName, rawColumns)
           || danglingCalendar.isExcludedRow(tableName, rawColumns)
-          || demoMasterData.isExcludedRow(tableName, rawColumns);
+          || demoMasterData.isExcludedRow(tableName, rawColumns)
+          || tableCounterSequence.isExcludedRow(tableName, rawColumns);
+    }
+  }
+
+  /**
+   * ETP-5364 — skips the {@code DocumentNo_<table>} counters that Openbravo's
+   * {@code InitialClientSetup} has ALREADY created for the new client by the time this dataset is
+   * imported, so the tenant ends up with one of each instead of two.
+   *
+   * <p><b>The bug this closes.</b> Onboarding creates the client with {@code InitialClientSetup}
+   * (which writes 97 {@code DocumentNo_<table>} rows, {@code CREATEDBY='0'}, no mask) and then
+   * imports this dataset ~45s later, which re-inserted 96 of those same names as fresh rows
+   * ({@code CREATEDBY} = the tenant admin, mask {@code #######}). Measured fleet-wide before the
+   * fix: <b>9888 surplus {@code AD_Sequence} rows across 103 of 125 clients</b>, every duplicated
+   * name a {@code DocumentNo_*} one; not a single named document series was affected.
+   *
+   * <p><b>Why it matters, given that numbering appeared to work.</b> {@code ad_sequence_doc}
+   * increments EVERY row matching the name ({@code WHERE Name = … AND ad_client_id = …} — no org,
+   * no id) and then reads one back with a non-{@code STRICT} {@code SELECT INTO}, so PL/pgSQL takes
+   * an arbitrary row rather than raising. While both copies hold the same value either answer is
+   * correct — <b>140 pairs had already diverged</b>, and past that point the value actually applied
+   * is non-deterministic, with PostgreSQL free to relocate an updated row.
+   *
+   * <p><b>Not blamed on {@code generateOnboardingSequences}</b>, as earlier notes had it. Etendo's
+   * classic <i>Create Sequences</i> ({@code SequencesGenerator}) names its rows
+   * {@code <Table>-<Column>} and sets {@code AD_Column_ID}; only 206 such rows exist fleet-wide, so
+   * it produced none of the duplicates. Every duplicate carries {@code AD_Column_ID IS NULL}.
+   *
+   * <p><b>Why a filter and not a deletion from the source.</b> Same reason as
+   * {@link DemoMasterDataFilter} — see {@link OnboardingDemoMasterData} for the full account. The
+   * other consumer, {@code install.source} → {@code import.sample.data}, seeds the GOClient sample
+   * client from these files WHOLESALE: it never runs {@code InitialClientSetup}, so for that
+   * consumer the XML is the only source of those counters and deleting them would leave the sample
+   * client unable to number a document at all. (The deletion is also tempting because it produces
+   * no dangling foreign key — {@code OnboardingDatasetReferentialIntegrityTest} stays green — so
+   * the breakage would surface only when someone created a document in GOClient.)
+   *
+   * <p><b>Stateless and keyed on the name prefix</b>, like {@link DemoMasterDataFilter} and unlike
+   * the two order-dependent filters: the property that makes a row droppable is that the client
+   * setup creates it, and that is exactly what the {@code DocumentNo_<table>} name encodes, for
+   * whatever set of tables the running Etendo has.
+   *
+   * <p><b>{@link #GO_ONLY_COUNTERS} is the exception list and the thing to maintain.</b> Two names
+   * in this dataset are NOT created by {@code InitialClientSetup} — verified on the instance:
+   * exactly one row per client, in all 105 clients that have them, versus two for every other
+   * {@code DocumentNo_*} name. Dropping those would remove a counter the tenant has no other source
+   * for. A future {@code DocumentNo_*} row added to the dataset for a table the client setup does
+   * not cover must be added here, or it will be silently filtered out.
+   */
+  private static final class TableCounterSequenceFilter {
+    private static final String SEQUENCE_TABLE = "AD_SEQUENCE";
+    private static final String NAME_COLUMN = "NAME";
+    /** The name shape {@code InitialClientSetup} gives a per-table counter. */
+    private static final String TABLE_COUNTER_PREFIX = "DocumentNo_";
+
+    /**
+     * {@code DocumentNo_*} names this dataset must still ship, because the client setup does not
+     * create them. See the class javadoc for how that was established.
+     */
+    private static final Set<String> GO_ONLY_COUNTERS = Set.of(
+        "DocumentNo_C_ExtBP_Config_Filter_Opt",
+        "DocumentNo_C_ExtBP_Config_Prop_Opt");
+
+    private boolean isExcludedRow(String tableName, Map<String, String> rawColumns) {
+      if (tableName == null || !SEQUENCE_TABLE.equalsIgnoreCase(tableName)) {
+        return false;
+      }
+      String name = rawColumns.get(NAME_COLUMN);
+      return name != null
+          && name.startsWith(TABLE_COUNTER_PREFIX)
+          && !GO_ONLY_COUNTERS.contains(name);
     }
   }
 
