@@ -222,6 +222,11 @@ public class CheckoutRequestStore {
    * Finds a checkout request only when both the immutable account id and the normalized email
    * match the authenticated platform account. The email check remains defense in depth for
    * legacy rows; the account id is the actual tenancy boundary.
+   *
+   * @param requestId checkout request correlation id
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @return the matching request, or {@code null} when the identity tuple does not match
    */
   public CheckoutRequest find(String requestId, String accountId, String accountEmail) {
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
@@ -271,7 +276,13 @@ public class CheckoutRequestStore {
     }
   }
 
-  /** Strict account-scoped purchase list using the immutable account id. */
+  /**
+   * Lists recent purchase attempts using the immutable account id and normalized email.
+   *
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @return recent requests for the account
+   */
   public List<CheckoutRequest> findForAccount(String accountId, String accountEmail) {
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
     OBContext.setAdminMode(true);
@@ -320,7 +331,14 @@ public class CheckoutRequestStore {
     }
   }
 
-  /** Strict lookup of an active purchase by account id, email and environment name. */
+  /**
+   * Finds an active purchase by account id, email and environment name.
+   *
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @param clientName requested environment name
+   * @return the newest matching request, or {@code null} when none exists
+   */
   public CheckoutRequest findActiveForAccountAndClientName(String accountId, String accountEmail,
       String clientName) {
     if (StringUtils.isBlank(accountId) || StringUtils.isBlank(accountEmail)
@@ -368,7 +386,15 @@ public class CheckoutRequestStore {
             StringUtils.trimToEmpty(clientName)));
   }
 
-  /** Strict payment correlation including the immutable account id. */
+  /**
+   * Checks payment correlation including the immutable account id.
+   *
+   * @param requestId checkout request correlation id
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @param clientName requested environment name, when available
+   * @return {@code true} when a paid request matches the identity tuple
+   */
   public boolean isPaidFor(String requestId, String accountId, String accountEmail,
       String clientName) {
     CheckoutRequest request = find(requestId, accountId, accountEmail);
@@ -376,6 +402,19 @@ public class CheckoutRequestStore {
     boolean paid = rank(request.getCheckoutRequestStatus()) >= rank(STATUS_PAID);
     return paid && (StringUtils.isBlank(clientName)
         || StringUtils.equalsIgnoreCase(request.getClientName(), StringUtils.trimToEmpty(clientName)));
+  }
+
+  /**
+   * Atomically claims a paid request for provisioning using the authenticated account identity.
+   *
+   * @param requestId checkout request correlation id
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @return {@code true} when this caller won the claim
+   */
+  public boolean claimForProvisioning(String requestId, String accountId, String accountEmail) {
+    if (find(requestId, accountId, accountEmail) == null) return false;
+    return claimForProvisioning(requestId, accountEmail);
   }
 
   /**
@@ -397,19 +436,10 @@ public class CheckoutRequestStore {
    * renewed only by that stale-lease branch; {@code PROVISIONING_ATTEMPTS} carries the fencing
    * token.
    *
-   * @param requestId correlation id
-   * @param accountEmail authenticated account email
-   * @return true when this caller won the claim
+   * @param requestId checkout request correlation id
+   * @param accountEmail authenticated platform account email
+   * @return {@code true} when this caller won the claim
    */
-  /**
-   * Strict claim entry point. The legacy email-only method remains for old fixtures, but all
-   * authenticated onboarding callers must pass the account id through this overload.
-   */
-  public boolean claimForProvisioning(String requestId, String accountId, String accountEmail) {
-    if (find(requestId, accountId, accountEmail) == null) return false;
-    return claimForProvisioning(requestId, accountEmail);
-  }
-
   public boolean claimForProvisioning(String requestId, String accountEmail) {
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
     OBContext.setAdminMode(true);
@@ -481,7 +511,14 @@ public class CheckoutRequestStore {
     }
   }
 
-  /** Strict lookup of the provisioning claim using the immutable account id. */
+  /**
+   * Looks up the provisioning claim using the immutable account id.
+   *
+   * @param requestId checkout request correlation id
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @return current claim attempt, or {@code null} when no active claim exists
+   */
   public Long findProvisioningAttempt(String requestId, String accountId, String accountEmail) {
     CheckoutRequest request = find(requestId, accountId, accountEmail);
     if (request == null || !StringUtils.equals(STATUS_PROVISIONING,

@@ -57,6 +57,7 @@ public class TenantEnvironmentLifecycleService {
 
   private static final String PARAM_ATTRIBUTE = "attribute";
   private static final String PARAM_CLIENT_ID = "clientId";
+  private static final String PREFERENCE_CLIENT_PREDICATE = " and pref.";
   private static final Logger log = LogManager.getLogger(TenantEnvironmentLifecycleService.class);
 
   private final TenantPlanService tenantPlanService;
@@ -350,8 +351,8 @@ public class TenantEnvironmentLifecycleService {
   private void setPreference(String attribute, String value, Client client) {
     OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
         "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :" + PARAM_ATTRIBUTE
-            + " and pref." + Preference.PROPERTY_CLIENT + ".id = :" + PARAM_CLIENT_ID
-            + " and pref." + Preference.PROPERTY_ACTIVE + " = true");
+            + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_CLIENT + ".id = :" + PARAM_CLIENT_ID
+            + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_ACTIVE + " = true");
     query.setNamedParameter(PARAM_ATTRIBUTE, attribute);
     query.setNamedParameter(PARAM_CLIENT_ID, client.getId());
     query.setFilterOnReadableClients(false);
@@ -374,8 +375,8 @@ public class TenantEnvironmentLifecycleService {
   private String readPreference(String attribute, String clientId) {
     OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
         "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :" + PARAM_ATTRIBUTE
-            + " and pref." + Preference.PROPERTY_CLIENT + ".id = :" + PARAM_CLIENT_ID
-            + " and pref." + Preference.PROPERTY_ACTIVE + " = true");
+            + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_CLIENT + ".id = :" + PARAM_CLIENT_ID
+            + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_ACTIVE + " = true");
     query.setNamedParameter(PARAM_ATTRIBUTE, attribute);
     query.setNamedParameter(PARAM_CLIENT_ID, clientId);
     query.setFilterOnReadableClients(false);

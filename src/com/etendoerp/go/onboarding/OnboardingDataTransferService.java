@@ -35,7 +35,19 @@ import com.etendoerp.go.schemaforge.PriceListVersionResolver;
  */
 public class OnboardingDataTransferService {
   private static final Logger log = LogManager.getLogger(OnboardingDataTransferService.class);
+  private static final String SEARCH_KEY = "searchKey";
+  private static final String PRODUCT_SPEC = "product";
 
+  /**
+   * Transfers the selected products and contacts from the demo client into the target client.
+   *
+   * @param sourceClientId source demo client identifier
+   * @param targetClientId target productive client identifier
+   * @param targetOrgId target organization identifier
+   * @param products whether products and their first sales price should be transferred
+   * @param contacts whether business partners should be transferred
+   * @return transfer counters and a failure reason when the import did not commit
+   */
   public TransferResult transfer(String sourceClientId, String targetClientId, String targetOrgId,
       boolean products, boolean contacts) {
     if (StringUtils.isBlank(sourceClientId) || (!products && !contacts)) {
@@ -100,13 +112,13 @@ public class OnboardingDataTransferService {
     for (Product source : products) {
       String operationId = "product-" + source.getId();
       JSONObject body = new JSONObject();
-      putIfPresent(body, "searchKey", source.get("searchKey"));
+      putIfPresent(body, SEARCH_KEY, source.get(SEARCH_KEY));
       putIfPresent(body, "name", source.get("name"));
       putIfPresent(body, "description", source.get("description"));
       putIfPresent(body, "productType", source.get("productType"));
       putReference(body, "uOM", source.get("uOM"));
       putReference(body, "productCategory", source.get("productCategory"));
-      operations.put(operation("product", "product", operationId, body, null));
+      operations.put(operation(PRODUCT_SPEC, PRODUCT_SPEC, operationId, body, null));
 
       ProductPrice price = firstPriceByProduct.get(source.getId());
       if (price != null) {
@@ -115,14 +127,14 @@ public class OnboardingDataTransferService {
         putIfPresent(priceBody, "standardPrice", price.getStandardPrice());
         putIfPresent(priceBody, "listPrice", price.getListPrice());
         putIfPresent(priceBody, "priceLimit", price.getPriceLimit());
-        operations.put(operation("product", "price", "price-" + source.getId(), priceBody,
+        operations.put(operation(PRODUCT_SPEC, "price", "price-" + source.getId(), priceBody,
             operationId));
       }
     }
 
     for (BusinessPartner source : contacts) {
       JSONObject body = new JSONObject();
-      putIfPresent(body, "searchKey", source.get("searchKey"));
+      putIfPresent(body, SEARCH_KEY, source.get(SEARCH_KEY));
       putIfPresent(body, "name", source.get("name"));
       putIfPresent(body, "taxID", source.get("taxID"));
       putIfPresent(body, "etgoFirstname", source.get("etgoFirstname"));
@@ -166,7 +178,7 @@ public class OnboardingDataTransferService {
   private List<Product> filterNewProducts(List<Product> sourceProducts, String targetClientId) {
     return sourceProducts.stream()
         .filter(product -> !exists(Product.class, targetClientId,
-            String.valueOf(product.get("searchKey"))))
+            String.valueOf(product.get(SEARCH_KEY))))
         .toList();
   }
 
@@ -174,15 +186,15 @@ public class OnboardingDataTransferService {
       String targetClientId) {
     return sourceContacts.stream()
         .filter(contact -> !exists(BusinessPartner.class, targetClientId,
-            String.valueOf(contact.get("searchKey"))))
+            String.valueOf(contact.get(SEARCH_KEY))))
         .toList();
   }
 
   private <T extends BaseOBObject> boolean exists(Class<T> type, String clientId, String searchKey) {
     OBQuery<T> query = OBDal.getInstance().createQuery(type,
-        "as row where row.client.id = :clientId and row.searchKey = :searchKey");
+        "as row where row.client.id = :clientId and row." + SEARCH_KEY + " = :" + SEARCH_KEY);
     query.setNamedParameter("clientId", clientId);
-    query.setNamedParameter("searchKey", searchKey);
+    query.setNamedParameter(SEARCH_KEY, searchKey);
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     query.setMaxResult(1);
@@ -235,6 +247,7 @@ public class OnboardingDataTransferService {
     return query.list();
   }
 
+  /** Result counters returned by a data transfer operation. */
   public record TransferResult(int productsCopied, int contactsCopied, int failures,
       String failureReason) {
     static TransferResult empty() {

@@ -2884,11 +2884,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return account == null ? null : account.getId();
   }
 
-  private String resolveOnboardingAccountIdFromEmail(String accountEmail) {
-    Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(accountEmail);
-    return account == null ? null : account.getId();
-  }
-
   private String resolveOnboardingAccountEmail(String token, HttpServletResponse response)
       throws IOException {
     String accountEmail = null;
