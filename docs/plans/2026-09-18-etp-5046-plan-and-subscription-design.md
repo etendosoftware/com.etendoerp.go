@@ -1,4 +1,4 @@
-# ETP-5046 — Plan catalog and per-tenant subscription: design
+# ETP-5046 — Subscription Plan Catalog and per-tenant subscription: design
 
 Status: implemented on `feature/ETP-5046`. Supersedes the `ETGO_TenantPlan` `AD_Preference`
 marker as the source of truth for whether a tenant is paying.
@@ -15,9 +15,16 @@ Before this ticket the commercial state of a tenant was one `AD_Preference` row
 the entire product: the deployment property `etendo.go.checkout.price.id`. Selling a second
 plan, or changing a price, meant editing a property file and redeploying.
 
-Now there is a plan catalog (`ETGO_PLAN` + its `ETGO_PLAN_QUOTA` children) that commercial
-edits from Etendo Classic, and a per-tenant subscription record (`ETGO_SUBSCRIPTION`) that says
-who is on which plan, in which status, for which period, at which price.
+Now there is a **Subscription Plan Catalog** (`ETGO_PLAN` + its `ETGO_PLAN_QUOTA` children) that
+commercial edits from Etendo Classic, and a per-tenant subscription record (`ETGO_SUBSCRIPTION`)
+that says who is on which plan, in which status, for which period, at which price.
+
+> **Always write "Subscription Plan Catalog" in full, never a bare "catalog".** This module has
+> more than one catalog and the short form is ambiguous: ETP-5050's `ETGO_BILLING_RESOURCE` is the
+> *billing resource catalog* (what can be **metered**), while `ETGO_PLAN` is the Subscription Plan
+> Catalog (what can be **bought**). `ETGO_PLAN_QUOTA` is the join between the two. The data-fix
+> runner's ordered set of `.sql` files is also called a catalog in `run.js`. In code the name is
+> already explicit — `PlanCatalogService`, `planCatalog` — and prose should match it.
 
 ---
 
@@ -182,9 +189,9 @@ body containing `"priceId"` is *ignored, not validated*.
 - Valid key with no provider price (the legacy plan) → `503 CHECKOUT_NOT_CONFIGURED`.
 
 `CheckoutConfiguration.isConfigured()` now proves only that Stripe credentials exist. It used to
-also prove that *a purchasable thing existed*; that guarantee moved to the plan catalog, which is
-why both map onto the same `CHECKOUT_NOT_CONFIGURED` response. **This is the easiest thing in the
-ticket to lose silently in review.**
+also prove that *a purchasable thing existed*; that guarantee moved to the Subscription Plan
+Catalog, which is why both map onto the same `CHECKOUT_NOT_CONFIGURED` response. **This is the
+easiest thing in the ticket to lose silently in review.**
 
 ### 6.1 Deploy ordering — a real operational requirement
 

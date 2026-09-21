@@ -476,7 +476,7 @@ filtered on `AD_CLIENT_ID` is a silent no-op, so the end-condition count would n
 Phase F would be blocked forever with nothing reporting why.
 
 A tenant answered by the fallback reports `plan: "productive"` with **`planKey` and
-`subscriptionStatus` both JSON null**. There is genuinely no catalog row and no subscription behind
+`subscriptionStatus` both JSON null**. There is genuinely no Subscription Plan Catalog row and no subscription behind
 it; inventing a key such as `"legacy-productive"` would claim a row that does not exist and would
 hide the gap from anyone reading the payload.
 

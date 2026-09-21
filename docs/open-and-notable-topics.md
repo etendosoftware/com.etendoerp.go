@@ -4,7 +4,7 @@ A living register of the decisions still owed, the operational constraints that 
 from the code, and the traps that would otherwise be rediscovered the hard way.
 
 **Scope:** the whole billing development — ETP-5045 (durable checkout state), ETP-5050 (usage
-measurement), ETP-5046 (plan catalog + subscriptions), and what they hand to ETP-5047/5048/5051/5053.
+measurement), ETP-5046 (Subscription Plan Catalog + subscriptions), and what they hand to ETP-5047/5048/5051/5053.
 
 **Status key:** 🔴 decision owed · 🟠 constraint to respect · 🟡 known issue, worked around
 
@@ -261,7 +261,7 @@ together or they drift apart in silence.
   whichever way the payment itself was recorded.
 - The `ETGO_SubscriptionStatus` / `ETGO_SubscriptionDueAt` preferences are still read **when the
   tenant has no subscription row at all** (`ETP-5046-TRANSITIONAL-FALLBACK`). The order matters:
-  consulting them first would let the access policy and the plan catalog disagree about the same
+  consulting them first would let the access policy and the Subscription Plan Catalog disagree about the same
   tenant, which is the whole point of the unification. That block goes in Phase F with the rest of
   the fallback, once R37 has given every productive tenant a row.
 
@@ -310,7 +310,7 @@ trigger. Given §3.4's stake, firing more often is the safe direction, but it is
 
 `UsageMessages.atSafe` replaces `@` with `(at)` in any value interpolated into a user-facing
 message, because `OBMessageUtils` treats `@token@` as a substitution and an unescaped at-sign in a
-catalog search key, an HQL fragment or a Hibernate/CDI exception message can blank the message. The
+billing resource catalog search key, an HQL fragment or a Hibernate/CDI exception message can blank the message. The
 guard is sound and has 22 call sites.
 
 The **production surface is one line**:
@@ -351,7 +351,7 @@ Raised by Martin on 2026-09-18; not yet actioned.
 
 ### 🟡 4.6 `recordRequested` accepts a null plan that production cannot produce
 
-`CheckoutRequestStore.recordRequested(..., Plan plan)` records the catalog row being bought, so the
+`CheckoutRequestStore.recordRequested(..., Plan plan)` records the Subscription Plan Catalog row being bought, so the
 subscription opened after payment reflects **what the buyer actually saw** rather than whatever the
 plan says by then. `ETGO_CHECKOUT_REQUEST.ETGO_PLAN_ID` is nullable because rows predating ETP-5046
 have no plan.

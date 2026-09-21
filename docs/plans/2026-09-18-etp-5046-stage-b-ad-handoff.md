@@ -45,7 +45,7 @@ Existing IDs (references, tables, elements) must always be looked up, never gues
 
 ---
 
-## 1. Table `ETGO_PLAN` — the plan catalog
+## 1. Table `ETGO_PLAN` — the Subscription Plan Catalog
 
 ### AD_TABLE
 
@@ -102,7 +102,7 @@ Existing IDs (references, tables, elements) must always be looked up, never gues
 
 ### Window / tab / menu
 
-- Window **"Plans"**, `WINDOWTYPE=M`, **editable** — this is the catalog the system administrator
+- Window **"Plans"**, `WINDOWTYPE=M`, **editable** — this is the Subscription Plan Catalog the system administrator
   maintains.
 - Header tab **"Plan"** over `ETGO_PLAN`: `TABLEVEL=0`, `SEQNO=10`.
 - Child tab **"Quotas"** over `ETGO_PLAN_QUOTA`: `TABLEVEL=1`, `SEQNO=20` (see §2).
