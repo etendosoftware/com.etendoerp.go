@@ -231,7 +231,7 @@ public class AssetsHandlerTest {
 
       NeoContext ctx = buildContext("PATCH", body, "record-xyz");
       assertNull(handler.handle(ctx));
-      assertFalse("endDate should not be injected when record not found", body.has("depreciationEndDate"));
+      assertFalse("endDate should not be injected when entry not found", body.has("depreciationEndDate"));
     }
   }
 
@@ -426,21 +426,21 @@ public class AssetsHandlerTest {
 
   @Test
   public void testAfterHandleReturnsNullForNonCrudEndpoint() throws Exception {
-    JSONObject record = new JSONObject();
-    record.put("etgoAmortizationStatus", 17);
-    record.put("depreciationAmt", 600);
-    record.put("depreciatedValue", 100);
-    record.put("previouslyDepreciatedAmt", 0);
+    JSONObject entry = new JSONObject();
+    entry.put("etgoAmortizationStatus", 17);
+    entry.put("depreciationAmt", 600);
+    entry.put("depreciatedValue", 100);
+    entry.put("previouslyDepreciatedAmt", 0);
 
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.SELECTOR)
         .httpMethod("GET")
-        .previousResult(NeoResponse.ok(record))
+        .previousResult(NeoResponse.ok(entry))
         .build();
 
     assertNull(handler.afterHandle(ctx));
     // Untouched — SELECTOR responses are never recomputed by this handler.
-    assertEquals(17, record.getInt("etgoAmortizationStatus"));
+    assertEquals(17, entry.getInt("etgoAmortizationStatus"));
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -451,116 +451,116 @@ public class AssetsHandlerTest {
   public void testAfterHandleFlatRecordRecomputesToTwoDecimals() throws Exception {
     // (100 + 0) / 600 * 100 = 16.666... -> 16.67, matching the trigger's formula but
     // with 2-decimal precision instead of its integer ROUND(x) (which stores 17).
-    JSONObject record = new JSONObject();
-    record.put("etgoAmortizationStatus", 17);
-    record.put("depreciationAmt", 600);
-    record.put("depreciatedValue", 100);
-    record.put("previouslyDepreciatedAmt", 0);
+    JSONObject entry = new JSONObject();
+    entry.put("etgoAmortizationStatus", 17);
+    entry.put("depreciationAmt", 600);
+    entry.put("depreciatedValue", 100);
+    entry.put("previouslyDepreciatedAmt", 0);
 
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
         .httpMethod("GET")
         .recordId("record-123")
-        .previousResult(NeoResponse.ok(record))
+        .previousResult(NeoResponse.ok(entry))
         .build();
 
     assertNull(handler.afterHandle(ctx));
-    assertEquals(new BigDecimal("16.67"), record.get("etgoAmortizationStatus"));
+    assertEquals(new BigDecimal("16.67"), entry.get("etgoAmortizationStatus"));
   }
 
   @Test
   public void testAfterHandleAddsPreviouslyDepreciatedAmt() throws Exception {
     // (50 + 50) / 600 * 100 = 16.666... -> 16.67
-    JSONObject record = new JSONObject();
-    record.put("etgoAmortizationStatus", 17);
-    record.put("depreciationAmt", 600);
-    record.put("depreciatedValue", 50);
-    record.put("previouslyDepreciatedAmt", 50);
+    JSONObject entry = new JSONObject();
+    entry.put("etgoAmortizationStatus", 17);
+    entry.put("depreciationAmt", 600);
+    entry.put("depreciatedValue", 50);
+    entry.put("previouslyDepreciatedAmt", 50);
 
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
         .httpMethod("GET")
         .recordId("record-123")
-        .previousResult(NeoResponse.ok(record))
+        .previousResult(NeoResponse.ok(entry))
         .build();
 
     assertNull(handler.afterHandle(ctx));
-    assertEquals(new BigDecimal("16.67"), record.get("etgoAmortizationStatus"));
+    assertEquals(new BigDecimal("16.67"), entry.get("etgoAmortizationStatus"));
   }
 
   @Test
   public void testAfterHandleCapsAtHundred() throws Exception {
-    JSONObject record = new JSONObject();
-    record.put("etgoAmortizationStatus", 100);
-    record.put("depreciationAmt", 100);
-    record.put("depreciatedValue", 150); // over-depreciated edge case
-    record.put("previouslyDepreciatedAmt", 0);
+    JSONObject entry = new JSONObject();
+    entry.put("etgoAmortizationStatus", 100);
+    entry.put("depreciationAmt", 100);
+    entry.put("depreciatedValue", 150); // over-depreciated edge case
+    entry.put("previouslyDepreciatedAmt", 0);
 
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
         .httpMethod("GET")
         .recordId("record-123")
-        .previousResult(NeoResponse.ok(record))
+        .previousResult(NeoResponse.ok(entry))
         .build();
 
     assertNull(handler.afterHandle(ctx));
-    assertEquals(new BigDecimal("100.00"), record.get("etgoAmortizationStatus"));
+    assertEquals(new BigDecimal("100.00"), entry.get("etgoAmortizationStatus"));
   }
 
   @Test
   public void testAfterHandleZeroDenominatorYieldsZero() throws Exception {
-    JSONObject record = new JSONObject();
-    record.put("etgoAmortizationStatus", 5);
-    record.put("depreciationAmt", 0);
-    record.put("depreciatedValue", 100);
-    record.put("previouslyDepreciatedAmt", 0);
+    JSONObject entry = new JSONObject();
+    entry.put("etgoAmortizationStatus", 5);
+    entry.put("depreciationAmt", 0);
+    entry.put("depreciatedValue", 100);
+    entry.put("previouslyDepreciatedAmt", 0);
 
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
         .httpMethod("GET")
         .recordId("record-123")
-        .previousResult(NeoResponse.ok(record))
+        .previousResult(NeoResponse.ok(entry))
         .build();
 
     assertNull(handler.afterHandle(ctx));
-    assertEquals(new BigDecimal("0.00"), record.get("etgoAmortizationStatus"));
+    assertEquals(new BigDecimal("0.00"), entry.get("etgoAmortizationStatus"));
   }
 
   @Test
   public void testAfterHandleMissingDenominatorYieldsZero() throws Exception {
-    JSONObject record = new JSONObject();
-    record.put("etgoAmortizationStatus", 5);
+    JSONObject entry = new JSONObject();
+    entry.put("etgoAmortizationStatus", 5);
     // no depreciationAmt at all
-    record.put("depreciatedValue", 100);
-    record.put("previouslyDepreciatedAmt", 0);
+    entry.put("depreciatedValue", 100);
+    entry.put("previouslyDepreciatedAmt", 0);
 
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
         .httpMethod("GET")
         .recordId("record-123")
-        .previousResult(NeoResponse.ok(record))
+        .previousResult(NeoResponse.ok(entry))
         .build();
 
     assertNull(handler.afterHandle(ctx));
-    assertEquals(new BigDecimal("0.00"), record.get("etgoAmortizationStatus"));
+    assertEquals(new BigDecimal("0.00"), entry.get("etgoAmortizationStatus"));
   }
 
   @Test
   public void testAfterHandleFieldNotPresentIsNoop() throws Exception {
-    JSONObject record = new JSONObject();
-    record.put("depreciationAmt", 600);
-    record.put("depreciatedValue", 100);
+    JSONObject entry = new JSONObject();
+    entry.put("depreciationAmt", 600);
+    entry.put("depreciatedValue", 100);
     // no etgoAmortizationStatus field on the record — not included for this role/entity
 
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
         .httpMethod("GET")
         .recordId("record-123")
-        .previousResult(NeoResponse.ok(record))
+        .previousResult(NeoResponse.ok(entry))
         .build();
 
     assertNull(handler.afterHandle(ctx));
-    assertFalse(record.has("etgoAmortizationStatus"));
+    assertFalse(entry.has("etgoAmortizationStatus"));
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -602,14 +602,14 @@ public class AssetsHandlerTest {
 
   @Test
   public void testAfterHandleRecomputesEveryRecordInPlainDataArray() throws Exception {
-    JSONObject record = new JSONObject();
-    record.put("etgoAmortizationStatus", 17);
-    record.put("depreciationAmt", 600);
-    record.put("depreciatedValue", 100);
-    record.put("previouslyDepreciatedAmt", 0);
+    JSONObject entry = new JSONObject();
+    entry.put("etgoAmortizationStatus", 17);
+    entry.put("depreciationAmt", 600);
+    entry.put("depreciatedValue", 100);
+    entry.put("previouslyDepreciatedAmt", 0);
 
     JSONArray data = new JSONArray();
-    data.put(record);
+    data.put(entry);
     JSONObject body = new JSONObject();
     body.put("data", data);
 
@@ -620,7 +620,7 @@ public class AssetsHandlerTest {
         .build();
 
     assertNull(handler.afterHandle(ctx));
-    assertEquals(new BigDecimal("16.67"), record.get("etgoAmortizationStatus"));
+    assertEquals(new BigDecimal("16.67"), entry.get("etgoAmortizationStatus"));
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -629,21 +629,21 @@ public class AssetsHandlerTest {
 
   @Test
   public void testAfterHandleUnparseableDepreciationAmtDoesNotCrash() throws Exception {
-    JSONObject record = new JSONObject();
-    record.put("etgoAmortizationStatus", 17);
-    record.put("depreciationAmt", "not-a-number");
-    record.put("depreciatedValue", 100);
-    record.put("previouslyDepreciatedAmt", 0);
+    JSONObject entry = new JSONObject();
+    entry.put("etgoAmortizationStatus", 17);
+    entry.put("depreciationAmt", "not-a-number");
+    entry.put("depreciatedValue", 100);
+    entry.put("previouslyDepreciatedAmt", 0);
 
     NeoContext ctx = NeoContext.builder()
         .endpointType(NeoEndpointType.CRUD)
         .httpMethod("GET")
         .recordId("record-123")
-        .previousResult(NeoResponse.ok(record))
+        .previousResult(NeoResponse.ok(entry))
         .build();
 
     // Unparseable denominator -> optBigDecimal returns null -> treated as "no plan defined" (0).
     assertNull(handler.afterHandle(ctx));
-    assertEquals(new BigDecimal("0.00"), record.get("etgoAmortizationStatus"));
+    assertEquals(new BigDecimal("0.00"), entry.get("etgoAmortizationStatus"));
   }
 }

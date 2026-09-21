@@ -205,28 +205,28 @@ public class AssetsHandler implements NeoHandler {
    *   status = 0  when depreciationAmt is null or zero (no plan defined)
    * </pre>
    */
-  private static void recomputeAmortizationStatus(JSONObject record) {
-    if (record == null || !record.has(FIELD_ETGO_AMORTIZATION_STATUS)) {
+  private static void recomputeAmortizationStatus(JSONObject entry) {
+    if (entry == null || !entry.has(FIELD_ETGO_AMORTIZATION_STATUS)) {
       return;
     }
     try {
-      BigDecimal denominator = optBigDecimal(record, FIELD_DEPRECIATION_AMT);
+      BigDecimal denominator = optBigDecimal(entry, FIELD_DEPRECIATION_AMT);
       if (denominator == null || denominator.compareTo(BigDecimal.ZERO) == 0) {
-        record.put(FIELD_ETGO_AMORTIZATION_STATUS, BigDecimal.ZERO.setScale(PERCENTAGE_SCALE));
+        entry.put(FIELD_ETGO_AMORTIZATION_STATUS, BigDecimal.ZERO.setScale(PERCENTAGE_SCALE));
         return;
       }
-      BigDecimal depreciatedValue = optBigDecimalOrZero(record, FIELD_DEPRECIATED_VALUE);
-      BigDecimal previouslyDepreciated = optBigDecimalOrZero(record, FIELD_PREVIOUSLY_DEPRECIATED_AMT);
+      BigDecimal depreciatedValue = optBigDecimalOrZero(entry, FIELD_DEPRECIATED_VALUE);
+      BigDecimal previouslyDepreciated = optBigDecimalOrZero(entry, FIELD_PREVIOUSLY_DEPRECIATED_AMT);
       BigDecimal numerator = depreciatedValue.add(previouslyDepreciated);
       BigDecimal percentage = numerator.multiply(HUNDRED)
           .divide(denominator, PERCENTAGE_SCALE, RoundingMode.HALF_UP);
       if (percentage.compareTo(HUNDRED) > 0) {
         percentage = HUNDRED.setScale(PERCENTAGE_SCALE);
       }
-      record.put(FIELD_ETGO_AMORTIZATION_STATUS, percentage);
+      entry.put(FIELD_ETGO_AMORTIZATION_STATUS, percentage);
     } catch (Exception e) {
       log.debug("AssetsHandler: skipping etgoAmortizationStatus recompute for record {}: {}",
-          record.opt("id"), e.getMessage());
+          entry.opt("id"), e.getMessage());
     }
   }
 
@@ -235,11 +235,11 @@ public class AssetsHandler implements NeoHandler {
    * {@link Number} or as a {@link String}). Returns {@code null} if absent, JSON-null, or
    * unparseable.
    */
-  private static BigDecimal optBigDecimal(JSONObject record, String key) {
-    if (record == null || !record.has(key) || record.isNull(key)) {
+  private static BigDecimal optBigDecimal(JSONObject entry, String key) {
+    if (entry == null || !entry.has(key) || entry.isNull(key)) {
       return null;
     }
-    Object raw = record.opt(key);
+    Object raw = entry.opt(key);
     if (raw instanceof BigDecimal) {
       return (BigDecimal) raw;
     }
@@ -247,7 +247,7 @@ public class AssetsHandler implements NeoHandler {
       return BigDecimal.valueOf(((Number) raw).doubleValue());
     }
     try {
-      String strVal = record.optString(key, null);
+      String strVal = entry.optString(key, null);
       return strVal != null && !strVal.isEmpty() ? new BigDecimal(strVal) : null;
     } catch (NumberFormatException e) {
       return null;
@@ -256,8 +256,8 @@ public class AssetsHandler implements NeoHandler {
 
   /** Same as {@link #optBigDecimal(JSONObject, String)}, but returns {@link BigDecimal#ZERO}
    * instead of {@code null} when the field is absent/unparseable. */
-  private static BigDecimal optBigDecimalOrZero(JSONObject record, String key) {
-    BigDecimal value = optBigDecimal(record, key);
+  private static BigDecimal optBigDecimalOrZero(JSONObject entry, String key) {
+    BigDecimal value = optBigDecimal(entry, key);
     return value != null ? value : BigDecimal.ZERO;
   }
 
