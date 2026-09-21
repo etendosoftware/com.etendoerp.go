@@ -6,7 +6,11 @@ from the code, and the traps that would otherwise be rediscovered the hard way.
 **Scope:** the whole billing development — ETP-5045 (durable checkout state), ETP-5050 (usage
 measurement), ETP-5046 (plan catalog + subscriptions), and what they hand to ETP-5047/5048/5051/5053.
 
-**Status key:** 🔴 decision owed · 🟠 constraint to respect · 🟡 known issue, worked around · 🟢 closed
+**Status key:** 🔴 decision owed · 🟠 constraint to respect · 🟡 known issue, worked around
+
+**This register carries only what is still live.** A topic is deleted once it is fixed or settled —
+it does not graduate to a "closed" section. The history stays in the commit that resolved it, which
+is the only copy that cannot drift from the code.
 
 ---
 
@@ -279,35 +283,7 @@ Phase F cleanup should settle which.
 
 ---
 
-## 4. Known issues — one fixed, the rest live
-
-### 🟢 4.1 `CheckoutRequestStore` leaked its `OBContext` — FIXED on ETP-5045
-
-Every method set `OBContext.setOBContext("0","0","0","0")` + admin mode, but its `finally` called
-only `restorePreviousMode()` — which pops the **admin-mode stack, not the context**. The caller's
-`OBContext` was silently replaced and never restored.
-
-Harmless for the callers that existed when it was written (the webhook path holds no context at
-all); **not** harmless from `applyPaidUpgradeSideEffects`, which runs after `prepareAdminContext`
-mid-onboarding where every later provisioning step depends on the context it was given.
-
-Fixed in `Feature ETP-5045: Restore the caller OBContext in CheckoutRequestStore`. All seven entry
-points now run through one private `runAsSystem(...)` wrapper that captures the caller's context
-and restores it in the `finally`. Two details worth keeping:
-
-- **Admin mode is restored BEFORE the context, and the order is load-bearing.**
-  `restorePreviousMode()` pops the stack and then inspects whichever context is current at that
-  moment; if the stack empties while the *caller's* context is installed, it would clear it —
-  reintroducing the same leak from the other end.
-- **`null` is a legitimate previous context** and must survive as `null`. A contextless caller is
-  left contextless, never upgraded to a system one.
-
-Neither restorer can throw, so a restore failure cannot mask the body's exception.
-
-**ETP-5046's caller-side workaround is now redundant but still correct** — the helper that captures
-the context around the store call, and `SubscriptionService` opening a system context only when
-there is none. Left in place deliberately: it is defensive rather than wrong, and unpicking it
-during a merge would be churn. Remove it whenever that file is next touched for its own reasons.
+## 4. Known issues
 
 ### 🟡 4.2 `ETGO_SF_FIELD` rows with a dangling `AD_COLUMN` break `update.database`
 
@@ -373,21 +349,6 @@ information.
 behaviour change — the cost being paid is maintenance drag and reviewer attention, not correctness.
 Raised by Martin on 2026-09-18; not yet actioned.
 
-### 🟢 4.5 `BillingEventStore` had the identical `OBContext` leak — FIXED
-
-`claim(...)` and `updateResult(...)` installed the system context and unwound with
-`restorePreviousMode()` alone, exactly as §4.1 did. Fixed on ETP-5046 with the same `runAsSystem`
-helper copied from `CheckoutRequestStore`, so the two classes now behave identically rather than
-one merely claiming in its javadoc to follow the other.
-
-Pinned by three specs in `BillingEventStoreIntegrationTest` ("Group 9"), mirroring Group 6 of the
-`CheckoutRequestStore` suite: every entry point hands back the **same** `OBContext` instance
-(`assertSame`, not an id comparison — `setOBContext(String,String,String,String)` builds a new
-object each call, so an equal-looking context is still the wrong one), a contextless caller is left
-contextless rather than upgraded to system, and a call that throws still restores. Each carries a
-sanity assertion on committed state, so a store that "restored the context" by doing no work would
-still fail.
-
 ### 🟡 4.6 `recordRequested` accepts a null plan that production cannot produce
 
 `CheckoutRequestStore.recordRequested(..., Plan plan)` records the catalog row being bought, so the
@@ -407,15 +368,16 @@ during the ETP-5045 merge because changing a method contract mid-merge is the wr
 
 ### 🟠 4.7 The rest of the `OBContext` survey — one real, one false alarm, one unread
 
-Chasing §4.1 and §4.5 raised the obvious question: how many more of these are there? A module-wide
+Fixing the same leak twice — in `CheckoutRequestStore` (ETP-5045) and then in `BillingEventStore`
+(ETP-5046) — raised the obvious question: how many more of these are there? Below is a module-wide
 survey of every class that installs a system context, with the verdict for each. **The grep alone
 lies in both directions** — it flags comments as calls and cannot see a guarded install — so each
 line below is the result of reading the code, not of counting matches.
 
 | Class | Verdict |
 |---|---|
-| `payment/CheckoutRequestStore` | ✅ fixed (§4.1) |
-| `payment/BillingEventStore` | ✅ fixed (§4.5) |
+| `payment/CheckoutRequestStore` | ✅ fixed on ETP-5045 |
+| `payment/BillingEventStore` | ✅ fixed on ETP-5046 |
 | `payment/SubscriptionService` | ✅ correct by design — `openSystemContextWhenAbsent()` sets a context only when there is none, and its javadoc already spells out this hazard |
 | `rest/TransactionalAuthEmailSender` | ✅ captures and restores |
 | `rest/CompanyInvitationService` | ❌ **real, unfixed** — see below |
@@ -470,17 +432,6 @@ Re-pricing a plan does **not** re-price existing subscribers — the subscriptio
 `PROVIDER_PRICE_ID` and amount snapshot, never rewritten by a plan edit. A plan change closes the
 current row (`END_DATE`) and inserts a successor, preserving price history. `PENDING_PLAN_ID` and
 `PENDING_EFFECTIVE_DATE` already exist, nullable and hidden, so no second AD pass is needed.
-
----
-
-## 6. Closed
-
-### 🟢 6.1 `ETGO_BILLING_RESOURCE` has two `ISIDENTIFIER='Y'` columns
-
-`Value` *and* `Name`. Raised during ETP-5046 as a possible latent defect; **confirmed fine** by
-Martin on 2026-09-18 — two identifier columns are a supported and intentional shape. `ETGO_PLAN`
-was given a single identifier (`Name`); adding `Value` alongside it would show the key in lookups
-and is a cosmetic choice, not a correctness one.
 
 ---
 
