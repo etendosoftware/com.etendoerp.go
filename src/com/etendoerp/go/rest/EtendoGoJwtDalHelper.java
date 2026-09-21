@@ -131,6 +131,11 @@ final class EtendoGoJwtDalHelper {
     return query.uniqueResult();
   }
 
+  /** Resolves only an account session token; environment JWTs are rejected for billing mutations. */
+  static Account findActiveAccountByPlatformToken(String token) {
+    return findActiveAccountByToken(token);
+  }
+
   /** Resolves either an account session token or the active environment JWT to its account. */
   static Account findActiveAccountByBearerToken(String token) {
     Account account = findActiveAccountByToken(token);

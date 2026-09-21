@@ -178,6 +178,17 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
    * subscription ids.
    */
   @Test
+  public void testFindRequiresTheImmutableAccountIdInAdditionToTheEmail() {
+    String ownerEmail = newEmail("same-email-owner");
+    String ownerId = createAccount(ownerEmail);
+    String requestId = createRequest(ownerId, ownerEmail);
+    String differentAccountId = createAccount(newEmail("same-email-intruder"));
+
+    assertNull("A matching email must not compensate for a different authenticated account id",
+        store.find(requestId, differentAccountId, ownerEmail));
+  }
+
+  @Test
   public void testFindReturnsNullForADifferentAccountsEmail() {
     String ownerEmail = newEmail("victim");
     String ownerId = createAccount(ownerEmail);
