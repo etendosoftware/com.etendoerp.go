@@ -25,6 +25,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -46,6 +47,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
+import org.mockito.MockedConstruction;
 import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
@@ -66,6 +68,7 @@ import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoResponse;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
+import com.etendoerp.go.schemaforge.NeoVectorSearchEndpoint;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
@@ -1456,6 +1459,87 @@ class McpToolRouterRouteTest {
         .contains("query and either targets or namespaces are required"));
   }
 
+  // ── neo_vector_search — omitted-targets substitution (IMP-41 follow-up) ─
+
+  @Nested
+  @DisplayName("route — neo_vector_search omitted-targets substitution")
+  class VectorSearchTargetSubstitutionTests {
+
+    @Test
+    @DisplayName("omitted targets are substituted with the full authorized list")
+    void omittedTargetsSubstituteAuthorizedList() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("query", "quotation");
+
+      try (MockedStatic<NeoVectorSearchEndpoint> endpointStatics =
+               mockStatic(NeoVectorSearchEndpoint.class);
+           MockedConstruction<NeoVectorSearchEndpoint> construction =
+               mockConstruction(NeoVectorSearchEndpoint.class, (endpointMock, context) ->
+                   when(endpointMock.handle(any(), any(), any(), any(), any(), any(), any()))
+                       .thenReturn(NeoResponse.ok(new JSONObject().put("items", new JSONArray()))))) {
+        endpointStatics.when(NeoVectorSearchEndpoint::authorizedTargetKeys)
+            .thenReturn(Optional.of(List.of("sales-quotation", "purchase-order")));
+
+        JSONObject result = router.route("neo_vector_search", args, READ_SCOPES);
+
+        assertFalse(result.optBoolean("isError"));
+        assertEquals(1, construction.constructed().size());
+        NeoVectorSearchEndpoint endpoint = construction.constructed().get(0);
+        verify(endpoint).handle(eq("quotation"), isNull(), eq("sales-quotation,purchase-order"),
+            isNull(), isNull(), isNull(), isNull());
+      }
+    }
+
+    @Test
+    @DisplayName("no readable target returns the dedicated refusal, not a generic 400")
+    void noReadableTargetsReturnsDedicatedRefusal() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("query", "quotation");
+
+      try (MockedStatic<NeoVectorSearchEndpoint> endpointStatics =
+               mockStatic(NeoVectorSearchEndpoint.class);
+           MockedConstruction<NeoVectorSearchEndpoint> construction =
+               mockConstruction(NeoVectorSearchEndpoint.class)) {
+        endpointStatics.when(NeoVectorSearchEndpoint::authorizedTargetKeys)
+            .thenReturn(Optional.of(Collections.emptyList()));
+
+        JSONObject result = router.route("neo_vector_search", args, READ_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+        assertTrue(text.contains("no_searchable_vector_targets"), "body must name the dedicated refusal code");
+        assertFalse(text.contains("query and either targets or namespaces are required"),
+            "must not read as the generic missing-parameter 400");
+        assertTrue(construction.constructed().isEmpty(),
+            "the endpoint must not even be constructed once the role has nothing to search");
+      }
+    }
+
+    @Test
+    @DisplayName("unreadable target catalog leaves targets null and defers to the endpoint")
+    void unreadableCatalogDefersToEndpoint() throws Exception {
+      JSONObject args = new JSONObject();
+      args.put("query", "quotation");
+
+      try (MockedStatic<NeoVectorSearchEndpoint> endpointStatics =
+               mockStatic(NeoVectorSearchEndpoint.class)) {
+        endpointStatics.when(NeoVectorSearchEndpoint::authorizedTargetKeys)
+            .thenReturn(Optional.empty());
+
+        // No mockConstruction here: the real endpoint runs, exactly as it did before this
+        // feature existed. With no substitution, both namespaces and targets stay empty, so the
+        // endpoint answers its own bad-request 400 without touching any DB.
+        JSONObject result = router.route("neo_vector_search", args, READ_SCOPES);
+
+        assertTrue(result.getBoolean("isError"));
+        String text = result.getJSONArray("content").getJSONObject(0).getString("text");
+        assertTrue(text.contains("query and either targets or namespaces are required"));
+        assertFalse(text.contains("no_searchable_vector_targets"),
+            "a null catalog must not be confused with an empty (all-denied) one");
+      }
+    }
+  }
+
   // ── docs ────────────────────────────────────────────────────────────────
 
   @Nested
@@ -1520,7 +1604,10 @@ class McpToolRouterRouteTest {
 
       assertFalse(result.has("isError"));
       String text = result.getJSONArray("content").getJSONObject(0).getString("text");
-      assertEquals("# Finance docs\nbody text", text);
+      // ETP-5306: the docs body is returned verbatim, preceded by the record-reference note —
+      // the construction rule that replaced the per-row `$ref` field.
+      assertTrue(text.endsWith("# Finance docs\nbody text"));
+      assertTrue(text.startsWith(McpConstants.RECORD_REF_NOTE));
     }
 
     @Test

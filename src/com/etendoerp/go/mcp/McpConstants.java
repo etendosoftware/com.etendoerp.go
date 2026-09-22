@@ -110,6 +110,9 @@ final class McpConstants {
   static final String ERROR_SERVER = "server_error";
   /** Machine-detectable error code for a write on an entity whose method flag is off (IMP-15). */
   static final String ERROR_METHOD_NOT_ALLOWED = "method_not_allowed";
+
+  /** A role-level refusal. Permanent for this role: re-sending the same call cannot succeed. */
+  static final String ERROR_FORBIDDEN = "forbidden";
   /**
    * Machine-detectable error code for a filter key that resolves to no property on the entity
    * (ETP-5184). Distinct from {@link #ERROR_VALIDATION} because the fix is specific and known:
@@ -121,12 +124,77 @@ final class McpConstants {
    * made {@code neo_list} on a child entity return every row in the table.</p>
    */
   static final String ERROR_UNKNOWN_FILTER_FIELD = "unknown_filter_field";
+  /** Machine-detectable code for a top-level argument the tool does not declare (IMP-40). */
+  static final String ERROR_UNKNOWN_ARGUMENT = "unknown_argument";
+
+  /**
+   * IMP-44: {@code neo_schema} was called without a {@code view}, or with a value that is not one
+   * of its three projections. Distinct from {@link #ERROR_VALIDATION} because the request is
+   * well-formed and the fix is a single named argument — and because the silent case it replaces
+   * was worse than an error: an unrecognised view (e.g. {@code "summary"}, which belongs to
+   * neo_list/neo_get, not here) used to fall through to the full dump, so the caller paid the
+   * largest response in the tool for asking for the smallest.
+   */
+  static final String ERROR_VIEW_REQUIRED = "view_required";
+
+  /**
+   * A write carried a field the spec does not expose on this entity (IMP-39).
+   *
+   * <p>Named for what the caller may do, not for what exists: a field curated out of a window and
+   * a field that was never a column of its table get this same code and the same message, so the
+   * response cannot be used to probe which columns the underlying AD table really has.</p>
+   */
+  static final String ERROR_FIELD_NOT_ALLOWED = "field_not_allowed";
+
+  /**
+   * A write carried a value for a field the spec exposes as read-only (IMP-48).
+   *
+   * <p>Distinct from {@link #ERROR_FIELD_NOT_ALLOWED} on purpose, and the distinction leaks
+   * nothing: {@code neo_schema} already publishes this field with {@code readOnly: true}, so
+   * naming the reason tells the caller only what it was told before it wrote. The other code
+   * covers a field the surface never named, where saying more would be saying too much.</p>
+   */
+  static final String ERROR_READ_ONLY_FIELD = "read_only_field";
   /**
    * Machine-detectable error code for a call on a child entity that did not name its parent
    * (ETP-5184). In Etendo a child record is only ever browsed inside one parent record — there is
    * no global list — so a child call without {@code parentId} has no correct answer to give.
    */
   static final String ERROR_PARENT_REQUIRED = "parent_required";
+  /**
+   * Machine-detectable error code for a tool that exists in this build but is switched off
+   * (ETP-5335). Distinct from {@link #ERROR_NOT_FOUND}: the agent did not misspell anything and
+   * will not find a working variant by retrying — the capability is deliberately unavailable, and
+   * the answer says what to use instead.
+   */
+  static final String ERROR_TOOL_DISABLED = "tool_disabled";
+  /**
+   * Whether {@code neo_batch} is published and routable (ETP-5335).
+   *
+   * <p><b>Off by decision, not by defect.</b> {@code neo_batch} and {@code neo_create} are two
+   * different implementations of "create": {@code neo_create} runs the MCP write pipeline in
+   * {@code McpToolRouter#handleCreate}, while {@code neo_batch} delegates each operation to the
+   * shared REST path through {@code BatchService} → {@code NeoCrudHandler#handleDefault}. They had
+   * drifted apart in both directions — {@code neo_batch} misses the full mandatory-column sweep,
+   * the unreadable-date 422, image-field validation, line-price derivation, FK-sentinel cleanup and
+   * the entity pre-hook; {@code neo_create} misses {@code injectCommercialAmounts}. Keeping one
+   * write path correct is cheaper than keeping two in step, so the second one is switched off until
+   * they converge.
+   *
+   * <p><b>What is given up.</b> Not the ability to create several records — an agent simply calls
+   * {@code neo_create} once per record — but <em>atomicity</em>: a batch rolls back as a unit
+   * (IMP-23) and lets a later operation reference an earlier one's id through {@code $ref:}. With
+   * it off, a run that fails halfway leaves the records already created in place, and the agent has
+   * to carry the parent id forward itself.
+   *
+   * <p><b>Scope.</b> This flag governs the MCP tool only. The REST {@code /sws/neo/batch} endpoint
+   * is untouched and keeps serving its callers (the OCR purchase-invoice ingest), so
+   * {@code BatchService} stays live either way.
+   *
+   * <p>To re-enable: flip to {@code true}. The tool then reappears in {@code tools/list} and routes
+   * again; nothing else has to change.
+   */
+  static final boolean BATCH_TOOL_ENABLED = false;
   /**
    * How many names an {@code available} list may carry before it is truncated (ETP-5184). Twenty
    * is enough for the agent to spot its own typo; a wide entity has 150+ properties and dumping
@@ -135,6 +203,8 @@ final class McpConstants {
   static final int MAX_AVAILABLE_NAMES = 20;
   /** HTTP-style status for a not-found result (IMP-5). */
   static final int STATUS_NOT_FOUND = 404;
+  /** HTTP-style status for a refusal the caller cannot fix by rewriting the request (IMP-41). */
+  static final int STATUS_FORBIDDEN = 403;
   /** HTTP-style status for a validation failure on a write (IMP-5). */
   static final int STATUS_UNPROCESSABLE = 422;
   /**
@@ -188,6 +258,21 @@ final class McpConstants {
   /** Key that points a structured error at a relevant {@code docs} recipe (IMP-10). */
   static final String KEY_SEE_ALSO = "seeAlso";
   /**
+   * Key inviting the agent to report what just went wrong through {@code neo_feedback} (B3).
+   * <p>
+   * A sibling of {@link #KEY_SEE_ALSO} rather than a reuse of it: {@code seeAlso} is single-valued
+   * and on the write paths it already carries a {@code docs} recipe, so writing the invitation
+   * there would delete the more actionable pointer at exactly the moment the agent needs it.
+   */
+  static final String KEY_FEEDBACK = "feedback";
+  /** The invitation itself. Present on error envelopes because that is when it is worth most. */
+  static final String FEEDBACK_INVITATION =
+      "If this error was confusing, or you had to guess at something, call neo_feedback to say so. "
+          + "It costs nothing, it is never charged against you, and it is the only way the people "
+          + "who build this API find out what it is like to use.";
+  /** Tool an agent calls to report friction in its own words (B3). */
+  static final String TOOL_NEO_FEEDBACK = "neo_feedback";
+  /**
    * Told to the agent by neo_get and neo_create so it knows a ready-made link is in the response
    * and never has to invent one (ETP-5200). Emitted only for header records, and only when the
    * deployment has a public app base URL configured — see {@link McpRecordUrls}.
@@ -196,6 +281,22 @@ final class McpConstants {
       "When the record is a spec's primaryEntity, the response carries a `url` field: the Etendo "
           + "Go link to that record. Use it verbatim when referring the user to the record — never "
           + "build a link by hand.";
+  /**
+   * How a reference to a record is written, declared once instead of shipped on every row
+   * (ETP-5306).
+   *
+   * <p>Records used to carry a prebuilt {@code $ref} field. It was removed because Gemini treats
+   * {@code $ref} as a reserved pointer into {@code function_response.parts} and rejects the whole
+   * response over it (see {@link McpResponseSanitizer}), and because it was pure redundancy —
+   * {@code _entityName} and {@code id} are on the same row. Removing the value must not remove the
+   * knowledge, so the construction rule is stated in the two places an agent learns shapes:
+   * {@code neo_schema}'s hint and the {@code docs} preamble.</p>
+   */
+  static final String RECORD_REF_NOTE =
+      "A reference to a record is written `<entityName>/<id>` — build it yourself from the "
+          + "`_entityName` and `id` fields that every row carries. No response ships a prebuilt "
+          + "reference field.";
+
   /** Hint advertised by neo_discover to route a cold agent to ready-to-run recipes (IMP-10). */
   static final String GUIDANCE_DOCS_HINT =
       "Call docs(topic:…) for ready-to-run recipes per task.";
@@ -223,6 +324,27 @@ final class McpConstants {
 
   /** Tool name for the amortization plan generation tool. */
   static final String TOOL_GENERATE_AMORTIZATION_PLAN = "neo_generate_amortization_plan";
+
+  /**
+   * The eight CRUD tool names. Declared here, beside the other tool names, so the enum in the
+   * tool definitions, the CRUD test in {@code ToolRegistry} and the router's dispatch all read
+   * the same spelling from one place.
+   */
+  static final String TOOL_NEO_LIST = "neo_list";
+  /** @see #TOOL_NEO_LIST */
+  static final String TOOL_NEO_GET = "neo_get";
+  /** @see #TOOL_NEO_LIST */
+  static final String TOOL_NEO_CREATE = "neo_create";
+  /** @see #TOOL_NEO_LIST */
+  static final String TOOL_NEO_UPDATE = "neo_update";
+  /** @see #TOOL_NEO_LIST */
+  static final String TOOL_NEO_DELETE = "neo_delete";
+  /** @see #TOOL_NEO_LIST */
+  static final String TOOL_NEO_SELECTORS = "neo_selectors";
+  /** @see #TOOL_NEO_LIST */
+  static final String TOOL_NEO_DEFAULTS = "neo_defaults";
+  /** @see #TOOL_NEO_LIST */
+  static final String TOOL_NEO_SCHEMA = "neo_schema";
 
   /** Tool name for the business-widget enum tool (gap G4, ETP-4284). */
   static final String TOOL_NEO_WIDGET = "neo_widget";

@@ -27,6 +27,7 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
@@ -302,6 +303,45 @@ public final class NeoCommercialLinePolicy {
       // log tying it back to this injection. That is exactly how ETP-4793 lost an afternoon.
       log.warn("Could not inject product-derived UOM for product {}: {}", productId, e.getMessage());
     }
+  }
+
+  /**
+   * ETP-5286 — re-derives {@code uOM} from the (possibly just-changed) {@code product} on a
+   * PATCH/PUT update, resolving the entity from its DAL name first.
+   * <p>
+   * {@code uOM} is a "system"-visibility field — readOnly by contract, so
+   * {@code NeoFieldFilter#filterWriteRequest} strips it before {@code NeoCrudHandler#executeUpdate}
+   * calls this — and its only legitimate source is the product, never the client: even though the
+   * frontend callout DOES echo the correct new {@code uOM} back in this same PATCH body (verified
+   * live, ETP-5286 repro), trusting that echoed value would (a) defeat the whole point of the field
+   * being non-writable, and (b) silently keep working only by accident of the frontend never having
+   * a bug in that callout. Deriving it server-side here is what actually fixes AD message 20111
+   * ("La unidad del producto en la ficha y la de la operación en curso son distintas") on
+   * product-change PATCHes, which previously reached {@code C_ORDERLINE_TRG} with the OLD
+   * {@code uOM} still in place.
+   * <p>
+   * {@code userProvidedUom=false} unconditionally: unlike create (where an external caller such as
+   * an OCR import may legitimately pre-select a specific uOM), there is no UI path where a user
+   * picks {@code uOM} independently of {@code product} on an existing line, so nothing here should
+   * ever defer to a client-submitted value.
+   * <p>
+   * Total: delegates entirely to {@link #injectProductDerivedUomIfMissing}, which is a no-op (and
+   * never throws) when {@code filteredBody} carries no {@code product} key — i.e. this PATCH did
+   * not touch the product — or when the product/UOM cannot be resolved.
+   * <p>
+   * Lives here (rather than as a private method on {@code NeoCrudHandler}) so it can be called and
+   * unit-tested directly, without reflection, and to keep {@code NeoCrudHandler} under SonarQube's
+   * method-count limit (java:S1448).
+   *
+   * @param filteredBody  the PATCH/PUT body, already run through {@code filterWriteRequest},
+   *                      mutated in place with the re-derived {@code uOM} when applicable
+   * @param dalEntityName the DAL entity name of the line being updated (e.g. {@code "OrderLine"}),
+   *                      resolved here into the {@link org.openbravo.base.model.Entity} that
+   *                      {@link #injectProductDerivedUomIfMissing} needs
+   */
+  public static void applyDerivedUomOnUpdate(JSONObject filteredBody, String dalEntityName) {
+    injectProductDerivedUomIfMissing(filteredBody,
+        ModelProvider.getInstance().getEntity(dalEntityName, false), false);
   }
 
   /**

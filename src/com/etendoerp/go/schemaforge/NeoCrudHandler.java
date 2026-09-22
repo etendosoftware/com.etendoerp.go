@@ -40,6 +40,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
+import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -47,6 +48,7 @@ import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.datamodel.Column;
 import org.openbravo.model.ad.ui.Tab;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
+import org.openbravo.service.db.DalConnectionProvider;
 import org.openbravo.service.json.DefaultJsonDataService;
 import org.openbravo.service.json.JsonConstants;
 
@@ -62,6 +64,7 @@ import com.etendoerp.go.schemaforge.util.NeoLocatorIdentifierHelper;
 import com.etendoerp.go.schemaforge.util.NeoMethodPolicy;
 import com.etendoerp.go.schemaforge.util.NeoRecordVersion;
 import com.etendoerp.go.schemaforge.util.NeoTypeCoercionHelper;
+import com.etendoerp.go.schemaforge.util.NeoValidationErrorResponseBuilder;
 
 /**
  * Handles all CRUD operations for NEO window entity endpoints.
@@ -794,7 +797,10 @@ class NeoCrudHandler {
             NeoListReferenceError.enrich(translated))));
     }
     if (status == JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, responseJson);
+      // ETP-5323: delegated to NeoValidationErrorResponseBuilder (kept out of this class to stay
+      // under SonarQube's method-count limit, java:S1448) — see its javadoc for the full
+      // RPCREQUEST_STATUS_VALIDATION_ERROR body shape and rationale.
+      return NeoValidationErrorResponseBuilder.build(innerResponse);
     }
     return null;
   }
@@ -829,6 +835,12 @@ class NeoCrudHandler {
     long perfInjectDefaults = System.nanoTime();
     Set<String> protectedCalloutFields = NeoCrudHelper.snapshotMandatoryBodyFields(filteredBody, adTab);
     protectedCalloutFields.addAll(userSubmittedFields);
+    // ETP-5350: kept OUT of protectedCalloutFields. That set is a snapshot of keys the caller
+    // actually sent, and "protected" there means "do not overwrite what is already here" - a
+    // test a field absent from the body always fails. NeoHandler#protectedCreateCalloutFields
+    // declares the stronger "must not populate or overwrite", and its fields are precisely the
+    // ones NOT in the body, so merging the two made every such declaration a silent no-op.
+    Set<String> suppressedCalloutFields = new HashSet<>();
     String javaQualifier = context.getSfEntity() != null
         ? context.getSfEntity().getJavaQualifier() : null;
     if (StringUtils.isNotBlank(javaQualifier)) {
@@ -841,10 +853,11 @@ class NeoCrudHandler {
       // (same precedent as NeoActionSurface's CDI_RESOLVER).
       NeoHandler handler = NeoServletSupport.lookupHandler(javaQualifier);
       if (handler != null) {
-        protectedCalloutFields.addAll(handler.protectedCreateCalloutFields(context));
+        suppressedCalloutFields.addAll(handler.protectedCreateCalloutFields(context));
       }
     }
-    executePostCalloutCascade(filteredBody, adTab, context, parentIdValue, protectedCalloutFields);
+    executePostCalloutCascade(filteredBody, adTab, context, protectedCalloutFields,
+        suppressedCalloutFields);
     long perfCalloutCascade = System.nanoTime();
     // checkIfNotExists=false: a name the runtime model does not know must not blow up the create —
     // the policy simply abstains on a null entity.
@@ -892,7 +905,8 @@ class NeoCrudHandler {
   }
 
   private void executePostCalloutCascade(JSONObject filteredBody, Tab adTab,
-      NeoContext context, String parentIdValue, Set<String> protectedFields) {
+      NeoContext context, Set<String> protectedFields,
+      Set<String> suppressedFields) {
     if (adTab == null) {
       return;
     }
@@ -921,8 +935,11 @@ class NeoCrudHandler {
         ? protectedFields
         : java.util.Collections.emptySet();
     long t0 = System.nanoTime();
+    Set<String> effectiveSuppressed = suppressedFields != null
+        ? suppressedFields
+        : java.util.Collections.emptySet();
     NeoDefaultsCascadeHelper.executeCalloutCascade(context, adTab, filteredBody, seqFields,
-        effectiveProtected);
+        effectiveProtected, effectiveSuppressed);
     long t1 = System.nanoTime();
     DocTypeResolver.reapplyDocTypeFromTabFilter(filteredBody, adTab, context, effectiveProtected);
     NeoDefaultsCascadeHelper.removeEmptyFkValues(filteredBody, adTab);
@@ -1004,7 +1021,27 @@ class NeoCrudHandler {
     // its read, never data we persist: core reads it, compares it, and overwrites the column with
     // its own timestamp on save.
     Object updatedBeforeFilter = rawBody != null ? rawBody.opt(FIELD_UPDATED) : null;
+    // Same capture-before-filter reason: DocumentNo is read-only for the client, so the filter
+    // strips it and we could no longer tell "the caller sent a number" from "it never sent one".
+    // regenerateDocumentNoOnDocTypeChange must not overwrite a number the caller authored itself.
+    boolean clientSentDocumentNo = DocumentNoRepreviewHelper.hasClientAuthoredDocumentNo(rawBody);
     JSONObject filteredBody = fieldFilter.filterWriteRequest(rawBody);
+    // Keep C_DocType_ID in sync with the doc-type target the client just submitted. The create
+    // path does this through DocTypeResolver.reapplyDocTypeFromTabFilter; without it here,
+    // changing the document type of an already-saved draft leaves the effective doctype stale and
+    // the document number is generated from the wrong sequence. Runs after filtering because the
+    // helper addresses the body by DAL property name.
+    DocTypeResolver.syncDocumentTypeToSubmittedTarget(filteredBody, context.getAdTab());
+    // Syncing the effective doctype is not enough for an already-saved draft: its DocumentNo was
+    // taken from the OLD doctype's sequence and stays persisted, so a credit note would keep an
+    // invoice number. Replicates the classic SL_Invoice_Legacy callout — on a doc-type change the
+    // draft gets the new sequence's <currentnext> PLACEHOLDER (angle brackets, sequence not
+    // consumed); the real number is materialized on completion.
+    DocumentNoRepreviewHelper.regenerateDocumentNoOnDocTypeChange(
+        filteredBody, context, dalEntityName, clientSentDocumentNo);
+    // ETP-5286: on a PATCH that changes `product` on a transactional document line, re-derive
+    // `uOM` from the NEW product. See applyDerivedUomOnUpdate's own javadoc for the why.
+    NeoCommercialLinePolicy.applyDerivedUomOnUpdate(filteredBody, dalEntityName);
     // Inject lineNetAmount when absent from filteredBody (stripped by readOnly filter).
     // The frontend sends invoicedQuantity and unitPrice as editable fields, so both are
     // available here to compute the correct net amount even for products where SL_Invoice_Amt

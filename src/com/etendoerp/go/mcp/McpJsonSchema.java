@@ -45,6 +45,11 @@ final class McpJsonSchema {
   /** The JSON-schema {@code required} keyword, kept as one constant so it is not re-typed. */
   static final String KEY_REQUIRED = "required";
 
+  /** JSON Schema's array type, and the key that carries its element schema. */
+  private static final String TYPE_ARRAY = "array";
+  /** @see #TYPE_ARRAY */
+  private static final String KEY_ITEMS = "items";
+
   /** An {@code object} schema over {@code properties}; {@code required} is omitted when empty. */
   static Map<String, Object> buildObjectSchema(Map<String, Object> properties,
       List<String> required) {
@@ -94,14 +99,56 @@ final class McpJsonSchema {
     return prop;
   }
 
+  /** A JSON-schema boolean property. */
+  static Map<String, Object> booleanProp(String description) {
+    Map<String, Object> prop = new LinkedHashMap<>();
+    prop.put("type", "boolean");
+    prop.put(McpConstants.KEY_DESCRIPTION, description);
+    return prop;
+  }
+
+  /** A JSON-schema array of objects, used for the {@code neo_feedback} verdict's nested lists. */
+  static Map<String, Object> objectArrayProp(String description, Map<String, Object> itemProps,
+      List<String> itemRequired) {
+    Map<String, Object> prop = new LinkedHashMap<>();
+    prop.put("type", TYPE_ARRAY);
+    prop.put(McpConstants.KEY_DESCRIPTION, description);
+    prop.put(KEY_ITEMS, buildObjectSchema(itemProps, itemRequired));
+    return prop;
+  }
+
+  /**
+   * A JSON-schema array whose items are constrained to {@code values}.
+   *
+   * <p>The array counterpart of {@link #enumProp}: where a scalar parameter with a closed set of
+   * legal values gets an {@code enum}, a list-valued one gets the same {@code enum} on its
+   * {@code items}. IMP-41 — {@code neo_vector_search.targets} was a free string array, so the only
+   * way to learn a legal key was to guess one and read the refusal. A model that can only pick from
+   * the list cannot misspell the key at all.</p>
+   *
+   * @param description the parameter description
+   * @param values      the legal item values; must not be empty, or the parameter is unsatisfiable
+   * @return the array schema
+   */
+  static Map<String, Object> stringEnumArrayProp(String description, List<String> values) {
+    Map<String, Object> items = new LinkedHashMap<>();
+    items.put("type", McpConstants.TYPE_STRING);
+    items.put("enum", values);
+    Map<String, Object> prop = new LinkedHashMap<>();
+    prop.put("type", TYPE_ARRAY);
+    prop.put(McpConstants.KEY_DESCRIPTION, description);
+    prop.put(KEY_ITEMS, items);
+    return prop;
+  }
+
   /** A JSON-schema array of strings, used for the IMP-2 {@code fields} projection whitelist. */
   static Map<String, Object> stringArrayProp(String description) {
     Map<String, Object> items = new LinkedHashMap<>();
     items.put("type", McpConstants.TYPE_STRING);
     Map<String, Object> prop = new LinkedHashMap<>();
-    prop.put("type", "array");
+    prop.put("type", TYPE_ARRAY);
     prop.put(McpConstants.KEY_DESCRIPTION, description);
-    prop.put("items", items);
+    prop.put(KEY_ITEMS, items);
     return prop;
   }
 }

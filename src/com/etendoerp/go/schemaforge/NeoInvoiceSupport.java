@@ -20,11 +20,13 @@ import java.math.BigDecimal;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
 
 /**
@@ -54,9 +56,40 @@ final class NeoInvoiceSupport {
     return computePendingQtyPerLine(inOutId, false);
   }
 
+  /**
+   * Same computation as {@link #computePendingQtyPerLine(String, boolean)} but propagating DB
+   * failures instead of swallowing them (ETP-5381).
+   *
+   * <p>The swallowing variant returns an empty map both when nothing is pending AND when the query
+   * blew up, which is harmless for the billing-status badge but not for a duplicate-invoice guard:
+   * a transient DB error would read as "already fully invoiced" and block a legitimate invoice
+   * with a misleading message. Callers that make a decision on emptiness must use this one, so an
+   * infrastructure failure surfaces as a 500 rather than a bogus 409.
+   *
+   * @throws OBException if the pending-quantity query cannot be executed
+   */
+  static Map<String, BigDecimal> computePendingQtyPerLineOrThrow(String inOutId, boolean includeDrafts) {
+    try {
+      return queryPendingQtyPerLine(inOutId, includeDrafts);
+    } catch (Exception e) {
+      log.error("DB error computing pending qty per line for inout {}", inOutId, e);
+      throw new OBException("Could not determine pending quantities to invoice", e);
+    }
+  }
+
+  static Map<String, BigDecimal> computePendingQtyPerLine(String inOutId, boolean includeDrafts) {
+    try {
+      return queryPendingQtyPerLine(inOutId, includeDrafts);
+    } catch (Exception e) {
+      log.error("DB error computing pending qty per line for inout {}", inOutId, e);
+      return new HashMap<>();
+    }
+  }
+
   // SQL literals derived from trusted booleans — no injection risk.
   @SuppressWarnings("java:S2077")
-  static Map<String, BigDecimal> computePendingQtyPerLine(String inOutId, boolean includeDrafts) {
+  private static Map<String, BigDecimal> queryPendingQtyPerLine(String inOutId, boolean includeDrafts)
+      throws SQLException {
     // includeDrafts=false: three paths — m_matchsi, direct m_inoutline_id, and ol_qty (invoice
     // created from the ORDER: m_inoutline_id IS NULL, joined via c_orderline_id scoped to this
     // shipment). Used for the billing-status badge and for blocking duplicate invoice creation.
@@ -152,28 +185,24 @@ final class NeoInvoiceSupport {
     }
 
     Map<String, BigDecimal> result = new HashMap<>();
-    try {
-      Connection conn = OBDal.getInstance().getConnection();
-      try (PreparedStatement ps = conn.prepareStatement(sql)) {
-        for (int i = 1; i <= paramCount; i++) {
-          ps.setString(i, inOutId);
-        }
-        try (ResultSet rs = ps.executeQuery()) {
-          while (rs.next()) {
-            String lineId = rs.getString(1);
-            BigDecimal movQty = rs.getBigDecimal(2);
-            BigDecimal invQty = rs.getBigDecimal(3);
-            BigDecimal pending = (movQty != null ? movQty : BigDecimal.ZERO)
-                .subtract(invQty != null ? invQty : BigDecimal.ZERO)
-                .max(BigDecimal.ZERO);
-            if (pending.compareTo(BigDecimal.ZERO) > 0) {
-              result.put(lineId, pending);
-            }
+    Connection conn = OBDal.getInstance().getConnection();
+    try (PreparedStatement ps = conn.prepareStatement(sql)) {
+      for (int i = 1; i <= paramCount; i++) {
+        ps.setString(i, inOutId);
+      }
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          String lineId = rs.getString(1);
+          BigDecimal movQty = rs.getBigDecimal(2);
+          BigDecimal invQty = rs.getBigDecimal(3);
+          BigDecimal pending = (movQty != null ? movQty : BigDecimal.ZERO)
+              .subtract(invQty != null ? invQty : BigDecimal.ZERO)
+              .max(BigDecimal.ZERO);
+          if (pending.compareTo(BigDecimal.ZERO) > 0) {
+            result.put(lineId, pending);
           }
         }
       }
-    } catch (Exception e) {
-      log.error("DB error computing pending qty per line for inout {}", inOutId, e);
     }
     return result;
   }

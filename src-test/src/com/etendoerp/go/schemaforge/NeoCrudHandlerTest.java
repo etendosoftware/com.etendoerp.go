@@ -1402,6 +1402,113 @@ class NeoCrudHandlerTest {
       assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
     }
 
+    /**
+     * ETP-5323 — {@code buildValidationErrorResponse}. {@code DefaultJsonDataService} catches a
+     * per-property setter failure (e.g. {@code StringPropertyValidator} rejecting a
+     * "Description" longer than its AD column) during JSON-to-entity conversion and reports it
+     * as a {@code RPCREQUEST_STATUS_VALIDATION_ERROR} body whose message lives under
+     * {@code response.errors.<propertyName>} — a sibling of {@code response.error} (singular),
+     * not a variant of it. Before this fix the raw {@code responseJson} was returned verbatim,
+     * a shape {@code parseBackendErrorMessage} (app-shell) does not recognize, so the frontend
+     * fell back to the bare "Error 400" even though the real message was one level down.
+     */
+    @Test
+    @DisplayName("Returns 400 with translated message under error.message for a validation-error errors map")
+    void returns400WithTranslatedMessageForValidationErrorsMap() throws Exception {
+      JSONObject errors = new JSONObject();
+      String rawMsg = "C_OrderLine.description: Value too long. Length 2150, maximum allowed 2000 "
+          + "[Some very long description text...]";
+      errors.put("description", rawMsg);
+      JSONObject inner = new JSONObject();
+      inner.put(JsonConstants.RESPONSE_STATUS, JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR);
+      inner.put(JsonConstants.RESPONSE_ERRORS, errors);
+      JSONObject json = new JSONObject();
+      json.put(JsonConstants.RESPONSE_RESPONSE, inner);
+
+      String translated = "Value too long. Length 2150, maximum allowed 2000 characters.";
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msgMock =
+          Mockito.mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+        msgMock.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(eq(rawMsg)))
+            .thenReturn(translated);
+
+        NeoResponse result = invokeCheckResponse(json);
+
+        assertNotNull(result);
+        assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+        JSONObject body = result.getBody();
+        assertNotNull(body, "error body must not be null");
+        assertTrue(body.has("error"), "body must carry a top-level 'error' object");
+        assertEquals(translated, body.getJSONObject("error").getString("message"));
+      }
+    }
+
+    /**
+     * ETP-5323 follow-up: when the {@code errors} map is empty (e.g. the property-level
+     * validation was recorded but not captured with a message), the handler must still answer a
+     * generic 400 rather than throwing — the pre-existing {@code returns400ForValidationError}
+     * test above covers the "no errors key at all" case; this covers "errors key present but
+     * empty".
+     */
+    @Test
+    @DisplayName("Falls back to a generic 400 message when the errors map is empty, without throwing")
+    void returns400WithGenericMessageWhenErrorsMapIsEmpty() throws Exception {
+      JSONObject inner = new JSONObject();
+      inner.put(JsonConstants.RESPONSE_STATUS, JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR);
+      inner.put(JsonConstants.RESPONSE_ERRORS, new JSONObject());
+      JSONObject json = new JSONObject();
+      json.put(JsonConstants.RESPONSE_RESPONSE, inner);
+
+      NeoResponse result = invokeCheckResponse(json);
+
+      assertNotNull(result);
+      assertEquals(HttpServletResponse.SC_BAD_REQUEST, result.getHttpStatus());
+      JSONObject body = result.getBody();
+      assertNotNull(body, "error body must not be null");
+      assertEquals("Validation failed", body.getJSONObject("error").getString("message"));
+    }
+
+    /**
+     * ETP-5323 follow-up: a raw property-validation message shaped like a DAL row dump or an
+     * object-reference toString must go through the same sanitization chain
+     * ({@code stripRowDump}/{@code redactObjectReferences}) as the FAILURE branch above — this is
+     * the "consistent between the two ways core can report a rejected write" guarantee the
+     * method's own javadoc documents.
+     */
+    @Test
+    @DisplayName("Sanitizes a row-dump-shaped validation-error message the same way as the FAILURE branch")
+    void sanitizesRowDumpShapedValidationErrorMessage() throws Exception {
+      // NeoErrorSanitizer.stripRowDump only redacts a parenthesised run of at least 200 chars
+      // (MAX_PARENTHESISED_RUN) — mirror a real oversized Postgres "Failing row contains (…)"
+      // detail rather than a short tuple, or the sanitizer has nothing to strip.
+      String longTuple = "1, 2, ".repeat(40); // well over 200 chars before the closing paren
+      JSONObject errors = new JSONObject();
+      String rawMsg = "Some validation failure. Failing row contains (" + longTuple + ").";
+      errors.put("description", rawMsg);
+      JSONObject inner = new JSONObject();
+      inner.put(JsonConstants.RESPONSE_STATUS, JsonConstants.RPCREQUEST_STATUS_VALIDATION_ERROR);
+      inner.put(JsonConstants.RESPONSE_ERRORS, errors);
+      JSONObject json = new JSONObject();
+      json.put(JsonConstants.RESPONSE_RESPONSE, inner);
+
+      try (MockedStatic<org.openbravo.erpCommon.utility.OBMessageUtils> msgMock =
+          Mockito.mockStatic(org.openbravo.erpCommon.utility.OBMessageUtils.class)) {
+        msgMock.when(() -> org.openbravo.erpCommon.utility.OBMessageUtils.messageBD(eq(rawMsg)))
+            .thenReturn(rawMsg);
+
+        NeoResponse result = invokeCheckResponse(json);
+
+        assertNotNull(result);
+        String message = result.getBody().getJSONObject("error").getString("message");
+        // stripRowDump only redacts the parenthesised tuple itself (replacing it with "(…)") — the
+        // surrounding "Failing row contains" lead-in text is untouched, same as the FAILURE branch.
+        // The leak this guards against is the actual row data, so assert on that.
+        assertFalse(message.contains(longTuple),
+            "the long parenthesised row dump must be stripped from a validation-error message, same as FAILURE branch");
+        assertTrue(message.contains("(…)"),
+            "the stripped tuple must be replaced with the redaction marker, same as FAILURE branch");
+      }
+    }
+
     @Test
     @DisplayName("Returns null for unknown non-error status")
     void returnsNullForUnknownStatus() throws Exception {
@@ -3017,8 +3124,8 @@ class NeoCrudHandlerTest {
 
       invokePrivate(handler, "executePostCalloutCascade",
           new Class<?>[] { JSONObject.class, Tab.class, NeoContext.class,
-              String.class, java.util.Set.class },
-          body, null, context, null, Collections.emptySet());
+              java.util.Set.class, java.util.Set.class },
+          body, null, context, Collections.emptySet(), Collections.emptySet());
       // no exception = success
     }
 
@@ -3041,7 +3148,7 @@ class NeoCrudHandlerTest {
            MockedStatic<DocTypeResolver> docTypeMock =
                Mockito.mockStatic(DocTypeResolver.class)) {
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any())).then(invocation -> null);
+            any(), any(), any(), any(), any(), any())).then(invocation -> null);
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.removeEmptyFkValues(
             any(), any())).then(invocation -> null);
         docTypeMock.when(() -> DocTypeResolver.reapplyDocTypeFromTabFilter(
@@ -3049,12 +3156,12 @@ class NeoCrudHandlerTest {
 
         invokePrivate(handler, "executePostCalloutCascade",
             new Class<?>[] { JSONObject.class, Tab.class, NeoContext.class,
-                String.class, java.util.Set.class },
-            body, adTab, context, null, new HashSet<>());
+                java.util.Set.class, java.util.Set.class },
+            body, adTab, context, new HashSet<>(), new HashSet<>());
 
         // Verify cascade was called (no exception)
         cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any()));
+            any(), any(), any(), any(), any(), any()));
       }
     }
 
@@ -3073,7 +3180,7 @@ class NeoCrudHandlerTest {
            MockedStatic<DocTypeResolver> docTypeMock =
                Mockito.mockStatic(DocTypeResolver.class)) {
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any())).then(invocation -> null);
+            any(), any(), any(), any(), any(), any())).then(invocation -> null);
         cascadeMock.when(() -> NeoDefaultsCascadeHelper.removeEmptyFkValues(
             any(), any())).then(invocation -> null);
         docTypeMock.when(() -> DocTypeResolver.reapplyDocTypeFromTabFilter(
@@ -3082,12 +3189,12 @@ class NeoCrudHandlerTest {
         // Pass null for protectedFields
         invokePrivate(handler, "executePostCalloutCascade",
             new Class<?>[] { JSONObject.class, Tab.class, NeoContext.class,
-                String.class, java.util.Set.class },
-            body, adTab, context, null, (Set<String>) null);
+                java.util.Set.class, java.util.Set.class },
+            body, adTab, context, (Set<String>) null, (Set<String>) null);
 
         // Should not throw NPE
         cascadeMock.verify(() -> NeoDefaultsCascadeHelper.executeCalloutCascade(
-            any(), any(), any(), any(), any()));
+            any(), any(), any(), any(), any(), any()));
       }
     }
 
@@ -3106,8 +3213,8 @@ class NeoCrudHandlerTest {
                Mockito.mockStatic(DocTypeResolver.class)) {
         invokePrivate(handler, "executePostCalloutCascade",
             new Class<?>[] { JSONObject.class, Tab.class, NeoContext.class,
-                String.class, java.util.Set.class },
-            body, adTab, context, null, Collections.emptySet());
+                java.util.Set.class, java.util.Set.class },
+            body, adTab, context, Collections.emptySet(), Collections.emptySet());
 
         docTypeMock.verify(() -> DocTypeResolver.reapplyDocTypeFromTabFilter(
             body, adTab, context, Collections.emptySet()));

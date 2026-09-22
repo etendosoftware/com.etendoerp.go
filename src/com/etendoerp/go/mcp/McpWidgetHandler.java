@@ -103,11 +103,11 @@ final class McpWidgetHandler {
     if (response == null) {
       return McpToolRouter.wrapAsErrorContent("Widget '" + widget + "' returned no response.");
     }
+    // ETP-5306: the JSONObject overloads, so a widget body is sanitised like every other result.
     JSONObject body = response.getBody();
-    String text = body != null ? body.toString(2) : "{}";
     if (response.getHttpStatus() >= 400) {
-      return McpToolRouter.wrapAsErrorContent(text);
+      return McpToolRouter.wrapAsErrorContent(body);
     }
-    return McpToolRouter.wrapAsTextContent(text);
+    return McpToolRouter.wrapAsTextContent(body);
   }
 }

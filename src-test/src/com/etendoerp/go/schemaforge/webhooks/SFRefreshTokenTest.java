@@ -599,10 +599,13 @@ class SFRefreshTokenTest {
    * When the caller's OWN token (as reflected in {@code OBContext.getRole()}) already embeds the
    * SAME role the DB just resolved via {@code user.getDefaultRole()}, {@code get()} must skip
    * minting entirely: no {@code generateToken} call, no {@code token}/{@code session} keys, just
-   * {@code {"unchanged": true}}.
+   * {@code {"unchanged": true, "roleList": [...]}}. ETP-5329 follow-up: {@code roleList} is still
+   * loaded fresh via {@code EtendoGoJwtSupport#loadRoleListData} even on this short-circuited
+   * path -- see {@code effectiveRoleNamesAreRecomputedEvenWhenRoleIdIsUnchanged} below for the
+   * regression this actually guards against.
    */
   @Test
-  void sameRoleAsCallerSkipsMintingAndReturnsUnchanged() {
+  void sameRoleAsCallerSkipsMintingAndReturnsUnchanged() throws JSONException {
     User callerUser = givenAuthenticatedUser("user-1");
     when(callerUser.isActive()).thenReturn(true);
     Role currentRole = mock(Role.class);
@@ -619,9 +622,14 @@ class SFRefreshTokenTest {
     when(obDal.get(User.class, "user-1")).thenReturn(callerUser);
     stubUserRolesCriteria(obDal, 1);
 
+    RoleListData roleListData = roleListDataWith("role-1", "Role One");
+
     try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
-         MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {
+         MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class);
+         MockedStatic<EtendoGoJwtSupport> jwtSupportMock = mockStatic(EtendoGoJwtSupport.class)) {
       obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      jwtSupportMock.when(() -> EtendoGoJwtSupport.loadRoleListData("user-1"))
+          .thenReturn(roleListData);
 
       webhook.get(parameters, responseVars);
 
@@ -633,6 +641,71 @@ class SFRefreshTokenTest {
     assertTrue(result.optBoolean("unchanged", false));
     assertFalse(result.has("token"));
     assertFalse(result.has("session"));
+    assertEquals(roleListData.getRoleArray().toString(), result.getJSONArray("roleList").toString());
+  }
+
+  /**
+   * ETP-5329 regression — the actual bug this fix targets: a user's applied role TEMPLATE
+   * COMPOSITION changes (e.g. demoted from a broader template set to a narrower one) while their
+   * personal {@code Default_Ad_Role_ID} stays exactly the same. {@code isSameRoleAsCaller} still
+   * returns {@code true} (role identity is unchanged), so the token-mint short-circuit still
+   * fires -- but {@code roleList} (carrying the recomputed {@code effectiveRoleNames} for the
+   * default role entry) must reflect the NEW composition, not a stale/absent one. Before the
+   * fix, this path never called {@code loadRoleListData} at all, so the response body could not
+   * possibly have carried updated role names.
+   */
+  @Test
+  void effectiveRoleNamesAreRecomputedEvenWhenRoleIdIsUnchanged() throws JSONException {
+    User callerUser = givenAuthenticatedUser("user-1");
+    when(callerUser.isActive()).thenReturn(true);
+    Role currentRole = mock(Role.class);
+    when(currentRole.getId()).thenReturn("role-1");
+    when(currentRole.isActive()).thenReturn(true);
+    stubSameClientRole(currentRole);
+    when(callerUser.getDefaultRole()).thenReturn(currentRole);
+
+    // Same role identity as the caller's current token -> isSameRoleAsCaller is true, even
+    // though the applied template composition underneath it has changed (demotion scenario).
+    when(mockContext.getRole()).thenReturn(currentRole);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.get(User.class, "user-1")).thenReturn(callerUser);
+    stubUserRolesCriteria(obDal, 1);
+
+    // The NEW, post-demotion composition: only "Ventas/Sales" remains, where before there would
+    // have been the full Finance-Sales-Purchasing-Inventory set.
+    JSONArray roleArray = new JSONArray();
+    JSONObject roleEntry = new JSONObject();
+    roleEntry.put("id", "role-1");
+    roleEntry.put("name", "role-1");
+    roleEntry.put("orgList", new JSONArray());
+    roleEntry.put("effectiveRoleNames", new JSONArray(java.util.List.of("Ventas/Sales")));
+    roleArray.put(roleEntry);
+    RoleListData updatedRoleListData = new RoleListData("role-1", roleArray);
+
+    try (MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class);
+         MockedStatic<EtendoGoJwtSupport> jwtSupportMock = mockStatic(EtendoGoJwtSupport.class)) {
+      obDalMock.when(OBDal::getInstance).thenReturn(obDal);
+      jwtSupportMock.when(() -> EtendoGoJwtSupport.loadRoleListData("user-1"))
+          .thenReturn(updatedRoleListData);
+
+      webhook.get(parameters, responseVars);
+
+      // The token dimension is genuinely unchanged -- no new JWT is minted.
+      swsMock.verifyNoInteractions();
+      // But the role-names dimension MUST have been freshly resolved, not skipped.
+      jwtSupportMock.verify(() -> EtendoGoJwtSupport.loadRoleListData("user-1"), times(1));
+    }
+
+    assertFalse(responseVars.containsKey("error"));
+    JSONObject result = resultOf(responseVars);
+    assertTrue(result.optBoolean("unchanged", false));
+    JSONArray returnedRoleList = result.getJSONArray("roleList");
+    JSONObject returnedRoleEntry = returnedRoleList.getJSONObject(0);
+    JSONArray returnedEffectiveRoleNames = returnedRoleEntry.getJSONArray("effectiveRoleNames");
+    assertEquals(1, returnedEffectiveRoleNames.length());
+    assertEquals("Ventas/Sales", returnedEffectiveRoleNames.getString(0));
   }
 
   /**

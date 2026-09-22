@@ -103,8 +103,13 @@ class Fiscal303SourcesSupport {
 
   private Map<String, Object> buildNewInvoiceRow(Invoice inv, SimpleDateFormat sdf) {
     Map<String, Object> r = new LinkedHashMap<>();
+    // ETP-5393 Bug A: the invoice's own id must travel into the row so the frontend has a
+    // collision-free React key. `ref` (documentno) is NOT unique across AR/AP — sales and
+    // purchase invoice numbering sequences are independent and can legitimately coincide.
+    r.put("id",    inv.getId());
     r.put("ref",   inv.getDocumentNo());
     r.put("date",  sdf.format(inv.getInvoiceDate()));
+    r.put("accountingDate", inv.getAccountingDate() != null ? sdf.format(inv.getAccountingDate()) : null);
     String cat = inv.getDocumentType().getDocumentCategory();
     r.put("type",  "ARI".equals(cat) || "ARI_RM".equals(cat) ? "Venta" : "Compra");
     r.put("party", inv.getBusinessPartner() != null ? inv.getBusinessPartner().getName() : "");

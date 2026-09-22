@@ -710,10 +710,10 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
 
   /**
    * Applies the editable fields to an updated transaction according to its state, returning a 400
-   * {@link NeoResponse} on a resolution failure or {@code null} on success. A Processed (not posted)
-   * transaction only accepts the "safe" fields — G/L item, accounting dimensions, description and
-   * dates (amount / direction / status stay locked, as they already impacted the balance); a Draft
-   * accepts the full editable set (including currency and amounts).
+   * {@link NeoResponse} on a resolution failure or {@code null} on success. A Processed (not
+   * posted) transaction only accepts the four accounting dimensions, the G/L item and the
+   * description (ETP-4879) — dates stay locked, along with amount/direction/currency/status; a
+   * Draft accepts the full editable set (including currency and amounts).
    */
   private NeoResponse applyUpdateEdits(FIN_FinaccTransaction trx, JSONObject body, boolean processed) {
     if (processed) {
@@ -1074,14 +1074,14 @@ public class FinancialAccountTransactionsHandler implements NeoHandler {
 
   /**
    * Applies only the fields that stay editable once a transaction is Processed (but not yet
-   * posted): description, dates, G/L item and accounting dimensions. Amount, direction
-   * (deposit/withdrawal), currency and status are intentionally left untouched — they are locked
-   * because they already impacted the account balance.
+   * posted): the four accounting dimensions (business partner, project, cost center, product),
+   * the G/L item and the free-text description. Dates, amount, direction, currency and status
+   * are intentionally left untouched (ETP-4879): dates used to be accepted here too, but that let
+   * an edit silently roll back {@code DATEACCT} to the transaction date on save (see the
+   * two-field-collapse note in NewTransactionModal.jsx).
    */
   private void applyEditableDimensions(FIN_FinaccTransaction trx, JSONObject body) {
     trx.setDescription(body.optString(FIELD_DESCRIPTION, trx.getDescription()));
-    trx.setTransactionDate(parseLocalDate(body.optString("transactionDate", null), trx.getTransactionDate()));
-    trx.setDateAcct(parseLocalDate(body.optString("accountingDate", null), trx.getDateAcct()));
     setOptionalRef(body, FIELD_BPARTNER_ID, BusinessPartner.class, trx::setBusinessPartner);
     setOptionalRef(body, FIELD_GL_ITEM_ID, GLItem.class, trx::setGLItem);
     setOptionalRef(body, FIELD_PROJECT_ID, Project.class, trx::setProject);

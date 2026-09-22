@@ -19,6 +19,8 @@ package com.etendoerp.go.schemaforge.email;
 
 import java.util.Objects;
 
+import org.codehaus.jettison.json.JSONObject;
+
 /**
  * Result of resolving an email contract command.
  */
@@ -29,14 +31,16 @@ public final class EmailContractResolution {
   private final String status;
   private final String message;
   private final EmailProviderRequest providerRequest;
+  private final JSONObject extra;
 
   private EmailContractResolution(boolean ready, int httpStatus, String status, String message,
-      EmailProviderRequest providerRequest) {
+      EmailProviderRequest providerRequest, JSONObject extra) {
     this.ready = ready;
     this.httpStatus = httpStatus;
     this.status = status;
     this.message = message;
     this.providerRequest = providerRequest;
+    this.extra = extra;
   }
 
   /**
@@ -47,7 +51,7 @@ public final class EmailContractResolution {
    */
   public static EmailContractResolution ready(EmailProviderRequest providerRequest) {
     return new EmailContractResolution(true, 200, TransactionalEmailService.STATUS_SENT, null,
-        Objects.requireNonNull(providerRequest, "Email provider request cannot be null"));
+        Objects.requireNonNull(providerRequest, "Email provider request cannot be null"), null);
   }
 
   /**
@@ -59,7 +63,23 @@ public final class EmailContractResolution {
    * @return rejected contract resolution
    */
   public static EmailContractResolution rejected(int httpStatus, String status, String message) {
-    return new EmailContractResolution(false, httpStatus, status, message, null);
+    return rejected(httpStatus, status, message, null);
+  }
+
+  /**
+   * Creates a rejected contract resolution with a client-visible status and machine-readable extra
+   * fields (e.g. a {@code reasonCode}) the frontend can map to translated copy.
+   *
+   * @param httpStatus HTTP status to return
+   * @param status contract response status
+   * @param message client-visible rejection message
+   * @param extra additional machine-readable fields flattened into the response's {@code data},
+   *        or {@code null} when there is nothing extra to carry
+   * @return rejected contract resolution
+   */
+  public static EmailContractResolution rejected(int httpStatus, String status, String message,
+      JSONObject extra) {
+    return new EmailContractResolution(false, httpStatus, status, message, null, extra);
   }
 
   public boolean isReady() {
@@ -80,5 +100,9 @@ public final class EmailContractResolution {
 
   public EmailProviderRequest getProviderRequest() {
     return providerRequest;
+  }
+
+  public JSONObject getExtra() {
+    return extra;
   }
 }

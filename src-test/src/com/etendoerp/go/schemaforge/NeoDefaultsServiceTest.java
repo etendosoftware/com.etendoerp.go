@@ -5111,4 +5111,700 @@ public class NeoDefaultsServiceTest {
       utilityMock.verifyNoInteractions();
     }
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-5277 — isUserSessionFallbackExcludedColumn: identifies exactly the 4 AD_User columns
+  // (Default_Ad_Role_ID/Default_Ad_Client_ID/Default_Ad_Org_ID/Default_M_Warehouse_ID) confirmed
+  // (live repro) to leak the creating admin's own session state into a brand-new user's record —
+  // scoped narrowly by table + column name, never by column name alone.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  public void testIsUserSessionFallbackExcludedColumnMatchesAllFourTargetColumnsOnAdUser()
+      throws Exception {
+    String[] excludedColumns = {
+        "Default_Ad_Role_ID", "Default_Ad_Client_ID", "Default_Ad_Org_ID", "Default_M_Warehouse_ID"
+    };
+    for (String columnName : excludedColumns) {
+      Column adColumn = mock(Column.class);
+      Table table = mock(Table.class);
+      when(table.getDBTableName()).thenReturn("AD_User");
+      when(adColumn.getTable()).thenReturn(table);
+      when(adColumn.getDBColumnName()).thenReturn(columnName);
+
+      boolean result = (Boolean) invokePrivate("isUserSessionFallbackExcludedColumn",
+          new Class<?>[]{ Column.class }, adColumn);
+
+      assertTrue(columnName + " on AD_User must be excluded from the session/prefs fallback",
+          result);
+    }
+  }
+
+  @Test
+  public void testIsUserSessionFallbackExcludedColumnDoesNotMatchSameColumnOnDifferentTable()
+      throws Exception {
+    // Same column NAME as one of the 4 excluded ones, but on a completely unrelated table — the
+    // exclusion must be scoped by table + column, never by column name alone (a same-named
+    // Default_Ad_Role_ID-shaped column on another entity must keep its own default behavior).
+    Column adColumn = mock(Column.class);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn("C_ORDER");
+    when(adColumn.getTable()).thenReturn(table);
+    when(adColumn.getDBColumnName()).thenReturn("Default_Ad_Role_ID");
+
+    boolean result = (Boolean) invokePrivate("isUserSessionFallbackExcludedColumn",
+        new Class<?>[]{ Column.class }, adColumn);
+
+    assertFalse("A same-named column on a different table must never be excluded", result);
+  }
+
+  @Test
+  public void testIsUserSessionFallbackExcludedColumnDoesNotMatchDifferentColumnOnAdUser()
+      throws Exception {
+    // Default_Ad_Language lives on the SAME AD_User table and relies on the SAME generic
+    // session/prefs fallback, but is NOT one of the 4 confirmed-leaking columns — see the
+    // full-pipeline negative-control test further below for the end-to-end proof of this same
+    // guarantee.
+    Column adColumn = mock(Column.class);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn("AD_User");
+    when(adColumn.getDBColumnName()).thenReturn("Default_Ad_Language");
+    when(adColumn.getTable()).thenReturn(table);
+
+    boolean result = (Boolean) invokePrivate("isUserSessionFallbackExcludedColumn",
+        new Class<?>[]{ Column.class }, adColumn);
+
+    assertFalse("A non-deny-listed AD_User column must not be excluded", result);
+  }
+
+  @Test
+  public void testIsUserSessionFallbackExcludedColumnHandlesNullTableGracefully() throws Exception {
+    Column adColumn = mock(Column.class);
+    when(adColumn.getTable()).thenReturn(null);
+    when(adColumn.getDBColumnName()).thenReturn("Default_Ad_Role_ID");
+
+    boolean result = (Boolean) invokePrivate("isUserSessionFallbackExcludedColumn",
+        new Class<?>[]{ Column.class }, adColumn);
+
+    assertFalse("A column with no resolvable table must never be excluded — missing metadata "
+        + "must fail open (defer to the normal default-resolution path), not silently swallow "
+        + "the column's default", result);
+  }
+
+  @Test
+  public void testIsUserSessionFallbackExcludedColumnHandlesNullDbTableNameGracefully()
+      throws Exception {
+    Column adColumn = mock(Column.class);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn(null);
+    when(adColumn.getTable()).thenReturn(table);
+    when(adColumn.getDBColumnName()).thenReturn("Default_Ad_Role_ID");
+
+    boolean result = (Boolean) invokePrivate("isUserSessionFallbackExcludedColumn",
+        new Class<?>[]{ Column.class }, adColumn);
+
+    assertFalse(result);
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-5277 — resolveFieldDefault: the single choke point (see its own inline comment) that
+  // guards both the session/prefs fallback below AND, via applyDefaultWithComboFallback further
+  // up the call chain, the combo-preselection fallback. Each of the 4 excluded AD_User columns
+  // must resolve to null when no AD_Column/ETGO_SF_FIELD default is configured, and must never
+  // even reach Utility.getPreference — proving the exclusion short-circuits before the fallback
+  // it guards, not merely that the fallback happens to return nothing.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  public void testResolveFieldDefaultReturnsNullForAllFourExcludedAdUserColumns() throws Exception {
+    String[] excludedColumns = {
+        "Default_Ad_Role_ID", "Default_Ad_Client_ID", "Default_Ad_Org_ID", "Default_M_Warehouse_ID"
+    };
+    for (String columnName : excludedColumns) {
+      Column adColumn = mock(Column.class);
+      Table table = mock(Table.class);
+      when(table.getDBTableName()).thenReturn("AD_User");
+      when(adColumn.getTable()).thenReturn(table);
+      when(adColumn.getDBColumnName()).thenReturn(columnName);
+      when(adColumn.getDefaultValue()).thenReturn(null);
+      when(adColumn.isLinkToParentColumn()).thenReturn(false);
+      when(adColumn.isUseAutomaticSequence()).thenReturn(false);
+      VariablesSecureApp vars = mock(VariablesSecureApp.class);
+
+      try (MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+           MockedStatic<Utility> utilityMock = mockStatic(Utility.class)) {
+        sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
+
+        NeoDefaultsService.FieldDefaultRequest request =
+            new NeoDefaultsService.FieldDefaultRequest(adColumn, null, vars,
+                mock(DalConnectionProvider.class), "WIN-1", null);
+
+        Object result = NeoDefaultsService.resolveFieldDefault(request);
+
+        assertNull("Excluded column " + columnName + " must resolve to null when no default "
+            + "is configured for a new AD_User record", result);
+        // Must never even reach the session/prefs fallback — that is the whole point of the
+        // exclusion, matching the "no default configured" contract it promises.
+        utilityMock.verify(() -> Utility.getPreference(any(), any(), any()), never());
+      }
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-5277 — resolveDefaults: the SECOND, independently-discovered leak. Even a NON-readonly
+  // field on an excluded AD_User column must never reach resolveFirstComboOption, which — before
+  // this exclusion was also added to applyDefaultWithComboFallback — queried the unscoped first
+  // row of the ENTIRE referenced table across every tenant (live-verified: defaultClient came
+  // back as an unrelated client, "aaa", from a completely different tenant). This is a WORSE leak
+  // than the session-derived value this ticket originally reported, so it gets its own explicit
+  // regression test rather than relying on incidental coverage from the pre-existing
+  // isReadOnly-gated tests (testResolveDefaultsSkipsReadonlyComboAutopick and siblings), which
+  // only ever exercised the readonly gate, not this exclusion.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveDefaultsExcludesComboFallbackForExcludedAdUserColumnEvenWhenEditable()
+      throws Exception {
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<SFField> fieldCriteria = mock(OBCriteria.class);
+    SFField sfField = mock(SFField.class);
+    Column adColumn = mock(Column.class);
+    Table table = mock(Table.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    OBContext obContext = mock(OBContext.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    Entity dalEntity = mock(Entity.class);
+
+    when(sfEntity.getId()).thenReturn("sf-entity-1");
+    when(sfField.getADColumn()).thenReturn(adColumn);
+    // Deliberately NOT readonly — before this fix, applyDefaultWithComboFallback's own
+    // isReadOnly gate was the ONLY thing standing between an editable excluded column and the
+    // unscoped combo fallback. This proves the NEW exclusion, not the pre-existing readonly gate.
+    when(sfField.isReadOnly()).thenReturn(false);
+    when(sfField.getDefaultValue()).thenReturn(null);
+    when(table.getDBTableName()).thenReturn("AD_User");
+    when(adColumn.getTable()).thenReturn(table);
+    when(adColumn.getDBColumnName()).thenReturn("Default_Ad_Client_ID");
+    when(adColumn.getDefaultValue()).thenReturn(null);
+    when(adColumn.isLinkToParentColumn()).thenReturn(false);
+    when(adColumn.isUseAutomaticSequence()).thenReturn(false);
+    when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
+    when(fieldCriteria.list()).thenReturn(Collections.singletonList(sfField));
+    when(dal.createCriteria(SFField.class)).thenReturn(fieldCriteria);
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+      obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, null)).thenReturn(vars);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
+          .thenReturn(dalEntity);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper
+          .resolvePropertyName(dalEntity, "Default_Ad_Client_ID"))
+          .thenReturn("defaultClient");
+      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
+
+      NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
+
+      assertEquals(200, response.getHttpStatus());
+      assertFalse("Excluded column must resolve to no value at all — not the unscoped "
+              + "cross-tenant first-row-of-the-table value the combo fallback would otherwise "
+              + "pick",
+          response.getBody().getJSONObject("defaults").has("defaultClient"));
+      utilityMock.verify(() -> Utility.getPreference(any(), any(), any()), never());
+      selectorMock.verify(() -> NeoSelectorService.getBaseReferenceId(adColumn), never());
+      selectorMock.verify(() -> NeoSelectorService.querySelectorByColumn(
+          any(), anyString(), any(), anyInt(), anyInt(), any()), never());
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-5277 — control/negative test: a column that legitimately relies on the shared
+  // session/prefs fallback (Default_Ad_Language, same AD_User table, NOT in the deny-list) must
+  // keep resolving normally — confirms the exclusion is scoped to exactly the 4 target columns,
+  // not a blanket regression of resolveFromPrefsOrDocType for every AD_User column (live-verified
+  // in the ticket's own investigation: defaultLanguage kept resolving correctly for both test
+  // accounts after the fix).
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  public void testResolveFieldDefaultStillAppliesSessionFallbackForNonExcludedAdUserColumn()
+      throws Exception {
+    Column adColumn = mock(Column.class);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn("AD_User");
+    when(adColumn.getTable()).thenReturn(table);
+    when(adColumn.getDBColumnName()).thenReturn("Default_Ad_Language");
+    when(adColumn.getDefaultValue()).thenReturn(null);
+    when(adColumn.isLinkToParentColumn()).thenReturn(false);
+    when(adColumn.isUseAutomaticSequence()).thenReturn(false);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+
+    try (MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class)) {
+      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
+      utilityMock.when(() -> Utility.getPreference(vars, "Default_Ad_Language", "WIN-1"))
+          .thenReturn("en_US");
+
+      NeoDefaultsService.FieldDefaultRequest request = new NeoDefaultsService.FieldDefaultRequest(
+          adColumn, null, vars, mock(DalConnectionProvider.class), "WIN-1", null);
+
+      Object result = NeoDefaultsService.resolveFieldDefault(request);
+
+      assertEquals("A non-excluded AD_User column must still resolve via the shared "
+          + "session/prefs fallback", "en_US", result);
+      utilityMock.verify(() -> Utility.getPreference(vars, "Default_Ad_Language", "WIN-1"));
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-5277 (review hardening, W1) — resolveOrFirstComboOption: Alex's REVIEW found this is a
+  // THIRD, previously-unguarded call site into resolveFirstComboOption, reached from the Pass-3
+  // hidden-mandatory-defaults resolver (NeoHiddenMandatoryDefaultsResolver, gated by
+  // column.isMandatory()==true). It was inert only because all 4 excluded AD_User columns are
+  // ismandatory='N' in the live DB today — a coincidence of data, not a structural guarantee.
+  // This test simulates the landmine condition directly (isMandatory() == true on one of the 4
+  // excluded columns, with no ETGO_SF_FIELD entry so it is genuinely a "hidden mandatory" column
+  // reached only through Pass 3) and proves the FULL PATH — resolveDefaults end to end, not just
+  // the guard function in isolation — never reaches the unscoped combo/selector fallback.
+  // Before the fix this test fails: NeoSelectorService.getBaseReferenceId is invoked and the
+  // cross-tenant "first row of the table" leak reopens exactly as Alex described.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testResolveDefaultsHiddenMandatoryResolverExcludesComboFallbackForExcludedColumnEvenWhenMandatory()
+      throws Exception {
+    OBDal dal = mock(OBDal.class);
+    OBCriteria<SFField> fieldCriteria = mock(OBCriteria.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    OBContext obContext = mock(OBContext.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    Entity dalEntity = mock(Entity.class);
+    Tab adTab = mock(Tab.class);
+    Table table = mock(Table.class);
+    Column adColumn = mock(Column.class);
+    Property prop = mock(Property.class);
+
+    when(sfEntity.getId()).thenReturn("sf-entity-1");
+    // No SFField rows configured for this entity at all — so the excluded column is reached
+    // ONLY as a "hidden mandatory" column via Pass 3, never via Pass 1.
+    when(fieldCriteria.add(any())).thenReturn(fieldCriteria);
+    when(fieldCriteria.list()).thenReturn(Collections.emptyList());
+    when(dal.createCriteria(SFField.class)).thenReturn(fieldCriteria);
+
+    when(table.getDBTableName()).thenReturn("AD_User");
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(adColumn));
+    when(adTab.getTable()).thenReturn(table);
+
+    when(adColumn.getTable()).thenReturn(table);
+    when(adColumn.getDBColumnName()).thenReturn("Default_Ad_Role_ID");
+    when(adColumn.isActive()).thenReturn(true);
+    // The landmine condition: simulate this excluded column being mandatory, which is exactly
+    // what NeoHiddenMandatoryDefaultsResolver.shouldResolveColumn requires to let it through to
+    // Pass 3's own resolveOrFirstComboOption call site.
+    when(adColumn.isMandatory()).thenReturn(true);
+    when(adColumn.isKeyColumn()).thenReturn(false);
+    when(adColumn.getDefaultValue()).thenReturn(null);
+    when(adColumn.isLinkToParentColumn()).thenReturn(false);
+    when(adColumn.isUseAutomaticSequence()).thenReturn(false);
+
+    when(dalEntity.getPropertyByColumnName("Default_Ad_Role_ID")).thenReturn(prop);
+    when(prop.getName()).thenReturn("defaultRole");
+    when(prop.isAuditInfo()).thenReturn(false);
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .adTab(adTab)
+        .build();
+
+    try (MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<OBDal> obDalMock = mockStatic(OBDal.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+      obContextMock.when(OBContext::setAdminMode).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
+      cascadeMock.when(() -> NeoDefaultsCascadeHelper.resolveDalEntity(sfEntity))
+          .thenReturn(dalEntity);
+      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
+
+      NeoResponse response = NeoDefaultsService.resolveDefaults(ctx, null);
+
+      assertEquals(200, response.getHttpStatus());
+      assertFalse("The excluded AD_User column must resolve to no value at all via the "
+              + "hidden-mandatory-defaults pass, even when simulated as mandatory — not the "
+              + "unscoped cross-tenant first-row-of-the-table value the combo fallback would "
+              + "otherwise pick",
+          response.getBody().getJSONObject("defaults").has("defaultRole"));
+      // Proves the short-circuit happens BEFORE resolveFirstComboOption's own selector query —
+      // not merely that the query happened to return nothing.
+      selectorMock.verify(() -> NeoSelectorService.getBaseReferenceId(adColumn), never());
+      selectorMock.verify(() -> NeoSelectorService.querySelectorByColumn(
+          any(), anyString(), any(), anyInt(), anyInt(), any()), never());
+      utilityMock.verify(() -> Utility.getPreference(any(), any(), any()), never());
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-5277 (review hardening, W2) — NeoMandatoryDefaultsService.tryInjectFromSession: Alex's
+  // REVIEW found this is a FOURTH path into the same leak, on the CREATE request itself (not
+  // just the /defaults GET bootstrap) — it reads session values directly via
+  // vars.getSessionValue("#" + dbColName)/vars.getSessionValue(dbColName), entirely bypassing
+  // resolveFieldDefault/Utility.getPreference and therefore the isUserSessionFallbackExcluded-
+  // Column exclusion. It was dormant only because Etendo's session vars are seeded as
+  // #AD_Role_ID/#AD_Client_ID/#AD_Org_ID/#M_Warehouse_ID, never #Default_Ad_Role_ID etc. — a
+  // naming coincidence, not a structural guarantee. This test simulates the landmine directly:
+  // a session variable literally named "#Default_Ad_Role_ID" DOES exist (as if core's seeding
+  // convention changed), and proves the FULL create-request injection path
+  // (injectMandatoryDefaults -> injectDefaultsForActiveColumns -> injectMandatoryDefaultForColumn
+  // -> tryInjectFromSession) never reads it, let alone injects it into the create body. Before
+  // the fix this test fails: the poisoned session value would have been written to
+  // body.defaultRole.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testInjectMandatoryDefaultsNeverReadsSessionForExcludedAdUserColumnEvenWhenSessionVarExists()
+      throws Exception {
+    JSONObject body = new JSONObject();
+    Tab adTab = mock(Tab.class);
+    Table table = mock(Table.class);
+    OBContext obContext = mock(OBContext.class);
+    SFEntity sfEntity = mock(SFEntity.class);
+    Entity dalEntity = mock(Entity.class);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+
+    Column adColumn = mock(Column.class);
+    when(table.getDBTableName()).thenReturn("AD_User");
+    when(adColumn.getTable()).thenReturn(table);
+    when(adColumn.getDBColumnName()).thenReturn("Default_Ad_Role_ID");
+    when(adColumn.isActive()).thenReturn(true);
+    when(adColumn.isMandatory()).thenReturn(false); // matches the live DB today (ismandatory='N')
+    when(adColumn.isKeyColumn()).thenReturn(false);
+    when(adColumn.getDefaultValue()).thenReturn(null);
+    when(adColumn.isLinkToParentColumn()).thenReturn(false);
+    when(adColumn.isUseAutomaticSequence()).thenReturn(false);
+
+    Property prop = mock(Property.class);
+    when(prop.isAuditInfo()).thenReturn(false);
+    when(prop.getName()).thenReturn("defaultRole");
+    when(dalEntity.getPropertyByColumnName("Default_Ad_Role_ID")).thenReturn(prop);
+
+    when(adTab.getTable()).thenReturn(table);
+    when(table.getId()).thenReturn("TABLE-1");
+    when(table.getADColumnList()).thenReturn(Collections.singletonList(adColumn));
+
+    // The landmine condition: a session variable literally named "#Default_Ad_Role_ID" exists
+    // and would resolve to the creating admin's own role — simulating core's session-var
+    // seeding using this naming convention, which it does not do today but might in the future.
+    when(vars.getSessionValue("#Default_Ad_Role_ID")).thenReturn("POISONED-ADMIN-ROLE-ID");
+    when(vars.getSessionValue("Default_Ad_Role_ID")).thenReturn("POISONED-ADMIN-ROLE-ID");
+
+    OBDal obDal = mock(OBDal.class);
+    OBCriteria<SFField> sfFieldCriteria = mock(OBCriteria.class);
+    when(sfFieldCriteria.add(any())).thenReturn(sfFieldCriteria);
+    when(sfFieldCriteria.list()).thenReturn(Collections.emptyList());
+    when(obDal.createCriteria(SFField.class)).thenReturn(sfFieldCriteria);
+    when(sfEntity.getId()).thenReturn("entity-1");
+
+    NeoContext ctx = NeoContext.builder()
+        .sfEntity(sfEntity)
+        .obContext(obContext)
+        .build();
+
+    try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+         MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+         MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+         MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+             mockStatic(NeoDefaultsCascadeHelper.class);
+         MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+         MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+         MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+         MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class);
+         MockedStatic<NeoParentValuesLoader> parentMock =
+             mockStatic(NeoParentValuesLoader.class)) {
+      ModelProvider mp = mock(ModelProvider.class);
+      modelMock.when(ModelProvider::getInstance).thenReturn(mp);
+      when(mp.getEntityByTableId("TABLE-1")).thenReturn(dalEntity);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+      calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
+      sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
+      parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
+          .thenReturn(java.util.Collections.emptyMap());
+
+      NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+
+      assertFalse("The excluded AD_User column must never be injected from a session variable, "
+              + "even one shaped exactly like the deny-listed column name",
+          body.has("defaultRole"));
+      // Proves the short-circuit happens BEFORE the session read itself — not merely that the
+      // session happened to return something unusable.
+      verify(vars, never()).getSessionValue("#Default_Ad_Role_ID");
+      verify(vars, never()).getSessionValue("Default_Ad_Role_ID");
+      selectorMock.verify(() -> NeoSelectorService.querySelectorByColumn(
+          any(), anyString(), any(), anyInt(), anyInt(), any()), never());
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-5277 (architectural consolidation) — the deny-list check moved INTO the shared
+  // primitives themselves (resolveFirstComboOption / resolveFromPrefsOrDocType), instead of
+  // living at each call site. The tests above already prove this indirectly through every
+  // caller (resolveOrFirstComboOption, applyDefaultWithComboFallback, resolveFieldDefault,
+  // tryInjectFromSession). The tests below test the two primitives DIRECTLY, so the guard
+  // itself is covered even if a caller's own test is ever removed or a brand-new caller is
+  // added without a matching test of its own — the whole point of moving the check down here.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  public void testResolveFirstComboOptionReturnsNullForAllFourExcludedColumnsAtThePrimitiveLevel()
+      throws Exception {
+    String[] excludedColumns = {
+        "Default_Ad_Role_ID", "Default_Ad_Client_ID", "Default_Ad_Org_ID", "Default_M_Warehouse_ID"
+    };
+    for (String columnName : excludedColumns) {
+      Column adColumn = mock(Column.class);
+      Table table = mock(Table.class);
+      when(table.getDBTableName()).thenReturn("AD_User");
+      when(adColumn.getTable()).thenReturn(table);
+      when(adColumn.getDBColumnName()).thenReturn(columnName);
+
+      try (MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+        Object result = invokePrivate("resolveFirstComboOption",
+            new Class<?>[]{ Column.class, NeoContext.class }, adColumn, null);
+
+        assertNull("resolveFirstComboOption must refuse to resolve a value for the excluded "
+            + "column " + columnName + " — the primitive itself is now the guard, not a "
+            + "per-call-site check", result);
+        // Proves the short-circuit happens BEFORE even asking what kind of reference this
+        // column is — every one of resolveFirstComboOption's 3 real callers (plus any future
+        // one) is protected the same way, with nothing to remember at the call site.
+        selectorMock.verifyNoInteractions();
+      }
+    }
+  }
+
+  @Test
+  public void testResolveFirstComboOptionStillResolvesNormallyForNonExcludedColumn()
+      throws Exception {
+    // Control: the primitive-level guard must be scoped to exactly the 4 AD_User columns, not a
+    // regression of the combo first-option mechanism itself for every other FK in the system.
+    Column column = mock(Column.class);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn("C_Order");
+    when(column.getTable()).thenReturn(table);
+    when(column.getDBColumnName()).thenReturn("C_Reject_Reason_ID");
+
+    JSONObject item = new JSONObject();
+    item.put("id", "FIRST-OPTION-ID");
+    JSONArray items = new JSONArray();
+    items.put(item);
+    JSONObject selectorBody = new JSONObject();
+    selectorBody.put("items", items);
+    NeoResponse selectorResp = NeoResponse.ok(selectorBody);
+
+    try (MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class)) {
+      selectorMock.when(() -> NeoSelectorService.getBaseReferenceId(column)).thenReturn("17");
+      selectorMock.when(() -> NeoSelectorService.hasObuiselSelector(column)).thenReturn(false);
+      selectorMock.when(() -> NeoSelectorService.querySelectorByColumn(
+          eq(column), eq("C_Reject_Reason_ID"), eq(null), eq(1), eq(0), any()))
+          .thenReturn(selectorResp);
+
+      Object result = invokePrivate("resolveFirstComboOption",
+          new Class<?>[]{ Column.class, NeoContext.class }, column, null);
+
+      assertEquals("A non-excluded column must still resolve via the normal combo "
+          + "first-option mechanism — the guard must not weaken it for everyone else",
+          "FIRST-OPTION-ID", result);
+    }
+  }
+
+  @Test
+  public void testResolveFromPrefsOrDocTypeReturnsNullForAllFourExcludedColumnsAtThePrimitiveLevel()
+      throws Exception {
+    String[] excludedColumns = {
+        "Default_Ad_Role_ID", "Default_Ad_Client_ID", "Default_Ad_Org_ID", "Default_M_Warehouse_ID"
+    };
+    for (String columnName : excludedColumns) {
+      Column adColumn = mock(Column.class);
+      Table table = mock(Table.class);
+      when(table.getDBTableName()).thenReturn("AD_User");
+      when(adColumn.getTable()).thenReturn(table);
+      when(adColumn.getDBColumnName()).thenReturn(columnName);
+      VariablesSecureApp vars = mock(VariablesSecureApp.class);
+
+      try (MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+           MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class)) {
+        Object result = invokePrivate("resolveFromPrefsOrDocType",
+            new Class<?>[]{ Column.class, VariablesSecureApp.class, DalConnectionProvider.class,
+                String.class, String.class, NeoContext.class },
+            adColumn, vars, mock(DalConnectionProvider.class), "WIN-1", columnName, null);
+
+        assertNull("resolveFromPrefsOrDocType must refuse to resolve a value for the excluded "
+            + "column " + columnName + " directly — not only when reached through "
+            + "resolveFieldDefault's own (now-redundant) guard", result);
+        utilityMock.verifyNoInteractions();
+        docTypeMock.verifyNoInteractions();
+      }
+    }
+  }
+
+  @Test
+  public void testResolveFromPrefsOrDocTypeStillResolvesNormallyForNonExcludedColumn()
+      throws Exception {
+    // Control: same scoping guarantee as the resolveFirstComboOption control test above, for
+    // the OTHER primitive this ticket guards.
+    Column adColumn = mock(Column.class);
+    Table table = mock(Table.class);
+    when(table.getDBTableName()).thenReturn("AD_User");
+    when(adColumn.getTable()).thenReturn(table);
+    when(adColumn.getDBColumnName()).thenReturn("Default_Ad_Language");
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+
+    try (MockedStatic<Utility> utilityMock = mockStatic(Utility.class)) {
+      utilityMock.when(() -> Utility.getPreference(vars, "Default_Ad_Language", "WIN-1"))
+          .thenReturn("en_US");
+
+      Object result = invokePrivate("resolveFromPrefsOrDocType",
+          new Class<?>[]{ Column.class, VariablesSecureApp.class, DalConnectionProvider.class,
+              String.class, String.class, NeoContext.class },
+          adColumn, vars, mock(DalConnectionProvider.class), "WIN-1", "Default_Ad_Language", null);
+
+      assertEquals("A non-excluded AD_User column must still resolve via the shared "
+          + "session/prefs fallback", "en_US", result);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ETP-5277 — the "5th path": NeoMandatoryDefaultsService.tryInjectFirstFromLookup calls
+  // NeoDefaultsService.resolveFirstComboOption DIRECTLY, bypassing resolveOrFirstComboOption's
+  // (now-redundant) call-site guard entirely. Found during the W1/W2 hardening pass and left
+  // unfixed at the time; this test proves it is now closed WITHOUT any change to
+  // tryInjectFirstFromLookup itself — it inherits the fix automatically because the guard moved
+  // into resolveFirstComboOption, the primitive it calls directly.
+  //
+  // The column is forced mandatory so injectMandatoryDefaultForColumn reaches the LAST
+  // NOT-NULL fallback (tryInjectFirstFromLookup); no session var is seeded and no parent values
+  // are provided, so the two earlier passes (tryResolveFieldDefault, tryInjectFromSession) are
+  // isolated from this test and cannot be the reason nothing leaks.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  @Test
+  @SuppressWarnings("unchecked")
+  public void testInjectMandatoryDefaultsTryInjectFirstFromLookupNeverLeaksForExcludedAdUserColumns()
+      throws Exception {
+    String[] excludedColumns = {
+        "Default_Ad_Role_ID", "Default_Ad_Client_ID", "Default_Ad_Org_ID", "Default_M_Warehouse_ID"
+    };
+    for (String columnName : excludedColumns) {
+      JSONObject body = new JSONObject();
+      Tab adTab = mock(Tab.class);
+      Table table = mock(Table.class);
+      OBContext obContext = mock(OBContext.class);
+      SFEntity sfEntity = mock(SFEntity.class);
+      Entity dalEntity = mock(Entity.class);
+      VariablesSecureApp vars = mock(VariablesSecureApp.class);
+
+      Column adColumn = mock(Column.class);
+      when(table.getDBTableName()).thenReturn("AD_User");
+      when(adColumn.getTable()).thenReturn(table);
+      when(adColumn.getDBColumnName()).thenReturn(columnName);
+      when(adColumn.isActive()).thenReturn(true);
+      // Forced mandatory (unlike the live DB today) so the column reaches the LAST NOT-NULL
+      // fallback, tryInjectFirstFromLookup — matching the W1 landmine's own reasoning: today's
+      // ismandatory='N' is a coincidence of data, not a structural guarantee.
+      when(adColumn.isMandatory()).thenReturn(true);
+      when(adColumn.isKeyColumn()).thenReturn(false);
+      when(adColumn.getDefaultValue()).thenReturn(null);
+      when(adColumn.isLinkToParentColumn()).thenReturn(false);
+      when(adColumn.isUseAutomaticSequence()).thenReturn(false);
+
+      Property prop = mock(Property.class);
+      when(prop.isAuditInfo()).thenReturn(false);
+      when(prop.getName()).thenReturn("someDefaultProp");
+      when(dalEntity.getPropertyByColumnName(columnName)).thenReturn(prop);
+
+      when(adTab.getTable()).thenReturn(table);
+      when(table.getId()).thenReturn("TABLE-1");
+      when(table.getADColumnList()).thenReturn(Collections.singletonList(adColumn));
+
+      // No session var seeded at all (unlike the W2 test) — isolates this test from
+      // tryInjectFromSession's own guard, so a leak observed here could only come from
+      // tryInjectFirstFromLookup / resolveFirstComboOption.
+      when(vars.getSessionValue(anyString())).thenReturn(null);
+
+      OBDal obDal = mock(OBDal.class);
+      OBCriteria<SFField> sfFieldCriteria = mock(OBCriteria.class);
+      when(sfFieldCriteria.add(any())).thenReturn(sfFieldCriteria);
+      when(sfFieldCriteria.list()).thenReturn(Collections.emptyList());
+      when(obDal.createCriteria(SFField.class)).thenReturn(sfFieldCriteria);
+      when(sfEntity.getId()).thenReturn("entity-1");
+
+      NeoContext ctx = NeoContext.builder()
+          .sfEntity(sfEntity)
+          .obContext(obContext)
+          .build();
+
+      try (MockedStatic<ModelProvider> modelMock = mockStatic(ModelProvider.class);
+           MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBContext> obContextMock = mockStatic(OBContext.class);
+           MockedStatic<NeoCalloutService> calloutMock = mockStatic(NeoCalloutService.class);
+           MockedStatic<NeoDefaultsCascadeHelper> cascadeMock =
+               mockStatic(NeoDefaultsCascadeHelper.class);
+           MockedStatic<SequenceUtils> sequenceMock = mockStatic(SequenceUtils.class);
+           MockedStatic<Utility> utilityMock = mockStatic(Utility.class);
+           MockedStatic<DocTypeResolver> docTypeMock = mockStatic(DocTypeResolver.class);
+           MockedStatic<NeoSelectorService> selectorMock = mockStatic(NeoSelectorService.class);
+           MockedStatic<NeoParentValuesLoader> parentMock =
+               mockStatic(NeoParentValuesLoader.class)) {
+        ModelProvider mp = mock(ModelProvider.class);
+        modelMock.when(ModelProvider::getInstance).thenReturn(mp);
+        when(mp.getEntityByTableId("TABLE-1")).thenReturn(dalEntity);
+        dalMock.when(OBDal::getInstance).thenReturn(obDal);
+        obContextMock.when(() -> OBContext.setAdminMode(true)).thenAnswer(inv -> null);
+        obContextMock.when(OBContext::restorePreviousMode).thenAnswer(inv -> null);
+        calloutMock.when(() -> NeoCalloutService.buildVars(obContext, adTab)).thenReturn(vars);
+        sequenceMock.when(() -> SequenceUtils.isSequence(adColumn)).thenReturn(false);
+        parentMock.when(() -> NeoParentValuesLoader.load(adTab, null))
+            .thenReturn(java.util.Collections.emptyMap());
+
+        NeoMandatoryDefaultsService.injectMandatoryDefaults(body, adTab, ctx);
+
+        assertFalse("tryInjectFirstFromLookup must never inject a value for excluded column "
+                + columnName + " — this is the '5th path' the primitive-level fix closes without "
+                + "any change to tryInjectFirstFromLookup itself",
+            body.has("someDefaultProp"));
+        // Proves the short-circuit happens before resolveFirstComboOption's own selector query —
+        // not merely that the query happened to return nothing usable.
+        selectorMock.verify(() -> NeoSelectorService.getBaseReferenceId(adColumn), never());
+        selectorMock.verify(() -> NeoSelectorService.querySelectorByColumn(
+            any(), anyString(), any(), anyInt(), anyInt(), any()), never());
+      }
+    }
+  }
 }

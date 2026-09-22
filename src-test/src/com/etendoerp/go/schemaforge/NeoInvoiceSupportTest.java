@@ -19,6 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -29,8 +30,10 @@ import java.sql.ResultSet;
 import java.util.Map;
 
 import org.junit.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
 
 /**
@@ -372,6 +375,89 @@ public class NeoInvoiceSupportTest {
 
       Map<String, BigDecimal> oneArg = NeoInvoiceSupport.computePendingQtyPerLine("inout-1arg");
       assertTrue("1-arg overload must return empty map when RS has no rows", oneArg.isEmpty());
+    }
+  }
+
+  // ─── ETP-5381: computePendingQtyPerLineOrThrow ─────────────────────────────
+
+  /**
+   * The throwing variant differs from the swallowing one ONLY in how it reports failure: on a
+   * successful query both must produce the exact same pending map, so a caller can switch to it
+   * for the duplicate-invoice guards without changing what gets invoiced.
+   */
+  @Test
+  public void computePendingQtyPerLineOrThrow_success_returnsSameMapAsSwallowingVariant()
+      throws Exception {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      Connection conn = stubDalConnection(obDalMock, dal);
+
+      PreparedStatement ps = mock(PreparedStatement.class);
+      ResultSet rs = mock(ResultSet.class);
+      when(conn.prepareStatement(Mockito.anyString())).thenReturn(ps);
+      when(ps.executeQuery()).thenReturn(rs);
+
+      // One row per invocation: the first two values drive the swallowing call, the last two the
+      // throwing one.
+      when(rs.next()).thenReturn(true, false, true, false);
+      when(rs.getString(1)).thenReturn("line-1");
+      when(rs.getBigDecimal(2)).thenReturn(BigDecimal.valueOf(9.0));
+      when(rs.getBigDecimal(3)).thenReturn(BigDecimal.valueOf(2.0));
+
+      Map<String, BigDecimal> swallowing =
+          NeoInvoiceSupport.computePendingQtyPerLine("inout-parity", true);
+      Map<String, BigDecimal> throwing =
+          NeoInvoiceSupport.computePendingQtyPerLineOrThrow("inout-parity", true);
+
+      assertEquals("Both variants must compute the same pending map", swallowing, throwing);
+      assertEquals("Pending must be 7",
+          0, throwing.get("line-1").compareTo(BigDecimal.valueOf(7.0)));
+    }
+  }
+
+  /**
+   * A DB failure must propagate as an {@link OBException}. This is the whole point of the
+   * variant: the duplicate-invoice guards decide on the map being empty, so an outage that
+   * returned an empty map would read as "already fully invoiced" and reject a legitimate invoice
+   * with a message describing something that never happened.
+   */
+  @Test
+  public void computePendingQtyPerLineOrThrow_dbError_throwsOBException() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenThrow(new RuntimeException("DB connection failed"));
+
+      try {
+        NeoInvoiceSupport.computePendingQtyPerLineOrThrow("inout-throw-err", true);
+        fail("A DB failure must not be reported as an empty pending map");
+      } catch (OBException e) {
+        assertEquals("Could not determine pending quantities to invoice", e.getMessage());
+      }
+    }
+  }
+
+  /**
+   * The divergence, asserted against one and the same failure: the swallowing variant keeps
+   * returning an empty map (correct for the read-only billing-status badge, which must not blow
+   * up a list request), while the throwing variant refuses to answer.
+   */
+  @Test
+  public void pendingQtyVariants_sameDbError_swallowReturnsEmptyWhileThrowRaises() {
+    try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenThrow(new RuntimeException("DB down"));
+
+      assertTrue("The badge path must degrade silently",
+          NeoInvoiceSupport.computePendingQtyPerLine("inout-diverge", true).isEmpty());
+
+      try {
+        NeoInvoiceSupport.computePendingQtyPerLineOrThrow("inout-diverge", true);
+        fail("The guard path must not degrade silently");
+      } catch (OBException expected) {
+        // Expected: an infrastructure failure must stay distinguishable from "nothing pending".
+      }
     }
   }
 }

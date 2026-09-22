@@ -315,8 +315,16 @@ public class DefaultDocumentSendEmailContract implements EmailContract {
     try {
       messageEdits = EmailMessageEdits.fromBody(command.getBody());
     } catch (EmailMessageEdits.InvalidMessageEditsException e) {
+      JSONObject extra = new JSONObject();
+      try {
+        extra.put("reasonCode", e.getReasonCode());
+        extra.put("maxSubjectLength", EmailMessageEdits.MAX_SUBJECT_LENGTH);
+        extra.put("maxMessageLength", EmailMessageEdits.MAX_MESSAGE_LENGTH);
+      } catch (JSONException je) {
+        extra = null; // degrade to no extra rather than fail the rejection
+      }
       return EmailContractResolution.rejected(400,
-          TransactionalEmailService.STATUS_VALIDATION_FAILED, e.getMessage());
+          TransactionalEmailService.STATUS_VALIDATION_FAILED, e.getMessage(), extra);
     }
     // ETP-5003 — every document email now renders through the shared layout, so there is no
     // branded-template branch left: an edited send and an untouched one produce the same design.

@@ -71,9 +71,31 @@ public class NeoTelemetryService {
       "token",
       "url"));
 
+  /**
+   * MCP tool-call property keys (B2). Additive to the allowlist: adding a key only permits more,
+   * it cannot change what an existing caller already emits, and the denylist is still consulted
+   * first. Every one of these is shape, not content — see NeoTelemetryEvents.
+   */
+  private static final String PROP_CLIENT_NAME = "clientName";
+  private static final String PROP_ERROR_CODE = "errorCode";
+  private static final String PROP_FIELDS_TOUCHED = "fieldsTouched";
+  private static final String PROP_REQ_BYTES = "reqBytes";
+  private static final String PROP_RESP_BYTES = "respBytes";
+  private static final String PROP_ROW_TYPE = "rowType";
+  private static final String PROP_TOOL = "tool";
+  private static final String PROP_VERB = "verb";
+
   private static final Set<String> SAFE_PROPERTY_KEYS = new HashSet<>(Arrays.asList(
       "accuracy",
       "attempt",
+      PROP_CLIENT_NAME,
+      PROP_ERROR_CODE,
+      PROP_FIELDS_TOUCHED,
+      PROP_REQ_BYTES,
+      PROP_RESP_BYTES,
+      PROP_ROW_TYPE,
+      PROP_TOOL,
+      PROP_VERB,
       "category",
       "channel",
       "count",
@@ -315,6 +337,8 @@ public class NeoTelemetryService {
     bounds.put(PROP_DURATION_MS, new NumericBounds(0, 86400000));
     bounds.put(PROP_HTTP_STATUS, new NumericBounds(100, 599));
     bounds.put("position", new NumericBounds(0, 1000000));
+    bounds.put(PROP_REQ_BYTES, new NumericBounds(0, 1000000000));
+    bounds.put(PROP_RESP_BYTES, new NumericBounds(0, 1000000000));
     bounds.put("score", new NumericBounds(0, 100));
     bounds.put("step", new NumericBounds(0, 1000));
     bounds.put(PROP_TOTAL, new NumericBounds(0, 1000000000));

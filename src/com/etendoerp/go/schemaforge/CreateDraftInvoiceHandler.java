@@ -193,7 +193,6 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
           invoice = createFromOrder(recordId, lineOverrides, null);
         } else if (SPEC_SALES_QUOTATION.equals(specName)) {
           invoice = createFromOrder(recordId, lineOverrides, null);
-          markQuotationAsInvoiceCreated(recordId);
         } else if (SPEC_GOODS_SHIPMENT.equals(specName)) {
           List<String> shipmentIds = parseShipmentIds(body, recordId);
           String priceListId = body != null ? body.optString(PARAM_PRICE_LIST_ID, null) : null;
@@ -210,10 +209,28 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
           OBDal.getInstance().flush();
         }
 
+        // ETP-5381: create and confirm in a single atomic step. A draft invoice reserves nothing
+        // — c_orderline.qtyinvoiced and m_inoutline.isinvoiced are only written by C_Invoice_Post
+        // — so leaving one behind lets the same order or shipment be invoiced a second time.
+        // The id is captured BEFORE the call because ProcessInvoiceUtil commits and closes the
+        // Hibernate session, leaving `invoice` detached; `completed` is read from the reopened
+        // session, which also picks up the DocumentNo the completion may have reassigned from the
+        // document type's sequence. On failure the internal rollback reverts the whole creation.
+        String invoiceId = invoice.getId();
+        InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, context.getObContext());
+        Invoice completed = OBDal.getInstance().get(Invoice.class, invoiceId);
+
+        // After completion, not before: ETGO_CI must mean "a CONFIRMED invoice exists for this
+        // quotation". Writing it first would mark the quotation even when the completion is
+        // rolled back, leaving it closed with nothing to show for it.
+        if (SPEC_SALES_QUOTATION.equals(specName)) {
+          markQuotationAsInvoiceCreated(recordId);
+        }
+
         JSONObject data = new JSONObject();
-        data.put("id", invoice.getId());
-        data.put(FIELD_DOCUMENT_NO, invoice.getDocumentNo());
-        data.put("documentStatus", invoice.getDocumentStatus());
+        data.put("id", invoiceId);
+        data.put(FIELD_DOCUMENT_NO, completed.getDocumentNo());
+        data.put("documentStatus", completed.getDocumentStatus());
 
         JSONObject responseData = new JSONObject();
         responseData.put("data", data);
@@ -227,18 +244,27 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       }
     } catch (OBException e) {
       log.warn("Error creating draft invoice from {}: {}", specName, e.getMessage());
-      try {
-        JSONObject body = new JSONObject();
-        body.put("status", "error");
-        body.put("message", e.getMessage());
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
-      } catch (Exception jsonEx) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
-      }
+      return errorResponse(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {
       log.error("Error creating draft invoice from {}: {}", specName, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while creating the invoice");
+    }
+  }
+
+  /**
+   * Builds the {@code {status, message}} error body every frontend caller of this action reads as
+   * {@code err.response.message}, falling back to a plain-text response if the JSON cannot be
+   * assembled.
+   */
+  private NeoResponse errorResponse(int status, String message) {
+    try {
+      JSONObject body = new JSONObject();
+      body.put("status", "error");
+      body.put("message", message);
+      return NeoResponse.error(status, body);
+    } catch (Exception jsonEx) {
+      return NeoResponse.error(status, message);
     }
   }
 

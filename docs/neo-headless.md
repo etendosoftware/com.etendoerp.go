@@ -571,6 +571,104 @@ core's own check be the final word rather than fabricating a conflict.
 edit then 400s as `missing_updated` no matter how freshly the record was just read. See §5.3's
 `ChartOfAccountsHandler` example for a concrete case that hit exactly this gap.
 
+#### 4.3.4 Create-defaults exclusion for `AD_User`'s 4 `Default_*` columns (ETP-5277)
+
+Neither the `user` entity's create-defaults bootstrap (`GET /{specName}/user/defaults`, consulted
+by the create form on load) nor its `POST /{specName}/user` create response will ever resolve or
+echo a session-derived value for these 4 `AD_User` columns:
+
+- `Default_Ad_Role_ID`
+- `Default_Ad_Client_ID`
+- `Default_Ad_Org_ID`
+- `Default_M_Warehouse_ID`
+
+**Why.** These columns have no `AD_Column`/`ETGO_SF_FIELD` default configured, so resolution used
+to fall through to the generic create-defaults fallback chain — which, for a brand-new `AD_User`
+record with no matching `AD_Preference` row, resolves to whatever the *creating caller's own
+session* (or, in one variant of the bug, an arbitrary unscoped first row of the whole table)
+happens to hold. Concretely: creating a new user showed it, in the instant right after Guardar and
+before any refresh, already holding the *creating admin's own* role/client/org/warehouse — in one
+observed case even a **different tenant's** client/org entirely, since the combo-preselection
+fallback below queried with no scoping at all. Neither leak is a real grant: the backend
+(`UserRoleAssignmentHandler#ensurePersonalRoleForNewlyCreatedUser`) always persists the correct
+values (a fresh, empty personal role; the real client/organization/first-active-warehouse) in the
+same request — the bug was that the create response was never told about it, so the wrong values
+lingered until a follow-up `GET`.
+
+**Where the guard lives.** `NeoDefaultsService.isUserSessionFallbackExcludedColumn(Column)` is a
+small, explicit deny-list (table `AD_USER` + the 4 DB column names above, case-insensitive; fails
+open — returns `false` — on missing table/column metadata, so it can never accidentally exclude a
+column it can't positively identify). It is checked inside the **primitives themselves**, not at
+each call site, so every current and future caller is covered by construction:
+
+- `NeoDefaultsService.resolveFirstComboOption(Column, NeoContext)` — the combo/selector
+  first-option fallback (an unscoped "first row of the table" query when no other default
+  resolves). This is the primitive `resolveOrFirstComboOption`, `applyDefaultWithComboFallback`,
+  and `NeoMandatoryDefaultsService#tryInjectFirstFromLookup` all eventually reach.
+- `NeoDefaultsService.resolveFromPrefsOrDocType(...)` — the `Utility.getPreference` session/prefs
+  fallback used when no `AD_Preference` row exists for the column.
+- `NeoMandatoryDefaultsService#tryInjectFromSession` — a structurally separate mechanism (reads
+  `#ColumnName`/`ColumnName` straight off the session, bypassing both primitives above), reusing
+  the same deny-list rather than a second copy. Dormant in practice today only because core seeds
+  session vars as `#AD_Role_ID`/`#AD_Client_ID`/`#AD_Org_ID`/`#M_Warehouse_ID`, never as
+  `#Default_Ad_Role_ID` etc. — a naming coincidence, not a structural guarantee, which is exactly
+  why it is guarded rather than left to that coincidence.
+
+**Why the guard sits at the primitive, not the call site — read this before adding a 6th caller.**
+Every round of investigating this bug turned up one more unguarded caller of the same underlying
+fallback (the original `defaultRole` leak → an unscoped cross-tenant combo-fallback leak found
+while fixing it → two more call sites found in review → a fifth found while hardening those two).
+Guarding one call site at a time was whack-a-mole: each fix left the mechanism itself still capable
+of leaking through whatever caller nobody had looked at yet. The guard therefore lives inside
+`resolveFirstComboOption` and `resolveFromPrefsOrDocType` — the two low-level primitives every one
+of those callers eventually routes through — so a **new** caller added later (a new combo fallback,
+a new session/prefs read) inherits the exclusion automatically, with nothing to remember at the
+call site. If you are adding a new resolution path for create-defaults values, route it through
+one of these two primitives (or, if it must read the session directly like
+`tryInjectFromSession` does, call `isUserSessionFallbackExcludedColumn` yourself first) — do not
+special-case `AD_User` at your own call site instead.
+
+**Response-patch complement.** Because the 4 fields are still real, meaningful data once
+persisted, the create response is patched with their final values immediately after
+`ensurePersonalRoleForNewlyCreatedUser` runs (`UserRoleAssignmentHandler#patchUserDefaultsOntoRow`),
+re-reading them off the just-saved `User` entity and writing both `<field>` and its
+`<field>$_identifier` companion (via `BaseOBObject#getIdentifier()`, the same convention every
+other FK field's identifier uses — not a hand-rolled per-tenant name map). This mirrors the
+existing `attachInvitationStatusToRowSafely` pattern in the same file: best-effort, isolated in its
+own `try/catch`, logged (never thrown) on failure, and a `null` reference (e.g. no active warehouse
+yet) is omitted from the row rather than forced to `JSONObject.NULL`. Net effect: the create
+response is now honest about the field this same request just changed, instead of only becoming
+correct after a follow-up `GET`.
+
+**Scope — deliberately narrow.** The deny-list is exactly these 4 columns on exactly `AD_User`; it
+does not weaken `resolveFirstComboOption`/`resolveFromPrefsOrDocType`/`tryInjectFromSession` for any
+other entity or column (e.g. `AD_User.AD_Language`, on the same table, still resolves normally
+through the same fallback — that's the control case the regression tests assert). No
+existing-record path (`PUT`/`PATCH`) reaches either primitive — both are exclusively new-record
+paths — so nothing here affects editing an existing user.
+
+**Known limitations surfaced while fixing this, not fixed here:**
+
+- `WarehouseLookupHelper#findFirstActiveWarehouse` (`src/com/etendoerp/go/common/WarehouseLookupHelper.java`)
+  has no `ORDER BY` on either of its `OBCriteria` lookups, only `setMaxResults(1)` — so "first
+  active warehouse" is non-deterministic whenever 2+ are active for the same client/organization.
+  Pre-existing (ETP-4894), not introduced by ETP-5277 — but the response-patch above makes a
+  wrong-but-plausible warehouse **more visible** than before (previously `null` until a refresh;
+  now shown immediately in the create response). Candidate follow-up: add a stable `ORDER BY` (id
+  or creation date) to both criteria.
+- `Utility.getPreference` — the mechanism `resolveFromPrefsOrDocType` falls back from — was
+  **already structurally incapable of returning a real, admin-configured `AD_Preference` value**
+  through this call path, for *any* column, not just the 4 excluded here, before ETP-5277 existed.
+  It only ever consults the session snapshot (never a live DB query), and
+  `NeoSessionVarsCache`'s `IDENTITY_KEYS` whitelist (`src/com/etendoerp/go/schemaforge/util/NeoSessionVarsCache.java`)
+  — the fixed set of keys that snapshot is allowed to carry — does not include the `"P|"`-prefixed
+  keys `Preferences.savePreferenceInSession` writes real preferences under. So a legitimately
+  configured `AD_Preference` for a create-defaults column was already invisible to this endpoint
+  everywhere in NEO Headless, not just for `AD_User`. ETP-5277's guard changes nothing about this —
+  it is called out here because the investigation is what surfaced it. Candidate follow-up: widen
+  `IDENTITY_KEYS` to include `"P|"`-prefixed keys, or route this fallback through a live
+  `AD_Preference` query instead of the session snapshot.
+
 ### 4.4 Selectors (FK Dropdowns)
 
 The selector service resolves foreign key references and provides searchable dropdown values.
@@ -716,6 +814,36 @@ Button actions are fields whose AD_Column has `AD_Reference_ID = '28'` (Button t
 The `recordId` from the URL path is injected into the process parameters automatically. Request body contains additional process parameters as JSON.
 
 Process access is checked before execution. If the current role lacks access to the process, the request returns `403 Forbidden`.
+
+#### Failure body: `message` + `messageKeys` (ETP-5316)
+
+When the action runs a DB procedure (`CallProcess` -> `ProcessInstance`) and it fails, the `400`
+body carries the translated sentence **and** the AD_MESSAGE search keys behind it:
+
+```json
+{
+  "status": "error",
+  "message": "En la línea 10, 20, 30, 40, Cuando el producto no esta vacío entonces la cantidad movida no debe ser cero.",
+  "messageKeys": ["Inline", "ProductNotNullAndMovementQtyZero"]
+}
+```
+
+Core assembles these messages from AD_MESSAGE tokens plus run-time data --
+`M_INOUT_POST` raises `'@Inline@ '||v_Message_Qty||' @ProductNotNullAndMovementQtyZero@'` -- so the
+translated text differs per document and cannot be matched by a client, and the numbers in it are
+**AD line numbers** (`line`, numbered in tens), not the row positions the user sees. Neither the
+text nor the numbers are usable.
+
+`NeoProcessService.translatePInstanceResult` therefore extracts the `@Key@` tokens from the raw
+`ProcessInstance.errorMsg` **before** `NeoMessageTranslator.safeParseTranslation` replaces them
+(`NeoMessageTranslator.extractMessageKeys`), preserving order and dropping duplicates. The client
+matches the first key it recognises against its own allow-list and renders its own wording; there
+is no AD_MESSAGE catalog lookup here, so an unrecognised token is inert.
+
+`message` is byte-for-byte what it was before, and `messageKeys` is **omitted** when the raw message
+carried no token -- a client that ignores the field is unaffected. Scope: this branch only (the
+document-action / `CallProcess` path). The OBUIAPP result paths in `translateObuiappResult` also
+funnel through `safeParseTranslation` and could carry the same field, but deliberately do not yet.
 
 ### 4.6 Process Specs (Standalone Processes)
 
@@ -1145,7 +1273,57 @@ comma-separated selection of active, compatible DB Extended sources. The browser
 tenant scope: DB Extended derives client and organization from `OBContext`; Go maps every requested
 namespace to its AD table and requires the active role to have entity read access before searching.
 
-Alternatively, pass `targets=sales-invoice` to select an active configured search target.
+Alternatively, pass `targets=sales-invoice` to select an active configured search target. The
+valid keys are the `Search Key` values of the active `ETARC_VECTOR_SEARCH_TARGET` rows.
+`NeoVectorSearchEndpoint.configuredTargetKeys()` returns them, and the MCP `neo_vector_search` tool
+publishes them as an `enum` on the `targets` parameter so an agent never has to guess one (IMP-41).
+
+**A target key IS the name of the spec that owns it (ETP-5335).** That is a convention, not a
+coincidence, and it is what lets a caller act on a result: a match found in target `X` is read with
+`neo_get(spec:"X", entity:<X's primaryEntity>, id:<match.id>)`. The entity comes from
+`neo_discover` — `neo_get` requires it and does not default to the primary one — so the convention
+removes the guess about *which spec*, not the lookup of which entity. It matters because a match carries
+`target`, `namespace`, `id`, `score` and `fields` — and **no** pointer to where the record lives, so
+without the convention the target name is the only clue and the caller is left guessing a spec from
+it. Three of the four targets already followed it; `contact`/`business-partner` did not, and reading
+one of its matches meant a failed `neo_get` first (the spec is `contacts`), so it was renamed to
+match.
+
+The convention is declared twice and enforced in neither place, which is the standing risk:
+`ETARC_VECTOR_SEARCH_TARGET.SEARCH_KEY` is what the server and the MCP answer with, while
+`artifacts/<spec>/decisions.json → window.vectorSearch.target` is what the React SPA sends — the
+contract is bundled into the app, and `ETGO_SF_*` carries no vector column at all, so neither side
+can see the other's value. Keep the two equal to each other and to the spec name. A pipeline
+validator rule (F11) enforcing exactly that is the open follow-up; until it exists, a one-sided
+rename makes the SPA send a key the server does not know, and the SPA renders that as *no results*
+rather than as an error (`useVectorSearch.js` maps any non-`ok` response to an empty match list).
+
+On the MCP surface `targets` is **optional**: omitted, the router substitutes every target the
+current role can read (`NeoVectorSearchEndpoint.authorizedTargetKeys()`, which filters per key so
+one unreadable index does not deny the whole search). That is the semantic-search equivalent of a
+global search box, and it is the right call when the caller does not already know which index holds
+the answer — which, for a natural-language question, is the normal case. A role that can read no
+index at all gets `no_searchable_vector_targets` with an explicit "do not retry" hint, rather than
+the bare 400 about a missing parameter that an empty target list would otherwise produce. The REST
+endpoint keeps its own contract unchanged: `query` plus either `targets` or `namespaces`.
+
+A requested key that is not in that set returns **`422 unknown_vector_target`**, not `403`. The body
+carries `unknownTargets` and `available` (capped at 20) so the caller can correct itself from the
+response alone:
+
+```json
+{ "error": { "status": 422, "code": "unknown_vector_target",
+             "message": "Unknown vector search target(s): sales-order. Retry with one of the keys in 'available'.",
+             "unknownTargets": ["sales-order"],
+             "available": ["contact", "product", "purchase-invoice", "sales-invoice"] } }
+```
+
+When DB Extended is not installed or not wired, the endpoint returns **`503`** and says so — again
+not `403`. Before IMP-41 all three conditions — module absent, key absent, role denied — returned
+the same `403 "Access denied to vector target"`, so a caller that had merely misspelled a key read
+it as a permission wall and stopped. Only a role that genuinely cannot read the target's source
+entity still gets `403`.
+
 Authorization resolves sources, targets, and included Schema Forge entities through OBDal.
 Metadata reads use `OBContext.setAdminMode(true)`, preserving client/organization filtering
 and allowing shared system-client configuration. The previous mode is restored in a
@@ -1155,9 +1333,10 @@ another client must remain denied. A matching window must be active and exposed 
 
 `query` and `namespaces` are required. `topK` defaults to `10` and is limited to `1..50`.
 `metadataFilter` is optional JSONB containment input for DB Extended. The response is its portable
-`{ namespaces, matches }` payload. Invalid request data returns `400`, unauthorized sources return
-`403`, controlled DB Extended capability/source failures return `422`, and provider failures return
-a sanitized `500`. Only `GET` is supported.
+`{ namespaces, matches }` payload. Invalid request data returns `400`, unauthorized sources and
+unauthorized targets return `403`, an unknown target key returns `422 unknown_vector_target`,
+controlled DB Extended capability/source failures return `422`, a missing DB Extended wiring returns
+`503`, and provider failures return a sanitized `500`. Only `GET` is supported.
 
 Schema Forge configures its consumer through the Vite contract
 `VITE_VECTOR_SEARCH_NAMESPACES`; leaving it empty disables semantic matches while normal page search
@@ -1181,6 +1360,7 @@ GET /sws/neo/promoteuserrole?UserId=<id>&Mode=promote|demote              (§8i)
 GET /sws/neo/documentemailhistory?recordId=<id>[&specName=<spec>]         (§8j)
 GET /sws/neo/acctprocessmonitor[?Limit=<n>][&Action=trigger]              (§8k)
 GET /sws/neo/refreshtoken                                                 (§8l)
+GET /sws/neo/costingcadence[?scope=client|all]                            (§8m)
 Authorization: Bearer {token}
 ```
 
@@ -1512,6 +1692,10 @@ reference.
 
 #### 4.12.4 `neo_batch` failure envelope (IMP-15)
 
+> **`neo_batch` is switched off** since ETP-5335 (§4.12.9). This section describes the contract the
+> tool had, and the one it resumes if the flag is flipped back; the REST `/batch` endpoint it shares
+> `BatchService` with is unaffected and this envelope still applies there.
+
 `BatchService` serves both the REST `/batch` endpoint and `neo_batch`, and its failure body forwards
 the offending sub-response verbatim under `error.detail`. For a REST caller that is useful; for an
 agent it meant a raw DAL payload — `{"response":{"status":-4,"errors":{…}}}` — with no stable code to
@@ -1660,7 +1844,7 @@ metadata.
 | Section | Level | Purpose |
 |---|---|---|
 | `parent` | entity | How a child entity identifies its parent, and for which verbs the parent key is required (`field`, `entity`, `optionalFor`, `mode`, `reason`). See §6. |
-| `fields` | spec / entity / field | Reclassifies the MCP's view of field curation — `visibility`, `readOnly`, `businessCritical`, `reason`. |
+| `fields` | spec / entity / field | Reclassifies the MCP's view of field curation — `visibility`, `included`, `readOnly`, `businessCritical`, `reason`. |
 
 ##### The `fields` section
 
@@ -1668,6 +1852,7 @@ metadata.
 {
   "fields": {
     "visibility": "editable",
+    "included": true,
     "readOnly": false,
     "businessCritical": true,
     "reason": "why the shared curation is wrong for agent use"
@@ -1677,6 +1862,15 @@ metadata.
 
 - `visibility` — one of `editable`, `readOnly`, `system`, `discarded`. An unknown value is a
   validation error.
+- `included` — **the escape hatch for the exclusion gate of §4.12.10.** Since that change, a field
+  whose `ETGO_SF_FIELD` row says `ISINCLUDED = 'N'` is absent from `neo_schema` and refused by
+  `neo_list` and the write verbs. `included: true` reclaims it for the MCP and for the MCP only —
+  the REST and React layers read the row and never see this section. `included: false` does the
+  reverse: it removes from the agent surface a field the shared curation still exposes, without
+  touching what the UI shows. The default is right (`discarded` is a decision about the product
+  surface, and the agent surface should not quietly contradict it), but the two surfaces are not the
+  same surface, and a field a person never needs to see can be one an agent legitimately needs to
+  carry. Like `visibility`, it widens what is *offered*, never what is *allowed*.
 - `readOnly`, `businessCritical` — JSON booleans, unquoted. An absent key is *not* a configured
   `false`: it leaves the `ETGO_SF_FIELD` value standing.
 - `reason` — **mandatory** whenever the section is present, and non-blank. Every row of this section
@@ -1706,14 +1900,22 @@ gap. It was not taken here because that column is read by the REST and React lay
 backfill changes the shared contract for every existing consumer. The override is the deliberately
 low-risk path: MCP-only, blast radius of one entity. Only `bpLocation` carries it today.
 
-**One resolver, three readers.** `McpFieldView.of(SFField)` applies the resolved section and is the
-single source of `visibility` / `readOnly` / `businessCritical` / `isEditable` for all three places
+**One resolver, every reader.** `McpFieldView.of(SFField)` applies the resolved section and is the
+single source of `visibility` / `included` / `readOnly` / `businessCritical` / `isEditable` for the
+places
 that previously derived them independently — `McpSchemaFieldBuilder.loadFieldMetadata`
 (`neo_schema`), `McpQuerySupport.editablePropertyNames` (`neo_selectors`, which computed its own
 `isIncluded && !isReadOnly`) and `McpResourceProvider`. Without it an override honoured by only the
 first reader would have `neo_schema` and `neo_selectors` contradicting each other about the same
 field. A field that neither the row nor the override classifies still reports **no** `visibility`
 key, exactly as before.
+
+`included` is under the same rule and it matters more than the others: the exclusion gate of
+§4.12.10 is enforced by `neo_schema`, by `neo_list`'s filter resolution and by the write verbs, so a
+reader that queried `ISINCLUDED` in its own criteria would honour the override in one place and
+ignore it in the other two — reproducing exactly the three-way disagreement §4.12.10 exists to end.
+`McpQuerySupport.excludedPropertyNames` and `filterablePropertyNames` therefore load the rows and
+resolve through `McpFieldView`, never through a `Restrictions.eq` on the column.
 
 ##### Entity-level `AGENT_PROMPT` — a sibling column, not an `MCP_CONFIG` section
 
@@ -1758,6 +1960,503 @@ Making the schema itself tell the truth is the deeper fix and is proposed, not i
 `schema_forge/docs/plans/2026-09-07-mcp-handler-contract-section.md` (a `handlerContract`
 `MCP_CONFIG` section). It touches `validateMandatoryFields`, the write gate for the whole MCP, so it
 was deferred to its own cycle.
+
+#### 4.12.7 Reserved keys are stripped from every MCP tool result (ETP-5306)
+
+`$ref` is a **reserved key inside Google Gemini's `function_response.response`**: it means "a
+pointer to an attached part, resolvable by `display_name`". Openbravo's
+`DataToJsonConverter#toJsonObject` puts one on every serialised record (`JsonConstants.REF`), so
+every row of a `neo_list` / `neo_get` carried:
+
+```json
+"$ref": "BusinessPartner/BC8DDDF69DDA49E9938729F19B0F330E"
+```
+
+Gemini tried to resolve that pointer, found no matching part, and rejected the **entire** request
+with HTTP 400 `INVALID_ARGUMENT` — *"The referenced name `BusinessPartner/BC8D…` in
+function_response.response does not match to a display_name in the function_response.parts"*. The
+rejection is on the tool **result**, so no prompt change and no retry worked around it: the MCP
+server was unusable with any Gemini model as soon as the agent read a record.
+
+Measured against the live gateway with hand-built tool results, the trigger is the **literal key
+name**, irrespective of its value — a `$ref` carrying the string `"hello world"` fails the same
+way. Keys that merely *contain* a `$` are fine, which is why the `xxx$_identifier` columns are
+untouched, and a `"$ref:<opId>"` **value** (the `neo_batch` placeholder, §4.12.4) is untouched too:
+only key names are inspected.
+
+**Where it is stripped.** `McpResponseSanitizer`, called from the JSON overloads of
+`McpToolRouter.wrapAsTextContent` / `wrapAsErrorContent` — the MCP's single content egress, which
+every tool result and every `NeoResponse`-carrying path (`McpHookExecutor.neoResponseToMcpResult`)
+passes through. Stripping is recursive, because rows nest. **The NEO REST API is unchanged**: the
+`$ref` comes from the shared core serialiser, and the MCP removes it on its own way out rather than
+touching that serialiser, so the React SPA and every other REST consumer still get the platform
+shape. The overloads take a `JSONObject` and render it, rather than sanitising rendered text, so no
+number is re-parsed on the way out (jettison would degrade a decimal wider than a `double`).
+
+**Nothing is lost.** The value is exactly `_entityName` + `"/"` + `id`, both already on the same
+row. The construction rule is now declared once per session instead of paid for on every row —
+`McpConstants.RECORD_REF_NOTE`, emitted in the `neo_schema` hint and as the `docs` preamble. That
+makes this an Agent Context Economy win as well as a fix (see the ACE index in
+`schema_forge/docs/mcp-evaluation/mcp-improvements-registry.md`).
+
+---
+
+#### 4.12.8 Server-derived mandatory fields on the MCP write path (ETP-5335)
+
+A column can be mandatory in AD, hidden from `neo_schema({view:"create"})` because Schema Forge
+classifies it `visibility:"system"`, and still have no working derivation behind it. The agent is
+then asked for a field it was never offered, in a 422 it cannot act on. Where the value is
+recoverable, the MCP derives it instead of refusing.
+
+**The case this exists for — `sales-order/header.invoiceAddress` (`C_Order.BillTo_ID`).**
+`SE_Order_BPartner` is the only writer of that column in the platform, and it writes it from one
+input, `inpcBpartnerId_LOC`. That is a selector auxiliary value, and NEO only produces those from
+OBUISEL selector fields flagged `isoutfield` **with a suffix**. The selector behind
+`C_Order.C_BPartner_ID` (reference `30` / `800057`) declares a single outfield, `identifier`, with a
+null suffix — so the aux value never exists and that branch of the callout never fires. The UI does
+not fill the column either: the only remaining producer of the `_LOC` suffix in core is the legacy
+Classic search popup (`SearchUniqueKeyResponse.html`), which reads a form field this version no
+longer has.
+
+What kept this invisible is an asymmetry in the *reach* of the mandatory check, not a derivation.
+`BillTo_ID` is `ismandatory='Y'` in AD while the physical column is nullable (`C_ORDER.xml`:
+`required="false"`), and the two create paths validate differently:
+
+| path | validator | scope |
+|---|---|---|
+| shared (React, REST, **`neo_batch`**) | `NeoMandatoryFieldValidator.findMissingMandatoryFields` | only properties the caller **submitted** (`userSubmittedFields`) — a mandatory field nobody mentions is never checked |
+| `neo_create` | `McpWriteRequestSupport.validateMandatoryFields` | **every** mandatory AD column, submitted or not |
+
+So the shared paths persist the null without complaint, and `neo_create` is the only caller that
+ever saw the problem.
+
+**Why the null is not harmless.** `C_INVOICE_CREATE` copies `Cur_Order.BillTo_ID` straight into
+`C_Invoice.C_BPartner_Location_ID` with no `COALESCE`, and that column *is* `NOT NULL` — so the
+order becomes one that cannot be invoiced through the PL/SQL path. The same address is what
+`C_GETTAX` reads `IsTaxExempt` and the partner tax category from, and one of the `InvoiceGrouping`
+keys.
+
+**Resolution order** (`McpBillToInjector`), most specific first:
+
+1. the ship-to already chosen for the document, when it belongs to the partner and is itself
+   flagged `IsBillTo` — keeps both addresses consistent, and is the whole story in a tenant where
+   each partner has one location;
+2. the partner's own active `IsBillTo` location;
+3. the ship-to as a last resort — the same fallback core applies in `SL_Order_Product` line 164.
+
+It abstains, leaving the body untouched, when the entity has no bill-to column, the column is not
+mandatory there (`C_Project.BillTo_ID` is optional and is deliberately not touched), the body
+already carries a value, the business partner is unknown or still a `$ref:` placeholder, or the
+partner exposes no usable location. The lookup runs in the caller's own DAL scope — no admin mode —
+so a location the role cannot read never becomes the invoicing address of a document it writes.
+
+**Where it runs.** `neo_create` runs it in `handleCreate`, before the mandatory check — this is the
+live call site. A second call site exists in the per-operation pre-pass `resolveBatchOpFkNames`,
+after the FK resolution so a partner given by name is already an id, but it is **dormant**:
+`neo_batch` is switched off (`McpConstants.BATCH_TOOL_ENABLED = false`, §4.12.9) and is neither
+published nor routable. It is kept wired so that flipping the flag back cannot silently reintroduce
+null bill-tos — on that path the missing value was never a 422 at all, because the shared
+`NeoCrudHandler` validator only checks submitted keys, so the document was simply persisted without
+one.
+
+**The REST `/sws/neo/batch` endpoint keeps the existing behaviour.** It shares `BatchService` but
+not the MCP pre-pass, and changing what the React frontend persists is out of scope for this fix.
+
+---
+
+#### 4.12.9 `neo_batch` is switched off (ETP-5335)
+
+`McpConstants.BATCH_TOOL_ENABLED` is `false`. The tool is not published in `tools/list`
+(`ToolRegistry`) **and** is refused if called by name (`McpToolRouter.route`) — withdrawing it from
+the listing alone would leave an agent that learned the name elsewhere reaching a code path we chose
+not to maintain, and a silent success there is worse than a refusal.
+
+**Why.** `neo_batch` and `neo_create` are two different implementations of "create".
+`neo_create` runs the MCP write pipeline in `handleCreate`; `neo_batch` delegates each operation to
+the shared REST path (`BatchService` → `NeoCrudHandler.handleDefault`). They had drifted apart in
+**both** directions:
+
+| | in `neo_create`, not in `neo_batch` |
+|---|---|
+| `validateMandatoryFields` | the full sweep of mandatory AD columns (the shared validator only checks keys the caller submitted) |
+| `coerceFieldTypes` + `buildInvalidDatesError` | the 422 for unreadable/ambiguous dates (ETP-4793 / IMP-24) |
+| `McpImageFieldSupport.validateImageFields` | which tool produces a valid image id (ETP-5184) |
+| `McpLinePriceInjector` | the unit price derived from the parent's price list |
+| `resolveFkSentinels` | the `"0"` sentinel cleanup |
+| entity pre-hook | `handleDefault` never goes through `handleWithHooks`, so `NeoHandler.handle()` does not run |
+
+| | in `neo_batch`, not in `neo_create` |
+|---|---|
+| `NeoCommercialLinePolicy.injectCommercialAmounts` | ETP-4855's net-before-gross ordering, reached only via `executePostCreate` |
+| `stripContactsPreCreateBillingDefaults` | — |
+| `handler.protectedCreateCalloutFields` | the fields each handler shields from the cascade |
+
+Keeping one write path correct is cheaper than keeping two in step, so the second is off until they
+converge.
+
+**What is given up.** Not the ability to create several records — an agent calls `neo_create` once
+per record — but **atomicity**. A batch was applied as a unit (IMP-23) and let a later operation
+reference an earlier one's id through `$ref:`. Without it, a run that fails halfway leaves the
+records already created in place, and the agent carries the parent id forward itself. The refusal
+says so, so an agent does not assume the two are equivalent:
+
+```json
+{
+  "status": 405,
+  "error": "tool_disabled",
+  "detail": "neo_batch is disabled on this server. Create the records one at a time with neo_create instead: create the parent first, then pass its returned id as parentId on each child create.",
+  "hint": "These are not equivalent in one respect: a batch was applied as a unit, so a failure undid the whole set. Separate creates are not undone — if one fails, the records already created stay. Check what exists before retrying.",
+  "seeAlso": "docs(topic:\"creating records\")"
+}
+```
+
+`tool_disabled` rather than `not_found` on purpose: the agent misspelled nothing and will not find a
+working variant by retrying.
+
+**Scope.** The flag governs the MCP tool only. The REST `/sws/neo/batch` endpoint is untouched and
+keeps serving its callers (the OCR purchase-invoice ingest), so `BatchService` stays live.
+`handleBatch` and the MCP-side pre-pass are kept as they are — flipping the flag to `true` restores
+the tool with nothing else to change.
+
+---
+
+#### 4.12.10 An excluded field does not exist, on every verb (ETP-5335, IMP-39)
+
+**A field the spec excludes is absent from `neo_schema`, refused by `neo_list` as a filter, and
+refused by `neo_create` / `neo_update` as a value.** Before this, only the read projection honoured
+the decision, and the three tools disagreed with one another about whether the same field existed.
+
+##### The defect
+
+`orderReference` (`C_Order.POReference`) is curated `visibility:"discarded"` on `sales-order/header`.
+Measured against a live instance:
+
+| Call | Answer |
+|---|---|
+| `neo_update(fields:{orderReference:"X"})` | `200`, value persisted |
+| `neo_get(id:…)` | field absent from the record |
+| `neo_list(filters:{orderReference:"X"})` | `200`, `totalRows: 1` |
+
+So an agent could set a value, be told the write succeeded, and then have no way to read it back —
+every read said empty while the database said otherwise. The same shape as a silent write failure,
+except the write actually worked.
+
+##### The cause, which was one cause and not three
+
+The MCP surface was built **from the AD table** and used the curated spec only as decoration. Only
+the read projection was built from the spec.
+
+- `McpSchemaFieldBuilder.buildSchemaFieldsArray` walked every active AD column and hung the curated
+  `visibility` on the result — it never filtered.
+- `McpQuerySupport.resolveFilterProperty` accepted any key that resolved against the **DAL model**,
+  while the `available` list it offered on refusal was scoped to the spec's **included rows**. The
+  set advertised and the set enforced were two different sets.
+- `McpWriteRequestSupport.mapFieldsToDalProperties` mapped names onto DAL properties and passed the
+  rest through, under an explicit comment stating that the MCP accepts *"all valid table columns
+  from AI agents, not just SF-configured ones"*.
+
+##### The rule now
+
+**Only an explicit exclusion excludes.** A field is refused when its `ETGO_SF_FIELD` row exists and
+carries `ISINCLUDED = 'N'` — which is what `push-to-neo.js` writes for the `discarded` decision.
+Read it through `McpFieldView.isIncluded()`, never off the row's `VISIBILITY` string: roughly half
+the excluded rows carry `ISINCLUDED = 'N'` with a **`NULL` visibility**, because the pipeline maps
+the decision to the booleans and leaves the string empty.
+
+**A column with no row at all is uncurated and stays exposed.** Absence of curation is not a
+decision — the same principle `addInvokability` already applies to buttons. There are ~1043 such
+columns across the curated entities of a typical instance (a column added to AD since the last
+`push-to-neo`, a table the spec never walked in full), and treating that silence as exclusion would
+remove them on nobody's authority. It also makes the ~21 handler-backed entities (dashboards,
+reports, reconciliation views), which have no field rows whatsoever, fall out correctly with no
+special case.
+
+**Buttons are exempt.** `IMP-21` settled that question the other way on measured evidence: an
+excluded action stays in the catalogue carrying `invokable:false` and a machine-readable
+`notInvokableReason`, because knowing an action exists but is out of scope is useful where being
+told it is callable when it is not is not. Filtering buttons here would silently revert it.
+
+##### The refusal says as little as possible
+
+Both refusals are deliberately **indistinguishable from the answer for a name that does not exist**:
+
+```
+neo_list   → 422 unknown_filter_field
+             "Field 'X' is not available for filtering on entity 'Y'"  + available[]
+neo_create → 422 field_not_allowed
+             "Field 'X' is not allowed on entity 'Y'"                  + available[]
+```
+
+Neither asserts nor denies that a column of that name exists. Two distinguishable answers would let
+any caller enumerate the columns of the underlying AD table by probing keys and reading which
+refusal came back — the response itself would confirm the existence of every field the spec was
+curated to hide. `available` carries what the entity does expose, which is the only part the caller
+is entitled to.
+
+##### The override
+
+The rule is a default, not a wall. `MCP_CONFIG → fields.included` (§4.12.6) reclaims an excluded
+field for the agent surface, or removes an exposed one, **for the MCP alone** — the REST and React
+layers read `ISINCLUDED` off the row and never see the section. It carries a mandatory `reason`, so
+every reclamation states on its own row why the shared curation was wrong for agent use, and like
+every other key in that section it widens what is *offered*, never what is *allowed*: a field
+reclaimed here still has to get past the DAL, AD's own `isUpdatable` and the caller's role.
+
+This is why the exclusion set is read through `McpFieldView` in all three paths rather than through a
+`Restrictions.eq` on `ISINCLUDED`. A criteria cannot see the override, so a reader using one would
+honour it in `neo_schema` and ignore it in `neo_list` and the write verbs — the same three-way
+disagreement this section exists to end, reintroduced by the fix for it.
+
+##### Scope and what is not fixed
+
+- **MCP only.** The REST layer keeps its own `NeoFieldFilter` and is untouched.
+- **`IMP-18` is not fixed here.** A key that resolves to no property at all still passes through the
+  write path in silence. The set refused here is only the explicitly excluded one.
+- **Injected values are unaffected.** The server's own injectors (`McpBillToInjector`,
+  `McpLinePriceInjector`, the mandatory-defaults pass) run *downstream* of the mapping, on the body
+  it returns, so they can still populate an excluded column when the platform requires it.
+
+---
+
+#### 4.12.11 A read-only field is refused on write, on both verbs (ETP-5335, IMP-48)
+
+**`neo_create` and `neo_update` reject a value sent for a field the spec publishes as
+`readOnly: true`.** Until this change the MCP write path had no read-only gate of any kind.
+
+##### The gap
+
+The rejection existed, and its reasoning was already written down — `NeoFieldFilter
+.filterCreateRequest` has thrown `ReadOnlyFieldRejectedException` since **IMP-28 clause 2**:
+
+> *"before this exception existed, such a field was silently dropped from the body — the request
+> returned 200 and the caller's value was discarded without any indication. An agent that had just
+> been told that this field is read-only should never send it in the first place; if it does anyway,
+> the honest response is a rejection, not a silent no-op."*
+
+`McpToolRouter` builds a `NeoFieldFilter` on all four CRUD routes — and calls it only for
+`filterGetResponse` and `applyProjection`, both read-side. `filterCreateRequest` appears nowhere in
+the `mcp` package. So the protection was built for REST and the MCP was outside it.
+
+##### What decided the outcome instead
+
+AD's `isUpdatable`, alone. On `sales-order/header`, of the seven curated read-only fields:
+
+| Field | Column | AD `isUpdatable` |
+|---|---|---|
+| `grandTotalAmount` | `GrandTotal` | N |
+| `documentStatus` | `DocStatus` | N |
+| `deliveryStatus` | `DeliveryStatus` | N |
+| `summedLineAmount` | `TotalLines` | N |
+| `processed` | `Processed` | N |
+| **`documentNo`** | `DocumentNo` | **Y** |
+| **`invoiceStatus`** | `InvoiceStatus` | **Y** |
+
+Five were barred by the platform. Two were not — so an agent told `readOnly: true` by `neo_schema`
+could rewrite an order's document number through `neo_update`, and nothing in the MCP said no.
+
+##### The rule
+
+A read-only field is rejected on **both** `neo_create` and `neo_update`. A field is read-only or it
+is not; which verb is asking does not change the answer, and `NeoFieldFilter`'s own javadoc already
+says there is no separate update-side set to consult.
+
+**The predicate is `rejectableOnCreateFields` (IMP-28 clause 2), but one of its two exemptions is
+deliberately not carried over** — and the reason is structural, not a difference of opinion about
+what read-only means.
+
+- **Dropped: the entity-wide `Java_Qualifier` exemption.** On REST, `filterCreateRequest` runs
+  *after* `handleWithHooks` has already invoked the entity's `NeoHandler` pre-hook, so it cannot
+  tell a value the handler injected (`InventoryLineHandler` sets `bookQuantity`) from one the client
+  sent — exempting the whole entity is the only safe answer available to it. **On the MCP path that
+  ambiguity does not exist:** the field mapping runs on the caller's own `fields` argument and
+  `McpHookExecutor.runPreHook` fires further down `handleCreate`, on the body the mapping returns.
+  Every key at the gate is the caller's by construction.
+- **Kept, but narrowed to the echo it exists for: the configured-AD-default exemption.** The
+  platform fills that column, and `neo_defaults` actively invites an agent to send resolved values
+  back in `fields` (the subject of IMP-45), so a default echoed into a write is a shape the
+  recommended sequence produces rather than a mistake. **It now covers the echo and nothing else:
+  a value equal to the column's literal default passes, a different one is refused.** As first
+  shipped it exempted any value at all, and a re-probe of IMP-30's 2026-08-13 body found the hole
+  still open — `documentStatus` carries the AD default `'DR'`, so `neo_create` accepted
+  `documentStatus: "CO"` and created a **completed order with zero lines and a grand total of 0**,
+  a state Etendo cannot otherwise reach. `grandTotalAmount`, which has no default, was correctly
+  refused in the same probe. A default that is an *expression* — `@#AD_Org_ID@`, `@SQL=…`,
+  `now()` — cannot be compared against what the caller sent, so those columns keep the blanket
+  exemption: narrowing one we cannot evaluate would refuse legitimate echoes with no way for the
+  caller to tell why.
+
+**Why the exemption mattered enough to measure.** 79 of the 128 writable entities declare a
+qualifier, and 783 curated read-only fields behind them are AD-updatable — keeping it would have
+left the rejection firing on under two fifths of the surface. The first implementation did keep it,
+and a live probe caught it: `neo_update` on `sales-order/header`, whose qualifier is
+`salesOrderHeaderHandler`, accepted `documentNo` and answered 200.
+
+Read-only-ness resolves through `McpFieldView`, so `MCP_CONFIG → fields.readOnly: false` reclaims a
+field for writing exactly as `fields.included` reclaims an excluded one (§4.12.6).
+
+##### The refusal names the reason, unlike §4.12.10's
+
+```
+422 read_only_field
+"Field 'documentNo' is read-only on entity 'header' and cannot be written"
+hint: "Remove it from 'fields' and retry. neo_schema reports this field with readOnly:true;
+       the server maintains its value."
+```
+
+This leaks nothing. `neo_schema` publishes the field carrying `readOnly: true`, so the refusal
+repeats what the caller was already told. The opaque wording of `field_not_allowed` is for a field
+the surface never named, where saying more would be saying too much.
+
+##### Server-injected values are unaffected
+
+The injectors (`McpBillToInjector`, `McpLinePriceInjector`, the mandatory-defaults pass) run
+*downstream* of the field mapping, on the body it returns. A derived read-only value the server
+fills for itself never passes through this gate — only a value the caller sent does.
+
+---
+
+#### 4.12.12 The write verbs report an unrecognised field instead of swallowing it (ETP-5335, IMP-18)
+
+**`neo_create` and `neo_update` return `unknownFields` for any key they could not map**, the same
+array `neo_schema`, `neo_list` and `neo_get` have returned since 2026-08-10.
+
+Before this, a body carrying a field that does not exist was created with `201`, no warning, and the
+value was never persisted — so no later read could contradict the success.
+
+```
+neo_create(sales-order/header, fields:{ reference:"X", … })
+→ 201 { …, "unknownFields": ["reference"],
+        "unknownFieldsHint": "These names were not mapped to a field of this entity, and no
+                              field of the record holds their value. Call neo_schema with
+                              view:\"create\" for the names this entity accepts." }
+```
+
+##### Why this reports rather than refuses, unlike §4.12.10 and §4.12.11
+
+The symmetry is tempting and it was measured and rejected. Of the **73 handler qualifiers reachable
+by an MCP write**, at least eight read request keys that are **not AD columns anywhere in the
+instance** — verified against `AD_COLUMN`, zero active rows for each:
+
+| Handler | Keys of its own |
+|---|---|
+| `InventoryLineHandler` | `formState`, `value` |
+| `ReturnMaterialReceiptHeaderHandler` | `lines`, `shipmentId` |
+| `ReturnToVendorShipmentHeaderHandler` | `lines`, `receiptId` |
+| `FinancialAccountTransactionsHandler` | `sourceAccountId`, `destinationAccountId`, `paymentRemoval`, `bankFee`, `transferDate` |
+| `GeneralLedgerConfigurationHandler` | `dimensions`, `general`, `generalAccounts` |
+| `GlJournalHeaderHandler` | `fieldValues`, `docAction` |
+| `InventoryStockReportHandler` | `includeZeroStock`, `M_Product_Category_ID` |
+| `MarkSubsanationHandler` | `isSubsanation` |
+
+Those keys travel through the exact branch a refusal would close. **This is the difference from the
+other two gates:** an excluded field and a read-only field are declared sets — `ETGO_SF_FIELD` says
+so, and the server can point at the row. "Unknown" is not a declared set, so a refusal could not
+tell a caller's typo from a handler's own protocol, and would break at least eight entities.
+
+The reporting is also the instrument that would make a refusal safe later: `unknownFields` in
+production is what produces the inventory of keys actually in use, which is the thing nobody has
+today. Refuse-by-declaration is the eventual shape; it needs that inventory first.
+
+##### The hint is worded to stay true when a handler did consume the key
+
+It says the name was not mapped to a field of this entity and no field of the record holds the
+value. Both halves are true whether the key was a typo or a handler's protocol. Saying the key was
+*ignored* would be a lie on the entities above, and a contract that lies in a knowable case is worse
+than one that says less.
+
+##### Not covered
+
+`parentId` is excluded from the report — it is a declared argument of both write tools, consumed by
+`resolveParentFK`, and naming it would make the warning noise on every child-record write.
+
+---
+
+#### 4.12.13 `neo_schema` requires an explicit `view` (ETP-5335, IMP-44)
+
+**`view` is a required argument of `neo_schema`,** with three values and no default:
+
+| `view` | What it returns | Size on `sales-order/header` |
+|---|---|---|
+| `"create"` | only the fields you may send, split required/optional | **5.4 kB** |
+| `"actions"` | only the callable buttons/processes | small |
+| `"full"` | every field, read-only and system ones included | **39.5 kB** |
+
+Before this, omitting `view` returned the full dump, and the response carried a hint at the bottom
+advising `view:"create"` instead — correct advice delivered after the bill was paid.
+
+##### Why the argument and not more wording
+
+The tool's own description has recommended `view:"create"` since **2026-08-06** (`6cc522f5`). On
+2026-09-15 three independent blind agents each called `neo_schema` with no `view`, paid the full
+dump, read the hint, and then called it again with `view:"create"`. One of them reported it
+unprompted, mid-task, while doing something else:
+
+> *"Buen hint, pero llega después de haberme cobrado los 47 KB. Debería estar en la descripción de
+> la tool, no en la respuesta."*
+
+It already was. So the default was the lever, not the prose: a projection nobody chooses is a
+projection everybody inherits.
+
+##### The same check closes a silent case
+
+`view:"summary"` is a real view on `neo_list` and `neo_get`. On `neo_schema` it was not recognised
+and fell through to the full dump — measured at the same 39 514 bytes as no `view` at all, so a
+caller asking for the *smallest* response received the *largest* one, with nothing to indicate the
+argument had been ignored. An unrecognised value now raises the same `422 view_required` as an
+absent one, listing the three that exist.
+
+```
+neo_schema(sales-order/header)                 → 422 view_required
+neo_schema(sales-order/header, view:"summary") → 422 view_required  (available: create, full, actions)
+neo_schema(sales-order/header, view:"create")  → 5.4 kB
+neo_schema(sales-order/header, view:"full")    → 39.5 kB
+```
+
+`fields:[…]` still narrows the dump, and now says so: it applies under `view:"full"` and is ignored
+by the two views that already define their own projection.
+
+---
+
+#### 4.12.14 `neo_create` reports a default your own value displaced (ETP-5335, IMP-45)
+
+**When a callout resolved a different value for a field the caller sent, the create returns
+`supersededDefaults`.** The caller's value still wins — nothing about which value is persisted has
+changed.
+
+```
+neo_defaults(sales-order/header)   → { paymentTerms: "…", paymentTerms$_identifier: "30 Días", … }
+neo_create(sales-order/header, fields:{ businessPartner:"…", paymentTerms:"…30 Días id…" })
+→ 201 { …, "supersededDefaults": { "paymentTerms": { "sent": "<30 Días id>",
+                                                     "callout": "<Inmediato id>" } },
+        "supersededDefaultsHint": "…" }
+```
+
+##### The trap this makes visible
+
+Both `neo_defaults` and `neo_create` tell an agent to call `neo_defaults` first and build on its
+result. `neo_defaults` resolves with **no business partner and no record context** — on
+`sales-order/header` it answers `paymentTerms: "30 Días"` from a generic default. The partner chosen
+a moment later implies `"Inmediato"`, and `SE_Order_BPartner` would resolve it during the create.
+
+But ETP-4784 protects a field the caller sent from being recomputed by a callout, deliberately and
+correctly: on the REST path that value came from a form a person filled in. An agent that followed
+the recommended sequence and echoed the whole defaults block back has, by that same rule, pinned a
+generic value over the partner-derived one — and the `201` says nothing.
+
+##### Why it reports rather than corrects
+
+The server cannot tell an echoed default from a value the user genuinely chose; both arrive as a
+key in `fields`. Silently overriding the second is a harder failure than reporting the first, so
+this follows §4.12.12: the write succeeds, and the divergence is named. The wording of both tools
+now asks for deliberate values rather than a blanket echo, and points at this key.
+
+##### Where it comes from
+
+`NeoDefaultsCascadeHelper.mergeCalloutUpdates` records the divergence at the exact point where
+`shouldKeepExistingValue` holds a callout back, so there are no false positives — a callout
+re-proposing the value already on the record records nothing, and `$_identifier` companion keys are
+skipped. It travels on `NeoContext.supersededDefaults`. **The REST path never reads it**: there the
+protected value came from a person, and there is nothing to warn about.
 
 ---
 
@@ -2143,7 +2842,7 @@ Core Etendo's accounting engine (`AcctServer`) doesn't always say *which* entity
   3. **Both addendum message templates were reworded for clarity.** The old parenthesized form — `"(Missing account setup on BP Group: @missingAccounts@)"` / `"(Missing account setup on Product: @missingAccounts@)"` — read ambiguously, since `@missingAccounts@` could be misread as naming the BP Group/Product itself rather than its missing account labels. Both `AD_MESSAGE` (`ETGO_InvalidAccountMissingBpGroupAccounts`, `ETGO_InvalidAccountMissingProductAccounts`) entries were reworded to plain sentences: `"Please review the BP Group's accounting setup: @missingAccounts@."` / `"Please review the Product's accounting setup: @missingAccounts@."` (Spanish: `"Revise la configuración contable del Grupo de Terceros: @missingAccounts@."` / `"Revise la configuración contable del Producto: @missingAccounts@."`).
 - **Spanish translations added for all four message keys in the chain (ETP-5175, same increment).** `src-db/database/sourcedata/AD_MESSAGE_TRL.xml` — a new file, this table had no rows for this catalog before — now carries `es_ES` rows for the two reworded ETP-5175 addendum keys above **and** for the two pre-existing ETP-4706 baseline keys (`ETGO_InvalidAccountBpAndGroup` → `"(Contacto: @bpName@, Grupo de Terceros: @bpGroup@)"`, `ETGO_InvalidAccountBpOnly` → `"(Contacto: @bpName@)"`), which predate ETP-5175 but were found untranslated during the same live-testing session. All four rows are `ISTRANSLATED='Y'` real translations, not placeholders.
   - **Hand-authored, not machine-exported — flag for whoever runs a clean `export.database` next.** The canonical DB-first flow (SQL `UPDATE`/`INSERT` the rows, then `./gradlew export.database` to regenerate sourcedata) was attempted, but `export.database` fails in this checkout on a **pre-existing, unrelated** issue: `ETGO_EMAIL_SEND_LOG.STATUS` has a `FieldLength`/actual-column drift left over from ETP-5069 (`AD_Column` says 60, the model XML and the live DB column both say 40). Not fixed here (out of scope). `AD_MESSAGE_TRL.xml` was therefore hand-authored to match the table model and the existing `AD_MESSAGE.xml`'s `<!--ID-->`-comment format; the four rows were verified present and correct in the live local DB via direct `psql` queries. Whoever next gets a clean `export.database` run on this module should diff the machine-generated `AD_MESSAGE_TRL.xml` against this hand-authored one to confirm they match — the export format could differ in some detail (whitespace, `MSGTIP` handling) that couldn't be verified without a working export.
-  - **Reject-cycle lesson worth documenting.** The first pass at the Spanish translations for the two ETP-4706 baseline keys dropped the enclosing parentheses that the English `AD_MESSAGE` text has (`"Contacto: @bpName@"` instead of `"(Contacto: @bpName@)"`), producing a run-on sentence once the ETP-5175 addendum sentence got appended after it — reintroducing, in Spanish only, the exact ambiguity problem this whole feature exists to solve. Fixed in commit `71aeb484` (restored parentheses on both rows, live DB synced via targeted `UPDATE`s). The bug is now guarded by a new XML-level test, `AccountErrorMessageTrlSampleDataTest` (`src-test/src/com/etendoerp/go/schemaforge/handlers/AccountErrorMessageTrlSampleDataTest.java`, added in `5487573b`, same direct-XML-parsing pattern as `BpGroupAcctSampleDataTest`), which parses `AD_MESSAGE_TRL.xml` itself and asserts both `MSGTEXT` values stay wrapped in parentheses — verified to fail against the pre-fix XML and pass against the corrected one. This is worth calling out precisely because the *original* pinning regression test for this message chain (`DocumentPostingServiceTest#postComposesExactSpanishMessageForBpGroupAndProductScenario`) mocks `OBMessageUtils.messageBD(...)` with hardcoded Java strings and never reads the XML at all — it could not have caught this regression, and was deliberately left as-is (its own javadoc already flags the gap for a future update) rather than patched over.
+  - **Reject-cycle lesson worth documenting.** The first pass at the Spanish translations for the two ETP-4706 baseline keys dropped the enclosing parentheses that the English `AD_MESSAGE` text has (`"Contacto: @bpName@"` instead of `"(Contacto: @bpName@)"`), producing a run-on sentence once the ETP-5175 addendum sentence got appended after it — reintroducing, in Spanish only, the exact ambiguity problem this whole feature exists to solve. Fixed in commit `71aeb484` (restored parentheses on both rows, live DB synced via targeted `UPDATE`s). The bug was briefly guarded by an XML-level test, `AccountErrorMessageTrlSampleDataTest` (added in `5487573b`, same direct-XML-parsing pattern as `BpGroupAcctSampleDataTest`), which parsed `AD_MESSAGE_TRL.xml` itself and asserted both `MSGTEXT` values stayed wrapped in parentheses — verified to fail against the pre-fix XML and pass against the corrected one. **Deleted in ETP-5377**, however: `AD_MESSAGE_TRL.xml` is not exported by `./gradlew export.database` for this module and gets removed by every export run, so the test broke — through no fault of the developer — on any normal `export.database` workflow. The DB rows themselves remain correct (verified live in the DB); this was a test-design flaw, not a data regression. This is worth calling out precisely because the *original* pinning regression test for this message chain (`DocumentPostingServiceTest#postComposesExactSpanishMessageForBpGroupAndProductScenario`) mocks `OBMessageUtils.messageBD(...)` with hardcoded Java strings and never reads the XML at all — it could not have caught this regression, and remains the only (partial) automated coverage for this area after the ETP-5377 deletion.
   - **Final example strings**, illustrating labels, wording, and translation together on the same repro scenario (Business Partner "Blanquiceleste S.A.", BP Group "Proveedora", missing `Invoice Price Variance` on the product):
     - EN: `"Account could not be found. (Business Partner: Blanquiceleste S.A., BP Group: Proveedora) Please review the Product's accounting setup: Invoice Price Variance."`
     - ES: `"No se pudo encontrar la cuenta. (Contacto: Blanquiceleste S.A., Grupo de Terceros: Proveedora) Revise la configuración contable del Producto: Desviación Pr. Factura."`
@@ -2235,6 +2934,27 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 
   One behaviour was also **widened**, but only at the no-locator-at-all edge: `createReturnLineShell` used to guard the write with `if (anchoredBin != null)`, so when the header warehouse had no active locator whatsoever the shell kept whatever bin the entity provider defaulted to instead of an explicit `null`. It now always calls `setStorageBin` with the anchor result, so that edge fails loudly at posting instead of silently keeping a stale value — the same contract every other anchored write path follows. A source line with no bin whose header warehouse DOES have an active locator was already anchored to it before this widening: the cascade treats "absent" and "belongs elsewhere" identically, so that scenario is preexisting behaviour, not part of what changed here.
 
+**Real-world example — `ReturnLineQuantityPolicy` (the return-line quantity sign, ETP-5313):** a return line's `M_InOutLine.MovementQty` is **stored NEGATIVE and exposed POSITIVE**, in BOTH return windows (`return-material-receipt`, sales; `return-to-vendor-shipment`, purchase). `schemaforge/ReturnLineQuantityPolicy.java` is the single owner of that rule and every write and read path goes through it.
+
+  Why the DB sign is not a free choice:
+  - Core `M_INOUT_POST` negates `MovementQty` **and** `QuantityOrder` whenever the document's `MovementType` ends in `-`. A SALES return must INCREASE stock and always ends up as `C-`, so it only restores stock if the stored quantity is negative. A PURCHASE return gets `V+`, is not negated, and must DECREASE stock — so it needs a negative quantity too. One rule covers both.
+  - `MovementType` cannot be used as the lever: core trigger `M_INOUT_TRG_PROV` (BEFORE INSERT OR UPDATE, FOR EACH ROW) rewrites it on every write from `IsSOTrx` alone (`'N' → 'V+'`, else `'C-'`) and ignores `C_DocType.IsReturn`, so `C+`/`V-` are unreachable and any `setMovementType("C-")` in the document factories is decorative. Etendo Classic solves it the same way (`RMInOutPickEditLines` persists `qtyReceived.negate()`).
+  - The functional contract keeps the user-facing field ("Cant. a devolver") POSITIVE in every response, in both windows — the DB sign never reaches the UI.
+
+  | Path | Direction |
+  |---|---|
+  | `ReturnMaterialReceiptLineHandler#handle` / `ReturnToVendorShipmentLineHandler#handle` (CRUD `POST`/`PUT`/`PATCH`) | `applyStoredSignToWriteBody` |
+  | `ReturnShipmentUtils.buildAndSaveReturnLine` (import-lines action, both windows) | `toStoredQuantity` |
+  | `NeoReturnReceiptService#buildAndSaveReturnLine` + `applyOrderUOM` (`createReturn` action) | `toStoredQuantity`, on `MovementQty` **and** `QuantityOrder` |
+  | `CreatePurchaseReturnHandler#addReturnLine` | `toStoredQuantity` |
+  | both line handlers' `afterHandle` | `applyDisplaySignToRecord` |
+
+  The display flip runs on **every response that carries a line**, not just on GET (ETP-5336). `NeoHandlerUtils.extractResponseDataArray` is the method-agnostic twin of `extractGetDataArray` used for that: a `PATCH` echoes the persisted record back and the frontend renders it optimistically (`DetailView.jsx`'s `buildInlineRowUpdateHandler`), so a GET-only flip made the line flash its stored NEGATIVE quantity until the next refetch. The rule of thumb: enrichment that *describes the record* (a sign convention, an identifier label) belongs on every response; enrichment that is a read-only aggregate or a batch SQL lookup for the grid — like the `orderQuantity`/`productCode` injection in both return line handlers — stays GET-only so it does not add a query to every save. Those `afterHandle`s mutate the body in place and return `null` on a write, so the original response and its status code are preserved.
+
+  Both line handlers also override `afterCallout` to call `NeoHandlerUtils.stripStockDerivedMovementQuantity` (ETP-5336), the same protection `GoodsReceiptLineHandler` (ETP-4671) and `GoodsShipmentLineHandler` (ETP-5062) already had: the classic `SL_InOutLine_Product` callout echoes the product's **on-hand stock** back as `movementQuantity` on every product selection, which on a return line is meaningless — the quantity is what is being sent back — and silently overwrote what the user typed. Note that `ReturnToVendorShipmentLineHandler`'s `body.remove("product")` on `PUT`/`PATCH` is **not** that protection: the NEO CRUD callout cascade only runs on create (`NeoCrudHandler#executePostCreate`), never on an update, so that line only makes the product of an existing RTV line immutable.
+
+  Both sign directions are `abs()`-based normalisations, not `negate()` flips, so they are **idempotent** — a caller that already normalised is never flipped back. Everything that reads a return quantity for aggregation is sign-agnostic by construction (`SUM(ABS(rl.MovementQty))` in the "already returned" availability queries of both header handlers; `resolveShipmentLineQty`'s explicit `signum()`/`abs()` split in `CreateDraftInvoiceHandler`). The one deliberate exception is the rectificative invoice line, which must stay NEGATIVE by functional decision: `ReturnShipmentUtils.addReturnInvoiceLines` forces it with `abs().negate()` (ETP-4737) and stays sign-agnostic so it keeps working for return documents created before ETP-5313.
+
 **Real-world example — `NeoExchangeRateService.hasRate` (one lookup behind two surfaces, ETP-4838):** exchange-rate availability is asked twice for the same user gesture — once by the frontend through `GET /sws/neo/validate-exchange-rate` before it applies a currency change, and once by `afterCallout()` on the order/invoice header handlers, which appends a `WARNING` message when the user edits `currency` by hand. Both now call the package-private `NeoExchangeRateService.hasRate(from, to, date)`, which reuses the endpoint's own `queryRate` — including its `AD_Client_ID IN ('0', ?)` scoping and its inverse-direction fallback — and fails **open** (returns `true`) on any error so a DB hiccup never manufactures a false warning.
 
   Previously `AbstractOrderHeaderHandler` and `AbstractInvoiceHeaderHandler` each carried a private `hasConversionRate()` copy of the query filtered by `ad_client_id = ?` alone. When ETP-4474 moved the currencyLayer rate sync to the System client, those copies went blind to it: the endpoint answered `hasRate: true` and the callout warned `noExchangeRateAvailable` for the very same pair and date. The lesson generalises — **when a handler needs an answer a NEO endpoint already computes, call the endpoint's helper, don't re-derive the query.** Two copies of a client-scoping filter is exactly the kind of drift that survives review and only surfaces when the data moves.
@@ -2258,6 +2978,135 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
   Both changes are best-effort, same contract as the handler's other two concerns: any failure is logged and swallowed, never failing the parent `AD_User` request.
 
   - **`ETGO_INVITATION_USER_FK` cascade delete (ETP-4830):** because this handler makes admin-created-user invitations part of the normal create flow, `ETGO_INVITATION` rows now exist for ordinary users, not just for ETP-4894's opt-in "invite an existing user" path. `ETGO_INVITATION.AD_USER_ID` originally referenced `AD_USER` with no `ON DELETE` behavior (`onDelete` omitted in `src-db/database/model/tables/ETGO_INVITATION.xml`, i.e. `NO ACTION`), so deleting an `AD_User` that had ever received an invitation failed with a 500 ("Este registro no puede ser eliminado ya que está relacionado con otros elementos existentes.") — a pre-existing ETP-4894 schema gap, only surfaced now that this handler makes invitation rows routine. Fixed by adding `onDelete="cascade"` to `ETGO_INVITATION_USER_FK`: deleting the `AD_User` now deletes its `ETGO_INVITATION` row(s) with it, since a dangling invitation for a user that no longer exists can never sensibly be accepted. The sibling `ETGO_INVITATION_CREATEDBY_FK`/`ETGO_INVITATION_UPDATEDBY_FK`/`ETGO_INVITATION_ACCOUNT_FK`/`ETGO_INVITATION_CLIENT_FK`/`ETGO_INVITATION_ORG_FK` constraints are intentionally left as `NO ACTION` — those reference the actor/tenant, not the invited user, and Etendo audit columns (`CREATEDBY`/`UPDATEDBY`) are never expected to be deleted out from under a row.
+
+**Real-world example — `AbstractOrderHeaderHandler`'s GET annotations (`hasLinkedDocuments`, plus `needsPrimaryDoc`/`needsInvoiceDoc`, ETP-5295):** the shared base of `SalesOrderHeaderHandler`, `PurchaseOrderHeaderHandler` and `SalesQuotationHeaderHandler` appends three computed booleans to **every** record of **every** order GET — list and single-record alike — so the React list view can make document-flow decisions per row without any extra round trip.
+
+  - `hasLinkedDocuments` (pre-existing) — is there *any* `C_Invoice` or `M_InOut` with this `C_Order_ID`. Single-record GETs use a `LIMIT 1` query, list GETs one batch `IN` query.
+  - `needsPrimaryDoc` / `needsInvoiceDoc` (ETP-5295) — "a shipment/receipt is still pending" and "an invoice is still pending". The names are deliberately **neutral across sales and purchase** ("primary doc" = goods shipment for a sales order, goods receipt for a purchase order — both `M_InOut`), so the one shared frontend hook that reads them (`useOrderWindow.jsx` in `etendo_schema_forge`) needs no per-window parameterization.
+
+  **Why they exist.** The row kebab menu's "Gestionar envío/factura" entry derived its visibility and label from the `DeliveryStatus`/`InvoiceStatus` percent columns, while the "Gestionar" button on the detail form derives the same decision from the real documents. The two disagreed — the kebab showed or hid the entry, and picked its label, wrongly. Making the kebab issue the form's three requests *per row* was not an option, so the form's derivation moved server-side.
+
+  **The formula** — a literal transcription of the detail form's (`artifacts/sales-order/custom/OrderCreateInvoice.jsx`, `artifacts/purchase-order/custom/PurchaseOrderActions.jsx`):
+
+  ```
+  qtyPending      = SUM(C_OrderLine.QtyOrdered) - SUM(C_OrderLine.QtyDelivered)
+  needsPrimaryDoc = qtyPending != 0 AND no linked M_InOut in DocStatus 'DR'
+
+  totalPending    = order GrandTotal - SUM(GrandTotal of LINKED invoices in DocStatus 'CO')
+  needsInvoiceDoc = totalPending != 0 AND no LINKED invoice in DocStatus 'DR'
+  ```
+
+  **"LINKED invoice" is the union of two paths, not `C_Invoice.C_Order_ID` alone.** The form reads its invoice list from the `listInvoices` action (`CreateDraftInvoiceHandler#handleList`), which runs two queries and merges them deduplicating by invoice id: (1) through the invoice lines — `C_InvoiceLine.C_OrderLine_ID → C_OrderLine.C_Order_ID`, covering invoices created from the classic Etendo UI and every partial-invoicing-by-lines flow — and (2) directly through `C_Invoice.C_Order_ID`, covering the edge case of an invoice created by our own action that has no lines yet. `batchFetchLinkedInvoiceTotals` reproduces exactly that with a single `UNION` subquery (the `UNION` *is* the dedup by `(order, invoice)`), aggregated by `(order, DocStatus)` in one pass. Note that `batchCheckLinkedDocuments`, which backs `hasLinkedDocuments`, covers only `C_Order_ID` — that is a narrower, separate concern and **is not the spec for linkage here**; using it would make the flags disagree with the form in precisely the partial-invoicing cases the ticket is about.
+
+  **Cost and shape.** Three batched queries per GET response, independent of page size — never one per row: ordered-vs-delivered quantity grouped by order, draft `M_InOut` by order, and the linked-invoice union above. Sales vs purchase (`IsSOTrx` `'Y'`/`'N'`) is parameterized off the existing `isSalesTransaction()` override, the same switch the callout price-list fallback already uses, so a subclass needs to know nothing about this annotation to be classified correctly. Comparisons are exact-decimal (`BigDecimal.compareTo`), not float subtraction. The order total is read from the JSON record rather than re-queried, so it is the same number the form sees — `applyTotalDiscountToRecord` has already adjusted `grandTotalAmount` for a draft carrying a not-yet-materialized total discount by the time this runs.
+
+  **Status-agnostic.** Both flags are annotated for every document status; the form only evaluates them once the order is completed and the kebab already gates its own entry on `status === 'CO'`, so the backend stays a pure function of the order's documents and never re-reads `documentStatus`.
+
+  **Degradation.** A DB failure annotates both flags `false` (entry hidden) rather than leaving them absent or defaulting to `true`: a spuriously hidden shortcut is recoverable from the detail form, a spuriously shown one sends the user into an empty "manage" modal. The parent GET is never failed.
+
+  **Known pre-existing defect, replicated deliberately.** When ONE invoice groups lines from SEVERAL orders, its FULL `GrandTotal` is counted against EACH of those orders, inflating the invoiced total so `needsInvoiceDoc` reads `false` too early. The form has exactly this bug today, and parity with the form is the whole point of the annotation — fixing it on one side only would replace one disagreement with another. Tracked separately; do not "fix" the backend without fixing the form in the same change.
+
+**Real-world example — `FinancialAccountTransactionsHandler` field-acceptance by movement state (ETP-4500, tightened by ETP-4879):** `schemaforge/FinancialAccountTransactionsHandler.java` (wired on the `financial-account-transactions` entity) restricts which fields an `update` actually persists, keyed off the transaction's own `Processed`/`Posted` state rather than the request body's shape — `handleUpdate` dispatches to one of two private appliers:
+
+| State | Applier | Fields persisted |
+|---|---|---|
+| **Draft** (`processed = false`) | `applyEditableFields` | Full editable set: `description`, `transactionDate`, `accountingDate` (`dateAcct`), `businessPartnerId`, `glItemId`, `projectId`, `costcenterId`, `productId`, plus amount/direction/currency. |
+| **Processed, not yet Posted** (`processed = true`, `posted = 'N'`) | `applyEditableDimensions` | Only `description`, `businessPartnerId`, `glItemId`, `projectId`, `costcenterId`, `productId` — the 4 accounting dimensions, the G/L item and the free-text description. `transactionDate`/`accountingDate`, amount, direction and currency are silently ignored even when present in the body — not rejected, just never read into the entity. |
+| **Posted** | — | `handleUpdate` returns `400` before either applier runs. |
+
+  **Why dates were removed from the Processed path (ETP-4879).** Before this ticket, `applyEditableDimensions` also unconditionally called `trx.setTransactionDate(...)`/`trx.setDateAcct(...)` from the request body. The frontend's edit modal (`NewTransactionModal.jsx`, `etendo_schema_forge`) exposes only ONE date field (`form.date`) and derives both `transactionDate` and `accountingDate` from it on every save — so any edit to a Processed movement, even a dimensions-only edit, silently rolled the accounting date (`DATEACCT`) back to the transaction date whenever the two had legitimately diverged. ETP-4879 removed both setter calls from `applyEditableDimensions` entirely: a Processed movement's dates are now immutable through this endpoint no matter what the body contains. The frontend was updated in lockstep to disable the date field once `movement.processed` is true (`lockWhileProcessed` in `NewTransactionModal.jsx`), so the UI and the backend contract agree — see `etendo_schema_forge`'s `docs/generated-custom-windows/financial-account.md` ("Edit mode") for the full user-facing writeup.
+
+  `process: true` in the request body is also ignored on the Processed path — this endpoint never re-runs Classic's `FIN_TransactionProcess`, so a client cannot use `update` to (re)process a transaction.
+
+**Real-world example — `GeneralLedgerConfigurationHandler` locked dimension types (ETP-4879):** the `dimensions` sub-resource of the `general-ledger-configuration` spec (`GET`/`PUT` behind the "Dimensiones contables" screen) exposes each active `C_AcctSchema_Element` row as a toggle (`active`, gated by `mandatory`). ETP-4879 added a second, type-based lock on top of that pre-existing mandatory guard:
+
+```java
+private static final List<String> LOCKED_DIMENSION_TYPES = Arrays.asList("BP", "PR");
+```
+
+  - `buildDimensions(List<AcctSchemaElement>)` skips any row whose `ElementType` is `BP` (Contacto/Business Partner) or `PR` (Producto) — these rows never appear in the `GET` response at all, not even as a disabled/read-only entry.
+  - `applyDimensionChanges(...)` silently ignores an `active` change submitted for a `BP`/`PR` row's `id` — the request still succeeds (`200`) for any other rows in the same payload, but that one row's stored `active` value is left untouched. This applies regardless of the row's own `mandatory` value, i.e. independently of the pre-existing `"Mandatory accounting dimensions cannot be deactivated"` guard.
+
+  **Rationale.** Every window that actually renders these two dimensions (Assets, Financial Account, Amortization) already hardcodes Contacto/Producto as always-visible and never reads this config's `active` flag — so the toggle was a dead no-op that only misled users (the "Opcional · Ventas y Compras" caption implied disabling it would hide the field somewhere; it never did). Project (`PJ`) and Cost Center (`CC`) are unaffected — still genuinely config-gated, still returned by `buildDimensions` and still writable by `applyDimensionChanges`.
+
+  **The stored `IsActive`/`IsMandatory` values are NOT retroactively corrected by this code change** — a client whose BP/PR rows were already `IsActive='N'`/`IsMandatory='N'` before ETP-4879 stays that way at the DB level; this handler only stops future edits through this one screen. The companion corrective data-fix `R37-acctdim-bp-pr-locked-active` (`cli/src/data-fixes/sql/20260917T120000Z__R37-acctdim-bp-pr-locked-active.sql` in `etendo_schema_forge`, gap K2) forces both flags to `'Y'` fleet-wide; the GOClient sampledata seed (`referencedata/sampledata/GOClient/C_ACCTSCHEMA_ELEMENT.xml`) was corrected in the same change so a newly onboarded tenant is born correct. See `etendo_schema_forge`'s `docs/etendo-ad/onboarding-gaps.md` §K2 for the full DB-state investigation and safety analysis.
+
+**Real-world example — `ETGO_FDI_DECL_FK` cascade delete (ETP-5393 Bug D, same bug class as ETP-4830 above):** `FiscalDeclCrudHandler#handleDeclDelete` calls `OBDal.getInstance().remove(decl)` to delete a draft `ETGO_Fiscal_Decl` row, without first deleting its `ETGO_Fiscal_Decl_Incident` children. `ETGO_FDI_DECL_FK` (`etgo_fiscal_decl_incident.etgo_fiscal_decl_id → etgo_fiscal_decl.etgo_fiscal_decl_id`) had no `ON DELETE` behavior (`NO ACTION`), so Postgres rejected the delete with a raw FK-violation whenever the declaration had at least one incident row (e.g. after a failed AEAT submission attempt that reverted it to draft) — surfacing to the user as an opaque 500 ("No se pudo eliminar la declaración."). Fixed the identical way: adding `onDelete="cascade"` directly to `ETGO_FDI_DECL_FK` in `src-db/database/model/tables/ETGO_FISCAL_DECL_INCIDENT.xml` (not a raw `ALTER TABLE` against the live DB — that XML is `update.database`'s actual source of truth, so a hand-run `ALTER TABLE` would be silently reverted on the next rebuild). No Java change was needed in `handleDeclDelete` itself: `OBDal.remove` issues the same `DELETE` regardless, and Postgres now cascades it. Verified locally by running `update.database` and confirming `pg_constraint.confdeltype = 'c'` for `etgo_fdi_decl_fk`, then inserting a draft declaration with an incident row and deleting the declaration directly — the incident row is removed automatically.
+
+**Real-world example — `UserRoleAssignmentHandler`'s "Rol" advanced-filter query params (ETP-5188):** the Users window's list `GET` (record id absent) gained a THIRD pre-hook concern, `applyRoleFilter`, alongside the existing `excludeContactOnlyUsers` (ETP-5019) — both run unconditionally on every `user` list fetch, in `handle()`. The frontend's generic `criteria=` mechanism cannot express "filter by composed role" at all: it would build a dotted HQL property path through the `aDUserRolesList` one-to-many collection, which is invalid HQL and 500s (confirmed empirically). So the frontend's "Rol" advanced-filter field bypasses `criteria=` entirely for this one field and instead sends three DEDICATED query params on the same `user` list `GET`:
+
+| Query param | Meaning |
+|---|---|
+| `RoleIds=<id1>,<id2>,...` | Comma-separated `AD_Role_ID`s — the fixed system role templates and/or the caller's own client's admin role. |
+| `NoRole=true` | Users with no composed role at all (and not the admin). |
+| `RoleFilterNegate=true` | Negates the ENTIRE `RoleIds`/`NoRole` combination (wraps it in `not (...)`) — no new query semantics on top of the two params above. |
+
+Together these three primitives express the frontend's 4 advanced-filter operators (see
+`etendo_schema_forge`'s `docs/generated-custom-windows/user.md` → "Users list role filter" for the
+UI side):
+
+| Operator ("Rol" field) | Query params |
+|---|---|
+| Es | `RoleIds=` and/or `NoRole=true` |
+| No es | same, plus `RoleFilterNegate=true` |
+| Está vacío | `NoRole=true` alone |
+| No está vacío | `NoRole=true&RoleFilterNegate=true` |
+
+**Why two branches for a `RoleIds` match.** Since ETP-4906, a user's actual access is never a direct
+`Default_Ad_Role_ID` match against a template — it is expressed via that user's PERSONAL role, which
+COMPOSES 1+ templates through an active `AD_Role_Inheritance` row. The one exception is the
+client-admin "Admin" role, which `UserRoleCompositionService` never lets a personal role compose —
+it is always a DIRECT `Default_Ad_Role_ID` assignment (see §8d). `buildComposedOrDirectPredicate`
+covers both shapes with one OR:
+
+```
+(e.defaultRole.id in ('ID1','ID2')) or
+(exists (select 1 from ADRoleInheritance ri where ri.role = e.defaultRole and
+         ri.active = true and ri.inheritFrom.id in ('ID1','ID2')))
+```
+
+**The "Sin rol" (`NoRole=true`) predicate** additionally excludes the client-admin role — Admin is a
+real, direct role assignment, never "no role":
+
+```
+not exists (select 1 from ADRoleInheritance ri where ri.role = e.defaultRole and ri.active = true)
+and (e.defaultRole is null or e.defaultRole.id <> '<clientAdminRoleId>')
+```
+
+`<clientAdminRoleId>` is resolved per-request from the caller's own `OBContext.getCurrentClient()`
+(`resolveClientAdminRoleId`, the same `OBCriteria` shape `SFRolesOverview#resolveTenantRoles`
+already uses) and simply omitted from the predicate — never inlined as a literal `null` — when it
+cannot be resolved.
+
+**Injection mechanism and id sanitization.** Both predicates are injected as an HQL `_neoWhere`
+predicate (`NeoCrudHelper.NEO_WHERE_PARAM`, the exact same query-param mechanism
+`excludeContactOnlyUsers` already uses on this same list `GET`) — combined with any EXISTING
+`_neoWhere` predicate (from `excludeContactOnlyUsers` or elsewhere) via `and`, while `RoleIds` and
+`NoRole` combine with `or` BETWEEN themselves (two chips of the same multi-select filter, not two
+independent filters). `RoleFilterNegate`, when present, wraps that `or`-joined combination in one
+outer `not (...)` — applied AFTER the combination is built and BEFORE it is merged into any existing
+`_neoWhere` predicate.
+
+`NEO_WHERE_PARAM` has **no bind-parameter mechanism** — `NeoCrudHelper#buildWhereClause` splices the
+predicate string into the HQL text verbatim. Every `AD_Role_ID` inlined into the predicate is
+therefore validated against `^[A-Fa-f0-9]{32}$` (`sanitizeRoleIds`, Etendo AD ids are 32 hex chars,
+case-insensitive) before being spliced in — an entry that doesn't match is logged at WARN and
+silently dropped rather than reaching the HQL string unescaped, so one malformed id in `RoleIds`
+degrades the filter instead of 500ing the whole list. `RoleFilterNegate` itself carries no id/value
+and needs no sanitization — it only decides whether to prepend the literal `"not "` wrapper, and is
+parsed with the same strict `"true"`-only (case-insensitive), anything-else-is-absent convention
+`NoRole` already uses.
+
+**No-op contract.** `applyRoleFilter` returns immediately, touching nothing, when both `RoleIds` is
+empty/absent AND `NoRole` is absent — regardless of `RoleFilterNegate` (negating an empty/no-op
+filter would otherwise wrongly match every user). Every other `user` entity concern in this class
+(the invitation flow above, the write-path guards, `excludeContactOnlyUsers`) is unaffected — this
+is purely additive to the list `GET` path.
+
+*As of this writing, `applyRoleFilter`/`sanitizeRoleIds`/`buildComposedOrDirectPredicate`/
+`buildNoRolePredicate` have no dedicated unit test in `UserRoleAssignmentHandlerTest` — this feature
+was verified live/manually against `localhost:3100` instead (see `etendo_schema_forge`'s
+`docs/plans/2026-09-11-etp-5188-role-filter-open-questions.md`, "Live verification performed").*
 
 #### 5.3.1 Post-hook writes and the `updated` audit token (ETP-5255 / ETP-5262)
 
@@ -2562,7 +3411,7 @@ Folder nodes are never filtered directly: their children are filtered first (pos
 ```json
 {
   "windowAccess": { "111": "full", "268": "read-only" },
-  "capabilities": { "showAccountingFields": true, "isAdminOrClientAdmin": true }
+  "capabilities": { "showAccountingFields": true, "isAdminOrClientAdmin": true, "isOwner": false }
 }
 ```
 
@@ -2571,12 +3420,14 @@ Folder nodes are never filtered directly: their children are filtered first (pos
 **Resolution order** (mirrors `NeoAccessHelper.hasWindowAccess(Role, String, String)`, §7 item 3):
 
 1. No role assigned → `{"windowAccess": {}, "capabilities": {}}`, without querying the database — same convention as `SFListMenu`: the role is captured once, at the very top of the request, before the servlet enters `OBContext.setAdminMode()`.
-2. System Administrator role (`"0"`) or a client-admin role (`NeoAccessHelper.isAdminOrClientAdmin(Role)`, now `public` specifically so this webhook can reuse it): every distinct window ID in the **union** of (a) `AD_Window` references from active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` rows (`resolveActiveEtendoGoWindowIds()`) and (b) windows with at least one active `AD_Window_Access` row across **any role** (`resolveWindowsWithAnyGrant()`) resolves to `"full"`. Both queries skip null window references, and the union deduplicates IDs. The grant query has no per-role or explicit client/tenant restriction and does not require a spec, menu node, or read-write grant; neither query explicitly filters `AD_Window.IsActive`. This includes permission-anchor windows such as Financial Reports, Smart Scan, and Inventory Stock Report, which have grants but no backing spec (ETP-5240). `capabilities.showAccountingFields` / `capabilities.isAdminOrClientAdmin` are both always `true`; the accounting column is never queried for this branch.
-3. Otherwise, for every active `AD_Window_Access` row the role has: `IsReadWrite = true` → `"full"`; `IsReadWrite = false` → `"read-only"`. `capabilities.showAccountingFields` is read directly off the new `AD_Role.EM_ETGO_Show_Acct_Fields` boolean extension column (ETP-4520) for the resolved role, via a native SQL lookup rather than the DAL entity model (the column was added straight to the physical table and is not yet mapped as a typed entity property). `capabilities.isAdminOrClientAdmin` is always `false` in this branch — reaching it at all already proves the bypass check in step 2 failed for this role.
+2. System Administrator role (`"0"`) or a client-admin role (`NeoAccessHelper.isAdminOrClientAdmin(Role)`, now `public` specifically so this webhook can reuse it): every distinct window ID in the **union** of (a) `AD_Window` references from active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` rows (`resolveActiveEtendoGoWindowIds()`) and (b) windows with at least one active `AD_Window_Access` row across **any role** (`resolveWindowsWithAnyGrant()`) resolves to `"full"`. Both queries skip null window references, and the union deduplicates IDs. The grant query has no per-role or explicit client/tenant restriction and does not require a spec, menu node, or read-write grant; neither query explicitly filters `AD_Window.IsActive`. This includes permission-anchor windows such as Financial Reports, Smart Scan, and Inventory Stock Report, which have grants but no backing spec (ETP-5240). `capabilities.showAccountingFields` / `capabilities.isAdminOrClientAdmin` are both always `true`; the accounting column is never queried for this branch. **`capabilities.isOwner` is the one exception** (ETP-5395): it is always PRESENT in this branch's response too, but it is never blanket `true` — it is resolved per-user via `OwnerSupport.isOwner(userId)`, so a client-admin who also happens to be the tenant owner gets `isOwner: true`, and one who is not still gets `isOwner: false`.
+3. Otherwise, for every active `AD_Window_Access` row the role has: `IsReadWrite = true` → `"full"`; `IsReadWrite = false` → `"read-only"`. `capabilities.showAccountingFields` is read directly off the new `AD_Role.EM_ETGO_Show_Acct_Fields` boolean extension column (ETP-4520) for the resolved role, via a native SQL lookup rather than the DAL entity model (the column was added straight to the physical table and is not yet mapped as a typed entity property). `capabilities.isAdminOrClientAdmin` is always `false` in this branch — reaching it at all already proves the bypass check in step 2 failed for this role. `capabilities.isOwner` is resolved exactly the same way as in step 2 above — via `OwnerSupport.isOwner(userId)`, per-user — since ownership is orthogonal to admin/client-admin status.
 
 **`AD_Role.EM_ETGO_Show_Acct_Fields`:** a Yes/No extension column added by this module (`AD_Column_ID = A0F2D12B5B4A48C2855EE73E3E93E274`, default `N`) and exposed as a real field (`AD_Field_ID = 98C71197D0744EED96856A497E49F159`) on the classic `AD_Role` window/tab, so a functional consultant can toggle it like any other role attribute. It gates accounting-sensitive field/tab visibility in Etendo GO — e.g. the `Posted` status pill on invoice windows and the financial-account edit form's "Cuentas contables" tab — independently of per-window `AD_Window_Access`. **`resolveShowAccountingFields` above reads it as a flat stored value with no join to `AD_Role_Inheritance` — it is a DERIVED fact, not an independent one, for any role composed via `UserRoleCompositionService` (ETP-4852).** `UserRoleCompositionService#syncShowAccountingFieldsFlag` (ETP-4877), called unconditionally at the end of every `reconcileInheritances`, keeps a personal role's column in sync with whether it currently inherits from the system Finance template (`'Y'` iff yes, `'N'` otherwise — both directions, including Finance being removed). The retroactive half for personal roles that predate this sync (or were never touched by a live composition call) is `R26-tenant-owner-and-personal-role-retrofit.sql` Step 8b in `etendo_schema_forge`, plus a one-time system-level health check (Step 8a) correcting the Finance template's own column, found stale (`'N'`) on the local dev DB. Both predicates must be kept in lockstep.
 
 **`capabilities.isAdminOrClientAdmin`** (ETP-4513) is the proactive signal the frontend uses to decide whether to show admin-only settings entries — e.g. the "Configuración > Roles" menu item, backed by `SFRolesOverview` (§8c) — up front, instead of showing them to every role and handling denial only once the page itself loads.
+
+**`capabilities.isOwner`** (ETP-5395, backed by `AD_User.EM_ETGO_Is_Owner` — ETP-4830, §7 item 10) reflects whether the CURRENT USER — not the current role — is the tenant's onboarding owner. Unlike the other two capabilities above, it is resolved identically in BOTH branches of the resolution order (steps 2 and 3), via `OwnerSupport.isOwner(String)`, off the current user captured before admin mode the same way the current role is captured for the rest of this webhook. Ownership is orthogonal to admin status: a client-admin who happens to also be the tenant owner still gets `isOwner: true`, and one who is not still gets `isOwner: false`. The frontend uses it to gate "Primeros pasos" (First Steps onboarding) visibility to the owner only.
 
 ---
 
@@ -3612,7 +4463,7 @@ eight audit call sites funnel through — writes the history row immediately BEF
 `EmailSafetyStore#recordAudit`, so both land in the same transaction (the DAL safety store ends a
 successful send with `SessionHandler.commitAndStart()`). The gate is declarative:
 `EmailContract#logsSendHistory()` defaults to `false` and is overridden `true` once, in
-`DefaultDocumentSendEmailContract`, so the six document-send contracts opt in automatically while
+`DefaultDocumentSendEmailContract`, so the eight document-send contracts opt in automatically while
 the account/auth family (invitation, reset password, login alert, organization joined) stays out.
 There is no contract-name list anywhere.
 
@@ -3868,7 +4719,12 @@ check above), the response carries a `session` object alongside the token:
     "clientId": "...",
     "selectedRoleId": "...",
     "selectedOrgId": "...",
-    "roleList": [{ "id": "...", "name": "...", "orgList": [{ "id": "...", "name": "..." }] }]
+    "roleList": [{
+      "id": "...",
+      "name": "...",
+      "orgList": [{ "id": "...", "name": "..." }],
+      "effectiveRoleNames": ["Finance", "Sales"]
+    }]
   }
 }
 ```
@@ -3882,6 +4738,21 @@ can never disagree with what the JWT actually contains. `roleList` reuses
 helper/query already used to build the equivalent list at login. This activates the richer
 validation `schema_forge_core`'s `reconcileSessionRefresh` already implements client-side (see
 `docs/auth-session-refresh.md` in that repo) instead of its "legacy" token-swap-only fallback.
+
+**`effectiveRoleNames` (ETP-5329).** The names of the template roles composed (via
+`AD_Role_Inheritance`) into the user's personal role, resolved through
+`UserRoleCompositionService#getAppliedTemplateRoleIds(String)`, in `Seqno` order — this is what
+the topbar should display instead of the auto-generated `"Personal – <username>"` role name. It
+appears ONLY on the `roleList` entry whose `id` equals the user's actual default/personal role
+(`AD_User.Default_Ad_Role_ID`), never on every entry: a rare pre-existing anomaly (ETP-4604) can
+leave a user with more than one active `AD_User_Roles` row, and attaching the composed-template
+list to a non-default entry would misrepresent a role it doesn't actually apply to. The key is
+omitted entirely when the default role has no composed templates (e.g. right after
+`ensurePersonalRole`, before any `assignTemplateRoles` call) — frontends should fall back to the
+role's own `name` in that case. A template role id with no matching (active) `Role` row — deleted
+or renamed out from under `AD_Role_Inheritance`, an ETP-4604-style anomaly — is silently skipped
+(logged as a `warn`, not thrown), so `effectiveRoleNames.length` can be smaller than the number of
+composed template roles; the array is never padded or nulled out for a single unresolved entry.
 
 The `currentRole == null` case is UNCHANGED: the response stays the bare
 `{"token": "<new signed JWT>"}`, no `session` key, so the frontend's legacy fallback still
@@ -3897,6 +4768,136 @@ the returned one before the next NEO request, instead of forcing the user throug
 re-login.
 
 ---
+
+---
+
+## 8m. Costing Schedule Cadence Realignment (SFCostingCadence Webhook, ETP-5370)
+
+`SFCostingCadence` (`GET /sws/neo/costingcadence[?scope=client|all]` — reached ONLY through the NEO
+pseudo-spec bridge, §4.10/§4.11) enforces the costing invariant on tenants that already exist:
+**exactly ONE active scheduled `CostingBackground` request per client, firing every 30 seconds.**
+
+> **This endpoint is the escape hatch, not the main path.** The fleet-wide correction is done by
+> `CostingCadenceStartup` (`com.etendoerp.go.startup`), which runs the same routine over every tenant
+> on application boot — and shipping the module IS a boot, so a release realigns everything with no
+> operator action. Reach for this webhook to correct ONE tenant without waiting for a release.
+> It is also what makes `scope=all` a rarely-needed path: see the scope note below.
+>
+> **The startup is ONE-SHOT per tenant; this endpoint is not.** The startup marks each tenant it
+> migrates in `ETGO_DATA_FIX_HISTORY` (`fix_id='__costing-cadence-30s__'`) and skips it from then on,
+> so it is a migration rather than a standing policy — see `CostingCadenceStartup`'s javadoc for why
+> that distinction matters once users can pick their own frequency. This webhook deliberately ignores
+> those markers: an operator asking for one tenant to be corrected means it.
+
+### Why this is a webhook and not a data-fix `.sql`
+
+This is the reusable lesson, not an implementation detail. **An `UPDATE` on `AD_PROCESS_REQUEST`
+does not change what a running instance executes.** `OBScheduler.initialize()` reads that table
+exactly ONCE, at Quartz startup; afterwards the trigger lives in Quartz's own JobStore and
+`DefaultJob.execute` rebuilds its bundle from the `JobDataMap`, never re-reading the row. The same
+conclusion was reached independently on ETP-5269 and is written up in `SFAcctProcessMonitor`'s class
+javadoc ("Refuted from source"), and the PSD2 schedule-removal data-fix records that even DELETING
+the row leaves the job firing — it just starts failing with an FK violation.
+
+Production does not restart Tomcat, so a `.sql` would leave every tenant's row claiming 30 seconds
+while the trigger kept firing every 5 minutes — worse than doing nothing, because the row would then
+be lying about what runs. The correction has to happen inside the live JVM. This is exactly the
+escape hatch the data-fixes framework documents for its own SQL-first rule (see `tenant-fixer.md`,
+"How to choose the fix mechanism"): too stateful for hand SQL → write it once in Java and expose it
+as a remediation webhook.
+
+### What it does
+
+The work lives in `OnboardingCostingScheduleService#realignCadence(String)`, next to the
+provisioning code whose row shape it has to match — one implementation, no SQL/Java drift. Per
+client:
+
+| Step | Behaviour |
+|---|---|
+| Winner | The most recently created active `SCH` request (ties broken by id, so the choice is deterministic) — it is the one onboarding or the ETP-5245 data-fix provisioned with a resolved `ob_context` for that tenant |
+| Losers | Unscheduled from Quartz, then marked `status='UNS'` + `isactive='N'`. **Never deleted** — the history stays auditable |
+| Cadence | `timing='S'`, `frequency='1'`, `SECONDLY_INTERVAL=30`, `MINUTELY_INTERVAL` cleared to `NULL` |
+| Re-arm | `OBScheduler.reschedule(...)` on the survivor — `schedule(...)` is a no-op when the Quartz job already exists, so reschedule (unschedule + delete + schedule) is the only thing that works here |
+| `COM` rows | Ignored. A completed one-shot run is execution history, not a schedule |
+
+The commit happens BEFORE the re-arm: `TriggerProvider` reads the timing columns through the
+scheduler's own JDBC connection, which cannot see an uncommitted row.
+
+**`NEXT_FIRE_TIME` must be nulled, or the new cadence is correct but dormant.** This is the one thing
+live verification caught that no unit test could. `ScheduledTriggerGenerator#getBuilder` does not
+start a rebuilt trigger from the request's start boundary when the row carries a next fire time — it
+starts it *at* that instant:
+
+```java
+if (StringUtils.isEmpty(data.nextFireTime)) { builder.startAt(getStartDate(data)); }
+else                                        { builder.startAt(getNextFireDate(data)); }
+```
+
+That column still holds the OLD trigger's next fire. Measured on the shared dev DB: the webhook ran
+at 19:55:02, the row read `1|30` immediately, and the process did not run once until **19:58:55** —
+the stale next fire — after which the 30-second cadence held exactly. Harmless when the old cadence
+was 5 minutes; a daily old cadence would have left the job idle for a day. `realignCadence` therefore
+nulls it in native SQL (the column is deliberately unmapped on the `ProcessRequest` entity — it is
+scheduler bookkeeping written by `ProcessMonitor` through `ProcessRequestData`'s XSQL) and restates
+`START_DATE`/`START_TIME` from the provisioning path's own helpers, jitter included.
+
+**The survivor is re-armed even when its row already reads 30 s.** That is deliberate, and it is the
+direct consequence of the section above: the row is not evidence about the live trigger. Re-arming is
+the only thing that can guarantee the invariant, and at a 30-second cadence resetting the trigger
+phase costs nothing. The per-client `status` still distinguishes `realigned` (the row needed
+changing) from `alreadyCorrect` (it did not).
+
+A failure on one tenant is rolled back, recorded as `failed`, and the sweep continues with the rest.
+
+### Access and scope
+
+Gated on `NeoAccessHelper.isAdminOrClientAdmin(role)`, enforced server-side.
+
+- `scope=client` (**default**) — realigns the CALLER'S OWN client only.
+- `scope=all` — sweeps every tenant in one call, and is **refused unless the caller is in the System
+  client (`'0'`)**. Letting a tenant admin re-arm other tenants' Quartz jobs would be a privilege
+  escalation, so the check is on the CLIENT, not only on the role.
+
+Refusals answer with a payload (`success:false` + `reason`), never a 403 — `NeoGoWebhookBridge` maps
+`responseVars["error"]` to HTTP 500, so a refusal must not travel as an error. Reasons:
+`notAuthorized`, `systemScopeRequired`, `schedulerUnavailable` (a node under the no-execute
+background policy leaves Quartz in standby, where schedule/reschedule silently no-op — reporting
+success there would be a lie).
+
+### Response
+
+```json
+{
+  "success": true,
+  "scope": "all",
+  "realigned": 3, "alreadyCorrect": 1, "failed": 0, "deactivated": 1,
+  "clients": [
+    { "clientId": "...", "clientName": "E2E User 1", "status": "realigned",
+      "requestId": "...", "deactivated": 0 }
+  ]
+}
+```
+
+### What it does not do
+
+**It never creates a missing schedule.** A client with zero active `SCH` requests is simply absent
+from the response. Provisioning one is a different problem with a different owner — onboarding step 8
+for new tenants, `R36-costing-background-schedule` for existing ones. Read an empty `clients` array as
+"nothing here was misconfigured", not as "every tenant is covered".
+
+Provisioning one was `R36-costing-background-schedule`'s job, and **that fix is retired as of
+ETP-5370** (`retired.json`): it hardcoded the 5-minute cadence, so any row it still created would be
+born with the value the product has moved away from. Its long-standing side problem is resolved by
+the same change — R36 INSERTed `SCH` rows and never registered them with Quartz, leaving them
+dormant until an `OBScheduler.initialize()` that never came, and `CostingCadenceStartup` now re-arms
+every surviving request on each boot, dormant ones included.
+
+### Verifying it worked
+
+The DB alone cannot prove it — that is the whole point. After calling it, check in Classic's Process
+Request window that `next_fire_time - previous_fire_time` is 30 s on the surviving row, **without
+having restarted Tomcat**. The DB-side invariant (one active `SCH` row per client at `1`/`30`) is
+necessary but not sufficient.
 
 ---
 
@@ -3942,8 +4943,8 @@ e.g. `UserRoleAssignmentHandlerTest`/`OwnerSupportTest`) and `src-test/src/com/e
 `resendInvitation` coverage, §8h, lives alongside its pre-existing `createInvitation`/
 `findLatestInvitationStatus` suites, same file, no separate class).
 The `NeoPseudoSpecDispatcher` routing for `userroleassignments`, `systemroletemplates`,
-`debuginvitationbypass`, `resendinvitation`, `promoteuserrole`, and `acctprocessmonitor` is
-covered by
+`debuginvitationbypass`, `resendinvitation`, `promoteuserrole`, `acctprocessmonitor`, and
+`costingcadence` is covered by
 `NeoPseudoSpecDispatcherTest` (same package), mirroring its existing per-endpoint dispatch/
 method-not-allowed test pairs — `debuginvitationbypass` additionally covers the flag-off/flag-on
 branch described in §8g (`resendinvitation` and `promoteuserrole` have no such flag to test, §8h/
@@ -3974,3 +4975,103 @@ is exercised entirely through `UserRoleCompositionServiceOverlapIntegrationTest`
 **Callout endpoints.** Etendo callouts (field-change triggers) are not exposed through the API. A callout endpoint would allow clients to request server-side field recalculations when a field value changes.
 
 **Custom HQL selectors.** OBUISEL selectors with `isCustomQuery = true` are fully supported. The `executeCustomHqlQuery()` method handles custom HQL with org filtering, validation rules, search across searchable properties, and pagination.
+
+#### 4.12.15 `client` and `organization` are resolved from the session, never from the payload
+
+**The tenant a record belongs to is not a per-request choice.** `client` and `organization` are
+resolved from the caller's session on every write, on both verbs and on both the MCP and REST
+paths. A value supplied by the caller is discarded — never compared, never honoured.
+
+Etendo GO positions an account in one specific organization of one client, so selecting a
+different one is not a business act a caller can perform. It is either a client bug or an
+attempt to write into another tenant.
+
+**What this closes.** A `neo_create` carrying `organization` set to another org returned
+`200 OK`, and the record was then invisible to the session that created it (`404` on re-read):
+the write had landed in the other tenant. Neither column has an `ETGO_SF_FIELD` row, and the
+two write paths answered that absence in opposite ways:
+
+- **REST is a whitelist.** `NeoFieldFilter.filterCreateRequest` ends in
+  `filterBody(body, includedFields)`, built only from curated rows, so an uncurated key was
+  stripped. REST was safe **by accident, not by design** — curating `AD_Org_ID` as an included
+  field would have exposed it, and an inactive filter returns the body untouched.
+- **The MCP write gate is two deny-sets**, built from those same rows. `organization` resolves
+  to a real DAL property, so it was never "unknown"; it matched neither deny-set, passed both
+  gates, and reached `jsonService.add` with the caller's value intact.
+
+The policy is therefore stated once, in `NeoServerOwnedFields`, and both write paths call it.
+Implementing it separately on each side is how the same defect survived in two files after being
+closed (IMP-39).
+
+**Reading is unchanged.** Both fields stay in `neo_get`, `neo_list` and `neo_schema` responses.
+They are information the caller legitimately needs; only the write side changes.
+
+**The write is not refused.** The record is always created in the caller's own tenant, so there
+is nothing to fail. What the MCP path adds is telling the caller, when — and only when — the
+value it sent was not its own:
+
+```json
+{
+  "serverOwnedFields": {
+    "organization": { "sent": "1B8...E2", "session": "0F3...A9" }
+  },
+  "serverOwnedFieldsHint": "These fields are owned by the server and were resolved from your session, not from the values you sent. ..."
+}
+```
+
+Echoing back the value a read response handed you is silent, because nothing was taken from
+you. Sending a different tenant is reported, rather than discovered later from a `404` on the
+record you believe you just created — the failure shape §4.12.14 exists to avoid.
+
+REST does not report: its client is the SPA, which never sends these fields.
+
+**Update is in scope too.** An update that changed `organization` would relocate an existing
+record into another tenant — the same hole from the other direction.
+
+#### 4.12.16 The report catalogue answers the same question the execution does
+
+A report the role cannot run is no longer offered. `neo_discover` and the publication of the
+`generate_*` tool now resolve through the same rule that refuses the call, so the catalogue
+stops advertising what it will then deny.
+
+**What it looked like before.** Under a role holding no grant for it, `neo_discover` listed
+`tax-report` with `callable: true` and the `generate_tax_report` tool was published — and calling
+it answered `403`. Two surfaces asked the permissive shared gate (§4.12.15's fail-open, which a
+type-`R` spec with no linked process and no `AD_TAB_ID` falls through to), while the third asked
+the handler, which owns the real rule.
+
+**How they were joined.** `NeoHandler` gained an optional declaration:
+
+```java
+default boolean isAccessibleForCurrentRole() {
+  return true;
+}
+```
+
+The report handlers override it with the grant they already enforced, and
+`NeoAccessHelper.hasReportSpecAccess` consults it after the constituent-window tier. A handler
+that does not override answers `true`, so nothing that worked before changes.
+
+The declaration is deliberately coarser than the execution check where the two can differ: the
+aging report answers "may this role use it at all" (either the receivables or the payables
+grant), because a role granted one side must still see the report; the exact side-specific grant
+is enforced where the report runs and the requested side is known.
+
+**A role refusal is `403`, not `500`.** `authorizeSpecAccess` raises a `SecurityException`, which
+used to reach the router's generic handler and surface as `500 server_error`. A permanent
+authorization decision dressed as a server failure makes a client with a retry-on-5xx rule loop
+forever. Both refusal types are now mapped: `SecurityException` and Openbravo's own
+`OBSecurityException`, which does **not** extend it and therefore needs its own clause.
+
+```json
+{
+  "status": 403,
+  "error": "forbidden",
+  "detail": "Access denied to spec 'inventory-stock-report' for current role",
+  "hint": "Your role does not have access to this. The answer is the same every time, so do not retry: …"
+}
+```
+
+**The fail-open itself is not closed by this.** A report handler that declares nothing still
+passes. See `schema_forge docs/plans/2026-09-16-report-spec-access-fail-open.md` for the
+remaining work, including the guardrail test that would make the omission fail the build.
