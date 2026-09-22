@@ -433,9 +433,11 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
    *   <li>otherwise, the Business Partner's own configured PURCHASE price list
    *       ({@code BusinessPartner#getPurchasePricelist()} — never {@code getPriceList()},
    *       which is the sales tariff);</li>
-   *   <li>otherwise, neither field is added — the frontend picker leaves the tariff empty
-   *       and blocks confirm, matching {@code createFromReceiptNoPo}'s own hard failure
-   *       when no purchase price list can be resolved at all.</li>
+   *   <li>otherwise, the client's own DEFAULT purchase price list — matching what Etendo
+   *       Classic falls back to when a Business Partner has none configured (ETP-5410
+   *       follow-up: this tier used to be missing, leaving the field empty — this modal's own
+   *       picker never fills it in on its own, since {@code CreateInvoiceConfirmModal} always
+   *       disables the generic fallback here).</li>
    * </ol>
    * Adds {@code resolvedPriceListId} / {@code resolvedPriceList$_identifier} to the header
    * JSON. Must run AFTER {@link #enrichLinkedOrder} in {@link #afterHandle}, since it reads
@@ -448,7 +450,10 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
       if (applyPriceListFromLinkedOrder(rec)) {
         return;
       }
-      applyPriceListFromBusinessPartner(rec, receiptId);
+      if (applyPriceListFromBusinessPartner(rec, receiptId)) {
+        return;
+      }
+      applyClientDefaultPriceList(rec);
     } catch (Exception e) {
       log.warn("Could not resolve price list for receipt {}: {}", receiptId, e.getMessage());
     }
@@ -474,15 +479,35 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
     return true;
   }
 
-  private void applyPriceListFromBusinessPartner(JSONObject rec, String receiptId)
+  private boolean applyPriceListFromBusinessPartner(JSONObject rec, String receiptId)
       throws JSONException {
     try {
       OBContext.setAdminMode(true);
       ShipmentInOut receipt = OBDal.getReadOnlyInstance().get(ShipmentInOut.class, receiptId);
       if (receipt == null || receipt.getBusinessPartner() == null) {
-        return;
+        return false;
       }
       PriceList priceList = receipt.getBusinessPartner().getPurchasePricelist();
+      if (priceList != null) {
+        rec.put("resolvedPriceListId", priceList.getId());
+        rec.put("resolvedPriceList$_identifier", priceList.getName());
+        return true;
+      }
+      return false;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Tier-3 fallback of {@link #enrichResolvedPriceList}: the client's own DEFAULT purchase
+   * price list, reusing {@code MultiDocumentInvoiceSupport}'s lookup rather than a second copy
+   * of the same Criteria query.
+   */
+  private void applyClientDefaultPriceList(JSONObject rec) throws JSONException {
+    try {
+      OBContext.setAdminMode(true);
+      PriceList priceList = MultiDocumentInvoiceSupport.findDefaultPriceList(false);
       if (priceList != null) {
         rec.put("resolvedPriceListId", priceList.getId());
         rec.put("resolvedPriceList$_identifier", priceList.getName());

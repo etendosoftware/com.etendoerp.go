@@ -2842,8 +2842,16 @@ public class CreateDraftInvoiceHandlerTest {
    */
   @Test
   public void testHandlePendingLinesSuccessReturns200WithLineArray() throws Exception {
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       mockAdminMode(ctxMock);
+      // ETP-5410 follow-up: handlePendingLines now also loads the shipment itself (for the
+      // product/salesOrderLine enrichment and the resolved price list) — a null doc here keeps
+      // this test focused on the pre-existing lineId/pendingQty assertions below.
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(org.openbravo.model.materialmgmt.transaction.ShipmentInOut.class), anyString()))
+          .thenReturn(null);
 
       CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
         @Override
@@ -2890,6 +2898,69 @@ public class CreateDraftInvoiceHandlerTest {
 
       assertNotNull(r);
       assertEquals(500, r.getHttpStatus());
+    }
+  }
+
+  // ── handleProductPrices ───────────────────────────────────────────────────
+
+  /** GET method for productPrices is not routed (only POST is handled). */
+  @Test
+  public void testHandleProductPricesGetMethodReturnsNull() {
+    NeoResponse r = new CreateDraftInvoiceHandler().handle(NeoContext.builder()
+        .specName(SPEC_GOODS_SHIPMENT).entityName(ENTITY_HEADER)
+        .httpMethod("GET").endpointType(NeoEndpointType.ACTION)
+        .fieldName("productPrices").build());
+    assertNull(r);
+  }
+
+  /** No productIds in the body: 200 with an empty data array, never a 500/NPE. */
+  @Test
+  public void testHandleProductPricesEmptyBodyReturns200WithEmptyArray() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+      mockAdminMode(ctxMock);
+
+      NeoResponse r = new CreateDraftInvoiceHandler().handle(NeoContext.builder()
+          .specName(SPEC_GOODS_SHIPMENT).entityName(ENTITY_HEADER)
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("productPrices").requestBody(new JSONObject()).build());
+
+      assertNotNull(r);
+      assertEquals(200, r.getHttpStatus());
+      JSONArray data = r.getBody().getJSONObject("response").getJSONArray("data");
+      assertEquals(0, data.length());
+    }
+  }
+
+  /**
+   * Happy path: delegates to {@link MultiDocumentInvoiceSupport#resolveProductPrices} and
+   * serialises the result as {@code [{productId, price}, ...]}.
+   */
+  @Test
+  public void testHandleProductPricesSuccessReturns200WithPricedProducts() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<MultiDocumentInvoiceSupport> supportMock =
+            Mockito.mockStatic(MultiDocumentInvoiceSupport.class)) {
+      mockAdminMode(ctxMock);
+      Map<String, BigDecimal> prices = new java.util.LinkedHashMap<>();
+      prices.put("prod-1", new BigDecimal("9.99"));
+      supportMock.when(() -> MultiDocumentInvoiceSupport.resolveProductPrices(
+          eq("PL-1"), any())).thenReturn(prices);
+
+      JSONObject body = new JSONObject()
+          .put("priceListId", "PL-1")
+          .put("productIds", new JSONArray().put("prod-1"));
+
+      NeoResponse r = new CreateDraftInvoiceHandler().handle(NeoContext.builder()
+          .specName(SPEC_GOODS_SHIPMENT).entityName(ENTITY_HEADER)
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("productPrices").requestBody(body).build());
+
+      assertNotNull(r);
+      assertEquals(200, r.getHttpStatus());
+      JSONArray data = r.getBody().getJSONObject("response").getJSONArray("data");
+      assertEquals(1, data.length());
+      assertEquals("prod-1", data.getJSONObject(0).getString("productId"));
+      assertEquals(9.99, data.getJSONObject(0).getDouble("price"), 0.0);
     }
   }
 

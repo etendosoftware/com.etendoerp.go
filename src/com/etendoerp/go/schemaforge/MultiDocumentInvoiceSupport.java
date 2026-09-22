@@ -18,18 +18,26 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Restrictions;
+import org.hibernate.query.NativeQuery;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
+import org.openbravo.model.common.order.Order;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
+import org.openbravo.model.pricing.pricelist.PriceList;
 
 /**
  * Shared plumbing for building ONE invoice from MULTIPLE source shipments/receipts
@@ -42,7 +50,9 @@ import org.openbravo.model.materialmgmt.transaction.ShipmentInOutLine;
  * <p><b>Why this exists separately from {@link NeoInvoiceSupport}:</b> that class is a
  * single-concern SQL helper (pending-quantity computation). This one is generic
  * multi-document plumbing — id parsing, cross-document validation, and per-line quantity
- * resolution — with no SQL of its own. Mixing the two would muddy both.
+ * resolution. {@link #resolveProductPrices} and {@link #resolveEffectivePriceListId} are the
+ * two methods here with queries of their own — see each one's doc for why it lives here
+ * instead of a third helper class.
  *
  * <p>Every user-facing message is a caller-supplied parameter, not a literal here, so the
  * sales handler's existing wording stays byte-identical after delegating to these methods —
@@ -227,5 +237,150 @@ final class MultiDocumentInvoiceSupport {
       }
     }
     return selectedLines;
+  }
+
+  /**
+   * Resolves the standard price of a specific, known set of products under a price list, via a
+   * single indexed {@code m_productprice} lookup keyed on an {@code IN} clause of exactly those
+   * ids — never the generic product-browse selector.
+   *
+   * <p><b>Why this exists:</b> the "Crear factura" quote feature (ETP-5410) originally priced
+   * unpriced-by-order lines by calling {@code GET .../selectors/M_Product_ID?limit=500}, the same
+   * generic "browse products" selector the manual line-entry UI uses to let a human search a
+   * catalog. That selector has to run its full generic query — joins, identifiers, pagination —
+   * for up to 500 products before {@code ProductPriceSelectorPolicy} even starts pricing them,
+   * even though the caller already knows the exact 1-3 product ids it needs a price for. This
+   * method is the same indexed {@code IN (...)} query {@code ProductPriceSelectorPolicy} already
+   * uses to price selector rows, extracted so a caller that isn't browsing a catalog can reach it
+   * directly, without paying for the browse query at all.
+   *
+   * @param priceListId
+   *     the price list to price against
+   * @param productIds
+   *     the specific products to price; duplicates and blanks are ignored
+   * @return map of {@code M_Product_ID -> standard price}; a product with no active price-list
+   *     entry is simply absent from the result, never zero-padded
+   */
+  static Map<String, BigDecimal> resolveProductPrices(String priceListId, List<String> productIds) {
+    Map<String, BigDecimal> prices = new HashMap<>();
+    if (StringUtils.isBlank(priceListId) || productIds == null || productIds.isEmpty()) {
+      return prices;
+    }
+    Set<String> distinctIds = new LinkedHashSet<>();
+    for (String id : productIds) {
+      if (StringUtils.isNotBlank(id)) {
+        distinctIds.add(id);
+      }
+    }
+    if (distinctIds.isEmpty()) {
+      return prices;
+    }
+
+    StringBuilder inClause = new StringBuilder();
+    List<String> orderedIds = new ArrayList<>(distinctIds);
+    for (int i = 0; i < orderedIds.size(); i++) {
+      if (i > 0) {
+        inClause.append(", ");
+      }
+      inClause.append(":pid").append(i);
+    }
+    String sql = "SELECT pp.m_product_id, pp.pricestd"
+        + " FROM m_productprice pp"
+        + " JOIN m_pricelist_version plv"
+        + "   ON plv.m_pricelist_version_id = pp.m_pricelist_version_id"
+        + " WHERE plv.m_pricelist_id = :priceListId"
+        + "   AND pp.m_product_id IN (" + inClause + ")"
+        + "   AND pp.isactive = 'Y'"
+        + "   AND plv.isactive = 'Y'"
+        + "   AND plv.validfrom = ("
+        + "     SELECT MAX(v.validfrom) FROM m_pricelist_version v"
+        + "     WHERE v.m_pricelist_id = :priceListId"
+        + "       AND v.isactive = 'Y'"
+        + "       AND v.validfrom <= NOW()"
+        + "   )";
+    @SuppressWarnings("rawtypes")
+    NativeQuery nq = OBDal.getInstance().getSession().createNativeQuery(sql);
+    nq.setParameter("priceListId", priceListId);
+    for (int i = 0; i < orderedIds.size(); i++) {
+      nq.setParameter("pid" + i, orderedIds.get(i));
+    }
+    for (Object row : nq.list()) {
+      Object[] cols = (Object[]) row;
+      if (cols[1] != null) {
+        prices.put(String.valueOf(cols[0]), new BigDecimal(cols[1].toString()));
+      }
+    }
+    return prices;
+  }
+
+  /**
+   * Resolves the effective price list to preselect for a shipment/receipt's invoice quote, in
+   * priority order:
+   * <ol>
+   *   <li>the price list of the order the document resolves to — its own header {@code
+   *       C_Order_ID}, or, for a header-less document, the order of its first order-linked
+   *       line (same notion {@code CreatePurchaseInvoiceHandler#deriveOrderFromLines}
+   *       already uses for the create path);</li>
+   *   <li>otherwise, the Business Partner's own configured price list for the matching trade
+   *       direction ({@code getPriceList()} for sales, {@code getPurchasePricelist()} for
+   *       purchase);</li>
+   *   <li>otherwise, the client's own DEFAULT price list for that direction — the fallback
+   *       Etendo Classic uses when a Business Partner has no price list configured at all.
+   *       Both {@code GoodsShipmentHeaderHandler#enrichResolvedPriceList} and its
+   *       goods-receipt counterpart used to stop at tier 2 and leave the field empty; this is
+   *       the tier they were missing.</li>
+   * </ol>
+   * Used by {@code CreateDraftInvoiceHandler#handlePendingLines} /
+   * {@code CreatePurchaseInvoiceHandler#handlePendingLines} to return the resolved price list
+   * in the SAME response as the pending quantities, instead of the caller needing a separate
+   * full single-record GET just for this one field (ETP-5410 follow-up).
+   *
+   * @param doc     the shipment/receipt to resolve for
+   * @param isSOTrx {@code true} for a sales shipment, {@code false} for a purchase receipt
+   * @return the resolved {@code M_PriceList_ID}, or {@code null} if no default price list
+   *     exists for the client/direction either
+   */
+  static String resolveEffectivePriceListId(ShipmentInOut doc, boolean isSOTrx) {
+    Order order = doc.getSalesOrder();
+    if (order == null) {
+      order = deriveOrderFromLines(doc);
+    }
+    if (order != null && order.getPriceList() != null) {
+      return order.getPriceList().getId();
+    }
+    BusinessPartner bp = doc.getBusinessPartner();
+    if (bp != null) {
+      PriceList bpPriceList = isSOTrx ? bp.getPriceList() : bp.getPurchasePricelist();
+      if (bpPriceList != null) {
+        return bpPriceList.getId();
+      }
+    }
+    PriceList defaultPriceList = findDefaultPriceList(isSOTrx);
+    return defaultPriceList != null ? defaultPriceList.getId() : null;
+  }
+
+  private static Order deriveOrderFromLines(ShipmentInOut doc) {
+    for (ShipmentInOutLine line : doc.getMaterialMgmtShipmentInOutLineList()) {
+      if (line.getSalesOrderLine() != null && line.getSalesOrderLine().getSalesOrder() != null) {
+        return line.getSalesOrderLine().getSalesOrder();
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Package-visible (not {@code private}) so {@code GoodsShipmentHeaderHandler} /
+   * {@code GoodsReceiptHeaderHandler} can reuse it as the tier-3 fallback of their own
+   * {@code enrichResolvedPriceList}, instead of a second copy of this query.
+   */
+  static PriceList findDefaultPriceList(boolean isSOTrx) {
+    @SuppressWarnings("unchecked")
+    List<PriceList> matches = OBDal.getInstance().createCriteria(PriceList.class)
+        .add(Restrictions.eq(PriceList.PROPERTY_SALESPRICELIST, isSOTrx))
+        .add(Restrictions.eq(PriceList.PROPERTY_DEFAULT, true))
+        .add(Restrictions.eq(PriceList.PROPERTY_ACTIVE, true))
+        .setMaxResults(1)
+        .list();
+    return matches.isEmpty() ? null : matches.get(0);
   }
 }

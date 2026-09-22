@@ -1720,11 +1720,17 @@ public class CreatePurchaseInvoiceHandlerTest {
   @Test
   public void handle_pendingInvoiceLinesGet_onGoodsReceiptSpec_routesToHandlePendingLines() {
     try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
         MockedStatic<NeoInvoiceSupport> supportMock = Mockito.mockStatic(NeoInvoiceSupport.class)) {
       obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
       obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
       supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLine(eq("r-1"), eq(true)))
           .thenReturn(Collections.emptyMap());
+      // ETP-5410 follow-up: handlePendingLines now also loads the receipt itself — a null doc
+      // keeps this test focused on the dispatch-routing assertion below.
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(ShipmentInOut.class), anyString())).thenReturn(null);
 
       NeoResponse response = new CreatePurchaseInvoiceHandler().handle(NeoContext.builder()
           .endpointType(NeoEndpointType.ACTION)
@@ -1772,9 +1778,16 @@ public class CreatePurchaseInvoiceHandlerTest {
 
   @Test
   public void handlePendingLines_success_returnsLineIdAndPendingQty() throws JSONException {
-    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class)) {
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
       obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
       obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+      // ETP-5410 follow-up: handlePendingLines now also loads the receipt itself (for the
+      // product/salesOrderLine enrichment and the resolved price list) — a null doc here keeps
+      // this test focused on the pre-existing lineId/pendingQty assertions below.
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(ShipmentInOut.class), anyString())).thenReturn(null);
 
       Map<String, BigDecimal> pending = new LinkedHashMap<>();
       pending.put("l-1", BigDecimal.valueOf(4));
@@ -1820,6 +1833,77 @@ public class CreatePurchaseInvoiceHandlerTest {
 
       assertNotNull(response);
       assertEquals(500, response.getHttpStatus());
+    }
+  }
+
+  // ─── handleProductPrices ────────────────────────────────────────────────────
+
+  /**
+   * Regression guard mirroring {@code handle_pendingInvoiceLinesGet_onPurchaseOrderSpec_
+   * returnsNull}: this handler also sits in {@code PurchaseOrderHeaderHandler}'s dispatch
+   * chain, so productPrices must stay gated to goods-receipt or it could shadow a sibling
+   * handler serving the same action name on purchase-order.
+   */
+  @Test
+  public void handle_productPricesPost_onPurchaseOrderSpec_returnsNull() {
+    assertNull(new CreatePurchaseInvoiceHandler().handle(NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .httpMethod("POST")
+        .fieldName("productPrices")
+        .specName("purchase-order")
+        .recordId("po-1")
+        .build()));
+  }
+
+  /** GET method for productPrices is not routed (only POST is handled). */
+  @Test
+  public void handle_productPricesGet_onGoodsReceiptSpec_returnsNull() {
+    assertNull(new CreatePurchaseInvoiceHandler().handle(NeoContext.builder()
+        .endpointType(NeoEndpointType.ACTION)
+        .httpMethod("GET")
+        .fieldName("productPrices")
+        .specName("goods-receipt")
+        .recordId("r-1")
+        .build()));
+  }
+
+  /**
+   * Happy path on the goods-receipt spec: delegates to
+   * {@link MultiDocumentInvoiceSupport#resolveProductPrices} and serialises the result as
+   * {@code [{productId, price}, ...]}.
+   */
+  @Test
+  public void handle_productPricesPost_onGoodsReceiptSpec_returns200WithPricedProducts()
+      throws JSONException {
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<MultiDocumentInvoiceSupport> supportMock =
+            Mockito.mockStatic(MultiDocumentInvoiceSupport.class)) {
+      obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+      obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+      Map<String, BigDecimal> prices = new LinkedHashMap<>();
+      prices.put("prod-1", new BigDecimal("9.99"));
+      supportMock.when(() -> MultiDocumentInvoiceSupport.resolveProductPrices(
+          eq("PL-1"), any())).thenReturn(prices);
+
+      JSONObject body = new JSONObject()
+          .put("priceListId", "PL-1")
+          .put("productIds", new JSONArray().put("prod-1"));
+
+      NeoResponse response = new CreatePurchaseInvoiceHandler().handle(NeoContext.builder()
+          .endpointType(NeoEndpointType.ACTION)
+          .httpMethod("POST")
+          .fieldName("productPrices")
+          .specName("goods-receipt")
+          .recordId("r-1")
+          .requestBody(body)
+          .build());
+
+      assertNotNull(response);
+      assertEquals(200, response.getHttpStatus());
+      JSONArray data = response.getBody().getJSONObject("response").getJSONArray("data");
+      assertEquals(1, data.length());
+      assertEquals("prod-1", data.getJSONObject(0).getString("productId"));
+      assertEquals(9.99, data.getJSONObject(0).getDouble("price"), 0.0);
     }
   }
 
