@@ -281,6 +281,19 @@ public class SubscriptionLifecycleApplierTest {
     assertEquals("", SubscriptionLifecycleApplier.subscriptionIdOf("invoice.paid", null));
   }
 
+  /**
+   * An invoice not tied to any subscription reports {@code subscription} as JSON null, not an
+   * absent key; that must not be read back as the literal id "null".
+   */
+  @Test
+  public void invoiceWithANullSubscriptionIsNotTreatedAsTheLiteralIdNull() throws Exception {
+    assertEquals("", SubscriptionLifecycleApplier.subscriptionIdOf("invoice.paid",
+        new JSONObject("{\"id\":\"in_1\",\"subscription\":null}")));
+    assertEquals("", SubscriptionLifecycleApplier.subscriptionIdOf("invoice.payment_failed",
+        new JSONObject("{\"id\":\"in_1\",\"subscription\":null,\"parent\":{"
+            + "\"subscription_details\":{\"subscription\":null}}}")));
+  }
+
   @Test
   public void eventCreatedAtReadsTheEnvelopeCreatedField() throws Exception {
     assertEquals(Instant.ofEpochSecond(CREATED), SubscriptionLifecycleApplier.eventCreatedAt(

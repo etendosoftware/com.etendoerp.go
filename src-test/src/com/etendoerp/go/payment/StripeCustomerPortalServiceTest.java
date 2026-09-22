@@ -79,6 +79,61 @@ class StripeCustomerPortalServiceTest {
     assertTrue(detail.isCancelAtPeriodEnd());
   }
 
+  // ===================== Plan name (nickname vs. product vs. price id) =====================
+
+  /** Stripe sends {@code nickname: null} for a price with no custom nickname, not an absent key. */
+  @Test
+  void fallsBackToTheExpandedProductNameWhenNicknameIsNull() throws Exception {
+    StripeCustomerPortalService.SubscriptionDetail detail =
+        StripeCustomerPortalService.SubscriptionDetail.fromProviderJson(new JSONObject(
+            "{\"status\":\"active\",\"items\":{\"data\":[{\"price\":{\"id\":\"price_1\","
+                + "\"nickname\":null,\"unit_amount\":2900,\"currency\":\"eur\","
+                + "\"product\":{\"id\":\"prod_1\",\"name\":\"Etendo GO Pro\"}}}]}}"));
+
+    assertEquals("Etendo GO Pro", detail.getPlan());
+  }
+
+  @Test
+  void fallsBackToThePriceIdWhenNicknameIsNullAndTheProductHasNoUsableName() throws Exception {
+    StripeCustomerPortalService.SubscriptionDetail unnamedProduct =
+        StripeCustomerPortalService.SubscriptionDetail.fromProviderJson(new JSONObject(
+            "{\"status\":\"active\",\"items\":{\"data\":[{\"price\":{\"id\":\"price_1\","
+                + "\"nickname\":null,\"unit_amount\":2900,\"currency\":\"eur\","
+                + "\"product\":{\"id\":\"prod_1\"}}}]}}"));
+    assertEquals("price_1", unnamedProduct.getPlan());
+
+    // product not expanded: Stripe sends it as a bare id string instead of an object.
+    StripeCustomerPortalService.SubscriptionDetail unexpandedProduct =
+        StripeCustomerPortalService.SubscriptionDetail.fromProviderJson(new JSONObject(
+            "{\"status\":\"active\",\"items\":{\"data\":[{\"price\":{\"id\":\"price_1\","
+                + "\"nickname\":null,\"unit_amount\":2900,\"currency\":\"eur\","
+                + "\"product\":\"prod_1\"}}]}}"));
+    assertEquals("price_1", unexpandedProduct.getPlan());
+  }
+
+  @Test
+  void aNonNullNicknameWinsOverTheExpandedProductName() throws Exception {
+    StripeCustomerPortalService.SubscriptionDetail detail =
+        StripeCustomerPortalService.SubscriptionDetail.fromProviderJson(new JSONObject(
+            "{\"status\":\"active\",\"items\":{\"data\":[{\"price\":{\"id\":\"price_1\","
+                + "\"nickname\":\"Productive\",\"unit_amount\":2900,\"currency\":\"eur\","
+                + "\"product\":{\"id\":\"prod_1\",\"name\":\"Etendo GO Pro\"}}}]}}"));
+
+    assertEquals("Productive", detail.getPlan());
+  }
+
+  /** A null currency or status must read as blank, never as the literal text "null". */
+  @Test
+  void readsNullCurrencyAndStatusAsBlankNotTheLiteralWordNull() throws Exception {
+    StripeCustomerPortalService.SubscriptionDetail detail =
+        StripeCustomerPortalService.SubscriptionDetail.fromProviderJson(new JSONObject(
+            "{\"status\":null,\"items\":{\"data\":[{\"price\":{\"id\":\"price_1\","
+                + "\"nickname\":\"Productive\",\"unit_amount\":2900,\"currency\":null}}]}}"));
+
+    assertEquals("", detail.getCurrency());
+    assertEquals("", detail.getStatus());
+  }
+
   @Test
   void readsTheRenewalFromTheTopLevelPeriodEnd() throws Exception {
     StripeCustomerPortalService.SubscriptionDetail detail =
