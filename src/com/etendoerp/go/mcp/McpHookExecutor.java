@@ -17,8 +17,12 @@
 
 package com.etendoerp.go.mcp;
 
+import java.util.HashMap;
+import java.util.Iterator;
 import java.util.Map;
 
+import org.apache.commons.lang3.StringUtils;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
@@ -68,6 +72,112 @@ final class McpHookExecutor {
   }
 
   /**
+   * Run the read's <b>pre</b> phase, before the generic query exists (ETP-5415, D13).
+   *
+   * <p>This is the provider half of the read surface: a customization whose {@code handle} returns
+   * a response on a GET is serving the whole read itself, and the generic path must not run. REST
+   * has always worked this way — {@code NeoHookDispatcher.executeHookChain} invokes the pre-hook
+   * before anything touches the tab — and MCP did not, which had one loud consequence and one
+   * quiet one.</p>
+   *
+   * <p><b>The loud one:</b> the 16 entities with no {@code AD_Tab}
+   * ({@code ETGO_SF_ENTITY.ad_tab_id IS NULL}, every one carrying a working {@code java_qualifier})
+   * answer over REST and returned HTTP 500 over MCP — {@code getAdTabOrThrow} fired before any
+   * hook could decline the generic path. The dashboard widgets, {@code contacts/bp-stats}, the
+   * three reports and {@code not-posted-documents} all render in the SPA and were unreachable to
+   * an agent, while {@code neo_discover} advertised them and the {@code not_found} hint steered
+   * callers straight into them.</p>
+   *
+   * <p><b>The quiet one, which is the reason this is not just a bug fix:</b> the asymmetry applied
+   * to <em>every</em> entity, not only the tab-less ones. A customization that serves a read from
+   * its pre-hook worked in the app and silently did nothing for an agent — no error, no trace, the
+   * generic answer instead of the intended one. That is the failure mode this ticket exists to
+   * remove, and it was the last surface still carrying it.</p>
+   *
+   * <p>The tab is read leniently here ({@code sfEntity.getADTab()}, which may be {@code null})
+   * rather than through {@code getAdTabOrThrow}, precisely so a tab-less entity reaches its
+   * customization. That matches what REST passes: {@code NeoHookDispatcher.buildHookContext} also
+   * takes the tab straight off the entity and tolerates {@code null}.</p>
+   *
+   * <p><b>Query params.</b> A provider reads its inputs from {@code getQueryParams()} — the REST
+   * read fills that from the query string ({@code NeoServlet.extractQueryParams}, which always
+   * returns a map, never {@code null}). MCP has no query string, so the map is built from the
+   * tool's own arguments: {@code parentId}, plus every scalar entry of {@code filters}. Both
+   * halves matter and for different reasons. The map is never {@code null}, because the REST one
+   * never is and a provider written against REST dereferences it without a guard
+   * ({@code ContactsBpStatsHandler:71-72} is exactly that shape) — a null there is an
+   * {@code NPE} presented to the agent as a 500. And the {@code filters} pass-through is what
+   * gives the agent a way to supply a named input at all: {@code bp-stats} needs a
+   * {@code bpartnerId} that no MCP argument otherwise carries, so
+   * {@code neo_list(contacts, bp-stats, filters:{bpartnerId:"…"})} is its call shape.</p>
+   *
+   * @param specName   the spec being read
+   * @param entityName the entity being read
+   * @param recordId   the record for {@code neo_get}, {@code null} for {@code neo_list} — the
+   *                   value customizations branch on to tell a single-record read from a list
+   * @param sfEntity   the entity configuration, whose {@code Java_Qualifier} is resolved
+   * @param args       the tool arguments, read for {@code parentId} and {@code filters}; may be
+   *                   {@code null}
+   * @return the MCP result when the customization served the read, or {@code null} to carry on
+   *         with the generic path
+   * @throws JSONException when the customization's response cannot be converted
+   */
+  static JSONObject runReadProvider(String specName, String entityName, String recordId,
+      SFEntity sfEntity, JSONObject args) throws JSONException {
+    NeoContext ctx = NeoContext.builder()
+        .specName(specName)
+        .entityName(entityName)
+        .httpMethod(HTTP_METHOD_GET)
+        .recordId(recordId)
+        .adTab(sfEntity.getADTab())
+        .sfEntity(sfEntity)
+        .obContext(OBContext.getOBContext())
+        .endpointType(NeoEndpointType.CRUD)
+        .queryParams(buildReadProviderParams(args))
+        .build();
+    NeoExtensionResult result = NeoExtensionDispatcher.dispatch(NeoExtensionRequest.builder()
+        .qualifier(sfEntity.getJavaQualifier())
+        .specName(specName)
+        .entityName(entityName)
+        .surface(NeoExtensionSurface.READ)
+        .channel(NeoExtensionChannel.MCP)
+        .context(ctx)
+        .build());
+    NeoResponse response = result.response();
+    return response != null ? neoResponseToMcpResult(response) : null;
+  }
+
+  /**
+   * Build the provider's query-param map from the tool arguments. Never returns {@code null} —
+   * see {@link #runReadProvider}.
+   */
+  private static Map<String, String> buildReadProviderParams(JSONObject args) {
+    Map<String, String> params = new HashMap<>();
+    if (args == null) {
+      return params;
+    }
+    String parentId = args.optString(McpConstants.PARAM_PARENT_ID, null);
+    if (StringUtils.isNotBlank(parentId)) {
+      params.put(McpConstants.PARAM_PARENT_ID, parentId);
+    }
+    JSONObject filters = args.optJSONObject("filters");
+    if (filters == null) {
+      return params;
+    }
+    // Scalars only. A filter value that is itself an object or an array is an operator form
+    // ({"gt": …}, a list of ids) belonging to the generic query language; flattening one into a
+    // string would hand the provider something that looks like a value and is not.
+    Iterator<String> keys = filters.keys();
+    while (keys.hasNext()) {
+      String key = keys.next();
+      Object value = filters.opt(key);
+      if (value != null && !(value instanceof JSONObject) && !(value instanceof JSONArray)) {
+        params.put(key, String.valueOf(value));
+      }
+    }
+    return params;
+  }
+  /**
    * Run the entity customization's READ post-phase over an MCP read result (ETP-5415, T3).
    *
    * <p>Until this existed, {@code neo_list} and {@code neo_get} were the only NEO surfaces that
@@ -87,11 +197,9 @@ final class McpHookExecutor {
    * handler reads its rows through {@code NeoHandlerUtils.extractGetDataArray}, which requires the
    * {@code response.data} wrapper core produced and an HTTP method of {@code GET}.</p>
    *
-   * <p><b>The pre phase is not routed here.</b> A REST read runs {@code handle} as well, and a
-   * customization that fully serves a read from its pre-hook therefore still behaves differently
-   * over MCP. Invoking {@code handle} on a read would let a customization short-circuit or rewrite
-   * an MCP query, which is a materially larger change than injecting fields into a result; it is
-   * left for a later, deliberate step.</p>
+   * <p><b>The pre phase is not routed here</b> — it runs earlier, in
+   * {@link #runReadProvider}, because a pre-hook that serves the whole read has to be offered the
+   * chance before the generic query is built, not after. See that method for why.</p>
    *
    * @param specName     the spec being read
    * @param entityName   the entity being read
@@ -185,6 +293,50 @@ final class McpHookExecutor {
         .obContext(OBContext.getOBContext())
         .endpointType(NeoEndpointType.DEFAULTS)
         .queryParams(queryParams)
+        .build();
+  }
+
+  /**
+   * Build the {@link NeoContext} for the SELECTOR endpoint hook (ETP-5415).
+   *
+   * <p>Mirrors what the REST path passes on
+   * {@code GET /sws/neo/{spec}/{entity}/selector/{field}}
+   * ({@code NeoHookDispatcher.buildHookContext} with {@code endpointType=SELECTOR}), so a
+   * selector queried through MCP reaches the entity's customization with the same shape the SPA
+   * produces. {@code fieldName} is the whole of the routing: an entity has one customization but
+   * as many selectors as it has foreign keys, and the field name is what tells them apart — see
+   * {@code PaymentMethodSelectorSupport.handleIfPaymentMethodSelector}, which declines every
+   * field but its own, and {@code ProductPriceHandler.afterHandle}, which enriches only
+   * {@code priceListVersion}.</p>
+   *
+   * <p>{@code adTab} matters here beyond mere parity: it is how
+   * {@code DirectionFallback.WINDOW} resolves pay-in vs pay-out
+   * ({@code ctx.getAdTab().getWindow().isSalesTransaction()}). Without it that support fails
+   * closed with a 422 rather than guessing — which is the correct behaviour, but a needless one
+   * when the tab is right there.</p>
+   *
+   * @param specName      the spec that owns the entity
+   * @param entityName    the entity that owns the FK field
+   * @param fieldName     the selector field as passed to {@code neo_selectors}, e.g.
+   *                      {@code paymentMethod}
+   * @param contextParams the validated selector context params, exposed as query params so a
+   *                      customization reads them the way the REST path lets it
+   * @param adTab         the entity's AD tab, may be {@code null} for tab-less entities
+   * @param sfEntity      the entity configuration
+   * @return a NeoContext with {@code endpointType=SELECTOR} and {@code httpMethod=GET}
+   */
+  static NeoContext buildSelectorHookContext(String specName, String entityName, String fieldName,
+      Map<String, String> contextParams, Tab adTab, SFEntity sfEntity) {
+    return NeoContext.builder()
+        .specName(specName)
+        .entityName(entityName)
+        .httpMethod("GET")
+        .adTab(adTab)
+        .sfEntity(sfEntity)
+        .obContext(OBContext.getOBContext())
+        .endpointType(NeoEndpointType.SELECTOR)
+        .fieldName(fieldName)
+        .queryParams(contextParams)
         .build();
   }
 

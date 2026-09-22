@@ -428,6 +428,16 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
+
+    // ETP-5415 (D13): the read's pre phase, which must run before the tab is required. A
+    // customization that answers here is serving the whole list itself — the case of the 16
+    // tab-less entities, which answered over REST and returned 500 over MCP. See
+    // McpHookExecutor.runReadProvider.
+    JSONObject provided = McpHookExecutor.runReadProvider(specName, entityName, null, sfEntity, args);
+    if (provided != null) {
+      return provided;
+    }
+
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
     // IMP-40: a child entity is readable only through its parent. The gate itself is not new —
@@ -522,6 +532,15 @@ public class McpToolRouter {
 
     SFSpec spec = McpToolRouterSupport.findActiveSpecByName(specName);
     SFEntity sfEntity = McpToolRouterSupport.resolveIncludedEntityOrExplain(spec, entityName);
+
+    // ETP-5415 (D13): the read's pre phase — see the twin call in handleList and
+    // McpHookExecutor.runReadProvider. recordId is what lets a customization tell a single-record
+    // read from a list, exactly as it does in the post phase.
+    JSONObject provided = McpHookExecutor.runReadProvider(specName, entityName, recordId, sfEntity, args);
+    if (provided != null) {
+      return provided;
+    }
+
     Tab adTab = McpWriteRequestSupport.getAdTabOrThrow(sfEntity, entityName);
 
     String dalEntityName = adTab.getTable().getName();
@@ -1122,11 +1141,45 @@ public class McpToolRouter {
     Map<String, String> contextParams = McpSelectorContextHelper.buildSelectorContextParams(
         args, adTab);
 
-    // ETP-5368: hand the source entity over rather than the column alone. See the javadoc on the
-    // overload — passing null disables organisation context and every source-scoped selector
-    // policy, which is how the MCP and the SPA ended up serving different candidate sets.
-    NeoResponse neoResponse = NeoSelectorService.querySelectorByColumn(
-        sfEntity, adColumn, columnName, query, 50, 0, contextParams);
+    // ETP-5415: the SELECTOR surface, which until now reached an entity's customization over REST
+    // and over no other channel. The consequence was not a missing feature but a silently
+    // different answer: PaymentMethodSelectorSupport filters the candidate list down to the
+    // pay-in or pay-out methods and fails closed when it cannot tell which — over MCP none of
+    // that ran, so the agent was served every payment method of both directions and had no way to
+    // know the list was wrong. Same dispatcher, same hook order as the REST path
+    // (NeoHookDispatcher.executeHookChain): a pre-hook response replaces the query but is still
+    // offered to the post-hook, because a customization that produces the whole candidate list is
+    // exactly the one that may also want to enrich it.
+    NeoExtensionRequest selectorRequest = NeoExtensionRequest.builder()
+        .qualifier(sfEntity.getJavaQualifier())
+        .specName(specName)
+        .entityName(entityName)
+        .surface(NeoExtensionSurface.SELECTOR)
+        .channel(NeoExtensionChannel.MCP)
+        .context(McpHookExecutor.buildSelectorHookContext(
+            specName, entityName, columnName, contextParams, adTab, sfEntity))
+        .build();
+
+    NeoExtensionResult preDispatch = NeoExtensionDispatcher.dispatch(selectorRequest);
+
+    NeoResponse neoResponse;
+    if (preDispatch.response() != null) {
+      neoResponse = preDispatch.response();
+    } else {
+      // ETP-5368: hand the source entity over rather than the column alone. See the javadoc on the
+      // overload — passing null disables organisation context and every source-scoped selector
+      // policy, which is how the MCP and the SPA ended up serving different candidate sets.
+      neoResponse = NeoSelectorService.querySelectorByColumn(
+          sfEntity, adColumn, columnName, query, 50, 0, contextParams);
+    }
+
+    if (preDispatch.customization() != null) {
+      NeoExtensionResult postDispatch = NeoExtensionDispatcher.dispatch(
+          selectorRequest.post(preDispatch.customization()).withPreviousResult(neoResponse));
+      if (postDispatch.response() != null) {
+        neoResponse = postDispatch.response();
+      }
+    }
 
     NeoResponse response = McpSelectorContextHelper.withDiagnostics(
         neoResponse, columnName, contextParams);

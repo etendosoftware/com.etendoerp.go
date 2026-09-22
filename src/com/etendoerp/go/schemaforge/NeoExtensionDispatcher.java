@@ -17,6 +17,7 @@
 
 package com.etendoerp.go.schemaforge;
 
+import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -158,8 +159,19 @@ public final class NeoExtensionDispatcher {
   /**
    * The fallback: pick the resolver the channel's callers use today. The two are not
    * interchangeable; see the class javadoc and {@code NeoHandlerResolutionCache}.
+   *
+   * <p>A blank qualifier is answered here rather than by the resolvers, because they disagree on
+   * it: {@link NeoHandlerLookup#byQualifier} already returns {@code null}, while
+   * {@code NeoServletSupport.lookupHandler} runs a full CDI scan that cannot match and then logs
+   * "No NeoHandler found" — once per request, for every entity that simply has no
+   * {@code Java_Qualifier}. Callers used to avoid that by checking for blank before dispatching,
+   * which is the check that has to go: an entity with no qualifier may still carry a
+   * {@link NeoExtension} annotation, and the annotation branch above runs before this one.</p>
    */
   private static NeoHandler resolveByQualifier(NeoExtensionRequest request) {
+    if (StringUtils.isBlank(request.qualifier())) {
+      return null;
+    }
     if (request.channel() == NeoExtensionChannel.MCP) {
       return NeoHandlerLookup.byQualifier(request.qualifier());
     }
