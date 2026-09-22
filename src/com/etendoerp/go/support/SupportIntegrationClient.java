@@ -69,6 +69,16 @@ final class SupportIntegrationClient {
       "support.adk.url", "ETGO_SUPPORT_ADK_URL", "");
   private static final String ADK_APP_NAME = "agent";
 
+  // ETP-4210: the old hostname -> environment-name map (staging/experimental/go.etendo.cloud)
+  // went stale the moment those deployments were retired or renamed (go.etendo.cloud is not
+  // production anymore). Guessing the environment from the request's hostname means the code
+  // has to be updated by hand every time a domain changes, and nothing fails loudly when it
+  // doesn't — it just silently mislabels data. Same fix as ADK_BASE_URL above: each deployment
+  // declares its own name once in its Openbravo.properties, instead of the code trying to
+  // infer it.
+  static final String ENVIRONMENT_NAME = ConfigPropertyReader.readConfigValue(
+      "support.environment.name", "ETGO_SUPPORT_ENVIRONMENT_NAME", "development");
+
   /** Zero-width-prefixed marker appended to a reply's text when the ADK's response for that
    * turn set {@code pending_escalation=confirm} — i.e. ValerIA just offered to escalate to a
    * human. Persisted as part of the message text; the frontend strips it before rendering and
@@ -102,7 +112,8 @@ final class SupportIntegrationClient {
 
   // --- ADK session / messaging ---
 
-  static void createAdkSession(String userId, String sessionId, String locale, String userEmail) {
+  static void createAdkSession(String userId, String sessionId, String locale, String userEmail,
+      String clientId, String environment) {
     String url = ADK_BASE_URL + "/apps/" + ADK_APP_NAME + "/users/" + userId + "/sessions/" + sessionId;
     try {
       // The body IS the initial state dict directly — NOT wrapped in a "state" key.
@@ -116,6 +127,12 @@ final class SupportIntegrationClient {
       if (userEmail != null && !userEmail.isEmpty()) {
         state.put("user_email", userEmail);
       }
+      if (clientId != null && !clientId.isEmpty()) {
+        state.put("client_id", clientId);
+      }
+      if (environment != null && !environment.isEmpty()) {
+        state.put("environment", environment);
+      }
       String body = state.toString();
       HttpRequest req = HttpRequest.newBuilder()
           .uri(URI.create(url))
@@ -124,8 +141,8 @@ final class SupportIntegrationClient {
           .timeout(Duration.ofSeconds(10))
           .build();
       HttpResponse<String> resp = HTTP_CLIENT.send(req, HttpResponse.BodyHandlers.ofString());
-      log.debug("ADK session created: {} (locale={}, user_email={}) → {}", sessionId, locale, userEmail,
-          resp.statusCode());
+      log.debug("ADK session created: {} (locale={}, user_email={}, client_id={}, environment={}) → {}",
+          sessionId, locale, userEmail, clientId, environment, resp.statusCode());
     } catch (InterruptedException e) {
       Thread.currentThread().interrupt();
       log.warn("Failed to create ADK session {}: {}", sessionId, e.getMessage());

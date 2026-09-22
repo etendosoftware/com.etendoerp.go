@@ -843,4 +843,40 @@ public class GoodsReceiptHeaderHandlerTest {
           receiptRec.getString("resolvedPriceList$_identifier"));
     }
   }
+
+  /**
+   * Case 5 (ETP-5410 follow-up) — no linked order and the Business Partner itself has no
+   * PURCHASE price list ({@code getPurchasePricelist()} returns null, tier 2 also misses):
+   * falls through to the tier-3 client-default lookup. {@code MultiDocumentInvoiceSupport}'s
+   * Criteria query is mocked at the class boundary rather than its own Hibernate chain — that
+   * chain's correctness is {@code MultiDocumentInvoiceSupportTest}'s concern, this test only
+   * verifies the handler wires the tier-3 fallback in.
+   */
+  @Test
+  public void enrichResolvedPriceListFallsBackToClientDefaultWhenBusinessPartnerHasNone()
+      throws Exception {
+    try (MockedStatic<OBContext> ignored = Mockito.mockStatic(OBContext.class);
+         MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+         MockedStatic<MultiDocumentInvoiceSupport> supportMock =
+             Mockito.mockStatic(MultiDocumentInvoiceSupport.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+      stubReceiptWithBusinessPartnerPriceList(dal, "rcpt-5", null);
+
+      PriceList clientDefault = mock(PriceList.class);
+      when(clientDefault.getId()).thenReturn("PL-CLIENT-DEFAULT");
+      when(clientDefault.getName()).thenReturn("Client Default Purchase List");
+      supportMock.when(() -> MultiDocumentInvoiceSupport.findDefaultPriceList(false))
+          .thenReturn(clientDefault);
+
+      JSONObject receiptRec = new JSONObject().put("id", "rcpt-5")
+          .put("linkedOrders", new JSONArray());
+
+      invokeEnrichResolvedPriceList(new GoodsReceiptHeaderHandler(), receiptRec, "rcpt-5");
+
+      assertEquals("PL-CLIENT-DEFAULT", receiptRec.getString("resolvedPriceListId"));
+      assertEquals("Client Default Purchase List",
+          receiptRec.getString("resolvedPriceList$_identifier"));
+    }
+  }
 }

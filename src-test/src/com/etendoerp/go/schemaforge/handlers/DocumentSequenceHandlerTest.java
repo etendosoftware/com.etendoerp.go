@@ -280,9 +280,9 @@ class DocumentSequenceHandlerTest {
     }
 
     @Test
-    @DisplayName("narrows a list GET to the five sequence names, as an inSet clause")
+    @DisplayName("narrows a list GET to the six sequence names, as an inSet clause")
     void narrowsListByName() throws JSONException {
-      // A provisioned tenant has 242 sequences; all but these are record-ID and internal
+      // A provisioned tenant has ~145 sequences; all but these are record-ID and internal
       // counters. Injected as criteria rather than filtered out of the response so the
       // narrowed query is the one that runs — see the method's javadoc on paging.
       Map<String, String> params = new HashMap<>();
@@ -299,15 +299,18 @@ class DocumentSequenceHandlerTest {
     }
 
     @Test
-    @DisplayName("carries the exact five names the product asked for")
+    @DisplayName("carries the exact six names the product asked for")
     void allowlistContentIsTheAgreedList() {
       // Verified against the instance: every one of these exists, by this exact name, in a
       // provisioned client. Renaming or dropping one is a product change, not a refactor.
       // ETP-5285 cut this from seven to five: AP Payment, AR Receipt, MM Shipment and
       // Secuencia TICKETBAI are not document series a tenant configures on this screen.
+      // ETP-5364 added the sixth, "AP Invoice" (FC), together with the dataset pair that
+      // creates that sequence and points the AP Invoice doctype at it.
       assertEquals(java.util.List.of(
           "Purchase Order", "Standard Order", "AR Invoice",
-          "Factura Rectificativa (Ventas)", "Factura Rectificativa (Compras)"),
+          "Factura Rectificativa (Ventas)", "AP Invoice",
+          "Factura Rectificativa (Compras)"),
           DocumentSequenceHandler.VISIBLE_SEQUENCE_NAMES);
     }
 
@@ -325,27 +328,33 @@ class DocumentSequenceHandlerTest {
     }
 
     @Test
-    @DisplayName("holds no purchase-invoice series, which has no sequence to point at")
-    void allowlistExcludesPurchaseInvoiceSeries() {
-      // ETP-5285 asked for six series; only five are here. "Factura de compra" (FC) has no
-      // AD_Sequence to expose: AP Invoice carries IsDocNoControlled='N' and no sequence in
-      // 76 of 76 doctypes, so its number comes from the supplier, not from a series. Adding
-      // one means flipping that doctype — a product decision tracked separately.
-      assertEquals(5, DocumentSequenceHandler.VISIBLE_SEQUENCE_NAMES.size());
-      assertFalse(DocumentSequenceHandler.VISIBLE_SEQUENCE_NAMES.contains("AP Invoice"),
-          "AP Invoice is numbered by the supplier, not by a configurable series");
+    @DisplayName("holds the purchase-invoice series ETP-5364 gave a sequence to")
+    void allowlistIncludesPurchaseInvoiceSeries() {
+      // ETP-5285 asked for six series and could only ship five: "Factura de compra" (FC) had
+      // no AD_Sequence to expose, because stock AP Invoice carries IsDocNoControlled='N' and
+      // no sequence, so its number came from the supplier rather than from a series. ETP-5364
+      // took that product decision — GOClient/AD_SEQUENCE.xml now ships an "AP Invoice"
+      // sequence with prefix FC and GOClient/C_DOCTYPE.xml points the doctype at it with
+      // IsDocNoControlled='Y'. This name is only useful WITH that dataset pair: dropping
+      // either half turns the row into a prefix that governs nothing.
+      assertEquals(6, DocumentSequenceHandler.VISIBLE_SEQUENCE_NAMES.size());
+      assertTrue(DocumentSequenceHandler.VISIBLE_SEQUENCE_NAMES.contains("AP Invoice"),
+          "AP Invoice is numbered by its own FC series since ETP-5364");
     }
 
     @Test
     @DisplayName("holds no DocumentNo_* fallback counter, which would be unsafe to edit")
     void allowlistExcludesTableLevelFallbacks() {
-      // REGRESSION GUARD, and the reason is data, not taste. Provisioning creates every
-      // DocumentNo_* row twice (6912 surplus rows across 72 of 94 clients when measured), and
-      // ad_sequence_doc increments every row matching the name before reading one back with a
-      // non-STRICT SELECT INTO. The duplicates therefore advance in lockstep and numbering
-      // works — until someone edits ONE of them here, at which point the rows diverge and the
-      // prefix or counter that is actually used becomes non-deterministic. Re-adding one of
-      // these names puts that back; de-duplicate the data first.
+      // REGRESSION GUARD. A DocumentNo_* row is a table-level FALLBACK counter, shared by
+      // every doctype that has no sequence of its own, so a prefix set here would configure a
+      // series that is not authoritative for any single document — that alone disqualifies it.
+      // Editing one is also unsafe on any tenant provisioned before ETP-5364, whose dataset
+      // import re-inserted 96 of these names on top of the 97 InitialClientSetup already creates
+      // (9888 surplus rows across 103 of 125 clients when measured). ad_sequence_doc
+      // increments every row matching the name and reads one back with a non-STRICT SELECT
+      // INTO, so the pair advances together and numbering works — until someone edits ONE of
+      // them here, at which point the rows diverge and the value actually used becomes
+      // non-deterministic. The import filter fixes new tenants; the existing ones are not.
       for (String name : DocumentSequenceHandler.VISIBLE_SEQUENCE_NAMES) {
         assertFalse(name.startsWith("DocumentNo_"),
             name + " is a duplicated table-level counter and must not be editable");

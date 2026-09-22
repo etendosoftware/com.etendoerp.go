@@ -359,6 +359,63 @@ public class OnboardingDatasetNormalizerTest {
   }
 
   /**
+   * ETP-5364 — the {@code DocumentNo_<table>} counters that {@code InitialClientSetup} has already
+   * written for the new client are dropped here, so the tenant ends up with one of each instead of
+   * two.
+   *
+   * <p>The duplication was real and measured: 9888 surplus {@code AD_Sequence} rows across 103 of
+   * 125 clients before the fix, every duplicated name a {@code DocumentNo_*} one. Numbering
+   * survived it only by accident ({@code ad_sequence_doc} bumps every row matching the name and
+   * reads one back non-{@code STRICT}), and 140 pairs had already diverged, at which point the
+   * value actually applied becomes non-deterministic.
+   *
+   * <p>Counted rather than name-checked one by one: the failure this guards against is a filter
+   * that drops too much. The source ships 142 {@code AD_SEQUENCE} rows, 98 of them
+   * {@code DocumentNo_*}, of which 96 collide with the client setup — so 46 must survive.
+   */
+  @Test
+  public void testNormalizerDropsTheDocumentNoCountersTheClientSetupAlreadyCreates() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertEquals("the 43 named document series, AP Invoice, and the two GO-only counters", 46,
+        countEntities(xml, "adSequence"));
+    assertFalse("DocumentNo_C_Invoice is created by InitialClientSetup",
+        xml.contains("DocumentNo_C_Invoice"));
+    assertFalse("DocumentNo_M_InOut is created by InitialClientSetup",
+        xml.contains("DocumentNo_M_InOut"));
+  }
+
+  /**
+   * The exception list, asserted separately because getting it wrong is silent: these two names
+   * are NOT created by {@code InitialClientSetup} (verified on the instance — exactly one row per
+   * client in all 105 clients that have them, versus two for every other {@code DocumentNo_*}
+   * name), so filtering them out would leave the tenant with no counter for those tables at all.
+   */
+  @Test
+  public void testNormalizerKeepsTheDocumentNoCountersOnlyThisDatasetProvides() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue(xml.contains("DocumentNo_C_ExtBP_Config_Filter_Opt"));
+    assertTrue(xml.contains("DocumentNo_C_ExtBP_Config_Prop_Opt"));
+  }
+
+  /**
+   * The named document series are untouched by that filter — it keys on the {@code DocumentNo_}
+   * prefix, and these are what the tenant actually configures in the Document Sequence window.
+   * {@code AP Invoice} is ETP-5364's own new series (prefix {@code FC}); the rest predate it.
+   */
+  @Test
+  public void testNormalizerKeepsEveryNamedDocumentSeries() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    for (String series : new String[] { "Purchase Order", "Standard Order", "AR Invoice",
+        "Factura Rectificativa (Ventas)", "AP Invoice", "Factura Rectificativa (Compras)" }) {
+      assertTrue(series + " is a document series a tenant configures, not a table counter",
+          xml.contains(series));
+    }
+  }
+
+  /**
    * Counts normalized entity elements of one entity name. Matches {@code "<name "} rather than
    * {@code "<name"}: every emitted row carries an {@code id} attribute, and the trailing space is
    * what keeps {@code mProduct} from also counting {@code mProductCategory} and
@@ -589,6 +646,21 @@ public class OnboardingDatasetNormalizerTest {
         xml.contains("<allownegative>N</allownegative>"));
     assertTrue("iscentrallymaintained must remain Y (out of scope for ETP-4947)",
         xml.contains("<iscentrallymaintained>Y</iscentrallymaintained>"));
+  }
+
+  /**
+   * ETP-5372: a freshly-provisioned tenant's accounting schema must be born with
+   * {@code IsAccrual=Y} (Devengo) — Etendo Go doesn't support Caja (cash-basis) for taxes.
+   * {@code GeneralLedgerConfigurationHandler.applyGeneralChanges} now refuses to change this
+   * value after creation (see its own test), so this dataset default is the only place a
+   * schema's accrual value is ever set — it must never regress to {@code N}.
+   */
+  @Test
+  public void testNormalizerAccountingSchemaAccrualDefaultsToDevengo() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue("isaccrual must be Y (Devengo) — Etendo Go doesn't support Caja for taxes",
+        xml.contains("<isaccrual>Y</isaccrual>"));
   }
 
   /**
