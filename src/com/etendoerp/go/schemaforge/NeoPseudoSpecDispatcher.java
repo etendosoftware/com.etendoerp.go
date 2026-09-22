@@ -28,6 +28,7 @@ import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
 import com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistory;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
+import com.etendoerp.go.schemaforge.webhooks.SFMyReportAccess;
 import com.etendoerp.go.schemaforge.webhooks.SFPortalAccess;
 import com.etendoerp.go.schemaforge.webhooks.SFPromoteUserRole;
 import com.etendoerp.go.schemaforge.webhooks.SFRefreshToken;
@@ -121,6 +122,13 @@ class NeoPseudoSpecDispatcher {
         return dispatchGoWebhook("Listmenu", method, request, response, new SFListMenu());
       case "windowaccessmap":
         return dispatchGoWebhook("Windowaccessmap", method, request, response, new SFWindowAccessMap());
+
+      // ETP-5402 QA follow-up: the CURRENT caller's own Informes-subsection report access,
+      // mirroring windowaccessmap's shape but for ReportAccessCatalog's 9 report rows. See
+      // SFMyReportAccess's class javadoc for why it exists (ReportViewerPage.jsx's real gate
+      // never consulted per-report tiers before this).
+      case "myreportaccess":
+        return dispatchGoWebhook("Myreportaccess", method, request, response, new SFMyReportAccess());
       case "rolesoverview":
         return dispatchGoWebhook("Rolesoverview", method, request, response, new SFRolesOverview());
 
