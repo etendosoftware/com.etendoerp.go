@@ -276,6 +276,15 @@ abstract class AbstractFiscalHandler {
    */
   @FunctionalInterface
   protected interface DispatchBody {
+    /**
+     * Runs one {@code dispatch()} override's entity if/else chain. Declares the generic
+     * {@code Exception} deliberately (SonarQube java:S112 reviewed, not a shortcut): the lambda
+     * bodies it wraps call into siblings that each throw a different checked type (JSON parsing,
+     * I/O on the response writer, DAL/report lookups), and {@link #runDispatch} exists precisely
+     * to funnel every one of them into the single {@link FiscalHandlerException} translation —
+     * narrowing this to a specific type would defeat that purpose.
+     */
+    @SuppressWarnings("java:S112")
     void run() throws Exception;
   }
 
