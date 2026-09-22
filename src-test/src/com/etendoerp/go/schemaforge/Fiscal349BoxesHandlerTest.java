@@ -1235,7 +1235,7 @@ public class Fiscal349BoxesHandlerTest {
   }
 
   @SuppressWarnings("unchecked")
-  @Test(expected = Fiscal349BoxesHandler.AlreadySubmittedException.class)
+  @Test(expected = AbstractFiscalHandler.AlreadySubmittedException.class)
   public void testGuardNotAlreadySubmittedSubmittedThrows() {
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
@@ -1249,7 +1249,7 @@ public class Fiscal349BoxesHandlerTest {
   }
 
   @SuppressWarnings("unchecked")
-  @Test(expected = Fiscal349BoxesHandler.AlreadySubmittedException.class)
+  @Test(expected = AbstractFiscalHandler.AlreadySubmittedException.class)
   public void testGuardNotAlreadySubmittedSubmittedExtThrows() {
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
@@ -1263,7 +1263,7 @@ public class Fiscal349BoxesHandlerTest {
   }
 
   @SuppressWarnings("unchecked")
-  @Test(expected = Fiscal349BoxesHandler.AlreadySubmittedException.class)
+  @Test(expected = AbstractFiscalHandler.AlreadySubmittedException.class)
   public void testGuardNotAlreadySubmittedSubmittedAckThrows() {
     try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {

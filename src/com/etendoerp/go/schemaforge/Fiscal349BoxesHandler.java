@@ -145,44 +145,14 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
   }
 
   /**
-   * Thrown by {@link #guardNotAlreadySubmitted} — caught in {@link #dispatch} and turned into a
-   * clean {@code 409} instead of bubbling up to the generic {@code 500} handler. Package-private
-   * (not private) so {@code Fiscal349BoxesHandlerTest} can assert on it directly.
-   */
-  static final class AlreadySubmittedException extends RuntimeException {
-    AlreadySubmittedException(String message) {
-      super(message);
-    }
-  }
-
-  /**
-   * ETP-5438 defense in depth — rejects {@code operators}/{@code generate} once the latest
-   * declaration for this {@code (org, year, period)} natural key is already in {@link
-   * FiscalDeclCrudHandler#SUBMITTED_STATUSES}. The frontend already hides "Calcular"/"Generar
-   * fichero 349" once {@code isSubmitted} ({@code FmModel349Page.jsx}), but neither of these two
-   * NEO entities is otherwise aware of any declaration's status at all — both compute purely from
-   * {@code (orgId, year, period)} against LIVE invoice data — so a direct/raw call (or a future
-   * frontend regression) would silently recompute or regenerate an already-presented declaration,
-   * with no server-side guard, unlike the PUT path {@link
-   * FiscalDeclCrudHandler#rejectRepresentation} already covers.
-   *
-   * <p>No-op (returns normally) when no declaration exists yet for the natural key — a first-time
-   * compute before any declaration row was ever created is not "already submitted" by definition.
-   *
-   * <p>Package-private (not private) so {@code Fiscal349BoxesHandlerTest} can exercise it
-   * directly without mocking the rest of {@link #computeOperators}'s/{@link #handleGenerate}'s own
-   * DB-dependent call chain (see this class's own test file javadoc: those two are integration-
-   * tested separately).
+   * ETP-5438 — thin, model-fixed wrapper around the shared {@link
+   * AbstractFiscalHandler#guardNotAlreadySubmitted(String, int, String, String)}, so callers here
+   * (and {@code Fiscal349BoxesHandlerTest}) don't have to repeat the {@code "349"} literal. The
+   * guard logic itself (and {@code AlreadySubmittedException}) moved to the shared base class —
+   * see its javadoc — once {@code Fiscal303BoxesHandler} needed the identical check.
    */
   void guardNotAlreadySubmitted(String orgId, int year, String period) {
-    String clientId = OBContext.getOBContext().getCurrentClient().getId();
-    String status = declHandler().findLatestDeclarationStatus(
-        clientId, orgId, "349", year, period);
-    if (status != null && FiscalDeclCrudHandler.SUBMITTED_STATUSES.contains(status)) {
-      throw new AlreadySubmittedException(
-          "This declaration was already submitted (status: " + status + ") for org=" + orgId
-              + " year=" + year + " period=" + period);
-    }
+    guardNotAlreadySubmitted(orgId, year, period, "349");
   }
 
   @Override

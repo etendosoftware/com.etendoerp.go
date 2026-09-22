@@ -69,11 +69,62 @@ abstract class AbstractFiscalHandler {
 
   /**
    * Exposes the shared {@link FiscalDeclCrudHandler} delegate to subclasses that need one of its
-   * declaration lookups (e.g. {@link Fiscal349BoxesHandler}'s ETP-5438 already-submitted guard,
-   * {@link FiscalDeclCrudHandler#findLatestDeclarationStatus}) without instantiating a second one.
+   * declaration lookups (e.g. {@link #guardNotAlreadySubmitted}'s ETP-5438 use of {@link
+   * FiscalDeclCrudHandler#findLatestDeclarationStatus}) without instantiating a second one.
    */
   protected FiscalDeclCrudHandler declHandler() {
     return declHandler;
+  }
+
+  /**
+   * Thrown by {@link #guardNotAlreadySubmitted} — every {@code dispatch()} override that calls it
+   * must catch this specifically (before its own generic {@code catch (Exception e)}) and turn it
+   * into a clean {@code 409} instead of letting it bubble up wrapped as a generic {@code 500}. See
+   * {@link Fiscal303BoxesHandler#dispatch}/{@link Fiscal349BoxesHandler#dispatch} for the exact
+   * catch-and-409 pattern (identical in both). Package-private (not private) so both handlers'
+   * test classes can assert on it directly — inherited nested types are reachable by simple name
+   * from subclass code, and by {@code SubClass.AlreadySubmittedException} from outside it (JLS
+   * 8.5), so this does not need to be duplicated per subclass.
+   */
+  static final class AlreadySubmittedException extends RuntimeException {
+    AlreadySubmittedException(String message) {
+      super(message);
+    }
+  }
+
+  /**
+   * ETP-5438 defense in depth, shared by every fiscal model's boxes/operators-and-generate
+   * handler — rejects a compute/generate call once the LATEST declaration for this {@code
+   * (org, year, period, model)} natural key is already in {@link
+   * FiscalDeclCrudHandler#SUBMITTED_STATUSES}. The frontend already hides "Calcular"/"Generar
+   * fichero <N>" once {@code isSubmitted} (every {@code FmModel<N>Page.jsx}), but the NEO
+   * compute/generate entities are otherwise unaware of any declaration's status at all — they
+   * compute purely from {@code (orgId, year, period)} against LIVE invoice data — so a direct/raw
+   * call (or a future frontend regression) would silently recompute or regenerate an
+   * already-presented declaration, with no server-side guard, unlike the PUT path {@link
+   * FiscalDeclCrudHandler#rejectRepresentation} already covers.
+   *
+   * <p>Gates on the MOST RECENT declaration (highest {@code DECL_SEQ}) for the natural key, not
+   * just any match — see {@link FiscalDeclCrudHandler#findLatestDeclarationStatus}'s own javadoc
+   * for why: a period can legitimately have more than one declaration (the rectificativa flow),
+   * and an older, already-submitted one must not block a fresh draft for the same period.
+   *
+   * <p>No-op (returns normally) when no declaration exists yet for the natural key — a first-time
+   * compute before any declaration row was ever created is not "already submitted" by definition.
+   *
+   * @param model the {@code ETGO_Fiscal_Decl.model} value for the calling handler (e.g. {@code
+   *              "303"}, {@code "349"}) — passed explicitly rather than derived from {@link
+   *              #getModelKey()}, which returns the URL segment ({@code "fiscal303"}/{@code
+   *              "fiscal349"}), not the bare model code the declaration table stores.
+   */
+  protected void guardNotAlreadySubmitted(String orgId, int year, String period, String model) {
+    String clientId = OBContext.getOBContext().getCurrentClient().getId();
+    String status = declHandler().findLatestDeclarationStatus(clientId, orgId, model, year, period);
+    if (status != null && FiscalDeclCrudHandler.SUBMITTED_STATUSES.contains(status)) {
+      throw new AlreadySubmittedException(
+          "This declaration was already submitted (status: " + status + ") for org=" + orgId
+              + " year=" + year + " period=" + period + " model=" + model);
+    }
   }
 
   void handle(String entityName, String method, HttpServletRequest request,

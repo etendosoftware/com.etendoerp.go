@@ -138,11 +138,13 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
       HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {
     try {
       if (BOXES.equals(entityName)) {
+        guardNotAlreadySubmitted(orgId, year, period);
         ComputeResult cr = computeBoxes(orgId, year, period);
         JSONObject result = buildResponse(cr.boxes, cr.sources);
         response.setContentType(JSON_CT);
         response.getWriter().write(result.toString());
       } else if (GENERATE.equals(entityName)) {
+        guardNotAlreadySubmitted(orgId, year, period);
         String tipo = request.getParameter("tipo");
         submissionSupport.handleGenerate(orgId, year, period, tipo, request, response);
       } else if (SUBMIT.equals(entityName)) {
@@ -153,11 +155,30 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
         long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
         handleModified(orgId, year, period, new java.util.Date(sinceMs), response);
       }
+    } catch (AlreadySubmittedException e) {
+      try {
+        servlet.sendError(response, HttpServletResponse.SC_CONFLICT, e.getMessage());
+      } catch (Exception ioEx) {
+        throw new FiscalHandlerException(ioEx);
+      }
     } catch (FiscalHandlerException e) {
       throw e;
     } catch (Exception e) {
       throw new FiscalHandlerException(e);
     }
+  }
+
+  /**
+   * ETP-5438 — thin, model-fixed wrapper around the shared {@link
+   * AbstractFiscalHandler#guardNotAlreadySubmitted(String, int, String, String)} (see its
+   * javadoc). {@code submit} (the real AEAT telematic filing) is deliberately NOT gated by this —
+   * it already has its own, narrower, {@code submitted_ack}-only guard in {@link
+   * Fiscal303SubmissionSupport#handleSubmit} (the {@code ALREADY_SUBMITTED} check), which this
+   * does not replace or widen; that endpoint is a distinct concern (idempotency of a real AEAT
+   * filing action) from "must not silently recompute/regenerate a presented declaration".
+   */
+  void guardNotAlreadySubmitted(String orgId, int year, String period) {
+    guardNotAlreadySubmitted(orgId, year, period, "303");
   }
 
   @Override
