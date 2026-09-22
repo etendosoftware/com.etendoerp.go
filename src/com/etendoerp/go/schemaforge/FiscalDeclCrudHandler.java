@@ -443,6 +443,12 @@ class FiscalDeclCrudHandler {
     if (rejectNegativeManualBoxes(body, id, response)) {
       return;
     }
+    if (rejectOversizedIdentificationFields(body, id, response)) {
+      return;
+    }
+    if (rejectInvalidBankSepa(body, id, response)) {
+      return;
+    }
     applyDeclPutScalarFields(decl, body);
     boolean manualDataApplied = applyManualDataIfRequested(decl, body);
     decl.set(PROPERTY_UPDATED_BY, OBContext.getOBContext().getUser());
@@ -520,8 +526,17 @@ class FiscalDeclCrudHandler {
   // equivalent server-side check at all — unlike setManualDataIfPresent's tolerant handling of a
   // malformed manualData blob, a negative value here is a real business-rule violation the caller
   // must be told about, not silently swallowed.
+  //
+  // ETP-5438 (AEAT spec audit) — boxes 70, 78, 109 and 110 are ALSO declared "Num" (numérico sin
+  // signo / unsigned) in the official Modelo 303 "Diseño de registro" (DR303e26v101 v1.01, the
+  // spec bundled with this ticket), exactly like 111 and 77 — the same class of bug ETP-5393 Bug C
+  // fixed for those two, just not caught at the time because the audit that found it (casilla-by-
+  // casilla cross-check of every editable box's AEAT type against this guard's coverage) hadn't
+  // been done yet. Added to the SAME set/mechanism rather than a parallel one, per the AEAT type
+  // legend confirmed in the spec's own "Nota" footer on every page: "1. Los campos deben ser A
+  // (Alfabético) An (Alfanumérico), Num (Numérico sin signo) o N (Numérico con signo)."
   private static final java.util.Set<String> NEGATIVE_NOT_ALLOWED_BOX_KEYS =
-      java.util.Set.of("111", "77");
+      java.util.Set.of("111", "77", "70", "78", "109", "110");
 
   /**
    * Rejects a PUT whose {@code manualData.manualOverrides} sets box 111 or box 77 to a negative
@@ -553,6 +568,110 @@ class FiscalDeclCrudHandler {
             "Box " + boxKey + " does not accept negative values: " + id);
         return true;
       }
+    }
+    return false;
+  }
+
+  /**
+   * Reads {@code manualData.identification} out of a PUT body, or {@code null} if
+   * {@code manualData} (or {@code identification} within it) is absent/malformed — shared by
+   * {@link #rejectOversizedIdentificationFields} and {@link #rejectInvalidBankSepa} below, the
+   * ETP-5438 siblings of {@link #rejectNegativeManualBoxes}'s own {@code manualOverrides} read.
+   */
+  private JSONObject extractIdentification(JSONObject body) {
+    if (!body.has(MANUAL_DATA_KEY) || body.isNull(MANUAL_DATA_KEY)) {
+      return null;
+    }
+    JSONObject manualData = body.optJSONObject(MANUAL_DATA_KEY);
+    return manualData != null ? manualData.optJSONObject("identification") : null;
+  }
+
+  // ETP-5438 (AEAT spec audit) — max lengths for the alphanumeric ("An") identification fields,
+  // read straight off the official Modelo 303 "Diseño de registro" (DR303e26v101 v1.01): the
+  // DID page for the 6 bank_* fields (SWIFT-BIC 11, IBAN 34 — "Nota 6: Para el IBAN español
+  // deberá empezar por ES y únicamente se usan las primeras 24 posiciones", Bank name 70, Bank
+  // address 35, City 30, Country code 2) and page 3 for nro_justificante (13, "Número
+  // justificante identificativo de la autoliquidación anterior"). Same rationale as
+  // NEGATIVE_NOT_ALLOWED_BOX_KEYS above: the classic AEAT engine's fixed-width record slots make
+  // an oversized value a real business-rule violation, not a cosmetic nit — better to reject it
+  // here, where the user can still fix it, than have it silently truncated (or rejected outright)
+  // at file-generation time.
+  private static final java.util.Map<String, Integer> IDENTIFICATION_MAX_LENGTHS = buildIdentificationMaxLengths();
+
+  private static java.util.Map<String, Integer> buildIdentificationMaxLengths() {
+    java.util.Map<String, Integer> m = new java.util.LinkedHashMap<>();
+    m.put("bank_iban", 34);
+    m.put("bank_swift_bic", 11);
+    m.put("bank_nombre", 70);
+    m.put("bank_direccion", 35);
+    m.put("bank_ciudad", 30);
+    m.put("bank_pais", 2);
+    m.put("nro_justificante", 13);
+    return java.util.Collections.unmodifiableMap(m);
+  }
+
+  /**
+   * Rejects a PUT whose {@code manualData.identification} carries a value longer than its AEAT
+   * fixed-width slot (ETP-5438) — see {@link #IDENTIFICATION_MAX_LENGTHS}. A missing/malformed
+   * {@code manualData}/{@code identification}, or a field simply absent from the payload, is not
+   * this method's concern (same tolerant precedent as {@link #rejectNegativeManualBoxes}).
+   *
+   * @return {@code true} if the PUT was rejected (a 400 was already sent to {@code response} and
+   *         the caller must stop processing); {@code false} if the request may proceed.
+   */
+  private boolean rejectOversizedIdentificationFields(JSONObject body, String id,
+      HttpServletResponse response) throws IOException {
+    JSONObject identification = extractIdentification(body);
+    if (identification == null) {
+      return false;
+    }
+    for (java.util.Map.Entry<String, Integer> entry : IDENTIFICATION_MAX_LENGTHS.entrySet()) {
+      String key = entry.getKey();
+      if (!identification.has(key) || identification.isNull(key)) {
+        continue;
+      }
+      String value = identification.optString(key, "");
+      if (value.length() > entry.getValue()) {
+        servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+            "Field " + key + " exceeds its max length of " + entry.getValue() + " characters: " + id);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // ETP-5438 (AEAT spec audit) — bank_sepa ("Devolución - Marca SEPA") is a single-digit Num
+  // field on the DID page whose only valid values are this 4-entry enum (spec's own "Nota 2:
+  // Devolución marca SEPA" table): 0 Vacía, 1 Cuenta España, 2 Unión Europea SEPA, 3 Resto
+  // Países. The frontend now renders it as a <select> constrained to these 4 values (see
+  // fm303Layouts.js's bank_sepa field), but manualData is a generic PUT body, not exclusively
+  // fed by that control — same rationale as rejectNegativeManualBoxes's string-encoded-value
+  // test coverage.
+  private static final java.util.Set<String> VALID_BANK_SEPA_VALUES = java.util.Set.of("0", "1", "2", "3");
+
+  /**
+   * Rejects a PUT whose {@code manualData.identification.bank_sepa} is present, non-blank, and
+   * not one of {@link #VALID_BANK_SEPA_VALUES} (ETP-5438). An absent, {@code null} or empty-string
+   * value is left alone — {@code bank_sepa} is only conditionally required (see
+   * {@code _BANK_FULL_BLOCK_REQUIRED_WHEN} in {@code fm303Layouts.js}), and requiredness is a
+   * frontend/UX concern this server-side guard does not duplicate.
+   *
+   * @return {@code true} if the PUT was rejected (a 400 was already sent to {@code response} and
+   *         the caller must stop processing); {@code false} if the request may proceed.
+   */
+  private boolean rejectInvalidBankSepa(JSONObject body, String id, HttpServletResponse response)
+      throws IOException {
+    JSONObject identification = extractIdentification(body);
+    if (identification == null || !identification.has("bank_sepa")
+        || identification.isNull("bank_sepa")) {
+      return false;
+    }
+    String value = identification.optString("bank_sepa", "");
+    if (!value.isEmpty() && !VALID_BANK_SEPA_VALUES.contains(value)) {
+      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
+          "bank_sepa must be one of 0 (Vacía), 1 (Cuenta España), 2 (UE SEPA) or 3 (Resto Países): "
+              + id);
+      return true;
     }
     return false;
   }
