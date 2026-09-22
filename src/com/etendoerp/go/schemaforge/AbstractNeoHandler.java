@@ -30,8 +30,13 @@ import org.openbravo.dal.core.OBContext;
  * common to every handler: HTTP write-method detection, lenient JSON field reading and
  * admin-mode toggling. The admin-mode hooks are instance methods (not static) so unit
  * tests can stub them on a Mockito spy without touching {@code OBContext}.
+ *
+ * <p>Public, not package-private: handlers live in both {@code schemaforge} and
+ * {@code schemaforge.handlers}, and a package-private base locked the latter out of reusing any of
+ * this. The visibility is the only thing that is public — every member below stays
+ * {@code protected}, so the surface a subclass sees is unchanged.</p>
  */
-abstract class AbstractNeoHandler implements NeoHandler {
+public abstract class AbstractNeoHandler implements NeoHandler {
 
   protected static final String METHOD_POST = "POST";
   protected static final String METHOD_PUT = "PUT";

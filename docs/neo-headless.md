@@ -2693,6 +2693,26 @@ public class MyCustomHandler implements NeoHandler {
 
 Then set `JAVA_QUALIFIER = 'myCustomHandler'` on the corresponding ETGO_SF_Entity record.
 
+> **`@Named` only — never a normal CDI scope.** Do not add `@ApplicationScoped`,
+> `@RequestScoped`, `@SessionScoped` or `@ConversationScoped` to a handler an
+> `ETGO_SF_ENTITY` row resolves. `NeoServletSupport.lookupHandler` matches by reading
+> `@Named` off the resolved instance's class, and a normal-scoped bean resolves to a Weld
+> client proxy — a generated subclass that does not carry the (non-`@Inherited`)
+> annotation. The handler is skipped **silently**: the endpoint still answers, with the
+> generic CRUD body. `@Named`-only defaults to `@Dependent`, which is not proxied. The set
+> this applies to is every `<JAVA_QUALIFIER>` in
+> `src-db/database/sourcedata/ETGO_SF_ENTITY.xml`. A handler consumed only by `@Inject`
+> (e.g. `NeoCloneRecordHandler`, which has no row there) is exempt and may be scoped —
+> injection is proxy-safe. Nothing enforces this automatically yet; a guardrail test is on
+> the ETP-5415 test backlog.
+>
+> Resolution is memoised per qualifier by `NeoHandlerResolutionCache` (ETP-5415), so the
+> CDI scan runs once per qualifier per deployment instead of once per request. The two
+> resolvers — `lookupHandler` (REST/batch, `@Named`-on-the-class) and
+> `NeoHandlerLookup.byQualifier` (MCP/access, CDI `Bean#getName()`) — keep separate caches
+> and separate semantics on purpose. Only the matched bean/class is cached, never the
+> instance: every request still gets its own handler reference.
+
 **Handler behavior:**
 - The handler receives a `NeoContext` with all request information (spec name, entity name, HTTP method, record ID, request body, query params, AD_Tab, OBContext).
 - Return a `NeoResponse` to take full control of the response.

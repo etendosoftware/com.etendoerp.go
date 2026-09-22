@@ -25,6 +25,12 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.model.ad.ui.Tab;
 
 import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoExtensionChannel;
+import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
+import com.etendoerp.go.schemaforge.NeoExtensionOutcome;
+import com.etendoerp.go.schemaforge.NeoExtensionRequest;
+import com.etendoerp.go.schemaforge.NeoExtensionResult;
+import com.etendoerp.go.schemaforge.NeoExtensionSurface;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
 import com.etendoerp.go.schemaforge.NeoHandler;
 import com.etendoerp.go.schemaforge.NeoResponse;
@@ -40,7 +46,92 @@ import com.etendoerp.go.schemaforge.util.NeoHandlerLookup;
  */
 final class McpHookExecutor {
 
+  private static final String HTTP_METHOD_GET = "GET";
+
   private McpHookExecutor() {
+  }
+
+  /**
+   * What a READ-surface dispatch leaves the MCP read pipeline to do next (ETP-5415, T3).
+   *
+   * <p>A read cannot borrow the write sites' "a non-null hook response is the answer, return it"
+   * contract: an MCP read still has to project, flatten and (for {@code neo_get}) attach the record
+   * URL, and returning a handler's {@link NeoResponse} body verbatim would hand the agent core's
+   * wrapped envelope instead of the flat shape every other read produces. So a successful hook
+   * response <b>replaces the body the pipeline carries on with</b>, and only a {@code >= 400} one
+   * short-circuits — through the same error funnel as every other MCP hook result.</p>
+   *
+   * @param body     the response body the remaining read stages must operate on
+   * @param mcpError a ready-to-return MCP error result, or {@code null} when there is none
+   */
+  record ReadHookOutcome(JSONObject body, JSONObject mcpError) {
+  }
+
+  /**
+   * Run the entity customization's READ post-phase over an MCP read result (ETP-5415, T3).
+   *
+   * <p>Until this existed, {@code neo_list} and {@code neo_get} were the only NEO surfaces that
+   * reached no customization at all: {@code OrderLineHandler.afterHandle} injects {@code
+   * productCode} into every sales-order line a REST read returns, and an MCP read of the same rows
+   * simply did not have it — with nothing in the response, and no line in the log, to say a hook
+   * had been skipped.</p>
+   *
+   * <p><b>Where this sits in the pipeline is deliberate.</b> The caller invokes it after
+   * {@code NeoFieldFilter#filterGetResponse} and before {@code McpQuerySupport.applyProjection},
+   * which is exactly the REST read's own ordering: {@code NeoCrudHandler.handleDefault} filters the
+   * body and {@code NeoServletSupport.handleWithHooks} then runs {@code afterHandle} over the
+   * filtered result. Projection has no REST counterpart — it is the caller's explicit
+   * {@code fields:[…]} whitelist — and running the hook before it keeps that whitelist the last
+   * word on what the agent asked for, rather than letting a customization silently re-widen a
+   * response the caller narrowed. It also runs before {@code flattenCoreResponse}, because a
+   * handler reads its rows through {@code NeoHandlerUtils.extractGetDataArray}, which requires the
+   * {@code response.data} wrapper core produced and an HTTP method of {@code GET}.</p>
+   *
+   * <p><b>The pre phase is not routed here.</b> A REST read runs {@code handle} as well, and a
+   * customization that fully serves a read from its pre-hook therefore still behaves differently
+   * over MCP. Invoking {@code handle} on a read would let a customization short-circuit or rewrite
+   * an MCP query, which is a materially larger change than injecting fields into a result; it is
+   * left for a later, deliberate step.</p>
+   *
+   * @param specName     the spec being read
+   * @param entityName   the entity being read
+   * @param recordId     the record for {@code neo_get}, {@code null} for {@code neo_list} — the
+   *                     value customizations branch on to tell a single-record read from a list
+   * @param adTab        the entity's AD tab
+   * @param sfEntity     the entity configuration, whose {@code Java_Qualifier} is resolved
+   * @param responseJson the filtered, still-wrapped body produced by the generic read
+   * @return the body to carry on with, or the MCP error to return
+   * @throws JSONException when a {@code >= 400} hook response cannot be converted
+   */
+  static ReadHookOutcome runReadHook(String specName, String entityName, String recordId,
+      Tab adTab, SFEntity sfEntity, JSONObject responseJson) throws JSONException {
+    NeoContext ctx = buildHookContext(specName, entityName, HTTP_METHOD_GET, recordId, null,
+        adTab, sfEntity);
+    NeoExtensionRequest request = NeoExtensionRequest.builder()
+        .qualifier(sfEntity.getJavaQualifier())
+        .specName(specName)
+        .entityName(entityName)
+        .surface(NeoExtensionSurface.READ)
+        .channel(NeoExtensionChannel.MCP)
+        .context(ctx)
+        .build();
+    // Resolution goes through the MCP resolver, as every other MCP hook site does — NOT the one
+    // the REST paths use. The two are not equivalent (see NeoExtensionDispatcher); keeping the
+    // channel's own resolver is what makes this step a routing change and not a resolution change.
+    NeoExtensionResult result = NeoExtensionDispatcher.dispatch(request
+        .post(resolveEntityHandler(sfEntity))
+        .withPreviousResult(NeoResponse.ok(responseJson)));
+    NeoResponse response = result.response();
+    if (response == null) {
+      // The customization declined, or mutated the body in place — which is what an injection like
+      // OrderLineHandler's productCode does — so the body the caller already holds is the answer.
+      return new ReadHookOutcome(responseJson, null);
+    }
+    if (response.getHttpStatus() >= 400) {
+      return new ReadHookOutcome(responseJson, neoResponseToMcpResult(response));
+    }
+    return new ReadHookOutcome(
+        response.getBody() != null ? response.getBody() : responseJson, null);
   }
 
   /**
@@ -169,6 +260,42 @@ final class McpHookExecutor {
     // builds it from `previousResult`, so the stale token travels into it. The declining case
     // patches `responseJson` in place, which is the object the caller goes on to flatten and hand
     // to the agent.
+    if (post != null) {
+      NeoAuditTokenRefresh.refreshInResponse(ctx, post);
+      return neoResponseToMcpResult(post);
+    }
+    NeoAuditTokenRefresh.refreshInBody(ctx, responseJson);
+    return null;
+  }
+
+  /**
+   * Run the entity hook's post-phase through {@link NeoExtensionDispatcher} (ETP-5415).
+   *
+   * <p>Same contract as {@link #runPostHook(NeoHandler, NeoContext, JSONObject)}, and deliberately
+   * the same body: the dispatcher only resolves nothing and invokes {@code afterHandle} on the
+   * instance the pre phase already resolved, so the MCP-specific parts — the
+   * {@code NeoResponse.ok(responseJson)} wrapper, and above all the ETP-5262 audit-token refresh,
+   * which patches the <b>response body in place</b> when the handler declines and the response
+   * object when it does not — stay here. The REST dispatcher refreshes differently (see
+   * {@code NeoServletSupport.runPostHook}); that difference is pre-existing and is preserved on
+   * purpose in this step.</p>
+   *
+   * @param request      the post-phase request, carrying the instance the pre phase resolved; a
+   *                     {@code null} customization yields {@code null} with no refresh, exactly as
+   *                     the {@code handler == null} guard of the original overload does
+   * @param responseJson the response produced by generic persistence
+   * @return an MCP result when the handler replaced the response, or {@code null} to keep it
+   * @throws JSONException when the handler's response cannot be converted
+   */
+  static JSONObject runPostHook(NeoExtensionRequest request, JSONObject responseJson)
+      throws JSONException {
+    NeoExtensionResult result = NeoExtensionDispatcher.dispatch(
+        request.withPreviousResult(NeoResponse.ok(responseJson)));
+    if (result.outcome() == NeoExtensionOutcome.NO_CUSTOMIZATION) {
+      return null;
+    }
+    NeoContext ctx = request.context();
+    NeoResponse post = result.response();
     if (post != null) {
       NeoAuditTokenRefresh.refreshInResponse(ctx, post);
       return neoResponseToMcpResult(post);

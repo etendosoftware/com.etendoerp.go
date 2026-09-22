@@ -60,6 +60,11 @@ import com.etendoerp.go.schemaforge.util.NeoButtonActionHelper;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.schemaforge.util.NeoReportContract;
 import com.etendoerp.go.schemaforge.NeoContext;
+import com.etendoerp.go.schemaforge.NeoExtensionChannel;
+import com.etendoerp.go.schemaforge.NeoExtensionDispatcher;
+import com.etendoerp.go.schemaforge.NeoExtensionRequest;
+import com.etendoerp.go.schemaforge.NeoExtensionResult;
+import com.etendoerp.go.schemaforge.NeoExtensionSurface;
 import com.etendoerp.go.schemaforge.NeoDefaultsService;
 import com.etendoerp.go.schemaforge.DocTypeResolver;
 import com.etendoerp.go.schemaforge.NeoFieldFilter;
@@ -480,6 +485,19 @@ public class McpToolRouter {
     // Apply field filtering
     fieldFilter.filterGetResponse(responseJson);
 
+    // ETP-5415: the entity's customization gets its READ post-phase here, which is the stage an
+    // MCP read simply did not have — a REST list of sales-order lines carried OrderLineHandler's
+    // injected `productCode` and this one did not, with no error and no log line to say so.
+    // Placed after field filtering and before projection on purpose: that is the REST read's own
+    // ordering (NeoCrudHandler filters, then handleWithHooks runs afterHandle), and it leaves the
+    // caller's explicit `fields:[…]` whitelist as the last word. See McpHookExecutor#runReadHook.
+    McpHookExecutor.ReadHookOutcome readHook = McpHookExecutor.runReadHook(
+        specName, entityName, null, adTab, sfEntity, responseJson);
+    if (readHook.mcpError() != null) {
+      return readHook.mcpError();
+    }
+    responseJson = readHook.body();
+
     // IMP-2: optional projection — explicit `fields:[...]` or view:"summary". No-op when neither
     // is present, so the default returns every column.
     // IMP-18: the filter is passed in so an unknown requested name is reported, not dropped.
@@ -530,6 +548,17 @@ public class McpToolRouter {
     }
 
     fieldFilter.filterGetResponse(responseJson);
+
+    // ETP-5415: READ post-phase, at the same stage as in handleList — see that call site and
+    // McpHookExecutor#runReadHook for why it sits between field filtering and projection. The
+    // record id is passed on, because that is the value a customization branches on to tell a
+    // single-record read from a list (e.g. ReactivatePaymentHandler#isSingleRecordGet).
+    McpHookExecutor.ReadHookOutcome readHook = McpHookExecutor.runReadHook(
+        specName, entityName, recordId, adTab, sfEntity, responseJson);
+    if (readHook.mcpError() != null) {
+      return readHook.mcpError();
+    }
+    responseJson = readHook.body();
 
     // IMP-2: optional projection — explicit `fields:[...]` or view:"summary".
     // IMP-18: unknown requested names are reported as unknownFields — lifted to the top level by
@@ -786,11 +815,24 @@ public class McpToolRouter {
 
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path): it may
     // validate and mutate filteredBody (e.g. inject derived FK values) before persist.
-    NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
+    // ETP-5415: routed through NeoExtensionDispatcher so this write is traced like the REST
+    // ones. Resolution is unchanged — the MCP channel still resolves via NeoHandlerLookup, which
+    // is NOT the resolver the REST paths use — and so is the pre-hook contract: a NeoResponse
+    // short-circuits, null proceeds to generic persistence, and the handler may have mutated the
+    // body in place. The other five MCP hook sites are deliberately left alone in this step.
     NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_POST, null, filteredBody, adTab, sfEntity);
-    JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
-    if (preHookResult != null) {
-      return preHookResult;
+    NeoExtensionRequest customizationRequest = NeoExtensionRequest.builder()
+        .qualifier(sfEntity.getJavaQualifier())
+        .specName(specName)
+        .entityName(entityName)
+        .surface(NeoExtensionSurface.CREATE)
+        .channel(NeoExtensionChannel.MCP)
+        .context(hookCtx)
+        .build();
+    NeoExtensionResult preDispatch = NeoExtensionDispatcher.dispatch(customizationRequest);
+    NeoHandler handler = preDispatch.customization();
+    if (preDispatch.response() != null) {
+      return McpHookExecutor.neoResponseToMcpResult(preDispatch.response());
     }
 
     // Wrap for DefaultJsonDataService
@@ -810,7 +852,8 @@ public class McpToolRouter {
 
     fieldFilter.filterGetResponse(responseJson);
 
-    JSONObject postHookResult = McpHookExecutor.runPostHook(handler, hookCtx, responseJson);
+    JSONObject postHookResult =
+        McpHookExecutor.runPostHook(customizationRequest.post(handler), responseJson);
     if (postHookResult != null) {
       return postHookResult;
     }
@@ -908,11 +951,21 @@ public class McpToolRouter {
     }
 
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path).
-    NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
+    // ETP-5415: routed through NeoExtensionDispatcher so this write is traced. Resolution and the
+    // pre-hook contract are unchanged — any non-null response still short-circuits.
     NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_PUT, recordId, filteredBody, adTab, sfEntity);
-    JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
-    if (preHookResult != null) {
-      return preHookResult;
+    NeoExtensionRequest extensionRequest = NeoExtensionRequest.builder()
+        .qualifier(sfEntity.getJavaQualifier())
+        .specName(specName)
+        .entityName(entityName)
+        .surface(NeoExtensionSurface.UPDATE)
+        .channel(NeoExtensionChannel.MCP)
+        .context(hookCtx)
+        .build();
+    NeoExtensionResult preDispatch = NeoExtensionDispatcher.dispatch(extensionRequest);
+    NeoHandler handler = preDispatch.customization();
+    if (preDispatch.response() != null) {
+      return McpHookExecutor.neoResponseToMcpResult(preDispatch.response());
     }
 
     // ETP-5073 / DOC-04: the conflict is detected before the write, for the same reason the REST
@@ -948,7 +1001,8 @@ public class McpToolRouter {
 
     fieldFilter.filterGetResponse(responseJson);
 
-    JSONObject postHookResult = McpHookExecutor.runPostHook(handler, hookCtx, responseJson);
+    JSONObject postHookResult =
+        McpHookExecutor.runPostHook(extensionRequest.post(handler), responseJson);
     if (postHookResult != null) {
       return postHookResult;
     }
@@ -986,11 +1040,19 @@ public class McpToolRouter {
 
     // Run the entity's NeoHandler pre-hook (parity with the REST CRUD path). A
     // handler may fully handle the delete (e.g. a soft-archive) or reject it.
-    NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
+    // ETP-5415: routed through NeoExtensionDispatcher. Note this surface has NO post-hook — the
+    // delete returns its own payload and never calls afterHandle. Preserved as-is; see D14.
     NeoContext hookCtx = McpHookExecutor.buildHookContext(specName, entityName, HTTP_METHOD_DELETE, recordId, null, adTab, sfEntity);
-    JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
-    if (preHookResult != null) {
-      return preHookResult;
+    NeoExtensionResult preDispatch = NeoExtensionDispatcher.dispatch(NeoExtensionRequest.builder()
+        .qualifier(sfEntity.getJavaQualifier())
+        .specName(specName)
+        .entityName(entityName)
+        .surface(NeoExtensionSurface.DELETE)
+        .channel(NeoExtensionChannel.MCP)
+        .context(hookCtx)
+        .build());
+    if (preDispatch.response() != null) {
+      return McpHookExecutor.neoResponseToMcpResult(preDispatch.response());
     }
 
     String result = jsonService.remove(params);
@@ -1126,14 +1188,24 @@ public class McpToolRouter {
     // REST path (NeoSubEndpointDispatcher → NeoHookDispatcher). This allows handlers
     // like AmortizationHeaderHandler to compute dynamic defaults (e.g. the header name
     // from assetId) over MCP, just as they do over REST.
-    NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
+    // ETP-5415: routed through NeoExtensionDispatcher for the trace and for the annotation-first
+    // resolution order. This surface is post-only — no pre-hook exists here — and it builds its
+    // context with buildDefaultsHookContext, not buildHookContext. Both preserved.
+    NeoExtensionRequest defaultsRequest = NeoExtensionRequest.builder()
+        .qualifier(sfEntity.getJavaQualifier())
+        .specName(specName)
+        .entityName(entityName)
+        .surface(NeoExtensionSurface.DEFAULTS)
+        .channel(NeoExtensionChannel.MCP)
+        .context(McpHookExecutor.buildDefaultsHookContext(
+            specName, entityName, adTab, sfEntity, queryParams))
+        .build();
+    NeoHandler handler = NeoExtensionDispatcher.resolveOnly(defaultsRequest);
     if (handler != null) {
-      NeoContext hookCtx = McpHookExecutor.buildDefaultsHookContext(
-          specName, entityName, adTab, sfEntity, queryParams);
-      hookCtx.setPreviousResult(neoResponse);
-      NeoResponse afterResult = handler.afterHandle(hookCtx);
-      if (afterResult != null) {
-        neoResponse = afterResult;
+      NeoExtensionResult afterDispatch = NeoExtensionDispatcher.dispatch(
+          defaultsRequest.post(handler).withPreviousResult(neoResponse));
+      if (afterDispatch.response() != null) {
+        neoResponse = afterDispatch.response();
       }
     }
 
@@ -1583,12 +1655,23 @@ public class McpToolRouter {
     // normalizes or injects the action value is honoured by the process call that follows —
     // the same contract the REST path gives handlers.
     JSONObject actionParams = parameters != null ? parameters : new JSONObject();
-    NeoHandler handler = McpHookExecutor.resolveEntityHandler(sfEntity);
+    // ETP-5415: routed through NeoExtensionDispatcher. The action name is carried in the context
+    // by buildActionHookContext; the dispatcher does not route on it, so a handler that serves
+    // several buttons still discriminates internally, exactly as today.
     NeoContext hookCtx = McpHookExecutor.buildActionHookContext(specName, entityName, recordId,
         actionName, actionParams, sfEntity.getADTab(), sfEntity);
-    JSONObject preHookResult = McpHookExecutor.runPreHook(handler, hookCtx);
-    if (preHookResult != null) {
-      return preHookResult;
+    NeoExtensionRequest actionRequest = NeoExtensionRequest.builder()
+        .qualifier(sfEntity.getJavaQualifier())
+        .specName(specName)
+        .entityName(entityName)
+        .surface(NeoExtensionSurface.ACTION)
+        .channel(NeoExtensionChannel.MCP)
+        .context(hookCtx)
+        .build();
+    NeoExtensionResult preDispatch = NeoExtensionDispatcher.dispatch(actionRequest);
+    NeoHandler handler = preDispatch.customization();
+    if (preDispatch.response() != null) {
+      return McpHookExecutor.neoResponseToMcpResult(preDispatch.response());
     }
 
     NeoResponse neoResponse = NeoButtonActionHelper.executeButtonActionCore(
@@ -1609,7 +1692,8 @@ public class McpToolRouter {
 
     // Post-hook only on the success path, mirroring handleCreate/handleUpdate, which both
     // return early on error before runPostHook.
-    JSONObject postHookResult = McpHookExecutor.runPostHook(handler, hookCtx, actionResult);
+    JSONObject postHookResult =
+        McpHookExecutor.runPostHook(actionRequest.post(handler), actionResult);
     if (postHookResult != null) {
       return postHookResult;
     }
@@ -1688,8 +1772,19 @@ public class McpToolRouter {
         break;
       }
     }
+    // ETP-5415: this site RESOLVES but never dispatches — the handler is consulted for its report
+    // contract, no hook is invoked. So it uses resolveOnly and emits no trace: a "dispatched" line
+    // here would claim something that did not happen. It still needs the annotation-first order,
+    // or an annotated report generator would be invisible to neo_report while working elsewhere.
     NeoHandler handler = reportEntity != null
-        ? McpHookExecutor.resolveEntityHandler(reportEntity) : null;
+        ? NeoExtensionDispatcher.resolveOnly(NeoExtensionRequest.builder()
+            .qualifier(reportEntity.getJavaQualifier())
+            .specName(specName)
+            .entityName(reportEntity.getName())
+            .surface(NeoExtensionSurface.UNKNOWN)
+            .channel(NeoExtensionChannel.MCP)
+            .build())
+        : null;
     if (handler == null) {
       // Non-callable report: identical message to neo_discover. Not an error path.
       return wrapAsTextContent(

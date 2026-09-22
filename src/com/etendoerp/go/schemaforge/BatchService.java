@@ -676,7 +676,11 @@ public class BatchService {
     // violation instead of ever running ContactsLocationAddressHandler.
     String javaQualifier = sfEntity.getJavaQualifier();
     if (StringUtils.isNotBlank(javaQualifier)) {
-      return NeoServletSupport.handleWithHooks(javaQualifier, ctx, crudHandler);
+      // REST_BATCH, not REST_SINGLE: the resolver is the same, but the trace has to say which
+      // caller this dispatch came from — this path and the direct HTTP write reach the same
+      // dispatch through different code and have silently diverged once already.
+      return NeoServletSupport.handleWithHooks(javaQualifier, ctx, crudHandler,
+          NeoExtensionChannel.REST_BATCH);
     }
     return crudHandler.handleDefault(ctx);
   }
