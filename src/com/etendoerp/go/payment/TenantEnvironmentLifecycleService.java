@@ -226,9 +226,8 @@ public class TenantEnvironmentLifecycleService {
         return false;
       }
       setPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, status.name(), client);
-      if (renewalDueAt != null) {
-        setPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE, renewalDueAt.toString(), client);
-      }
+      setPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE,
+          renewalDueAt == null ? "" : renewalDueAt.toString(), client);
       return true;
     } catch (RuntimeException e) {
       log.error("Could not update subscription projection for client {}", clientId, e);

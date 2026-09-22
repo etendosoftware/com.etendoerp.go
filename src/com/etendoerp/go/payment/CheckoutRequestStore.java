@@ -287,6 +287,68 @@ public class CheckoutRequestStore {
   }
 
   /**
+   * Finds the newest purchase with a provider customer for the authenticated account.
+   *
+   * <p>Both identity predicates are part of the query. The returned provider customer is never
+   * selected from a request parameter, which keeps the portal call account-scoped even when old
+   * checkout rows exist for another account.
+   *
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @return newest purchase with a nonblank Stripe customer, or {@code null}
+   */
+  public CheckoutRequest findBillableForAccount(String accountId, String accountEmail) {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      if (StringUtils.isBlank(accountId) || StringUtils.isBlank(accountEmail)) {
+        return null;
+      }
+      OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
+          "as cr where cr.etendoGoAccount.id = :accountId"
+              + " and lower(cr.accountEmail) = lower(:accountEmail)"
+              + " and cr.stripeCustomer is not null"
+              + " and length(trim(cr.stripeCustomer)) > 0 order by cr.creationDate desc");
+      query.setNamedParameter(PARAM_ACCOUNT_ID, StringUtils.trimToEmpty(accountId));
+      query.setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail));
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setMaxResult(1);
+      return query.uniqueResult();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /** Finds the provisioned account purchase associated with a Stripe subscription. */
+  public CheckoutRequest findByStripeSubscription(String subscriptionId) {
+    return findByProviderField("stripeSubscription", subscriptionId);
+  }
+
+  /** Finds the provisioned account purchase associated with a Stripe customer. */
+  public CheckoutRequest findByStripeCustomer(String customerId) {
+    return findByProviderField("stripeCustomer", customerId);
+  }
+
+  private CheckoutRequest findByProviderField(String field, String value) {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      if (StringUtils.isBlank(value)) return null;
+      OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
+          "as cr where cr." + field + " = :providerValue and cr.createdClient is not null"
+              + " order by cr.creationDate desc");
+      query.setNamedParameter("providerValue", StringUtils.trimToEmpty(value));
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setMaxResult(1);
+      return query.uniqueResult();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
    * Finds an unfinished or paid purchase for the same account and environment name.
    * @param accountEmail authenticated account email
    * @param clientName requested environment name
