@@ -63,6 +63,8 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
   private static final String FIELD_MOVEMENT_DATE = "movementDate";
   private static final String FIELD_ACCOUNTING_DATE = "accountingDate";
   private static final String ACTION_DOCUMENT_ACTION = "documentAction";
+  private static final String FIELD_RESOLVED_PRICE_LIST_ID = "resolvedPriceListId";
+  private static final String FIELD_RESOLVED_PRICE_LIST_IDENTIFIER = "resolvedPriceList$_identifier";
 
   @Inject
   private NeoCloneRecordHandler cloneRecordHandler;
@@ -474,8 +476,8 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
     Object rawPriceListName = firstOrder.opt("priceList$_identifier");
     Object priceListName = (rawPriceListName == null || JSONObject.NULL.equals(rawPriceListName))
         ? JSONObject.NULL : rawPriceListName.toString();
-    rec.put("resolvedPriceListId", priceListId);
-    rec.put("resolvedPriceList$_identifier", priceListName);
+    rec.put(FIELD_RESOLVED_PRICE_LIST_ID, priceListId);
+    rec.put(FIELD_RESOLVED_PRICE_LIST_IDENTIFIER, priceListName);
     return true;
   }
 
@@ -489,8 +491,8 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
       }
       PriceList priceList = receipt.getBusinessPartner().getPurchasePricelist();
       if (priceList != null) {
-        rec.put("resolvedPriceListId", priceList.getId());
-        rec.put("resolvedPriceList$_identifier", priceList.getName());
+        rec.put(FIELD_RESOLVED_PRICE_LIST_ID, priceList.getId());
+        rec.put(FIELD_RESOLVED_PRICE_LIST_IDENTIFIER, priceList.getName());
         return true;
       }
       return false;
@@ -509,8 +511,8 @@ public class GoodsReceiptHeaderHandler implements NeoHandler {
       OBContext.setAdminMode(true);
       PriceList priceList = MultiDocumentInvoiceSupport.findDefaultPriceList(false);
       if (priceList != null) {
-        rec.put("resolvedPriceListId", priceList.getId());
-        rec.put("resolvedPriceList$_identifier", priceList.getName());
+        rec.put(FIELD_RESOLVED_PRICE_LIST_ID, priceList.getId());
+        rec.put(FIELD_RESOLVED_PRICE_LIST_IDENTIFIER, priceList.getName());
       }
     } finally {
       OBContext.restorePreviousMode();

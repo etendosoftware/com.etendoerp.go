@@ -75,6 +75,8 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
   private static final String FIELD_ORDERED_QUANTITY = "orderedQuantity";
   private static final String PARAM_RECEIPT_IDS = "receiptIds";
   private static final String ERR_RECORD_ID_REQUIRED = "Record ID is required";
+  private static final String KEY_RESPONSE = "response";
+  private static final String ERR_NO_AP_INVOICE_DOC_TYPE = "No AP Invoice document type found";
   // ETP-4942 — same guard as CreateDraftInvoiceHandler#ensurePriceListResolved, surfaced as a
   // 400 instead of letting a null Invoice.getPriceList() reach UpdatePricesAndAmounts and blow
   // up as an unguarded 500 further down the native invoice-line-creation pipeline. The single-
@@ -91,6 +93,32 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
   @Inject
   TotalDiscountService totalDiscountService;
 
+  /**
+   * Routes the two goods-receipt-ONLY actions ({@code pendingInvoiceLines} GET,
+   * {@code productPrices} POST) that must never fire on {@code purchase-order} — this handler
+   * is also injected into {@code PurchaseOrderHeaderHandler}'s dispatch chain (for
+   * {@code createFromOrder}), and {@code NeoHeaderActionRouter.dispatch} takes the first
+   * non-null response. An ungated GET here would treat a {@code C_Order_ID} as an
+   * {@code M_InOut_ID} and would also shadow {@code currencyOptionsHandler}, which sits later
+   * in that same chain. Extracted out of {@link #handle} to keep its cognitive complexity down.
+   *
+   * @return the dispatched response, or {@code null} when neither action matches (caller falls
+   *     through to the {@code createPurchaseInvoice} handling below).
+   */
+  private NeoResponse dispatchGoodsReceiptOnlyAction(NeoContext context, String specName,
+      String fieldName, String method) {
+    if (!SPEC_GOODS_RECEIPT.equals(specName)) {
+      return null;
+    }
+    if (PENDING_LINES_ACTION.equals(fieldName) && "GET".equals(method)) {
+      return handlePendingLines(context);
+    }
+    if (PRODUCT_PRICES_ACTION.equals(fieldName) && "POST".equals(method)) {
+      return handleProductPrices(context);
+    }
+    return null;
+  }
+
   @Override
   public NeoResponse handle(NeoContext context) {
     if (!NeoEndpointType.ACTION.equals(context.getEndpointType())) {
@@ -104,21 +132,10 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     String fieldName = context.getFieldName();
     String method = context.getHttpMethod();
 
-    // Read-only, goods-receipt ONLY. This handler is also injected into
-    // PurchaseOrderHeaderHandler's dispatch chain (for createFromOrder), and
-    // NeoHeaderActionRouter.dispatch takes the first non-null response — an ungated GET action
-    // here would treat a C_Order_ID as an M_InOut_ID and would also shadow
-    // currencyOptionsHandler, which sits later in that chain.
-    if (SPEC_GOODS_RECEIPT.equals(specName) && PENDING_LINES_ACTION.equals(fieldName) && "GET".equals(method)) {
-      return handlePendingLines(context);
-    }
-
-    // POST productPrices — prices a caller-supplied list of products against a price list.
-    // Gated to goods-receipt for the same reason as PENDING_LINES_ACTION above: this handler
-    // also sits in PurchaseOrderHeaderHandler's dispatch chain, so an ungated check here could
-    // shadow a sibling handler serving the same action name on purchase-order.
-    if (SPEC_GOODS_RECEIPT.equals(specName) && PRODUCT_PRICES_ACTION.equals(fieldName) && "POST".equals(method)) {
-      return handleProductPrices(context);
+    NeoResponse readOnlyOrPricingResponse =
+        dispatchGoodsReceiptOnlyAction(context, specName, fieldName, method);
+    if (readOnlyOrPricingResponse != null) {
+      return readOnlyOrPricingResponse;
     }
 
     if (!ACTION_NAME.equals(fieldName) || !"POST".equals(method)) {
@@ -168,7 +185,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
         responseData.put("data", data);
 
         JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
+        wrapper.put(KEY_RESPONSE, responseData);
 
         return NeoResponse.created(wrapper);
       } finally {
@@ -291,7 +308,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
         JSONObject responseData = new JSONObject();
         responseData.put("data", data);
         JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
+        wrapper.put(KEY_RESPONSE, responseData);
         return new NeoResponse(200, wrapper);
       } finally {
         OBContext.restorePreviousMode();
@@ -421,7 +438,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       invoiceDocType = findAPInvoiceDocType(order.getClient().getId());
     }
     if (invoiceDocType == null) {
-      throw new OBException("No AP Invoice document type found");
+      throw new OBException(ERR_NO_AP_INVOICE_DOC_TYPE);
     }
     return invoiceDocType;
   }
@@ -600,7 +617,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       paymentMethod = bp != null ? bp.getPOPaymentMethod() : null;
       docType = findAPInvoiceDocType(first.getClient().getId());
       if (docType == null) {
-        throw new OBException("No AP Invoice document type found");
+        throw new OBException(ERR_NO_AP_INVOICE_DOC_TYPE);
       }
     }
 
@@ -694,7 +711,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
           responseData.put("resolvedPriceListId", resolvedPriceListId != null ? resolvedPriceListId : JSONObject.NULL);
         }
         JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
+        wrapper.put(KEY_RESPONSE, responseData);
         return new NeoResponse(200, wrapper);
       } finally {
         OBContext.restorePreviousMode();
@@ -766,7 +783,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
         JSONObject responseData = new JSONObject();
         responseData.put("data", arr);
         JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
+        wrapper.put(KEY_RESPONSE, responseData);
         return new NeoResponse(200, wrapper);
       } finally {
         OBContext.restorePreviousMode();
@@ -1004,7 +1021,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
 
     DocumentType docType = findAPInvoiceDocType(receipt.getClient().getId());
     if (docType == null) {
-      throw new OBException("No AP Invoice document type found");
+      throw new OBException(ERR_NO_AP_INVOICE_DOC_TYPE);
     }
     // Read before evicting receipt below — a lazy FK access on a detached entity
     // would throw LazyInitializationException.
