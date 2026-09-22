@@ -59,6 +59,7 @@ import org.hibernate.query.Query;
 import org.mockito.ArgumentCaptor;
 import org.junit.Test;
 import org.mockito.MockedStatic;
+import org.mockito.Answers;
 import org.mockito.Mockito;
 import org.openbravo.advpaymentmngt.ProcessInvoiceUtil;
 import org.openbravo.base.exception.OBException;
@@ -2932,14 +2933,17 @@ public class CreateDraftInvoiceHandlerTest {
   }
 
   /**
-   * Happy path: delegates to {@link MultiDocumentInvoiceSupport#resolveProductPrices} and
-   * serialises the result as {@code [{productId, price}, ...]}.
+   * Happy path: delegates to {@link MultiDocumentInvoiceSupport#buildProductPricesResponse},
+   * which in turn calls {@link MultiDocumentInvoiceSupport#resolveProductPrices} and
+   * serialises the result as {@code [{productId, price}, ...]}. {@code CALLS_REAL_METHODS}
+   * keeps {@code buildProductPricesResponse} itself real (it's the delegation this test
+   * verifies) while only {@code resolveProductPrices} — the DB-touching part — is stubbed.
    */
   @Test
   public void testHandleProductPricesSuccessReturns200WithPricedProducts() throws Exception {
     try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
         MockedStatic<MultiDocumentInvoiceSupport> supportMock =
-            Mockito.mockStatic(MultiDocumentInvoiceSupport.class)) {
+            Mockito.mockStatic(MultiDocumentInvoiceSupport.class, Answers.CALLS_REAL_METHODS)) {
       mockAdminMode(ctxMock);
       Map<String, BigDecimal> prices = new java.util.LinkedHashMap<>();
       prices.put("prod-1", new BigDecimal("9.99"));

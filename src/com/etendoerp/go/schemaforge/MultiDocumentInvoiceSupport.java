@@ -25,6 +25,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import javax.servlet.http.HttpServletResponse;
+
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONArray;
@@ -32,6 +34,7 @@ import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.order.Order;
@@ -382,5 +385,77 @@ final class MultiDocumentInvoiceSupport {
         .setMaxResults(1)
         .list();
     return matches.isEmpty() ? null : matches.get(0);
+  }
+
+  /**
+   * Maps each active line of {@code doc} to its {@code [productId, salesOrderLineId]} pair
+   * (either entry may be {@code null}). Shared by both handlers' {@code handlePendingLines} so
+   * the quote feature gets product/order-line data in the SAME response as the pending
+   * quantities, instead of a second request. Takes the already-loaded entity (rather than an
+   * id) because the caller also needs it for {@link #resolveEffectivePriceListId}.
+   */
+  static Map<String, String[]> loadLineProductAndOrderLine(ShipmentInOut doc) {
+    Map<String, String[]> details = new HashMap<>();
+    if (doc == null) {
+      return details;
+    }
+    for (ShipmentInOutLine line : doc.getMaterialMgmtShipmentInOutLineList()) {
+      if (!line.isActive()) {
+        continue;
+      }
+      String productId = line.getProduct() != null ? line.getProduct().getId() : null;
+      String orderLineId = line.getSalesOrderLine() != null ? line.getSalesOrderLine().getId() : null;
+      details.put(line.getId(), new String[] { productId, orderLineId });
+    }
+    return details;
+  }
+
+  /**
+   * Prices a caller-supplied list of products against a price list — shared body of both
+   * handlers' POST {@code .../action/productPrices}, body {@code {productIds: [...],
+   * priceListId: "..."}}. Exists only so the "Crear factura" quote feature can price the
+   * handful of products its own pending lines actually reference, instead of running the
+   * generic product-browse selector (up to 500 rows) and discarding all but a few of them —
+   * see {@link #resolveProductPrices}.
+   *
+   * @param log the caller's own Logger, so a parse/DB warning or error is attributed to the
+   *     calling handler class rather than to this shared support class.
+   */
+  static NeoResponse buildProductPricesResponse(JSONObject body, Logger log) {
+    String priceListId = body != null ? body.optString("priceListId", null) : null;
+    List<String> productIds = new ArrayList<>();
+    if (body != null && body.has("productIds")) {
+      try {
+        JSONArray idsArr = body.getJSONArray("productIds");
+        for (int i = 0; i < idsArr.length(); i++) {
+          productIds.add(idsArr.getString(i));
+        }
+      } catch (Exception e) {
+        log.warn("Failed to parse productIds: {}", e.getMessage());
+      }
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        Map<String, BigDecimal> prices = resolveProductPrices(priceListId, productIds);
+        JSONArray arr = new JSONArray();
+        for (Map.Entry<String, BigDecimal> entry : prices.entrySet()) {
+          JSONObject item = new JSONObject();
+          item.put("productId", entry.getKey());
+          item.put("price", entry.getValue());
+          arr.put(item);
+        }
+        JSONObject responseData = new JSONObject();
+        responseData.put("data", arr);
+        JSONObject wrapper = new JSONObject();
+        wrapper.put("response", responseData);
+        return new NeoResponse(200, wrapper);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("Error resolving product prices: {}", e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+    }
   }
 }

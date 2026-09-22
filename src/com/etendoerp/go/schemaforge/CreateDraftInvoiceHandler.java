@@ -413,7 +413,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       try {
         Map<String, BigDecimal> pendingMap = computePendingQtyPerLine(recordId, true);
         ShipmentInOut doc = OBDal.getInstance().get(ShipmentInOut.class, recordId);
-        Map<String, String[]> lineDetails = loadLineProductAndOrderLine(doc);
+        Map<String, String[]> lineDetails = MultiDocumentInvoiceSupport.loadLineProductAndOrderLine(doc);
         JSONArray arr = new JSONArray();
         for (Map.Entry<String, BigDecimal> entry : pendingMap.entrySet()) {
           JSONObject item = new JSONObject();
@@ -447,77 +447,22 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   }
 
   /**
-   * Maps each active line of {@code doc} to its {@code [productId, salesOrderLineId]} pair
-   * (either entry may be {@code null}). Used only by {@link #handlePendingLines} so the quote
-   * feature gets product/order-line data in the SAME response as the pending quantities,
-   * instead of a second request. Takes the already-loaded entity (rather than an id) because
-   * the caller also needs it for {@link MultiDocumentInvoiceSupport#resolveEffectivePriceListId}.
-   */
-  private Map<String, String[]> loadLineProductAndOrderLine(ShipmentInOut doc) {
-    Map<String, String[]> details = new HashMap<>();
-    if (doc == null) {
-      return details;
-    }
-    for (ShipmentInOutLine line : doc.getMaterialMgmtShipmentInOutLineList()) {
-      if (!line.isActive()) {
-        continue;
-      }
-      String productId = line.getProduct() != null ? line.getProduct().getId() : null;
-      String orderLineId = line.getSalesOrderLine() != null ? line.getSalesOrderLine().getId() : null;
-      details.put(line.getId(), new String[] { productId, orderLineId });
-    }
-    return details;
-  }
-
-  /**
    * Prices a caller-supplied list of products against a price list — POST {@code
    * /goods-shipment/goodsShipment/{id}/action/productPrices}, body {@code {productIds: [...],
    * priceListId: "..."}}. {@code recordId} is not used: this exists only so the "Crear factura"
    * quote feature can price the handful of products its own pending lines actually reference,
    * instead of running the generic product-browse selector (up to 500 rows) and discarding all
-   * but a few of them — see {@link MultiDocumentInvoiceSupport#resolveProductPrices}.
+   * but a few of them.
    *
    * <p>POST, not GET, because ACTION-endpoint dispatch never threads query-string parameters into
    * {@link NeoContext} (only the request body reaches it) — the same reason {@link #handleCheck}
    * already accepts POST for what is otherwise a pure read.
+   *
+   * <p>Delegates to {@link MultiDocumentInvoiceSupport#buildProductPricesResponse}, shared
+   * byte-for-byte with {@code CreatePurchaseInvoiceHandler#handleProductPrices}.
    */
   protected NeoResponse handleProductPrices(NeoContext context) {
-    JSONObject body = context.getRequestBody();
-    String priceListId = body != null ? body.optString(PARAM_PRICE_LIST_ID, null) : null;
-    List<String> productIds = new ArrayList<>();
-    if (body != null && body.has("productIds")) {
-      try {
-        JSONArray idsArr = body.getJSONArray("productIds");
-        for (int i = 0; i < idsArr.length(); i++) {
-          productIds.add(idsArr.getString(i));
-        }
-      } catch (Exception e) {
-        log.warn("Failed to parse productIds: {}", e.getMessage());
-      }
-    }
-    try {
-      OBContext.setAdminMode(true);
-      try {
-        Map<String, BigDecimal> prices = MultiDocumentInvoiceSupport.resolveProductPrices(priceListId, productIds);
-        JSONArray arr = new JSONArray();
-        for (Map.Entry<String, BigDecimal> entry : prices.entrySet()) {
-          JSONObject item = new JSONObject();
-          item.put("productId", entry.getKey());
-          item.put("price", entry.getValue());
-          arr.put(item);
-        }
-        JSONObject responseData = new JSONObject();
-        responseData.put("data", arr);
-        JSONObject wrapper = new JSONObject();
-        wrapper.put(KEY_RESPONSE, responseData);
-        return new NeoResponse(200, wrapper);
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-    } catch (Exception e) {
-      log.error("Error resolving product prices: {}", e.getMessage(), e);
-      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
-    }
+    return MultiDocumentInvoiceSupport.buildProductPricesResponse(context.getRequestBody(), log);
   }
 
   /**
