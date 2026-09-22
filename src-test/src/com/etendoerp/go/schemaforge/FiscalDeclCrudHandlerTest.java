@@ -1083,10 +1083,10 @@ public class FiscalDeclCrudHandlerTest {
     }
   }
 
-  // ── handleDeclPut (identification maxLength + bank_sepa enum, ETP-5438) ─
+  // ── handleDeclPut (identification maxLength, ETP-5438) ──────────────
   // AEAT-spec audit follow-up: the alphanumeric ("An") identification fields have fixed max
-  // lengths, and bank_sepa is a 4-value enum, not free text. See IDENTIFICATION_MAX_LENGTHS and
-  // VALID_BANK_SEPA_VALUES' javadoc for the exact spec citations.
+  // lengths. See IDENTIFICATION_MAX_LENGTHS' javadoc for the exact spec citations. (bank_sepa's
+  // 4-value enum guard was reverted from this ticket — handled separately.)
 
   /**
    * A {@code bank_iban} longer than its 34-char AEAT slot must reject the PUT with 400 and leave
@@ -1175,92 +1175,6 @@ public class FiscalDeclCrudHandlerTest {
 
       verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
       verify(decl, never()).set(any(), any());
-    }
-  }
-
-  /**
-   * A {@code bank_sepa} value outside the AEAT 4-value enum ("0"/"1"/"2"/"3") must reject the PUT
-   * with 400.
-   */
-  @Test
-  public void testHandleDeclPutWithInvalidBankSepaReturns400() throws Exception {
-    HttpServletRequest req = mock(HttpServletRequest.class);
-    HttpServletResponse resp = mock(HttpServletResponse.class);
-    when(req.getParameter("id")).thenReturn("decl1");
-    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
-        "{\"status\":\"draft\",\"manualData\":{\"identification\":{\"bank_sepa\":\"9\"}}}")));
-
-    BaseOBObject decl = declOwnedBy("client1", "org1");
-
-    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-      mockContext(ctxMock, "client1", "org1");
-      OBDal obDal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(obDal);
-      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
-
-      handler.handleDeclarations("PUT", req, resp);
-
-      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_BAD_REQUEST), anyString());
-      verify(decl, never()).set(any(), any());
-    }
-  }
-
-  /**
-   * A valid {@code bank_sepa} enum value ("1" — Cuenta España) must be accepted normally.
-   */
-  @Test
-  public void testHandleDeclPutWithValidBankSepaSucceeds() throws Exception {
-    HttpServletRequest req = mock(HttpServletRequest.class);
-    HttpServletResponse resp = mock(HttpServletResponse.class);
-    StringWriter sw = new StringWriter();
-    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
-    when(req.getParameter("id")).thenReturn("decl1");
-    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
-        "{\"status\":\"draft\",\"manualData\":{\"identification\":{\"bank_sepa\":\"1\"}}}")));
-
-    BaseOBObject decl = declOwnedBy("client1", "org1");
-
-    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-      mockContext(ctxMock, "client1", "org1");
-      OBDal obDal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(obDal);
-      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
-
-      handler.handleDeclarations("PUT", req, resp);
-
-      verify(servlet, never()).sendError(any(), anyInt(), anyString());
-    }
-  }
-
-  /**
-   * An empty-string {@code bank_sepa} (field visible but not yet chosen) must NOT be rejected —
-   * the enum guard only fires on a non-blank, out-of-range value; requiredness is a separate,
-   * frontend-only concern (see {@code _BANK_FULL_BLOCK_REQUIRED_WHEN} in {@code fm303Layouts.js}).
-   */
-  @Test
-  public void testHandleDeclPutWithEmptyBankSepaSucceeds() throws Exception {
-    HttpServletRequest req = mock(HttpServletRequest.class);
-    HttpServletResponse resp = mock(HttpServletResponse.class);
-    StringWriter sw = new StringWriter();
-    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
-    when(req.getParameter("id")).thenReturn("decl1");
-    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(
-        "{\"status\":\"draft\",\"manualData\":{\"identification\":{\"bank_sepa\":\"\"}}}")));
-
-    BaseOBObject decl = declOwnedBy("client1", "org1");
-
-    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-      mockContext(ctxMock, "client1", "org1");
-      OBDal obDal = mock(OBDal.class);
-      dalMock.when(OBDal::getInstance).thenReturn(obDal);
-      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
-
-      handler.handleDeclarations("PUT", req, resp);
-
-      verify(servlet, never()).sendError(any(), anyInt(), anyString());
     }
   }
 

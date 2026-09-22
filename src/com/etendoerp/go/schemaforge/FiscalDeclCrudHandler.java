@@ -446,9 +446,6 @@ class FiscalDeclCrudHandler {
     if (rejectOversizedIdentificationFields(body, id, response)) {
       return;
     }
-    if (rejectInvalidBankSepa(body, id, response)) {
-      return;
-    }
     applyDeclPutScalarFields(decl, body);
     boolean manualDataApplied = applyManualDataIfRequested(decl, body);
     decl.set(PROPERTY_UPDATED_BY, OBContext.getOBContext().getUser());
@@ -574,9 +571,9 @@ class FiscalDeclCrudHandler {
 
   /**
    * Reads {@code manualData.identification} out of a PUT body, or {@code null} if
-   * {@code manualData} (or {@code identification} within it) is absent/malformed — shared by
-   * {@link #rejectOversizedIdentificationFields} and {@link #rejectInvalidBankSepa} below, the
-   * ETP-5438 siblings of {@link #rejectNegativeManualBoxes}'s own {@code manualOverrides} read.
+   * {@code manualData} (or {@code identification} within it) is absent/malformed — used by
+   * {@link #rejectOversizedIdentificationFields} below, the ETP-5438 sibling of
+   * {@link #rejectNegativeManualBoxes}'s own {@code manualOverrides} read.
    */
   private JSONObject extractIdentification(JSONObject body) {
     if (!body.has(MANUAL_DATA_KEY) || body.isNull(MANUAL_DATA_KEY)) {
@@ -640,41 +637,12 @@ class FiscalDeclCrudHandler {
     return false;
   }
 
-  // ETP-5438 (AEAT spec audit) — bank_sepa ("Devolución - Marca SEPA") is a single-digit Num
-  // field on the DID page whose only valid values are this 4-entry enum (spec's own "Nota 2:
-  // Devolución marca SEPA" table): 0 Vacía, 1 Cuenta España, 2 Unión Europea SEPA, 3 Resto
-  // Países. The frontend now renders it as a <select> constrained to these 4 values (see
-  // fm303Layouts.js's bank_sepa field), but manualData is a generic PUT body, not exclusively
-  // fed by that control — same rationale as rejectNegativeManualBoxes's string-encoded-value
-  // test coverage.
-  private static final java.util.Set<String> VALID_BANK_SEPA_VALUES = java.util.Set.of("0", "1", "2", "3");
-
-  /**
-   * Rejects a PUT whose {@code manualData.identification.bank_sepa} is present, non-blank, and
-   * not one of {@link #VALID_BANK_SEPA_VALUES} (ETP-5438). An absent, {@code null} or empty-string
-   * value is left alone — {@code bank_sepa} is only conditionally required (see
-   * {@code _BANK_FULL_BLOCK_REQUIRED_WHEN} in {@code fm303Layouts.js}), and requiredness is a
-   * frontend/UX concern this server-side guard does not duplicate.
-   *
-   * @return {@code true} if the PUT was rejected (a 400 was already sent to {@code response} and
-   *         the caller must stop processing); {@code false} if the request may proceed.
-   */
-  private boolean rejectInvalidBankSepa(JSONObject body, String id, HttpServletResponse response)
-      throws IOException {
-    JSONObject identification = extractIdentification(body);
-    if (identification == null || !identification.has("bank_sepa")
-        || identification.isNull("bank_sepa")) {
-      return false;
-    }
-    String value = identification.optString("bank_sepa", "");
-    if (!value.isEmpty() && !VALID_BANK_SEPA_VALUES.contains(value)) {
-      servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
-          "bank_sepa must be one of 0 (Vacía), 1 (Cuenta España), 2 (UE SEPA) or 3 (Resto Países): "
-              + id);
-      return true;
-    }
-    return false;
-  }
+  // ETP-5438 (AEAT spec audit) — bank_sepa ("Devolución - Marca SEPA") is also declared a
+  // single-digit Num field on the DID page restricted to a 4-value enum (spec's own "Nota 2:
+  // Devolución marca SEPA" table: 0 Vacía, 1 Cuenta España, 2 Unión Europea SEPA, 3 Resto
+  // Países) in the same audit that found the gaps above. That fix (a `rejectInvalidBankSepa`
+  // guard here, paired with a `type: 'select'` conversion in fm303Layouts.js) was reverted from
+  // this ticket — it is being handled under a separate ticket instead. Do not re-add it here.
 
   /**
    * Applies every scalar (non-{@code manualData}) optional field {@link #handleDeclPut} accepts —
