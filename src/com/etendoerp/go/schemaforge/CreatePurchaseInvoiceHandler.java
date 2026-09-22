@@ -25,6 +25,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import javax.inject.Inject;
 import javax.inject.Named;
@@ -67,14 +68,56 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
 
   private static final Logger log = LogManager.getLogger(CreatePurchaseInvoiceHandler.class);
   private static final String ACTION_NAME = "createPurchaseInvoice";
+  private static final String PENDING_LINES_ACTION = "pendingInvoiceLines";
+  private static final String PRODUCT_PRICES_ACTION = "productPrices";
   private static final String SPEC_PURCHASE_ORDER = "purchase-order";
   private static final String SPEC_GOODS_RECEIPT = "goods-receipt";
   private static final String FIELD_ORDERED_QUANTITY = "orderedQuantity";
+  private static final String PARAM_RECEIPT_IDS = "receiptIds";
+  private static final String ERR_RECORD_ID_REQUIRED = "Record ID is required";
+  private static final String KEY_RESPONSE = "response";
+  private static final String ERR_NO_AP_INVOICE_DOC_TYPE = "No AP Invoice document type found";
+  // ETP-4942 — same guard as CreateDraftInvoiceHandler#ensurePriceListResolved, surfaced as a
+  // 400 instead of letting a null Invoice.getPriceList() reach UpdatePricesAndAmounts and blow
+  // up as an unguarded 500 further down the native invoice-line-creation pipeline. The single-
+  // receipt path (createFromReceipt / createFromReceiptNoPo) never needed this because it
+  // always has either the linked order's price list or the BP's own purchase tariff to fall
+  // back on; the multi-receipt path can legitimately have neither (different POs, no common
+  // order, BP with no default tariff) until the user picks one explicitly.
+  private static final String ERR_PRICE_LIST_REQUIRED =
+      "No Price List could be resolved for this invoice: select a tariff or configure "
+          + "a default Price List for the Business Partner";
   @Inject
   InvoiceFromOrderSupport invoiceFromOrderSupport;
 
   @Inject
   TotalDiscountService totalDiscountService;
+
+  /**
+   * Routes the two goods-receipt-ONLY actions ({@code pendingInvoiceLines} GET,
+   * {@code productPrices} POST) that must never fire on {@code purchase-order} — this handler
+   * is also injected into {@code PurchaseOrderHeaderHandler}'s dispatch chain (for
+   * {@code createFromOrder}), and {@code NeoHeaderActionRouter.dispatch} takes the first
+   * non-null response. An ungated GET here would treat a {@code C_Order_ID} as an
+   * {@code M_InOut_ID} and would also shadow {@code currencyOptionsHandler}, which sits later
+   * in that same chain. Extracted out of {@link #handle} to keep its cognitive complexity down.
+   *
+   * @return the dispatched response, or {@code null} when neither action matches (caller falls
+   *     through to the {@code createPurchaseInvoice} handling below).
+   */
+  private NeoResponse dispatchGoodsReceiptOnlyAction(NeoContext context, String specName,
+      String fieldName, String method) {
+    if (!SPEC_GOODS_RECEIPT.equals(specName)) {
+      return null;
+    }
+    if (PENDING_LINES_ACTION.equals(fieldName) && "GET".equals(method)) {
+      return handlePendingLines(context);
+    }
+    if (PRODUCT_PRICES_ACTION.equals(fieldName) && "POST".equals(method)) {
+      return handleProductPrices(context);
+    }
+    return null;
+  }
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -86,21 +129,40 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       return null;
     }
 
-    if (!ACTION_NAME.equals(context.getFieldName()) || !"POST".equals(context.getHttpMethod())) {
+    String fieldName = context.getFieldName();
+    String method = context.getHttpMethod();
+
+    NeoResponse readOnlyOrPricingResponse =
+        dispatchGoodsReceiptOnlyAction(context, specName, fieldName, method);
+    if (readOnlyOrPricingResponse != null) {
+      return readOnlyOrPricingResponse;
+    }
+
+    if (!ACTION_NAME.equals(fieldName) || !"POST".equals(method)) {
       return null;
     }
 
     String recordId = context.getRecordId();
     if (StringUtils.isBlank(recordId)) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Record ID is required");
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
     }
 
     try {
       OBContext.setAdminMode(true);
       try {
-        Invoice invoice = SPEC_GOODS_RECEIPT.equals(specName)
-            ? createFromReceipt(recordId, context.getRequestBody())
-            : createFromOrder(recordId);
+        Invoice invoice;
+        if (SPEC_GOODS_RECEIPT.equals(specName)) {
+          JSONObject body = context.getRequestBody();
+          List<String> receiptIds = parseReceiptIds(body, recordId);
+          // A caller that sends no receiptIds (every existing single-receipt caller) falls
+          // back to [recordId] via parseReceiptIds, so this always resolves to the ORIGINAL,
+          // untouched createFromReceipt path — zero behaviour change for it.
+          invoice = receiptIds.size() == 1
+              ? createFromReceipt(receiptIds.get(0), body)
+              : createFromReceipts(receiptIds, body);
+        } else {
+          invoice = createFromOrder(recordId);
+        }
         OBDal.getInstance().flush();
         // Refresh to pick up trigger-generated documentNo and totals set by CreateInvoiceLinesFromProcess.
         OBDal.getInstance().getSession().refresh(invoice);
@@ -123,7 +185,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
         responseData.put("data", data);
 
         JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
+        wrapper.put(KEY_RESPONSE, responseData);
 
         return NeoResponse.created(wrapper);
       } finally {
@@ -246,7 +308,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
         JSONObject responseData = new JSONObject();
         responseData.put("data", data);
         JSONObject wrapper = new JSONObject();
-        wrapper.put("response", responseData);
+        wrapper.put(KEY_RESPONSE, responseData);
         return new NeoResponse(200, wrapper);
       } finally {
         OBContext.restorePreviousMode();
@@ -376,7 +438,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       invoiceDocType = findAPInvoiceDocType(order.getClient().getId());
     }
     if (invoiceDocType == null) {
-      throw new OBException("No AP Invoice document type found");
+      throw new OBException(ERR_NO_AP_INVOICE_DOC_TYPE);
     }
     return invoiceDocType;
   }
@@ -394,6 +456,298 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
         .list();
     return results.isEmpty() ? null : results.get(0);
   }
+
+  // ── Multi-receipt (bulk) invoice creation ──────────────────────────────────────────
+  //
+  // Mirrors CreateDraftInvoiceHandler's goods-shipment bulk path (createFromShipments):
+  // N selected receipts are combined into ONE invoice. Unlike that sales path, this one
+  // has no single-receipt-with-order short-circuit into createFromOrder — the existing
+  // createFromReceipt (untouched, below) already IS that single-receipt path, reached
+  // directly from handle() when receiptIds.size() == 1.
+
+  /**
+   * Extracts the list of receipt IDs from the request body. Reads the {@code receiptIds}
+   * JSON array when present; falls back to {@code recordId} so that every existing
+   * single-receipt caller (which sends no array at all) keeps invoicing exactly the record
+   * the URL already names.
+   */
+  protected List<String> parseReceiptIds(JSONObject body, String recordId) {
+    return MultiDocumentInvoiceSupport.parseDocumentIds(body, PARAM_RECEIPT_IDS, recordId, log);
+  }
+
+  /**
+   * Loads the {@link ShipmentInOut} receipts for the given IDs and validates that all belong
+   * to the same Business Partner — the one cross-document invariant a combined invoice
+   * cannot relax, since {@code C_Invoice.C_BPartner_ID} is a single column. This is the only
+   * server-side cross-document validation on this path: {@code docStatus == 'CO'} and "same
+   * currency" stay client-side only, matching the sales twin.
+   *
+   * @param receiptIds
+   *     list of {@code M_InOut_ID} values to load
+   * @return validated list of receipts in the same order as the input IDs
+   * @throws OBException
+   *     if any ID is not found, the list is empty, or the receipts span multiple
+   *     Business Partners
+   */
+  protected List<ShipmentInOut> loadAndValidateReceipts(List<String> receiptIds) {
+    return MultiDocumentInvoiceSupport.loadAndValidateSameBusinessPartner(receiptIds,
+        "Goods receipt not found: ", "No goods receipts provided",
+        "All goods receipts must belong to the same Business Partner");
+  }
+
+  /**
+   * Creates a draft (immediately confirmed — see {@link #handle}) AP Invoice from N goods
+   * receipts, combined into a single invoice header. Reached only when {@link #handle}
+   * resolves more than one receipt id; a single id is still routed to the untouched {@link
+   * #createFromReceipt}.
+   *
+   * <p>Every validation here runs BEFORE the first setter on the invoice header: the line
+   * selection is built and checked first (step order below), and only once it is known to be
+   * non-empty is the transient {@link Invoice} constructed. A handler that returns an error
+   * after a write still leaves that write for Hibernate to flush regardless of the HTTP
+   * status, so nothing may be created on a path that is about to throw.
+   *
+   * <p>Uses {@code ShipmentInOutLine.class} for the native line-creation process, never {@code
+   * OrderLine.class}: Core's order-line path re-derives quantities from EVERY completed
+   * receipt of that order line, not just the ones the user selected here — see {@link
+   * MultiDocumentInvoiceSupport} for the full rationale. This also means N=1 (via {@link
+   * #createFromReceipt}) and N&gt;=2 take genuinely different Core paths and can price/derive
+   * quantities differently; that is intentional, and the multi-receipt path is the more
+   * faithful one to "the invoice is built from the receipt(s), not the order".
+   *
+   * @param receiptIds
+   *     list of {@code M_InOut_ID} values to invoice (size &gt;= 2)
+   * @param body
+   *     optional request body — read for {@code lines} overrides and {@code priceListId}
+   * @return the newly persisted (pre-completion) {@link Invoice}
+   * @throws OBException
+   *     if the receipts are invalid (see {@link #loadAndValidateReceipts}), nothing is
+   *     pending to invoice, or no price list can be resolved
+   */
+  protected Invoice createFromReceipts(List<String> receiptIds, JSONObject body) {
+    List<ShipmentInOut> receipts = loadAndValidateReceipts(receiptIds);
+    ShipmentInOut first = receipts.get(0);
+
+    Map<String, BigDecimal> qtyOverrides = parseLineOverrides(body);
+
+    // Seed per-receipt pending quantities — the multi-receipt twin of the ETP-5381 seeding in
+    // createFromReceipt (line 426 area): a QUANTITY SOURCE, not a duplicate-invoice guard.
+    // Core's own pending-quantity logic (raised qtyinvoiced once the first invoice is
+    // confirmed) is what actually blocks a genuine re-invoice. Uses the throwing variant
+    // (computePendingQtyPerLineOrThrow) deliberately: the swallowing variant returns an empty
+    // map on a transient DB error exactly as it would for "nothing pending", and an empty map
+    // here makes resolveInOutLineQty fall back to the FULL movement quantity — silently
+    // producing a duplicate invoice instead of a visible failure.
+    Map<String, BigDecimal> pendingQtyMap = new HashMap<>();
+    for (ShipmentInOut r : receipts) {
+      pendingQtyMap.putAll(NeoInvoiceSupport.computePendingQtyPerLineOrThrow(r.getId(), true));
+    }
+
+    JSONArray selectedLines = MultiDocumentInvoiceSupport.buildInOutLineSelection(receipts, qtyOverrides,
+        pendingQtyMap, log);
+    if (selectedLines.length() == 0) {
+      throw new OBException("No hay líneas pendientes de facturar en estos albaranes de compra");
+    }
+
+    Invoice invoice = createInvoiceHeaderFromReceipts(first, receipts);
+    applyPriceListOverride(invoice, body);
+    ensurePriceListResolved(invoice);
+
+    OBDal.getInstance().save(invoice);
+    OBDal.getInstance().flush();
+
+    CreateInvoiceLinesFromProcess proc =
+        WeldUtils.getInstanceFromStaticBeanManager(CreateInvoiceLinesFromProcess.class);
+    proc.createInvoiceLinesFromDocumentLines(selectedLines, invoice, ShipmentInOutLine.class);
+
+    OBDal.getInstance().flush();
+    OBDal.getInstance().getSession().refresh(invoice);
+    // ETP-4726 pattern (see createFromReceipt/createFromReceiptNoPo): CreateInvoiceLinesFromProcess
+    // never populates Line_Gross_Amount / grossUnitPrice; only this call does.
+    getSupport().ensureLineGrossAmounts(invoice);
+
+    // Deliberately NOT called on this path, unlike createFromReceipt/createFromOrder:
+    // copyLineDiscountsFromOrder / applyOrderDiscountToInvoice / propagateOrderRateToInvoice
+    // are all scoped to ONE source order and would be meaningless (or wrong) when receipts
+    // span several orders or none. A bulk invoice therefore does not carry per-line
+    // % Descuento nor a header total-discount from the source order(s) — a known, accepted
+    // gap relative to the single-receipt flow, not an oversight.
+
+    return invoice;
+  }
+
+  /**
+   * Builds the transient invoice header for a multi-receipt invoice. Never sets {@code
+   * C_Invoice.C_Order_ID}: {@link NeoCommercialDocumentFactory#createInvoiceFromReceiptHeader}
+   * simply never sets it, which is the correct state for N&gt;1 (an ambiguous order link on a
+   * combined invoice). Core's own {@code UpdateInvoiceLineInformation} later sets it from the
+   * lines if — and only if — every line the native process created turns out to share one
+   * order; this method never has to decide that itself.
+   *
+   * <p>Financial fields follow a PO-preferred, Business-Partner-default fallback: when every
+   * receipt resolves to the SAME purchase order, that order's tariff/terms/payment method are
+   * used (mirroring the single-receipt-with-PO flow); otherwise (different POs, a mix of
+   * with/without PO, or no PO at all) the Business Partner's own purchase defaults are used,
+   * exactly like {@link #createFromReceiptNoPo}. A selection spanning different purchase
+   * orders is never rejected — same-Business-Partner is the only hard cross-document rule
+   * (see {@link #loadAndValidateReceipts}).
+   *
+   * @param first
+   *     the first receipt, used to derive client/org/BP/address/currency
+   * @param receipts
+   *     the full validated list, used to look for a common linked order
+   * @return a transient {@link Invoice} ready to be saved and populated with lines
+   */
+  protected Invoice createInvoiceHeaderFromReceipts(ShipmentInOut first, List<ShipmentInOut> receipts) {
+    BusinessPartner bp = first.getBusinessPartner();
+    Order commonOrder = resolveCommonOrder(receipts);
+
+    PriceList priceList;
+    PaymentTerm paymentTerms;
+    FIN_PaymentMethod paymentMethod;
+    DocumentType docType;
+    if (commonOrder != null) {
+      priceList = commonOrder.getPriceList();
+      paymentTerms = commonOrder.getPaymentTerms();
+      paymentMethod = commonOrder.getPaymentMethod();
+      docType = resolveAPInvoiceDocType(commonOrder);
+    } else {
+      priceList = bp != null ? bp.getPurchasePricelist() : null;
+      paymentTerms = bp != null ? bp.getPOPaymentTerms() : null;
+      paymentMethod = bp != null ? bp.getPOPaymentMethod() : null;
+      docType = findAPInvoiceDocType(first.getClient().getId());
+      if (docType == null) {
+        throw new OBException(ERR_NO_AP_INVOICE_DOC_TYPE);
+      }
+    }
+
+    // ETP-4028: the invoice's currency is always inherited from the receipt's own
+    // (editable-until-confirmed) currency, never from the linked order or price list.
+    Currency currency = first.getEtgoCurrency();
+
+    return NeoCommercialDocumentFactory.createInvoiceFromReceiptHeader(
+        first, docType, priceList, paymentTerms, paymentMethod, currency);
+  }
+
+  /**
+   * Returns the purchase order every one of {@code receipts} resolves to (directly via {@code
+   * C_Order_ID}, or via {@link #deriveOrderFromLines} for a header-less NEO-imported receipt),
+   * or {@code null} when they do not all resolve to the SAME one (different orders, a mix of
+   * with/without order, or none at all).
+   */
+  private Order resolveCommonOrder(List<ShipmentInOut> receipts) {
+    Order common = null;
+    for (ShipmentInOut r : receipts) {
+      Order o = r.getSalesOrder();
+      if (o == null) {
+        o = deriveOrderFromLines(r);
+      }
+      if (o == null) {
+        return null;
+      }
+      if (common == null) {
+        common = o;
+      } else if (!Objects.equals(common.getId(), o.getId())) {
+        return null;
+      }
+    }
+    return common;
+  }
+
+  /**
+   * Fails fast with a clear 400 when neither a common linked order, the Business Partner's
+   * default purchase tariff, nor an explicit {@code priceListId} override resolved a price
+   * list (ETP-4942 pattern — see {@link CreateDraftInvoiceHandler#ensurePriceListResolved}).
+   * Must run AFTER {@link #applyPriceListOverride}, which is the last chance to fill it in.
+   */
+  private void ensurePriceListResolved(Invoice invoice) {
+    if (invoice.getPriceList() == null) {
+      throw new OBException(ERR_PRICE_LIST_REQUIRED);
+    }
+  }
+
+  /**
+   * Returns the pending-to-invoice quantity per line for a single goods receipt — GET
+   * {@code /goods-receipt/goodsReceipt/{id}/action/pendingInvoiceLines}. Mirrors {@code
+   * CreateDraftInvoiceHandler#handlePendingLines}; used by the bulk toolbar action to preview
+   * the total pending units across a selection (one call per selected receipt, summed
+   * client-side) and, on the single-receipt form-view flow, to show the same subtitle the
+   * goods-shipment "Crear factura" confirm popup already shows.
+   *
+   * <p>Also returns each line's {@code product}/{@code salesOrderLine} — ETP-5410 follow-up:
+   * these used to require a SEPARATE {@code goodsReceiptLine?parentId=} request; they come from
+   * the same already-loaded {@link ShipmentInOut}, so returning them here removes one whole
+   * round trip from every "Crear factura" modal open.
+   */
+  protected NeoResponse handlePendingLines(NeoContext context) {
+    String recordId = context.getRecordId();
+    if (StringUtils.isBlank(recordId)) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        Map<String, BigDecimal> pendingMap = computePendingQtyPerLine(recordId, true);
+        ShipmentInOut doc = OBDal.getInstance().get(ShipmentInOut.class, recordId);
+        Map<String, String[]> lineDetails = MultiDocumentInvoiceSupport.loadLineProductAndOrderLine(doc);
+        JSONArray arr = new JSONArray();
+        for (Map.Entry<String, BigDecimal> entry : pendingMap.entrySet()) {
+          JSONObject item = new JSONObject();
+          item.put("lineId", entry.getKey());
+          item.put("pendingQty", entry.getValue());
+          String[] details = lineDetails.get(entry.getKey());
+          item.put("product", details != null && details[0] != null ? details[0] : JSONObject.NULL);
+          item.put("salesOrderLine", details != null && details[1] != null ? details[1] : JSONObject.NULL);
+          arr.put(item);
+        }
+        JSONObject responseData = new JSONObject();
+        responseData.put("data", arr);
+        // ETP-5410 follow-up: also resolve the price list HERE (order → BP → client default),
+        // so the caller's N=1 auto-select-Tarifa feature no longer needs a separate full
+        // single-record GET just for this one field — that GET was the single heaviest request
+        // in the "Crear factura" modal's opening waterfall.
+        if (doc != null) {
+          String resolvedPriceListId = MultiDocumentInvoiceSupport.resolveEffectivePriceListId(doc, false);
+          responseData.put("resolvedPriceListId", resolvedPriceListId != null ? resolvedPriceListId : JSONObject.NULL);
+        }
+        JSONObject wrapper = new JSONObject();
+        wrapper.put(KEY_RESPONSE, responseData);
+        return new NeoResponse(200, wrapper);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      log.error("Error computing pending invoice lines for receipt {}: {}", recordId, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
+    }
+  }
+
+  /**
+   * Prices a caller-supplied list of products against a price list — POST {@code
+   * /goods-receipt/goodsReceipt/{id}/action/productPrices}, body {@code {productIds: [...],
+   * priceListId: "..."}}. {@code recordId} is not used: this exists only so the "Crear factura"
+   * quote feature can price the handful of products its own pending lines actually reference,
+   * instead of running the generic product-browse selector (up to 500 rows) and discarding all
+   * but a few of them. Mirrors {@code CreateDraftInvoiceHandler#handleProductPrices}, including
+   * the POST-not-GET reasoning (ACTION-endpoint dispatch never threads query-string parameters
+   * into {@link NeoContext}).
+   *
+   * <p>Delegates to {@link MultiDocumentInvoiceSupport#buildProductPricesResponse}, shared
+   * byte-for-byte with the sales handler.
+   */
+  protected NeoResponse handleProductPrices(NeoContext context) {
+    return MultiDocumentInvoiceSupport.buildProductPricesResponse(context.getRequestBody(), log);
+  }
+
+  /**
+   * Overridable seam for {@link #handlePendingLines} (and usable by a future caller of {@link
+   * #createFromReceipts}), so a test can stub the pending-quantity computation without a DB.
+   */
+  protected Map<String, BigDecimal> computePendingQtyPerLine(String inOutId, boolean includeDrafts) {
+    return NeoInvoiceSupport.computePendingQtyPerLine(inOutId, includeDrafts);
+  }
+
+  // ── Single-receipt invoice creation (unchanged) ────────────────────────────────────
 
   /**
    * Creates a draft AP Invoice from a Goods Receipt. Quantities come from the
@@ -612,7 +966,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
 
     DocumentType docType = findAPInvoiceDocType(receipt.getClient().getId());
     if (docType == null) {
-      throw new OBException("No AP Invoice document type found");
+      throw new OBException(ERR_NO_AP_INVOICE_DOC_TYPE);
     }
     // Read before evicting receipt below — a lazy FK access on a detached entity
     // would throw LazyInitializationException.
@@ -684,7 +1038,7 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     return null;
   }
 
-  private Map<String, BigDecimal> parseLineOverrides(JSONObject body) {
+  protected Map<String, BigDecimal> parseLineOverrides(JSONObject body) {
     Map<String, BigDecimal> overrides = new HashMap<>();
     if (body == null) {
       return overrides;
