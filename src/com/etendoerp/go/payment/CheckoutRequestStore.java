@@ -287,17 +287,19 @@ public class CheckoutRequestStore {
   }
 
   /**
-   * Finds the newest purchase with a provider customer for the authenticated account.
+   * Finds the one purchase that backs the authenticated account's subscription.
    *
-   * <p>Both identity predicates are part of the query. The returned provider customer is never
-   * selected from a request parameter, which keeps the portal call account-scoped even when old
-   * checkout rows exist for another account.
+   * <p>It is the account's newest purchase carrying both a Stripe subscription and a Stripe
+   * customer. The Subscription page and the Customer Portal both resolve through here, so the
+   * subscription shown and the customer whose portal opens always come from the same row, however
+   * many purchases the account has. Both identity predicates are part of the query, and the
+   * provider ids are never taken from a request parameter.
    *
    * @param accountId immutable platform account id
    * @param accountEmail authenticated platform account email
-   * @return newest purchase with a nonblank Stripe customer, or {@code null}
+   * @return newest purchase with a nonblank Stripe subscription and customer, or {@code null}
    */
-  public CheckoutRequest findBillableForAccount(String accountId, String accountEmail) {
+  public CheckoutRequest findSubscriptionForAccount(String accountId, String accountEmail) {
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
     OBContext.setAdminMode(true);
     try {
@@ -307,6 +309,8 @@ public class CheckoutRequestStore {
       OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
           "as cr where cr.etendoGoAccount.id = :accountId"
               + " and lower(cr.accountEmail) = lower(:accountEmail)"
+              + " and cr.stripeSubscription is not null"
+              + " and length(trim(cr.stripeSubscription)) > 0"
               + " and cr.stripeCustomer is not null"
               + " and length(trim(cr.stripeCustomer)) > 0 order by cr.creationDate desc");
       query.setNamedParameter(PARAM_ACCOUNT_ID, StringUtils.trimToEmpty(accountId));

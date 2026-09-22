@@ -11,6 +11,7 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Locale;
 
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
@@ -21,6 +22,10 @@ import com.etendoerp.go.common.PublicUrlResolver;
 
 /** Provider adapter for the Stripe customer portal and live subscription display details. */
 public class StripeCustomerPortalService {
+  /** Bounds each provider call so a slow Stripe cannot hold a servlet thread indefinitely. */
+  static final int CONNECT_TIMEOUT_MS = 5_000;
+  static final int READ_TIMEOUT_MS = 10_000;
+
   /** Creates a short-lived Stripe Customer Portal session for the server-selected customer. */
   public JSONObject createSession(String customerId) throws IOException, JSONException {
     requireConfigured();
@@ -60,7 +65,8 @@ public class StripeCustomerPortalService {
     if (normalizedSubscriptionId == null) {
       throw new IllegalArgumentException("A Stripe subscription is required");
     }
-    HttpURLConnection connection = open("/v1/subscriptions/" + normalizedSubscriptionId
+    HttpURLConnection connection = open("/v1/subscriptions/"
+        + URLEncoder.encode(normalizedSubscriptionId, StandardCharsets.UTF_8.name())
         + "?expand%5B%5D=items.data.price.product", "GET");
     String response = read(connection);
     if (connection.getResponseCode() / 100 != 2) {
@@ -81,6 +87,8 @@ public class StripeCustomerPortalService {
     HttpURLConnection connection = (HttpURLConnection) new URL(CheckoutConfiguration.apiBaseUrl()
         + path).openConnection();
     connection.setRequestMethod(method);
+    connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
+    connection.setReadTimeout(READ_TIMEOUT_MS);
     connection.setRequestProperty("Authorization", "Bearer " + CheckoutConfiguration.secretKey());
     return connection;
   }
@@ -136,7 +144,7 @@ public class StripeCustomerPortalService {
       this.cancelAtPeriodEnd = cancelAtPeriodEnd;
     }
 
-    private static SubscriptionDetail fromProviderJson(JSONObject subscription)
+    static SubscriptionDetail fromProviderJson(JSONObject subscription)
         throws JSONException, IOException {
       JSONObject itemsObject = subscription.optJSONObject("items");
       JSONArray items = itemsObject == null ? null : itemsObject.optJSONArray("data");
@@ -156,10 +164,12 @@ public class StripeCustomerPortalService {
       if (StringUtils.isBlank(plan)) {
         plan = StringUtils.trimToEmpty(price.optString("id", ""));
       }
-      long renewalEpoch = subscription.optLong("current_period_end", 0L);
-      String renewalAt = renewalEpoch > 0 ? Instant.ofEpochSecond(renewalEpoch).toString() : null;
+      // Top level before API 2025-03-31, on the subscription item from then on.
+      Instant renewal = SubscriptionLifecycleApplier.subscriptionPeriodBoundary(subscription,
+          SubscriptionLifecycleApplier.CURRENT_PERIOD_END);
+      String renewalAt = renewal == null ? null : renewal.toString();
       return new SubscriptionDetail(plan, price.optLong("unit_amount", 0L),
-          StringUtils.trimToEmpty(price.optString("currency", "")),
+          StringUtils.trimToEmpty(price.optString("currency", "")).toUpperCase(Locale.ROOT),
           StringUtils.trimToEmpty(subscription.optString("status", "")), renewalAt,
           subscription.optBoolean("cancel_at_period_end", false));
     }

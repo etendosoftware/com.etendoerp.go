@@ -6,8 +6,12 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -30,6 +34,9 @@ import javax.servlet.http.HttpServletResponse;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.After;
 import org.junit.Test;
+import org.mockito.InOrder;
+import org.mockito.MockedStatic;
+import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
 
 import com.etendoerp.go.rest.EtendoGoJwtServlet;
@@ -174,6 +181,171 @@ public class SubscriptionLifecycleCorrelationTest {
     verify(lifecycle).updateSubscriptionStatus("client-replay",
         EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, PERIOD_END);
     verify(eventStore).markApplied("evt-replay");
+  }
+
+  // ===================== ETP-5443 REVIEW fixes =====================
+
+  private static final long CREATED = 1793800000L;
+
+  /** API 2025-03-31 and later: the invoice names its subscription only under parent. */
+  @Test
+  public void invoiceWithSubscriptionOnlyUnderParentResolvesThroughIt() throws Exception {
+    CheckoutRequestStore requestStore = mock(CheckoutRequestStore.class);
+    BillingEventStore eventStore = mock(BillingEventStore.class);
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    CheckoutRequest purchase = purchaseWithClient("client-parent");
+    when(requestStore.findByStripeSubscription("sub-parent")).thenReturn(purchase);
+    when(lifecycle.updateSubscriptionStatus("client-parent",
+        EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, PERIOD_END)).thenReturn(true);
+
+    EtendoGoJwtServlet servlet = servlet(requestStore, eventStore, lifecycle);
+    invokeLifecycle(servlet, "evt-parent", "invoice.payment_failed", new JSONObject(
+        "{\"created\":" + CREATED + ",\"data\":{\"object\":{\"customer\":\"cus-parent\","
+            + "\"period_end\":1793750400,\"parent\":{\"subscription_details\":{"
+            + "\"subscription\":\"sub-parent\"}}}}}"));
+
+    verify(requestStore).findByStripeSubscription("sub-parent");
+    verify(requestStore, never()).findByStripeCustomer(anyString());
+    verify(lifecycle).updateSubscriptionStatus("client-parent",
+        EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, PERIOD_END);
+    verify(eventStore).markApplied("evt-parent");
+  }
+
+  @Test
+  public void eventOlderThanTheStoredOneIsIgnoredAsStaleWithoutWriting() throws Exception {
+    CheckoutRequestStore requestStore = mock(CheckoutRequestStore.class);
+    BillingEventStore eventStore = mock(BillingEventStore.class);
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    CheckoutRequest purchase = purchaseWithClient("client-stale");
+    when(requestStore.findByStripeSubscription("sub-stale")).thenReturn(purchase);
+    when(lifecycle.readSubscriptionState("client-stale")).thenReturn(
+        new SubscriptionLifecycleApplier.StoredState(
+            EnvironmentAccessPolicy.SubscriptionStatus.CURRENT, null,
+            Instant.ofEpochSecond(CREATED + 60L)));
+
+    EtendoGoJwtServlet servlet = servlet(requestStore, eventStore, lifecycle);
+    invokeLifecycle(servlet, "evt-stale", "invoice.payment_failed",
+        paymentFailedEventCreated("sub-stale", "cus-stale", CREATED));
+
+    verify(eventStore).markIgnored("evt-stale", "stale event");
+    verify(lifecycle, never()).updateSubscriptionStatus(anyString(), any(), any());
+    verify(lifecycle, never()).recordSubscriptionEventAt(anyString(), any());
+    verify(eventStore, never()).markApplied(anyString());
+  }
+
+  /** The stored authoritative due date wins over the subscription payload's period. */
+  @Test
+  public void subscriptionUpdateKeepsTheStoredPastDueDueDate() throws Exception {
+    CheckoutRequestStore requestStore = mock(CheckoutRequestStore.class);
+    BillingEventStore eventStore = mock(BillingEventStore.class);
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    Instant stored = PERIOD_END.minusSeconds(86400L);
+    CheckoutRequest purchase = purchaseWithClient("client-keep");
+    when(requestStore.findByStripeSubscription("sub-keep")).thenReturn(purchase);
+    when(lifecycle.readSubscriptionState("client-keep")).thenReturn(
+        new SubscriptionLifecycleApplier.StoredState(
+            EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, stored, null));
+    when(lifecycle.updateSubscriptionStatus("client-keep",
+        EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, stored)).thenReturn(true);
+
+    EtendoGoJwtServlet servlet = servlet(requestStore, eventStore, lifecycle);
+    invokeLifecycle(servlet, "evt-keep", "customer.subscription.updated", new JSONObject(
+        "{\"created\":" + CREATED + ",\"data\":{\"object\":{\"id\":\"sub-keep\","
+            + "\"status\":\"past_due\",\"current_period_start\":1793750400,"
+            + "\"current_period_end\":1796428800}}}"));
+
+    verify(lifecycle).updateSubscriptionStatus("client-keep",
+        EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, stored);
+    verify(eventStore).markApplied("evt-keep");
+  }
+
+  @Test
+  public void appliedEventRecordsItsCreatedInstantBeforeMarkingApplied() throws Exception {
+    CheckoutRequestStore requestStore = mock(CheckoutRequestStore.class);
+    BillingEventStore eventStore = mock(BillingEventStore.class);
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    CheckoutRequest purchase = purchaseWithClient("client-order");
+    when(requestStore.findByStripeSubscription("sub-order")).thenReturn(purchase);
+    when(lifecycle.updateSubscriptionStatus("client-order",
+        EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, PERIOD_END)).thenReturn(true);
+
+    EtendoGoJwtServlet servlet = servlet(requestStore, eventStore, lifecycle);
+    invokeLifecycle(servlet, "evt-order", "invoice.payment_failed",
+        paymentFailedEventCreated("sub-order", "cus-order", CREATED));
+
+    InOrder order = inOrder(lifecycle, eventStore);
+    order.verify(lifecycle).updateSubscriptionStatus("client-order",
+        EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, PERIOD_END);
+    order.verify(lifecycle).recordSubscriptionEventAt("client-order",
+        Instant.ofEpochSecond(CREATED));
+    order.verify(eventStore).markApplied("evt-order");
+  }
+
+  @Test
+  public void failedStatusWriteRollsBackThenMarksFailedWithoutRecordingTheEvent()
+      throws Exception {
+    CheckoutRequestStore requestStore = mock(CheckoutRequestStore.class);
+    BillingEventStore eventStore = mock(BillingEventStore.class);
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    CheckoutRequest purchase = purchaseWithClient("client-fail");
+    when(requestStore.findByStripeSubscription("sub-fail")).thenReturn(purchase);
+    when(lifecycle.updateSubscriptionStatus("client-fail",
+        EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, PERIOD_END)).thenReturn(false);
+    OBDal dal = mock(OBDal.class);
+
+    EtendoGoJwtServlet servlet = servlet(requestStore, eventStore, lifecycle);
+    try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      invokeLifecycle(servlet, "evt-fail", "invoice.payment_failed",
+          paymentFailedEventCreated("sub-fail", "cus-fail", CREATED));
+    }
+
+    InOrder order = inOrder(dal, eventStore);
+    order.verify(dal).rollbackAndClose();
+    order.verify(eventStore).markFailed("evt-fail", "Could not store the subscription projection");
+    verify(eventStore, never()).markApplied(anyString());
+    verify(lifecycle, never()).recordSubscriptionEventAt(anyString(), any());
+  }
+
+  @Test
+  public void eventInstantWriteFailureThroughWebhookAnswers500AndMarksFailed() throws Exception {
+    System.setProperty(WEBHOOK_SECRET_PROPERTY, WEBHOOK_SECRET);
+    CheckoutRequestStore requestStore = mock(CheckoutRequestStore.class);
+    BillingEventStore eventStore = mock(BillingEventStore.class);
+    TenantEnvironmentLifecycleService lifecycle = mock(TenantEnvironmentLifecycleService.class);
+    CheckoutRequest purchase = purchaseWithClient("client-throw");
+    when(requestStore.findByStripeSubscription("sub-throw")).thenReturn(purchase);
+    when(lifecycle.updateSubscriptionStatus("client-throw",
+        EnvironmentAccessPolicy.SubscriptionStatus.PAST_DUE, PERIOD_END)).thenReturn(true);
+    doThrow(new IllegalStateException("Client not found while recording a subscription event"))
+        .when(lifecycle).recordSubscriptionEventAt("client-throw", Instant.ofEpochSecond(CREATED));
+    OBDal dal = mock(OBDal.class);
+
+    EtendoGoJwtServlet servlet = servlet(requestStore, eventStore, lifecycle);
+    setField(servlet, "checkoutWebhookProcessor", new CheckoutWebhookProcessor(eventId -> true,
+        300));
+    String payload = "{\"id\":\"evt-throw\",\"type\":\"invoice.payment_failed\","
+        + "\"created\":" + CREATED + ",\"data\":{\"object\":{\"subscription\":\"sub-throw\","
+        + "\"customer\":\"cus-throw\",\"period_end\":1793750400}}}";
+    ResponseCapture capture;
+    try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class)) {
+      dalStatic.when(OBDal::getInstance).thenReturn(dal);
+      capture = deliver(servlet, payload);
+    }
+
+    assertEquals(500, capture.status);
+    InOrder order = inOrder(dal, eventStore);
+    order.verify(dal).rollbackAndClose();
+    order.verify(eventStore).markFailed(eq("evt-throw"),
+        startsWith("Handler failed while applying the event: java.lang.IllegalStateException"));
+    verify(eventStore, never()).markApplied(anyString());
+  }
+
+  private static JSONObject paymentFailedEventCreated(String subscriptionId, String customerId,
+      long created) throws Exception {
+    JSONObject event = paymentFailedEvent(subscriptionId, customerId);
+    event.put("created", created);
+    return event;
   }
 
   private static EtendoGoJwtServlet servlet(CheckoutRequestStore requestStore,

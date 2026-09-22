@@ -708,76 +708,84 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     });
   }
 
-  /** Returns the authenticated account's live subscription detail plus stored grace state. */
+  /**
+   * Returns the authenticated account's live subscription detail plus stored grace state.
+   *
+   * <p>Only the provider call maps an {@link IllegalStateException} to 503: that is where the
+   * Stripe "not configured" condition is raised. The same exception from the stored-state lookup
+   * is a real server fault and reaches {@code runWithPlatformAccount}'s 500 path.
+   */
   private void handleBillingSubscription(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     runWithPlatformAccount(request, response, "billing-subscription", account -> {
-      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-      OBContext.setAdminMode(true);
-      try {
-        CheckoutRequest purchase = null;
-        for (CheckoutRequest candidate : checkoutRequestStore.findForAccount(account.getId(),
-            account.getEmail())) {
-          if (StringUtils.isNotBlank(candidate.getStripeSubscription())) {
-            purchase = candidate;
-            break;
-          }
-        }
-        if (purchase == null) {
-          JSONObject result = new JSONObject();
-          result.put("hasSubscription", false);
-          writeResponse(response, HttpServletResponse.SC_OK, result);
-          return;
-        }
-
-        StripeCustomerPortalService.SubscriptionDetail live =
-            stripeCustomerPortalService.retrieveSubscription(purchase.getStripeSubscription());
-        TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot = null;
-        if (purchase.getCreatedClient() != null) {
-          snapshot = tenantEnvironmentLifecycleService.resolve(purchase.getCreatedClient().getId());
-        }
-        JSONObject result = buildBillingSubscriptionJson(live, snapshot);
+      CheckoutRequest purchase = checkoutRequestStore.findSubscriptionForAccount(account.getId(),
+          account.getEmail());
+      if (purchase == null) {
+        JSONObject result = new JSONObject();
+        result.put("hasSubscription", false);
         writeResponse(response, HttpServletResponse.SC_OK, result);
+        return;
+      }
+      StripeCustomerPortalService.SubscriptionDetail live;
+      try {
+        live = stripeCustomerPortalService.retrieveSubscription(purchase.getStripeSubscription());
       } catch (IllegalStateException e) {
         writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
             CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
+        return;
       } catch (IOException e) {
         log.error("Could not load account billing subscription", e);
         writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
             "Unable to load billing subscription", "Unable to load billing subscription");
-      } catch (JSONException e) {
-        log.error("JSON error building billing subscription", e);
-        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+        return;
+      }
+      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+      OBContext.setAdminMode(true);
+      try {
+        TenantEnvironmentLifecycleService.EnvironmentSnapshot snapshot = null;
+        if (purchase.getCreatedClient() != null) {
+          snapshot = tenantEnvironmentLifecycleService.resolve(purchase.getCreatedClient().getId());
+        }
+        writeResponse(response, HttpServletResponse.SC_OK,
+            buildBillingSubscriptionJson(live, snapshot));
       } finally {
         OBContext.restorePreviousMode();
       }
     });
   }
 
-  /** Creates a portal session using only the authenticated account's stored customer id. */
+  /**
+   * Creates a portal session using only the authenticated account's stored customer id.
+   *
+   * <p>The purchase is resolved exactly as the Subscription page resolves it, so the portal always
+   * opens for the customer of the subscription the page shows.
+   */
   private void handleBillingPortal(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     runWithPlatformAccount(request, response, "billing-portal", account -> {
-      CheckoutRequest purchase = checkoutRequestStore.findBillableForAccount(account.getId(),
+      CheckoutRequest purchase = checkoutRequestStore.findSubscriptionForAccount(account.getId(),
           account.getEmail());
       if (purchase == null || StringUtils.isBlank(purchase.getStripeCustomer())) {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, "NO_SUBSCRIPTION",
             "No subscription for this account", "No subscription for this account");
         return;
       }
+      JSONObject session;
       try {
-        JSONObject session = stripeCustomerPortalService.createSession(purchase.getStripeCustomer());
-        JSONObject result = new JSONObject();
-        result.put("url", session.optString("url", ""));
-        writeResponse(response, HttpServletResponse.SC_OK, result);
+        session = stripeCustomerPortalService.createSession(purchase.getStripeCustomer());
       } catch (IllegalStateException e) {
         writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
             CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
+        return;
       } catch (IOException e) {
         log.error("Could not create a billing portal session", e);
         writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
             "Unable to open the billing portal", "Unable to open the billing portal");
+        return;
       }
+      JSONObject result = new JSONObject();
+      result.put("url", session.optString("url", ""));
+      writeResponse(response, HttpServletResponse.SC_OK, result);
     });
   }
 
@@ -911,6 +919,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       // phrase only. A provider message can quote payload fragments, and FAILURE_REASON is
       // required to stay operationally safe (no customer or card data) — see BillingEventStore.
       log.error("Checkout webhook event '{}' ({}) could not be applied", eventId, type, e);
+      // Discard whatever the handler left pending, so the FAILED write below does not commit a
+      // partial projection with it. The claim row was committed on its own and is unaffected.
+      EtendoGoDalHelper.rollbackDalChanges("checkout webhook event", e, log);
       billingEventStore.markFailed(eventId,
           "Handler failed while applying the event: " + e.getClass().getName());
       writeWebhookFailed(response);
@@ -968,18 +979,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * session. Invoice events are keyed by the subscription field, while subscription events are
    * keyed by the object id; both fall back to the customer when the subscription lookup misses.
    * An event that resolves to no environment is ignored, never blocking.
+   *
+   * <p>The event is evaluated twice: once without state, so a malformed or unhandled event is
+   * ignored before any lookup, and once against the environment's stored projection, which makes
+   * an out-of-order older event stale and keeps an authoritative {@code PAST_DUE} due date.
+   *
+   * <p>The status, due date and event instant are written in the session that
+   * {@code markApplied} commits, so they land together. When a write fails the session is rolled
+   * back before the row is marked {@code FAILED}; otherwise that commit would persist a partial
+   * projection. The claim row itself was committed by the claim and survives the rollback.
    */
   private void applySubscriptionLifecycle(String eventId, String type, JSONObject event) {
-    SubscriptionEventOutcome outcome = subscriptionLifecycleApplier.evaluate(type, event);
-    if (outcome.isIgnored()) {
-      billingEventStore.markIgnored(eventId, outcome.reason());
+    SubscriptionEventOutcome screened = subscriptionLifecycleApplier.evaluate(type, event);
+    if (screened.isIgnored()) {
+      billingEventStore.markIgnored(eventId, screened.reason());
       return;
     }
     JSONObject data = event.optJSONObject("data");
     JSONObject object = data == null ? null : data.optJSONObject("object");
-    String subscriptionId = type.startsWith("customer.subscription.")
-        ? object.optString("id", "")
-        : object.optString("subscription", "");
+    String subscriptionId = SubscriptionLifecycleApplier.subscriptionIdOf(type, object);
     CheckoutRequest purchase = checkoutRequestStore.findByStripeSubscription(subscriptionId);
     if (purchase == null) {
       purchase = checkoutRequestStore.findByStripeCustomer(object.optString("customer", ""));
@@ -988,12 +1006,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       billingEventStore.markIgnored(eventId, "unresolved subscription");
       return;
     }
-    boolean stored = tenantEnvironmentLifecycleService.updateSubscriptionStatus(
-        purchase.getCreatedClient().getId(), outcome.status(), outcome.dueAt());
+    String clientId = purchase.getCreatedClient().getId();
+    SubscriptionEventOutcome outcome = subscriptionLifecycleApplier.evaluate(type, event,
+        tenantEnvironmentLifecycleService.readSubscriptionState(clientId));
+    if (outcome.isIgnored()) {
+      billingEventStore.markIgnored(eventId, outcome.reason());
+      return;
+    }
+    boolean stored = tenantEnvironmentLifecycleService.updateSubscriptionStatus(clientId,
+        outcome.status(), outcome.dueAt());
     if (!stored) {
+      EtendoGoDalHelper.rollbackDalChanges("subscription lifecycle event", null, log);
       billingEventStore.markFailed(eventId, "Could not store the subscription projection");
       return;
     }
+    tenantEnvironmentLifecycleService.recordSubscriptionEventAt(clientId,
+        SubscriptionLifecycleApplier.eventCreatedAt(event));
     billingEventStore.markApplied(eventId);
     log.info("Subscription lifecycle event '{}' ({}) applied", eventId, type);
   }
