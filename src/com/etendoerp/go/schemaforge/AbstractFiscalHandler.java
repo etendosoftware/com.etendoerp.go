@@ -271,6 +271,43 @@ abstract class AbstractFiscalHandler {
   protected abstract String getModelKey();
 
   /**
+   * Functional shape for the per-model work {@link #runDispatch} wraps — one {@code dispatch()}
+   * override's whole if/else entity chain, as a lambda.
+   */
+  @FunctionalInterface
+  protected interface DispatchBody {
+    void run() throws Exception;
+  }
+
+  /**
+   * Runs {@code body} (a {@code dispatch()} override's entity if/else chain), translating any
+   * {@link AlreadySubmittedException} into a clean 409 and any other exception into a
+   * {@link FiscalHandlerException} — the exact try/catch chain every {@code dispatch()} override
+   * needs. Hoisted here (ETP-5438, SonarQube java:S1192) once {@link Fiscal303BoxesHandler#dispatch}
+   * and {@link Fiscal349BoxesHandler#dispatch} both needed the identical chain: CPD flagged it as a
+   * duplicated block spanning the catch clauses plus the two model-fixed wrapper methods
+   * immediately below them (both subclasses' {@code guardNotAlreadySubmitted(orgId, year, period)}
+   * and {@code getModelKey()} — CPD normalizes literals, so the two differ only by the AEAT model
+   * code/URL segment and still matched as one duplicate).
+   */
+  protected void runDispatch(HttpServletResponse response, DispatchBody body)
+      throws FiscalHandlerException {
+    try {
+      body.run();
+    } catch (AlreadySubmittedException e) {
+      try {
+        servlet.sendError(response, HttpServletResponse.SC_CONFLICT, e.getMessage());
+      } catch (Exception ioEx) {
+        throw new FiscalHandlerException(ioEx);
+      }
+    } catch (FiscalHandlerException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new FiscalHandlerException(e);
+    }
+  }
+
+  /**
    * Replaces the persisted AEAT validation rows ({@code ETGO_Fiscal_Decl_Incident}) for a
    * declaration: deletes every existing row for it, then inserts one row per entry in
    * {@code errors} (severity {@code block}) followed by one row per entry in {@code warnings}

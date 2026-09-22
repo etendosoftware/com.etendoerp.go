@@ -114,7 +114,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
   @Override
   protected void dispatch(String entityName, String orgId, int year, String period,
       HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {
-    try {
+    runDispatch(response, () -> {
       if (OPERATORS.equals(entityName)) {
         guardNotAlreadySubmitted(orgId, year, period);
         JSONObject result = computeOperators(orgId, year, period);
@@ -131,17 +131,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
         long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
         handleModified(orgId, year, period, new Date(sinceMs), response);
       }
-    } catch (AlreadySubmittedException e) {
-      try {
-        servlet.sendError(response, HttpServletResponse.SC_CONFLICT, e.getMessage());
-      } catch (Exception ioEx) {
-        throw new FiscalHandlerException(ioEx);
-      }
-    } catch (FiscalHandlerException e) {
-      throw e;
-    } catch (Exception e) {
-      throw new FiscalHandlerException(e);
-    }
+    });
   }
 
   /**
