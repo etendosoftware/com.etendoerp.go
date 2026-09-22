@@ -80,6 +80,37 @@ public class DocumentPostingService {
   private static final String LANGUAGE_ES_ES = "es_ES";
 
   /**
+   * {@code AcctServer#tableName} value for Goods Movements (ETP-5436) — matches the literal
+   * {@code acct.tableName = "M_Movement"} assignment in {@code AcctServer.get()}'s {@code case
+   * 323} branch (core {@code AcctServer.java}), which is the only place this string is defined.
+   */
+  private static final String TABLE_M_MOVEMENT = "M_Movement";
+
+  /**
+   * EN/ES text for {@code STATUS_DocumentDisabled} ('D') on a Goods Movement specifically
+   * (ETP-5436). Core's {@code DocMovement#getDocumentConfirmation} sets this status when none of
+   * the movement's lines yet carry an {@code M_Transaction} with a non-zero
+   * {@code transactionCost} — i.e. the background cost-calculation process has not run for this
+   * movement yet. Core's own message for 'D' is the generic, table-agnostic "Document disabled"
+   * (surfaced client-side as {@code postedStatusDocumentDisabled}), which gives the user no way
+   * to act on it. Hardcoded EN/ES here rather than a new {@code AD_MESSAGE} — same reasoning as
+   * {@link BpGroupAccountColumn#label(String)} just above: this module has no
+   * {@code AD_MESSAGE_TRL} translation pipeline of its own, so a brand-new message row would
+   * silently stay English-only for es_ES clients until a translation was added by hand elsewhere.
+   * Scoped to {@link #TABLE_M_MOVEMENT} only — 'D' means a structurally different precondition on
+   * every other {@code Doc*} subclass ({@code DocFINPayment}, {@code DocInventory},
+   * {@code DocGLJournal}, …), so a table-agnostic rewrite here would misinform every other
+   * document type that can legitimately reach 'D'.
+   */
+  private static final String MSG_MOVEMENT_COST_NOT_CALCULATED_EN =
+      "This movement cannot be posted yet: the cost engine has not calculated the cost of its "
+          + "transactions. Wait for the cost calculation background process to finish, then try again.";
+  private static final String MSG_MOVEMENT_COST_NOT_CALCULATED_ES =
+      "Este movimiento todavía no puede contabilizarse: el motor de costes aún no calculó el "
+          + "coste de sus transacciones. Espere a que finalice el proceso de cálculo de costes e "
+          + "intente contabilizar de nuevo.";
+
+  /**
    * The {@code C_BP_Group_Acct} columns relevant to this app's document types (ETP-5175) — a
    * curated subset, not every nullable column on that table. {@code NotInvoicedReceivables_Acct}
    * (getter {@code getNonInvoicedReceivables()}) was deliberately dropped from this list
@@ -283,7 +314,19 @@ public class DocumentPostingService {
         message = localizedBase;
       }
     }
+    if (AcctServer.STATUS_DocumentDisabled.equals(acct.getStatus())
+        && TABLE_M_MOVEMENT.equals(acct.tableName)) {
+      message = movementCostNotCalculatedMessage();
+    }
     return enrichWithFailingEntity(acct, message);
+  }
+
+  /** See {@link #MSG_MOVEMENT_COST_NOT_CALCULATED_EN} for why this is hardcoded, not an {@code AD_MESSAGE}. */
+  private static String movementCostNotCalculatedMessage() {
+    String lang = OBContext.getOBContext().getLanguage().getLanguage();
+    return LANGUAGE_ES_ES.equals(lang)
+        ? MSG_MOVEMENT_COST_NOT_CALCULATED_ES
+        : MSG_MOVEMENT_COST_NOT_CALCULATED_EN;
   }
 
   /**
