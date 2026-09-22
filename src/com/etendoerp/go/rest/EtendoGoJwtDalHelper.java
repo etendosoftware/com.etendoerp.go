@@ -122,6 +122,14 @@ final class EtendoGoJwtDalHelper {
     return query.uniqueResult();
   }
 
+  static Account findActiveAccountById(String accountId) {
+    if (accountId == null) {
+      return null;
+    }
+    Account account = OBDal.getInstance().get(Account.class, accountId);
+    return account != null && account.isActive() ? account : null;
+  }
+
   static Account findActiveAccountByToken(String token) {
     OBQuery<Account> query = OBDal.getInstance().createQuery(Account.class,
         ACCOUNT_QUERY + "sessionToken = :" + PARAM_TOKEN + ACTIVE_ACCOUNT_FILTER);
@@ -129,6 +137,11 @@ final class EtendoGoJwtDalHelper {
     query.setFilterOnReadableClients(false);
     query.setFilterOnReadableOrganization(false);
     return query.uniqueResult();
+  }
+
+  /** Resolves only an account session token; environment JWTs are rejected for billing mutations. */
+  static Account findActiveAccountByPlatformToken(String token) {
+    return findActiveAccountByToken(token);
   }
 
   /** Resolves either an account session token or the active environment JWT to its account. */
@@ -532,8 +545,12 @@ final class EtendoGoJwtDalHelper {
   /**
    * Returns the account's only free tenant when it is unambiguous, for demo/productive linking.
    * Multiple free tenants are deliberately treated as unresolved rather than guessed.
+   *
+   * @param accountEmail authenticated platform account email
+   * @return the only free client id, or {@code null} when the account has zero or multiple free
+   *     tenants
    */
-  static String findOnlyFreeTenantIdByAccountEmail(String accountEmail) {
+  public static String findOnlyFreeTenantIdByAccountEmail(String accountEmail) {
     Set<String> freeClientIds = new HashSet<>();
     for (User environmentUser : findEnvironmentUsersByAccountEmail(accountEmail)) {
       String clientId = environmentUser.getClient().getId();
