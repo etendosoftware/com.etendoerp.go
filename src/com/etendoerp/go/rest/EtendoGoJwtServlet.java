@@ -581,7 +581,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       CheckoutRequest activePurchase = checkoutRequestStore
           .findActiveForAccountAndClientName(account.getId(), account.getEmail(), clientName);
       if (activePurchase != null) {
-        handleExistingBillingPurchase(request, response, account, activePurchase);
+        handleExistingBillingPurchase(response, account, activePurchase);
         return;
       }
       // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
@@ -601,9 +601,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     });
   }
 
-  private void handleExistingBillingPurchase(HttpServletRequest request,
-      HttpServletResponse response, Account account, CheckoutRequest activePurchase)
-      throws IOException, JSONException {
+  private void handleExistingBillingPurchase(HttpServletResponse response, Account account,
+      CheckoutRequest activePurchase) throws IOException, JSONException {
     String status = activePurchase.getCheckoutRequestStatus();
     if ("CREATING".equals(status) || "CREATED".equals(status)) {
       // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.

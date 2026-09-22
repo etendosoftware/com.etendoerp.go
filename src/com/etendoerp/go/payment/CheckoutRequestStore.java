@@ -525,28 +525,7 @@ public class CheckoutRequestStore {
         return;
       }
       if (claimAttempt != null) {
-        int completed = OBDal.getInstance().getSession()
-            .createQuery(HQL_UPDATE + CheckoutRequest.ENTITY_NAME + " cr"
-                + "   set cr.checkoutRequestStatus = :provisioned,"
-                + "       cr.createdClient = :createdClient,"
-                + "       cr.provisionedAt = :now,"
-                + "       cr.updated = :now"
-                + " where cr.request = :requestId"
-                + "   and cr.checkoutRequestStatus = :" + HQL_PROVISIONING
-                + "   and cr.provisioningAttempts = :claimAttempt")
-            .setParameter("provisioned", STATUS_PROVISIONED)
-            .setParameter(HQL_PROVISIONING, STATUS_PROVISIONING)
-            .setParameter("createdClient", StringUtils.isBlank(createdClientId)
-                ? null : OBDal.getInstance().get(Client.class, createdClientId))
-            .setParameter("now", new Date())
-            .setParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId))
-            .setParameter("claimAttempt", claimAttempt)
-            .executeUpdate();
-        if (completed != 1) {
-          log.warn("Ignoring stale provisioning completion for checkout request '{}'", requestId);
-          return;
-        }
-        flushAndCommit();
+        completeFencedProvisioning(requestId, createdClientId, claimAttempt);
         return;
       }
       if (request.getCreatedClient() == null && StringUtils.isNotBlank(createdClientId)) {
@@ -558,6 +537,44 @@ public class CheckoutRequestStore {
       OBDal.getInstance().save(request);
       flushAndCommit();
     });
+  }
+
+
+  /**
+   * Completes a provisioning claim with a fenced conditional update.
+   *
+   * <p>Extracted from {@link #recordProvisioned} so neither path carries the other's
+   * branching: the update only applies while the row still belongs to {@code claimAttempt},
+   * so a lease that was taken over by a later attempt leaves the row untouched.
+   *
+   * @param requestId checkout request id
+   * @param createdClientId provisioned client id, blank when none was created
+   * @param claimAttempt fencing token that performed the work
+   */
+  private void completeFencedProvisioning(String requestId, String createdClientId,
+      Long claimAttempt) {
+    int completed = OBDal.getInstance().getSession()
+        .createQuery(HQL_UPDATE + CheckoutRequest.ENTITY_NAME + " cr"
+            + "   set cr.checkoutRequestStatus = :provisioned,"
+            + "       cr.createdClient = :createdClient,"
+            + "       cr.provisionedAt = :now,"
+            + "       cr.updated = :now"
+            + " where cr.request = :requestId"
+            + "   and cr.checkoutRequestStatus = :" + HQL_PROVISIONING
+            + "   and cr.provisioningAttempts = :claimAttempt")
+        .setParameter("provisioned", STATUS_PROVISIONED)
+        .setParameter(HQL_PROVISIONING, STATUS_PROVISIONING)
+        .setParameter("createdClient", StringUtils.isBlank(createdClientId)
+            ? null : OBDal.getInstance().get(Client.class, createdClientId))
+        .setParameter("now", new Date())
+        .setParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId))
+        .setParameter("claimAttempt", claimAttempt)
+        .executeUpdate();
+    if (completed != 1) {
+      log.warn("Ignoring stale provisioning completion for checkout request '{}'", requestId);
+      return;
+    }
+    flushAndCommit();
   }
 
   private long provisioningLeaseMillis() {
