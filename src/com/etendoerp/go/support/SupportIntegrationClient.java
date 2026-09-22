@@ -25,7 +25,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -70,24 +69,15 @@ final class SupportIntegrationClient {
       "support.adk.url", "ETGO_SUPPORT_ADK_URL", "");
   private static final String ADK_APP_NAME = "agent";
 
-  // Same hostname → environment-name mapping as the frontend's SENTRY_ENV_MAP
-  // (tools/app-shell/src/lib/sentry.js), so both sides report identical environment strings
-  // for the same deployment. Forwarded to the ADK session so the Jira ticket it creates can
-  // carry it as a custom field for Mixpanel (mirrors client_id above).
-  private static final Map<String, String> ENVIRONMENT_NAME_BY_HOSTNAME = Map.of(
-      "go.staging.etendo.cloud", "staging",
-      "go.experimental.etendo.cloud", "experimental",
-      "go.etendo.cloud", "production");
-  private static final String DEFAULT_ENVIRONMENT_NAME = "development";
-
-  /**
-   * Resolves the deployment environment name from the request's hostname, mirroring
-   * resolveSentryEnvironment() on the frontend. Unknown hostnames (including local dev,
-   * e.g. localhost) fall back to {@value #DEFAULT_ENVIRONMENT_NAME}.
-   */
-  static String resolveEnvironment(String hostname) {
-    return ENVIRONMENT_NAME_BY_HOSTNAME.getOrDefault(hostname, DEFAULT_ENVIRONMENT_NAME);
-  }
+  // ETP-4210: the old hostname -> environment-name map (staging/experimental/go.etendo.cloud)
+  // went stale the moment those deployments were retired or renamed (go.etendo.cloud is not
+  // production anymore). Guessing the environment from the request's hostname means the code
+  // has to be updated by hand every time a domain changes, and nothing fails loudly when it
+  // doesn't — it just silently mislabels data. Same fix as ADK_BASE_URL above: each deployment
+  // declares its own name once in its Openbravo.properties, instead of the code trying to
+  // infer it.
+  static final String ENVIRONMENT_NAME = ConfigPropertyReader.readConfigValue(
+      "support.environment.name", "ETGO_SUPPORT_ENVIRONMENT_NAME", "development");
 
   /** Zero-width-prefixed marker appended to a reply's text when the ADK's response for that
    * turn set {@code pending_escalation=confirm} — i.e. ValerIA just offered to escalate to a
