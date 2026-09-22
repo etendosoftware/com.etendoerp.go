@@ -51,6 +51,7 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.security.OrganizationStructureProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.system.Language;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
@@ -77,6 +78,8 @@ class InventoryStockReportHandlerTest {
   private Client client;
   @Mock
   private Organization organization;
+  @Mock
+  private Language language;
   @Mock
   private OrganizationStructureProvider orgStructureProvider;
   @Mock
@@ -107,6 +110,9 @@ class InventoryStockReportHandlerTest {
     when(client.getId()).thenReturn("test-client-id");
     when(obContext.getCurrentOrganization()).thenReturn(organization);
     when(organization.getId()).thenReturn("test-org-id");
+    // ETP-5419 — uom_name translation join needs the session language.
+    when(obContext.getLanguage()).thenReturn(language);
+    when(language.getLanguage()).thenReturn("en_US");
     when(obContext.getOrganizationStructureProvider("test-client-id")).thenReturn(orgStructureProvider);
 
     Set<String> orgTree = new HashSet<>(Arrays.asList("test-org-id", "child-org-1"));
@@ -252,6 +258,29 @@ class InventoryStockReportHandlerTest {
         .endpointType(NeoEndpointType.CRUD)
         .build();
     assertEquals(405, handler.handle(ctx).getHttpStatus());
+  }
+
+  // ── uom_name translation (ETP-5419) ─────────────────────────────────────
+
+  /**
+   * Verifies that the query binds the session language as {@code :lang}, so the
+   * {@code c_uom_trl} join resolves the UOM name in the user's own language instead of
+   * always falling back to {@code c_uom.name} (the base, English name).
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  void testBindsSessionLanguageForUomTranslation() throws Exception {
+    mockQueryReturning(Collections.singletonList(
+        new Object[]{ "WH-A", "Category A", "P001", "Product A", "Unidad",
+            new BigDecimal("10"), new BigDecimal("2.00"), new BigDecimal("20.00") }));
+    when(language.getLanguage()).thenReturn("es_ES");
+
+    NeoResponse response = handler.handle(postContext(new JSONObject()));
+
+    assertEquals(200, response.getHttpStatus());
+    verify(nativeQuery).setParameter("lang", "es_ES");
+    JSONObject item = response.getBody().getJSONObject("response").getJSONArray("data").getJSONObject(0);
+    assertEquals("Unidad", item.getString("uom"));
   }
 
   // ── POST with no body / no filters ──────────────────────────────────────
