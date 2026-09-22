@@ -283,6 +283,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final int ONBOARDING_DRAFT_MAX_LENGTH = 4000;
   private static final String FIELD_FULL_NAME = "fullName";
   private static final String FIELD_ADDRESS = "address";
+  private static final String FIELD_PRODUCTS = "products";
+  private static final String FIELD_CONTACTS = "contacts";
   private static final String[] ONBOARDING_DRAFT_FORM_FIELDS = { FIELD_FULL_NAME, "businessType",
       FIELD_CLIENT_NAME, FIELD_CURRENCY, FIELD_LANGUAGE, FIELD_COUNTRY_CODE, "fiscalIdType",
       "fiscalIdValue", FIELD_ADDRESS, "sector" };
@@ -307,8 +309,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * itself is cosmetic. {@code create-account} is deliberately absent — it is implicit, the
    * account already exists — and a client sending it gets it dropped rather than rejected.
    */
-  private static final String[] FIRST_STEPS_IDS = { "company-data", "fiscal-config", "products",
-      "contacts", "invoice-sequence", "team" };
+  private static final String[] FIRST_STEPS_IDS = { "company-data", "fiscal-config", FIELD_PRODUCTS,
+      FIELD_CONTACTS, "invoice-sequence", "team" };
   private static final String PATH_ONBOARDING_COMPANY_DATA = "/onboarding/company-data";
   private static final String FIELD_COMPANY_DATA = "companyData";
 
@@ -2469,8 +2471,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     JSONObject selection = body.optJSONObject("dataTransfer");
     if (selection == null) return;
     String requestId = checkoutResult.optString("requestId", "");
-    demoDataTransferService.recordSelection(requestId, selection.optBoolean("products"),
-        selection.optBoolean("contacts"));
+    demoDataTransferService.recordSelection(requestId, selection.optBoolean(FIELD_PRODUCTS),
+        selection.optBoolean(FIELD_CONTACTS));
   }
 
   /** JSON-null for an absent value, so the client can tell "blank" from "not answered". */
@@ -3245,8 +3247,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
       data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
       JSONObject transfer = body.optJSONObject("dataTransfer");
-      data.transferProducts = transfer != null && transfer.optBoolean("products", false);
-      data.transferContacts = transfer != null && transfer.optBoolean("contacts", false);
+      data.transferProducts = transfer != null && transfer.optBoolean(FIELD_PRODUCTS, false);
+      data.transferContacts = transfer != null && transfer.optBoolean(FIELD_CONTACTS, false);
       if ("convert-demo".equalsIgnoreCase(data.upgradeAction)) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST,
             "Demo environments cannot be converted; create a new productive environment");

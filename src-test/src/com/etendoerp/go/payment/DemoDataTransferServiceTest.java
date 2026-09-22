@@ -28,6 +28,7 @@ import static org.mockito.Mockito.when;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
@@ -43,6 +44,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
@@ -244,18 +246,19 @@ class DemoDataTransferServiceTest {
   @SafeVarargs
   private final void givenPreferenceReads(Preference... values) {
     when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
-    when(preferenceQuery.uniqueResult()).thenReturn(values);
+    when(preferenceQuery.uniqueResult()).thenReturn(values[0],
+        Arrays.copyOfRange(values, 1, values.length));
   }
 
   @SuppressWarnings("unchecked")
-  private static <T> OBQuery<T> queryWithList(List<T> rows) {
+  private static <T extends BaseOBObject> OBQuery<T> queryWithList(List<T> rows) {
     OBQuery<T> query = mock(OBQuery.class);
     when(query.list()).thenReturn(rows);
     return query;
   }
 
   @SuppressWarnings("unchecked")
-  private static <T> OBQuery<T> queryWithUniqueResult(T row) {
+  private static <T extends BaseOBObject> OBQuery<T> queryWithUniqueResult(T row) {
     OBQuery<T> query = mock(OBQuery.class);
     when(query.uniqueResult()).thenReturn(row);
     return query;

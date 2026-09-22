@@ -1,8 +1,8 @@
 /* Etendo License. */
 package com.etendoerp.go.payment;
 
-import java.lang.reflect.Method;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -55,6 +55,9 @@ public class DemoDataTransferService {
   private static final String CONTACTS_DONE = "ETGO_DemoDataTransferContactsDone";
   private static final String CONTACTS_TOTAL = "ETGO_DemoDataTransferContactsTotal";
   private static final String FAILURE = "ETGO_DemoDataTransferFailure";
+  private static final String CLIENT_ID_PARAMETER = "clientId";
+  private static final String SEARCH_KEY_PROPERTY = "SearchKey";
+  private static final String DESCRIPTION_PROPERTY = "Description";
   public static final String STATUS_NOT_REQUESTED = "NOT_REQUESTED";
   public static final String STATUS_RUNNING = "RUNNING";
   public static final String STATUS_FAILED = "FAILED";
@@ -76,7 +79,11 @@ public class DemoDataTransferService {
   });
   private final Set<String> activeClients = ConcurrentHashMap.newKeySet();
 
-  /** Stores user intent before redirecting to the payment provider. */
+  /** Stores user intent before redirecting to the payment provider.
+   * @param requestId payment request identifier
+   * @param products whether products should be transferred
+   * @param contacts whether business partners should be transferred
+   */
   public void recordSelection(String requestId, boolean products, boolean contacts) {
     if (StringUtils.isBlank(requestId)) return;
     withSystemContext(() -> {
@@ -86,7 +93,11 @@ public class DemoDataTransferService {
     });
   }
 
-  /** Creates the durable tenant projection and starts the detached work after provisioning commits. */
+  /** Creates the durable tenant projection and starts work after provisioning commits.
+   * @param requestId payment request identifier
+   * @param demoClientId source demo client identifier
+   * @param productiveClientId provisioned client identifier
+   */
   public void start(String requestId, String demoClientId, String productiveClientId) {
     if (StringUtils.isBlank(requestId) || StringUtils.isBlank(demoClientId)
         || StringUtils.isBlank(productiveClientId)) return;
@@ -110,14 +121,22 @@ public class DemoDataTransferService {
     submitIfRunning(productiveClientId);
   }
 
-  /** Returns a compact persisted projection; a stranded RUNNING job is resumed on read. */
+  /** Returns a compact persisted projection; a stranded RUNNING job is resumed on read.
+   * @param productiveClientId provisioned client identifier
+   * @return persisted transfer status and progress
+   * @throws JSONException if the status projection cannot be serialized
+   */
   public JSONObject status(String productiveClientId) throws JSONException {
     JSONObject result = withSystemResult(() -> statusJson(productiveClientId));
     if (STATUS_RUNNING.equals(result.optString("status"))) submitIfRunning(productiveClientId);
     return result;
   }
 
-  /** Only a failed transfer can be retried. Completed and skipped work is immutable. */
+  /** Only a failed transfer can be retried. Completed and skipped work is immutable.
+   * @param productiveClientId provisioned client identifier
+   * @return current transfer status and progress
+   * @throws JSONException if the status projection cannot be serialized
+   */
   public JSONObject retry(String productiveClientId) throws JSONException {
     withSystemContext(() -> {
       if (!STATUS_FAILED.equals(readClientPreference(STATUS, productiveClientId))) return;
@@ -220,7 +239,7 @@ public class DemoDataTransferService {
 
   /** Product fields mirror the import contract; prices/costing are added through their own records. */
   private void copyProductFields(Product source, Product target) {
-    copy(source, target, "SearchKey", "Name", "Description", "ProductType");
+    DemoDataTransferReflection.copy(source, target, SEARCH_KEY_PROPERTY, "Name", DESCRIPTION_PROPERTY, "ProductType");
   }
 
   /** UOM rows can be client-scoped; never attach a source tenant's entity to the new product. */
@@ -231,7 +250,7 @@ public class DemoDataTransferService {
     if (existing != null) return existing;
     UOM copy = OBProvider.getInstance().get(UOM.class);
     copy.setClient(target); copy.setOrganization(targetOrg);
-    copy(source, copy, "Name", "Symbol", "X", "StandardPrecision", "CostingPrecision", "UOMType");
+    DemoDataTransferReflection.copy(source, copy, "Name", "Symbol", "X", "StandardPrecision", "CostingPrecision", "UOMType");
     OBDal.getInstance().save(copy);
     return copy;
   }
@@ -244,7 +263,7 @@ public class DemoDataTransferService {
     if (existing != null) return existing;
     ProductCategory copy = OBProvider.getInstance().get(ProductCategory.class);
     copy.setClient(target); copy.setOrganization(targetOrg);
-    copy(source, copy, "Name", "SearchKey", "Description");
+    DemoDataTransferReflection.copy(source, copy, "Name", SEARCH_KEY_PROPERTY, DESCRIPTION_PROPERTY);
     OBDal.getInstance().save(copy);
     return copy;
   }
@@ -255,23 +274,35 @@ public class DemoDataTransferService {
     boolean copiedSales = false;
     boolean copiedPurchase = false;
     for (ProductPrice sourcePrice : prices) {
-      Boolean sales = salesPriceList(sourcePrice);
-      if (sales == null || (sales && copiedSales) || (!sales && copiedPurchase)) continue;
-      PriceListVersion version = targetVersion(targetClient.getId(), targetOrg.getId(), sales.booleanValue());
-      if (version == null) continue;
-      ProductPrice copy = targetPrice(target.getId(), version.getId());
-      if (copy == null) {
-        copy = OBProvider.getInstance().get(ProductPrice.class);
-        copy.setClient(targetClient);
-        copy.setOrganization(targetOrg);
-        copy.setProduct(target);
-        copy.setPriceListVersion(version);
+      Optional<Boolean> salesPriceList = DemoDataTransferReflection.salesPriceList(sourcePrice);
+      if (salesPriceList.isEmpty()) continue;
+      boolean sales = salesPriceList.get();
+      boolean alreadyCopied = sales ? copiedSales : copiedPurchase;
+      if (copyPriceIfNeeded(sourcePrice, target, targetClient, targetOrg, sales, alreadyCopied)) {
+        copiedSales |= sales;
+        copiedPurchase |= !sales;
       }
-      copy(sourcePrice, copy, "StandardPrice", "ListPrice", "PriceLimit");
-      copy.setActive(true);
-      OBDal.getInstance().save(copy);
-      if (sales) copiedSales = true; else copiedPurchase = true;
     }
+  }
+
+  private boolean copyPriceIfNeeded(ProductPrice sourcePrice, Product targetProduct,
+      Client targetClient, Organization targetOrg, boolean sales, boolean alreadyCopied) {
+    if (alreadyCopied) return false;
+    PriceListVersion version = targetVersion(targetClient.getId(), targetOrg.getId(), sales);
+    if (version == null) return false;
+    ProductPrice targetProductPrice = targetPrice(targetProduct.getId(), version.getId());
+    if (targetProductPrice == null) {
+      targetProductPrice = OBProvider.getInstance().get(ProductPrice.class);
+      targetProductPrice.setClient(targetClient);
+      targetProductPrice.setOrganization(targetOrg);
+      targetProductPrice.setProduct(targetProduct);
+      targetProductPrice.setPriceListVersion(version);
+    }
+    DemoDataTransferReflection.copy(sourcePrice, targetProductPrice,
+        "StandardPrice", "ListPrice", "PriceLimit");
+    targetProductPrice.setActive(true);
+    OBDal.getInstance().save(targetProductPrice);
+    return true;
   }
 
   /** Cost is a history row, not a product column: migrate the current row and its start date. */
@@ -287,18 +318,8 @@ public class DemoDataTransferService {
       copy.setOrganization(targetOrg);
       copy.setProduct(target);
     }
-    copy(sourceCost, copy, "Cost", "StartingDate", "EndingDate", "CostType", "Manual", "Permanent", "Production", "Currency");
+    DemoDataTransferReflection.copy(sourceCost, copy, "Cost", "StartingDate", "EndingDate", "CostType", "Manual", "Permanent", "Production", "Currency");
     OBDal.getInstance().save(copy);
-  }
-
-  private Boolean salesPriceList(ProductPrice price) {
-    try {
-      Object version = price.getPriceListVersion();
-      Object list = version.getClass().getMethod("getPriceList").invoke(version);
-      return (Boolean) list.getClass().getMethod("isSalesPriceList").invoke(list);
-    } catch (ReflectiveOperationException e) {
-      return null;
-    }
   }
 
   /** Uses the same configured-default resolver as the product form/import path. */
@@ -331,7 +352,7 @@ public class DemoDataTransferService {
 
   /** Deliberately no CIF validation: existing demo contacts are authoritative migration input. */
   private void copyBusinessPartnerFields(BusinessPartner source, BusinessPartner target) {
-    copy(source, target, "SearchKey", "Name", "TaxID", "Customer", "Vendor", "Employee",
+    DemoDataTransferReflection.copy(source, target, SEARCH_KEY_PROPERTY, "Name", "TaxID", "Customer", "Vendor", "Employee",
         "EMEtgoIsperson", "EMEtgoFirstname", "EMEtgoLastname", "EMEtgoEmail", "EMEtgoPhone", "EMEtgoWeb");
   }
 
@@ -343,26 +364,9 @@ public class DemoDataTransferService {
     if (existing != null) return existing;
     Category copy = OBProvider.getInstance().get(Category.class);
     copy.setClient(target); copy.setOrganization(targetOrg);
-    copy(source, copy, "Name", "SearchKey", "Description");
+    DemoDataTransferReflection.copy(source, copy, "Name", SEARCH_KEY_PROPERTY, DESCRIPTION_PROPERTY);
     OBDal.getInstance().save(copy);
     return copy;
-  }
-
-  private void copy(Object source, Object target, String... properties) {
-    for (String property : properties) {
-      try {
-        Object value = source.getClass().getMethod("get" + property).invoke(source);
-        if (value == null) continue;
-        for (Method method : target.getClass().getMethods()) {
-          if (method.getName().equals("set" + property) && method.getParameterCount() == 1) {
-            method.invoke(target, value);
-            break;
-          }
-        }
-      } catch (ReflectiveOperationException ignored) {
-        // Optional module columns differ by installed module/version; their absence is not a row failure.
-      }
-    }
   }
 
   private JSONObject statusJson(String clientId) throws JSONException {
@@ -395,13 +399,13 @@ public class DemoDataTransferService {
 
   private <T extends BaseOBObject> List<T> query(Class<T> type, String where, String clientId) {
     OBQuery<T> query = OBDal.getInstance().createQuery(type, where);
-    query.setNamedParameter("clientId", clientId);
+    query.setNamedParameter(CLIENT_ID_PARAMETER, clientId);
     query.setFilterOnReadableClients(false); query.setFilterOnReadableOrganization(false);
     return query.list();
   }
   private <T extends BaseOBObject> T unique(Class<T> type, String where, String clientId, String key) {
     OBQuery<T> query = OBDal.getInstance().createQuery(type, where);
-    query.setNamedParameter("clientId", clientId);
+    query.setNamedParameter(CLIENT_ID_PARAMETER, clientId);
     if (key != null) query.setNamedParameter("key", key);
     query.setFilterOnReadableClients(false); query.setFilterOnReadableOrganization(false); query.setMaxResult(1);
     return query.uniqueResult();
@@ -416,7 +420,7 @@ public class DemoDataTransferService {
   private String readClientPreference(String attribute, String clientId) {
     OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
         "as p where p.attribute = :attribute and p.visibleAtClient.id = :clientId and p.active = true");
-    query.setNamedParameter("attribute", attribute); query.setNamedParameter("clientId", clientId);
+    query.setNamedParameter("attribute", attribute); query.setNamedParameter(CLIENT_ID_PARAMETER, clientId);
     query.setFilterOnReadableClients(false); query.setFilterOnReadableOrganization(false); query.setMaxResult(1);
     Preference preference = query.uniqueResult();
     return preference == null ? null : StringUtils.trimToNull(preference.getSearchKey());
