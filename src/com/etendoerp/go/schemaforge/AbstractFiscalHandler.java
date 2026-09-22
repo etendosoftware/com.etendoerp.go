@@ -18,6 +18,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -39,6 +40,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 import org.openbravo.model.financialmgmt.calendar.Period;
+import org.openbravo.module.taxreportlauncher.TaxReport;
 
 import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 
@@ -375,6 +377,24 @@ abstract class AbstractFiscalHandler {
       throw new OBException("No AcctSchema found for client=" + clientId);
     }
     return list.get(0);
+  }
+
+  /**
+   * Org-scoped (falls back to org {@code "0"}) {@code TaxReport} searchKey lookup, shared by
+   * every fiscal model's {@code TaxReport} resolution — hoisted here (SonarQube java:S1192/
+   * duplicated-block) from {@link Fiscal303BoxesHandler#resolveTaxReport} and {@code
+   * Fiscal349BoxesHandler#resolveTaxReport349}, which previously each carried their own
+   * byte-identical private copy. Returns {@code null} (never throws) so callers can fall through
+   * to a different searchKey on an empty result instead of failing outright.
+   */
+  protected TaxReport findTaxReport(String orgId, String searchKey) {
+    OBCriteria<TaxReport> crit = OBDal.getInstance().createCriteria(TaxReport.class);
+    crit.add(Restrictions.in(TaxReport.PROPERTY_ORGANIZATION + ".id", Arrays.asList(orgId, "0")));
+    crit.add(Restrictions.eq(TaxReport.PROPERTY_SEARCHKEY, searchKey));
+    crit.addOrder(Order.desc(TaxReport.PROPERTY_ORGANIZATION + ".id"));
+    crit.setMaxResults(1);
+    List<TaxReport> list = crit.list();
+    return list.isEmpty() ? null : list.get(0);
   }
 
   @SuppressWarnings("unchecked")

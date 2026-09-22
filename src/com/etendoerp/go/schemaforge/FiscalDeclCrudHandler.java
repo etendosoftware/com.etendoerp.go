@@ -323,6 +323,27 @@ class FiscalDeclCrudHandler {
    */
   private boolean hasDraftDeclaration(String clientId, String orgId, String model, long year,
       String period) {
+    OBQuery<BaseOBObject> query = naturalKeyQuery(clientId, orgId, model, year, period);
+    for (BaseOBObject existing : query.list()) {
+      if (DEFAULT_STATUS.equals(asString(existing.get(PROPERTY_DECLARATION_STATUS)))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Builds the shared HQL query on the natural key
+   * ({@code AD_CLIENT_ID, AD_ORG_ID, MODEL, FISCAL_YEAR, PERIOD}) used by
+   * {@link #hasDraftDeclaration}, {@link #resolveNextDeclSeq} and
+   * {@link #findLatestDeclarationStatus} — hoisted into a single helper (SonarQube S1192,
+   * duplicated-literal WHERE-clause pieces) so each fragment
+   * ({@code "client.id = :clientId and organization.id = :orgId and "}, {@code " = :model and "},
+   * {@code " = :year and "}, {@code " = :period"}) is defined exactly once instead of copy-pasted
+   * across the 3 call sites.
+   */
+  private static OBQuery<BaseOBObject> naturalKeyQuery(String clientId, String orgId,
+      String model, long year, String period) {
     OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY_FISCAL_DECL,
         "client.id = :clientId and organization.id = :orgId and " + PROPERTY_FISCAL_MODEL
             + " = :model and " + PROPERTY_FISCAL_YEAR + " = :year and " + PROPERTY_PERIOD
@@ -332,12 +353,7 @@ class FiscalDeclCrudHandler {
     query.setNamedParameter(MODEL_KEY, model);
     query.setNamedParameter("year", Long.valueOf(year));
     query.setNamedParameter(PERIOD_KEY, period);
-    for (BaseOBObject existing : query.list()) {
-      if (DEFAULT_STATUS.equals(asString(existing.get(PROPERTY_DECLARATION_STATUS)))) {
-        return true;
-      }
-    }
-    return false;
+    return query;
   }
 
   /**
@@ -365,15 +381,7 @@ class FiscalDeclCrudHandler {
   // in this class rather than introducing a new one.
   long resolveNextDeclSeq(String clientId, String orgId, String model, long year,
       String period) {
-    OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY_FISCAL_DECL,
-        "client.id = :clientId and organization.id = :orgId and " + PROPERTY_FISCAL_MODEL
-            + " = :model and " + PROPERTY_FISCAL_YEAR + " = :year and " + PROPERTY_PERIOD
-            + " = :period");
-    query.setNamedParameter(PARAM_CLIENT_ID, clientId);
-    query.setNamedParameter(PARAM_ORG_ID, orgId);
-    query.setNamedParameter(MODEL_KEY, model);
-    query.setNamedParameter("year", Long.valueOf(year));
-    query.setNamedParameter(PERIOD_KEY, period);
+    OBQuery<BaseOBObject> query = naturalKeyQuery(clientId, orgId, model, year, period);
     long maxSeq = -1L;
     for (BaseOBObject existing : query.list()) {
       Object rawSeq = existing.get(PROPERTY_DECL_SEQ);
@@ -404,15 +412,7 @@ class FiscalDeclCrudHandler {
    */
   String findLatestDeclarationStatus(String clientId, String orgId, String model, long year,
       String period) {
-    OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY_FISCAL_DECL,
-        "client.id = :clientId and organization.id = :orgId and " + PROPERTY_FISCAL_MODEL
-            + " = :model and " + PROPERTY_FISCAL_YEAR + " = :year and " + PROPERTY_PERIOD
-            + " = :period");
-    query.setNamedParameter(PARAM_CLIENT_ID, clientId);
-    query.setNamedParameter(PARAM_ORG_ID, orgId);
-    query.setNamedParameter(MODEL_KEY, model);
-    query.setNamedParameter("year", Long.valueOf(year));
-    query.setNamedParameter(PERIOD_KEY, period);
+    OBQuery<BaseOBObject> query = naturalKeyQuery(clientId, orgId, model, year, period);
     long maxSeq = -1L;
     BaseOBObject latest = null;
     for (BaseOBObject existing : query.list()) {

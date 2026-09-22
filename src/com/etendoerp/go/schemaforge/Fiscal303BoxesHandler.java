@@ -18,7 +18,6 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
@@ -33,10 +32,7 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Order;
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
@@ -699,18 +695,8 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
     return base;
   }
 
-  /** Same org-scoped (falls back to org "0") searchKey lookup {@link #resolveTaxReport} always
-   *  used — extracted so it can be tried without throwing, letting callers fall through to a
-   *  different searchKey on an empty result instead of failing outright. */
-  private TaxReport findTaxReport(String orgId, String searchKey) {
-    OBCriteria<TaxReport> crit = OBDal.getInstance().createCriteria(TaxReport.class);
-    crit.add(Restrictions.in(TaxReport.PROPERTY_ORGANIZATION + ".id", Arrays.asList(orgId, "0")));
-    crit.add(Restrictions.eq(TaxReport.PROPERTY_SEARCHKEY, searchKey));
-    crit.addOrder(Order.desc(TaxReport.PROPERTY_ORGANIZATION + ".id"));
-    crit.setMaxResults(1);
-    List<TaxReport> list = crit.list();
-    return list.isEmpty() ? null : list.get(0);
-  }
+  // findTaxReport(orgId, searchKey) moved to AbstractFiscalHandler (SonarQube java:S1192 dedupe
+  // — was byte-identical to Fiscal349BoxesHandler's own copy).
 
   // ── Utility ──────────────────────────────────────────────────────
 

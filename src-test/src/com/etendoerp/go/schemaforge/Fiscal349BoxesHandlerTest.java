@@ -1215,7 +1215,8 @@ public class Fiscal349BoxesHandlerTest {
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       mockClient(ctxMock, "client1");
       OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
-      when(query.list()).thenReturn(Collections.singletonList(declWithSeqAndStatus(0L, "ready")));
+      BaseOBObject decl = declWithSeqAndStatus(0L, "ready");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
 
       handler.guardNotAlreadySubmitted("org1", 2026, "T1"); // must not throw
     }
@@ -1228,7 +1229,8 @@ public class Fiscal349BoxesHandlerTest {
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       mockClient(ctxMock, "client1");
       OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
-      when(query.list()).thenReturn(Collections.singletonList(declWithSeqAndStatus(0L, "draft")));
+      BaseOBObject decl = declWithSeqAndStatus(0L, "draft");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
 
       handler.guardNotAlreadySubmitted("org1", 2026, "T1"); // must not throw
     }
@@ -1241,8 +1243,8 @@ public class Fiscal349BoxesHandlerTest {
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       mockClient(ctxMock, "client1");
       OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
-      when(query.list())
-          .thenReturn(Collections.singletonList(declWithSeqAndStatus(0L, "submitted")));
+      BaseOBObject decl = declWithSeqAndStatus(0L, "submitted");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
 
       handler.guardNotAlreadySubmitted("org1", 2026, "T1");
     }
@@ -1255,8 +1257,8 @@ public class Fiscal349BoxesHandlerTest {
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       mockClient(ctxMock, "client1");
       OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
-      when(query.list())
-          .thenReturn(Collections.singletonList(declWithSeqAndStatus(0L, "submitted_ext")));
+      BaseOBObject decl = declWithSeqAndStatus(0L, "submitted_ext");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
 
       handler.guardNotAlreadySubmitted("org1", 2026, "T1");
     }
@@ -1269,8 +1271,8 @@ public class Fiscal349BoxesHandlerTest {
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       mockClient(ctxMock, "client1");
       OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
-      when(query.list())
-          .thenReturn(Collections.singletonList(declWithSeqAndStatus(0L, "submitted_ack")));
+      BaseOBObject decl = declWithSeqAndStatus(0L, "submitted_ack");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
 
       handler.guardNotAlreadySubmitted("org1", 2026, "T1");
     }
@@ -1310,8 +1312,8 @@ public class Fiscal349BoxesHandlerTest {
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       mockClient(ctxMock, "client1");
       OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
-      when(query.list())
-          .thenReturn(Collections.singletonList(declWithSeqAndStatus(0L, "submitted_ack")));
+      BaseOBObject decl = declWithSeqAndStatus(0L, "submitted_ack");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
 
       handler.dispatch("operators", "org1", 2026, "T1", req, resp);
     }
@@ -1329,8 +1331,8 @@ public class Fiscal349BoxesHandlerTest {
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
       mockClient(ctxMock, "client1");
       OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
-      when(query.list())
-          .thenReturn(Collections.singletonList(declWithSeqAndStatus(0L, "submitted")));
+      BaseOBObject decl = declWithSeqAndStatus(0L, "submitted");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
 
       handler.dispatch("generate", "org1", 2026, "T1", req, resp);
     }
