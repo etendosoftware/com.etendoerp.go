@@ -39,17 +39,21 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.time.Instant;
 
+import javax.servlet.http.Cookie;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
+import org.hibernate.criterion.Restrictions;
+import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.erpCommon.businessUtility.InitialClientSetup;
 import org.openbravo.erpCommon.businessUtility.InitialOrgSetup;
@@ -58,7 +62,9 @@ import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.common.enterprise.Warehouse;
 
+import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.common.EtendoGoCorsServlet;
 import com.etendoerp.go.common.JwtAuthUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
@@ -78,6 +84,7 @@ import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
 import com.etendoerp.go.onboarding.OnboardingAdminIdentityService;
 import com.etendoerp.go.onboarding.OnboardingBaselineService;
 import com.etendoerp.go.onboarding.OnboardingAccountingWiringService;
+import com.etendoerp.go.onboarding.OnboardingDataTransferService;
 import com.etendoerp.go.onboarding.OnboardingDatasetImportService;
 import com.etendoerp.go.onboarding.OnboardingForceTestModeService;
 import com.etendoerp.go.onboarding.OnboardingFiscalDataSetupService;
@@ -91,6 +98,14 @@ import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.AccountIdentity;
 import com.etendoerp.go.schemaforge.email.EmailContractCommandSupport;
+import com.etendoerp.go.session.GoSessionAuthResult;
+import com.etendoerp.go.session.GoSessionAuthenticator;
+import com.etendoerp.go.session.GoLegacyBearer;
+import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionSecurity;
+import com.etendoerp.go.session.GoSessionService;
+import com.etendoerp.go.session.IssuedGoSession;
+import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -151,6 +166,18 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_ACCOUNT = "account";
   private static final String FIELD_AUTH_METHOD = "authMethod";
   private static final String FIELD_LANGUAGE = "language";
+  private static final String FIELD_CSRF_TOKEN = "csrfToken";
+  private static final String FIELD_USER_ID = "userId";
+  private static final String FIELD_ROLE_LIST = "roleList";
+  private static final String HEADER_USER_AGENT = "User-Agent";
+  private static final String HEADER_CONTENT_TYPE_OPTIONS = "X-Content-Type-Options";
+  private static final String VALUE_NOSNIFF = "nosniff";
+  private static final String HEADER_CACHE_CONTROL = "Cache-Control";
+  private static final String VALUE_NO_STORE = "no-store";
+  private static final String HEADER_SET_COOKIE = "Set-Cookie";
+  private static final String MSG_CSRF_VALIDATION_FAILED = "CSRF validation failed";
+  private static final String PATH_SESSION = "/session";
+  private static final String ERROR_UNKNOWN_ENDPOINT = "Unknown endpoint: ";
   private static final String FIELD_PAYMENT_TOKEN = "paymentToken";
   private static final String FIELD_ACCOUNT_EMAIL = "accountEmail";
   private static final String FIELD_CURRENCY = "currency";
@@ -184,6 +211,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String CODE_INVALID_CREDENTIALS = "INVALID_CREDENTIALS";
   private static final String CODE_LOGIN_SERVER_ERROR = "LOGIN_SERVER_ERROR";
   private static final String CODE_INTERNAL_ERROR = "INTERNAL_ERROR";
+  // ETP-4575 — the 5-arg writeError repeats each message as both `message` and
+  // `userMessage`, so every call site duplicated its literal twice (Sonar S1192).
+  private static final String INVALID_CREDENTIALS = "Invalid credentials";
+  private static final String MISSING_EMAIL_PASSWORD =
+      "Missing required fields: email, password";
   // ETP-4798 — email ownership confirmation. Stable codes, mirrored by the web client's
   // onboarding/errorMessages.js so it translates by code and never shows this English text.
   private static final String CODE_EMAIL_NOT_VERIFIED = "EMAIL_NOT_VERIFIED";
@@ -191,7 +223,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   // AUTH-07 / ETP-5022 — change-password failures. Stable codes so the web client translates
   // by code; the English text below is a developer-facing fallback, never end-user copy.
   private static final String CODE_MISSING_CREDENTIALS = "CHANGE_PASSWORD_MISSING_CREDENTIALS";
-  private static final String CODE_NO_LOCAL_PASSWORD = "NO_LOCAL_PASSWORD";
   private static final String CODE_INVALID_CURRENT_PASSWORD = "INVALID_CURRENT_PASSWORD";
   private static final String CODE_METHOD_NOT_FOUND = "AUTH_METHOD_NOT_FOUND";
   private static final String CODE_LAST_AUTH_METHOD = "LAST_AUTH_METHOD";
@@ -282,6 +313,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_COMPANY_DATA = "companyData";
 
   OnboardingDatasetImportService onboardingDatasetImportService = new OnboardingDatasetImportService();
+  OnboardingDataTransferService onboardingDataTransferService =
+      new OnboardingDataTransferService();
   OnboardingCompanyDataService onboardingCompanyDataService = new OnboardingCompanyDataService();
   OnboardingAccountingWiringService onboardingAccountingWiringService =
       new OnboardingAccountingWiringService();
@@ -319,6 +352,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   CompanyInvitationService companyInvitationService;
   private final TransactionalAuthEmailSender authEmailSender;
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
+  private final GoSessionService goSessionService;
 
   /**
    * Creates the default servlet wired to the runtime transactional auth email sender.
@@ -339,8 +373,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   EtendoGoJwtServlet(TransactionalAuthEmailSender authEmailSender,
       EtendoGoSsoProviderRegistry ssoProviderRegistry) {
+    this(authEmailSender, ssoProviderRegistry, new GoSessionService(new JdbcGoSessionStore()));
+  }
+
+  EtendoGoJwtServlet(TransactionalAuthEmailSender authEmailSender,
+      EtendoGoSsoProviderRegistry ssoProviderRegistry, GoSessionService goSessionService) {
     this.authEmailSender = authEmailSender;
     this.ssoProviderRegistry = ssoProviderRegistry;
+    this.goSessionService = goSessionService;
     this.companyInvitationService = new CompanyInvitationService(authEmailSender);
   }
 
@@ -403,6 +443,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       HttpServletResponse response) throws IOException {
     if (isPath(path, "/login")) {
       handleEnvironmentLogin(request, response);
+    } else if (isPath(path, PATH_SESSION)) {
+      handleSessionRestore(request, response);
     } else if (isPath(path, "/company-invitations/mine")) {
       handleCompanyInvitationMine(request, response);
     } else if (isPath(path, "/company-invitations/resolve")) {
@@ -430,17 +472,45 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleDevLifecyclePost(request, response);
       return;
     }
+    // Kept ahead of every credential-bearing group below: the provider calls this one
+    // unauthenticated, so it must not fall through any of them. (The dev-lifecycle block
+    // above is an exact-path match on a different path, so it does not affect that.)
     if (isPath(path, "/checkout/webhook")) {
       handleCheckoutWebhook(request, response);
       return;
     }
-    // Split across two chains so neither trips the cognitive-complexity limit. The relative order
-    // is identical to the single chain this replaces: authentication routes are still matched
-    // first, and an unmatched path still falls through to the 404 at the end.
-    if (routeAuthenticationPost(path, request, response)) {
+    // Split into groups purely to keep this dispatcher under its cognitive-complexity
+    // limit — the chain reached 20 once the session family and the invitation
+    // endpoints both landed here. Every route below is an EXACT match on a distinct
+    // literal, and the two prefix matches cannot collide (`/sso/` is the legacy
+    // provider path, `/session/sso/` the session-family one, and neither string is a
+    // prefix of the other), so grouping does not change which handler wins.
+    if (dispatchSessionPost(path, request, response)
+        || dispatchLegacyAuthPost(path, request, response)
+        || dispatchCredentialPost(path, request, response)
+        || dispatchProvisioningPost(path, request, response)) {
       return;
     }
-    routeOnboardingPost(path, request, response);
+    writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_UNKNOWN_ENDPOINT + path);
+  }
+
+  /** The `/session*` family (ETP-4575): cookie-backed sessions. */
+  private boolean dispatchSessionPost(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (isPath(path, "/session/register")) {
+      handleSessionRegister(request, response);
+    } else if (isPath(path, PATH_SESSION)) {
+      handleSessionCreate(request, response);
+    } else if (isPath(path, "/session/environment")) {
+      handleSessionEnvironment(request, response);
+    } else if (isPath(path, "/session/refresh")) {
+      handleSessionRefresh(request, response);
+    } else if (path != null && path.startsWith("/session/sso/")) {
+      handleSessionCreateSso(path.substring("/session/sso/".length()), request, response);
+    } else {
+      return false;
+    }
+    return true;
   }
 
   /** Local-only ETP-5396 lifecycle test controls. Disabled deployments answer the normal 404. */
@@ -462,11 +532,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Routes the authentication endpoints.
+   * The pre-session endpoints, still answering with a bearer token.
+   *
+   * <p>Keeps the ETP-4575 name: `doPost` above dispatches through it, and develop's rename to
+   * `routeAuthenticationPost` had no caller on this branch.
    *
    * @return true when the path matched one of them and the request was handled
    */
-  private boolean routeAuthenticationPost(String path, HttpServletRequest request,
+  private boolean dispatchLegacyAuthPost(String path, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     String ssoProvider = extractSsoProvider(path);
     if (isPath(path, "/register")) {
@@ -475,7 +548,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleLogin(request, response);
     } else if (ssoProvider != null) {
       handleSsoLogin(ssoProvider, request, response);
-    } else if (isPath(path, "/password-reset/request")) {
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  /** Password reset and change — credential management, no session created. */
+  private boolean dispatchCredentialPost(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (isPath(path, "/password-reset/request")) {
       handlePasswordResetRequest(request, response);
     } else if (isPath(path, "/password-reset/confirm")) {
       handlePasswordResetConfirm(request, response);
@@ -493,8 +575,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return true;
   }
 
-  /** Routes the onboarding, checkout and invitation endpoints, and answers 404 for anything else. */
-  private void routeOnboardingPost(String path, HttpServletRequest request,
+  /** Onboarding, checkout and company invitations. */
+  private boolean dispatchProvisioningPost(String path, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     if (isPath(path, PATH_ONBOARDING_DRAFT)) {
       handleSaveOnboardingDraft(request, response);
@@ -515,13 +597,24 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } else if (isPath(path, "/company-invitations/register-and-accept")) {
       handleCompanyInvitationRegisterAndAccept(request, response);
     } else {
-      writeError(response, HttpServletResponse.SC_NOT_FOUND, "Unknown endpoint: " + path);
+      return false;
+    }
+    return true;
+  }
+
+  @Override
+  public void doDelete(HttpServletRequest request, HttpServletResponse response) throws IOException {
+    String path = request.getPathInfo();
+    if (isPath(path, PATH_SESSION)) {
+      handleSessionDelete(request, response);
+    } else {
+      writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_UNKNOWN_ENDPOINT + path);
     }
   }
 
   private void handleCheckoutSession(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    runWithAuthenticatedAccount(request, response, "checkout-session", account -> {
+    runWithPlatformAccount(request, response, "checkout-session", account -> {
       OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
       OBContext.setAdminMode(true);
       boolean billingOwner;
@@ -543,9 +636,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             CLIENT_NAME_REQUIRED, CLIENT_NAME_REQUIRED);
         return;
       }
-      String requestOrigin = request.getHeader(HEADER_ORIGIN);
-      final String origin = StringUtils.isBlank(requestOrigin)
-          ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+      // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
+      final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
       try {
         JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
             clientName, origin);
@@ -568,7 +660,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleBillingPurchaseCreate(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
-    runWithAuthenticatedAccount(request, response, "billing-purchase-create", account -> {
+    runWithPlatformAccount(request, response, "billing-purchase-create", account -> {
       OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
       OBContext.setAdminMode(true);
       boolean billingOwner;
@@ -591,14 +683,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
       CheckoutRequest activePurchase = checkoutRequestStore
-          .findActiveForAccountAndClientName(account.getEmail(), clientName);
+          .findActiveForAccountAndClientName(account.getId(), account.getEmail(), clientName);
       if (activePurchase != null) {
         handleExistingBillingPurchase(request, response, account, activePurchase);
         return;
       }
-      String requestOrigin = request.getHeader(HEADER_ORIGIN);
-      final String origin = StringUtils.isBlank(requestOrigin)
-          ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+      // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
+      final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
       try {
         JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
             clientName, origin);
@@ -620,9 +711,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       throws IOException, JSONException {
     String status = activePurchase.getCheckoutRequestStatus();
     if ("CREATING".equals(status) || "CREATED".equals(status)) {
-      String requestOrigin = request.getHeader(HEADER_ORIGIN);
-      final String origin = StringUtils.isBlank(requestOrigin)
-          ? PublicUrlResolver.resolveAppBaseUrl(request) : requestOrigin;
+      // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
+      final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
       try {
         JSONObject result = hostedCheckoutService.reopenSession(activePurchase.getRequest(),
             account.getEmail(), activePurchase.getClientName(), origin);
@@ -649,13 +739,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String prefix = "/checkout/sessions/";
     String path = request.getPathInfo();
     String requestId = path != null && path.startsWith(prefix) ? path.substring(prefix.length()) : "";
-    runWithAuthenticatedAccount(request, response, "checkout-status", account -> {
-      CheckoutRequest checkoutRequest = checkoutRequestStore.find(requestId, account.getEmail());
+    runWithPlatformAccount(request, response, "checkout-status", account -> {
+      CheckoutRequest checkoutRequest = checkoutRequestStore.find(requestId, account.getId(),
+          account.getEmail());
       // Answers "pending" for an unknown request id, for another account's request id, and for a
       // genuinely unpaid one alike. That is deliberate: the endpoint must never confirm that a
       // request id exists, and the account predicate inside find() is what enforces it.
       boolean paid = checkoutRequest != null
-          && checkoutRequestStore.isPaidFor(requestId, account.getEmail(), null);
+          && checkoutRequestStore.isPaidFor(requestId, account.getId(), account.getEmail(), null);
       JSONObject result = new JSONObject();
       result.put("requestId", requestId);
       result.put(FIELD_STATUS, paid ? "paid" : "pending");
@@ -667,7 +758,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /** Account-level billing overview; it remains available when every ERP environment is blocked. */
   private void handleBillingOverview(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    runWithAuthenticatedAccount(request, response, "billing-overview", account -> {
+    runWithPlatformAccount(request, response, "billing-overview", account -> {
       OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
       OBContext.setAdminMode(true);
       try {
@@ -676,7 +767,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         result.put("canManageBilling",
             EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(account.getEmail()));
         org.codehaus.jettison.json.JSONArray purchases = new org.codehaus.jettison.json.JSONArray();
-        for (CheckoutRequest purchase : checkoutRequestStore.findForAccount(account.getEmail())) {
+        for (CheckoutRequest purchase : checkoutRequestStore.findForAccount(account.getId(),
+            account.getEmail())) {
           purchases.put(buildBillingPurchaseJson(purchase));
         }
         result.put("purchases", purchases);
@@ -693,7 +785,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /** Returns the server-owned offer projection used by the account billing UI. */
   private void handleBillingOffers(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    runWithAuthenticatedAccount(request, response, "billing-offers", account -> {
+    runWithPlatformAccount(request, response, "billing-offers", account -> {
       try {
         BillingOfferConfiguration.Offer offer = BillingOfferConfiguration.current();
         JSONObject result = new JSONObject();
@@ -714,8 +806,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       throws IOException {
     String prefix = "/billing/purchases/";
     String purchaseId = request.getPathInfo().substring(prefix.length());
-    runWithAuthenticatedAccount(request, response, "billing-purchase", account -> {
-      CheckoutRequest purchase = checkoutRequestStore.find(purchaseId, account.getEmail());
+    runWithPlatformAccount(request, response, "billing-purchase", account -> {
+      CheckoutRequest purchase = checkoutRequestStore.find(purchaseId, account.getId(),
+          account.getEmail());
       if (purchase == null) {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, "PURCHASE_NOT_FOUND",
             "Purchase not found", "Purchase not found");
@@ -968,9 +1061,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return;
     }
     String token = body.optString(FIELD_TOKEN, "").trim();
-    String accountBearerToken = extractBearerToken(request);
-    try {
-      JSONObject result = companyInvitationService.acceptExistingAccount(token, accountBearerToken);
+    // ETP-4576 — resolved through the same helper its siblings use
+    // (`create`/`list` company invitations), which accepts a `__Host-` session
+    // cookie OR a bearer header. This endpoint read `extractBearerToken`
+    // directly, so it was the only one of the family that a cookie-session
+    // caller could not authenticate against: after a cookie login the page holds
+    // no bearer token at all, and accepting an invitation as an existing account
+    // failed with no way for the client to fix it.
+    runWithAuthenticatedAccount(request, response, "accept company invitation", account -> {
+      JSONObject result = companyInvitationService.acceptExistingAccount(token, account);
       if (result.optBoolean(FIELD_ERROR, false)) {
         int httpStatus = result.optInt(FIELD_HTTP_STATUS, HttpServletResponse.SC_BAD_REQUEST);
         writeError(response, httpStatus, result.optString(FIELD_CODE, CODE_INVITATION_ERROR),
@@ -979,11 +1078,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
       writeResponse(response, HttpServletResponse.SC_OK, result);
-    } catch (Exception e) {
-      log.error("Error accepting company invitation", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CODE_INTERNAL_ERROR,
-          INTERNAL_ERROR, INTERNAL_ERROR);
-    }
+    });
   }
 
   /**
@@ -1027,6 +1122,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleRegister(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
+    handleRegister(request, response, false);
+  }
+
+  private void handleSessionRegister(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    handleRegister(request, response, true);
+  }
+
+  private void handleRegister(HttpServletRequest request, HttpServletResponse response,
+      boolean createCookieSession) throws IOException {
     JSONObject body;
     try {
       body = readJsonBody(request);
@@ -1092,25 +1197,26 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
 
       String passwordHash = hashPassword(password);
-      String sessionToken = generateToken();
-      Account account = EtendoGoJwtDalHelper.createAccount(email, passwordHash, name, sessionToken);
+      String legacySessionToken = generateToken();
+      Account account = EtendoGoJwtDalHelper.createAccount(email, passwordHash, name,
+          legacySessionToken);
       String normalizedLanguage = StringUtils.trimToNull(language);
       // ETP-4798: the session token below still comes back, so the user keeps filling in the
       // onboarding form and their draft keeps saving. What the unconfirmed address blocks is the
       // one irreversible, costly step — creating the tenant in handleOnboarding.
       issueEmailVerification(account, normalizedLanguage, true);
 
-      JSONObject accountJson = new JSONObject();
-      accountJson.put("id", account.getId());
-      accountJson.put(FIELD_EMAIL, account.getEmail());
-      accountJson.put("name", account.getName());
-
-      JSONObject result = new JSONObject();
-      result.put(FIELD_STATUS, STATUS_SUCCESS);
-      result.put(FIELD_TOKEN, sessionToken);
-      result.put(FIELD_ACCOUNT, accountJson);
-
-      writeResponse(response, HttpServletResponse.SC_CREATED, result);
+      if (createCookieSession) {
+        IssuedGoSession issued = goSessionService.create(account.getId(), FIELD_PASSWORD,
+            request.getHeader(HEADER_USER_AGENT), null);
+        writeSessionResponse(response, HttpServletResponse.SC_CREATED, account, issued);
+      } else {
+        JSONObject result = new JSONObject();
+        result.put(FIELD_STATUS, STATUS_SUCCESS);
+        result.put(FIELD_TOKEN, legacySessionToken);
+        result.put(FIELD_ACCOUNT, buildAccountJson(account));
+        writeResponse(response, HttpServletResponse.SC_CREATED, result);
+      }
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("account registration", e, log);
       log.error("Database error during account registration", e);
@@ -1148,8 +1254,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       password = body.getString(FIELD_PASSWORD);
     } catch (JSONException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_LOGIN_MISSING_FIELDS,
-          "Missing required fields: email, password",
-          "Missing required fields: email, password");
+          MISSING_EMAIL_PASSWORD, MISSING_EMAIL_PASSWORD);
       return;
     }
 
@@ -1161,17 +1266,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (account == null || !EtendoGoJwtDalHelper.hasLocalPassword(account)
           || !verifyPassword(password, account.getPasswordHash())) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, CODE_INVALID_CREDENTIALS,
-            "Invalid credentials", "Invalid credentials");
+            INVALID_CREDENTIALS, INVALID_CREDENTIALS);
         return;
       }
 
       String sessionToken = generateToken();
       EtendoGoJwtDalHelper.updateSessionToken(account, sessionToken);
 
-      JSONObject accountJson = new JSONObject();
-      accountJson.put("id", account.getId());
-      accountJson.put(FIELD_EMAIL, account.getEmail());
-      accountJson.put("name", account.getName());
+      JSONObject accountJson = buildAccountJson(account);
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
@@ -1213,39 +1315,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
 
-      Account account = EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity(
-          assertion.getProvider(), assertion.getSubject());
-      if (account == null) {
-        account = EtendoGoJwtDalHelper.findActiveAccountByEmail(assertion.getEmail());
-        if (account != null) {
-          if (!assertion.isEmailAuthoritative()) {
-            writeError(response, HttpServletResponse.SC_CONFLICT,
-                "Account requires explicit linking before SSO login");
-            return;
-          }
-          if (!EtendoGoJwtDalHelper.linkSsoIdentityIfCompatible(account,
-              assertion.getProvider(), assertion.getSubject(), assertion.getEmail())) {
-            writeError(response, HttpServletResponse.SC_CONFLICT,
-                "Account is already linked to a different SSO identity");
-            return;
-          }
-        }
-      }
-
       String sessionToken = generateToken();
-      Date loginAt = new Date();
+      Account account = resolveSsoAccount(assertion, sessionToken, response);
       if (account == null) {
-        account = EtendoGoJwtDalHelper.createSsoAccount(assertion.getEmail(), assertion.getName(),
-            assertion.getProvider(), assertion.getSubject(), assertion.getEmail(), sessionToken,
-            loginAt);
-      } else {
-        EtendoGoJwtDalHelper.updateSsoSession(account, assertion.getEmail(), sessionToken, loginAt);
+        return;
       }
 
-      JSONObject accountJson = new JSONObject();
-      accountJson.put("id", account.getId());
-      accountJson.put(FIELD_EMAIL, account.getEmail());
-      accountJson.put("name", account.getName());
+      JSONObject accountJson = buildAccountJson(account);
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
@@ -1262,6 +1338,81 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (JSONException e) {
       EtendoGoDalHelper.rollbackDalChanges("SSO login response", e, log);
       log.error("JSON error building SSO login response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Resolve (find, link, or create) the account for a verified SSO assertion under the current
+   * admin context, storing {@code sessionToken} as its platform token. Writes a 409 and returns
+   * {@code null} on a linking conflict. Shared by the legacy SSO login and the cookie SSO create.
+   */
+  private Account resolveSsoAccount(EtendoGoSsoAssertion assertion, String sessionToken,
+      HttpServletResponse response) throws IOException {
+    Account account = EtendoGoJwtDalHelper.findActiveAccountBySsoIdentity(
+        assertion.getProvider(), assertion.getSubject());
+    if (account == null) {
+      account = EtendoGoJwtDalHelper.findActiveAccountByEmail(assertion.getEmail());
+      if (account != null) {
+        if (!assertion.isEmailAuthoritative()) {
+          writeError(response, HttpServletResponse.SC_CONFLICT,
+              "Account requires explicit linking before SSO login");
+          return null;
+        }
+        if (!EtendoGoJwtDalHelper.linkSsoIdentityIfCompatible(account,
+            assertion.getProvider(), assertion.getSubject(), assertion.getEmail())) {
+          writeError(response, HttpServletResponse.SC_CONFLICT,
+              "Account is already linked to a different SSO identity");
+          return null;
+        }
+      }
+    }
+    Date loginAt = new Date();
+    if (account == null) {
+      return EtendoGoJwtDalHelper.createSsoAccount(assertion.getEmail(), assertion.getName(),
+          assertion.getProvider(), assertion.getSubject(), assertion.getEmail(), sessionToken,
+          loginAt);
+    }
+    EtendoGoJwtDalHelper.updateSsoSession(account, assertion.getEmail(), sessionToken, loginAt);
+    return account;
+  }
+
+  /**
+   * POST /sws/go/session/sso/{provider}
+   * SSO variant of session create: verifies the provider assertion, resolves the account and issues
+   * the {@code __Host-} session + refresh cookies. The platform token is never returned to JS.
+   */
+  private void handleSessionCreateSso(String provider, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    String rawBody = readRawBody(request);
+    EtendoGoSsoAssertion assertion;
+    try {
+      assertion = ssoProviderRegistry.verify(provider, request, rawBody);
+    } catch (EtendoGoSsoAssertionException e) {
+      writeError(response, e.getStatusCode(), e.getMessage());
+      return;
+    }
+
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+
+      Account account = resolveSsoAccount(assertion, generateToken(), response);
+      if (account == null) {
+        return;
+      }
+      IssuedGoSession issued = goSessionService.create(account.getId(), "sso",
+          request.getHeader(HEADER_USER_AGENT), null);
+      writeSessionResponse(response, HttpServletResponse.SC_OK, account, issued);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("session SSO create", e, log);
+      log.error("Database error during SSO session create", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Session creation failed due to a server error");
+    } catch (JSONException e) {
+      log.error("JSON error building SSO session response", e);
       writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
     } finally {
       OBContext.restorePreviousMode();
@@ -1529,34 +1680,38 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return true;
   }
 
-  /**
-   * POST /sws/go/change-password
-   * Header: Authorization: Bearer <session_token>
-   * Body: { "currentPassword": "...", "newPassword": "..." }
-   */
-  private void handleChangePassword(HttpServletRequest request, HttpServletResponse response)
-      throws IOException {
-    String token = extractBearerToken(request);
-    if (token == null) {
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
-      return;
-    }
+  /** The two passwords a change-password request carries, once validated. */
+  private static final class ChangePasswordRequest {
+    private final String currentPassword;
+    private final String newPassword;
 
+    private ChangePasswordRequest(String currentPassword, String newPassword) {
+      this.currentPassword = currentPassword;
+      this.newPassword = newPassword;
+    }
+  }
+
+  /**
+   * Reads and validates the change-password body. Writes the error response and returns
+   * {@code null} when the body is unusable, so the caller only has to check for null.
+   *
+   * <p>ETP-5115: currentPassword is read optionally rather than demanded up front. An account with
+   * no local password has none to give, and requiring it here rejected those callers with a
+   * missing-credentials error before anything ever looked at the account — so the endpoint that
+   * says "this account signs in through an external provider" could not be reached by the very
+   * accounts it describes. Whether it is actually required is decided by the caller, once the
+   * account is known; an account that has a password still must supply it.
+   */
+  private ChangePasswordRequest readChangePasswordRequest(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
     JSONObject body;
     try {
       body = readJsonBody(request);
     } catch (JSONException e) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
-      return;
+      return null;
     }
 
-    // ETP-5115: currentPassword is read optionally rather than demanded up front. An account with
-    // no local password has none to give, and requiring it here rejected those callers with a
-    // missing-credentials error before anything ever looked at the account — so the endpoint that
-    // says "this account signs in through an external provider" could not be reached by the very
-    // accounts it describes. Whether it is actually required is decided below, once the account is
-    // known; an account that has a password still must supply it.
-    String currentPassword = body.optString("currentPassword", "");
     String newPassword;
     try {
       newPassword = body.getString("newPassword");
@@ -1564,31 +1719,51 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
           "changePassword: request body lacks newPassword",
           "The new password is required.");
-      return;
+      return null;
     }
     if (newPassword.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_MISSING_CREDENTIALS,
           "changePassword: newPassword is empty",
           "The new password is required.");
-      return;
+      return null;
     }
     if (!PasswordPolicy.isStrong(newPassword)) {
       writeWeakPasswordError(response);
+      return null;
+    }
+    return new ChangePasswordRequest(body.optString("currentPassword", ""), newPassword);
+  }
+
+  /**
+   * POST /sws/go/change-password
+   * Header: Authorization: Bearer <session_token>
+   * Body: { "currentPassword": "...", "newPassword": "..." }
+   */
+  private void handleChangePassword(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    if (!hasAnyCredential(request)) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
       return;
     }
 
+    ChangePasswordRequest passwords = readChangePasswordRequest(request, response);
+    if (passwords == null) {
+      return;
+    }
+    String currentPassword = passwords.currentPassword;
+    String newPassword = passwords.newPassword;
+
     try {
-      OBContext.setOBContext("0", "0", "0", "0");
-      OBContext.setAdminMode(true);
-      Account account = EtendoGoJwtDalHelper.findActiveAccountByToken(token);
-      if (account == null) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+      AuthenticatedAccount authenticated = resolveAuthenticatedAccountContext(request, response);
+      if (authenticated == null) {
         return;
       }
+      Account account = authenticated.account;
       // ETP-5115: an account with no local password is enrolling rather than changing, and there
-      // is no current password to verify — the bearer token already proves who is asking. This used
-      // to be a dead end that told the caller the account "has no password to change" and stopped
-      // there, leaving an SSO-only account unable to give itself one from inside the app.
+      // is no current password to verify — the authenticated session already proves who is asking.
+      // This used to be a dead end that told the caller the account "has no password to change"
+      // and stopped there, leaving an SSO-only account unable to give itself one from inside the
+      // app. ETP-4575: the account comes from the session context, not a bearer-only lookup.
       boolean enrolling = !EtendoGoJwtDalHelper.hasLocalPassword(account);
       if (!enrolling && !currentPasswordAccepted(response, account, currentPassword)) {
         return;
@@ -1608,15 +1783,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         }
       });
 
-      JSONObject accountJson = new JSONObject();
-      accountJson.put("id", account.getId());
-      accountJson.put(FIELD_EMAIL, account.getEmail());
-      accountJson.put("name", account.getName());
+      JSONObject accountJson = buildAccountJson(account);
 
       JSONObject result = new JSONObject();
       result.put(FIELD_STATUS, STATUS_SUCCESS);
-      result.put(FIELD_TOKEN, sessionToken);
       result.put(FIELD_ACCOUNT, accountJson);
+      if (authenticated.sessionRecord != null) {
+        IssuedGoSession rotated = goSessionService.rotate(authenticated.sessionRecord);
+        if (rotated == null) {
+          writeError(response, HttpServletResponse.SC_CONFLICT,
+              "Session changed concurrently; restore and retry");
+          return;
+        }
+        setSessionCookies(response, rotated);
+        result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
+      } else {
+        result.put(FIELD_TOKEN, sessionToken);
+      }
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges("change password", e, log);
@@ -1831,22 +2014,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private void handleMe(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    String token = extractBearerToken(request);
-    if (token == null) {
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
-          INVALID_AUTHORIZATION_HEADER);
+    if (!hasAnyCredential(request)) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
       return;
     }
-
     try {
-      OBContext.setOBContext("0", "0", "0", "0");
-      OBContext.setAdminMode(true);
-
-      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
-      if (account == null) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+      AuthenticatedAccount authenticated = resolveAuthenticatedAccountContext(request, response);
+      if (authenticated == null) {
         return;
       }
+      Account account = authenticated.account;
 
       JSONObject result = new JSONObject();
       result.put("id", account.getId());
@@ -1881,8 +2058,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * in their finally block) and writes the 401 response when the header is
    * missing or the token does not match an active account, returning null.
    */
-  private Account resolveAuthenticatedAccount(HttpServletRequest request,
-      HttpServletResponse response) throws IOException {
+  private Account resolvePlatformAccount(HttpServletRequest request, HttpServletResponse response) throws IOException {
     OBContext.setOBContext("0", "0", "0", "0");
     OBContext.setAdminMode(true);
     String token = extractBearerToken(request);
@@ -1890,11 +2066,85 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
       return null;
     }
+    Account account = EtendoGoJwtDalHelper.findActiveAccountByPlatformToken(token);
+    if (account == null) writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+    return account;
+  }
+
+  private Account resolveAuthenticatedAccount(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    AuthenticatedAccount authenticated = resolveAuthenticatedAccountContext(request, response);
+    return authenticated == null ? null : authenticated.account;
+  }
+
+  /**
+   * Whether the request carries any credential at all (a session cookie or a bearer header),
+   * without touching {@code OBContext} or the DB — lets callers fail fast with 401 for a fully
+   * unauthenticated request before ever entering admin mode.
+   */
+  private boolean hasAnyCredential(HttpServletRequest request) {
+    Cookie[] cookies = request.getCookies();
+    if (cookies != null) {
+      for (Cookie cookie : cookies) {
+        if (GoSessionSecurity.COOKIE_NAME.equals(cookie.getName())) {
+          return true;
+        }
+      }
+    }
+    return extractBearerToken(request) != null;
+  }
+
+  private AuthenticatedAccount resolveAuthenticatedAccountContext(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    OBContext.setOBContext("0", "0", "0", "0");
+    OBContext.setAdminMode(true);
+    GoSessionAuthResult sessionAuth = new GoSessionAuthenticator(goSessionService).authenticate(request);
+    if (sessionAuth.getStatus() == GoSessionAuthResult.Status.CSRF_FAILED) {
+      writeError(response, HttpServletResponse.SC_FORBIDDEN, MSG_CSRF_VALIDATION_FAILED);
+      return null;
+    }
+    if (sessionAuth.getStatus() == GoSessionAuthResult.Status.UNAUTHENTICATED) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+      return null;
+    }
+    if (sessionAuth.isAuthenticated()) {
+      Account account = EtendoGoJwtDalHelper.findActiveAccountById(
+          sessionAuth.getRecord().getAccountId());
+      if (account == null) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return null;
+      }
+      return new AuthenticatedAccount(account, sessionAuth.getRecord());
+    }
+
+    String token = extractBearerToken(request);
+    if (token == null || !GoLegacyBearer.isEnabled()) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
+      return null;
+    }
+    GoLegacyBearer.recordUse();
+    // The wide lookup, not findActiveAccountByToken: the legacy path has to keep
+    // accepting Etendo's JWTs, and only this one falls back to decoding the token and
+    // resolving the account from its `user` claim when no opaque sessionToken matches.
+    // Centralising the resolution here narrowed it by accident, which answered 401 to
+    // every JWT-bearing client on /me, /environments, the onboarding draft and the
+    // invitation endpoints — the exact callers GoLegacyBearer stays enabled for.
     Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
     if (account == null) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+      return null;
     }
-    return account;
+    return new AuthenticatedAccount(account, null);
+  }
+
+  private static final class AuthenticatedAccount {
+    private final Account account;
+    private final GoSessionRecord sessionRecord;
+
+    private AuthenticatedAccount(Account account, GoSessionRecord sessionRecord) {
+      this.account = account;
+      this.sessionRecord = sessionRecord;
+    }
   }
 
   @FunctionalInterface
@@ -1907,9 +2157,32 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * runs the action, and maps failures to the standard 500 responses with a
    * DAL rollback. Keeps the per-endpoint logic free of boilerplate.
    */
+  private void runWithPlatformAccount(HttpServletRequest request,
+      HttpServletResponse response, String actionLabel, AuthenticatedAccountAction action)
+      throws IOException {
+    try {
+      Account account = resolvePlatformAccount(request, response);
+      if (account == null) return;
+      action.execute(account);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges(actionLabel, e, log);
+      log.error("Platform request failed: {}", actionLabel, e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("Platform request JSON error: {}", actionLabel, e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
   private void runWithAuthenticatedAccount(HttpServletRequest request,
       HttpServletResponse response, String actionLabel, AuthenticatedAccountAction action)
       throws IOException {
+    if (!hasAnyCredential(request)) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
+      return;
+    }
     try {
       Account account = resolveAuthenticatedAccount(request, response);
       if (account == null) {
@@ -2333,22 +2606,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleEnvironments(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    String token = extractBearerToken(request);
-    if (token == null) {
-      writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
-          INVALID_AUTHORIZATION_HEADER);
+    if (!hasAnyCredential(request)) {
+      writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
       return;
     }
-
     try {
-      OBContext.setOBContext("0", "0", "0", "0");
-      OBContext.setAdminMode(true);
-
-      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
-      if (account == null) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+      AuthenticatedAccount authenticated = resolveAuthenticatedAccountContext(request, response);
+      if (authenticated == null) {
         return;
       }
+      Account account = authenticated.account;
 
       org.codehaus.jettison.json.JSONArray envArray = new org.codehaus.jettison.json.JSONArray();
       List<User> environmentUsers = new ArrayList<>(
@@ -2403,13 +2670,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void handleEnvironmentLogin(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     String token = extractBearerToken(request);
-    if (token == null) {
+    if (token == null || !GoLegacyBearer.isEnabled()) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED,
           INVALID_AUTHORIZATION_HEADER);
       return;
     }
+    GoLegacyBearer.recordUse();
 
-    String userId = request.getParameter("userId");
+    String userId = request.getParameter(FIELD_USER_ID);
     if (userId == null || userId.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing userId parameter");
       return;
@@ -2474,7 +2742,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (preparation == null) {
       return;
     }
-    String token = preparation.token;
+    String accountId = preparation.accountId;
     String accountEmail = preparation.accountEmail;
     OnboardingRequestData onboardingRequest = preparation.request;
     String currencyId = preparation.currencyId;
@@ -2491,7 +2759,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     response.setStatus(HttpServletResponse.SC_OK);
     response.setContentType("application/x-ndjson");
     response.setCharacterEncoding(UTF_8);
-    response.setHeader("X-Content-Type-Options", "nosniff");
+    response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
     PrintWriter writer = response.getWriter();
 
     // Generate a random password for the admin user
@@ -2548,12 +2816,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       }
 
+      if (paidUpgrade && (onboardingRequest.transferProducts || onboardingRequest.transferContacts)) {
+        sendProgress(writer, "data-transfer", PROGRESS_IN_PROGRESS, "Transferring selected demo data...");
+        String sourceClientId = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail);
+        OnboardingDataTransferService.TransferResult transferResult = onboardingDataTransferService.transfer(
+            sourceClientId, clientId, orgId, onboardingRequest.transferProducts,
+            onboardingRequest.transferContacts);
+        sendProgress(writer, "data-transfer", "done",
+            "Selected demo data transferred (products=" + transferResult.productsCopied()
+                + ", contacts=" + transferResult.contactsCopied() + ")");
+      }
       if (!paidUpgrade && !tenantEnvironmentLifecycleService.markDemoReady(clientId, Instant.now())) {
         throw new IllegalStateException("Could not initialize demo trial lifecycle");
       }
 
       EtendoGoDalHelper.commitDalChanges("onboarding", log);
-      completeCommittedOnboarding(token, accountEmail, onboardingRequest, clientId, paidUpgrade,
+      completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
           provisioningClaim);
       // Activate the costing schedule now that its row is committed and therefore visible to the
       // scheduler's own DB connection. Best-effort: internally swallows failures, and the SCH row
@@ -2585,13 +2863,31 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private OnboardingPreparation prepareOnboarding(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
-    String token = extractBearerToken(request);
-    if (token == null) {
+    // ETP-4575 — the credential is whatever the active scheme holds, not a bearer. develop's
+    // version opened with `extractBearerToken`, which is null under the cookie session, so every
+    // onboarding would have answered 401. `resolveAuthenticatedAccountContext` accepts the
+    // `__Host-` session and the legacy bearer alike, and hands back the resolved account, so the
+    // email and the id below come from the session rather than from decoding a token.
+    if (!hasAnyCredential(request)) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
       return null;
     }
-    String accountEmail = resolveOnboardingAccountEmail(token, response);
-    if (accountEmail == null || rejectWhenEmailNotVerified(token, response)) {
+    AuthenticatedAccount authenticated;
+    try {
+      authenticated = resolveAuthenticatedAccountContext(request, response);
+    } catch (RuntimeException e) {
+      log.error("Database error validating the session for onboarding", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+    if (authenticated == null) {
+      return null;
+    }
+    String accountId = authenticated.account.getId();
+    String accountEmail = authenticated.account.getEmail();
+    if (rejectWhenEmailNotVerified(authenticated.account, response)) {
       return null;
     }
     OnboardingRequestData onboardingRequest = parseOnboardingRequest(request, response);
@@ -2609,12 +2905,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return null;
     }
     boolean paidUpgrade = paywallOutcome == PaywallOutcome.PAID;
-    Long provisioningClaim = claimPaidProvisioning(paidUpgrade, onboardingRequest, accountEmail,
-        response);
+    Long provisioningClaim = claimPaidProvisioning(paidUpgrade, onboardingRequest, accountId,
+        accountEmail, response);
     if (paidUpgrade && provisioningClaim == null) {
       return null;
     }
-    return new OnboardingPreparation(token, accountEmail, onboardingRequest, currencyId,
+    return new OnboardingPreparation(accountId, accountEmail, onboardingRequest, currencyId,
         paidUpgrade, provisioningClaim);
   }
 
@@ -2634,14 +2930,16 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * @return true when the request was refused and the caller must stop
    */
   private Long claimPaidProvisioning(boolean paidUpgrade,
-      OnboardingRequestData onboardingRequest, String accountEmail, HttpServletResponse response)
+      OnboardingRequestData onboardingRequest, String accountId, String accountEmail,
+      HttpServletResponse response)
       throws IOException {
     if (!paidUpgrade) {
       return null;
     }
-    if (checkoutRequestStore.claimForProvisioning(onboardingRequest.paymentToken, accountEmail)) {
+    if (checkoutRequestStore.claimForProvisioning(onboardingRequest.paymentToken, accountId,
+        accountEmail)) {
       Long attempt = checkoutRequestStore.findProvisioningAttempt(onboardingRequest.paymentToken,
-          accountEmail);
+          accountId, accountEmail);
       // A successful conditional update always has a persisted attempt. Keep the success path
       // recoverable even if a legacy database omits that value.
       return attempt == null ? 0L : attempt;
@@ -2688,7 +2986,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * @param clientId {@code AD_CLIENT_ID} of the environment just provisioned
    * @param paidUpgrade whether this environment was bought rather than free
    */
-  private void completeCommittedOnboarding(String token, String accountEmail,
+  private void completeCommittedOnboarding(String accountId, String accountEmail,
       OnboardingRequestData onboardingRequest, String clientId, boolean paidUpgrade,
       Long provisioningClaim) {
     if (paidUpgrade) {
@@ -2702,7 +3000,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             + "not be closed", onboardingRequest.clientName, clientId, e);
       }
     }
-    Account account = findAccountForCommittedOnboarding(token, accountEmail);
+    Account account = findAccountForCommittedOnboarding(accountId, accountEmail);
     clearOnboardingDraftBestEffort(account);
     String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
     sendAuthEmailBestEffort("environment-ready",
@@ -2896,28 +3194,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     writeResponse(response, SC_PAYMENT_REQUIRED, body);
   }
 
-  private String resolveOnboardingAccountEmail(String token, HttpServletResponse response)
-      throws IOException {
-    String accountEmail = null;
-    try {
-      OBContext.setOBContext("0", "0", "0", "0");
-      OBContext.setAdminMode(true);
-      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
-      String resolvedEmail = account == null ? null : account.getEmail();
-      if (resolvedEmail == null) {
-        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
-      } else {
-        accountEmail = resolvedEmail;
-      }
-    } catch (RuntimeException e) {
-      log.error("Database error validating token for onboarding", e);
-      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
-    } finally {
-      OBContext.restorePreviousMode();
-    }
-    return accountEmail;
-  }
-
   private void writeEnvironmentLoginResponse(HttpServletResponse response, String userId,
       EtendoGoJwtSupport.RoleListData roleListData) throws Exception {
     OBContext.setOBContext("0", "0", "0", "0");
@@ -2935,7 +3211,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       JSONObject result = new JSONObject();
       result.put(FIELD_TOKEN, jwtToken);
-      result.put("roleList", roleListData.getRoleArray());
+      result.put(FIELD_ROLE_LIST, roleListData.getRoleArray());
       writeResponse(response, HttpServletResponse.SC_OK, result);
     } finally {
       OBContext.restorePreviousMode();
@@ -2968,6 +3244,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.taxId = body.optString("fiscalIdValue", "").trim();
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
       data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
+      JSONObject transfer = body.optJSONObject("dataTransfer");
+      data.transferProducts = transfer != null && transfer.optBoolean("products", false);
+      data.transferContacts = transfer != null && transfer.optBoolean("contacts", false);
       if ("convert-demo".equalsIgnoreCase(data.upgradeAction)) {
         writeError(response, HttpServletResponse.SC_BAD_REQUEST,
             "Demo environments cannot be converted; create a new productive environment");
@@ -3736,8 +4015,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return false;
     }
   }
-  private Account findAccountForCommittedOnboarding(String token, String accountEmail) {
-    Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
+  private Account findAccountForCommittedOnboarding(String accountId, String accountEmail) {
+    Account account = EtendoGoJwtDalHelper.findActiveAccountById(accountId);
     return account != null ? account : EtendoGoJwtDalHelper.findActiveAccountByEmail(accountEmail);
   }
 
@@ -3891,13 +4170,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * confirmation. Any failure resolving that answers false: an infrastructure problem on our side
    * must not be what stops a paying user from creating their environment.
    */
-  private boolean rejectWhenEmailNotVerified(String token, HttpServletResponse response)
+  private boolean rejectWhenEmailNotVerified(Account account, HttpServletResponse response)
       throws IOException {
     boolean pending = false;
     try {
       OBContext.setOBContext("0", "0", "0", "0");
       OBContext.setAdminMode(true);
-      Account account = EtendoGoJwtDalHelper.findActiveAccountByBearerToken(token);
       pending = EmailVerificationDalHelper.isEmailVerificationPending(account);
     } catch (RuntimeException e) {
       log.error("Could not check the email verification state for onboarding; allowing the "
@@ -4011,6 +4289,456 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * POST /sws/go/session
+   * Body: { "email": "...", "password": "..." }
+   * Creates a backend-managed session: verifies the password, issues an opaque {@code __Host-}
+   * session cookie and returns { status, account, csrfToken }. The session token is never returned
+   * in the body (SEC-10). Legacy /login stays available during the migration window.
+   */
+  private void handleSessionCreate(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      return;
+    }
+
+    String email;
+    String password;
+    try {
+      email = body.getString(FIELD_EMAIL).trim().toLowerCase();
+      password = body.getString(FIELD_PASSWORD);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, MISSING_EMAIL_PASSWORD);
+      return;
+    }
+
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+
+      Account account = EtendoGoJwtDalHelper.findActiveAccountByEmail(email);
+      if (account == null || !EtendoGoJwtDalHelper.hasLocalPassword(account)
+          || !verifyPassword(password, account.getPasswordHash())) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_CREDENTIALS);
+        return;
+      }
+
+      IssuedGoSession issued = goSessionService.create(account.getId(), FIELD_PASSWORD,
+          request.getHeader(HEADER_USER_AGENT), null);
+      writeSessionResponse(response, HttpServletResponse.SC_OK, account, issued);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("session create", e, log);
+      log.error("Database error during session create", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Session creation failed due to a server error");
+    } catch (JSONException e) {
+      log.error("JSON error building session response", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * DELETE /sws/go/session
+   * Invalidates the current session server-side and clears the cookie. Idempotent — always clears
+   * the cookie even without a valid session. As an unsafe method it requires the CSRF proof.
+   */
+  private void handleSessionDelete(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+
+      GoSessionAuthResult auth = new GoSessionAuthenticator(goSessionService).authenticate(request);
+      if (auth.getStatus() == GoSessionAuthResult.Status.CSRF_FAILED) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, MSG_CSRF_VALIDATION_FAILED);
+        return;
+      }
+      if (auth.isAuthenticated()) {
+        goSessionService.revoke(auth.getRecord());
+      }
+      clearSessionCookies(response);
+      response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
+      response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
+      response.setStatus(HttpServletResponse.SC_NO_CONTENT);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("session delete", e, log);
+      log.error("Database error during session delete", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "Logout failed due to a server error");
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * POST /sws/go/session/environment
+   * Body: { "userId": "..." }
+   * Enters an environment: verifies the user belongs to the account, resolves the full context
+   * (user/role/client/org/warehouse) and rotates the session with that context stored. Returns
+   * { status, environment, roleList, csrfToken } plus a rotated cookie. Unsafe method → CSRF required.
+   */
+  private void handleSessionEnvironment(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    JSONObject body;
+    try {
+      body = readJsonBody(request);
+    } catch (JSONException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, INVALID_JSON_BODY);
+      return;
+    }
+    String userId = body.optString(FIELD_USER_ID, "").trim();
+    String requestedRoleId = body.optString("roleId", "").trim();
+    String requestedOrgId = body.optString("orgId", "").trim();
+    if (userId.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "Missing userId");
+      return;
+    }
+
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+
+      GoSessionAuthResult auth = new GoSessionAuthenticator(goSessionService).authenticate(request);
+      if (auth.getStatus() == GoSessionAuthResult.Status.CSRF_FAILED) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, MSG_CSRF_VALIDATION_FAILED);
+        return;
+      }
+      if (!auth.isAuthenticated()) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return;
+      }
+      GoSessionRecord sessionRecord = auth.getRecord();
+
+      Account account = EtendoGoJwtDalHelper.findActiveAccountById(sessionRecord.getAccountId());
+      if (account == null) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return;
+      }
+      if (!EtendoGoJwtSupport.isEnvironmentUserOwnedByAccount(account.getEmail(), userId)) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN,
+            "User does not belong to this account");
+        return;
+      }
+
+      User user = OBDal.getInstance().get(User.class, userId);
+      if (user == null) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, "User not found");
+        return;
+      }
+      EtendoGoJwtSupport.RoleListData roleListData = EtendoGoJwtSupport.loadRoleListData(userId);
+      Role role = resolveRequestedRole(roleListData, requestedRoleId, requestedOrgId, response);
+      if (role == null) {
+        return;
+      }
+
+      // Reuse the platform's context derivation: generate the environment JWT and read its claims,
+      // so the session stores exactly the user/role/client/org/warehouse the JWT layer would.
+      DecodedJWT context = SecureWebServicesUtils.decodeToken(
+          SecureWebServicesUtils.generateToken(user, role));
+      sessionRecord.setUserId(context.getClaim("user").asString());
+      sessionRecord.setRoleId(context.getClaim("role").asString());
+      sessionRecord.setCtxClientId(context.getClaim(PROGRESS_CLIENT).asString());
+      String generatedOrgId = context.getClaim(PROGRESS_ORGANIZATION).asString();
+      sessionRecord.setCtxOrgId(requestedOrgId.isEmpty() ? generatedOrgId : requestedOrgId);
+      sessionRecord.setWarehouseId(resolveWarehouseId(requestedOrgId, generatedOrgId, context));
+
+      IssuedGoSession rotated = goSessionService.rotate(sessionRecord);
+      if (rotated == null) {
+        writeError(response, HttpServletResponse.SC_CONFLICT,
+            "Session changed concurrently; restore and retry");
+        return;
+      }
+
+      setSessionCookies(response, rotated);
+      response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
+      response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put("environment", buildSessionEnvironment(rotated.getRecord()));
+      result.put(FIELD_ROLE_LIST, roleListData.getRoleArray());
+      result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("session environment", e, log);
+      log.error("Database error during environment switch", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("JSON error during environment switch", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } catch (Exception e) {
+      log.error("Token generation error during environment switch", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, "Environment switch failed");
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private static JSONObject findRole(JSONArray roleList, String roleId) throws JSONException {
+    if (roleList == null || roleId == null) {
+      return null;
+    }
+    for (int i = 0; i < roleList.length(); i++) {
+      JSONObject role = roleList.getJSONObject(i);
+      if (roleId.equals(role.optString("id"))) {
+        return role;
+      }
+    }
+    return null;
+  }
+
+  private static boolean roleContainsOrganization(JSONObject role, String orgId)
+      throws JSONException {
+    JSONArray organizations = role.optJSONArray("orgList");
+    if (organizations == null) {
+      return false;
+    }
+    for (int i = 0; i < organizations.length(); i++) {
+      if (orgId.equals(organizations.getJSONObject(i).optString("id"))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Resolve and validate the requested role (and, if given, organization) for an environment
+   * switch: defaults to the user's first role when none is requested, checks the role is one of
+   * the user's own, and that the requested organization (if any) belongs to that role. Writes the
+   * matching error response and returns {@code null} when the request is invalid.
+   */
+  private Role resolveRequestedRole(EtendoGoJwtSupport.RoleListData roleListData,
+      String requestedRoleId, String requestedOrgId, HttpServletResponse response)
+      throws IOException, JSONException {
+    String roleId = requestedRoleId.isEmpty() ? roleListData.getFirstRoleId() : requestedRoleId;
+    JSONObject selectedRole = findRole(roleListData.getRoleArray(), roleId);
+    if (roleId == null || selectedRole == null) {
+      writeError(response, HttpServletResponse.SC_FORBIDDEN,
+          "Requested role is not available to this user");
+      return null;
+    }
+    if (!requestedOrgId.isEmpty() && !roleContainsOrganization(selectedRole, requestedOrgId)) {
+      writeError(response, HttpServletResponse.SC_FORBIDDEN,
+          "Requested organization is not available to this role");
+      return null;
+    }
+    Role role = OBDal.getInstance().get(Role.class, roleId);
+    if (role == null) {
+      writeError(response, HttpServletResponse.SC_FORBIDDEN,
+          "Requested role is not available to this user");
+    }
+    return role;
+  }
+
+  /**
+   * Resolve the session's warehouse: the JWT-generated default when no organization was explicitly
+   * requested (or it matches the default), otherwise an active warehouse under the requested
+   * organization.
+   */
+  private static String resolveWarehouseId(String requestedOrgId, String generatedOrgId,
+      DecodedJWT context) {
+    if (requestedOrgId.isEmpty() || requestedOrgId.equals(generatedOrgId)) {
+      return context.getClaim("warehouse").asString();
+    }
+    return findWarehouseForOrganization(requestedOrgId);
+  }
+
+  /**
+   * Resolve an active warehouse under the given organization, for when an explicit environment
+   * switch selects an organization other than the one the JWT context derivation would default to.
+   *
+   * @return the warehouse id, or {@code null} if the organization has no active warehouse
+   */
+  private static String findWarehouseForOrganization(String orgId) {
+    Organization organization = OBDal.getInstance().get(Organization.class, orgId);
+    if (organization == null) {
+      return null;
+    }
+    OBCriteria<Warehouse> criteria = OBDal.getInstance().createCriteria(Warehouse.class);
+    criteria.add(Restrictions.eq(Warehouse.PROPERTY_ORGANIZATION, organization));
+    criteria.add(Restrictions.eq(Warehouse.PROPERTY_ACTIVE, true));
+    criteria.setMaxResults(1);
+    Warehouse warehouse = (Warehouse) criteria.uniqueResult();
+    return warehouse == null ? null : warehouse.getId();
+  }
+
+  /**
+   * GET /sws/go/session
+   * Restores the account and current environment context from the session cookie. Safe method — no
+   * CSRF required. Returns { status, account, environment|null, csrfToken }; 401 when there is no
+   * live session.
+   */
+  private void handleSessionRestore(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+
+      GoSessionAuthResult auth = new GoSessionAuthenticator(goSessionService).authenticate(request);
+      if (!auth.isAuthenticated()) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return;
+      }
+      GoSessionRecord sessionRecord = auth.getRecord();
+      Account account = EtendoGoJwtDalHelper.findActiveAccountById(sessionRecord.getAccountId());
+      if (account == null) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return;
+      }
+
+      JSONObject accountJson = buildAccountJson(account);
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put(FIELD_ACCOUNT, accountJson);
+      result.put("environment", buildSessionEnvironment(sessionRecord));
+      result.put(FIELD_ROLE_LIST, loadSessionRoleList(sessionRecord));
+      result.put(FIELD_CSRF_TOKEN, sessionRecord.getCsrfToken());
+
+      response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
+      response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (RuntimeException e) {
+      log.error("Database error during session restore", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("JSON error during session restore", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Build the environment block of a restore response: the selected {@code user/role/client/org/
+   * warehouse}, or {@code null} when no environment has been entered yet on this session.
+   */
+  private static Object buildSessionEnvironment(GoSessionRecord sessionRecord) throws JSONException {
+    if (sessionRecord.getUserId() == null) {
+      return JSONObject.NULL;
+    }
+    JSONObject env = new JSONObject();
+    env.put(FIELD_USER_ID, sessionRecord.getUserId());
+    env.put("roleId", sessionRecord.getRoleId());
+    env.put("clientId", sessionRecord.getCtxClientId());
+    env.put("orgId", sessionRecord.getCtxOrgId());
+    env.put("warehouseId", sessionRecord.getWarehouseId());
+    return env;
+  }
+
+  private static JSONArray loadSessionRoleList(GoSessionRecord sessionRecord) throws JSONException {
+    if (sessionRecord.getUserId() == null) {
+      return new JSONArray();
+    }
+    return EtendoGoJwtSupport.loadRoleListData(sessionRecord.getUserId()).getRoleArray();
+  }
+
+  /**
+   * POST /sws/go/session/refresh
+   * Rotates the session from the one-time refresh cookie and issues fresh session + refresh cookies.
+   * Protected by same-origin ({@code SameSite=Lax} + {@code Origin}) rather than a CSRF token, since
+   * the session may already be expired when refresh runs. A replayed/expired refresh clears the
+   * cookies and returns 401.
+   */
+  private void handleSessionRefresh(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    try {
+      OBContext.setOBContext("0", "0", "0", "0");
+      OBContext.setAdminMode(true);
+
+      if (!GoSessionSecurity.isOriginAllowed(request)) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN, MSG_CSRF_VALIDATION_FAILED);
+        return;
+      }
+      String rawRefresh = extractRefreshToken(request);
+      IssuedGoSession rotated = rawRefresh == null ? null : goSessionService.refresh(rawRefresh);
+      if (rotated == null) {
+        clearSessionCookies(response);
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return;
+      }
+
+      setSessionCookies(response, rotated);
+      response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
+      response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
+
+      JSONObject result = new JSONObject();
+      result.put(FIELD_STATUS, STATUS_SUCCESS);
+      result.put(FIELD_CSRF_TOKEN, rotated.getCsrfToken());
+      writeResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (RuntimeException e) {
+      EtendoGoDalHelper.rollbackDalChanges("session refresh", e, log);
+      log.error("Database error during session refresh", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, SERVER_ERROR);
+    } catch (JSONException e) {
+      log.error("JSON error during session refresh", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private void setSessionCookies(HttpServletResponse response, IssuedGoSession issued) {
+    response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildSessionCookie(issued.getSessionToken()));
+    response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildRefreshCookie(issued.getRefreshToken()));
+  }
+
+  private void clearSessionCookies(HttpServletResponse response) {
+    response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildExpiredSessionCookie());
+    response.addHeader(HEADER_SET_COOKIE, GoSessionSecurity.buildExpiredRefreshCookie());
+  }
+
+  private static String extractRefreshToken(HttpServletRequest request) {
+    Cookie[] cookies = request.getCookies();
+    if (cookies == null) {
+      return null;
+    }
+    for (Cookie cookie : cookies) {
+      if (GoSessionSecurity.REFRESH_COOKIE_NAME.equals(cookie.getName())) {
+        return StringUtils.trimToNull(cookie.getValue());
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Build the standard {@code {id, email, name}} JSON projection of an account, shared by every
+   * endpoint that returns account data.
+   */
+  private static JSONObject buildAccountJson(Account account) throws JSONException {
+    JSONObject accountJson = new JSONObject();
+    accountJson.put("id", account.getId());
+    accountJson.put(FIELD_EMAIL, account.getEmail());
+    accountJson.put("name", account.getName());
+    return accountJson;
+  }
+
+  /**
+   * Write a session response: sets the opaque {@code __Host-} cookie plus {@code no-store} and
+   * {@code nosniff} headers, and returns { status, account, csrfToken }. The session token itself
+   * is never placed in the body.
+   */
+  private void writeSessionResponse(HttpServletResponse response, int status, Account account,
+      IssuedGoSession issued) throws IOException, JSONException {
+    setSessionCookies(response, issued);
+    response.setHeader(HEADER_CACHE_CONTROL, VALUE_NO_STORE);
+    response.setHeader(HEADER_CONTENT_TYPE_OPTIONS, VALUE_NOSNIFF);
+
+    JSONObject accountJson = buildAccountJson(account);
+
+    JSONObject result = new JSONObject();
+    result.put(FIELD_STATUS, STATUS_SUCCESS);
+    result.put(FIELD_ACCOUNT, accountJson);
+    result.put(FIELD_CSRF_TOKEN, issued.getCsrfToken());
+    writeResponse(response, status, result);
+  }
+
+  /**
    * Write a JSON response with the given HTTP status code.
    */
   private void writeResponse(HttpServletResponse response, int status, JSONObject body)
@@ -4107,16 +4835,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   private static final class OnboardingPreparation {
-    private final String token;
+    private final String accountId;
     private final String accountEmail;
     private final OnboardingRequestData request;
     private final String currencyId;
     private final boolean paidUpgrade;
     private final Long provisioningClaim;
 
-    private OnboardingPreparation(String token, String accountEmail, OnboardingRequestData request,
-        String currencyId, boolean paidUpgrade, Long provisioningClaim) {
-      this.token = token;
+    private OnboardingPreparation(String accountId, String accountEmail,
+        OnboardingRequestData request, String currencyId, boolean paidUpgrade,
+        Long provisioningClaim) {
+      this.accountId = accountId;
       this.accountEmail = accountEmail;
       this.request = request;
       this.currencyId = currencyId;
@@ -4140,6 +4869,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // makes the resulting environment productive (ETP-4966, durable since ETP-5045).
     private String paymentToken;
     private String upgradeAction;
+    private boolean transferProducts;
+    private boolean transferContacts;
   }
 
   private static class AdminContextData {

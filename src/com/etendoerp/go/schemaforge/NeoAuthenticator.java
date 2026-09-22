@@ -31,6 +31,13 @@ import org.openbravo.dal.core.OBContext;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.oauth2.OAuth2Filter;
+import com.etendoerp.go.session.GoLegacyBearer;
+import com.etendoerp.go.session.GoNeoAuth;
+import com.etendoerp.go.session.GoSessionAuthResult;
+import com.etendoerp.go.session.GoSessionAuthenticator;
+import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionService;
+import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoLanguage;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
@@ -47,6 +54,8 @@ class NeoAuthenticator {
   private static final Logger log = LogManager.getLogger(NeoAuthenticator.class);
 
   private final NeoServlet servlet;
+  private final GoSessionAuthenticator sessionAuthenticator =
+      new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore()));
   private final TenantEnvironmentLifecycleService environmentLifecycleService =
       new TenantEnvironmentLifecycleService();
 
@@ -62,8 +71,28 @@ class NeoAuthenticator {
   boolean authenticateRequest(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
-      authenticateJwt(request);
-      return true;
+      GoSessionAuthResult sessionAuth = sessionAuthenticator.authenticate(request);
+      switch (GoNeoAuth.decide(sessionAuth.getStatus(), GoLegacyBearer.isEnabled())) {
+        case USE_SESSION:
+          applySessionContext(request, sessionAuth.getRecord());
+          return true;
+        case CSRF_REJECTED:
+          servlet.sendError(response, HttpServletResponse.SC_FORBIDDEN, "CSRF validation failed");
+          return false;
+        case SESSION_INVALID:
+          servlet.sendError(response, HttpServletResponse.SC_UNAUTHORIZED,
+              "Invalid or expired session");
+          return false;
+        case NO_CREDENTIALS:
+          servlet.sendError(response, HttpServletResponse.SC_UNAUTHORIZED,
+              "Missing or invalid Authorization header");
+          return false;
+        case USE_LEGACY_BEARER:
+        default:
+          GoLegacyBearer.recordUse();
+          authenticateJwt(request);
+          return true;
+      }
     } catch (CommercialAccessException e) {
       log.info("Commercial access denied for NEO request: {}", e.getMessage());
       servlet.sendError(response, HttpServletResponse.SC_PAYMENT_REQUIRED, e.getMessage());
@@ -79,6 +108,23 @@ class NeoAuthenticator {
       servlet.sendError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
       return false;
     }
+  }
+
+  /**
+   * Reconstruct {@link OBContext} from a resolved cookie session, mirroring {@link #authenticateJwt}
+   * but sourcing the environment from the session record instead of JWT claims. Throws when no
+   * environment has been selected on the session yet.
+   */
+  private void applySessionContext(HttpServletRequest request, GoSessionRecord sessionRecord) {
+    if (StringUtils.isAnyBlank(sessionRecord.getUserId(), sessionRecord.getRoleId(), sessionRecord.getCtxOrgId(),
+        sessionRecord.getCtxClientId())) {
+      throw new OBException("Session has no environment selected");
+    }
+    OBContext context = SecureWebServicesUtils.createContext(sessionRecord.getUserId(), sessionRecord.getRoleId(),
+        sessionRecord.getCtxOrgId(), sessionRecord.getWarehouseId(), sessionRecord.getCtxClientId());
+    OBContext.setOBContext(context);
+    OBContext.setOBContextInSession(request, context);
+    applyRequestLanguage(request);
   }
 
   void authenticateJwt(HttpServletRequest request) throws Exception {
