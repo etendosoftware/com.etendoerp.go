@@ -283,6 +283,9 @@ abstract class AbstractFiscalHandler {
      * I/O on the response writer, DAL/report lookups), and {@link #runDispatch} exists precisely
      * to funnel every one of them into the single {@link FiscalHandlerException} translation —
      * narrowing this to a specific type would defeat that purpose.
+     *
+     * @throws Exception whatever checked exception the wrapped {@code dispatch()} entity chain
+     *                    raises — {@link #runDispatch} is the single place that translates it.
      */
     @SuppressWarnings("java:S112")
     void run() throws Exception;
