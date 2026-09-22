@@ -290,6 +290,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_FIRST_STEPS_VERSION = "v";
   private static final String FIELD_FIRST_STEPS_SEEN = "seen";
   private static final String FIELD_FIRST_STEPS_COMPLETED = "completed";
+  /**
+   * ETP-5364 — the user closed the checklist for good, so the sidebar must stop offering it.
+   * Independent of {@code seen} (which only spends the one-time post-signup redirect) and of
+   * {@code completed} being full: a tenant can finish every step and still want the entry, and
+   * the flag is reversible from the page itself.
+   */
+  private static final String FIELD_FIRST_STEPS_DISMISSED = "dismissed";
   private static final int FIRST_STEPS_VERSION = 1;
   private static final int FIRST_STEPS_MAX_LENGTH = 1000;
   /**
@@ -2290,7 +2297,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * GET /sws/go/onboarding/first-steps
    * Header: Authorization: Bearer &lt;session_token&gt;
    * Returns 200 with { status, firstSteps } where firstSteps is the stored First Steps
-   * checklist state ({ v, seen, completed }) or null when nothing is stored.
+   * checklist state ({ v, seen, dismissed, completed }) or null when nothing is stored.
    */
   private void handleGetFirstSteps(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
@@ -2304,7 +2311,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   /**
    * POST /sws/go/onboarding/first-steps
    * Header: Authorization: Bearer &lt;session_token&gt;
-   * Body: { "firstSteps": { "v": 1, "seen": true, "completed": [ ... ] } } to save,
+   * Body: { "firstSteps": { "v": 1, "seen": true, "dismissed": false, "completed": [ ... ] } }
+   * to save,
    * { "firstSteps": null } to clear.
    * Only allowlisted step ids are stored and the serialized value is capped at
    * {@link #FIRST_STEPS_MAX_LENGTH} chars (400 otherwise).
@@ -2335,16 +2343,22 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /**
    * Keep only the known checklist shape so arbitrary client payloads are never persisted: the
-   * version is forced to {@link #FIRST_STEPS_VERSION} whatever the client sent, {@code seen} is
-   * coerced to a real boolean, and {@code completed} is intersected with
+   * version is forced to {@link #FIRST_STEPS_VERSION} whatever the client sent, {@code seen} and
+   * {@code dismissed} are coerced to real booleans, and {@code completed} is intersected with
    * {@link #FIRST_STEPS_IDS}. Unknown ids and non-string entries are dropped silently and
    * duplicates collapse, so the stored array is always deduplicated and in allowlist order
    * regardless of the order the client sent.
+   *
+   * <p>Package-visible and {@code static} so it can be unit-tested directly — it reads nothing
+   * but its argument and the constants above, and the same convention already applies to
+   * {@code maskEmail}. See {@code EtendoGoJwtServletFirstStepsTest}.
    */
-  private JSONObject sanitizeFirstSteps(JSONObject firstSteps) throws JSONException {
+  static JSONObject sanitizeFirstSteps(JSONObject firstSteps) throws JSONException {
     JSONObject clean = new JSONObject();
     clean.put(FIELD_FIRST_STEPS_VERSION, FIRST_STEPS_VERSION);
     clean.put(FIELD_FIRST_STEPS_SEEN, firstSteps.optBoolean(FIELD_FIRST_STEPS_SEEN, false));
+    clean.put(FIELD_FIRST_STEPS_DISMISSED,
+        firstSteps.optBoolean(FIELD_FIRST_STEPS_DISMISSED, false));
     Set<String> requested = new HashSet<>();
     JSONArray completed = firstSteps.optJSONArray(FIELD_FIRST_STEPS_COMPLETED);
     if (completed != null) {
