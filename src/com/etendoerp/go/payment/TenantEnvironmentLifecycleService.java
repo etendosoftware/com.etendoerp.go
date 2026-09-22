@@ -18,9 +18,9 @@ import java.util.Locale;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
-import org.openbravo.erpCommon.businessUtility.Preferences;
 import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.system.Client;
 
@@ -57,6 +57,7 @@ public class TenantEnvironmentLifecycleService {
 
   private static final String PARAM_ATTRIBUTE = "attribute";
   private static final String PARAM_CLIENT_ID = "clientId";
+  private static final String PREFERENCE_CLIENT_PREDICATE = " and pref.";
   private static final Logger log = LogManager.getLogger(TenantEnvironmentLifecycleService.class);
 
   private final TenantPlanService tenantPlanService;
@@ -348,14 +349,34 @@ public class TenantEnvironmentLifecycleService {
   }
 
   private void setPreference(String attribute, String value, Client client) {
-    Preferences.setPreferenceValue(attribute, value, false, client, null, null, null, null, null);
+    OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
+        "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :" + PARAM_ATTRIBUTE
+            + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_CLIENT + ".id = :" + PARAM_CLIENT_ID
+            + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_ACTIVE + " = true");
+    query.setNamedParameter(PARAM_ATTRIBUTE, attribute);
+    query.setNamedParameter(PARAM_CLIENT_ID, client.getId());
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    query.setMaxResult(1);
+    Preference preference = query.uniqueResult();
+    if (preference == null) {
+      preference = OBProvider.getInstance().get(Preference.class);
+      preference.setClient(client);
+      preference.setOrganization(null);
+      preference.setActive(true);
+      preference.setPropertyList(false);
+      preference.setAttribute(attribute);
+      preference.setSelected(true);
+    }
+    preference.setSearchKey(StringUtils.trimToEmpty(value));
+    OBDal.getInstance().save(preference);
   }
 
   private String readPreference(String attribute, String clientId) {
     OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
         "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :" + PARAM_ATTRIBUTE
-            + " and pref." + Preference.PROPERTY_VISIBLEATCLIENT + ".id = :" + PARAM_CLIENT_ID
-            + " and pref." + Preference.PROPERTY_ACTIVE + " = true");
+            + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_CLIENT + ".id = :" + PARAM_CLIENT_ID
+            + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_ACTIVE + " = true");
     query.setNamedParameter(PARAM_ATTRIBUTE, attribute);
     query.setNamedParameter(PARAM_CLIENT_ID, clientId);
     query.setFilterOnReadableClients(false);
