@@ -1216,6 +1216,214 @@ public class FiscalDeclCrudHandlerTest {
     assertEquals("{\"ok\":true}", sw.toString());
   }
 
+  // ── handleDeclPut (rejectRepresentation — block re-presentation, ETP-5438) ─
+  //
+  // "block re-presentation once already submitted" — this is the backend half of that: a PUT
+  // that re-sends a submitted-family `status` on a declaration that is ALREADY in a
+  // submitted-family status must be rejected, regardless of what the frontend does (it already
+  // hides "Registrar/Presentar" once isSubmitted). Model-agnostic — the same ETGO_Fiscal_Decl
+  // table/PUT path serves both 303 and 349, so these tests exercise the shared handler directly
+  // rather than a model-specific one.
+
+  /**
+   * The base case: current status {@code submitted}, PUT tries to set {@code submitted_ack} (a
+   * different manual path re-presenting the SAME declaration) — rejected with 409, no status
+   * write, no commit.
+   */
+  @Test
+  public void testHandleDeclPutRepresentAlreadySubmittedReturns409AndLeavesRecordUnchanged()
+      throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"submitted_ack\"}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT), anyString());
+      verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS), any());
+      verify(obDal, never()).commitAndClose();
+    }
+  }
+
+  /** Same guard, exercised with the exact same status on both sides (idempotent re-PUT). */
+  @Test
+  public void testHandleDeclPutRepresentSameStatusReturns409() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"submitted\"}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT), anyString());
+    }
+  }
+
+  /** {@code submitted_ext} (legacy) counts as "already submitted" too — mixed-status coverage. */
+  @Test
+  public void testHandleDeclPutRepresentFromSubmittedExtReturns409() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"submitted\"}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted_ext");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+
+      verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT), anyString());
+    }
+  }
+
+  /**
+   * The normal, FIRST-time presentation (current {@code ready} -> new {@code submitted}) must NOT
+   * be rejected — the guard only fires when BOTH sides are already in the submitted family.
+   */
+  @Test
+  public void testHandleDeclPutFirstPresentationFromReadySucceeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"submitted\"}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("ready");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+    }
+
+    verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "submitted");
+    assertEquals("{\"ok\":true}", sw.toString());
+  }
+
+  /**
+   * "Reactivar declaración" (current {@code submitted}, new {@code draft}, non-telematic) must
+   * remain unaffected by this new guard — it only special-cases an INCOMING submitted-family
+   * status, and {@code draft} is not one. {@link #rejectTelematicReactivation} is what already
+   * guards this specific transition on its own, narrower terms.
+   */
+  @Test
+  public void testHandleDeclPutReactivateFromSubmittedStillSucceeds() throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader())
+        .thenReturn(new BufferedReader(new StringReader("{\"status\":\"draft\"}")));
+
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMISSION_METHOD)).thenReturn("manual_ack");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+
+      handler.handleDeclarations("PUT", req, resp);
+    }
+
+    verify(servlet, never()).sendError(any(), anyInt(), anyString());
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "draft");
+    assertEquals("{\"ok\":true}", sw.toString());
+  }
+
+  // ── findLatestDeclarationStatus (ETP-5438) ───────────────────────────
+
+  /** No declaration exists yet for the natural key -> {@code null} ("not submitted" by default). */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testFindLatestDeclarationStatusNoneReturnsNull() {
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+      when(query.list()).thenReturn(Collections.emptyList());
+
+      String status = handler.findLatestDeclarationStatus("client1", "org1", "349", 2026L, "T1");
+
+      assertEquals(null, status);
+    }
+  }
+
+  /**
+   * Two declarations for the same natural key (rectificativa flow) — the one with the HIGHER
+   * {@code DECL_SEQ} wins, regardless of list iteration order, matching {@code
+   * resolveNextDeclSeq}'s own "latest wins" ordinal.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testFindLatestDeclarationStatusReturnsHighestDeclSeqStatus() {
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+
+      BaseOBObject older = mock(BaseOBObject.class);
+      when(older.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(0L);
+      when(older.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+      BaseOBObject newer = mock(BaseOBObject.class);
+      when(newer.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(1L);
+      when(newer.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("draft");
+      // Older-first in the list, on purpose — the result must not depend on iteration order.
+      when(query.list()).thenReturn(Arrays.asList(older, newer));
+
+      String status = handler.findLatestDeclarationStatus("client1", "org1", "349", 2026L, "T1");
+
+      assertEquals("draft", status);
+    }
+  }
+
   // ── declToJson (manualData) ────────────────────────────────────────
 
   /**

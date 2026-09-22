@@ -117,6 +117,20 @@ class FiscalDeclCrudHandler {
   static final String SUBMISSION_METHOD_AEAT_TELEMATIC = "aeat_telematic";
 
   /**
+   * The 3 {@link #PROPERTY_DECLARATION_STATUS} values that mean "already presented" — {@code
+   * submitted}, {@code submitted_ext} (legacy/historical only, no longer selectable from
+   * {@code PresentModal}, but still a real value on existing rows) and {@code submitted_ack}.
+   * Mirrors the frontend's own local {@code isSubmitted}/{@code SUBMITTED_STATUSES} literals
+   * (deliberately duplicated per language, not shared — see {@code fiscal-models.md}'s
+   * "Duplicated, deliberately, in 4 places" for the frontend side of this same tradeoff). Used
+   * by {@link #rejectRepresentation} (re-presentation guard, ETP-5438) and by
+   * {@link Fiscal349BoxesHandler}/{@code Fiscal303BoxesHandler} to block a raw
+   * compute/generate call against an already-presented declaration.
+   */
+  static final java.util.Set<String> SUBMITTED_STATUSES =
+      java.util.Set.of("submitted", "submitted_ext", "submitted_ack");
+
+  /**
    * Entity name (= DB table name) for the AEAT validation-error rows persisted on every Modelo
    * 303 submission attempt (see {@link Fiscal303SubmissionSupport#handleSubmit} /
    * {@link #replaceIncidents}). Referenced by its raw entity-name string rather than a generated
@@ -371,6 +385,47 @@ class FiscalDeclCrudHandler {
     return maxSeq + 1L;
   }
 
+  /**
+   * Resolves {@link #PROPERTY_DECLARATION_STATUS} of the MOST RECENT declaration (highest
+   * {@link #PROPERTY_DECL_SEQ} — same "latest wins" ordinal {@link #resolveNextDeclSeq} computes
+   * off) for the given natural key, or {@code null} when no declaration exists for it yet.
+   *
+   * <p>ETP-5438 — {@code /fiscal349/operators}, {@code /fiscal349/generate} and their 303
+   * counterparts take no declaration id, only {@code (org, year, period)}: the natural key can
+   * legitimately have MORE THAN ONE declaration (the rectificativa flow, {@link
+   * #resolveNextDeclSeq}'s own javadoc), so "the declaration this call is about" is inherently
+   * the latest one for that period — an older, already-submitted declaration for the SAME period
+   * must not block a fresh rectificativa draft's own compute/generate. Used by {@link
+   * Fiscal349BoxesHandler}/{@code Fiscal303BoxesHandler} to reject a compute/generate call once
+   * that latest declaration is already in {@link #SUBMITTED_STATUSES} — the same "must not
+   * silently recompute/regenerate an already-presented declaration" guarantee {@link
+   * #rejectRepresentation} enforces for the PUT path, extended to the read/generate endpoints a
+   * direct API call could otherwise reach without ever going through this handler's PUT at all.
+   */
+  String findLatestDeclarationStatus(String clientId, String orgId, String model, long year,
+      String period) {
+    OBQuery<BaseOBObject> query = OBDal.getInstance().createQuery(ENTITY_FISCAL_DECL,
+        "client.id = :clientId and organization.id = :orgId and " + PROPERTY_FISCAL_MODEL
+            + " = :model and " + PROPERTY_FISCAL_YEAR + " = :year and " + PROPERTY_PERIOD
+            + " = :period");
+    query.setNamedParameter(PARAM_CLIENT_ID, clientId);
+    query.setNamedParameter(PARAM_ORG_ID, orgId);
+    query.setNamedParameter(MODEL_KEY, model);
+    query.setNamedParameter("year", Long.valueOf(year));
+    query.setNamedParameter(PERIOD_KEY, period);
+    long maxSeq = -1L;
+    BaseOBObject latest = null;
+    for (BaseOBObject existing : query.list()) {
+      Object rawSeq = existing.get(PROPERTY_DECL_SEQ);
+      long seq = rawSeq instanceof Number ? ((Number) rawSeq).longValue() : 0L;
+      if (seq > maxSeq) {
+        maxSeq = seq;
+        latest = existing;
+      }
+    }
+    return latest != null ? asString(latest.get(PROPERTY_DECLARATION_STATUS)) : null;
+  }
+
   private void handleDeclPut(HttpServletRequest request, HttpServletResponse response)
       throws Exception {
     String id = request.getParameter("id");
@@ -380,6 +435,9 @@ class FiscalDeclCrudHandler {
     }
     JSONObject body = readJsonBody(request);
     if (rejectTelematicReactivation(decl, body, id, response)) {
+      return;
+    }
+    if (rejectRepresentation(decl, body, id, response)) {
       return;
     }
     if (rejectNegativeManualBoxes(body, id, response)) {
@@ -417,6 +475,40 @@ class FiscalDeclCrudHandler {
     }
     servlet.sendError(response, HttpServletResponse.SC_CONFLICT,
         "Cannot reactivate a declaration filed via AEAT telematic submission: " + id);
+    return true;
+  }
+
+  /**
+   * Blocks re-presenting a declaration that is already in a {@link #SUBMITTED_STATUSES} status
+   * (ETP-5438) — "block re-presentation once already submitted". Defense in depth: the frontend
+   * already hides "Registrar/Presentar" once {@code isSubmitted} ({@code FmModel303Page.jsx} /
+   * {@code FmModel349Page.jsx}), but this is what actually prevents a raw PUT (or a future
+   * frontend regression) from silently re-filing an already-presented declaration.
+   *
+   * <p>Only fires when BOTH the current status and the incoming one are in
+   * {@link #SUBMITTED_STATUSES} — a transition INTO the submitted family from {@code draft}/
+   * {@code ready} (the normal, first-time presentation) is unaffected, and so is the existing
+   * "Reactivar declaración" transition BACK to {@code draft} ({@link #rejectTelematicReactivation}
+   * already guards that one on its own, narrower, terms). Deliberately model-agnostic — the same
+   * {@code ETGO_Fiscal_Decl} table and PUT path serve both Modelo 303 and Modelo 349, and nothing
+   * about "you cannot re-present an already-presented declaration" is specific to either.
+   *
+   * @return {@code true} if the PUT was rejected (a 409 was already sent to {@code response} and
+   *         the caller must stop processing); {@code false} if the request may proceed.
+   */
+  private boolean rejectRepresentation(BaseOBObject decl, JSONObject body, String id,
+      HttpServletResponse response) throws Exception {
+    boolean hasStatus = body.has(STATUS_KEY);
+    String newStatus = hasStatus ? body.getString(STATUS_KEY) : null;
+    if (!hasStatus || !SUBMITTED_STATUSES.contains(newStatus)) {
+      return false;
+    }
+    String currentStatus = asString(decl.get(PROPERTY_DECLARATION_STATUS));
+    if (!SUBMITTED_STATUSES.contains(currentStatus)) {
+      return false;
+    }
+    servlet.sendError(response, HttpServletResponse.SC_CONFLICT,
+        "This declaration was already submitted (status: " + currentStatus + "): " + id);
     return true;
   }
 

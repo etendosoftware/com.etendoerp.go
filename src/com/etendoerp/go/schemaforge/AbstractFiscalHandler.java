@@ -67,6 +67,15 @@ abstract class AbstractFiscalHandler {
     this.declHandler = new FiscalDeclCrudHandler(servlet);
   }
 
+  /**
+   * Exposes the shared {@link FiscalDeclCrudHandler} delegate to subclasses that need one of its
+   * declaration lookups (e.g. {@link Fiscal349BoxesHandler}'s ETP-5438 already-submitted guard,
+   * {@link FiscalDeclCrudHandler#findLatestDeclarationStatus}) without instantiating a second one.
+   */
+  protected FiscalDeclCrudHandler declHandler() {
+    return declHandler;
+  }
+
   void handle(String entityName, String method, HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     if (DECLARATIONS.equals(entityName) || INCIDENTS.equals(entityName)) {
