@@ -785,6 +785,35 @@ public class Fiscal303SubmitHandlerTest {
   @SuppressWarnings("unchecked")
   @Test
   public void testHandleSubmit_alreadySubmittedDeclaration_blocksResubmission() throws Exception {
+    assertHandleSubmitBlocksResubmission("submitted_ack");
+  }
+
+  /**
+   * ETP-5438 (user decision) — "la presentación telemática debería funcionar igual que los
+   * otros casos": the resubmission guard was widened from a {@code submitted_ack}-only check to
+   * the full submitted family. These two cover the other two members.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_alreadySubmittedDeclaration_submitted_blocksResubmission()
+      throws Exception {
+    assertHandleSubmitBlocksResubmission("submitted");
+  }
+
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_alreadySubmittedDeclaration_submittedExt_blocksResubmission()
+      throws Exception {
+    assertHandleSubmitBlocksResubmission("submitted_ext");
+  }
+
+  /**
+   * Shared body for the three "already submitted -> blocks resubmission" tests above — same
+   * assertions {@code testHandleSubmit_alreadySubmittedDeclaration_blocksResubmission} always
+   * made, parametrized on {@code declarationStatus} so all three members of {@link
+   * FiscalDeclCrudHandler#SUBMITTED_STATUSES} get identical coverage.
+   */
+  private void assertHandleSubmitBlocksResubmission(String declarationStatus) throws Exception {
     StringWriter capturedBody = new StringWriter();
     HttpServletResponse res = responseCapturing(capturedBody);
     HttpServletRequest req = requestFor("2026", "T2", "decl-1",
@@ -792,8 +821,8 @@ public class Fiscal303SubmitHandlerTest {
     NeoServlet servlet = mock(NeoServlet.class);
     Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
     FiscalDecl decl = matchingDecl("client1", "org1");
-    // Declaration was already successfully submitted in a prior call.
-    when(decl.getDeclarationStatus()).thenReturn("submitted_ack");
+    // Declaration was already successfully submitted (via some path) in a prior call.
+    when(decl.getDeclarationStatus()).thenReturn(declarationStatus);
 
     try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);

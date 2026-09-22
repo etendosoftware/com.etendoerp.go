@@ -384,15 +384,27 @@ public class OnboardingDatasetNormalizer {
    * accounting schema and has no valid combinations — a dangling chart. Importing it would create
    * an orphan chart of accounts in every onboarded tenant. This filter ignores it at import time
    * <em>without modifying the source dataset</em>: it drops the org-specific element row, then
-   * cascades the exclusion to that element's {@code C_ELEMENTVALUE} rows and their
-   * {@code C_ELEMENTVALUE_TRL} translations. The cascade relies on the alphabetical source-file
-   * order ({@code C_ELEMENT} → {@code C_ELEMENTVALUE} → {@code C_ELEMENTVALUE_TRL}), which the
+   * cascades the exclusion to that element's {@code C_ELEMENTVALUE} rows, their
+   * {@code C_ELEMENTVALUE_OPERAND} formula rows and their {@code C_ELEMENTVALUE_TRL} translations.
+   * The cascade relies on the alphabetical source-file order ({@code C_ELEMENT} →
+   * {@code C_ELEMENTVALUE} → {@code C_ELEMENTVALUE_OPERAND} → {@code C_ELEMENTVALUE_TRL}), which the
    * source providers guarantee.
+   *
+   * <p>The {@code C_ELEMENTVALUE_OPERAND} arm is not optional. GOClient ships 78 operand rows split
+   * exactly 39/39 between the two trees, so importing the table without this cascade sends the
+   * excluded tree's 39 rows into the XML pointing at the 38 element values this filter just dropped,
+   * and {@code DataImportService} aborts the whole onboarding with "Referenced object
+   * FinancialMgmtElementValue ... not present in the xml or in the database". Both foreign keys are
+   * checked, not just the owner: an operand is "P.G.D = P.G.C + P.G.19", so it is only meaningful
+   * when the account it belongs to AND the account it references both survive the filter.
    */
   private static final class AccountElementTreeFilter {
     private static final String ELEMENT_TABLE = "C_ELEMENT";
     private static final String ELEMENT_VALUE_TABLE = "C_ELEMENTVALUE";
+    private static final String ELEMENT_VALUE_OPERAND_TABLE = "C_ELEMENTVALUE_OPERAND";
     private static final String ELEMENT_VALUE_TRL_TABLE = "C_ELEMENTVALUE_TRL";
+    private static final String ELEMENT_VALUE_ID_COLUMN = "C_ELEMENTVALUE_ID";
+    private static final String ACCOUNT_ID_COLUMN = "ACCOUNT_ID";
     private static final String CLIENT_LEVEL_ORG = "0";
 
     private final Set<String> excludedElementIds = new HashSet<>();
@@ -407,8 +419,10 @@ public class OnboardingDatasetNormalizer {
           return excludeOrgSpecificElement(rawColumns);
         case ELEMENT_VALUE_TABLE:
           return excludeValueOfExcludedElement(rawColumns);
+        case ELEMENT_VALUE_OPERAND_TABLE:
+          return excludeOperandOfExcludedValue(rawColumns);
         case ELEMENT_VALUE_TRL_TABLE:
-          return excludedElementValueIds.contains(rawColumns.get("C_ELEMENTVALUE_ID"));
+          return excludedElementValueIds.contains(rawColumns.get(ELEMENT_VALUE_ID_COLUMN));
         default:
           return false;
       }
@@ -431,11 +445,21 @@ public class OnboardingDatasetNormalizer {
       if (parentElementId == null || !excludedElementIds.contains(parentElementId)) {
         return false;
       }
-      String valueId = rawColumns.get("C_ELEMENTVALUE_ID");
+      String valueId = rawColumns.get(ELEMENT_VALUE_ID_COLUMN);
       if (valueId != null) {
         excludedElementValueIds.add(valueId);
       }
       return true;
+    }
+
+    /**
+     * Drops a formula row whose owner account or referenced account belongs to the excluded tree.
+     * Nothing is recorded in {@code excludedElementValueIds}: {@code C_ELEMENTVALUE_OPERAND} is a
+     * leaf of the cascade, so the exclusion stops here.
+     */
+    private boolean excludeOperandOfExcludedValue(Map<String, String> rawColumns) {
+      return excludedElementValueIds.contains(rawColumns.get(ELEMENT_VALUE_ID_COLUMN))
+          || excludedElementValueIds.contains(rawColumns.get(ACCOUNT_ID_COLUMN));
     }
   }
 
