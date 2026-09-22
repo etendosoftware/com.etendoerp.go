@@ -110,6 +110,22 @@ public class AgingReportHandler implements NeoHandler {
    */
   private static final String AGING_PAYABLE_PROCESS_ID = "EB4C4053F3B94A17A08D1DD7E89CEB7E";
 
+  /**
+   * Whether the role may use the aging report at all, for either side.
+   *
+   * <p>Deliberately coarser than the check inside {@link #handle}: this one answers the
+   * catalogue's question ("should this report be offered?"), and a role granted only one of the
+   * two sides must still see it. The exact, side-specific grant is enforced where the report
+   * executes, once the requested side is known — see {@code resolveGatedProcessId}.</p>
+   *
+   * @return {@code true} when the role holds either the receivables or the payables grant
+   */
+  @Override
+  public boolean isAccessibleForCurrentRole() {
+    return NeoAccessHelper.hasObuiappProcessAccess(AGING_RECEIVABLE_PROCESS_ID)
+        || NeoAccessHelper.hasObuiappProcessAccess(AGING_PAYABLE_PROCESS_ID);
+  }
+
   // -------------------------------------------------------------------------
   // Inner value types
   // -------------------------------------------------------------------------

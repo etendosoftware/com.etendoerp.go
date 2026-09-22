@@ -47,6 +47,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.base.model.Entity;
+import org.openbravo.base.model.ModelProvider;
 import org.openbravo.base.model.Property;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -56,6 +57,7 @@ import org.openbravo.model.ad.ui.Process;
 import com.etendoerp.go.schemaforge.NeoSelectorService;
 import com.etendoerp.go.schemaforge.data.SFEntity;
 import com.etendoerp.go.schemaforge.data.SFField;
+import com.etendoerp.go.schemaforge.selector.policy.NeoSelectorPolicy;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 
 /**
@@ -639,46 +641,117 @@ class McpSchemaFieldBuilderTest {
 
   // ─── shouldIncludeSchemaColumn ──────────────────────────────────────
 
+  /**
+   * Rewritten for IMP-39 (ETP-5335): the predicate gained a third argument and a third question.
+   *
+   * <p>It used to answer "is this column active and not an audit column". It now also asks whether
+   * the spec exposes it — {@code neo_schema} stopped naming a field the write verbs and the filter
+   * path refuse, which is the three-way agreement IMP-39 exists to produce. The two exemptions it
+   * carries are the reason this is a predicate and not a set lookup, and both are asserted below
+   * because each was a measured decision: a button is always published (IMP-21 — an excluded action
+   * stays in the catalogue carrying {@code invokable:false}), and an uncurated column is published
+   * too, because absence of curation is not a decision (1043 such columns in a typical
+   * instance).</p>
+   */
   @Nested
   @DisplayName("shouldIncludeSchemaColumn")
   class ShouldIncludeSchemaColumn {
 
+    private static final Class<?>[] SIGNATURE = {
+        org.openbravo.model.ad.datamodel.Column.class, java.util.Set.class,
+        McpSchemaFieldBuilder.FieldMetadata.class };
+
+    private McpSchemaFieldBuilder.FieldMetadata metadata(String... excludedColumnIds) {
+      return new McpSchemaFieldBuilder.FieldMetadata(new HashMap<>(), new HashMap<>(),
+          new HashMap<>(), java.util.Set.of(excludedColumnIds));
+    }
+
+    private org.openbravo.model.ad.datamodel.Column column(String id, String dbName,
+        boolean active, String referenceId) {
+      org.openbravo.model.ad.datamodel.Column col =
+          mock(org.openbravo.model.ad.datamodel.Column.class);
+      when(col.getId()).thenReturn(id);
+      when(col.getDBColumnName()).thenReturn(dbName);
+      when(col.isActive()).thenReturn(active);
+      if (referenceId != null) {
+        org.openbravo.model.ad.domain.Reference reference =
+            mock(org.openbravo.model.ad.domain.Reference.class);
+        when(reference.getId()).thenReturn(referenceId);
+        when(col.getReference()).thenReturn(reference);
+      }
+      return col;
+    }
+
+    private boolean include(org.openbravo.model.ad.datamodel.Column col,
+        java.util.Set<String> systemCols, McpSchemaFieldBuilder.FieldMetadata fieldMetadata)
+        throws Exception {
+      return (boolean) invokeStatic("shouldIncludeSchemaColumn", SIGNATURE, col, systemCols,
+          fieldMetadata);
+    }
+
     @Test
     void activeNonSystemColumnIsIncluded() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.isActive()).thenReturn(true);
-      when(col.getDBColumnName()).thenReturn("Name");
-
-      java.util.Set<String> systemCols = java.util.Set.of("AD_CLIENT_ID", "AD_ORG_ID");
-      boolean result = (boolean) invokeStatic("shouldIncludeSchemaColumn",
-          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class, java.util.Set.class },
-          col, systemCols);
-      assertTrue(result);
+      assertTrue(include(column("col-1", "Name", true, null),
+          java.util.Set.of("AD_CLIENT_ID", "AD_ORG_ID"), metadata()));
     }
 
     @Test
     void inactiveColumnIsExcluded() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.isActive()).thenReturn(false);
-      when(col.getDBColumnName()).thenReturn("Name");
-
-      boolean result = (boolean) invokeStatic("shouldIncludeSchemaColumn",
-          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class, java.util.Set.class },
-          col, java.util.Set.of());
-      assertFalse(result);
+      assertFalse(include(column("col-1", "Name", false, null), java.util.Set.of(), metadata()));
     }
 
     @Test
     void systemColumnIsExcluded() throws Exception {
-      org.openbravo.model.ad.datamodel.Column col = mock(org.openbravo.model.ad.datamodel.Column.class);
-      when(col.isActive()).thenReturn(true);
-      when(col.getDBColumnName()).thenReturn("ad_client_id");
+      assertFalse(include(column("col-1", "ad_client_id", true, null),
+          java.util.Set.of("AD_CLIENT_ID", "AD_ORG_ID"), metadata()));
+    }
 
-      java.util.Set<String> systemCols = java.util.Set.of("AD_CLIENT_ID", "AD_ORG_ID");
-      boolean result = (boolean) invokeStatic("shouldIncludeSchemaColumn",
-          new Class<?>[]{ org.openbravo.model.ad.datamodel.Column.class, java.util.Set.class },
-          col, systemCols);
-      assertFalse(result);
+    /**
+     * IMP-39. Before this, {@code neo_schema} named a field that {@code neo_create} now refuses
+     * with {@code field_not_allowed} and that {@code neo_list} refuses as a filter key — an agent
+     * was told a field existed by one tool and denied it by three.
+     */
+    @Test
+    @DisplayName("a column the spec excluded is not published")
+    void excludedColumnIsNotPublished() throws Exception {
+      assertFalse(include(column("col-excluded", "POReference", true, null),
+          java.util.Set.of(), metadata("col-excluded")));
+    }
+
+    /**
+     * <b>Absence of curation is not a decision.</b> A column with no {@code ETGO_SF_FIELD} row —
+     * one added to AD after the last {@code push-to-neo}, or any column of a handler-backed entity
+     * that has no field rows at all — must stay on the surface.
+     */
+    @Test
+    @DisplayName("a column with no ETGO_SF_FIELD row is still published")
+    void uncuratedColumnIsStillPublished() throws Exception {
+      assertTrue(include(column("col-uncurated", "Description", true, null),
+          java.util.Set.of(), metadata("some-other-column")));
+    }
+
+    /**
+     * IMP-21, settled the other way on measured evidence: an excluded action stays in the
+     * catalogue carrying {@code invokable:false} and a machine-readable {@code notInvokableReason},
+     * because knowing an action exists but is out of scope is useful, while being told it is
+     * callable when it is not is not. Dropping buttons here would silently revert that.
+     */
+    @Test
+    @DisplayName("a button column is published even when the spec excludes it")
+    void buttonColumnsSurviveExclusion() throws Exception {
+      assertTrue(include(column("col-button", "DocAction", true, "28"),
+          java.util.Set.of(), metadata("col-button")),
+          "an excluded action must remain visible as invokable:false, not vanish");
+    }
+
+    /** An inactive or audit column loses whatever the exemptions would have granted it. */
+    @Test
+    @DisplayName("the active/system checks still come first, buttons included")
+    void theStructuralChecksOutrankTheExemptions() throws Exception {
+      assertFalse(include(column("col-button", "DocAction", false, "28"),
+          java.util.Set.of(), metadata()));
+      assertFalse(include(column("col-button", "ad_org_id", true, "28"),
+          java.util.Set.of("AD_ORG_ID"), metadata()));
     }
   }
 
@@ -2159,6 +2232,174 @@ class McpSchemaFieldBuilderTest {
       assertEquals("EM_Aeatsii_Descripcion_Sii", fields.getJSONObject(0).getString("label"));
       McpSchemaFieldBuilder.applyCuratedLabels(fields, null);
       assertEquals("EM_Aeatsii_Descripcion_Sii", fields.getJSONObject(0).getString("label"));
+    }
+  }
+
+  // ─── virtual fields (ETP-5368) ──────────────────────────────────────
+
+  @Nested
+  @DisplayName("virtual fields")
+  class VirtualFields {
+
+    private org.openbravo.model.ad.datamodel.Column locationColumn(String id, String dbColumnName,
+        String label, org.openbravo.model.ad.datamodel.Table table) {
+      org.openbravo.model.ad.datamodel.Column col =
+          mock(org.openbravo.model.ad.datamodel.Column.class);
+      when(col.getId()).thenReturn(id);
+      when(col.getDBColumnName()).thenReturn(dbColumnName);
+      when(col.getName()).thenReturn(label);
+      when(col.isActive()).thenReturn(true);
+      when(col.isMandatory()).thenReturn(false);
+      when(col.isUseAutomaticSequence()).thenReturn(false);
+      when(col.getDefaultValue()).thenReturn(null);
+      when(col.getReference()).thenReturn(null);
+      when(col.getTable()).thenReturn(table);
+      return col;
+    }
+
+    private Property property(String name) {
+      Property prop = mock(Property.class);
+      when(prop.getName()).thenReturn(name);
+      when(prop.getComputationFunction()).thenReturn(null);
+      return prop;
+    }
+
+    @Test
+    @DisplayName("appendVirtualFields appends in order, after the tab's own fields")
+    void appendsInOrder() throws Exception {
+      JSONArray fields = new JSONArray();
+      fields.put(new JSONObject().put("name", "phone"));
+      JSONArray extra = new JSONArray();
+      extra.put(new JSONObject().put("name", "addressLine1"));
+      extra.put(new JSONObject().put("name", "city"));
+
+      McpSchemaFieldBuilder.appendVirtualFields(fields, extra);
+
+      assertEquals(3, fields.length());
+      assertEquals("phone", fields.getJSONObject(0).getString("name"));
+      assertEquals("addressLine1", fields.getJSONObject(1).getString("name"));
+      assertEquals("city", fields.getJSONObject(2).getString("name"));
+    }
+
+    @Test
+    @DisplayName("an empty or null addition leaves the array untouched")
+    void emptyAndNullAreNoops() throws Exception {
+      JSONArray fields = new JSONArray();
+      fields.put(new JSONObject().put("name", "phone"));
+
+      McpSchemaFieldBuilder.appendVirtualFields(fields, new JSONArray());
+      McpSchemaFieldBuilder.appendVirtualFields(fields, null);
+      McpSchemaFieldBuilder.appendVirtualFields(null, new JSONArray());
+
+      assertEquals(1, fields.length());
+    }
+
+    @Test
+    @DisplayName("an entity with no wrapper policy contributes no virtual fields")
+    void noPolicyYieldsNoFields() throws Exception {
+      SFEntity sfEntity = mock(SFEntity.class);
+      try (MockedStatic<NeoSelectorPolicy> policy = mockStatic(NeoSelectorPolicy.class)) {
+        policy.when(() -> NeoSelectorPolicy.resolveVirtualColumns(sfEntity))
+            .thenReturn(List.of());
+
+        JSONArray fields = McpSchemaFieldBuilder.buildVirtualFieldsArray(sfEntity, null,
+            java.util.Set.of());
+
+        assertEquals(0, fields.length());
+      }
+    }
+
+    /**
+     * The invariant this ticket turns on. A virtual descriptor has no ETGO_SF_FIELD row to take a
+     * visibility from, and an absent visibility is not neutral: {@code isAgentSuppliable} reads it
+     * as "not the agent's to send", so the fields would be published by the full dump and then
+     * dropped from {@code view:"create"} — the projection an agent reads immediately before
+     * writing. Nothing else fails when that regresses.
+     */
+    @Test
+    @DisplayName("every virtual descriptor is one the agent may supply on a create")
+    void virtualDescriptorsAreAgentSuppliable() throws Exception {
+      org.openbravo.model.ad.datamodel.Table locationTable =
+          mock(org.openbravo.model.ad.datamodel.Table.class);
+      when(locationTable.getDBTableName()).thenReturn("C_Location");
+      org.openbravo.model.ad.datamodel.Column address1 =
+          locationColumn("COL-ADDR1", "Address1", "Address Line 1", locationTable);
+      org.openbravo.model.ad.datamodel.Column region =
+          locationColumn("COL-REGION", "C_Region_ID", "Region", locationTable);
+
+      org.openbravo.model.ad.datamodel.Table wrapperTable =
+          mock(org.openbravo.model.ad.datamodel.Table.class);
+      when(wrapperTable.getDBTableName()).thenReturn("C_BPartner_Location");
+      org.openbravo.model.ad.ui.Tab wrapperTab = mock(org.openbravo.model.ad.ui.Tab.class);
+      when(wrapperTab.getTable()).thenReturn(wrapperTable);
+
+      // Built before the stubbing starts: property() stubs a mock of its own, and Mockito reads a
+      // nested when(...) inside an unfinished when(...) as the outer stubbing being abandoned.
+      Property addressProperty = property("addressLine1");
+      Property regionProperty = property("region");
+      Entity backingEntity = mock(Entity.class);
+      when(backingEntity.getPropertyByColumnName("Address1")).thenReturn(addressProperty);
+      when(backingEntity.getPropertyByColumnName("C_Region_ID")).thenReturn(regionProperty);
+      ModelProvider modelProvider = mock(ModelProvider.class);
+      when(modelProvider.getEntityByTableName("C_Location")).thenReturn(backingEntity);
+
+      SFEntity sfEntity = mock(SFEntity.class);
+      try (MockedStatic<NeoSelectorPolicy> policy = mockStatic(NeoSelectorPolicy.class);
+           MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class)) {
+        policy.when(() -> NeoSelectorPolicy.resolveVirtualColumns(sfEntity))
+            .thenReturn(List.of(address1, region));
+        models.when(ModelProvider::getInstance).thenReturn(modelProvider);
+
+        JSONArray fields = McpSchemaFieldBuilder.buildVirtualFieldsArray(sfEntity, wrapperTab,
+            java.util.Set.of());
+
+        assertEquals(2, fields.length());
+        for (int i = 0; i < fields.length(); i++) {
+          JSONObject field = fields.getJSONObject(i);
+          assertEquals("editable", field.getString(McpSchemaFieldBuilder.KEY_VISIBILITY));
+          assertTrue(McpSchemaFieldBuilder.isAgentSuppliable(field),
+              "virtual field " + field.getString("name") + " must survive view:\"create\"");
+          // Says where the value really lands — the column is not on the wrapper's own table.
+          assertEquals("C_Location", field.getString("backingTable"));
+        }
+        // Declaration order, and the DAL property name the write handler actually reads.
+        assertEquals("addressLine1", fields.getJSONObject(0).getString("name"));
+        assertEquals("region", fields.getJSONObject(1).getString("name"));
+      }
+    }
+
+    @Test
+    @DisplayName("the region descriptor carries the guidance a column definition has no room for")
+    void regionCarriesAgentPrompt() throws Exception {
+      org.openbravo.model.ad.datamodel.Table locationTable =
+          mock(org.openbravo.model.ad.datamodel.Table.class);
+      when(locationTable.getDBTableName()).thenReturn("C_Location");
+      org.openbravo.model.ad.datamodel.Column region =
+          locationColumn("COL-REGION", "C_Region_ID", "Region", locationTable);
+
+      org.openbravo.model.ad.datamodel.Table wrapperTable =
+          mock(org.openbravo.model.ad.datamodel.Table.class);
+      when(wrapperTable.getDBTableName()).thenReturn("C_BPartner_Location");
+      org.openbravo.model.ad.ui.Tab wrapperTab = mock(org.openbravo.model.ad.ui.Tab.class);
+      when(wrapperTab.getTable()).thenReturn(wrapperTable);
+
+      ModelProvider modelProvider = mock(ModelProvider.class);
+      when(modelProvider.getEntityByTableName("C_Location")).thenReturn(null);
+
+      SFEntity sfEntity = mock(SFEntity.class);
+      try (MockedStatic<NeoSelectorPolicy> policy = mockStatic(NeoSelectorPolicy.class);
+           MockedStatic<ModelProvider> models = mockStatic(ModelProvider.class)) {
+        policy.when(() -> NeoSelectorPolicy.resolveVirtualColumns(sfEntity))
+            .thenReturn(List.of(region));
+        models.when(ModelProvider::getInstance).thenReturn(modelProvider);
+
+        JSONArray fields = McpSchemaFieldBuilder.buildVirtualFieldsArray(sfEntity, wrapperTab,
+            java.util.Set.of());
+
+        String prompt = fields.getJSONObject(0).getString("agentPrompt");
+        assertTrue(prompt.contains("regionName"), "prompt must state the exclusion with regionName");
+        assertTrue(prompt.contains("country"), "prompt must state the dependency on the country");
+      }
     }
   }
 }

@@ -18,11 +18,14 @@ package com.etendoerp.go.schemaforge;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.hibernate.criterion.Order;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -46,10 +49,21 @@ public class NeoVectorSearchEndpoint {
   private static final double DEFAULT_MIN_SCORE = 0.60d;
   private static final double DEFAULT_MAX_SCORE = 1d;
   private static final int HTTP_UNPROCESSABLE_ENTITY = 422;
+  private static final int HTTP_SERVICE_UNAVAILABLE = 503;
+  /** {@code NeoResponse} keeps its own copy private; this path builds the body itself. */
+  private static final String MESSAGE_FIELD = "message";
+  /** Cap on the {@code available} list of an unknown-target refusal, mirroring the MCP envelope. */
+  private static final int MAX_AVAILABLE_TARGETS = 20;
   private final SearchGateway searchGateway;
   private final NamespaceAuthorizer namespaceAuthorizer;
   private TargetSearchGateway targetSearchGateway;
   private NamespaceAuthorizer targetAuthorizer;
+  /**
+   * The configured target keys, used only to tell an unknown key from a forbidden one (IMP-41).
+   * {@code null} disables the distinction and restores the pre-IMP-41 behaviour, which is what the
+   * collaborator-injecting test constructors want: they assert on the authorizer, not the catalog.
+   */
+  private TargetCatalog targetCatalog;
 
   /** Creates the production endpoint backed by DB Extended and authenticated entity access. */
   public NeoVectorSearchEndpoint() {
@@ -61,20 +75,29 @@ public class NeoVectorSearchEndpoint {
         new VectorSearchService(new DalConnectionProvider(false))
             .searchTargetsAsJson(targets, query, topK, minScore, maxScore);
     targetAuthorizer = new TargetEntityAuthorizer();
+    targetCatalog = NeoVectorSearchEndpoint::configuredTargetKeys;
   }
 
   NeoVectorSearchEndpoint(SearchGateway searchGateway) { this(searchGateway, namespaces -> true); }
   NeoVectorSearchEndpoint(SearchGateway searchGateway, NamespaceAuthorizer namespaceAuthorizer) {
     this.searchGateway = searchGateway; this.namespaceAuthorizer = namespaceAuthorizer;
     this.targetSearchGateway = null; this.targetAuthorizer = namespaces -> true;
+    this.targetCatalog = null;
   }
 
   NeoVectorSearchEndpoint(SearchGateway searchGateway, NamespaceAuthorizer namespaceAuthorizer,
       TargetSearchGateway targetSearchGateway, NamespaceAuthorizer targetAuthorizer) {
+    this(searchGateway, namespaceAuthorizer, targetSearchGateway, targetAuthorizer, null);
+  }
+
+  NeoVectorSearchEndpoint(SearchGateway searchGateway, NamespaceAuthorizer namespaceAuthorizer,
+      TargetSearchGateway targetSearchGateway, NamespaceAuthorizer targetAuthorizer,
+      TargetCatalog targetCatalog) {
     this.searchGateway = searchGateway;
     this.namespaceAuthorizer = namespaceAuthorizer;
     this.targetSearchGateway = targetSearchGateway;
     this.targetAuthorizer = targetAuthorizer;
+    this.targetCatalog = targetCatalog;
   }
 
   NeoResponse handle(HttpServletRequest request) {
@@ -111,8 +134,10 @@ public class NeoVectorSearchEndpoint {
         "minScore and maxScore must be numbers between 0 and 1, with minScore not greater than maxScore");
     try {
       if (!targets.isEmpty()) {
-        if (targetSearchGateway == null || !targetAuthorizer.isAuthorized(targets))
-          return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN, "Access denied to vector target");
+        NeoResponse refusal = refuseTargets(targets);
+        if (refusal != null) {
+          return refusal;
+        }
         return NeoResponse.ok(new JSONObject(targetSearchGateway.search(targets, query, topK,
             scoreRange.minScore, scoreRange.maxScore)));
       }
@@ -150,6 +175,162 @@ public class NeoVectorSearchEndpoint {
     if (value == null) return null;
     String trimmed = value.trim();
     return trimmed.isEmpty() ? null : trimmed;
+  }
+
+  /**
+   * Decides whether a target-scoped search may run, and says <em>why not</em> when it may not.
+   *
+   * <p>IMP-41: this used to be one boolean, so three unrelated situations left by the same door
+   * with the same {@code 403 "Access denied to vector target"} — DB Extended not wired at all, a
+   * target key that does not exist, and a key that exists but the role cannot read. Only the third
+   * is a permission problem. An agent reading "access denied" after a misspelling concludes the
+   * capability is not for it and abandons, when the fix was the spelling; the rest of the MCP
+   * surface answers an unknown name with the list of names that would work, and this path is the
+   * one that did not.</p>
+   *
+   * @param targets the requested target keys, never empty
+   * @return the refusal to return, or {@code null} when the search may proceed
+   */
+  private NeoResponse refuseTargets(List<String> targets) {
+    if (targetSearchGateway == null) {
+      return NeoResponse.error(HTTP_SERVICE_UNAVAILABLE,
+          "Semantic search is not available on this instance: the DB Extended module is not "
+              + "installed or not wired. This is not a permission problem — do not retry with "
+              + "different targets.");
+    }
+    List<String> known = targetCatalog == null
+        ? null : targetCatalog.knownKeys().orElse(null);
+    if (known != null) {
+      List<String> unknown = new ArrayList<>();
+      for (String target : targets) {
+        if (!known.contains(target)) {
+          unknown.add(target);
+        }
+      }
+      if (!unknown.isEmpty()) {
+        return unknownTargetError(unknown, known);
+      }
+    }
+    if (!targetAuthorizer.isAuthorized(targets)) {
+      return NeoResponse.error(HttpServletResponse.SC_FORBIDDEN, "Access denied to vector target");
+    }
+    return null;
+  }
+
+  /**
+   * The {@code available}/{@code hint} envelope the rest of the surface already uses for an
+   * unrecognised name, so an agent can correct itself from the response alone.
+   *
+   * @param unknown the requested keys that are not configured
+   * @param known   every configured key, for the {@code available} list
+   * @return a 422 carrying what was wrong, what exists and what to do next
+   */
+  private static NeoResponse unknownTargetError(List<String> unknown, List<String> known) {
+    List<String> available = known.size() > MAX_AVAILABLE_TARGETS
+        ? known.subList(0, MAX_AVAILABLE_TARGETS) : known;
+    try {
+      JSONObject error = new JSONObject();
+      error.put("status", HTTP_UNPROCESSABLE_ENTITY);
+      error.put("code", "unknown_vector_target");
+      error.put(MESSAGE_FIELD, "Unknown vector search target(s): "
+          + String.join(", ", unknown)
+          + (known.isEmpty()
+              ? ". No search target is configured on this instance."
+              : ". Retry with one of the keys in 'available'."));
+      error.put("unknownTargets", new JSONArray(unknown));
+      error.put("available", new JSONArray(available));
+      JSONObject body = new JSONObject();
+      body.put("error", error);
+      body.put(MESSAGE_FIELD, error.getString(MESSAGE_FIELD));
+      return NeoResponse.error(HTTP_UNPROCESSABLE_ENTITY, body);
+    } catch (Exception e) {
+      return NeoResponse.error(HTTP_UNPROCESSABLE_ENTITY,
+          "Unknown vector search target(s): " + String.join(", ", unknown));
+    }
+  }
+
+  /**
+   * Every active search target key configured on the instance, sorted so the list — which an agent
+   * reads as the authoritative set of what it may ask for — reads the same way twice.
+   *
+   * <p>Read in admin mode on purpose: this is the <em>catalogue</em>, not the data. Whether the
+   * caller may actually search a given target is still decided afterwards by
+   * {@link TargetEntityAuthorizer}, which applies the role's window access and DAL read check.</p>
+   *
+   * @return the configured keys, possibly empty; {@code null} when the catalogue cannot be read
+   */
+  public static Optional<List<String>> configuredTargetKeys() {
+    // The admin-mode switch is INSIDE the try on purpose: it is itself a call that can fail (no
+    // live Hibernate session, as in tool generation outside a request), and when it did, the
+    // exception escaped this method, broke buildVectorSearchTool and took the whole MCP tool list
+    // down with it — the opposite of the graceful degradation the catch clause exists to provide.
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        OBCriteria<VectorSearchTarget> criteria =
+            OBDal.getInstance().createCriteria(VectorSearchTarget.class);
+        criteria.add(Restrictions.eq(VectorSearchTarget.PROPERTY_ACTIVE, true));
+        criteria.addOrder(Order.asc(VectorSearchTarget.PROPERTY_SEARCHKEY));
+        List<String> keys = new ArrayList<>();
+        for (VectorSearchTarget target : criteria.list()) {
+          if (target.getSearchKey() != null) {
+            keys.add(target.getSearchKey());
+          }
+        }
+        return Optional.of(keys);
+      } finally {
+        // Only reached when setAdminMode succeeded, so there is always a mode to restore.
+        OBContext.restorePreviousMode();
+      }
+    } catch (Exception e) {
+      // A catalogue that cannot be read must not turn every search into a 422, nor break tool
+      // generation: fall back to the pre-IMP-41 behaviour, where the authorizer alone decides.
+      // Optional.empty() is "could not be read" and is NOT the same as a readable-but-empty
+      // catalogue, which is Optional.of(List.of()) — conflating the two is the defect IMP-41 fixed.
+      return Optional.empty();
+    }
+  }
+
+  /**
+   * The configured target keys the current role may actually search.
+   *
+   * <p>IMP-41: this is what an omitted {@code targets} means — "search everywhere I am allowed",
+   * the semantic-search equivalent of a global search box. Without it the caller is forced to name
+   * a target up front, which is exactly the knowledge it does not have; a natural-language question
+   * rarely arrives already sorted into the right index.</p>
+   *
+   * <p>Filtered per key rather than authorized as a set, on purpose: {@link TargetEntityAuthorizer}
+   * is all-or-nothing, so passing every configured key at once would refuse the whole search
+   * because of one target the role cannot read. A restricted role must get the subset it can see,
+   * not a denial.</p>
+   *
+   * @return the searchable keys, possibly an empty list; {@link Optional#empty()} when the
+   *     catalogue itself cannot be read — a distinction the caller must keep, since "no target you
+   *     may search" and "no catalogue" call for different answers
+   */
+  public static Optional<List<String>> authorizedTargetKeys() {
+    Optional<List<String>> catalogue = configuredTargetKeys();
+    if (!catalogue.isPresent()) {
+      return Optional.empty();
+    }
+    List<String> configured = catalogue.get();
+    TargetEntityAuthorizer authorizer = new TargetEntityAuthorizer();
+    List<String> allowed = new ArrayList<>();
+    for (String key : configured) {
+      if (authorizer.isAuthorized(List.of(key))) {
+        allowed.add(key);
+      }
+    }
+    return Optional.of(allowed);
+  }
+
+  /** Supplies the configured target keys, so the unknown-vs-forbidden split is testable. */
+  interface TargetCatalog {
+    /**
+     * Returns every configured target key.
+     * @return the keys, or {@link Optional#empty()} to skip the unknown-target check entirely
+     */
+    Optional<List<String>> knownKeys();
   }
 
   /** Executes a namespace-scoped vector search and returns its JSON response. */

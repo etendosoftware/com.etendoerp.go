@@ -358,7 +358,15 @@ public class SalesOrderHeaderHandlerTest {
       when(conn.prepareStatement(anyString())).thenReturn(ps);
       ResultSet rs = mock(ResultSet.class);
       when(ps.executeQuery()).thenReturn(rs);
-      when(rs.next()).thenReturn(true);
+      // ETP-5295 — stubbing a single true value would make this mocked ResultSet report a row
+      // FOREVER. That was harmless while the after-handle hook advanced the cursor exactly
+      // once, for the limit-one hasLinkedDocuments check, but it now issues three further
+      // batch queries for the needsPrimaryDoc and needsInvoiceDoc flags, and each of those
+      // keeps advancing the cursor until it reports no more rows. Against an always-true
+      // cursor they never terminate, so this test would hang instead of failing.
+      // Hence one row for the hasLinkedDocuments check and then exhaustion: this test is
+      // about that flag only, and an empty cursor is the right answer for the other three.
+      when(rs.next()).thenReturn(true, false);
 
       JSONObject body = singleRecordBody("order-1");
       NeoContext ctx = ctxWithPreviousResult("order-1", body);

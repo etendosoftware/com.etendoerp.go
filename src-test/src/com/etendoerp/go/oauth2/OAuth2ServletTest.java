@@ -104,6 +104,23 @@ public class OAuth2ServletTest {
   }
 
   @Test
+  public void doGetPublicApiKeysRequiresAuth() throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("GET", "/api-keys");
+
+    try (MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {
+      swsMock.when(() -> SecureWebServicesUtils.decodeToken(anyString()))
+          .thenThrow(new RuntimeException("bad"));
+
+      servlet.doGet(req, resp.response);
+    }
+
+    JSONObject body = new JSONObject(resp.body());
+    assertEquals("access_denied", body.getString("error"));
+    assertFalse(body.has("apiKeys"));
+  }
+
+  @Test
   public void doGetClientsNonAdminRoleForbidden() throws Exception {
     ResponseCapture resp = mockResponse();
     HttpServletRequest req = mockRequest("GET", "/clients");
@@ -2021,6 +2038,189 @@ public class OAuth2ServletTest {
     throw new IllegalStateException("Query param not found in URL: " + name);
   }
 
+  // ===== ETP-5430 — the organization stored on the issued token must never be null =====
+  //
+  // etgo_oauth2_token.ad_org_id is NOT NULL, and storeToken() binds parameter 2 to it.
+  // Both grants below build their ClientRecord by hand instead of going through
+  // loadClient(), so each one has to resolve the organization itself: the
+  // neo:public-api-owner-org:<id> scope wins, otherwise the organization the record was
+  // read from. Leaving it unset made every exchange fail with
+  // "null value in column ad_org_id violates not-null constraint".
+  //
+  // Note the owner-org scope is only asserted on the refresh path: it is not in VALID_SCOPES,
+  // so /authorize rejects it as unsupported and it can never reach an authorization_code
+  // exchange. On a refresh it can, because the scopes are read back from the stored token row
+  // rather than from the request.
+
+  @Test
+  public void authorizeCodeGrantStoresClientOrganization() throws Exception {
+    PreparedStatement insertPs = runAuthorizeCapturingTokenInsert("client-7", "ORG-OF-CLIENT");
+
+    verify(insertPs).setString(1, "client-7");
+    verify(insertPs).setString(2, "ORG-OF-CLIENT");
+  }
+
+  @Test
+  public void tokenRefreshStoresOrganizationOfRotatedToken() throws Exception {
+    PreparedStatement insertPs = runRefreshCapturingTokenInsert("neo:read neo:write",
+        "ORG-OF-TOKEN");
+
+    verify(insertPs).setString(2, "ORG-OF-TOKEN");
+  }
+
+  @Test
+  public void tokenRefreshOwnerOrgScopeOverridesRotatedTokenOrganization() throws Exception {
+    PreparedStatement insertPs = runRefreshCapturingTokenInsert(
+        "neo:read neo:public-api-owner-org:ORG-FROM-SCOPE", "ORG-OF-TOKEN");
+
+    verify(insertPs).setString(2, "ORG-FROM-SCOPE");
+  }
+
+  /**
+   * Drives POST /authorize followed by POST /token (authorization_code grant) and returns the
+   * mocked statement that performed the token INSERT, so the caller can verify the bound
+   * parameters.
+   *
+   * @param adClientId the ad_client_id stored on the client record
+   * @param adOrgId    the ad_org_id stored on the client record
+   */
+  private PreparedStatement runAuthorizeCapturingTokenInsert(String adClientId, String adOrgId)
+      throws Exception {
+    String codeVerifier = "test-code-verifier-" + java.util.UUID.randomUUID();
+    String codeChallenge = buildChallenge(codeVerifier);
+    String redirectUri = "https://example.com/callback";
+
+    ResponseCapture authorizeResp = mockResponse();
+    HttpServletRequest authorizeReq = mockRequest("POST", "/authorize");
+    when(authorizeReq.getContentType()).thenReturn("application/x-www-form-urlencoded");
+    when(authorizeReq.getParameter("token")).thenReturn(ADMIN_TOKEN);
+    when(authorizeReq.getParameter("client_id")).thenReturn(TEST_CLIENT_ID);
+    when(authorizeReq.getParameter("redirect_uri")).thenReturn(redirectUri);
+    when(authorizeReq.getParameter("code_challenge")).thenReturn(codeChallenge);
+    when(authorizeReq.getParameter("scope")).thenReturn("neo:read");
+
+    ResultSet clientRs = mock(ResultSet.class);
+    when(clientRs.next()).thenReturn(true);
+    when(clientRs.getString("etgo_oauth2_client_id")).thenReturn(TEST_CLIENT_DB_ID);
+    when(clientRs.getString("client_secret_hash")).thenReturn("irrelevant-hash");
+    when(clientRs.getString("scopes")).thenReturn("neo:read neo:write");
+    when(clientRs.getString("redirect_uris")).thenReturn("[\"" + redirectUri + "\"]");
+    when(clientRs.getString("ad_client_id")).thenReturn(adClientId);
+    when(clientRs.getString("ad_user_id")).thenReturn(ADMIN_USER_ID);
+    when(clientRs.getString("ad_role_id")).thenReturn(ADMIN_ROLE_ID);
+
+    PreparedStatement findClientPs = mock(PreparedStatement.class);
+    when(findClientPs.executeQuery()).thenReturn(clientRs);
+
+    // SQL_FIND_CLIENT_BY_IDENTIFIER, read inside handleAuthorizationCodeGrant: it is the only
+    // place the organization of the issued token can come from on this path.
+    ResultSet findByIdRs = mock(ResultSet.class);
+    when(findByIdRs.next()).thenReturn(true);
+    when(findByIdRs.getString("etgo_oauth2_client_id")).thenReturn(TEST_CLIENT_DB_ID);
+    when(findByIdRs.getString("ad_client_id")).thenReturn(adClientId);
+    when(findByIdRs.getString("ad_org_id")).thenReturn(adOrgId);
+
+    PreparedStatement findByIdPs = mock(PreparedStatement.class);
+    when(findByIdPs.executeQuery()).thenReturn(findByIdRs);
+
+    PreparedStatement updatePs = mock(PreparedStatement.class);
+    when(updatePs.executeUpdate()).thenReturn(1);
+
+    PreparedStatement insertPs = mock(PreparedStatement.class);
+    when(insertPs.executeUpdate()).thenReturn(1);
+
+    Connection conn = mock(Connection.class);
+    when(conn.prepareStatement(anyString())).thenReturn(
+        findClientPs, findClientPs, findByIdPs, updatePs, insertPs);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.getConnection()).thenReturn(conn);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<SecureWebServicesUtils> swsMock = mockStatic(SecureWebServicesUtils.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      DecodedJWT adminJwt = mockJwt(ADMIN_USER_ID, ADMIN_ROLE_ID);
+      swsMock.when(() -> SecureWebServicesUtils.decodeToken(ADMIN_TOKEN)).thenReturn(adminJwt);
+
+      servlet.doPost(authorizeReq, authorizeResp.response);
+
+      JSONObject authorizeBody = new JSONObject(authorizeResp.body());
+      String code = extractQueryParam(authorizeBody.getString("redirect_url"), "code");
+
+      ResponseCapture tokenResp = mockResponse();
+      HttpServletRequest tokenReq = mockRequest("POST", "/token");
+      when(tokenReq.getContentType()).thenReturn("application/x-www-form-urlencoded");
+      when(tokenReq.getParameter("grant_type")).thenReturn("authorization_code");
+      when(tokenReq.getParameter("code")).thenReturn(code);
+      when(tokenReq.getParameter("code_verifier")).thenReturn(codeVerifier);
+      when(tokenReq.getParameter("redirect_uri")).thenReturn(redirectUri);
+
+      servlet.doPost(tokenReq, tokenResp.response);
+
+      JSONObject tokenBody = new JSONObject(tokenResp.body());
+      assertNotNull("the exchange must succeed for the INSERT to have run",
+          tokenBody.getString("access_token"));
+    }
+    return insertPs;
+  }
+
+  /**
+   * Drives a refresh_token exchange and returns the mocked statement that performed the token
+   * INSERT, so the caller can verify the bound parameters.
+   *
+   * @param scopes the scopes stored on the token being rotated
+   * @param tokenOrgId the ad_org_id of the token being rotated
+   */
+  private PreparedStatement runRefreshCapturingTokenInsert(String scopes, String tokenOrgId)
+      throws Exception {
+    ResponseCapture resp = mockResponse();
+    HttpServletRequest req = mockRequest("POST", "/token");
+    when(req.getContentType()).thenReturn("application/x-www-form-urlencoded");
+    when(req.getParameter("grant_type")).thenReturn("refresh_token");
+    when(req.getParameter("refresh_token")).thenReturn("valid-refresh-token");
+
+    ResultSet findRs = mock(ResultSet.class);
+    when(findRs.next()).thenReturn(true);
+    when(findRs.getString("etgo_oauth2_token_id")).thenReturn("token-1");
+    when(findRs.getString("etgo_oauth2_client_id")).thenReturn(TEST_CLIENT_DB_ID);
+    when(findRs.getString("scopes")).thenReturn(scopes);
+    when(findRs.getString("is_revoked")).thenReturn("N");
+    when(findRs.getString("ad_user_id")).thenReturn("user-1");
+    when(findRs.getString("ad_role_id")).thenReturn("role-1");
+    when(findRs.getString("etendo_client_id")).thenReturn("0");
+    // The rotated token carries the organization the new one must inherit.
+    when(findRs.getString("token_org_id")).thenReturn(tokenOrgId);
+    when(findRs.getString("client_active")).thenReturn("Y");
+    when(findRs.getLong("validity_seconds")).thenReturn(86_400L);
+    when(findRs.wasNull()).thenReturn(false);
+
+    PreparedStatement findPs = mock(PreparedStatement.class);
+    when(findPs.executeQuery()).thenReturn(findRs);
+
+    PreparedStatement revokePs = mock(PreparedStatement.class);
+    when(revokePs.executeUpdate()).thenReturn(1);
+
+    PreparedStatement insertPs = mock(PreparedStatement.class);
+    when(insertPs.executeUpdate()).thenReturn(1);
+
+    Connection conn = mock(Connection.class);
+    when(conn.prepareStatement(anyString())).thenReturn(findPs, revokePs, insertPs);
+
+    OBDal obDal = mock(OBDal.class);
+    when(obDal.getConnection()).thenReturn(conn);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+
+      servlet.doPost(req, resp.response);
+    }
+
+    JSONObject body = new JSONObject(resp.body());
+    assertNotNull("the refresh must succeed for the INSERT to have run",
+        body.getString("access_token"));
+    return insertPs;
+  }
+
   // ===================== Helpers =====================
 
   private static HttpServletRequest mockRequest(String method, String pathInfo) {
@@ -2059,6 +2259,12 @@ public class OAuth2ServletTest {
     when(roleClaim.asString()).thenReturn(roleId);
     when(jwt.getClaim("user")).thenReturn(userClaim);
     when(jwt.getClaim("role")).thenReturn(roleClaim);
+    Claim clientClaim = mock(Claim.class);
+    when(clientClaim.asString()).thenReturn("client-1");
+    Claim organizationClaim = mock(Claim.class);
+    when(organizationClaim.asString()).thenReturn("org-1");
+    when(jwt.getClaim("client")).thenReturn(clientClaim);
+    when(jwt.getClaim("organization")).thenReturn(organizationClaim);
     return jwt;
   }
 

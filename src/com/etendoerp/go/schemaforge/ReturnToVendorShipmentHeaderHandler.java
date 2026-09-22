@@ -71,7 +71,10 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
   private static final String ACTION_AVAILABLE_RECEIPTS = "availableReceipts";
   private static final String ACTION_AVAILABLE_LINES = "availableReceiptLines";
   private static final String ACTION_CREATE_RETURN_INVOICE = "createReturnInvoice";
+  /** ETP-5381: lists the confirmed invoices this return document can rectify. */
+  private static final String ACTION_RECTIFIABLE_INVOICES = "rectifiableInvoices";
   private static final String ACTION_DOCUMENT_ACTION = "documentAction";
+  private static final String ERR_RECORD_ID_REQUIRED = "Record ID is required";
 
   @Override
   public NeoResponse handle(NeoContext context) {
@@ -89,25 +92,39 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
     NeoResponse cloneResponse = cloneRecordHandler.handle(context);
     if (cloneResponse != null) return cloneResponse;
 
+    return dispatchAction(context);
+  }
+
+  /**
+   * Routes one POST action to its handler. Every other HTTP method, and any action this
+   * window does not own, falls through to NEO's default processing by returning {@code null}
+   * — the same outcome as before, with the method tested once instead of per branch.
+   */
+  private NeoResponse dispatchAction(NeoContext context) {
+    if (!"POST".equals(context.getHttpMethod())) {
+      return null;
+    }
     String action = context.getFieldName();
-    String method = context.getHttpMethod();
-    if (ACTION_IMPORT_LINES.equals(action) && "POST".equals(method)) {
-      return handleImportReceiptLines(context);
+    if (action == null) {
+      return null;
     }
-    if (ACTION_AVAILABLE_RECEIPTS.equals(action) && "POST".equals(method)) {
-      return handleAvailableReceipts(context);
+    switch (action) {
+      case ACTION_IMPORT_LINES:
+        return handleImportReceiptLines(context);
+      case ACTION_AVAILABLE_RECEIPTS:
+        return handleAvailableReceipts(context);
+      case ACTION_AVAILABLE_LINES:
+        return handleAvailableReceiptLines(context);
+      case ACTION_CREATE_RETURN_INVOICE:
+        return handleCreateReturnInvoice(context);
+      case ACTION_RECTIFIABLE_INVOICES:
+        return handleRectifiableInvoices(context);
+      case ACTION_DOCUMENT_ACTION:
+        NeoHandlerUtils.reanchorLinesToHeaderWarehouse(context.getRecordId(), log);
+        return null; // let NEO native process handle completion
+      default:
+        return null;
     }
-    if (ACTION_AVAILABLE_LINES.equals(action) && "POST".equals(method)) {
-      return handleAvailableReceiptLines(context);
-    }
-    if (ACTION_CREATE_RETURN_INVOICE.equals(action) && "POST".equals(method)) {
-      return handleCreateReturnInvoice(context);
-    }
-    if (ACTION_DOCUMENT_ACTION.equals(action) && "POST".equals(method)) {
-      NeoHandlerUtils.reanchorLinesToHeaderWarehouse(context.getRecordId(), log);
-      return null; // let NEO native process handle completion
-    }
-    return null;
   }
 
   // ---------------------------------------------------------------------------
@@ -117,7 +134,7 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
   private NeoResponse handleImportReceiptLines(NeoContext context) {
     String returnId = context.getRecordId();
     if (returnId == null || returnId.isBlank()) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Record ID is required");
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
     }
     try {
       OBContext.setAdminMode(true);
@@ -145,7 +162,10 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
               ? OBDal.getInstance().get(ShipmentInOutLine.class, sourceLineId) : null;
           if (sourceLineId == null || qty.compareTo(BigDecimal.ZERO) <= 0 || sourceLine == null) continue;
 
-          ReturnShipmentUtils.buildAndSaveReturnLine(returnDoc, sourceLine, nextLineNo, qty.negate());
+          // ETP-5313: the stored sign is owned by ReturnLineQuantityPolicy, applied inside
+          // buildAndSaveReturnLine — pass the user-facing POSITIVE quantity, same as the sales
+          // side, instead of negating here. The normalisation is idempotent either way.
+          ReturnShipmentUtils.buildAndSaveReturnLine(returnDoc, sourceLine, nextLineNo, qty);
           nextLineNo += 10;
           imported++;
         }
@@ -275,10 +295,37 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
   // Action: createReturnInvoice  (Reversed Purchase Invoice — API + isReturn)
   // ---------------------------------------------------------------------------
 
+  /**
+   * ETP-5381: returns the confirmed invoices this return shipment can rectify, so the UI can make
+   * the user pick one before the rectificative invoice is created and confirmed. Mirror of the
+   * sales-side handler.
+   */
+  private NeoResponse handleRectifiableInvoices(NeoContext context) {
+    String returnId = context.getRecordId();
+    if (returnId == null || returnId.isBlank()) {
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
+    }
+    try {
+      OBContext.setAdminMode(true);
+      try {
+        return RectifiableInvoiceUtils.buildRectifiableInvoicesResponse(context, returnId);
+      } finally {
+        OBContext.restorePreviousMode();
+      }
+    } catch (OBException e) {
+      log.warn("Could not list rectifiable invoices for shipment {}: {}", returnId, e.getMessage());
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
+    } catch (Exception e) {
+      log.error("Error listing rectifiable invoices for shipment {}: {}", returnId, e.getMessage(), e);
+      return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+          "An internal error occurred while listing the invoices available to rectify");
+    }
+  }
+
   private NeoResponse handleCreateReturnInvoice(NeoContext context) {
     String returnId = context.getRecordId();
     if (returnId == null || returnId.isBlank()) {
-      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, "Record ID is required");
+      return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, ERR_RECORD_ID_REQUIRED);
     }
     try {
       OBContext.setAdminMode(true);
@@ -308,16 +355,23 @@ public class ReturnToVendorShipmentHeaderHandler implements NeoHandler {
               "No rectificative invoice document type found for this organization");
         }
 
+        // ETP-5381: resolve WHICH invoices are being rectified before creating anything. Without
+        // the C_Invoice_Reverse link the rectificative invoice cannot be confirmed, so failing
+        // here leaves no stuck draft behind.
+        List<String> rectifiedIds = ReturnShipmentUtils.resolveRectifiedInvoiceIds(
+            context.getRequestBody(), returnId);
+
         Invoice sourceInvoice = ReturnShipmentUtils.findSourceInvoice(lines);
         Invoice invoice = ReturnShipmentUtils.buildReturnInvoiceHeader(returnDoc, docType, sourceInvoice, false);
         OBDal.getInstance().save(invoice);
         OBDal.getInstance().flush();
-        return ReturnShipmentUtils.finalizeReturnInvoice(invoice, lines, createDraftInvoiceHandler);
+        return ReturnShipmentUtils.finalizeReturnInvoice(invoice, lines, createDraftInvoiceHandler,
+            rectifiedIds, context.getObContext());
 
       } finally {
         OBContext.restorePreviousMode();
       }
-    } catch (OBException e) {
+        } catch (OBException e) {
       log.warn("Return invoice creation rejected for shipment {}: {}", returnId, e.getMessage());
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {
