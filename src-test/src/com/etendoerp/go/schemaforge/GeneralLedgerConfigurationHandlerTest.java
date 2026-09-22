@@ -483,8 +483,8 @@ class GeneralLedgerConfigurationHandlerTest {
   }
 
   @Test
-  @DisplayName("POST updates accrual boolean field via applyGeneralChanges")
-  void postUpdatesAccrual() throws Exception {
+  @DisplayName("POST ignores client-supplied accrual — Etendo Go doesn't support Caja (ETP-5372)")
+  void postIgnoresAccrual() throws Exception {
     wireOrgWithLedger();
     wireLoadCriteria(Collections.emptyList());
 
@@ -494,12 +494,12 @@ class GeneralLedgerConfigurationHandlerTest {
     NeoResponse response = handler.handle(postCtx(ORG_ID, body));
 
     assertEquals(200, response.getHttpStatus());
-    verify(schema).setAccrual(false);
+    verify(schema, never()).setAccrual(anyBoolean());
   }
 
   @Test
-  @DisplayName("POST updates allowNegative boolean field via applyGeneralChanges")
-  void postUpdatesAllowNegative() throws Exception {
+  @DisplayName("POST ignores client-supplied allowNegative — checkbox removed from the UI (ETP-4947)")
+  void postIgnoresAllowNegative() throws Exception {
     wireOrgWithLedger();
     wireLoadCriteria(Collections.emptyList());
 
@@ -509,7 +509,7 @@ class GeneralLedgerConfigurationHandlerTest {
     NeoResponse response = handler.handle(postCtx(ORG_ID, body));
 
     assertEquals(200, response.getHttpStatus());
-    verify(schema).setAllowNegative(true);
+    verify(schema, never()).setAllowNegative(anyBoolean());
   }
 
   @Test

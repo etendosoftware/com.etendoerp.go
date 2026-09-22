@@ -359,6 +359,63 @@ public class OnboardingDatasetNormalizerTest {
   }
 
   /**
+   * ETP-5364 — the {@code DocumentNo_<table>} counters that {@code InitialClientSetup} has already
+   * written for the new client are dropped here, so the tenant ends up with one of each instead of
+   * two.
+   *
+   * <p>The duplication was real and measured: 9888 surplus {@code AD_Sequence} rows across 103 of
+   * 125 clients before the fix, every duplicated name a {@code DocumentNo_*} one. Numbering
+   * survived it only by accident ({@code ad_sequence_doc} bumps every row matching the name and
+   * reads one back non-{@code STRICT}), and 140 pairs had already diverged, at which point the
+   * value actually applied becomes non-deterministic.
+   *
+   * <p>Counted rather than name-checked one by one: the failure this guards against is a filter
+   * that drops too much. The source ships 142 {@code AD_SEQUENCE} rows, 98 of them
+   * {@code DocumentNo_*}, of which 96 collide with the client setup — so 46 must survive.
+   */
+  @Test
+  public void testNormalizerDropsTheDocumentNoCountersTheClientSetupAlreadyCreates() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertEquals("the 43 named document series, AP Invoice, and the two GO-only counters", 46,
+        countEntities(xml, "adSequence"));
+    assertFalse("DocumentNo_C_Invoice is created by InitialClientSetup",
+        xml.contains("DocumentNo_C_Invoice"));
+    assertFalse("DocumentNo_M_InOut is created by InitialClientSetup",
+        xml.contains("DocumentNo_M_InOut"));
+  }
+
+  /**
+   * The exception list, asserted separately because getting it wrong is silent: these two names
+   * are NOT created by {@code InitialClientSetup} (verified on the instance — exactly one row per
+   * client in all 105 clients that have them, versus two for every other {@code DocumentNo_*}
+   * name), so filtering them out would leave the tenant with no counter for those tables at all.
+   */
+  @Test
+  public void testNormalizerKeepsTheDocumentNoCountersOnlyThisDatasetProvides() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue(xml.contains("DocumentNo_C_ExtBP_Config_Filter_Opt"));
+    assertTrue(xml.contains("DocumentNo_C_ExtBP_Config_Prop_Opt"));
+  }
+
+  /**
+   * The named document series are untouched by that filter — it keys on the {@code DocumentNo_}
+   * prefix, and these are what the tenant actually configures in the Document Sequence window.
+   * {@code AP Invoice} is ETP-5364's own new series (prefix {@code FC}); the rest predate it.
+   */
+  @Test
+  public void testNormalizerKeepsEveryNamedDocumentSeries() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    for (String series : new String[] { "Purchase Order", "Standard Order", "AR Invoice",
+        "Factura Rectificativa (Ventas)", "AP Invoice", "Factura Rectificativa (Compras)" }) {
+      assertTrue(series + " is a document series a tenant configures, not a table counter",
+          xml.contains(series));
+    }
+  }
+
+  /**
    * Counts normalized entity elements of one entity name. Matches {@code "<name "} rather than
    * {@code "<name"}: every emitted row carries an {@code id} attribute, and the trailing space is
    * what keeps {@code mProduct} from also counting {@code mProductCategory} and
@@ -437,6 +494,113 @@ public class OnboardingDatasetNormalizerTest {
   }
 
   /**
+   * ETP-5442: extends the exclusion above to {@code C_ELEMENTVALUE_OPERAND}. A formula account
+   * (e.g. {@code P.G.D}, "D) RESULTADO DEL EJERCICIO") carries no children in the account tree —
+   * its report amount comes exclusively from operand rows — so an operand belonging to the orphan
+   * org-specific tree must be dropped exactly like the element/element-value rows above. Without
+   * this cascade, the excluded tree's operands would be emitted pointing at element values this
+   * same filter just removed, and a real {@code DataImportService} import aborts with "Referenced
+   * object FinancialMgmtElementValue ... not present in the xml or in the database" (reproduced
+   * live before this fix, ETP-5442). Both row ids below are real GOClient data: {@code 841C6B18...}
+   * is P.G.D's "+ P.G.C" operand line owned by the wired (client-level) P.G.D
+   * ({@code 99EB7D8D...}); {@code D6D980B2...} is the identical formula line owned by the orphan
+   * (org-specific) P.G.D ({@code D123E89F...}).
+   */
+  @Test
+  public void testNormalizerExcludesOperandsOfOrgSpecificAccountElementTree() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    String wiredTreeOperandId = "841C6B189D5D49C79FB542D847B32EFA";
+    String orphanTreeOperandId = "D6D980B2CC284EA08884E5C398FEAFDC";
+
+    assertTrue(xml.contains(wiredTreeOperandId));
+    assertFalse(xml.contains(orphanTreeOperandId));
+  }
+
+  /**
+   * ETP-5442 — the real GOClient dataset never exercises this branch: verified live that its 39
+   * excluded-tree operand rows reference ONLY accounts within that same tree (zero cross-tree
+   * references), so a real-data test can only prove the OWNER side is checked. An operand's owner
+   * account ({@code C_ELEMENTVALUE_ID}) and its referenced account ({@code ACCOUNT_ID}) are two
+   * independent foreign keys into {@code C_ELEMENTVALUE}; both must be excluded independently
+   * when either belongs to the orphan tree. Checking only the owner (mirroring the single-FK
+   * {@code C_ELEMENTVALUE_TRL} cascade) would let a row through whose REFERENCED account was
+   * removed, which breaks the same import the same way — a dangling FK. This synthetic fixture
+   * builds two account-element trees (wired: {@code AD_ORG_ID='0'}; orphan: org-owned) and three
+   * operand rows that isolate each combination.
+   */
+  @Test
+  public void testNormalizerExcludesOperandWhenEitherOwnerOrAccountIsOrgSpecific() throws Exception {
+    Path sampleDir = Files.createTempDirectory("onboarding-operand-cascade");
+
+    Files.write(sampleDir.resolve("C_ELEMENT.xml"),
+        ("<data>"
+            + "<C_ELEMENT>"
+            + "<C_ELEMENT_ID><![CDATA[WIRED_ELEM]]></C_ELEMENT_ID>"
+            + "<AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>"
+            + "</C_ELEMENT>"
+            + "<C_ELEMENT>"
+            + "<C_ELEMENT_ID><![CDATA[ORPHAN_ELEM]]></C_ELEMENT_ID>"
+            + "<AD_ORG_ID><![CDATA[SOME_ORG]]></AD_ORG_ID>"
+            + "</C_ELEMENT>"
+            + "</data>").getBytes(StandardCharsets.UTF_8));
+
+    Files.write(sampleDir.resolve("C_ELEMENTVALUE.xml"),
+        ("<data>"
+            + "<C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[WIRED_OWNER]]></C_ELEMENTVALUE_ID>"
+            + "<C_ELEMENT_ID><![CDATA[WIRED_ELEM]]></C_ELEMENT_ID>"
+            + "</C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[WIRED_ACCOUNT]]></C_ELEMENTVALUE_ID>"
+            + "<C_ELEMENT_ID><![CDATA[WIRED_ELEM]]></C_ELEMENT_ID>"
+            + "</C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[ORPHAN_OWNER]]></C_ELEMENTVALUE_ID>"
+            + "<C_ELEMENT_ID><![CDATA[ORPHAN_ELEM]]></C_ELEMENT_ID>"
+            + "</C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[ORPHAN_ACCOUNT]]></C_ELEMENTVALUE_ID>"
+            + "<C_ELEMENT_ID><![CDATA[ORPHAN_ELEM]]></C_ELEMENT_ID>"
+            + "</C_ELEMENTVALUE>"
+            + "</data>").getBytes(StandardCharsets.UTF_8));
+
+    Files.write(sampleDir.resolve("C_ELEMENTVALUE_OPERAND.xml"),
+        ("<data>"
+            // Both sides wired -> must survive.
+            + "<C_ELEMENTVALUE_OPERAND>"
+            + "<C_ELEMENTVALUE_OPERAND_ID><![CDATA[OP_BOTH_WIRED]]></C_ELEMENTVALUE_OPERAND_ID>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[WIRED_OWNER]]></C_ELEMENTVALUE_ID>"
+            + "<ACCOUNT_ID><![CDATA[WIRED_ACCOUNT]]></ACCOUNT_ID>"
+            + "</C_ELEMENTVALUE_OPERAND>"
+            // Owner is orphan, account is wired -> must be dropped.
+            + "<C_ELEMENTVALUE_OPERAND>"
+            + "<C_ELEMENTVALUE_OPERAND_ID><![CDATA[OP_OWNER_ORPHAN]]></C_ELEMENTVALUE_OPERAND_ID>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[ORPHAN_OWNER]]></C_ELEMENTVALUE_ID>"
+            + "<ACCOUNT_ID><![CDATA[WIRED_ACCOUNT]]></ACCOUNT_ID>"
+            + "</C_ELEMENTVALUE_OPERAND>"
+            // Owner is wired, account is orphan -> must ALSO be dropped. This is the branch the
+            // real-dataset test above cannot reach.
+            + "<C_ELEMENTVALUE_OPERAND>"
+            + "<C_ELEMENTVALUE_OPERAND_ID><![CDATA[OP_ACCOUNT_ORPHAN]]></C_ELEMENTVALUE_OPERAND_ID>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[WIRED_OWNER]]></C_ELEMENTVALUE_ID>"
+            + "<ACCOUNT_ID><![CDATA[ORPHAN_ACCOUNT]]></ACCOUNT_ID>"
+            + "</C_ELEMENTVALUE_OPERAND>"
+            + "</data>").getBytes(StandardCharsets.UTF_8));
+
+    String xml = new OnboardingDatasetNormalizer(sampleDir, this::mockEntityForTable)
+        .buildDatasetXml();
+
+    assertTrue("Operand whose owner and account both survive must be kept",
+        xml.contains("OP_BOTH_WIRED"));
+    assertFalse("Operand whose OWNER belongs to the excluded tree must be dropped",
+        xml.contains("OP_OWNER_ORPHAN"));
+    assertFalse("Operand whose ACCOUNT (referenced side) belongs to the excluded tree must be "
+        + "dropped too, even though its owner is in the kept tree",
+        xml.contains("OP_ACCOUNT_ORPHAN"));
+  }
+
+  /**
    * ETP-4245 (TC-40): verifies that a freshly-provisioned tenant is born with all 8 accounting
    * dimensions on {@code C_ACCTSCHEMA_ELEMENT} — the 2 mandatory ones (Organization, Account) plus
    * all 6 optional ones (Project, Bus.Partner, Product, Cost Center, User1, User2) — instead of just
@@ -482,6 +646,21 @@ public class OnboardingDatasetNormalizerTest {
         xml.contains("<allownegative>N</allownegative>"));
     assertTrue("iscentrallymaintained must remain Y (out of scope for ETP-4947)",
         xml.contains("<iscentrallymaintained>Y</iscentrallymaintained>"));
+  }
+
+  /**
+   * ETP-5372: a freshly-provisioned tenant's accounting schema must be born with
+   * {@code IsAccrual=Y} (Devengo) — Etendo Go doesn't support Caja (cash-basis) for taxes.
+   * {@code GeneralLedgerConfigurationHandler.applyGeneralChanges} now refuses to change this
+   * value after creation (see its own test), so this dataset default is the only place a
+   * schema's accrual value is ever set — it must never regress to {@code N}.
+   */
+  @Test
+  public void testNormalizerAccountingSchemaAccrualDefaultsToDevengo() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue("isaccrual must be Y (Devengo) — Etendo Go doesn't support Caja for taxes",
+        xml.contains("<isaccrual>Y</isaccrual>"));
   }
 
   /**

@@ -18,7 +18,6 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.HashMap;
@@ -33,10 +32,7 @@ import javax.servlet.http.HttpServletResponse;
 import org.apache.commons.lang3.StringUtils;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
-import org.hibernate.criterion.Order;
-import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.exception.OBException;
-import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
@@ -136,13 +132,15 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
   @Override
   protected void dispatch(String entityName, String orgId, int year, String period,
       HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {
-    try {
+    runDispatch(response, () -> {
       if (BOXES.equals(entityName)) {
+        guardNotAlreadySubmitted(orgId, year, period);
         ComputeResult cr = computeBoxes(orgId, year, period);
         JSONObject result = buildResponse(cr.boxes, cr.sources);
         response.setContentType(JSON_CT);
         response.getWriter().write(result.toString());
       } else if (GENERATE.equals(entityName)) {
+        guardNotAlreadySubmitted(orgId, year, period);
         String tipo = request.getParameter("tipo");
         submissionSupport.handleGenerate(orgId, year, period, tipo, request, response);
       } else if (SUBMIT.equals(entityName)) {
@@ -153,11 +151,20 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
         long sinceMs = Long.parseLong(request.getParameter(SINCE_KEY));
         handleModified(orgId, year, period, new java.util.Date(sinceMs), response);
       }
-    } catch (FiscalHandlerException e) {
-      throw e;
-    } catch (Exception e) {
-      throw new FiscalHandlerException(e);
-    }
+    });
+  }
+
+  /**
+   * ETP-5438 — thin, model-fixed wrapper around the shared {@link
+   * AbstractFiscalHandler#guardNotAlreadySubmitted(String, int, String, String)} (see its
+   * javadoc). {@code submit} (the real AEAT telematic filing) is deliberately NOT gated by this —
+   * it already has its own, narrower, {@code submitted_ack}-only guard in {@link
+   * Fiscal303SubmissionSupport#handleSubmit} (the {@code ALREADY_SUBMITTED} check), which this
+   * does not replace or widen; that endpoint is a distinct concern (idempotency of a real AEAT
+   * filing action) from "must not silently recompute/regenerate a presented declaration".
+   */
+  void guardNotAlreadySubmitted(String orgId, int year, String period) {
+    guardNotAlreadySubmitted(orgId, year, period, "303");
   }
 
   @Override
@@ -678,18 +685,8 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
     return base;
   }
 
-  /** Same org-scoped (falls back to org "0") searchKey lookup {@link #resolveTaxReport} always
-   *  used — extracted so it can be tried without throwing, letting callers fall through to a
-   *  different searchKey on an empty result instead of failing outright. */
-  private TaxReport findTaxReport(String orgId, String searchKey) {
-    OBCriteria<TaxReport> crit = OBDal.getInstance().createCriteria(TaxReport.class);
-    crit.add(Restrictions.in(TaxReport.PROPERTY_ORGANIZATION + ".id", Arrays.asList(orgId, "0")));
-    crit.add(Restrictions.eq(TaxReport.PROPERTY_SEARCHKEY, searchKey));
-    crit.addOrder(Order.desc(TaxReport.PROPERTY_ORGANIZATION + ".id"));
-    crit.setMaxResults(1);
-    List<TaxReport> list = crit.list();
-    return list.isEmpty() ? null : list.get(0);
-  }
+  // findTaxReport(orgId, searchKey) moved to AbstractFiscalHandler (SonarQube java:S1192 dedupe
+  // — was byte-identical to Fiscal349BoxesHandler's own copy).
 
   // ── Utility ──────────────────────────────────────────────────────
 
