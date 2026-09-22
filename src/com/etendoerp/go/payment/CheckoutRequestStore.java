@@ -49,6 +49,7 @@ public class CheckoutRequestStore {
   /** Name of the correlation-id parameter bound by every query keyed on {@code REQUEST_ID}. */
   private static final String PARAM_REQUEST_ID = "requestId";
   private static final String PARAM_ACCOUNT_EMAIL = "accountEmail";
+  private static final String PARAM_ACCOUNT_ID = "accountId";
   private static final String HQL_UPDATE = "update ";
   private static final String HQL_PROVISIONING = "provisioning";
 
@@ -218,6 +219,40 @@ public class CheckoutRequestStore {
   }
 
   /**
+   * Finds a checkout request only when both the immutable account id and the normalized email
+   * match the authenticated platform account. The email check remains defense in depth for
+   * legacy rows; the account id is the actual tenancy boundary.
+   *
+   * @param requestId checkout request correlation id
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @return the matching request, or {@code null} when the identity tuple does not match
+   */
+  public CheckoutRequest find(String requestId, String accountId, String accountEmail) {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      if (StringUtils.isBlank(requestId) || StringUtils.isBlank(accountId)
+          || StringUtils.isBlank(accountEmail)) {
+        return null;
+      }
+      OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
+          "as cr where cr.request = :requestId"
+              + " and cr.etendoGoAccount.id = :accountId"
+              + " and lower(cr.accountEmail) = lower(:accountEmail)");
+      query.setNamedParameter(PARAM_REQUEST_ID, StringUtils.trimToEmpty(requestId));
+      query.setNamedParameter(PARAM_ACCOUNT_ID, StringUtils.trimToEmpty(accountId));
+      query.setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail));
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setMaxResult(1);
+      return query.uniqueResult();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
    * Lists recent purchase attempts for one account without exposing provider fields.
    * @param accountEmail authenticated account email
    * @return recent checkout requests for the account
@@ -231,6 +266,32 @@ public class CheckoutRequestStore {
       }
       OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
           "as cr where lower(cr.accountEmail) = lower(:" + PARAM_ACCOUNT_EMAIL + ") order by cr.creationDate desc");
+      query.setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail));
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setMaxResult(20);
+      return query.list();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Lists recent purchase attempts using the immutable account id and normalized email.
+   *
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @return recent requests for the account
+   */
+  public List<CheckoutRequest> findForAccount(String accountId, String accountEmail) {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      if (StringUtils.isBlank(accountId) || StringUtils.isBlank(accountEmail)) return List.of();
+      OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
+          "as cr where cr.etendoGoAccount.id = :accountId"
+              + " and lower(cr.accountEmail) = lower(:accountEmail) order by cr.creationDate desc");
+      query.setNamedParameter(PARAM_ACCOUNT_ID, StringUtils.trimToEmpty(accountId));
       query.setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail));
       query.setFilterOnReadableClients(false);
       query.setFilterOnReadableOrganization(false);
@@ -271,6 +332,39 @@ public class CheckoutRequestStore {
   }
 
   /**
+   * Finds an active purchase by account id, email and environment name.
+   *
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @param clientName requested environment name
+   * @return the newest matching request, or {@code null} when none exists
+   */
+  public CheckoutRequest findActiveForAccountAndClientName(String accountId, String accountEmail,
+      String clientName) {
+    if (StringUtils.isBlank(accountId) || StringUtils.isBlank(accountEmail)
+        || StringUtils.isBlank(clientName)) return null;
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
+          "as cr where cr.etendoGoAccount.id = :accountId"
+              + " and lower(cr.accountEmail) = lower(:accountEmail)"
+              + " and lower(cr.clientName) = lower(:clientName)"
+              + " and cr.checkoutRequestStatus in ('CREATING', 'CREATED', 'PAID', 'PROVISIONING')"
+              + " order by cr.creationDate desc");
+      query.setNamedParameter(PARAM_ACCOUNT_ID, StringUtils.trimToEmpty(accountId));
+      query.setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail));
+      query.setNamedParameter("clientName", StringUtils.trimToEmpty(clientName));
+      query.setFilterOnReadableClients(false);
+      query.setFilterOnReadableOrganization(false);
+      query.setMaxResult(1);
+      return query.uniqueResult();
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
    * Returns whether a confirmed payment backs this request, account and environment name.
    *
    * <p>Accepts every status at or past {@code PAID}, so a resumed onboarding still passes the
@@ -293,6 +387,37 @@ public class CheckoutRequestStore {
   }
 
   /**
+   * Checks payment correlation including the immutable account id.
+   *
+   * @param requestId checkout request correlation id
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @param clientName requested environment name, when available
+   * @return {@code true} when a paid request matches the identity tuple
+   */
+  public boolean isPaidFor(String requestId, String accountId, String accountEmail,
+      String clientName) {
+    CheckoutRequest request = find(requestId, accountId, accountEmail);
+    if (request == null) return false;
+    boolean paid = rank(request.getCheckoutRequestStatus()) >= rank(STATUS_PAID);
+    return paid && (StringUtils.isBlank(clientName)
+        || StringUtils.equalsIgnoreCase(request.getClientName(), StringUtils.trimToEmpty(clientName)));
+  }
+
+  /**
+   * Atomically claims a paid request for provisioning using the authenticated account identity.
+   *
+   * @param requestId checkout request correlation id
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @return {@code true} when this caller won the claim
+   */
+  public boolean claimForProvisioning(String requestId, String accountId, String accountEmail) {
+    if (find(requestId, accountId, accountEmail) == null) return false;
+    return claimForProvisioning(requestId, accountEmail);
+  }
+
+  /**
    * Atomically claims a paid request for provisioning.
    *
    * <p>The one method that does not read-then-write: a conditional bulk update is what makes the
@@ -311,9 +436,9 @@ public class CheckoutRequestStore {
    * renewed only by that stale-lease branch; {@code PROVISIONING_ATTEMPTS} carries the fencing
    * token.
    *
-   * @param requestId correlation id
-   * @param accountEmail authenticated account email
-   * @return true when this caller won the claim
+   * @param requestId checkout request correlation id
+   * @param accountEmail authenticated platform account email
+   * @return {@code true} when this caller won the claim
    */
   public boolean claimForProvisioning(String requestId, String accountEmail) {
     OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
@@ -345,11 +470,12 @@ public class CheckoutRequestStore {
             .createQuery(HQL_UPDATE + CheckoutRequest.ENTITY_NAME + " cr"
                 + "   set cr.provisioningAt = :now,"
                 + "       cr.provisioningAttempts = cr.provisioningAttempts + 1,"
+                + "       cr.failureReason = null,"
                 + "       cr.updated = :now"
                 + " where cr.request = :requestId"
                 + "   and lower(cr.accountEmail) = lower(:" + PARAM_ACCOUNT_EMAIL + ")"
                 + "   and cr.checkoutRequestStatus = :" + HQL_PROVISIONING
-                + "   and cr.provisioningAt <= :staleBefore")
+                + "   and (cr.failureReason is not null or cr.provisioningAt <= :staleBefore)")
             .setParameter(HQL_PROVISIONING, STATUS_PROVISIONING)
             .setParameter("now", now)
             .setParameter("staleBefore", staleBefore)
@@ -383,6 +509,23 @@ public class CheckoutRequestStore {
     } finally {
       OBContext.restorePreviousMode();
     }
+  }
+
+  /**
+   * Looks up the provisioning claim using the immutable account id.
+   *
+   * @param requestId checkout request correlation id
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @return current claim attempt, or {@code null} when no active claim exists
+   */
+  public Long findProvisioningAttempt(String requestId, String accountId, String accountEmail) {
+    CheckoutRequest request = find(requestId, accountId, accountEmail);
+    if (request == null || !StringUtils.equals(STATUS_PROVISIONING,
+        request.getCheckoutRequestStatus())) {
+      return null;
+    }
+    return request.getProvisioningAttempts();
   }
 
   /**
