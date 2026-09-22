@@ -37,12 +37,16 @@ import org.openbravo.erpCommon.ad_forms.AcctServer;
 import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.OBMessageUtils;
 import org.openbravo.financial.ResetAccounting;
+import org.openbravo.model.ad.datamodel.Table;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.businesspartner.Category;
 import org.openbravo.model.common.businesspartner.CategoryAccounts;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.common.plm.ProductAccounts;
 import org.openbravo.model.financialmgmt.accounting.coa.AccountingCombination;
+import org.openbravo.model.materialmgmt.transaction.InventoryCount;
+import org.openbravo.model.materialmgmt.transaction.InventoryCountLine;
+import org.openbravo.model.materialmgmt.transaction.MaterialTransaction;
 import org.openbravo.model.procurement.ReceiptInvoiceMatch;
 import org.openbravo.service.db.DalConnectionProvider;
 
@@ -87,28 +91,29 @@ public class DocumentPostingService {
   private static final String TABLE_M_MOVEMENT = "M_Movement";
 
   /**
-   * EN/ES text for {@code STATUS_DocumentDisabled} ('D') on a Goods Movement specifically
-   * (ETP-5436). Core's {@code DocMovement#getDocumentConfirmation} sets this status when none of
-   * the movement's lines yet carry an {@code M_Transaction} with a non-zero
-   * {@code transactionCost} — i.e. the background cost-calculation process has not run for this
-   * movement yet. Core's own message for 'D' is the generic, table-agnostic "Document disabled"
-   * (surfaced client-side as {@code postedStatusDocumentDisabled}), which gives the user no way
-   * to act on it. Hardcoded EN/ES here rather than a new {@code AD_MESSAGE} — same reasoning as
-   * {@link BpGroupAccountColumn#label(String)} just above: this module has no
-   * {@code AD_MESSAGE_TRL} translation pipeline of its own, so a brand-new message row would
-   * silently stay English-only for es_ES clients until a translation was added by hand elsewhere.
-   * Scoped to {@link #TABLE_M_MOVEMENT} only — 'D' means a structurally different precondition on
-   * every other {@code Doc*} subclass ({@code DocFINPayment}, {@code DocInventory},
-   * {@code DocGLJournal}, …), so a table-agnostic rewrite here would misinform every other
-   * document type that can legitimately reach 'D'.
+   * DB table name (not {@code AD_Table_ID} — resolved from the table's own record, see
+   * {@link #post(String, String, ConnectionProvider)}) for Physical Inventory, the only document
+   * type this pre-check applies to (ETP-5360).
    */
-  private static final String MSG_MOVEMENT_COST_NOT_CALCULATED_EN =
-      "This movement cannot be posted yet: the cost engine has not calculated the cost of its "
-          + "transactions. Wait for the cost calculation background process to finish, then try again.";
-  private static final String MSG_MOVEMENT_COST_NOT_CALCULATED_ES =
-      "Este movimiento todavía no puede contabilizarse: el motor de costes aún no calculó el "
-          + "coste de sus transacciones. Espere a que finalice el proceso de cálculo de costes e "
-          + "intente contabilizar de nuevo.";
+  private static final String TABLE_M_INVENTORY = "M_Inventory";
+
+  /**
+   * {@code AD_MESSAGE.VALUE} for the plain, no-params "cost not yet calculated" text (ETP-5360) —
+   * confirmed against {@code AD_MESSAGE_ID = B6CDB7D04FD249579A48D26C0ED48F45} in core Etendo's
+   * {@code AD_MESSAGE.xml} ("Cost has not yet been calculated for all products in the document.").
+   * Resolved via {@link OBMessageUtils#messageBD}, which already follows {@code OBContext}'s
+   * language like the rest of this file (see {@link #MSG_INVALID_ACCOUNT_BASE} and
+   * {@link #errorMessageOf}).
+   *
+   * <p>Reused as-is for {@code STATUS_DocumentDisabled} on a Goods Movement ({@link
+   * #TABLE_M_MOVEMENT}, ETP-5436) instead of a second, hand-written message: the wording is
+   * table-agnostic ("...in the document", not Inventory-specific), and {@code
+   * DocMovement#getDocumentConfirmation} sets 'D' for the same underlying condition this message
+   * already describes — no {@code MaterialTransaction} on the document's lines has a calculated
+   * cost yet. Reusing a real, already-translated core {@code AD_MESSAGE} beats a hardcoded EN/ES
+   * pair maintained only in Java.</p>
+   */
+  private static final String MSG_NOT_CALCULATED_COST = "NotCalculatedCost";
 
   /**
    * The {@code C_BP_Group_Acct} columns relevant to this app's document types (ETP-5175) — a
@@ -192,6 +197,9 @@ public class DocumentPostingService {
    * commit / rollback logic can be exercised with a mocked {@link ConnectionProvider} (no live DB).
    */
   PostResult post(String adTableId, String recordId, ConnectionProvider conn) {
+    if (isUncalculatedCostInventory(adTableId, recordId)) {
+      return new PostResult(false, OBMessageUtils.messageBD(MSG_NOT_CALCULATED_COST));
+    }
     OBContext ctx = OBContext.getOBContext();
     String clientId = ctx.getCurrentClient().getId();
     String orgId = ctx.getCurrentOrganization().getId();
@@ -216,6 +224,67 @@ public class DocumentPostingService {
       rollbackQuietly(conn, con);
       log.error("Post failed for table {} record {}", adTableId, recordId, e);
       return new PostResult(false, e.getMessage());
+    }
+  }
+
+  /**
+   * Pre-check scoped to Physical Inventory ({@code M_Inventory}) ONLY (ETP-5360) — do not
+   * generalize to other document types, they don't share this exact per-transaction cost-
+   * calculation shape.
+   *
+   * <p>{@code DocInventory#createFact} (classic core, {@code DocInventory.java}) throws a bare
+   * {@code IllegalStateException()} when a line's {@code MaterialTransaction.isCostCalculated()}
+   * is false — no message, no status. That exception falls into {@code AcctServer.createFacts}'s
+   * generic {@code catch (Exception e)} branch (only {@code OBException} is special-cased there),
+   * so the specific {@code STATUS_NotCalculatedCost} core would otherwise set is discarded before
+   * we ever see it, and {@code postLogic} returns the generic {@code STATUS_Error} instead. Even if
+   * that status did survive, core's resolved text is the per-product
+   * {@code NotCalculatedCostWithTransaction} variant, not the clean generic message this ticket
+   * wants, and it would carry the same classic-session locale bug fixed for {@code InvalidAccount}
+   * in ETP-5175 (see {@link #errorMessageOf}). Rather than patch {@code AcctServer}'s status/message
+   * propagation (a core change, out of scope here), this pre-check runs BEFORE {@code acct.post()}
+   * is ever called, so the swallowed exception never happens and we return our own clean, correctly
+   * localized message directly.
+   *
+   * @param adTableId
+   *     AD_Table_ID of the document table being posted.
+   * @param recordId
+   *     primary key of the record being posted ({@code M_Inventory_ID} when applicable).
+   * @return {@code true} when this is an {@code M_Inventory} document with at least one line
+   *     transaction whose cost is not yet calculated (including a null/unset flag, treated as
+   *     not calculated); {@code false} otherwise, including when the table is not {@code
+   *     M_Inventory}, the record cannot be resolved, or the lookup itself fails. Unlike
+   *     {@link #resolveMissingAccountsDetail} and {@link #resolveMissingProductAccountsDetail} —
+   *     enrichment helpers called AFTER {@code acct.post()} has already failed, where a failure
+   *     here just omits extra detail text and the post stays blocked either way — this method is
+   *     a GATE called BEFORE {@code acct.post()}. On a lookup error it returns {@code false},
+   *     which lets the post PROCEED normally: this pre-check fails OPEN (permissive), not closed.
+   *     That is deliberate: the alternative (blocking on lookup failure) would risk breaking the
+   *     ~15 existing non-Inventory unit tests that exercise this path with an unmocked
+   *     {@code OBDal}, for a pre-check that is a purely additive improvement over the generic
+   *     error path in the first place.
+   */
+  private boolean isUncalculatedCostInventory(String adTableId, String recordId) {
+    try {
+      Table table = OBDal.getInstance().get(Table.class, adTableId);
+      if (table == null || !TABLE_M_INVENTORY.equals(table.getDBTableName())) {
+        return false;
+      }
+      InventoryCount inventoryCount = OBDal.getInstance().get(InventoryCount.class, recordId);
+      if (inventoryCount == null) {
+        return false;
+      }
+      for (InventoryCountLine line : inventoryCount.getMaterialMgmtInventoryCountLineList()) {
+        for (MaterialTransaction transaction : line.getMaterialMgmtMaterialTransactionList()) {
+          if (!Boolean.TRUE.equals(transaction.isCostCalculated())) {
+            return true;
+          }
+        }
+      }
+      return false;
+    } catch (Exception e) {
+      log.warn("Could not evaluate cost-calculated pre-check for table {} record {}", adTableId, recordId, e);
+      return false;
     }
   }
 
@@ -314,19 +383,17 @@ public class DocumentPostingService {
         message = localizedBase;
       }
     }
+    // ETP-5436: 'D' on a Goods Movement means the same "cost not yet calculated" condition
+    // MSG_NOT_CALCULATED_COST already describes (see its javadoc) — reuse it rather than a
+    // second hardcoded message.
     if (AcctServer.STATUS_DocumentDisabled.equals(acct.getStatus())
         && TABLE_M_MOVEMENT.equals(acct.tableName)) {
-      message = movementCostNotCalculatedMessage();
+      String localizedNotCalculated = OBMessageUtils.messageBD(MSG_NOT_CALCULATED_COST);
+      if (StringUtils.isNotBlank(localizedNotCalculated)) {
+        message = localizedNotCalculated;
+      }
     }
     return enrichWithFailingEntity(acct, message);
-  }
-
-  /** See {@link #MSG_MOVEMENT_COST_NOT_CALCULATED_EN} for why this is hardcoded, not an {@code AD_MESSAGE}. */
-  private static String movementCostNotCalculatedMessage() {
-    String lang = OBContext.getOBContext().getLanguage().getLanguage();
-    return LANGUAGE_ES_ES.equals(lang)
-        ? MSG_MOVEMENT_COST_NOT_CALCULATED_ES
-        : MSG_MOVEMENT_COST_NOT_CALCULATED_EN;
   }
 
   /**
