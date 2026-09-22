@@ -49,6 +49,7 @@ import org.openbravo.model.ad.ui.Window;
 import org.openbravo.model.common.enterprise.Organization;
 
 import com.etendoerp.go.schemaforge.data.SFSpec;
+import com.etendoerp.go.schemaforge.util.ReportAccessCatalog;
 
 /**
  * Unit tests for {@link NeoAccessStartup}.
@@ -89,6 +90,23 @@ class NeoAccessStartupTest {
     orgZero = mock(Organization.class);
     client = mock(Client.class);
     when(obDal.get(Organization.class, "0")).thenReturn(orgZero);
+
+    // ETP-5402 QA follow-up: the report-access grant pass runs for every non-system-client
+    // target role and always reads the OBUIAPP process-access criteria as part of resolving
+    // which anchors are already granted. Leaving that criteria class unstubbed makes Mockito
+    // hand back a null criteria object, which throws a NullPointerException the moment the
+    // production code tries to add a restriction to it. Same default-stub fix as
+    // BaseWebhookTest's own ETP-5402 regression fix — every test gets a safe empty-list default
+    // here, so only a test asserting real report-access behavior needs to override it.
+    stubEmptyObuiappProcessAccessCriteria();
+  }
+
+  @SuppressWarnings("unchecked")
+  private void stubEmptyObuiappProcessAccessCriteria() {
+    OBCriteria<org.openbravo.client.application.ProcessAccess> criteria = mock(OBCriteria.class);
+    when(criteria.list()).thenReturn(List.of());
+    when(obDal.createCriteria(org.openbravo.client.application.ProcessAccess.class))
+        .thenReturn(criteria);
   }
 
   @AfterEach
@@ -280,5 +298,121 @@ class NeoAccessStartupTest {
 
     verify(obProvider, times(2)).get(WindowAccess.class);
     verify(obDal, times(2)).save(any(WindowAccess.class));
+  }
+
+  @SuppressWarnings("unchecked")
+  private void stubObuiappProcessAccessCriteria(List<org.openbravo.client.application.ProcessAccess> result) {
+    OBCriteria<org.openbravo.client.application.ProcessAccess> criteria = mock(OBCriteria.class);
+    when(criteria.list()).thenReturn(result);
+    when(obDal.createCriteria(org.openbravo.client.application.ProcessAccess.class))
+        .thenReturn(criteria);
+  }
+
+  /**
+   * ETP-5402 QA follow-up — a target role with ZERO grants for any of {@link
+   * ReportAccessCatalog#ROWS}' 5 anchors gains all of them in one pass: one {@link WindowAccess}
+   * row per DISTINCT window id (2 distinct ids across the 6 {@code WINDOW}-kind rows — the 5
+   * financial-report rows collapse onto the same {@code FINANCIAL_REPORTS_WINDOW_ID}), one
+   * classic {@link ProcessAccess} row ({@code tax-report}), and two OBUIAPP process-access rows
+   * (both aging schedules).
+   */
+  @Test
+  @DisplayName("ETP-5402: grants all missing Informes-report access anchors to a target role")
+  void grantsMissingReportAccess() {
+    Role role = targetRole();
+    stubRoleCriteria(List.of(role));
+    stubSpecCriteria(List.of(), List.of());
+    stubExistingAccess(List.of(), List.of());
+    stubObuiappProcessAccessCriteria(List.of());
+
+    Window financialReportsWindow = mock(Window.class);
+    when(financialReportsWindow.getId()).thenReturn(ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID);
+    when(obDal.get(Window.class, ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID))
+        .thenReturn(financialReportsWindow);
+    Window inventoryStockReportWindow = mock(Window.class);
+    when(inventoryStockReportWindow.getId())
+        .thenReturn(ReportAccessCatalog.INVENTORY_STOCK_REPORT_WINDOW_ID);
+    when(obDal.get(Window.class, ReportAccessCatalog.INVENTORY_STOCK_REPORT_WINDOW_ID))
+        .thenReturn(inventoryStockReportWindow);
+
+    Process taxReportProcess = mock(Process.class);
+    when(obDal.get(Process.class, ReportAccessCatalog.TAX_REPORT_PROCESS_ID))
+        .thenReturn(taxReportProcess);
+
+    org.openbravo.client.application.Process agingReceivableProcess =
+        mock(org.openbravo.client.application.Process.class);
+    when(obDal.get(org.openbravo.client.application.Process.class,
+        ReportAccessCatalog.AGING_RECEIVABLE_PROCESS_ID)).thenReturn(agingReceivableProcess);
+    org.openbravo.client.application.Process agingPayableProcess =
+        mock(org.openbravo.client.application.Process.class);
+    when(obDal.get(org.openbravo.client.application.Process.class,
+        ReportAccessCatalog.AGING_PAYABLE_PROCESS_ID)).thenReturn(agingPayableProcess);
+
+    when(obProvider.get(WindowAccess.class))
+        .thenReturn(mock(WindowAccess.class), mock(WindowAccess.class));
+    when(obProvider.get(ProcessAccess.class)).thenReturn(mock(ProcessAccess.class));
+    when(obProvider.get(org.openbravo.client.application.ProcessAccess.class)).thenReturn(
+        mock(org.openbravo.client.application.ProcessAccess.class),
+        mock(org.openbravo.client.application.ProcessAccess.class));
+
+    startup.grantMissingAccess();
+
+    // 2 distinct WINDOW anchors (not 6 — the 5 financial-report rows share one window id).
+    verify(obProvider, times(2)).get(WindowAccess.class);
+    verify(obDal, times(2)).save(any(WindowAccess.class));
+    verify(obProvider, times(1)).get(ProcessAccess.class);
+    verify(obDal, times(1)).save(any(ProcessAccess.class));
+    verify(obProvider, times(2)).get(org.openbravo.client.application.ProcessAccess.class);
+    verify(obDal, times(2)).save(any(org.openbravo.client.application.ProcessAccess.class));
+  }
+
+  /**
+   * ETP-5402 QA follow-up — a target role that already holds all 5 report-catalog anchors gains
+   * nothing new: idempotency for the report-access pass, mirroring {@link
+   * #doesNotDuplicateExistingAccess()} for the spec-driven passes above.
+   */
+  @Test
+  @DisplayName("ETP-5402: does not duplicate report access the role already has")
+  void doesNotDuplicateExistingReportAccess() {
+    Role role = targetRole();
+    stubRoleCriteria(List.of(role));
+    stubSpecCriteria(List.of(), List.of());
+
+    WindowAccess existingFinancialWa = mock(WindowAccess.class);
+    Window financialWindow = mock(Window.class);
+    when(financialWindow.getId()).thenReturn(ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID);
+    when(existingFinancialWa.getWindow()).thenReturn(financialWindow);
+    WindowAccess existingInventoryWa = mock(WindowAccess.class);
+    Window inventoryWindow = mock(Window.class);
+    when(inventoryWindow.getId()).thenReturn(ReportAccessCatalog.INVENTORY_STOCK_REPORT_WINDOW_ID);
+    when(existingInventoryWa.getWindow()).thenReturn(inventoryWindow);
+
+    ProcessAccess existingTaxPa = mock(ProcessAccess.class);
+    Process taxProcess = mock(Process.class);
+    when(taxProcess.getId()).thenReturn(ReportAccessCatalog.TAX_REPORT_PROCESS_ID);
+    when(existingTaxPa.getProcess()).thenReturn(taxProcess);
+
+    stubExistingAccess(List.of(existingFinancialWa, existingInventoryWa), List.of(existingTaxPa));
+
+    org.openbravo.client.application.ProcessAccess existingReceivableOpa =
+        mock(org.openbravo.client.application.ProcessAccess.class);
+    org.openbravo.client.application.Process receivableProcess =
+        mock(org.openbravo.client.application.Process.class);
+    when(receivableProcess.getId()).thenReturn(ReportAccessCatalog.AGING_RECEIVABLE_PROCESS_ID);
+    when(existingReceivableOpa.getObuiappProcess()).thenReturn(receivableProcess);
+    org.openbravo.client.application.ProcessAccess existingPayableOpa =
+        mock(org.openbravo.client.application.ProcessAccess.class);
+    org.openbravo.client.application.Process payableProcess =
+        mock(org.openbravo.client.application.Process.class);
+    when(payableProcess.getId()).thenReturn(ReportAccessCatalog.AGING_PAYABLE_PROCESS_ID);
+    when(existingPayableOpa.getObuiappProcess()).thenReturn(payableProcess);
+    stubObuiappProcessAccessCriteria(List.of(existingReceivableOpa, existingPayableOpa));
+
+    startup.grantMissingAccess();
+
+    verify(obProvider, never()).get(WindowAccess.class);
+    verify(obProvider, never()).get(ProcessAccess.class);
+    verify(obProvider, never()).get(org.openbravo.client.application.ProcessAccess.class);
+    verify(obDal, never()).save(any());
   }
 }

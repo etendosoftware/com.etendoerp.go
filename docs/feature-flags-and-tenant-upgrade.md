@@ -279,6 +279,13 @@ reclaimed, its attempt number is incremented, and its timestamp is renewed. The 
 cannot close a request after a retry has taken over. This makes browser refreshes, process restarts,
 and stale workers recoverable without a schema migration or a second payment.
 
+When the paid flow requests demo-data transfer, the source rows are converted into the same NEO
+batch operations used by the Products and Contacts grid import. A product price is a linked
+`price` operation (`parentRef`) in the same atomic batch, and the destination default sales price
+list is resolved with the shared `PriceListVersionResolver`. Existing destination search keys are
+skipped before the batch, making retries idempotent. The transfer does not use `DalUtil.copy` or a
+second persistence path.
+
 ### The plan is derived from the payment, not from the decision
 
 `isProductive()` is `true` when — and only when — the request was not refused **and** the payment
