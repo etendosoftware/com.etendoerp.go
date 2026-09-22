@@ -966,7 +966,6 @@ public class SalesInvoiceHeaderHandlerTest {
       obContextMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
       obContextMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
 
-      // validateLineQtyBeforeComplete guard: no linked shipment lines → passes.
       OBDal dal = mock(OBDal.class);
       dalMock.when(OBDal::getInstance).thenReturn(dal);
       dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);

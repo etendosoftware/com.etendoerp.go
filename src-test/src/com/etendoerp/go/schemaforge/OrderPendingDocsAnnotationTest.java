@@ -73,8 +73,13 @@ import org.openbravo.dal.service.OBDal;
  *   <li>ordered vs delivered quantity per order ({@code C_OrderLine})</li>
  *   <li>orders carrying a DRAFT {@code M_InOut}</li>
  *   <li>linked-invoice totals ({@code C_Invoice}, completed sum + draft presence)</li>
+ *   <li>ETP-5317 — corrected {@code invoiceStatus}/{@code deliveryStatus}/
+ *       {@code deliveryStatusPurchase} percentages, run last so it never shifts the four
+ *       queries above; see {@link AbstractOrderHeaderHandler#applyCorrectedStatusPercentages}</li>
  * </ol>
  * so {@link #stubDb} hands one {@link ResultSet} per {@code executeQuery()} call, in that order.
+ * A test that only supplies the first four doesn't need to know about the fifth — {@link #stubDb}
+ * hands any call beyond the supplied list an empty cursor.
  * Each {@code ResultSet} is a real cursor over fixture rows rather than a single sticky
  * {@code thenReturn(true)}: queries 2–4 read with {@code while (rs.next())}, and an always-true
  * stub spins forever there.
@@ -566,17 +571,17 @@ public class OrderPendingDocsAnnotationTest {
   /**
    * Case 13 — THE regression guard. Every one of the three pending-docs queries is a single batch
    * statement over the whole page, so a list GET of N records must issue exactly THREE statements
-   * beyond the pre-existing {@code hasLinkedDocuments} batch — four in total — no matter how many
-   * rows came back.
+   * beyond the pre-existing {@code hasLinkedDocuments} batch, plus the one ETP-5317 status-
+   * percentage correction batch — five in total — no matter how many rows came back.
    *
    * <p>An N+1 regression here is invisible in every other test in this file (the flags would all
    * still be correct) and invisible in the UI until a customer opens a 200-row order list. Counted
-   * against a five-record page so that a per-record implementation would report 16, not 4.
+   * against a five-record page so that a per-record implementation would report way more than 5.
    */
   @Test
   public void testListGetIssuesThreeBatchQueriesRegardlessOfRecordCount() throws Exception {
     try (MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
-      Db db = stubDb(obDalMock, noRows(), noRows(), noRows(), noRows());
+      Db db = stubDb(obDalMock, noRows(), noRows(), noRows(), noRows(), noRows());
 
       NeoContext ctx = getCtx(null,
           orderRecord("order-1", 100.0), orderRecord("order-2", 100.0),
@@ -586,7 +591,7 @@ public class OrderPendingDocsAnnotationTest {
       NeoResponse result = new SalesOrderHeaderHandler().afterHandle(ctx);
 
       assertNotNull(result);
-      verify(db.conn(), times(4)).prepareStatement(anyString());
+      verify(db.conn(), times(5)).prepareStatement(anyString());
       assertEquals(5, dataOf(result).length());
     }
   }
@@ -626,9 +631,10 @@ public class OrderPendingDocsAnnotationTest {
   }
 
   /**
-   * Case 14 — a single-record GET takes the same three batch queries (four statements with the
-   * LIMIT-1 {@code hasLinkedDocuments} check) and annotates both flags on {@code data[0]}. The
-   * detail page and the list must be fed by one code path, or the two surfaces can drift again.
+   * Case 14 — a single-record GET takes the same three batch queries (five statements with the
+   * LIMIT-1 {@code hasLinkedDocuments} check and the ETP-5317 status-percentage correction) and
+   * annotates both flags on {@code data[0]}. The detail page and the list must be fed by one code
+   * path, or the two surfaces can drift again.
    */
   @Test
   public void testSingleRecordGetAnnotatesBothFlagsWithTheSameThreeQueries() throws Exception {
@@ -637,12 +643,13 @@ public class OrderPendingDocsAnnotationTest {
           noRows(),
           resultSet(qtyRow("order-1", "10", "0")),
           noRows(),
+          noRows(),
           noRows());
 
       NeoContext ctx = getCtx("order-1", orderRecord("order-1", 100.0));
       NeoResponse result = new SalesOrderHeaderHandler().afterHandle(ctx);
 
-      verify(db.conn(), times(4)).prepareStatement(anyString());
+      verify(db.conn(), times(5)).prepareStatement(anyString());
       JSONObject rec = dataOf(result).getJSONObject(0);
       assertTrue(rec.has(NEEDS_PRIMARY));
       assertTrue(rec.has(NEEDS_INVOICE));
@@ -853,7 +860,7 @@ public class OrderPendingDocsAnnotationTest {
   /**
    * Case 20 — {@code SalesQuotationHeaderHandler} overrides {@code afterHandle} to transfer the
    * currency rate and then delegates to {@code super}, so it inherits these annotations for free.
-   * Verifies the delegation still reaches them (and still issues exactly the four statements)
+   * Verifies the delegation still reaches them (and still issues exactly the five statements)
    * rather than short-circuiting on the override.
    */
   @Test
@@ -863,13 +870,14 @@ public class OrderPendingDocsAnnotationTest {
           noRows(),
           resultSet(qtyRow("quot-1", "10", "0")),
           noRows(),
+          noRows(),
           noRows());
 
       NeoContext ctx = getCtx("quot-1", orderRecord("quot-1", 100.0));
       NeoResponse result = new SalesQuotationHeaderHandler().afterHandle(ctx);
 
       assertNotNull(result);
-      verify(db.conn(), times(4)).prepareStatement(anyString());
+      verify(db.conn(), times(5)).prepareStatement(anyString());
       JSONObject rec = dataOf(result).getJSONObject(0);
       assertTrue(rec.getBoolean(NEEDS_PRIMARY));
       assertTrue(rec.getBoolean(NEEDS_INVOICE));

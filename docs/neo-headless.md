@@ -815,6 +815,36 @@ The `recordId` from the URL path is injected into the process parameters automat
 
 Process access is checked before execution. If the current role lacks access to the process, the request returns `403 Forbidden`.
 
+#### Failure body: `message` + `messageKeys` (ETP-5316)
+
+When the action runs a DB procedure (`CallProcess` -> `ProcessInstance`) and it fails, the `400`
+body carries the translated sentence **and** the AD_MESSAGE search keys behind it:
+
+```json
+{
+  "status": "error",
+  "message": "En la línea 10, 20, 30, 40, Cuando el producto no esta vacío entonces la cantidad movida no debe ser cero.",
+  "messageKeys": ["Inline", "ProductNotNullAndMovementQtyZero"]
+}
+```
+
+Core assembles these messages from AD_MESSAGE tokens plus run-time data --
+`M_INOUT_POST` raises `'@Inline@ '||v_Message_Qty||' @ProductNotNullAndMovementQtyZero@'` -- so the
+translated text differs per document and cannot be matched by a client, and the numbers in it are
+**AD line numbers** (`line`, numbered in tens), not the row positions the user sees. Neither the
+text nor the numbers are usable.
+
+`NeoProcessService.translatePInstanceResult` therefore extracts the `@Key@` tokens from the raw
+`ProcessInstance.errorMsg` **before** `NeoMessageTranslator.safeParseTranslation` replaces them
+(`NeoMessageTranslator.extractMessageKeys`), preserving order and dropping duplicates. The client
+matches the first key it recognises against its own allow-list and renders its own wording; there
+is no AD_MESSAGE catalog lookup here, so an unrecognised token is inert.
+
+`message` is byte-for-byte what it was before, and `messageKeys` is **omitted** when the raw message
+carried no token -- a client that ignores the field is unaffected. Scope: this branch only (the
+document-action / `CallProcess` path). The OBUIAPP result paths in `translateObuiappResult` also
+funnel through `safeParseTranslation` and could carry the same field, but deliberately do not yet.
+
 ### 4.6 Process Specs (Standalone Processes)
 
 Process specs (`SPEC_TYPE = 'P'`) expose an AD_Process as a standalone API endpoint.

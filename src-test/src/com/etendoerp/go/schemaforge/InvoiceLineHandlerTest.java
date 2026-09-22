@@ -20,8 +20,11 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
@@ -42,10 +45,13 @@ import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.common.enterprise.DocumentType;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.common.order.Order;
+import org.openbravo.model.common.order.OrderLine;
 
 /**
  * Unit tests for {@link InvoiceLineHandler}.
@@ -889,6 +895,383 @@ class InvoiceLineHandlerTest {
 
         Mockito.verify(newLine, never()).setETGOSourceInvoiceLine(any());
         Mockito.verify(dal, never()).save(newLine);
+      }
+    }
+  }
+
+  /**
+   * ETP-5381 — {@code syncInvoiceOrderReferenceAfterLineSave}, driven end-to-end through
+   * {@link InvoiceLineHandler#afterHandle} on a line save.
+   *
+   * <p>Replicates Classic's {@code Create Lines From} rule
+   * ({@code UpdateInvoiceLineInformation#setOrderReferenceInInvoiceHeaderIfLinkedOnlyToTheSame
+   * OrderOrBlankIt}): the invoice header's {@code C_Order_ID} points at the saved line's order,
+   * unless the invoice also holds lines from a DIFFERENT order, in which case it is BLANKED rather
+   * than left naming an arbitrary one. The multi-order case is the one a naive frontend guard
+   * ("only one document was imported") gets wrong, so it is covered explicitly.
+   *
+   * <p>Driven through POST contexts because the production step is POST-only by design (matching
+   * Classic, which re-derives per copied line): {@code C_Order_ID} is {@code isreadonly='Y'} on the
+   * header entity of both invoice specs, so it cannot change on a PATCH anyway. The PATCH and GET
+   * negative cases below pin that scope.
+   */
+  @Nested
+  @DisplayName("syncInvoiceOrderReferenceAfterLineSave — invoice header C_Order_ID (ETP-5381)")
+  class SyncInvoiceOrderReferenceAfterLineSave {
+
+    /** POST line-save context: the created line is exposed only via previousResult. */
+    private NeoContext postCtx(String createdLineId) throws Exception {
+      JSONObject createdLine = new JSONObject().put("id", createdLineId);
+      JSONObject body = new JSONObject().put("response",
+          new JSONObject().put("data", new JSONArray().put(createdLine)));
+      return NeoContext.builder()
+          .specName("sales-invoice").entityName("lines")
+          .httpMethod("POST").endpointType(NeoEndpointType.CRUD)
+          .recordId(null).previousResult(new NeoResponse(201, body)).build();
+    }
+
+    /**
+     * Stubs the saved line: its parent invoice (also consumed by the ETP-4029 conversion-rate
+     * step) and, when {@code order} is non-null, the {@code salesOrderLine → salesOrder} chain the
+     * ETP-5381 derivation reads. A {@code null} order leaves {@code getSalesOrderLine()} at its
+     * Mockito default (null), i.e. a free-text / manually added line.
+     */
+    private InvoiceLine stubLine(OBDal dal, String lineId, Invoice invoice, Order order) {
+      InvoiceLine line = mock(InvoiceLine.class);
+      when(dal.get(InvoiceLine.class, lineId)).thenReturn(line);
+      when(line.getInvoice()).thenReturn(invoice);
+      if (order != null) {
+        OrderLine orderLine = mock(OrderLine.class);
+        when(line.getSalesOrderLine()).thenReturn(orderLine);
+        when(orderLine.getSalesOrder()).thenReturn(order);
+      }
+      return line;
+    }
+
+    /**
+     * Stubs {@code existsOtherOrdersLinkedToThisInvoice}'s single-row HQL probe: a non-null
+     * unique result means the invoice already holds a line from a different order.
+     */
+    private void stubOtherOrdersProbe(OBDal dal, boolean otherOrderExists) {
+      @SuppressWarnings("unchecked")
+      OBQuery<InvoiceLine> query = mock(OBQuery.class);
+      when(dal.createQuery(eq(InvoiceLine.class), anyString())).thenReturn(query);
+      when(query.setNamedParameter(anyString(), any())).thenReturn(query);
+      when(query.setMaxResult(anyInt())).thenReturn(query);
+      when(query.uniqueResult()).thenReturn(otherOrderExists ? mock(InvoiceLine.class) : null);
+    }
+
+    /**
+     * Happy path: the imported line traces back to exactly one order and the invoice holds no line
+     * from another one, so the header starts pointing at that order — the chip
+     * {@code RelatedDocuments.jsx} renders, which the manual import path left empty before the fix.
+     */
+    @Test
+    @DisplayName("POST: single-order invoice sets the header order reference and saves")
+    void postSetsHeaderOrderWhenOnlyOneOrderLinked() throws Exception {
+      NeoContext ctx = postCtx("new-line-1");
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<AbstractInvoiceHeaderHandler> headerMock =
+               mockStatic(AbstractInvoiceHeaderHandler.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+        headerMock.when(() ->
+            AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(anyString()))
+            .thenAnswer(i -> null);
+
+        Invoice invoice = mock(Invoice.class);
+        when(invoice.getId()).thenReturn("inv-1");
+        when(invoice.getSalesOrder()).thenReturn(null);
+        Order order = mock(Order.class);
+        when(order.getId()).thenReturn("order-1");
+        stubLine(dal, "new-line-1", invoice, order);
+        stubOtherOrdersProbe(dal, false);
+
+        assertNull(handler.afterHandle(ctx));
+
+        Mockito.verify(invoice).setSalesOrder(order);
+        Mockito.verify(dal).save(invoice);
+        Mockito.verify(dal).flush();
+      }
+    }
+
+    /**
+     * THE case a naive frontend {@code importedDocIds.size() === 1} guard gets wrong: the invoice
+     * already holds a line from a DIFFERENT order, so the header must be BLANKED, not left pointing
+     * at the order of whichever line happened to be saved last.
+     */
+    @Test
+    @DisplayName("POST: a line from another order blanks the header order reference")
+    void postBlanksHeaderOrderWhenAnotherOrderIsLinked() throws Exception {
+      NeoContext ctx = postCtx("new-line-2");
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<AbstractInvoiceHeaderHandler> headerMock =
+               mockStatic(AbstractInvoiceHeaderHandler.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+        headerMock.when(() ->
+            AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(anyString()))
+            .thenAnswer(i -> null);
+
+        Order order = mock(Order.class);
+        when(order.getId()).thenReturn("order-1");
+        Invoice invoice = mock(Invoice.class);
+        when(invoice.getId()).thenReturn("inv-multi");
+        // The header still carries the order set by the FIRST import.
+        when(invoice.getSalesOrder()).thenReturn(order);
+        stubLine(dal, "new-line-2", invoice, order);
+        stubOtherOrdersProbe(dal, true);
+
+        assertNull(handler.afterHandle(ctx));
+
+        Mockito.verify(invoice).setSalesOrder(isNull());
+        Mockito.verify(invoice, never()).setSalesOrder(order);
+        Mockito.verify(dal).save(invoice);
+        Mockito.verify(dal).flush();
+      }
+    }
+
+    /**
+     * A line with no {@code salesOrderLine} (free text, or a manually added product line) carries no
+     * derivation input at all: the header is left exactly as it was, and the probe is not even run.
+     */
+    @Test
+    @DisplayName("POST: line without salesOrderLine leaves the header untouched")
+    void postWithoutSalesOrderLineLeavesHeaderUntouched() throws Exception {
+      NeoContext ctx = postCtx("new-line-3");
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<AbstractInvoiceHeaderHandler> headerMock =
+               mockStatic(AbstractInvoiceHeaderHandler.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+        headerMock.when(() ->
+            AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(anyString()))
+            .thenAnswer(i -> null);
+
+        Invoice invoice = mock(Invoice.class);
+        when(invoice.getId()).thenReturn("inv-free-text");
+        stubLine(dal, "new-line-3", invoice, null);
+
+        assertNull(handler.afterHandle(ctx));
+
+        Mockito.verify(invoice, never()).setSalesOrder(any());
+        Mockito.verify(dal, never()).createQuery(eq(InvoiceLine.class), anyString());
+        Mockito.verify(dal, never()).save(any());
+        Mockito.verify(dal, never()).flush();
+      }
+    }
+
+    /**
+     * Idempotence: the header already equals the resolved order (the usual case from the second
+     * imported line of the SAME order onwards), so no write is issued at all — no {@code save},
+     * no {@code flush}, no extra row version on every single imported line.
+     */
+    @Test
+    @DisplayName("POST: header already equals the resolved order — no save, no flush")
+    void postDoesNotWriteWhenHeaderAlreadyMatches() throws Exception {
+      NeoContext ctx = postCtx("new-line-4");
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<AbstractInvoiceHeaderHandler> headerMock =
+               mockStatic(AbstractInvoiceHeaderHandler.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+        headerMock.when(() ->
+            AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(anyString()))
+            .thenAnswer(i -> null);
+
+        Order order = mock(Order.class);
+        when(order.getId()).thenReturn("order-same");
+        Invoice invoice = mock(Invoice.class);
+        when(invoice.getId()).thenReturn("inv-idempotent");
+        when(invoice.getSalesOrder()).thenReturn(order);
+        stubLine(dal, "new-line-4", invoice, order);
+        stubOtherOrdersProbe(dal, false);
+
+        assertNull(handler.afterHandle(ctx));
+
+        Mockito.verify(invoice, never()).setSalesOrder(any());
+        Mockito.verify(dal, never()).save(any());
+        Mockito.verify(dal, never()).flush();
+      }
+    }
+
+    /**
+     * The derivation must never fail the request: the line and its order are already persisted and
+     * the match rows do not depend on this column, so a failure costs a UI chip, not the document.
+     * The earlier ETP-4029 conversion-rate step still ran, proving the failure is contained.
+     */
+    @Test
+    @DisplayName("POST: a failing order probe is swallowed — afterHandle still returns normally")
+    void postSwallowsProbeFailure() throws Exception {
+      NeoContext ctx = postCtx("new-line-5");
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<AbstractInvoiceHeaderHandler> headerMock =
+               mockStatic(AbstractInvoiceHeaderHandler.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+        headerMock.when(() ->
+            AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(anyString()))
+            .thenAnswer(i -> null);
+
+        Invoice invoice = mock(Invoice.class);
+        when(invoice.getId()).thenReturn("inv-probe-err");
+        Order order = mock(Order.class);
+        when(order.getId()).thenReturn("order-probe-err");
+        stubLine(dal, "new-line-5", invoice, order);
+        when(dal.createQuery(eq(InvoiceLine.class), anyString()))
+            .thenThrow(new RuntimeException("DB down"));
+
+        assertNull(handler.afterHandle(ctx));
+
+        Mockito.verify(invoice, never()).setSalesOrder(any());
+        Mockito.verify(dal, never()).save(any());
+        headerMock.verify(() ->
+            AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument("inv-probe-err"));
+      }
+    }
+
+    /**
+     * Stronger containment proof than the previous test: the step that runs AFTER the order sync
+     * (the ETP-4751 exemption-cause signal) still produces its response, so a failure in the order
+     * derivation does not truncate the rest of the POST path.
+     */
+    @Test
+    @DisplayName("POST: a failing order sync does not stop the later exemption-cause signal")
+    void postProbeFailureDoesNotStopLaterSteps() throws Exception {
+      NeoContext ctx = postCtx("new-line-6");
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+           MockedStatic<AbstractInvoiceHeaderHandler> headerMock =
+               mockStatic(AbstractInvoiceHeaderHandler.class)) {
+        ctxMock.when(() -> OBContext.setAdminMode(anyBoolean())).thenAnswer(i -> null);
+        ctxMock.when(OBContext::restorePreviousMode).thenAnswer(i -> null);
+        headerMock.when(() ->
+            AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(anyString()))
+            .thenAnswer(i -> null);
+
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+        dalMock.when(OBDal::getReadOnlyInstance).thenReturn(dal);
+
+        Invoice invoice = mock(Invoice.class);
+        when(invoice.getId()).thenReturn("inv-after-err");
+        Order order = mock(Order.class);
+        when(order.getId()).thenReturn("order-after-err");
+        stubLine(dal, "new-line-6", invoice, order);
+        when(dal.createQuery(eq(InvoiceLine.class), anyString()))
+            .thenThrow(new RuntimeException("DB down"));
+
+        // ETP-4751 wiring: sales invoice, no header cause, an exempt line, no default cause
+        // → the warning signal, which is produced AFTER the order sync.
+        java.sql.Connection conn = mock(java.sql.Connection.class);
+        when(dal.getConnection()).thenReturn(conn);
+        java.sql.PreparedStatement qualifyPs = mock(java.sql.PreparedStatement.class);
+        java.sql.ResultSet qualifyRs = mock(java.sql.ResultSet.class);
+        when(qualifyPs.executeQuery()).thenReturn(qualifyRs);
+        when(qualifyRs.next()).thenReturn(true);
+        when(qualifyRs.getString("issotrx")).thenReturn("Y");
+        when(qualifyRs.getString("em_aeatsii_cause_exemption_id")).thenReturn(null);
+        when(qualifyRs.getBoolean("has_exempt")).thenReturn(true);
+        java.sql.PreparedStatement defaultPs = mock(java.sql.PreparedStatement.class);
+        java.sql.ResultSet defaultRs = mock(java.sql.ResultSet.class);
+        when(defaultPs.executeQuery()).thenReturn(defaultRs);
+        when(defaultRs.next()).thenReturn(false);
+        when(conn.prepareStatement(anyString())).thenAnswer(inv ->
+            ((String) inv.getArgument(0)).toLowerCase().contains("isdefault") ? defaultPs : qualifyPs);
+
+        NeoResponse result = handler.afterHandle(ctx);
+
+        org.junit.jupiter.api.Assertions.assertNotNull(result);
+        org.junit.jupiter.api.Assertions.assertTrue(
+            result.getBody().getBoolean(InvoiceLineHandler.FIELD_EXEMPTION_CAUSE_WARNING));
+        Mockito.verify(dal, never()).save(any());
+      }
+    }
+
+    /**
+     * GET must never write: a read of the lines grid resolves the same records (the ETP-4737
+     * {@code sourceInvoiceLineId} enrichment loads each line) but must not re-derive or persist the
+     * header order reference.
+     */
+    @Test
+    @DisplayName("GET: never touches the header order reference")
+    void getNeverTouchesHeaderOrderReference() throws Exception {
+      JSONObject rec = new JSONObject().put("id", "line-get-1");
+      JSONObject body = new JSONObject().put("response",
+          new JSONObject().put("data", new JSONArray().put(rec)));
+      NeoContext ctx = NeoContext.builder()
+          .specName("sales-invoice").entityName("lines")
+          .httpMethod("GET").endpointType(NeoEndpointType.CRUD)
+          .previousResult(NeoResponse.ok(body)).build();
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        // A line that WOULD trigger the derivation if the sync ran on GET.
+        InvoiceLine line = mock(InvoiceLine.class);
+        Invoice invoice = mock(Invoice.class);
+        OrderLine orderLine = mock(OrderLine.class);
+        Order order = mock(Order.class);
+        when(dal.get(InvoiceLine.class, "line-get-1")).thenReturn(line);
+        lenient().when(line.getInvoice()).thenReturn(invoice);
+        lenient().when(line.getSalesOrderLine()).thenReturn(orderLine);
+        lenient().when(orderLine.getSalesOrder()).thenReturn(order);
+
+        handler.afterHandle(ctx);
+
+        Mockito.verify(invoice, never()).setSalesOrder(any());
+        Mockito.verify(dal, never()).createQuery(eq(InvoiceLine.class), anyString());
+        Mockito.verify(dal, never()).save(any());
+        Mockito.verify(dal, never()).flush();
+      }
+    }
+
+    /**
+     * Negative case pinning the deliberate POST-only scope: PATCH re-saves an existing line, and
+     * that cannot change which order the line points at, so no re-derivation is attempted. Also the
+     * only scope that is even reachable — {@code C_Order_ID} is read-only on the header entity of
+     * both invoice specs, so a PATCH could not persist it anyway.
+     */
+    @Test
+    @DisplayName("PATCH: does not re-derive the header order reference (POST-only by design)")
+    void patchDoesNotSyncHeaderOrderReference() {
+      NeoContext ctx = NeoContext.builder()
+          .specName("sales-invoice").entityName("lines")
+          .httpMethod("PATCH").endpointType(NeoEndpointType.CRUD)
+          .recordId("line-patch").build();
+
+      try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+           MockedStatic<AbstractInvoiceHeaderHandler> headerMock =
+               mockStatic(AbstractInvoiceHeaderHandler.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+        headerMock.when(() ->
+            AbstractInvoiceHeaderHandler.autoCreateOrUpdateConversionRateDocument(anyString()))
+            .thenAnswer(i -> null);
+
+        InvoiceLine line = mock(InvoiceLine.class);
+        Invoice invoice = mock(Invoice.class);
+        OrderLine orderLine = mock(OrderLine.class);
+        Order order = mock(Order.class);
+        when(dal.get(InvoiceLine.class, "line-patch")).thenReturn(line);
+        when(line.getInvoice()).thenReturn(invoice);
+        when(invoice.getId()).thenReturn("inv-patch");
+        lenient().when(line.getSalesOrderLine()).thenReturn(orderLine);
+        lenient().when(orderLine.getSalesOrder()).thenReturn(order);
+
+        assertNull(handler.afterHandle(ctx));
+
+        Mockito.verify(invoice, never()).setSalesOrder(any());
+        Mockito.verify(dal, never()).createQuery(eq(InvoiceLine.class), anyString());
+        Mockito.verify(dal, never()).save(any());
+        Mockito.verify(dal, never()).flush();
       }
     }
   }

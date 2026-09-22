@@ -32,6 +32,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import javax.xml.parsers.DocumentBuilder;
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -77,16 +78,31 @@ public class OnboardingDatasetCorrectionsSampleDataTest {
    * The eleven document sequences ETP-5079 corrected, mapped to the value BOTH {@code STARTNO} and
    * {@code CURRENTNEXT} must carry.
    *
-   * <p>This table is duplicated, deliberately and by value, from the corrective fix
-   * {@code schema_forge/cli/src/data-fixes/sql/20260902T120000Z__R31-document-sequence-startno.sql},
-   * which repairs tenants onboarded before the dataset was fixed. The preventive and the corrective
-   * fronts have to agree on the target numbers or existing tenants and new ones drift apart, so if
-   * one of these ever changes, change the other in the same commit.</p>
+   * <p>This table is duplicated, deliberately and by value, from the corrective fixes in
+   * {@code schema_forge/cli/src/data-fixes/sql/}, which repair tenants onboarded before the dataset
+   * was fixed. The preventive and the corrective fronts have to agree on the target numbers or
+   * existing tenants and new ones drift apart, so if one of these ever changes, change the other in
+   * the same commit.</p>
+   *
+   * <p><b>Two fixes own entries in this table, and the newer one wins where they overlap.</b>
+   * Ten values come from {@code 20260902T120000Z__R31-document-sequence-startno.sql} (ETP-5079).
+   * {@code AR Invoice} comes from {@code 20260919T120000Z__R38-document-sequence-series-prefixes.sql}
+   * (ETP-5285), which lowered it from R31's {@code 10000000} to {@code 1000000} so every one of the
+   * product's five document series starts at the same number. R31 still carries the old value and
+   * is deliberately NOT edited — tenants have already applied it as written, and rewriting an
+   * applied fix makes the ledger describe something that never ran. The two do not fight: fixes run
+   * in lexical filename order so R31 goes first, and a fix already in a {@code PROCESSED} state is
+   * never re-run, so a tenant needing both ends at R38's value. This table asserts the FINAL
+   * expected state, which is R38's.</p>
+   *
+   * <p>ETP-5285 also gives five of these sequences a {@code PREFIX}; that is asserted separately by
+   * {@code testTheProductSeriesShipWithTheirPrefix()}.</p>
    */
   private static final Map<String, String> EXPECTED_SEQUENCE_START = new LinkedHashMap<>();
 
   static {
-    EXPECTED_SEQUENCE_START.put("AR Invoice", "10000000");
+    // ETP-5285 lowered AR Invoice from 10000000 to 1000000 — see the javadoc above.
+    EXPECTED_SEQUENCE_START.put("AR Invoice", "1000000");
     EXPECTED_SEQUENCE_START.put("AP Payment", "1000000");
     EXPECTED_SEQUENCE_START.put("AR Receipt", "1000000");
     EXPECTED_SEQUENCE_START.put("MM Shipment", "1000000");
@@ -302,6 +318,71 @@ public class OnboardingDatasetCorrectionsSampleDataTest {
             + " asserted by testEveryUserFacingProductCategoryHasARealSpanishTranslation() never"
             + " reaches the tenant (ETP-5079)",
         OnboardingDatasetDefinition.getIncludedTables().contains("M_PRODUCT_CATEGORY_TRL"));
+  }
+
+  // ─── Document series prefixes (ETP-5285) ───────────────────────────────────
+
+  /**
+   * The five document series the product defines ship with their prefix, so a new tenant can tell
+   * an order from an invoice by its number alone.
+   *
+   * <p>Before ETP-5285 three of these shipped with NO prefix at all and the two rectificativas
+   * carried ETP-4737's interim {@code REC-}, so a tenant's first sales order and first sales
+   * invoice were both numbered {@code 1000000} and the two rectificativas shared one prefix.</p>
+   *
+   * <p>Every prefix here must also satisfy the Spanish fiscal rules
+   * {@code DocumentSequenceHandler} enforces on write (uppercase {@code A-Z0-9-} only, none of
+   * {@code I O Y W Ñ}, at most 20 characters) — otherwise the dataset would ship a value the
+   * window itself refuses to re-save, leaving the user stuck on an unsaveable form. That is
+   * asserted here rather than assumed.</p>
+   *
+   * <p>The sixth series ETP-5285 names, {@code FC} (Factura de compra), has no {@code AD_Sequence}
+   * to carry it: {@code AP Invoice} is {@code IsDocNoControlled='N'} with no sequence in 76 of 76
+   * doctypes, because a purchase invoice is numbered by the supplier. Do not add it here without
+   * first flipping that doctype, which is a product decision.</p>
+   *
+   * <p>The regression path is the same as every other assertion in this class: a dataset re-export
+   * from an instance where someone cleared the field silently reverts the row.</p>
+   */
+  @Test
+  public void testTheProductSeriesShipWithTheirPrefix() throws Exception {
+    Map<String, String> expectedPrefix = new LinkedHashMap<>();
+    expectedPrefix.put("Purchase Order", "PC");
+    expectedPrefix.put("Standard Order", "PV");
+    expectedPrefix.put("AR Invoice", "FV");
+    expectedPrefix.put("Factura Rectificativa (Ventas)", "FVR");
+    expectedPrefix.put("Factura Rectificativa (Compras)", "FCR");
+
+    List<String> seen = new ArrayList<>();
+    for (Element row : rows("AD_SEQUENCE.xml", "AD_SEQUENCE")) {
+      String name = childText(row, "NAME");
+      String expected = expectedPrefix.get(name);
+      if (expected == null) {
+        continue;
+      }
+      seen.add(name);
+
+      String prefix = childText(row, "PREFIX");
+      assertNotNull("series '" + name + "' must declare a PREFIX; without it a tenant cannot tell"
+          + " this series apart from any other by its document number", prefix);
+      assertEquals("series '" + name + "' must ship with its product-defined prefix",
+          expected, prefix.trim());
+
+      assertTrue("prefix '" + prefix + "' exceeds the 20 characters DocumentSequenceHandler allows",
+          prefix.trim().length() <= 20);
+      assertFalse("prefix '" + prefix + "' has a lowercase or accented letter, which"
+          + " DocumentSequenceHandler refuses on write",
+          Pattern.compile("[a-záéíóúüñ]").matcher(prefix).find());
+      assertFalse("prefix '" + prefix + "' uses one of the reserved letters I O Y W Ñ, which"
+          + " DocumentSequenceHandler refuses on write",
+          Pattern.compile("[IOYWÑ]").matcher(prefix).find());
+      assertFalse("prefix '" + prefix + "' has a character outside A-Z 0-9 and the hyphen, which"
+          + " DocumentSequenceHandler refuses on write",
+          Pattern.compile("[^A-Z0-9-]").matcher(prefix).find());
+    }
+
+    assertEquals("all five product series must be present in AD_SEQUENCE.xml",
+        expectedPrefix.size(), seen.size());
   }
 
   // ─── Starter tariffs (ETP-5190) ────────────────────────────────────────────

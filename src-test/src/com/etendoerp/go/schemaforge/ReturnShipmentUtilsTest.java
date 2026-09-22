@@ -17,10 +17,21 @@
 package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
+import static com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.completionSuccess;
+import static com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.mockCompletedInvoice;
+import static com.etendoerp.go.schemaforge.ReturnInvoiceSqlTestSupport.stubReturnInvoiceQueries;
+
+import com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.CompletionMocks;
 
 import java.math.BigDecimal;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -28,10 +39,14 @@ import java.util.List;
 import org.hibernate.Session;
 import org.hibernate.criterion.SimpleExpression;
 import org.hibernate.query.Query;
+import org.codehaus.jettison.json.JSONArray;
+import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.MockedStatic;
 import org.mockito.Mockito;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
@@ -42,6 +57,7 @@ import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.enterprise.Warehouse;
 import org.openbravo.model.common.invoice.Invoice;
 import org.openbravo.model.common.invoice.InvoiceLine;
+import org.openbravo.model.common.invoice.ReversedInvoice;
 import org.openbravo.model.common.plm.Product;
 import org.openbravo.model.financialmgmt.tax.TaxRate;
 import org.openbravo.model.materialmgmt.transaction.ShipmentInOut;
@@ -78,6 +94,13 @@ import static org.mockito.Mockito.when;
 public class ReturnShipmentUtilsTest {
 
   private static final BigDecimal FALLBACK = new BigDecimal("9.99");
+
+  /**
+   * The batch size the tests that do not care about paging ask for. Deliberately equal to
+   * {@link ReturnShipmentUtils#DEFAULT_RECTIFIABLE_PAGE_SIZE} so those tests keep exercising the
+   * same window an unparameterised request produces; the paging tests below pass their own sizes.
+   */
+  private static final int PAGE = ReturnShipmentUtils.DEFAULT_RECTIFIABLE_PAGE_SIZE;
 
   // ── Case 1: null shipmentLineId → fallback, OBDal never called ──────────────
 
@@ -1054,5 +1077,1114 @@ public class ReturnShipmentUtilsTest {
       defaultsMock.verify(() -> NeoBackgroundDefaultsService.applyDeclaredDefaultsToBackgroundEntity(
           "purchase-invoice", "header", createdInvoice, "shipment-purchase-002"));
     }
+  }
+
+  // ───────────────────────────────────────────────────────────────────────────────────────
+  // ETP-5381 — create-and-confirm: the rectified-invoice link, the P5 guard, and the order
+  // in which finalizeReturnInvoice performs them.
+  // ───────────────────────────────────────────────────────────────────────────────────────
+
+  /**
+   * <b>The regression this whole ticket hinges on.</b> {@code C_INVOICE_REVERSE_TRG} rejects any
+   * insert into {@code C_Invoice_Reverse} once the invoice is {@code Processed='Y'}, and
+   * {@code ETSG_CHECK_RECTIF_INV_DOC} rejects completing a rectificative document type with no
+   * rectified invoices attached. Complete before linking and the document can be neither
+   * confirmed nor linked, ever — a permanently stuck invoice, only recoverable by hand in the DB.
+   *
+   * <p>Verified through the two observable side effects, in order: the {@code ReversedInvoice}
+   * row reaching the DAL, then {@code ProcessInvoiceUtil.process} running.
+   */
+  @Test
+  public void finalizeReturnInvoice_linksRectifiedInvoicesBeforeCompleting() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("ret-inv-1");
+      when(dal.get(eq(Invoice.class), eq("inv-origin-1"))).thenReturn(mock(Invoice.class));
+      stubNoExistingReversedInvoiceLink(dal);
+      ReversedInvoice link = mock(ReversedInvoice.class);
+      when(provider.get(ReversedInvoice.class)).thenReturn(link);
+
+      CreateDraftInvoiceHandler createDraftInvoiceHandler = mock(CreateDraftInvoiceHandler.class);
+      when(createDraftInvoiceHandler.getSupport()).thenReturn(mock(InvoiceFromOrderSupport.class));
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        mockCompletedInvoice(dal, "ret-inv-1", "REC-1000001", "CO");
+
+        NeoResponse response = ReturnShipmentUtils.finalizeReturnInvoice(invoice,
+            Collections.<ShipmentInOutLine>emptyList(), createDraftInvoiceHandler,
+            Collections.singletonList("inv-origin-1"), null);
+
+        InOrder inOrder = Mockito.inOrder(dal, completion.processInvoiceUtil);
+        inOrder.verify(dal).save(link);
+        inOrder.verify(completion.processInvoiceUtil).process(
+            eq("ret-inv-1"), eq("CO"), anyString(), anyString(), anyString(), any(), any());
+
+        JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+        assertEquals("ret-inv-1", data.getString("id"));
+        assertEquals("REC-1000001", data.getString("documentNo"));
+        assertEquals("CO", data.getString("documentStatus"));
+      }
+    }
+  }
+
+  // ── linkRectifiedInvoices ─────────────────────────────────────────────────
+
+  /**
+   * An empty selection is rejected instead of silently producing an unlinked rectificative
+   * invoice, which the completion trigger would refuse forever.
+   */
+  @Test
+  public void linkRectifiedInvoices_emptyList_throwsWithoutWriting() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      try {
+        ReturnShipmentUtils.linkRectifiedInvoices(mock(Invoice.class), Collections.emptyList());
+        fail("An empty selection must be rejected");
+      } catch (OBException e) {
+        assertEquals(ReturnShipmentUtils.ERR_RECTIFIED_INVOICE_REQUIRED, e.getMessage());
+      }
+      verify(dal, never()).save(any());
+    }
+  }
+
+  /** {@code null} is treated exactly like an empty selection. */
+  @Test
+  public void linkRectifiedInvoices_nullList_throwsWithoutWriting() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      try {
+        ReturnShipmentUtils.linkRectifiedInvoices(mock(Invoice.class), null);
+        fail("A null selection must be rejected");
+      } catch (OBException e) {
+        assertEquals(ReturnShipmentUtils.ERR_RECTIFIED_INVOICE_REQUIRED, e.getMessage());
+      }
+      verify(dal, never()).save(any());
+    }
+  }
+
+  /**
+   * A pair that is already linked is skipped: {@code C_Invoice_Reverse} has a uniqueness
+   * constraint on (invoice, rectified invoice), so inserting the duplicate would abort the
+   * transaction and roll the whole create-and-confirm step back.
+   */
+  @Test
+  @SuppressWarnings("unchecked")
+  public void linkRectifiedInvoices_alreadyLinked_doesNotDuplicateTheRow() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = Mockito.mockStatic(OBProvider.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+
+      when(dal.get(eq(Invoice.class), eq("inv-origin-1"))).thenReturn(mock(Invoice.class));
+      OBCriteria<ReversedInvoice> criteria = mock(OBCriteria.class);
+      when(dal.createCriteria(ReversedInvoice.class)).thenReturn(criteria);
+      when(criteria.add(any())).thenReturn(criteria);
+      when(criteria.list())
+          .thenReturn(Collections.singletonList(mock(ReversedInvoice.class)));
+
+      ReturnShipmentUtils.linkRectifiedInvoices(mock(Invoice.class),
+          Collections.singletonList("inv-origin-1"));
+
+      verify(provider, never()).get(ReversedInvoice.class);
+      verify(dal, never()).save(any(ReversedInvoice.class));
+    }
+  }
+
+  /** An id that resolves to nothing fails loudly rather than linking to null. */
+  @Test
+  public void linkRectifiedInvoices_unknownInvoiceId_throws() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(Invoice.class), eq("does-not-exist"))).thenReturn(null);
+
+      try {
+        ReturnShipmentUtils.linkRectifiedInvoices(mock(Invoice.class),
+            Collections.singletonList("does-not-exist"));
+        fail("An unresolvable invoice id must be rejected");
+      } catch (OBException e) {
+        assertEquals("Invoice to rectify not found: does-not-exist", e.getMessage());
+      }
+      verify(dal, never()).save(any(ReversedInvoice.class));
+    }
+  }
+
+  // ── hasNonVoidedReturnInvoice (guard P5) ──────────────────────────────────
+
+  @Test
+  public void hasNonVoidedReturnInvoice_rowFound_returnsTrue() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, true, Collections.<String>emptyList());
+
+      assertTrue(RectifiableInvoiceUtils.hasNonVoidedReturnInvoice("ret-1"));
+    }
+  }
+
+  @Test
+  public void hasNonVoidedReturnInvoice_noRow_returnsFalse() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, false, Collections.<String>emptyList());
+
+      assertFalse(RectifiableInvoiceUtils.hasNonVoidedReturnInvoice("ret-1"));
+    }
+  }
+
+  /**
+   * A DB failure must PROPAGATE, not degrade to "no invoice": answering false on an unreadable
+   * database would wave the duplicate through, which is the single thing this guard exists to
+   * prevent.
+   */
+  @Test
+  public void hasNonVoidedReturnInvoice_dbFailure_propagatesInsteadOfAnsweringFalse() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenThrow(new RuntimeException("DB down"));
+
+      try {
+        RectifiableInvoiceUtils.hasNonVoidedReturnInvoice("ret-1");
+        fail("A DB failure must not be reported as 'no invoice'");
+      } catch (OBException e) {
+        assertEquals("Could not verify existing invoices for this return document",
+            e.getMessage());
+      }
+    }
+  }
+
+  // ── resolveRectifiedInvoiceIds ────────────────────────────────────────────
+
+  /** An explicit selection is honoured verbatim; the candidate query is never consulted. */
+  @Test
+  public void resolveRectifiedInvoiceIds_explicitIds_areUsedAndDbIsNotQueried() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, "inv-auto");
+
+      JSONObject body = new JSONObject().put(ReturnShipmentUtils.PARAM_ORIGIN_INVOICES,
+          new JSONArray().put("inv-a").put("inv-b"));
+
+      assertEquals(Arrays.asList("inv-a", "inv-b"),
+          ReturnShipmentUtils.resolveRectifiedInvoiceIds(body, "ret-1"));
+      verify(dal, never()).getConnection();
+    }
+  }
+
+  /** Repeated and blank entries are dropped: each pair may only be linked once. */
+  @Test
+  public void resolveRectifiedInvoiceIds_deduplicatesAndSkipsBlanks() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, "inv-auto");
+
+      JSONObject body = new JSONObject().put(ReturnShipmentUtils.PARAM_ORIGIN_INVOICES,
+          new JSONArray().put("inv-a").put("inv-a").put("  ").put("inv-b"));
+
+      assertEquals(Arrays.asList("inv-a", "inv-b"),
+          ReturnShipmentUtils.resolveRectifiedInvoiceIds(body, "ret-1"));
+    }
+  }
+
+  /**
+   * With no explicit selection the fallback takes the FIRST AUTO-DETECTED candidate — the same
+   * one {@code buildRectifiableInvoicesResponse} reports first in {@code suggestedInvoiceIds}, so
+   * what the modal preselects and what the server would pick on its own can never diverge.
+   */
+  @Test
+  public void resolveRectifiedInvoiceIds_noSelection_fallsBackToFirstCandidate() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, "inv-new", "inv-old");
+
+      assertEquals(Collections.singletonList("inv-new"),
+          ReturnShipmentUtils.resolveRectifiedInvoiceIds(null, "ret-1"));
+    }
+  }
+
+  /** An empty {@code originInvoices} array behaves exactly like no key at all. */
+  @Test
+  public void resolveRectifiedInvoiceIds_emptyArray_fallsBackToFirstCandidate() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, "inv-new");
+
+      JSONObject body = new JSONObject()
+          .put(ReturnShipmentUtils.PARAM_ORIGIN_INVOICES, new JSONArray());
+
+      assertEquals(Collections.singletonList("inv-new"),
+          ReturnShipmentUtils.resolveRectifiedInvoiceIds(body, "ret-1"));
+    }
+  }
+
+  /**
+   * Nothing to rectify → throw BEFORE anything is written. The alternative (create the invoice
+   * and discover at completion time that it has no rectified invoice) leaves a draft that can
+   * never be confirmed.
+   */
+  @Test
+  public void resolveRectifiedInvoiceIds_noCandidates_throws() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal);
+
+      try {
+        ReturnShipmentUtils.resolveRectifiedInvoiceIds(null, "ret-1");
+        fail("A return document with no rectifiable invoice must be rejected");
+      } catch (OBException e) {
+        assertEquals(ReturnShipmentUtils.ERR_RECTIFIED_INVOICE_REQUIRED, e.getMessage());
+      }
+      verify(dal, never()).save(any());
+    }
+  }
+
+  /**
+   * The single worst failure this feature can produce: rectifying an invoice that has nothing to
+   * do with the return. The selectable list is every confirmed invoice of the flow, so if the
+   * fallback ever read from it the server would quietly pick a stranger's invoice whenever the
+   * caller sent no selection. With no chain the only correct answer is to refuse.
+   */
+  @Test
+  public void resolveRectifiedInvoiceIds_noChain_refusesInsteadOfPickingFromTheSelectableList()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      // Nothing detected from the chain, but plenty of invoices the user COULD have picked.
+      stubReturnInvoiceQueries(dal, false, Collections.<String>emptyList(),
+          Arrays.asList("inv-stranger-a", "inv-stranger-b"));
+
+      try {
+        ReturnShipmentUtils.resolveRectifiedInvoiceIds(new JSONObject(), "ret-1");
+        fail("Without a chain the server must refuse, never pick an arbitrary invoice");
+      } catch (OBException e) {
+        assertEquals(ReturnShipmentUtils.ERR_RECTIFIED_INVOICE_REQUIRED, e.getMessage());
+        assertFalse("The error must not name a selectable invoice — that would mean it was chosen",
+            e.getMessage().contains("inv-stranger"));
+      }
+      verify(dal, never()).save(any());
+    }
+  }
+
+  /**
+   * An explicit multi-invoice selection is honoured in full: every id, in the order the caller
+   * sent them, minus repeats. A return covering two invoiced shipments rectifies BOTH, and
+   * dropping the tail would silently under-rectify.
+   */
+  @Test
+  public void resolveRectifiedInvoiceIds_multipleExplicitIds_keepsAllInOrderDeduplicated()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, false, Collections.singletonList("inv-auto"),
+          Arrays.asList("inv-auto", "inv-a", "inv-b", "inv-c"));
+
+      JSONObject body = new JSONObject().put(ReturnShipmentUtils.PARAM_ORIGIN_INVOICES,
+          new JSONArray().put("inv-c").put("inv-a").put("inv-c").put("inv-b").put("inv-a"));
+
+      assertEquals("Order is the caller's, repeats are collapsed to the first occurrence",
+          Arrays.asList("inv-c", "inv-a", "inv-b"),
+          ReturnShipmentUtils.resolveRectifiedInvoiceIds(body, "ret-1"));
+      assertFalse("An explicit selection must never be widened with the auto-detected one",
+          ReturnShipmentUtils.resolveRectifiedInvoiceIds(body, "ret-1").contains("inv-auto"));
+      verify(dal, never()).getConnection();
+    }
+  }
+
+  // ── buildRectifiableInvoicesResponse ──────────────────────────────────────
+
+  /**
+   * The action payload carries the selectable candidates (each flagged with whether the chain
+   * suggested it), every auto-detected suggestion and the already-invoiced flag. The suggestions
+   * must be the same ids {@code resolveRectifiedInvoiceIds} falls back to.
+   */
+  @Test
+  public void buildRectifiableInvoicesResponse_reportsCandidatesSuggestionAndFlag()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      Connection conn = stubReturnInvoiceQueries(dal, true, Arrays.asList("inv-new", "inv-old"));
+      assertNull(conn.getWarnings());
+
+      NeoResponse response =
+          RectifiableInvoiceUtils.buildRectifiableInvoicesResponse("ret-1", 0, PAGE, null);
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      JSONArray invoices = data.getJSONArray("invoices");
+      assertEquals(2, invoices.length());
+      assertEquals("inv-new", invoices.getJSONObject(0).getString("id"));
+      assertEquals("inv-old", invoices.getJSONObject(1).getString("id"));
+      assertTrue("A chain-detected invoice must be flagged so the UI can preselect it",
+          invoices.getJSONObject(0).getBoolean("suggested"));
+      assertTrue(invoices.getJSONObject(1).getBoolean("suggested"));
+      assertEquals(Arrays.asList("inv-new", "inv-old"), idsOf(data, "suggestedInvoiceIds"));
+      assertTrue(data.getBoolean("hasReturnInvoice"));
+    }
+  }
+
+  /** No candidates → an empty list and no suggestions at all, never an error. */
+  @Test
+  public void buildRectifiableInvoicesResponse_noCandidates_reportsNullSuggestion()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal);
+
+      NeoResponse response =
+          RectifiableInvoiceUtils.buildRectifiableInvoicesResponse("ret-1", 0, PAGE, null);
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals(0, data.getJSONArray("invoices").length());
+      assertEquals(0, data.getJSONArray("suggestedInvoiceIds").length());
+      assertFalse("The removed singular key must not come back",
+          data.has("suggestedInvoiceId"));
+      assertFalse(data.getBoolean("hasReturnInvoice"));
+    }
+  }
+
+  /**
+   * ETP-5381, production case #1: a return created by hand has NO {@code Canceled_Inoutline_ID}
+   * chain, so nothing is auto-detected — yet rectifying is perfectly legitimate. Before the
+   * split this emptied the whole list and left the user unable to create the rectificative at
+   * all, which is precisely the bug: the chain may limit the SUGGESTION, never the CHOICE.
+   */
+  @Test
+  public void buildRectifiableInvoicesResponse_noChain_stillOffersEverySelectableInvoice()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, false, Collections.<String>emptyList(),
+          Arrays.asList("inv-a", "inv-b", "inv-c"));
+
+      NeoResponse response =
+          RectifiableInvoiceUtils.buildRectifiableInvoicesResponse("ret-1", 0, PAGE, null);
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      JSONArray invoices = data.getJSONArray("invoices");
+      assertEquals("An empty chain must not empty the selectable list", 3, invoices.length());
+      for (int i = 0; i < invoices.length(); i++) {
+        assertFalse("Nothing was detected, so nothing may be flagged as suggested",
+            invoices.getJSONObject(i).getBoolean("suggested"));
+      }
+      assertEquals(0, data.getJSONArray("suggestedInvoiceIds").length());
+    }
+  }
+
+  /**
+   * ETP-5381, production case #2: a return covering two shipments billed on two separate invoices
+   * must preselect BOTH. Reporting only the newest made the user re-find the second one by hand,
+   * and silently under-rectified whoever trusted the preselection.
+   */
+  @Test
+  public void buildRectifiableInvoicesResponse_twoDetectedInvoices_suggestsBoth()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubReturnInvoiceQueries(dal, false, Arrays.asList("inv-new", "inv-old"),
+          Arrays.asList("inv-new", "inv-old", "inv-unrelated"));
+
+      NeoResponse response =
+          RectifiableInvoiceUtils.buildRectifiableInvoicesResponse("ret-1", 0, PAGE, null);
+
+      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+      assertEquals("Both chain-detected invoices must be preselected, not just the newest",
+          Arrays.asList("inv-new", "inv-old"), idsOf(data, "suggestedInvoiceIds"));
+
+      JSONArray invoices = data.getJSONArray("invoices");
+      assertEquals(3, invoices.length());
+      assertTrue(invoices.getJSONObject(0).getBoolean("suggested"));
+      assertTrue(invoices.getJSONObject(1).getBoolean("suggested"));
+      assertFalse("An invoice outside the chain is selectable but never suggested",
+          invoices.getJSONObject(2).getBoolean("suggested"));
+    }
+  }
+
+  /**
+   * The selectable query is scoped to the return document itself: same client and same
+   * {@code IsSOTrx} flow, confirmed and active rows only, ordered and bounded. Without the
+   * flow filter a sales return would offer purchase invoices — a rectification the trigger
+   * would reject only after the user committed to it.
+   */
+  @Test
+  public void fetchSelectableInvoices_isScopedToTheReturnDocumentsClientAndFlow()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      java.sql.ResultSet rs =
+          ReturnInvoiceSqlTestSupport.invoiceResultSet(Arrays.asList("inv-a", "inv-b"));
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+
+      List<JSONObject> invoices =
+          RectifiableInvoiceUtils.fetchSelectableInvoices("ret-1", 0, PAGE, null);
+
+      assertEquals(2, invoices.size());
+      assertEquals("inv-a", invoices.get(0).getString("id"));
+      verify(conn).prepareStatement(sqlCaptor.capture());
+      String sql = sqlCaptor.getValue();
+      assertTrue("Must stay inside the return document's flow",
+          sql.contains("i.IsSOTrx = ret.IsSOTrx"));
+      assertTrue("Must stay inside the return document's client",
+          sql.contains("i.AD_Client_ID = ret.AD_Client_ID"));
+      assertTrue("Only confirmed invoices can be rectified",
+          sql.contains("i.DocStatus = 'CO'"));
+      assertTrue("Inactive invoices must not be offered", sql.contains("i.IsActive = 'Y'"));
+      // Document number first, invoice date second — both DESC, so the newest still floats to the
+      // top and the preselection lands on the likely row. DocumentNo is a VARCHAR, so the primary
+      // key of the sort is a string sort; within one partner and one numbering series (the case
+      // this picker serves) that reads as newest-first. C_Invoice_ID closes the sort (ETP-5381) so
+      // that paging over it is deterministic — see the dedicated tie-break test below.
+      assertTrue("Ordered by document number first, invoice date second, id last, newest at the top",
+          sql.contains("ORDER BY i.DocumentNo DESC, i.DateInvoiced DESC, i.C_Invoice_ID DESC"));
+      assertTrue("The list must stay bounded — now by the paging window, not a fixed ceiling",
+          sql.contains("LIMIT ? OFFSET ?"));
+      assertFalse("The chain must not restrict the selectable list",
+          sql.contains("Canceled_Inoutline_ID"));
+      // The scope comes from the return document itself, so the only bound STRING is its id; the
+      // paging window occupies positions 2 and 3 and is bound as an integer, never as text.
+      verify(ps).setString(1, "ret-1");
+      verify(ps, never()).setString(eq(2), anyString());
+    }
+  }
+
+  /**
+   * ETP-5381: the selectable list is restricted to the return document's own business partner.
+   *
+   * <p>Do NOT "simplify" this filter away. An earlier revision dropped it on the stated grounds
+   * that {@code C_Invoice_Reverse} enforces same-BP "only where it applies (Verifactu orgs permit
+   * cross-BP rectifications)", so filtering "would hide rows the database would have accepted".
+   * That rationale is false. The trigger
+   * ({@code src-db/database/model/triggers/C_INVOICE_REVERSE_TRG.xml}) is titled "Check the
+   * introduced BP is the same as the Invoice" and its check
+   * ({@code IF v_bpheader_id <> v_bpreversed_id THEN RAISE_APPLICATION_ERROR('@NotEqualBPartner@')})
+   * is unconditional — Openbravo core, no Verifactu branch, no module gate. Offering another
+   * partner's invoice therefore offers a row the database ALWAYS rejects, and the user finds out
+   * only on save. Filtering removes impossible choices, never legitimate ones.
+   */
+  @Test
+  public void fetchSelectableInvoices_isRestrictedToTheReturnDocumentsBusinessPartner()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      java.sql.ResultSet rs =
+          ReturnInvoiceSqlTestSupport.invoiceResultSet(Collections.singletonList("inv-a"));
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+
+      RectifiableInvoiceUtils.fetchSelectableInvoices("ret-1", 0, PAGE, null);
+
+      verify(conn).prepareStatement(sqlCaptor.capture());
+      String sql = sqlCaptor.getValue();
+      assertTrue("Only the return document's own partner can be rectified — the trigger's BP "
+              + "check is unconditional, so any other partner's invoice is an impossible choice",
+          sql.contains("AND i.C_BPartner_ID = ret.C_BPartner_ID"));
+      // The partner is read off the return document itself, not handed in by the caller: a bound
+      // literal could be passed a partner the return does not belong to, which is precisely the
+      // mismatch the trigger rejects.
+      assertTrue("The partner must come from the joined return document",
+          sql.contains("JOIN M_InOut ret ON ret.M_InOut_ID = ?"));
+      assertFalse("The partner must not be a caller-supplied parameter",
+          sql.contains("i.C_BPartner_ID = ?"));
+      // Still a single bound parameter: the return document id. Filtering by partner adds a
+      // correlation to the existing join, not a new input.
+      verify(ps).setString(1, "ret-1");
+      verify(ps, never()).setString(eq(2), anyString());
+    }
+  }
+
+  /** The chain query is the one that walks {@code Canceled_Inoutline_ID}, and only confirmed. */
+  @Test
+  public void fetchAutoDetectedInvoices_walksTheCancelledLineChain() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      java.sql.ResultSet rs =
+          ReturnInvoiceSqlTestSupport.invoiceResultSet(Collections.singletonList("inv-new"));
+      PreparedStatement ps = mock(PreparedStatement.class);
+      when(ps.executeQuery()).thenReturn(rs);
+      Connection conn = mock(Connection.class);
+      when(dal.getConnection()).thenReturn(conn);
+      ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+      when(conn.prepareStatement(anyString())).thenReturn(ps);
+
+      List<JSONObject> invoices = RectifiableInvoiceUtils.fetchAutoDetectedInvoices("ret-1");
+
+      assertEquals(Collections.singletonList("inv-new"),
+          Collections.singletonList(invoices.get(0).getString("id")));
+      verify(conn).prepareStatement(sqlCaptor.capture());
+      String sql = sqlCaptor.getValue();
+      assertTrue(sql.contains("rl.Canceled_Inoutline_ID IS NOT NULL"));
+      assertTrue(sql.contains("i.DocStatus = 'CO'"));
+      verify(ps).setString(1, "ret-1");
+    }
+  }
+
+  /** Both candidate queries propagate DB failures with their own message, never an empty list. */
+  @Test
+  public void invoiceQueries_dbFailure_propagateDistinctMessages() {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getConnection()).thenThrow(new RuntimeException("DB down"));
+
+      try {
+        RectifiableInvoiceUtils.fetchSelectableInvoices("ret-1", 0, PAGE, null);
+        fail("An unreadable database must not look like 'no invoice to rectify'");
+      } catch (OBException e) {
+        assertEquals("Could not load the invoices available to rectify", e.getMessage());
+      }
+      try {
+        RectifiableInvoiceUtils.fetchAutoDetectedInvoices("ret-1");
+        fail("An unreadable database must not look like 'nothing detected'");
+      } catch (OBException e) {
+        assertEquals("Could not load the invoices detected for this return", e.getMessage());
+      }
+    }
+  }
+
+  // ── ETP-5381: server-side paging and search ───────────────────────────────
+
+  /**
+   * <b>The regression test that matters most in this batch.</b> The paging window must be bound as
+   * an INTEGER, never as text.
+   *
+   * <p>This is not a style preference. PostgreSQL types a {@code setString} parameter as
+   * {@code varchar} and {@code LIMIT}/{@code OFFSET} demand {@code bigint}, so binding {@code "80"}
+   * there fails the entire statement before a single row is read:
+   * {@code ERROR: argument of OFFSET must be type bigint, not type character varying}. Reproduced
+   * against a live database — {@code setString} fails, {@code setInt} returns rows — on the exact
+   * statement this method builds. Because the paging clause is unconditional, a regression here
+   * breaks EVERY call to the picker, not an edge case, and surfaces as the generic
+   * "Could not load the invoices available to rectify".
+   *
+   * <p>Asserting on the SQL text cannot catch this: the text is identical either way. A mocked
+   * {@code PreparedStatement} also accepts {@code setString} on a {@code LIMIT} placeholder without
+   * complaint, so every other test in this file stays green while the feature is entirely broken.
+   * Only verifying the SETTER closes that gap — hence the explicit {@code never()} clauses.
+   */
+  @Test
+  public void fetchSelectableInvoices_bindsPagingAsIntegers_becauseAStringLimitIsRejectedByPostgres()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      SelectableQuery q = captureSelectableQuery(dal, Collections.singletonList("inv-a"),
+          "ret-1", 40, 25, null);
+
+      assertTrue("The window must be bound, not inlined", q.sql.contains("LIMIT ? OFFSET ?"));
+      // Position 1 is the return document id and stays a string; 2 and 3 are the window.
+      verify(q.ps).setString(1, "ret-1");
+      verify(q.ps).setInt(2, 25);
+      verify(q.ps).setInt(3, 40);
+      verify(q.ps, never()).setString(eq(2), anyString());
+      verify(q.ps, never()).setString(eq(3), anyString());
+      // Belt and braces: the stringified values must not reach ANY position, which also catches a
+      // future refactor that reorders the parameters instead of changing the setter.
+      verify(q.ps, never()).setString(anyInt(), eq("25"));
+      verify(q.ps, never()).setString(anyInt(), eq("40"));
+    }
+  }
+
+  /**
+   * The id tie-break is what makes OFFSET/LIMIT paging correct, not merely tidy: over a set ordered
+   * only by document number and date, two invoices sharing both can straddle a batch boundary in a
+   * different order each time, so a row is silently repeated on one batch and skipped on the next.
+   * The user never sees an error — just an invoice that is missing from the picker.
+   */
+  @Test
+  public void fetchSelectableInvoices_ordersByIdLast_soPagingCannotRepeatOrSkipARow()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      SelectableQuery q = captureSelectableQuery(dal, Collections.singletonList("inv-a"),
+          "ret-1", 0, PAGE, null);
+
+      assertTrue("C_Invoice_ID must close the sort, or paging is non-deterministic",
+          q.sql.contains("ORDER BY i.DocumentNo DESC, i.DateInvoiced DESC, i.C_Invoice_ID DESC"));
+      assertTrue("A total order is only useful if it is applied before the window is cut",
+          q.sql.indexOf("ORDER BY") < q.sql.indexOf("LIMIT ?"));
+    }
+  }
+
+  /**
+   * Search runs in SQL, matched case-insensitively against document number and partner name — the
+   * two fields the picker renders as text.
+   *
+   * <p>Filtering client-side instead would be a correctness bug, not an optimisation: the client
+   * only holds the batches it has already fetched, so it would answer "no matches" for an invoice
+   * that exists further down the set and the user would conclude the invoice is not rectifiable.
+   */
+  @Test
+  public void fetchSelectableInvoices_appliesSearchInSql_trimmedAndLowercasedOnBothFields()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      SelectableQuery q = captureSelectableQuery(dal, Collections.singletonList("inv-a"),
+          "ret-1", 0, PAGE, "  AcMe  ");
+
+      assertTrue("Both rendered fields must be searched",
+          q.sql.contains("AND (LOWER(i.DocumentNo) LIKE ? OR LOWER(COALESCE(bp.Name, '')) LIKE ?)"));
+      // COALESCE matters: a NULL partner name would make the whole OR NULL and drop rows whose
+      // document number DOES match.
+      assertTrue("A null partner name must not swallow a document-number match",
+          q.sql.contains("COALESCE(bp.Name, '')"));
+      // Typed as "  AcMe  ", bound as "%acme%" — trimmed and lowercased, once per field.
+      verify(q.ps).setString(2, "%acme%");
+      verify(q.ps).setString(3, "%acme%");
+      // The window follows the search parameters, still as integers.
+      verify(q.ps).setInt(4, PAGE);
+      verify(q.ps).setInt(5, 0);
+    }
+  }
+
+  /**
+   * A blank search is no search: no clause, no bound parameters, and the window stays at positions
+   * 2 and 3. Emitting {@code LIKE '%%'} instead would be harmless but emitting a clause bound to a
+   * blank string while the caller believed it typed nothing would not be.
+   */
+  @Test
+  public void fetchSelectableInvoices_blankSearch_addsNoClauseAndNoParameters() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      MockedStatic<OBDal> staticMock = dalMock;
+      for (String blank : Arrays.asList(null, "", "   ", "\t\n")) {
+        OBDal dal = mock(OBDal.class);
+        staticMock.when(OBDal::getInstance).thenReturn(dal);
+
+        SelectableQuery q = captureSelectableQuery(dal, Collections.singletonList("inv-a"),
+            "ret-1", 0, PAGE, blank);
+
+        assertFalse("A blank search must not produce a LIKE clause: " + describe(blank),
+            q.sql.contains("LIKE ?"));
+        // With no search the window sits immediately after the return document id.
+        verify(q.ps).setInt(2, PAGE);
+        verify(q.ps).setInt(3, 0);
+        verify(q.ps, never()).setString(eq(2), anyString());
+      }
+    }
+  }
+
+  /**
+   * {@code pageSize} is clamped to {@code [1, 500]}. A non-positive value is the dangerous end:
+   * {@code LIMIT 0} returns nothing at all, so an off-by-one in a caller would empty the picker
+   * with no error to explain it. The ceiling stops a hand-crafted request asking for the table.
+   */
+  @Test
+  public void fetchSelectableInvoices_clampsPageSizeToAUsableWindow() throws Exception {
+    // requested → expected LIMIT
+    int[][] cases = { { 0, 1 }, { -5, 1 }, { 1, 1 }, { 80, 80 }, { 500, 500 }, { 100_000, 500 } };
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      for (int[] c : cases) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+        SelectableQuery q = captureSelectableQuery(dal, Collections.singletonList("inv-a"),
+            "ret-1", 0, c[0], null);
+
+        verify(q.ps).setInt(2, c[1]);
+      }
+    }
+  }
+
+  /** A negative offset is floored at 0 rather than rejected: the first batch is the safe answer. */
+  @Test
+  public void fetchSelectableInvoices_floorsNegativeStartRowAtZero() throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+
+      SelectableQuery q = captureSelectableQuery(dal, Collections.singletonList("inv-a"),
+          "ret-1", -10, PAGE, null);
+
+      verify(q.ps).setInt(3, 0);
+      verify(q.ps, never()).setInt(eq(3), eq(-10));
+    }
+  }
+
+  /**
+   * The chain-detected rows ride the FIRST batch only. They are prepended so a detected invoice
+   * outside the window is still reachable; merging them into every batch would repeat them down
+   * the list as the user scrolls.
+   */
+  @Test
+  public void buildRectifiableInvoicesResponse_mergesDetectedRowsOnTheFirstBatchOnly()
+      throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubAndCaptureSelectableStatement(dal, Collections.singletonList("inv-auto"),
+          Arrays.asList("inv-a", "inv-b"));
+
+      JSONObject first = dataOf(
+          RectifiableInvoiceUtils.buildRectifiableInvoicesResponse("ret-1", 0, PAGE, null));
+
+      assertEquals("The detected invoice is prepended so it can be reached from the picker",
+          Arrays.asList("inv-auto", "inv-a", "inv-b"), idsOfInvoices(first));
+      assertTrue(first.getJSONArray("invoices").getJSONObject(0).getBoolean("suggested"));
+    }
+
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubAndCaptureSelectableStatement(dal, Collections.singletonList("inv-auto"),
+          Arrays.asList("inv-a", "inv-b"));
+
+      JSONObject later = dataOf(
+          RectifiableInvoiceUtils.buildRectifiableInvoicesResponse("ret-1", PAGE, PAGE, null));
+
+      assertEquals("A later batch carries its own rows only — re-merging would duplicate the "
+              + "detected invoice further down the list",
+          Arrays.asList("inv-a", "inv-b"), idsOfInvoices(later));
+    }
+  }
+
+  /**
+   * {@code suggestedInvoiceIds} ships on EVERY batch, including batches that carry no detected row.
+   * It is small and identical each time, and making the client remember which batch defined it
+   * would make the preselection depend on the order the batches happen to arrive.
+   */
+  @Test
+  public void buildRectifiableInvoicesResponse_reportsSuggestedIdsOnEveryBatch() throws Exception {
+    for (int startRow : new int[] { 0, PAGE, 5 * PAGE }) {
+      try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+        OBDal dal = mock(OBDal.class);
+        dalMock.when(OBDal::getInstance).thenReturn(dal);
+        stubAndCaptureSelectableStatement(dal, Arrays.asList("inv-auto-1", "inv-auto-2"),
+            Arrays.asList("inv-a", "inv-b"));
+
+        JSONObject data = dataOf(
+            RectifiableInvoiceUtils.buildRectifiableInvoicesResponse("ret-1", startRow, PAGE, null));
+
+        assertEquals("Batch at offset " + startRow + " must still carry the full suggestion",
+            Arrays.asList("inv-auto-1", "inv-auto-2"), idsOf(data, "suggestedInvoiceIds"));
+      }
+    }
+  }
+
+  /**
+   * {@code hasMore} is the short-batch signal {@code useEntity} already reads: a full batch means
+   * "there may be more", a short one is the end. Deriving it this way is what lets the picker page
+   * without a second {@code COUNT(*)} on every scroll.
+   */
+  @Test
+  public void buildRectifiableInvoicesResponse_reportsHasMoreFromBatchFullnessAndEchoesStartRow()
+      throws Exception {
+    // Two rows available; a window of exactly two is full → there may be more.
+    assertTrue("A full batch must not be reported as the end of the set",
+        pagedData(0, 2).getBoolean("hasMore"));
+    // A window of three came back short → the set is exhausted.
+    assertFalse("A short batch is the end of the set",
+        pagedData(0, 3).getBoolean("hasMore"));
+    // The offset is echoed so the client can tell which window it is looking at.
+    assertEquals(40, pagedData(40, 2).getInt("startRow"));
+    assertEquals("A floored offset must be echoed as the value actually used, not as requested",
+        0, pagedData(-7, 2).getInt("startRow"));
+  }
+
+  /**
+   * The request-facing overload reads the window off the request BODY — {@code startRow} and
+   * {@code pageSize} — and passes it straight through to the query.
+   */
+  @Test
+  public void buildRectifiableInvoicesResponse_readsThePagingWindowOffTheRequestBody()
+      throws Exception {
+    PreparedStatement first = pagingParamsFor(contextWithBody("startRow", 0, "pageSize", 80));
+    verify(first).setInt(2, 80);
+    verify(first).setInt(3, 0);
+
+    PreparedStatement second = pagingParamsFor(contextWithBody("startRow", 80, "pageSize", 80));
+    verify(second).setInt(2, 80);
+    verify(second).setInt(3, 80);
+
+    // A third batch of a different size is honoured too — the window is not fixed to the default.
+    PreparedStatement third = pagingParamsFor(contextWithBody("startRow", 160, "pageSize", 25));
+    verify(third).setInt(2, 25);
+    verify(third).setInt(3, 160);
+  }
+
+  /**
+   * The window must come from the BODY, not from {@code _startRow}/{@code _endRow} query
+   * parameters, even though that is how the list windows page through {@code useEntity}.
+   *
+   * <p>An action endpoint reaches its handler via {@code NeoHookDispatcher#buildHookContext}, which
+   * populates {@code requestBody} but NOT {@code queryParams} — only {@code NeoRequestRouter} fills
+   * those in. A query-string implementation therefore reads null and silently serves the first
+   * batch forever: no error, no log, just a picker that never pages. This test fails if anyone
+   * "restores" the query-string convention.
+   */
+  @Test
+  public void buildRectifiableInvoicesResponse_ignoresQueryStringPaging_becauseActionsNeverCarryIt()
+      throws Exception {
+    NeoContext queryStringOnly = NeoContext.builder()
+        .queryParams(mapOf("_startRow", "80", "_endRow", "159", "search", "acme"))
+        .build();
+
+    PreparedStatement ps = pagingParamsFor(queryStringOnly);
+
+    verify(ps).setInt(2, PAGE);
+    verify(ps).setInt(3, 0);
+    // And no search was applied: position 2 is the window, not a LIKE parameter.
+    verify(ps, never()).setString(eq(2), anyString());
+  }
+
+  /**
+   * The window survives being sent as JSON strings. The frontend builds this body from state that
+   * may hold either a number or the string it was typed as, and {@code 80} vs {@code "80"} must
+   * not be the difference between paging and silently serving the first batch.
+   */
+  @Test
+  public void buildRectifiableInvoicesResponse_acceptsThePagingWindowAsJsonStrings()
+      throws Exception {
+    PreparedStatement ps = pagingParamsFor(contextWithBody("startRow", "80", "pageSize", "25"));
+    verify(ps).setInt(2, 25);
+    verify(ps).setInt(3, 80);
+  }
+
+  /** An empty body — and a null context — must still return the first default batch. */
+  @Test
+  public void buildRectifiableInvoicesResponse_withoutPagingParams_asksForTheFirstDefaultBatch()
+      throws Exception {
+    List<NeoContext> bare = Arrays.asList(null, contextWithBody(), NeoContext.builder().build());
+    for (NeoContext context : bare) {
+      PreparedStatement ps = pagingParamsFor(context);
+      verify(ps).setInt(2, PAGE);
+      verify(ps).setInt(3, 0);
+    }
+  }
+
+  /**
+   * A malformed paging value falls back to the default instead of failing the action. The caller is
+   * asking for a page of a picker: showing the first batch is a recoverable answer, while a 400
+   * would hide the whole list over a bad offset the user never typed.
+   */
+  @Test
+  public void buildRectifiableInvoicesResponse_malformedPagingValues_fallBackInsteadOfFailing()
+      throws Exception {
+    // Unparseable offset → the first row, with the default window.
+    PreparedStatement badStart = pagingParamsFor(contextWithBody("startRow", "abc"));
+    verify(badStart).setInt(2, PAGE);
+    verify(badStart).setInt(3, 0);
+
+    // Unparseable size → a default-sized batch from the requested offset, not an empty window.
+    PreparedStatement badSize =
+        pagingParamsFor(contextWithBody("startRow", 40, "pageSize", "xyz"));
+    verify(badSize).setInt(2, PAGE);
+    verify(badSize).setInt(3, 40);
+
+    // Blank values are absent values, not errors.
+    PreparedStatement blank =
+        pagingParamsFor(contextWithBody("startRow", "  ", "pageSize", ""));
+    verify(blank).setInt(2, PAGE);
+    verify(blank).setInt(3, 0);
+
+    // A negative offset is floored before it ever reaches the query.
+    PreparedStatement negative = pagingParamsFor(contextWithBody("startRow", -5));
+    verify(negative).setInt(3, 0);
+
+    // A non-positive size would make LIMIT return nothing, so it lands on the clamp floor of 1.
+    PreparedStatement zeroSize = pagingParamsFor(contextWithBody("pageSize", 0));
+    verify(zeroSize).setInt(2, 1);
+  }
+
+  /** The search term reaches SQL through the body too, not only through the direct overload. */
+  @Test
+  public void buildRectifiableInvoicesResponse_passesTheSearchTermFromTheBody() throws Exception {
+    PreparedStatement ps = pagingParamsFor(contextWithBody("search", "Acme"));
+    verify(ps).setString(2, "%acme%");
+    verify(ps).setString(3, "%acme%");
+    // The window follows the two search parameters.
+    verify(ps).setInt(4, PAGE);
+    verify(ps).setInt(5, 0);
+  }
+
+  // ── Paging test helpers ───────────────────────────────────────────────────
+
+  /** The statement {@code fetchSelectableInvoices} was run with, plus the SQL text it carried. */
+  private static final class SelectableQuery {
+    private final PreparedStatement ps;
+    private final String sql;
+
+    private SelectableQuery(PreparedStatement ps, String sql) {
+      this.ps = ps;
+      this.sql = sql;
+    }
+  }
+
+  /**
+   * Runs {@code fetchSelectableInvoices} against a mocked connection and hands back both the SQL it
+   * prepared and the statement it bound, so a test can assert on the text AND on the setters.
+   */
+  private static SelectableQuery captureSelectableQuery(OBDal dal, List<String> rows,
+      String inOutId, int startRow, int pageSize, String search) throws Exception {
+    java.sql.ResultSet rs = ReturnInvoiceSqlTestSupport.invoiceResultSet(rows);
+    PreparedStatement ps = mock(PreparedStatement.class);
+    when(ps.executeQuery()).thenReturn(rs);
+    Connection conn = mock(Connection.class);
+    when(dal.getConnection()).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenReturn(ps);
+
+    RectifiableInvoiceUtils.fetchSelectableInvoices(inOutId, startRow, pageSize, search);
+
+    ArgumentCaptor<String> sqlCaptor = ArgumentCaptor.forClass(String.class);
+    verify(conn).prepareStatement(sqlCaptor.capture());
+    return new SelectableQuery(ps, sqlCaptor.getValue());
+  }
+
+  /**
+   * Like {@link ReturnInvoiceSqlTestSupport#stubReturnInvoiceQueries}, but returns the statement
+   * the SELECTABLE query is prepared with: the paging parameters ride on that one, and the shared
+   * helper only exposes the connection. Dispatches by SQL marker for the same reason it does.
+   */
+  private static PreparedStatement stubAndCaptureSelectableStatement(OBDal dal,
+      List<String> autoDetectedIds, List<String> selectableIds) throws Exception {
+    java.sql.ResultSet autoRs = ReturnInvoiceSqlTestSupport.invoiceResultSet(autoDetectedIds);
+    java.sql.ResultSet selectableRs = ReturnInvoiceSqlTestSupport.invoiceResultSet(selectableIds);
+
+    PreparedStatement autoPs = mock(PreparedStatement.class);
+    when(autoPs.executeQuery()).thenReturn(autoRs);
+    PreparedStatement selectablePs = mock(PreparedStatement.class);
+    when(selectablePs.executeQuery()).thenReturn(selectableRs);
+
+    java.sql.ResultSet emptyRs = mock(java.sql.ResultSet.class);
+    when(emptyRs.next()).thenReturn(false);
+    PreparedStatement otherPs = mock(PreparedStatement.class);
+    when(otherPs.executeQuery()).thenReturn(emptyRs);
+
+    Connection conn = mock(Connection.class);
+    when(dal.getConnection()).thenReturn(conn);
+    when(conn.prepareStatement(anyString())).thenAnswer(invocation -> {
+      String sql = invocation.getArgument(0);
+      if (sql.contains("rl.Canceled_Inoutline_ID IS NOT NULL")) {
+        return autoPs;
+      }
+      return sql.contains("i.IsSOTrx = ret.IsSOTrx") ? selectablePs : otherPs;
+    });
+    return selectablePs;
+  }
+
+  /** Builds the action payload for one window over a fixed two-row selectable set. */
+  private static JSONObject pagedData(int startRow, int pageSize) throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      stubAndCaptureSelectableStatement(dal, Collections.<String>emptyList(),
+          Arrays.asList("inv-a", "inv-b"));
+      return dataOf(
+          RectifiableInvoiceUtils.buildRectifiableInvoicesResponse("ret-1", startRow, pageSize, null));
+    }
+  }
+
+  /** Runs the request-facing overload and returns the statement the selectable query bound. */
+  private static PreparedStatement pagingParamsFor(NeoContext context) throws Exception {
+    try (MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      PreparedStatement selectablePs = stubAndCaptureSelectableStatement(dal,
+          Collections.<String>emptyList(), Collections.singletonList("inv-a"));
+      RectifiableInvoiceUtils.buildRectifiableInvoicesResponse(context, "ret-1");
+      return selectablePs;
+    }
+  }
+
+  /**
+   * A request context whose BODY carries the given entries, as alternating key/value arguments.
+   * Values are {@code Object} so a test can send {@code 80} and {@code "80"} and prove both work.
+   */
+  private static NeoContext contextWithBody(Object... keyValues) throws Exception {
+    JSONObject body = new JSONObject();
+    for (int i = 0; i + 1 < keyValues.length; i += 2) {
+      body.put((String) keyValues[i], keyValues[i + 1]);
+    }
+    return NeoContext.builder().requestBody(body).build();
+  }
+
+  /** A string map from alternating key/value arguments. */
+  private static java.util.Map<String, String> mapOf(String... keyValues) {
+    java.util.Map<String, String> params = new java.util.HashMap<>();
+    for (int i = 0; i + 1 < keyValues.length; i += 2) {
+      params.put(keyValues[i], keyValues[i + 1]);
+    }
+    return params;
+  }
+
+  /** Unwraps the {@code response.data} object every action payload is wrapped in. */
+  private static JSONObject dataOf(NeoResponse response) throws Exception {
+    return response.getBody().getJSONObject("response").getJSONObject("data");
+  }
+
+  /** The ids of the {@code invoices} array, in payload order. */
+  private static List<String> idsOfInvoices(JSONObject data) throws Exception {
+    JSONArray arr = data.getJSONArray("invoices");
+    List<String> ids = new java.util.ArrayList<>();
+    for (int i = 0; i < arr.length(); i++) {
+      ids.add(arr.getJSONObject(i).getString("id"));
+    }
+    return ids;
+  }
+
+  /** Renders a blank search value readably in an assertion message. */
+  private static String describe(String blank) {
+    return blank == null ? "null" : "\"" + blank.replace("\t", "\\t").replace("\n", "\\n") + "\"";
+  }
+
+  /** Reads a string array out of the action payload so order can be asserted directly. */
+  private static List<String> idsOf(JSONObject data, String key) throws Exception {
+    JSONArray arr = data.getJSONArray(key);
+    List<String> ids = new java.util.ArrayList<>();
+    for (int i = 0; i < arr.length(); i++) {
+      ids.add(arr.getString(i));
+    }
+    return ids;
+  }
+
+  /** {@code linkRectifiedInvoices}' "is this pair already linked?" probe answers "no". */
+  @SuppressWarnings("unchecked")
+  private static void stubNoExistingReversedInvoiceLink(OBDal dal) {
+    OBCriteria<ReversedInvoice> criteria = mock(OBCriteria.class);
+    when(dal.createCriteria(ReversedInvoice.class)).thenReturn(criteria);
+    when(criteria.add(any())).thenReturn(criteria);
+    when(criteria.list()).thenReturn(Collections.<ReversedInvoice>emptyList());
   }
 }

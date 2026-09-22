@@ -68,7 +68,8 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * <p>It also SCOPES THE LIST. {@code AD_Sequence} holds 242 rows per provisioned tenant
  * (measured on the instance), almost all of them record-ID and internal counters that mean
  * nothing to a user looking for their invoice numbering — so the list is narrowed to the
- * caller's own client and to {@link #VISIBLE_SEQUENCE_NAMES}. See {@code applyListScope}.
+ * caller's own client and to the five document series in {@link #VISIBLE_SEQUENCE_NAMES}
+ * (ETP-5285). See {@code applyListScope}.
  *
  * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
  * {@code docs/neo-headless-extensibility.md} §2.2: {@code lookupHandler()} reads {@code @Named}
@@ -103,8 +104,26 @@ public class DocumentSequenceHandler implements NeoHandler {
    * Adding a sequence to the product means adding its name here.
    *
    * <p>Matched on the name because that is what identifies these rows across tenants: every one
-   * of the seven was verified to exist, by this exact name, exactly once per organization, in a
-   * provisioned client.
+   * of these was verified to exist, by this exact name, exactly once per organization, in a
+   * provisioned client. The name is consequently NOT editable from the window — {@code
+   * decisions.json} classifies it {@code readOnly} — because renaming a row here would drop it
+   * out of this very allowlist and make it unreachable, silently and permanently.
+   *
+   * <p><b>ETP-5285 narrowed this list from seven to five.</b> The product now defines exactly
+   * six document series (purchase order {@code PC}, sales order {@code PV}, sales invoice
+   * {@code FV}, corrective sales invoice {@code FVR}, purchase invoice {@code FC}, corrective
+   * purchase invoice {@code FCR}). Five of them are below. {@code AP Payment}, {@code AR
+   * Receipt}, {@code MM Shipment} and {@code Secuencia TICKETBAI} were dropped: they are not
+   * document series a tenant configures on this screen. Dropping a name here only hides the
+   * row — nothing is deleted, and the numbering those sequences drive is untouched.
+   *
+   * <p><b>"Factura de compra" ({@code FC}) is deliberately NOT here, and there is nothing to
+   * add.</b> {@code AP Invoice} carries {@code IsDocNoControlled='N'} and no sequence in 76 of
+   * 76 doctypes across all 75 clients, while every other invoice doctype has both. That is
+   * stock Openbravo semantics for "the number comes from outside" — the supplier numbers a
+   * purchase invoice. Giving it a configurable prefix means creating a sequence AND flipping
+   * the doctype to {@code IsDocNoControlled='Y'}, which changes how purchase invoices are
+   * numbered; that is a product decision, tracked separately, not part of ETP-5285.
    *
    * <p><b>Every {@code DocumentNo_*} name is deliberately absent</b>, for two independent
    * reasons.
@@ -118,13 +137,11 @@ public class DocumentSequenceHandler implements NeoHandler {
    * exactly that — the rows diverge, an arbitrary one still answers, and PostgreSQL relocates an
    * updated row, so a prefix would apply intermittently.
    *
-   * <p>And for the one series a tenant might actually want to prefix there is nothing to
-   * configure: {@code DocumentNo_C_Invoice} numbers purchase invoices, but {@code AP Invoice}
-   * carries {@code IsDocNoControlled='N'} and no sequence in 76 of 76 doctypes across all 75
-   * clients, while every other invoice doctype has both. That is stock Openbravo semantics for
-   * "the number comes from outside" — the supplier numbers a purchase invoice, and the fallback
-   * counter only supplies a proposed value. So de-duplicating the data would NOT make these
-   * names worth exposing; do not treat that data-fix as a prerequisite for re-adding them.
+   * <p>And {@code DocumentNo_C_Invoice} — the fallback counter that numbers a purchase invoice
+   * today — is exactly the {@code FC} case above: the fallback only supplies a *proposed* value,
+   * so a prefix there would configure a series that is not authoritative. De-duplicating the
+   * data would NOT make these names worth exposing; do not treat that data-fix as a
+   * prerequisite for re-adding them.
    *
    * <p>What their absence costs: the doctypes without a sequence of their own are unreachable
    * from here — {@code AP Invoice} and {@code AP CreditMemo}, {@code MM Receipt}, plus asset and
@@ -132,13 +149,11 @@ public class DocumentSequenceHandler implements NeoHandler {
    * sequence, so that entry point changed all of them at once. See the window's guide.
    */
   static final List<String> VISIBLE_SEQUENCE_NAMES = List.of(
-      "AR Invoice",
-      "AP Payment",
-      "AR Receipt",
-      "MM Shipment",
-      "Standard Order",
       "Purchase Order",
-      "Secuencia TICKETBAI");
+      "Standard Order",
+      "AR Invoice",
+      "Factura Rectificativa (Ventas)",
+      "Factura Rectificativa (Compras)");
 
   /** Contract field name of {@code AD_Sequence.Prefix} (see the window's decisions.json). */
   static final String FIELD_PREFIX = "prefix";

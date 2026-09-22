@@ -70,7 +70,6 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
   private static final String SPEC_PURCHASE_ORDER = "purchase-order";
   private static final String SPEC_GOODS_RECEIPT = "goods-receipt";
   private static final String FIELD_ORDERED_QUANTITY = "orderedQuantity";
-
   @Inject
   InvoiceFromOrderSupport invoiceFromOrderSupport;
 
@@ -107,9 +106,18 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
         OBDal.getInstance().getSession().refresh(invoice);
         ensureDocumentNo(invoice);
 
+        // ETP-5381: create and confirm atomically — see CreateDraftInvoiceHandler.handleCreate for
+        // the full rationale. The id is captured before the call because ProcessInvoiceUtil commits
+        // and closes the session, leaving `invoice` detached.
+        String invoiceId = invoice.getId();
+        InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, context.getObContext());
+        Invoice completed = OBDal.getInstance().get(Invoice.class, invoiceId);
+
         JSONObject data = new JSONObject();
-        data.put("id", invoice.getId());
-        data.put("documentNo", invoice.getDocumentNo());
+        data.put("id", invoiceId);
+        data.put("documentNo", completed.getDocumentNo());
+        // Not sent before this ticket; the frontend needs it to render the resulting status.
+        data.put("documentStatus", completed.getDocumentStatus());
 
         JSONObject responseData = new JSONObject();
         responseData.put("data", data);
@@ -123,18 +131,27 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
       }
     } catch (OBException e) {
       log.warn("Error creating purchase invoice from order {}: {}", recordId, e.getMessage());
-      try {
-        JSONObject body = new JSONObject();
-        body.put("status", "error");
-        body.put("message", e.getMessage());
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
-      } catch (Exception jsonEx) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
-      }
+      return errorResponse(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {
       log.error("Error creating purchase invoice from order {}: {}", recordId, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while creating the purchase invoice");
+    }
+  }
+
+  /**
+   * Builds the {@code {status, message}} error body every frontend caller of this action reads as
+   * {@code err.response.message}, falling back to a plain-text response if the JSON cannot be
+   * assembled.
+   */
+  private NeoResponse errorResponse(int status, String message) {
+    try {
+      JSONObject body = new JSONObject();
+      body.put("status", "error");
+      body.put("message", message);
+      return NeoResponse.error(status, body);
+    } catch (Exception jsonEx) {
+      return NeoResponse.error(status, message);
     }
   }
 
@@ -397,6 +414,18 @@ public class CreatePurchaseInvoiceHandler implements NeoHandler {
     }
 
     Map<String, BigDecimal> qtyOverrides = parseLineOverrides(body);
+    // ETP-5381: when the caller sends no explicit line quantities — which is what the UI always
+    // does, it posts only priceListId — seed them from the receipt's pending quantities. This is
+    // not a duplicate-invoice guard but a correctness fix: resolveReceiptLineQty otherwise falls
+    // back to the FULL movementQuantity, so unlike the order path this one never consulted what
+    // was already invoiced. Its javadoc already promised the map came from
+    // computePendingQtyPerLine; it was simply never wired up.
+    // Nothing pending leaves the map empty, and the existing "no lines to invoice" check below
+    // rejects the request. The throwing variant is used so a DB failure surfaces as such instead
+    // of being mistaken for "nothing left to invoice".
+    if (qtyOverrides.isEmpty()) {
+      qtyOverrides = NeoInvoiceSupport.computePendingQtyPerLineOrThrow(receiptId, true);
+    }
 
     Order linkedOrder = receipt.getSalesOrder();
     if (linkedOrder == null) {

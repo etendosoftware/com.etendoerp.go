@@ -27,6 +27,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -84,7 +85,7 @@ class NeoSupersededDefaultsTest {
         new NeoDefaultsService.CalloutCascadeResult();
     Method merge = NeoDefaultsCascadeHelper.class.getDeclaredMethod("mergeCalloutUpdates",
         JSONObject.class, JSONObject.class, JSONObject.class, Set.class, Tab.class,
-        NeoDefaultsService.CalloutCascadeResult.class, Set.class, Set.class);
+        NeoDefaultsService.CalloutCascadeResult.class, Set.class, Set.class, Set.class);
     merge.setAccessible(true);
     // seqFields holds every key in play so the unprotected branch short-circuits before it would
     // resolve a callout against the (absent) AD_Tab — this test is about the protected branch.
@@ -94,7 +95,7 @@ class NeoSupersededDefaultsTest {
       seqFields.add(keys.next());
     }
     merge.invoke(null, calloutBody, new JSONObject(), defaults, seqFields, null, result,
-        new HashSet<>(), protectedFields);
+        new HashSet<>(), protectedFields, Collections.emptySet());
     return result;
   }
 
