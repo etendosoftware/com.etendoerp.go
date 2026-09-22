@@ -19,9 +19,7 @@ package com.etendoerp.go.schemaforge;
 
 import java.math.BigDecimal;
 import java.text.ParseException;
-import java.util.ArrayList;
 import java.util.Date;
-import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -118,13 +116,6 @@ public final class PaymentRegistrationService {
   // organization. Same convention as SelectorOrgFilter.buildOrganizationPredicate/
   // buildReadableOrgsPredicate (includeOrgZero).
   private static final String ORG_ZERO = "0";
-
-  // ETP-5434: chunk size for the IN list of the grouped FinAccPaymentMethod query (see
-  // loadAllowedMethodsByAccount). One invoice's org tree realistically holds a few dozen financial
-  // accounts, so a single chunk is the normal case; the split exists only so a pathological tenant
-  // cannot build an unbounded IN list — Hibernate re-plans the statement for every distinct
-  // parameter count, so an ever-growing IN also pollutes the query-plan cache.
-  private static final int ACCOUNT_ID_CHUNK_SIZE = 500;
 
   private PaymentRegistrationService() {
   }
@@ -267,9 +258,10 @@ public final class PaymentRegistrationService {
 
         List<FIN_FinancialAccount> accounts = crit.list();
         // ETP-5434: the payment methods of every listed account are fetched up front in a single
-        // grouped query instead of one query per account inside the loop (N+1).
+        // grouped query instead of one query per account inside the loop (N+1). See
+        // PaymentAccountMethodsLoader for why this stays an OBCriteria, not HQL.
         Map<String, List<FinAccPaymentMethod>> methodsByAccount =
-            loadAllowedMethodsByAccount(accounts, allowProp);
+            PaymentAccountMethodsLoader.loadAllowedMethodsByAccount(accounts, allowProp);
 
         JSONArray arr = new JSONArray();
         for (FIN_FinancialAccount acc : accounts) {
@@ -298,55 +290,6 @@ public final class PaymentRegistrationService {
   }
 
   /**
-   * Loads the {@link FinAccPaymentMethod} link rows allowed for the given direction across ALL the
-   * listed accounts at once, grouped by account id (ETP-5434). Replaces the per-account query that
-   * used to run inside {@link #appendAccountItem}, so the query count no longer grows with the
-   * number of financial accounts in the invoice's org tree.
-   *
-   * <p><b>Deliberately an {@link OBCriteria} and NOT hand-written HQL.</b> The per-account criteria
-   * this replaces was relying on three filters that {@code OBCriteria#initialize()} adds by itself
-   * and that a raw {@code createQuery(...)} does NOT inherit: {@code isActive = 'Y'}
-   * ({@code filterOnActive} defaults to {@code true}), the readable-clients filter and the
-   * readable-organizations filter. Porting this to HQL to "make it one query" would silently start
-   * returning inactive link rows — and rows belonging to other clients — which is a data and
-   * security regression, not a speed-up. None of the three is touched here, so the row set is
-   * exactly the union of the per-account queries it replaces.
-   *
-   * <p>The order is pinned by payment-method name so that {@code defaultPaymentMethod} — the first
-   * element of an account's list, see {@link #appendAccountItem} — is deterministic; the replaced
-   * per-account query had no {@code order by} at all, leaving that pick to the engine. The join
-   * {@code addOrderBy} creates for the dotted path is an INNER join, which is safe here:
-   * {@code FIN_FINACC_PAYMENTMETHOD.FIN_PAYMENTMETHOD_ID} is {@code NOT NULL} and carries a foreign
-   * key, so it cannot drop a link row. It also does not constrain the payment method's own
-   * {@code isActive} — {@code OBCriteria} only applies that to the root entity — which is precisely
-   * the previous behaviour.
-   */
-  private static Map<String, List<FinAccPaymentMethod>> loadAllowedMethodsByAccount(
-      List<FIN_FinancialAccount> accounts, String allowProp) {
-    Map<String, List<FinAccPaymentMethod>> byAccountId = new HashMap<>();
-    List<String> accountIds = new ArrayList<>(accounts.size());
-    for (FIN_FinancialAccount acc : accounts) {
-      accountIds.add(acc.getId());
-    }
-    for (int from = 0; from < accountIds.size(); from += ACCOUNT_ID_CHUNK_SIZE) {
-      List<String> chunk = accountIds.subList(from,
-          Math.min(from + ACCOUNT_ID_CHUNK_SIZE, accountIds.size()));
-      OBCriteria<FinAccPaymentMethod> methodCrit = OBDal.getInstance()
-          .createCriteria(FinAccPaymentMethod.class);
-      methodCrit.add(Restrictions.in(FinAccPaymentMethod.PROPERTY_ACCOUNT + ".id", chunk));
-      methodCrit.add(Restrictions.eq(allowProp, Boolean.TRUE));
-      methodCrit.addOrderBy(
-          FinAccPaymentMethod.PROPERTY_PAYMENTMETHOD + "." + FIN_PaymentMethod.PROPERTY_NAME, true);
-      for (FinAccPaymentMethod fapm : methodCrit.list()) {
-        // getAccount() costs no round trip: every account reachable here was just loaded by the
-        // caller's own query in this same session, so the proxy resolves from the first-level cache.
-        byAccountId.computeIfAbsent(fapm.getAccount().getId(), id -> new ArrayList<>()).add(fapm);
-      }
-    }
-    return byAccountId;
-  }
-
-  /**
    * Appends one account item if it has at least one valid payment method for the direction.
    * Accounts are listed regardless of currency: a foreign-currency account is settled via the
    * conversion rate supplied by the two-step modal (see {@link #doRegisterPaymentAdvanced}), so
@@ -355,9 +298,10 @@ public final class PaymentRegistrationService {
    * conversion fields.
    *
    * <p>ETP-5434: {@code methods} arrives pre-loaded and grouped by
-   * {@link #loadAllowedMethodsByAccount} instead of being queried here once per account. A
-   * {@code null} list is the grouping's way of saying "this account has no allowed link row" and is
-   * the same omission the previous {@code methods.isEmpty()} check produced.
+   * {@link PaymentAccountMethodsLoader#loadAllowedMethodsByAccount} instead of being queried here
+   * once per account. A {@code null} list is the grouping's way of saying "this account has no
+   * allowed link row" and is the same omission the previous {@code methods.isEmpty()} check
+   * produced.
    */
   private static void appendAccountItem(JSONArray arr, FIN_FinancialAccount acc,
       List<FinAccPaymentMethod> methods) throws Exception {

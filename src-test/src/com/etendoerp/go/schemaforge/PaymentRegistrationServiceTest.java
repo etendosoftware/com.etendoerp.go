@@ -890,7 +890,7 @@ class PaymentRegistrationServiceTest {
 
   /**
    * ETP-5434: pins {@code defaultPaymentMethod} to the {@code addOrderBy} clause
-   * {@link PaymentRegistrationService#loadAllowedMethodsByAccount} adds (order by payment-method
+   * {@link PaymentAccountMethodsLoader#loadAllowedMethodsByAccount} adds (order by payment-method
    * name ascending), not to link-creation/insertion order. The two links below are created "Zulu"
    * first, "Alpha" second, but the query result is stubbed the way the real name-ordered query
    * would return it — Alpha first — so a correct implementation reports "Alpha Cash" as the
