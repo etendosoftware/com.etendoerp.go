@@ -71,6 +71,7 @@ import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.BillingEventStore;
 import com.etendoerp.go.payment.BillingOfferConfiguration;
 import com.etendoerp.go.payment.CheckoutRequestStore;
+import com.etendoerp.go.payment.DemoDataTransferService;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
 import com.etendoerp.go.onboarding.OnboardingAcctdimCentrallyMaintainedService;
@@ -311,6 +312,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   TenantPlanService tenantPlanService = new TenantPlanService();
   HostedCheckoutService hostedCheckoutService = new HostedCheckoutService();
   CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
+  DemoDataTransferService demoDataTransferService = new DemoDataTransferService();
   BillingEventStore billingEventStore = new BillingEventStore();
   CheckoutWebhookProcessor checkoutWebhookProcessor =
       new CheckoutWebhookProcessor(billingEventStore, CHECKOUT_WEBHOOK_TOLERANCE_SECONDS);
@@ -373,6 +375,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleGetFirstSteps(request, response);
     } else if (isPath(path, PATH_ONBOARDING_COMPANY_DATA)) {
       handleGetCompanyData(request, response);
+    } else if (isPath(path, "/demo-data-transfer")) {
+      handleDemoDataTransferStatus(request, response);
     } else if (isPath(path, "/environments")) {
       handleEnvironments(request, response);
     } else {
@@ -500,6 +504,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleOnboarding(request, response);
     } else if (isPath(path, "/billing/purchases")) {
       handleBillingPurchaseCreate(request, response);
+    } else if (isPath(path, "/demo-data-transfer/retry")) {
+      handleDemoDataTransferRetry(request, response);
     } else if (isPath(path, "/checkout/sessions")) {
       handleCheckoutSession(request, response);
     } else if (isPath(path, "/company-invitations")) {
@@ -543,6 +549,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       try {
         JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
             clientName, origin);
+        recordDemoDataTransferSelection(body, result);
         writeResponse(response, HttpServletResponse.SC_CREATED, result);
       } catch (IllegalStateException e) {
         writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
@@ -595,6 +602,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       try {
         JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
             clientName, origin);
+        recordDemoDataTransferSelection(body, result);
         writeResponse(response, HttpServletResponse.SC_CREATED, result);
       } catch (IllegalStateException e) {
         writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
@@ -2151,6 +2159,47 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     });
   }
 
+  /** Durable progress projection for the productive tenant's First Steps data-transfer row. */
+  private void handleDemoDataTransferStatus(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    runWithAuthenticatedAccount(request, response, "get demo data transfer", account -> {
+      TenantSession session = resolveTenantSession(request, response, account);
+      if (session == null) return;
+      try {
+        writeResponse(response, HttpServletResponse.SC_OK,
+            demoDataTransferService.status(session.clientId));
+      } catch (JSONException e) {
+        log.error("Could not read demo data transfer state", e);
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+      }
+    });
+  }
+
+  /** Reclaims only a failed transfer; payment and tenant provisioning are never repeated. */
+  private void handleDemoDataTransferRetry(HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    runWithAuthenticatedAccount(request, response, "retry demo data transfer", account -> {
+      TenantSession session = resolveTenantSession(request, response, account);
+      if (session == null) return;
+      try {
+        writeResponse(response, HttpServletResponse.SC_OK,
+            demoDataTransferService.retry(session.clientId));
+      } catch (JSONException e) {
+        log.error("Could not retry demo data transfer", e);
+        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+      }
+    });
+  }
+
+  /** Persists checkout selection before the hosted-provider redirect loses browser state. */
+  private void recordDemoDataTransferSelection(JSONObject body, JSONObject checkoutResult) {
+    JSONObject selection = body.optJSONObject("dataTransfer");
+    if (selection == null) return;
+    String requestId = checkoutResult.optString("requestId", "");
+    demoDataTransferService.recordSelection(requestId, selection.optBoolean("products"),
+        selection.optBoolean("contacts"));
+  }
+
   /** JSON-null for an absent value, so the client can tell "blank" from "not answered". */
   private static Object nullSafe(String value) {
     return value == null ? JSONObject.NULL : value;
@@ -2646,6 +2695,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       try {
         checkoutRequestStore.recordProvisioned(onboardingRequest.paymentToken, clientId,
             provisioningClaim);
+        String demoClientId = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail);
+        demoDataTransferService.start(onboardingRequest.paymentToken, demoClientId, clientId);
       } catch (RuntimeException e) {
         log.error("Environment '{}' (client {}) was provisioned but its checkout request could "
             + "not be closed", onboardingRequest.clientName, clientId, e);
