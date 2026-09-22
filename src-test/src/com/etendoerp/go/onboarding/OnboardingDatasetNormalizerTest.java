@@ -485,6 +485,21 @@ public class OnboardingDatasetNormalizerTest {
   }
 
   /**
+   * ETP-5372: a freshly-provisioned tenant's accounting schema must be born with
+   * {@code IsAccrual=Y} (Devengo) — Etendo Go doesn't support Caja (cash-basis) for taxes.
+   * {@code GeneralLedgerConfigurationHandler.applyGeneralChanges} now refuses to change this
+   * value after creation (see its own test), so this dataset default is the only place a
+   * schema's accrual value is ever set — it must never regress to {@code N}.
+   */
+  @Test
+  public void testNormalizerAccountingSchemaAccrualDefaultsToDevengo() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    assertTrue("isaccrual must be Y (Devengo) — Etendo Go doesn't support Caja for taxes",
+        xml.contains("<isaccrual>Y</isaccrual>"));
+  }
+
+  /**
    * ETP-4245 (R11, TC-41 follow-up, "Jorge's list", 2026-07-06): verifies that a freshly-provisioned
    * tenant is born with the 6 previously-NULL {@code C_ACCTSCHEMA_DEFAULT} Defaults-tab accounts
    * (doubtful debt, bad debt expense/revenue, allowance for doubtful debt, deferred product
