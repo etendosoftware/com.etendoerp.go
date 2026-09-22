@@ -2467,6 +2467,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (Exception e) {
       log.debug("Bearer token carries no NEO session claims", e);
     }
+    // ETP-4576 — under the cookie session there is no bearer JWT to read claims from, so the
+    // block above yields nothing and this endpoint answered 400 to every cookie-session caller
+    // (the whole product now). The session record carries the environment it was opened in, so
+    // read the tenant from there and keep the JWT branch for legacy bearer clients.
+    // `authenticate` is a pure read: it resolves the cookie and checks CSRF only for unsafe
+    // methods, so calling it on this GET neither rotates the session nor writes anything.
+    if (StringUtils.isBlank(clientId)) {
+      GoSessionAuthResult sessionAuth =
+          new GoSessionAuthenticator(goSessionService).authenticate(request);
+      if (sessionAuth.isAuthenticated()) {
+        clientId = sessionAuth.getRecord().getCtxClientId();
+        orgId = sessionAuth.getRecord().getCtxOrgId();
+      }
+    }
     if (StringUtils.isBlank(clientId)) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST,
           "This endpoint requires an environment session");
