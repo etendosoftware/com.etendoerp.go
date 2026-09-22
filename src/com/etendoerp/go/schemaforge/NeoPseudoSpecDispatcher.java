@@ -23,10 +23,12 @@ import javax.servlet.http.HttpServletResponse;
 
 import com.etendoerp.go.common.GoRuntimeProperties;
 import com.etendoerp.go.schemaforge.webhooks.SFAcctProcessMonitor;
+import com.etendoerp.go.schemaforge.webhooks.SFCostingCadence;
 import com.etendoerp.go.schemaforge.webhooks.SFAssignUserRoles;
 import com.etendoerp.go.schemaforge.webhooks.SFDebugInvitationBypass;
 import com.etendoerp.go.schemaforge.webhooks.SFDocumentEmailHistory;
 import com.etendoerp.go.schemaforge.webhooks.SFListMenu;
+import com.etendoerp.go.schemaforge.webhooks.SFMyReportAccess;
 import com.etendoerp.go.schemaforge.webhooks.SFPortalAccess;
 import com.etendoerp.go.schemaforge.webhooks.SFPromoteUserRole;
 import com.etendoerp.go.schemaforge.webhooks.SFRefreshToken;
@@ -120,6 +122,13 @@ class NeoPseudoSpecDispatcher {
         return dispatchGoWebhook("Listmenu", method, request, response, new SFListMenu());
       case "windowaccessmap":
         return dispatchGoWebhook("Windowaccessmap", method, request, response, new SFWindowAccessMap());
+
+      // ETP-5402 QA follow-up: the CURRENT caller's own Informes-subsection report access,
+      // mirroring windowaccessmap's shape but for ReportAccessCatalog's 9 report rows. See
+      // SFMyReportAccess's class javadoc for why it exists (ReportViewerPage.jsx's real gate
+      // never consulted per-report tiers before this).
+      case "myreportaccess":
+        return dispatchGoWebhook("Myreportaccess", method, request, response, new SFMyReportAccess());
       case "rolesoverview":
         return dispatchGoWebhook("Rolesoverview", method, request, response, new SFRolesOverview());
 
@@ -187,6 +196,14 @@ class NeoPseudoSpecDispatcher {
       case "acctprocessmonitor":
         return dispatchGoWebhook("Acctprocessmonitor", method, request, response,
             new SFAcctProcessMonitor());
+
+      // ETP-5370 — one-shot remediation that leaves exactly ONE active CostingBackground schedule
+      // per client, firing every 30s, and RE-ARMS its Quartz trigger. It is a webhook rather than a
+      // data-fix .sql because production does not restart Tomcat and an UPDATE to AD_PROCESS_REQUEST
+      // is invisible to an already-armed trigger; see SFCostingCadence's class javadoc.
+      case "costingcadence":
+        return dispatchGoWebhook("Costingcadence", method, request, response,
+            new SFCostingCadence());
 
       // ETP-5267 — the internal-user side of the Business Partner self-service portal: does this
       // Business Partner have a live portal link, and revoke it. Deliberately NOT behind the

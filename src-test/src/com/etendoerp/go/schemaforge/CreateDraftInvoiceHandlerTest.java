@@ -33,6 +33,12 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import static com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.completionError;
+import static com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.completionSuccess;
+import static com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.mockCompletedInvoice;
+
+import com.etendoerp.go.schemaforge.InvoiceCompletionTestSupport.CompletionMocks;
+
 import java.math.BigDecimal;
 import java.sql.Connection;
 import java.util.Arrays;
@@ -53,7 +59,9 @@ import org.hibernate.query.Query;
 import org.mockito.ArgumentCaptor;
 import org.junit.Test;
 import org.mockito.MockedStatic;
+import org.mockito.Answers;
 import org.mockito.Mockito;
+import org.openbravo.advpaymentmngt.ProcessInvoiceUtil;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.base.model.Entity;
 import org.openbravo.base.model.ModelProvider;
@@ -65,8 +73,10 @@ import org.openbravo.common.actionhandler.createlinesfromprocess.CreateInvoiceLi
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.erpCommon.utility.Utility;
 import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.ad.ui.Process;
 import org.openbravo.model.ad.utility.Sequence;
 import org.openbravo.model.common.businesspartner.BusinessPartner;
 import org.openbravo.model.common.currency.Currency;
@@ -1250,6 +1260,9 @@ public class CreateDraftInvoiceHandlerTest {
 
   /**
    * Verifies that sales-order creation returns HTTP 201 and exposes the created invoice payload.
+   *
+   * <p>ETP-5381: the payload is now read from the invoice re-loaded AFTER confirmation, so the
+   * completion has to be stubbed for this path to reach 201 at all.
    */
   @Test
   public void testHandleCreateSalesOrderReturnsCreatedResponse() throws Exception {
@@ -1263,8 +1276,6 @@ public class CreateDraftInvoiceHandlerTest {
 
       Invoice invoice = mock(Invoice.class);
       when(invoice.getId()).thenReturn("inv-1");
-      when(invoice.getDocumentNo()).thenReturn("INV-001");
-      when(invoice.getDocumentStatus()).thenReturn("DR");
 
       DispatchHandler handler = new DispatchHandler();
       handler.orderInvoice = invoice;
@@ -1274,30 +1285,166 @@ public class CreateDraftInvoiceHandlerTest {
               .put("orderLineId", "ol-1")
               .put("quantity", "2")));
 
-      NeoResponse response = handler.handle(NeoContext.builder()
-          .specName(SPEC_SALES_ORDER)
-          .entityName(ENTITY_HEADER)
-          .httpMethod("POST")
-          .endpointType(NeoEndpointType.ACTION)
-          .fieldName(ACTION_CREATE)
-          .recordId("order-1")
-          .requestBody(body)
-          .build());
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        mockCompletedInvoice(dal, "inv-1", "INV-001", "CO");
 
-      assertNotNull(response);
-      assertEquals(201, response.getHttpStatus());
-      JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
-      assertEquals("inv-1", data.getString("id"));
-      assertEquals("INV-001", data.getString("documentNo"));
-      assertEquals(new BigDecimal("2"), handler.receivedLineOverrides.get("ol-1"));
-      assertTrue(handler.ensuredDocumentNo);
-      verify(session).refresh(invoice);
-      verify(dal, Mockito.atLeastOnce()).flush();
+        NeoResponse response = handler.handle(NeoContext.builder()
+            .specName(SPEC_SALES_ORDER)
+            .entityName(ENTITY_HEADER)
+            .httpMethod("POST")
+            .endpointType(NeoEndpointType.ACTION)
+            .fieldName(ACTION_CREATE)
+            .recordId("order-1")
+            .requestBody(body)
+            .build());
+
+        assertNotNull(response);
+        assertEquals(201, response.getHttpStatus());
+        JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+        assertEquals("inv-1", data.getString("id"));
+        assertEquals("INV-001", data.getString("documentNo"));
+        assertEquals(new BigDecimal("2"), handler.receivedLineOverrides.get("ol-1"));
+        assertTrue(handler.ensuredDocumentNo);
+        verify(session).refresh(invoice);
+        verify(dal, Mockito.atLeastOnce()).flush();
+      }
+    }
+  }
+
+  /**
+   * ETP-5381 — the sales-order branch confirms the invoice it just created: the response reports
+   * the CONFIRMED status (not {@code DR}) and the completion process runs exactly once. Creating
+   * a draft and leaving it behind is what allowed the same order to be invoiced twice, because
+   * {@code c_orderline.qtyinvoiced} is only written by {@code C_Invoice_Post}.
+   */
+  @Test
+  public void handleCreate_salesOrder_confirmsInvoiceOnceAndReportsCompletedStatus()
+      throws Exception {
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      mockAdminMode(obContextMock);
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("inv-co-1");
+
+      DispatchHandler handler = new DispatchHandler();
+      handler.orderInvoice = invoice;
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        mockCompletedInvoice(dal, "inv-co-1", "INV-CO-001", "CO");
+
+        NeoResponse response = handler.handle(NeoContext.builder()
+            .specName(SPEC_SALES_ORDER)
+            .entityName(ENTITY_HEADER)
+            .httpMethod("POST")
+            .endpointType(NeoEndpointType.ACTION)
+            .fieldName(ACTION_CREATE)
+            .recordId("order-co-1")
+            .build());
+
+        assertNotNull(response);
+        assertEquals(201, response.getHttpStatus());
+        JSONObject data = response.getBody().getJSONObject("response").getJSONObject("data");
+        assertEquals("The response must report the confirmed status, not DR", "CO",
+            data.getString("documentStatus"));
+        verify(completion.processInvoiceUtil, Mockito.times(1)).process(
+            eq("inv-co-1"), eq("CO"), eq(""), eq(""), eq(""), any(), any());
+      }
+    }
+  }
+
+  /**
+   * ETP-5381 — when the confirmation is rejected for a business reason the whole request fails
+   * with a 400 carrying that message, and no success payload is emitted. The invoice was rolled
+   * back by {@code ProcessInvoiceUtil}, so reporting a {@code documentStatus} would be a lie.
+   */
+  @Test
+  public void handleCreate_completionRejected_returns400WithBusinessMessageAndNoStatus()
+      throws Exception {
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      mockAdminMode(obContextMock);
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("inv-ko-1");
+
+      DispatchHandler handler = new DispatchHandler();
+      handler.orderInvoice = invoice;
+
+      try (CompletionMocks completion =
+               new CompletionMocks(dal, completionError("Period is closed"))) {
+
+        NeoResponse response = handler.handle(NeoContext.builder()
+            .specName(SPEC_SALES_ORDER)
+            .entityName(ENTITY_HEADER)
+            .httpMethod("POST")
+            .endpointType(NeoEndpointType.ACTION)
+            .fieldName(ACTION_CREATE)
+            .recordId("order-ko-1")
+            .build());
+
+        assertNotNull(response);
+        assertEquals(400, response.getHttpStatus());
+        assertEquals("Period is closed", response.getBody().getString("message"));
+        assertFalse("A rolled-back creation must not report a document status",
+            response.getBody().toString().contains("documentStatus"));
+      }
+    }
+  }
+
+  /**
+   * ETP-5381 ordering regression — {@code markQuotationAsInvoiceCreated} must run AFTER the
+   * confirmation, never before. Marking first would leave the quotation in {@code ETGO_CI} even
+   * though the invoice was rolled back, and {@code assertQuotationNotInvoiced} would then reject
+   * every legitimate retry with a 409.
+   */
+  @Test
+  public void handleCreate_quotationCompletionFails_doesNotMarkQuotationAsInvoiced()
+      throws Exception {
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+      mockAdminMode(obContextMock);
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("inv-q-ko");
+
+      DispatchHandler handler = new DispatchHandler();
+      handler.orderInvoice = invoice;
+
+      try (CompletionMocks completion =
+               new CompletionMocks(dal, completionError("Tax rate is not configured"))) {
+
+        NeoResponse response = handler.handle(NeoContext.builder()
+            .specName(SPEC_SALES_QUOTATION)
+            .entityName(ENTITY_HEADER)
+            .httpMethod("POST")
+            .endpointType(NeoEndpointType.ACTION)
+            .fieldName(ACTION_CREATE)
+            .recordId("quotation-ko")
+            .build());
+
+        assertNotNull(response);
+        assertEquals(400, response.getHttpStatus());
+        assertNull("The quotation must not be closed as invoiced when the invoice was rolled back",
+            handler.markedQuotationId);
+      }
     }
   }
 
   /**
    * Verifies that quotation-based creation marks the source quotation as invoiced.
+   *
+   * <p>ETP-5381: the marking now happens only once the confirmation has succeeded, so the
+   * completion has to be stubbed for the quotation to be marked at all.
    */
   @Test
   public void testHandleCreateSalesQuotationMarksSourceQuotation() {
@@ -1311,45 +1458,54 @@ public class CreateDraftInvoiceHandlerTest {
 
       Invoice invoice = mock(Invoice.class);
       when(invoice.getId()).thenReturn("inv-q-1");
-      when(invoice.getDocumentNo()).thenReturn("INV-Q-001");
-      when(invoice.getDocumentStatus()).thenReturn("DR");
 
       DispatchHandler handler = new DispatchHandler();
       handler.orderInvoice = invoice;
 
-      NeoResponse response = handler.handle(NeoContext.builder()
-          .specName(SPEC_SALES_QUOTATION)
-          .entityName(ENTITY_HEADER)
-          .httpMethod("POST")
-          .endpointType(NeoEndpointType.ACTION)
-          .fieldName(ACTION_CREATE)
-          .recordId("quotation-1")
-          .build());
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        mockCompletedInvoice(dal, "inv-q-1", "INV-Q-001", "CO");
 
-      assertNotNull(response);
-      assertEquals(201, response.getHttpStatus());
-      assertEquals("quotation-1", handler.markedQuotationId);
-      assertTrue(handler.ensuredDocumentNo);
+        NeoResponse response = handler.handle(NeoContext.builder()
+            .specName(SPEC_SALES_QUOTATION)
+            .entityName(ENTITY_HEADER)
+            .httpMethod("POST")
+            .endpointType(NeoEndpointType.ACTION)
+            .fieldName(ACTION_CREATE)
+            .recordId("quotation-1")
+            .build());
+
+        assertNotNull(response);
+        assertEquals(201, response.getHttpStatus());
+        assertEquals("quotation-1", handler.markedQuotationId);
+        assertTrue(handler.ensuredDocumentNo);
+      }
     }
   }
 
   /**
    * Verifies that shipment-based creation triggers gross amount repair.
+   *
+   * <p>ETP-5381: the branch now runs {@code assertShipmentsHavePending} before creating and
+   * confirms the invoice afterwards, so both the pending-quantity query and the completion have
+   * to be stubbed.
    */
   @Test
   public void testHandleCreateGoodsShipmentRecalculatesShipmentInvoice() throws Exception {
     try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
-        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class)) {
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<NeoInvoiceSupport> supportMock =
+            Mockito.mockStatic(NeoInvoiceSupport.class)) {
       mockAdminMode(obContextMock);
       OBDal dal = mock(OBDal.class);
       Session session = mock(Session.class);
       obDalMock.when(OBDal::getInstance).thenReturn(dal);
       when(dal.getSession()).thenReturn(session);
 
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLineOrThrow(anyString(), eq(true)))
+          .thenReturn(Collections.singletonMap("sl-1", new BigDecimal("3")));
+
       Invoice invoice = mock(Invoice.class);
       when(invoice.getId()).thenReturn("inv-s-1");
-      when(invoice.getDocumentNo()).thenReturn("INV-S-001");
-      when(invoice.getDocumentStatus()).thenReturn("DR");
 
       DispatchHandler handler = new DispatchHandler();
       handler.shipmentInvoice = invoice;
@@ -1361,22 +1517,75 @@ public class CreateDraftInvoiceHandlerTest {
               .put("shipmentLineId", "sl-1")
               .put("quantity", "3")));
 
-      NeoResponse response = handler.handle(NeoContext.builder()
-          .specName(SPEC_GOODS_SHIPMENT)
-          .entityName(ENTITY_HEADER)
-          .httpMethod("POST")
-          .endpointType(NeoEndpointType.ACTION)
-          .fieldName(ACTION_CREATE)
-          .recordId("ship-fallback")
-          .requestBody(body)
-          .build());
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        mockCompletedInvoice(dal, "inv-s-1", "INV-S-001", "CO");
 
-      assertNotNull(response);
-      assertEquals(201, response.getHttpStatus());
-      assertEquals(Arrays.asList("ship-1", "ship-2"), handler.receivedShipmentIds);
-      assertEquals(new BigDecimal("3"), handler.receivedLineOverrides.get("sl-1"));
-      assertTrue(handler.ensuredGrossAmounts);
-      verify(dal, Mockito.times(2)).flush();
+        NeoResponse response = handler.handle(NeoContext.builder()
+            .specName(SPEC_GOODS_SHIPMENT)
+            .entityName(ENTITY_HEADER)
+            .httpMethod("POST")
+            .endpointType(NeoEndpointType.ACTION)
+            .fieldName(ACTION_CREATE)
+            .recordId("ship-fallback")
+            .requestBody(body)
+            .build());
+
+        assertNotNull(response);
+        assertEquals(201, response.getHttpStatus());
+        assertEquals(Arrays.asList("ship-1", "ship-2"), handler.receivedShipmentIds);
+        assertEquals(new BigDecimal("3"), handler.receivedLineOverrides.get("sl-1"));
+        assertTrue(handler.ensuredGrossAmounts);
+        verify(dal, Mockito.times(2)).flush();
+      }
+    }
+  }
+
+  /**
+   * ETP-5381 — the bulk case: the guard is "at least one shipment still has something pending",
+   * not "every shipment does". Rejecting a batch because its first shipment is already invoiced
+   * would block a perfectly valid multi-shipment invoice.
+   */
+  @Test
+  public void handleCreate_goodsShipmentBulkOnePending_isNotRejected() throws Exception {
+    try (MockedStatic<OBContext> obContextMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> obDalMock = Mockito.mockStatic(OBDal.class);
+        MockedStatic<NeoInvoiceSupport> supportMock =
+            Mockito.mockStatic(NeoInvoiceSupport.class)) {
+      mockAdminMode(obContextMock);
+      OBDal dal = mock(OBDal.class);
+      obDalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.getSession()).thenReturn(mock(Session.class));
+
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLineOrThrow(eq("ship-done"), eq(true)))
+          .thenReturn(Collections.emptyMap());
+      supportMock.when(() -> NeoInvoiceSupport.computePendingQtyPerLineOrThrow(eq("ship-open"), eq(true)))
+          .thenReturn(Collections.singletonMap("sl-9", new BigDecimal("4")));
+
+      Invoice invoice = mock(Invoice.class);
+      when(invoice.getId()).thenReturn("inv-bulk-1");
+
+      DispatchHandler handler = new DispatchHandler();
+      handler.shipmentInvoice = invoice;
+      handler.parsedShipmentIds = Arrays.asList("ship-done", "ship-open");
+
+      try (CompletionMocks completion = new CompletionMocks(dal, completionSuccess())) {
+        mockCompletedInvoice(dal, "inv-bulk-1", "INV-BULK-001", "CO");
+
+        NeoResponse response = handler.handle(NeoContext.builder()
+            .specName(SPEC_GOODS_SHIPMENT)
+            .entityName(ENTITY_HEADER)
+            .httpMethod("POST")
+            .endpointType(NeoEndpointType.ACTION)
+            .fieldName(ACTION_CREATE)
+            .recordId("ship-done")
+            .requestBody(new JSONObject())
+            .build());
+
+        assertNotNull(response);
+        assertEquals("One already-invoiced shipment must not veto the whole batch",
+            201, response.getHttpStatus());
+        assertEquals(Arrays.asList("ship-done", "ship-open"), handler.receivedShipmentIds);
+      }
     }
   }
 
@@ -2634,8 +2843,16 @@ public class CreateDraftInvoiceHandlerTest {
    */
   @Test
   public void testHandlePendingLinesSuccessReturns200WithLineArray() throws Exception {
-    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = Mockito.mockStatic(OBDal.class)) {
       mockAdminMode(ctxMock);
+      // ETP-5410 follow-up: handlePendingLines now also loads the shipment itself (for the
+      // product/salesOrderLine enrichment and the resolved price list) — a null doc here keeps
+      // this test focused on the pre-existing lineId/pendingQty assertions below.
+      OBDal dal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(dal);
+      when(dal.get(eq(org.openbravo.model.materialmgmt.transaction.ShipmentInOut.class), anyString()))
+          .thenReturn(null);
 
       CreateDraftInvoiceHandler handler = new CreateDraftInvoiceHandler() {
         @Override
@@ -2682,6 +2899,72 @@ public class CreateDraftInvoiceHandlerTest {
 
       assertNotNull(r);
       assertEquals(500, r.getHttpStatus());
+    }
+  }
+
+  // ── handleProductPrices ───────────────────────────────────────────────────
+
+  /** GET method for productPrices is not routed (only POST is handled). */
+  @Test
+  public void testHandleProductPricesGetMethodReturnsNull() {
+    NeoResponse r = new CreateDraftInvoiceHandler().handle(NeoContext.builder()
+        .specName(SPEC_GOODS_SHIPMENT).entityName(ENTITY_HEADER)
+        .httpMethod("GET").endpointType(NeoEndpointType.ACTION)
+        .fieldName("productPrices").build());
+    assertNull(r);
+  }
+
+  /** No productIds in the body: 200 with an empty data array, never a 500/NPE. */
+  @Test
+  public void testHandleProductPricesEmptyBodyReturns200WithEmptyArray() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class)) {
+      mockAdminMode(ctxMock);
+
+      NeoResponse r = new CreateDraftInvoiceHandler().handle(NeoContext.builder()
+          .specName(SPEC_GOODS_SHIPMENT).entityName(ENTITY_HEADER)
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("productPrices").requestBody(new JSONObject()).build());
+
+      assertNotNull(r);
+      assertEquals(200, r.getHttpStatus());
+      JSONArray data = r.getBody().getJSONObject("response").getJSONArray("data");
+      assertEquals(0, data.length());
+    }
+  }
+
+  /**
+   * Happy path: delegates to {@link MultiDocumentInvoiceSupport#buildProductPricesResponse},
+   * which in turn calls {@link MultiDocumentInvoiceSupport#resolveProductPrices} and
+   * serialises the result as {@code [{productId, price}, ...]}. {@code CALLS_REAL_METHODS}
+   * keeps {@code buildProductPricesResponse} itself real (it's the delegation this test
+   * verifies) while only {@code resolveProductPrices} — the DB-touching part — is stubbed.
+   */
+  @Test
+  public void testHandleProductPricesSuccessReturns200WithPricedProducts() throws Exception {
+    try (MockedStatic<OBContext> ctxMock = Mockito.mockStatic(OBContext.class);
+        MockedStatic<MultiDocumentInvoiceSupport> supportMock =
+            Mockito.mockStatic(MultiDocumentInvoiceSupport.class, Answers.CALLS_REAL_METHODS)) {
+      mockAdminMode(ctxMock);
+      Map<String, BigDecimal> prices = new java.util.LinkedHashMap<>();
+      prices.put("prod-1", new BigDecimal("9.99"));
+      supportMock.when(() -> MultiDocumentInvoiceSupport.resolveProductPrices(
+          eq("PL-1"), any())).thenReturn(prices);
+
+      JSONObject body = new JSONObject()
+          .put("priceListId", "PL-1")
+          .put("productIds", new JSONArray().put("prod-1"));
+
+      NeoResponse r = new CreateDraftInvoiceHandler().handle(NeoContext.builder()
+          .specName(SPEC_GOODS_SHIPMENT).entityName(ENTITY_HEADER)
+          .httpMethod("POST").endpointType(NeoEndpointType.ACTION)
+          .fieldName("productPrices").requestBody(body).build());
+
+      assertNotNull(r);
+      assertEquals(200, r.getHttpStatus());
+      JSONArray data = r.getBody().getJSONObject("response").getJSONArray("data");
+      assertEquals(1, data.length());
+      assertEquals("prod-1", data.getJSONObject(0).getString("productId"));
+      assertEquals(9.99, data.getJSONObject(0).getDouble("price"), 0.0);
     }
   }
 

@@ -234,12 +234,57 @@ provision) and `isProductive()` (does what it provisions become productive).
 3. **Request targets an environment the account already owns → allowed.** That is the resume path
    `validateExistingClient` handles downstream (a partially provisioned environment being
    reconciled), not a new environment, so it is not charged again.
-4. **Otherwise → the payment decides:** a `CheckoutPaymentRegistry`-confirmed payment ⇒ allowed;
-   token absent ⇒ `PAYMENT_REQUIRED`; token present but unconfirmed ⇒ `PAYMENT_DECLINED`. Both
-   refusals answer 402 with `error: payment_required`, differing only in `message`.
+4. **Otherwise → the payment decides:** a `CheckoutRequestStore`-confirmed payment (an
+   `ETGO_CHECKOUT_REQUEST` row at `PAID` or later) ⇒ allowed; token absent ⇒ `PAYMENT_REQUIRED`;
+   token present but unconfirmed ⇒ `PAYMENT_DECLINED`. Both refusals answer 402 with
+   `error: payment_required`, differing only in `message`.
 
 Ownership is counted with `EtendoGoJwtDalHelper.countTenantsOwnedByAccountEmail`, which reuses the
 same username-match rule as `GET /sws/go/environments`.
+
+The hosted checkout entry point also requires a server-marked owner. `POST
+/sws/go/checkout/sessions` returns HTTP 403 with `BILLING_OWNER_REQUIRED` when the authenticated
+account only has invited memberships or has no owner record. The check reads `AD_User.EM_ETGO_Is_Owner`
+through `OwnerSupport`; an administrator role name or an email match is not sufficient. Invitation
+access remains independent because environment discovery and NEO entry continue to evaluate the
+destination membership separately.
+
+For legacy free tenants, enforcement is opt-in through `etendo.go.demo.transition.activation.at`
+(`ETGO_DEMO_TRANSITION_ACTIVATION_AT`), an ISO-8601 UTC instant selected during rollout. The first
+lifecycle read persists that instant per tenant as `ETGO_LegacyTransitionStartedAt`; the configured
+trial duration then determines the deadline. With no activation instant configured, legacy tenants
+remain unresolved for a deliberate, reviewable rollout rather than receiving a guessed deadline.
+
+The account-level billing projection is available at `GET /sws/go/billing/overview`, and an
+individual purchase can be read at `GET /sws/go/billing/purchases/{purchaseId}`. Both responses are
+scoped to the authenticated account and expose only the local purchase status, environment name,
+and safe provisioning reference. They do not expose Stripe customer/session identifiers or create
+a second payment ledger.
+
+`GET /sws/go/billing/offers` supplies the display offer from the server-owned billing configuration
+(`etendo.go.billing.offer.amount.minor`, currency, and interval). The initial default is 4900 minor
+units in EUR per month. The browser uses this projection for display; the purchase boundary remains
+the authority for validation and checkout selection.
+
+`POST /sws/go/billing/purchases` also checks the durable request table for an active purchase with
+the same account and environment name. A duplicate submission returns HTTP 409 with the existing
+purchase ID and status, so a retry cannot create a second provider checkout. An unresolved `CREATING`
+row therefore remains visible for reconciliation rather than being silently replaced.
+
+Paid onboarding uses `PROVISIONING_ATTEMPTS` as a durable fencing token. The claim is normally
+taken from `PAID`; if the row has remained `PROVISIONING` longer than
+`etendo.go.billing.provisioning.lease.minutes` (`ETGO_BILLING_PROVISIONING_LEASE_MINUTES`), it is
+reclaimed, its attempt number is incremented, and its timestamp is renewed. The initial lease is
+30 minutes. Completion is an atomic status update guarded by that attempt number, so an old worker
+cannot close a request after a retry has taken over. This makes browser refreshes, process restarts,
+and stale workers recoverable without a schema migration or a second payment.
+
+When the paid flow requests demo-data transfer, the source rows are converted into the same NEO
+batch operations used by the Products and Contacts grid import. A product price is a linked
+`price` operation (`parentRef`) in the same atomic batch, and the destination default sales price
+list is resolved with the shared `PriceListVersionResolver`. Existing destination search keys are
+skipped before the batch, making retries idempotent. The transfer does not use `DalUtil.copy` or a
+second persistence path.
 
 ### The plan is derived from the payment, not from the decision
 
@@ -268,16 +313,64 @@ payment Stripe's webhook confirmed:
 | absent / blank | `PAYMENT_REQUIRED` |
 
 The token is server-generated and correlated server-side, so a browser cannot turn a successful
-return URL into authorization. `CheckoutPaymentRegistry.isPaidFor` matches on the request id **plus**
-the account email **plus** the environment name; a confirmed payment therefore cannot be redirected
-to another account or another environment.
+return URL into authorization. `CheckoutRequestStore.isPaidFor` matches on the request id **plus**
+the account email **plus** the environment name (the paywall always passes one; the status endpoint
+passes `null` and matches on request id and account only); a confirmed payment therefore cannot be
+redirected to another account or another environment.
 
-> **Open risk — `CheckoutPaymentRegistry` is process-local.** It is a static
-> `ConcurrentHashMap` in the JVM, so a confirmed payment lives only in the task that received the
-> webhook. On ECS, a task recycle or a redeploy between the payment and the onboarding call loses it,
-> and the account is charged while provisioning answers `PAYMENT_DECLINED`. Its `EVENTS` idempotency
-> map also grows without eviction. Persisting it is tracked separately and is a precondition for
-> treating this flow as production-grade at volume.
+> **Closed by ETP-5045 — payment state and webhook idempotency are durable.** The former
+> `CheckoutPaymentRegistry` (a static `ConcurrentHashMap` per JVM) is retired. Both halves of the
+> state it held now live in the database, so a task recycle, a redeploy or a second node between
+> the payment and the onboarding call no longer loses a paid request or reprocesses a retried event:
+>
+> - **`ETGO_CHECKOUT_REQUEST`** (`CheckoutRequestStore`) — one row per checkout attempt, written
+>   before Stripe is contacted and advanced forward-only through
+>   `CREATING → CREATED → PAID → PROVISIONING → PROVISIONED`. `isPaidFor` reads it.
+> - **`ETGO_BILLING_EVENT`** (`BillingEventStore`) — one row per provider event id. The unique
+>   constraint `ETGO_BILLEVT_EVENT_UQ` on `EVENT_ID` *is* the idempotency gate: the first delivery
+>   inserts the row, every later delivery hits the constraint and only increments
+>   `DUPLICATE_COUNT` / `LAST_DUPLICATE_AT`. `EVENT_RESULT` moves `RECEIVED → APPLIED | IGNORED |
+>   FAILED`, and the three end states are deliberately not equally locked:
+>   - **`APPLIED` is terminal and enforced as such.** Every write of another result carries an
+>     `eventResult <> 'APPLIED'` guard, so a late failure on a redelivery cannot reopen an event
+>     whose payment was already recorded (spec: `testAppliedIsTerminalAgainstALaterFailureOrIgnore`).
+>   - **`IGNORED` is terminal by intent but not locked** — a later `markFailed` does overwrite it,
+>     which makes the row re-claimable again. That is deliberate: a later delivery of the same id
+>     may carry the correlation the ignored one lacked (spec: `testIgnoredIsNotLockedTheWayAppliedIs`).
+>   - **`FAILED` is not terminal at all**: the next delivery flips the row back to `RECEIVED`
+>     atomically and re-claims it, so Stripe's own retry repairs a transient handler failure.
+>
+>   `PROCESSED_AT` is first-write-wins. `REQUEST_ID` always stores the raw `metadata.request_id`;
+>   `ETGO_CHECKOUT_REQUEST_ID` is resolved at claim time when that request exists (an event may
+>   legitimately reference a request this instance never issued). `PAYLOAD_SUMMARY` is an
+>   allow-list (`data.object.{id,customer,subscription,livemode,payment_status,amount_total,
+>   currency,mode}` + `metadata.request_id`, expanded objects reduced to their id, at most 2000
+>   chars) — never the raw body, never card data. The allow-list itself lives in
+>   `WebhookPayloadSummary`, not in the store: it is pure JSON with no DAL, so the generic
+>   `EventStore` seam can build a summary without reaching into the concrete store
+>   (`BillingEventStore.summarize` is a thin delegate).
+> - **`FAILURE_REASON` is not only about failures.** The same column carries the `IGNORED` reason,
+>   so most rows in a healthy instance read `unhandled event type` in a column named failure
+>   reason. On the genuine failure path it holds a fixed phrase plus the **exception class name
+>   only** — never the exception message, because a provider-controlled message can quote payload
+>   fragments and this column is required to stay operationally safe. The detail stays in the log.
+>
+> `EtendoGoJwtServlet.handleCheckoutWebhook` runs `CheckoutWebhookProcessor.evaluate(...)`
+> (signature via the unchanged `CheckoutWebhookVerifier`, then payload shape, then the claim) with
+> the same wire contract as before: `400 INVALID_CHECKOUT_SIGNATURE`, `400 INVALID_CHECKOUT_PAYLOAD`,
+> `200 {"received":true}` for a duplicate. An accepted `checkout.session.completed` /
+> `checkout.session.async_payment_succeeded` with `metadata.request_id` + `account_email` calls
+> `CheckoutRequestStore.recordPaid` and marks the event `APPLIED`. There are **three** ignore
+> reasons, all recorded on the row: `unhandled event type` (any other event type),
+> `missing correlation metadata` (no `metadata.request_id` / `account_email`) and
+> `unknown checkout request` (the correlation id names no `ETGO_CHECKOUT_REQUEST` this instance
+> issued — `recordPaid` reports that back rather than failing). A `RuntimeException` in the handler
+> marks the event `FAILED` and answers `500 CHECKOUT_WEBHOOK_FAILED`, which is what makes Stripe
+> retry and re-claim it. **`APPLIED` therefore always means a payment was actually recorded**, never
+> merely that the handler ran: an event whose request id is unknown is `IGNORED`, so the audit row
+> cannot claim an effect that did not happen. Both tables are readable as System Administrator from
+> the read-only Classic windows **Checkout Request** (with a **Billing Event** child tab linked
+> through that FK) and **Billing Event** (standalone, same menu parent).
 
 Money now moves for real, and these gaps are **open against real charges** — they are no longer
 hypothetical preconditions for a future gateway:
@@ -452,7 +545,9 @@ must never break the session.
 | Shared property resolution (system → Openbravo → env) | `com.etendoerp.go.common.ConfigPropertyReader` |
 | Paywall decision + productive-plan derivation | `com.etendoerp.go.payment.TenantPaywallService` |
 | Stripe hosted checkout session | `com.etendoerp.go.payment.HostedCheckoutService`, `CheckoutConfiguration` |
-| Webhook signature + confirmed-payment correlation | `com.etendoerp.go.payment.CheckoutWebhookVerifier`, `CheckoutPaymentRegistry` |
+| Webhook signature, payload shape and durable event claim | `com.etendoerp.go.payment.CheckoutWebhookVerifier`, `CheckoutWebhookProcessor`, `BillingEventStore` (`ETGO_BILLING_EVENT`) |
+| Payload allow-list (what may ever be written down) | `com.etendoerp.go.payment.WebhookPayloadSummary` |
+| Confirmed-payment correlation, checkout lifecycle | `com.etendoerp.go.payment.CheckoutRequestStore` (`ETGO_CHECKOUT_REQUEST`) |
 | Plan read/write | `com.etendoerp.go.payment.TenantPlanService` |
 | Gate wiring, 402 response, plan marking | `com.etendoerp.go.rest.EtendoGoJwtServlet` |
 | Ownership count, `plan` in `/environments` | `com.etendoerp.go.rest.EtendoGoJwtDalHelper` |

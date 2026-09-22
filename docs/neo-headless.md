@@ -815,6 +815,36 @@ The `recordId` from the URL path is injected into the process parameters automat
 
 Process access is checked before execution. If the current role lacks access to the process, the request returns `403 Forbidden`.
 
+#### Failure body: `message` + `messageKeys` (ETP-5316)
+
+When the action runs a DB procedure (`CallProcess` -> `ProcessInstance`) and it fails, the `400`
+body carries the translated sentence **and** the AD_MESSAGE search keys behind it:
+
+```json
+{
+  "status": "error",
+  "message": "En la línea 10, 20, 30, 40, Cuando el producto no esta vacío entonces la cantidad movida no debe ser cero.",
+  "messageKeys": ["Inline", "ProductNotNullAndMovementQtyZero"]
+}
+```
+
+Core assembles these messages from AD_MESSAGE tokens plus run-time data --
+`M_INOUT_POST` raises `'@Inline@ '||v_Message_Qty||' @ProductNotNullAndMovementQtyZero@'` -- so the
+translated text differs per document and cannot be matched by a client, and the numbers in it are
+**AD line numbers** (`line`, numbered in tens), not the row positions the user sees. Neither the
+text nor the numbers are usable.
+
+`NeoProcessService.translatePInstanceResult` therefore extracts the `@Key@` tokens from the raw
+`ProcessInstance.errorMsg` **before** `NeoMessageTranslator.safeParseTranslation` replaces them
+(`NeoMessageTranslator.extractMessageKeys`), preserving order and dropping duplicates. The client
+matches the first key it recognises against its own allow-list and renders its own wording; there
+is no AD_MESSAGE catalog lookup here, so an unrecognised token is inert.
+
+`message` is byte-for-byte what it was before, and `messageKeys` is **omitted** when the raw message
+carried no token -- a client that ignores the field is unaffected. Scope: this branch only (the
+document-action / `CallProcess` path). The OBUIAPP result paths in `translateObuiappResult` also
+funnel through `safeParseTranslation` and could carry the same field, but deliberately do not yet.
+
 ### 4.6 Process Specs (Standalone Processes)
 
 Process specs (`SPEC_TYPE = 'P'`) expose an AD_Process as a standalone API endpoint.
@@ -1330,6 +1360,7 @@ GET /sws/neo/promoteuserrole?UserId=<id>&Mode=promote|demote              (§8i)
 GET /sws/neo/documentemailhistory?recordId=<id>[&specName=<spec>]         (§8j)
 GET /sws/neo/acctprocessmonitor[?Limit=<n>][&Action=trigger]              (§8k)
 GET /sws/neo/refreshtoken                                                 (§8l)
+GET /sws/neo/costingcadence[?scope=client|all]                            (§8m)
 Authorization: Bearer {token}
 ```
 
@@ -2903,6 +2934,27 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
 
   One behaviour was also **widened**, but only at the no-locator-at-all edge: `createReturnLineShell` used to guard the write with `if (anchoredBin != null)`, so when the header warehouse had no active locator whatsoever the shell kept whatever bin the entity provider defaulted to instead of an explicit `null`. It now always calls `setStorageBin` with the anchor result, so that edge fails loudly at posting instead of silently keeping a stale value — the same contract every other anchored write path follows. A source line with no bin whose header warehouse DOES have an active locator was already anchored to it before this widening: the cascade treats "absent" and "belongs elsewhere" identically, so that scenario is preexisting behaviour, not part of what changed here.
 
+**Real-world example — `ReturnLineQuantityPolicy` (the return-line quantity sign, ETP-5313):** a return line's `M_InOutLine.MovementQty` is **stored NEGATIVE and exposed POSITIVE**, in BOTH return windows (`return-material-receipt`, sales; `return-to-vendor-shipment`, purchase). `schemaforge/ReturnLineQuantityPolicy.java` is the single owner of that rule and every write and read path goes through it.
+
+  Why the DB sign is not a free choice:
+  - Core `M_INOUT_POST` negates `MovementQty` **and** `QuantityOrder` whenever the document's `MovementType` ends in `-`. A SALES return must INCREASE stock and always ends up as `C-`, so it only restores stock if the stored quantity is negative. A PURCHASE return gets `V+`, is not negated, and must DECREASE stock — so it needs a negative quantity too. One rule covers both.
+  - `MovementType` cannot be used as the lever: core trigger `M_INOUT_TRG_PROV` (BEFORE INSERT OR UPDATE, FOR EACH ROW) rewrites it on every write from `IsSOTrx` alone (`'N' → 'V+'`, else `'C-'`) and ignores `C_DocType.IsReturn`, so `C+`/`V-` are unreachable and any `setMovementType("C-")` in the document factories is decorative. Etendo Classic solves it the same way (`RMInOutPickEditLines` persists `qtyReceived.negate()`).
+  - The functional contract keeps the user-facing field ("Cant. a devolver") POSITIVE in every response, in both windows — the DB sign never reaches the UI.
+
+  | Path | Direction |
+  |---|---|
+  | `ReturnMaterialReceiptLineHandler#handle` / `ReturnToVendorShipmentLineHandler#handle` (CRUD `POST`/`PUT`/`PATCH`) | `applyStoredSignToWriteBody` |
+  | `ReturnShipmentUtils.buildAndSaveReturnLine` (import-lines action, both windows) | `toStoredQuantity` |
+  | `NeoReturnReceiptService#buildAndSaveReturnLine` + `applyOrderUOM` (`createReturn` action) | `toStoredQuantity`, on `MovementQty` **and** `QuantityOrder` |
+  | `CreatePurchaseReturnHandler#addReturnLine` | `toStoredQuantity` |
+  | both line handlers' `afterHandle` | `applyDisplaySignToRecord` |
+
+  The display flip runs on **every response that carries a line**, not just on GET (ETP-5336). `NeoHandlerUtils.extractResponseDataArray` is the method-agnostic twin of `extractGetDataArray` used for that: a `PATCH` echoes the persisted record back and the frontend renders it optimistically (`DetailView.jsx`'s `buildInlineRowUpdateHandler`), so a GET-only flip made the line flash its stored NEGATIVE quantity until the next refetch. The rule of thumb: enrichment that *describes the record* (a sign convention, an identifier label) belongs on every response; enrichment that is a read-only aggregate or a batch SQL lookup for the grid — like the `orderQuantity`/`productCode` injection in both return line handlers — stays GET-only so it does not add a query to every save. Those `afterHandle`s mutate the body in place and return `null` on a write, so the original response and its status code are preserved.
+
+  Both line handlers also override `afterCallout` to call `NeoHandlerUtils.stripStockDerivedMovementQuantity` (ETP-5336), the same protection `GoodsReceiptLineHandler` (ETP-4671) and `GoodsShipmentLineHandler` (ETP-5062) already had: the classic `SL_InOutLine_Product` callout echoes the product's **on-hand stock** back as `movementQuantity` on every product selection, which on a return line is meaningless — the quantity is what is being sent back — and silently overwrote what the user typed. Note that `ReturnToVendorShipmentLineHandler`'s `body.remove("product")` on `PUT`/`PATCH` is **not** that protection: the NEO CRUD callout cascade only runs on create (`NeoCrudHandler#executePostCreate`), never on an update, so that line only makes the product of an existing RTV line immutable.
+
+  Both sign directions are `abs()`-based normalisations, not `negate()` flips, so they are **idempotent** — a caller that already normalised is never flipped back. Everything that reads a return quantity for aggregation is sign-agnostic by construction (`SUM(ABS(rl.MovementQty))` in the "already returned" availability queries of both header handlers; `resolveShipmentLineQty`'s explicit `signum()`/`abs()` split in `CreateDraftInvoiceHandler`). The one deliberate exception is the rectificative invoice line, which must stay NEGATIVE by functional decision: `ReturnShipmentUtils.addReturnInvoiceLines` forces it with `abs().negate()` (ETP-4737) and stays sign-agnostic so it keeps working for return documents created before ETP-5313.
+
 **Real-world example — `NeoExchangeRateService.hasRate` (one lookup behind two surfaces, ETP-4838):** exchange-rate availability is asked twice for the same user gesture — once by the frontend through `GET /sws/neo/validate-exchange-rate` before it applies a currency change, and once by `afterCallout()` on the order/invoice header handlers, which appends a `WARNING` message when the user edits `currency` by hand. Both now call the package-private `NeoExchangeRateService.hasRate(from, to, date)`, which reuses the endpoint's own `queryRate` — including its `AD_Client_ID IN ('0', ?)` scoping and its inverse-direction fallback — and fails **open** (returns `true`) on any error so a DB hiccup never manufactures a false warning.
 
   Previously `AbstractOrderHeaderHandler` and `AbstractInvoiceHeaderHandler` each carried a private `hasConversionRate()` copy of the query filtered by `ad_client_id = ?` alone. When ETP-4474 moved the currencyLayer rate sync to the System client, those copies went blind to it: the endpoint answered `hasRate: true` and the callout warned `noExchangeRateAvailable` for the very same pair and date. The lesson generalises — **when a handler needs an answer a NEO endpoint already computes, call the endpoint's helper, don't re-derive the query.** Two copies of a client-scoping filter is exactly the kind of drift that survives review and only surfaces when the data moves.
@@ -2926,6 +2978,135 @@ This is a plain duplicate-key conflict, not the concurrency conflict from §4.3.
   Both changes are best-effort, same contract as the handler's other two concerns: any failure is logged and swallowed, never failing the parent `AD_User` request.
 
   - **`ETGO_INVITATION_USER_FK` cascade delete (ETP-4830):** because this handler makes admin-created-user invitations part of the normal create flow, `ETGO_INVITATION` rows now exist for ordinary users, not just for ETP-4894's opt-in "invite an existing user" path. `ETGO_INVITATION.AD_USER_ID` originally referenced `AD_USER` with no `ON DELETE` behavior (`onDelete` omitted in `src-db/database/model/tables/ETGO_INVITATION.xml`, i.e. `NO ACTION`), so deleting an `AD_User` that had ever received an invitation failed with a 500 ("Este registro no puede ser eliminado ya que está relacionado con otros elementos existentes.") — a pre-existing ETP-4894 schema gap, only surfaced now that this handler makes invitation rows routine. Fixed by adding `onDelete="cascade"` to `ETGO_INVITATION_USER_FK`: deleting the `AD_User` now deletes its `ETGO_INVITATION` row(s) with it, since a dangling invitation for a user that no longer exists can never sensibly be accepted. The sibling `ETGO_INVITATION_CREATEDBY_FK`/`ETGO_INVITATION_UPDATEDBY_FK`/`ETGO_INVITATION_ACCOUNT_FK`/`ETGO_INVITATION_CLIENT_FK`/`ETGO_INVITATION_ORG_FK` constraints are intentionally left as `NO ACTION` — those reference the actor/tenant, not the invited user, and Etendo audit columns (`CREATEDBY`/`UPDATEDBY`) are never expected to be deleted out from under a row.
+
+**Real-world example — `AbstractOrderHeaderHandler`'s GET annotations (`hasLinkedDocuments`, plus `needsPrimaryDoc`/`needsInvoiceDoc`, ETP-5295):** the shared base of `SalesOrderHeaderHandler`, `PurchaseOrderHeaderHandler` and `SalesQuotationHeaderHandler` appends three computed booleans to **every** record of **every** order GET — list and single-record alike — so the React list view can make document-flow decisions per row without any extra round trip.
+
+  - `hasLinkedDocuments` (pre-existing) — is there *any* `C_Invoice` or `M_InOut` with this `C_Order_ID`. Single-record GETs use a `LIMIT 1` query, list GETs one batch `IN` query.
+  - `needsPrimaryDoc` / `needsInvoiceDoc` (ETP-5295) — "a shipment/receipt is still pending" and "an invoice is still pending". The names are deliberately **neutral across sales and purchase** ("primary doc" = goods shipment for a sales order, goods receipt for a purchase order — both `M_InOut`), so the one shared frontend hook that reads them (`useOrderWindow.jsx` in `etendo_schema_forge`) needs no per-window parameterization.
+
+  **Why they exist.** The row kebab menu's "Gestionar envío/factura" entry derived its visibility and label from the `DeliveryStatus`/`InvoiceStatus` percent columns, while the "Gestionar" button on the detail form derives the same decision from the real documents. The two disagreed — the kebab showed or hid the entry, and picked its label, wrongly. Making the kebab issue the form's three requests *per row* was not an option, so the form's derivation moved server-side.
+
+  **The formula** — a literal transcription of the detail form's (`artifacts/sales-order/custom/OrderCreateInvoice.jsx`, `artifacts/purchase-order/custom/PurchaseOrderActions.jsx`):
+
+  ```
+  qtyPending      = SUM(C_OrderLine.QtyOrdered) - SUM(C_OrderLine.QtyDelivered)
+  needsPrimaryDoc = qtyPending != 0 AND no linked M_InOut in DocStatus 'DR'
+
+  totalPending    = order GrandTotal - SUM(GrandTotal of LINKED invoices in DocStatus 'CO')
+  needsInvoiceDoc = totalPending != 0 AND no LINKED invoice in DocStatus 'DR'
+  ```
+
+  **"LINKED invoice" is the union of two paths, not `C_Invoice.C_Order_ID` alone.** The form reads its invoice list from the `listInvoices` action (`CreateDraftInvoiceHandler#handleList`), which runs two queries and merges them deduplicating by invoice id: (1) through the invoice lines — `C_InvoiceLine.C_OrderLine_ID → C_OrderLine.C_Order_ID`, covering invoices created from the classic Etendo UI and every partial-invoicing-by-lines flow — and (2) directly through `C_Invoice.C_Order_ID`, covering the edge case of an invoice created by our own action that has no lines yet. `batchFetchLinkedInvoiceTotals` reproduces exactly that with a single `UNION` subquery (the `UNION` *is* the dedup by `(order, invoice)`), aggregated by `(order, DocStatus)` in one pass. Note that `batchCheckLinkedDocuments`, which backs `hasLinkedDocuments`, covers only `C_Order_ID` — that is a narrower, separate concern and **is not the spec for linkage here**; using it would make the flags disagree with the form in precisely the partial-invoicing cases the ticket is about.
+
+  **Cost and shape.** Three batched queries per GET response, independent of page size — never one per row: ordered-vs-delivered quantity grouped by order, draft `M_InOut` by order, and the linked-invoice union above. Sales vs purchase (`IsSOTrx` `'Y'`/`'N'`) is parameterized off the existing `isSalesTransaction()` override, the same switch the callout price-list fallback already uses, so a subclass needs to know nothing about this annotation to be classified correctly. Comparisons are exact-decimal (`BigDecimal.compareTo`), not float subtraction. The order total is read from the JSON record rather than re-queried, so it is the same number the form sees — `applyTotalDiscountToRecord` has already adjusted `grandTotalAmount` for a draft carrying a not-yet-materialized total discount by the time this runs.
+
+  **Status-agnostic.** Both flags are annotated for every document status; the form only evaluates them once the order is completed and the kebab already gates its own entry on `status === 'CO'`, so the backend stays a pure function of the order's documents and never re-reads `documentStatus`.
+
+  **Degradation.** A DB failure annotates both flags `false` (entry hidden) rather than leaving them absent or defaulting to `true`: a spuriously hidden shortcut is recoverable from the detail form, a spuriously shown one sends the user into an empty "manage" modal. The parent GET is never failed.
+
+  **Known pre-existing defect, replicated deliberately.** When ONE invoice groups lines from SEVERAL orders, its FULL `GrandTotal` is counted against EACH of those orders, inflating the invoiced total so `needsInvoiceDoc` reads `false` too early. The form has exactly this bug today, and parity with the form is the whole point of the annotation — fixing it on one side only would replace one disagreement with another. Tracked separately; do not "fix" the backend without fixing the form in the same change.
+
+**Real-world example — `FinancialAccountTransactionsHandler` field-acceptance by movement state (ETP-4500, tightened by ETP-4879):** `schemaforge/FinancialAccountTransactionsHandler.java` (wired on the `financial-account-transactions` entity) restricts which fields an `update` actually persists, keyed off the transaction's own `Processed`/`Posted` state rather than the request body's shape — `handleUpdate` dispatches to one of two private appliers:
+
+| State | Applier | Fields persisted |
+|---|---|---|
+| **Draft** (`processed = false`) | `applyEditableFields` | Full editable set: `description`, `transactionDate`, `accountingDate` (`dateAcct`), `businessPartnerId`, `glItemId`, `projectId`, `costcenterId`, `productId`, plus amount/direction/currency. |
+| **Processed, not yet Posted** (`processed = true`, `posted = 'N'`) | `applyEditableDimensions` | Only `description`, `businessPartnerId`, `glItemId`, `projectId`, `costcenterId`, `productId` — the 4 accounting dimensions, the G/L item and the free-text description. `transactionDate`/`accountingDate`, amount, direction and currency are silently ignored even when present in the body — not rejected, just never read into the entity. |
+| **Posted** | — | `handleUpdate` returns `400` before either applier runs. |
+
+  **Why dates were removed from the Processed path (ETP-4879).** Before this ticket, `applyEditableDimensions` also unconditionally called `trx.setTransactionDate(...)`/`trx.setDateAcct(...)` from the request body. The frontend's edit modal (`NewTransactionModal.jsx`, `etendo_schema_forge`) exposes only ONE date field (`form.date`) and derives both `transactionDate` and `accountingDate` from it on every save — so any edit to a Processed movement, even a dimensions-only edit, silently rolled the accounting date (`DATEACCT`) back to the transaction date whenever the two had legitimately diverged. ETP-4879 removed both setter calls from `applyEditableDimensions` entirely: a Processed movement's dates are now immutable through this endpoint no matter what the body contains. The frontend was updated in lockstep to disable the date field once `movement.processed` is true (`lockWhileProcessed` in `NewTransactionModal.jsx`), so the UI and the backend contract agree — see `etendo_schema_forge`'s `docs/generated-custom-windows/financial-account.md` ("Edit mode") for the full user-facing writeup.
+
+  `process: true` in the request body is also ignored on the Processed path — this endpoint never re-runs Classic's `FIN_TransactionProcess`, so a client cannot use `update` to (re)process a transaction.
+
+**Real-world example — `GeneralLedgerConfigurationHandler` locked dimension types (ETP-4879):** the `dimensions` sub-resource of the `general-ledger-configuration` spec (`GET`/`PUT` behind the "Dimensiones contables" screen) exposes each active `C_AcctSchema_Element` row as a toggle (`active`, gated by `mandatory`). ETP-4879 added a second, type-based lock on top of that pre-existing mandatory guard:
+
+```java
+private static final List<String> LOCKED_DIMENSION_TYPES = Arrays.asList("BP", "PR");
+```
+
+  - `buildDimensions(List<AcctSchemaElement>)` skips any row whose `ElementType` is `BP` (Contacto/Business Partner) or `PR` (Producto) — these rows never appear in the `GET` response at all, not even as a disabled/read-only entry.
+  - `applyDimensionChanges(...)` silently ignores an `active` change submitted for a `BP`/`PR` row's `id` — the request still succeeds (`200`) for any other rows in the same payload, but that one row's stored `active` value is left untouched. This applies regardless of the row's own `mandatory` value, i.e. independently of the pre-existing `"Mandatory accounting dimensions cannot be deactivated"` guard.
+
+  **Rationale.** Every window that actually renders these two dimensions (Assets, Financial Account, Amortization) already hardcodes Contacto/Producto as always-visible and never reads this config's `active` flag — so the toggle was a dead no-op that only misled users (the "Opcional · Ventas y Compras" caption implied disabling it would hide the field somewhere; it never did). Project (`PJ`) and Cost Center (`CC`) are unaffected — still genuinely config-gated, still returned by `buildDimensions` and still writable by `applyDimensionChanges`.
+
+  **The stored `IsActive`/`IsMandatory` values are NOT retroactively corrected by this code change** — a client whose BP/PR rows were already `IsActive='N'`/`IsMandatory='N'` before ETP-4879 stays that way at the DB level; this handler only stops future edits through this one screen. The companion corrective data-fix `R37-acctdim-bp-pr-locked-active` (`cli/src/data-fixes/sql/20260917T120000Z__R37-acctdim-bp-pr-locked-active.sql` in `etendo_schema_forge`, gap K2) forces both flags to `'Y'` fleet-wide; the GOClient sampledata seed (`referencedata/sampledata/GOClient/C_ACCTSCHEMA_ELEMENT.xml`) was corrected in the same change so a newly onboarded tenant is born correct. See `etendo_schema_forge`'s `docs/etendo-ad/onboarding-gaps.md` §K2 for the full DB-state investigation and safety analysis.
+
+**Real-world example — `ETGO_FDI_DECL_FK` cascade delete (ETP-5393 Bug D, same bug class as ETP-4830 above):** `FiscalDeclCrudHandler#handleDeclDelete` calls `OBDal.getInstance().remove(decl)` to delete a draft `ETGO_Fiscal_Decl` row, without first deleting its `ETGO_Fiscal_Decl_Incident` children. `ETGO_FDI_DECL_FK` (`etgo_fiscal_decl_incident.etgo_fiscal_decl_id → etgo_fiscal_decl.etgo_fiscal_decl_id`) had no `ON DELETE` behavior (`NO ACTION`), so Postgres rejected the delete with a raw FK-violation whenever the declaration had at least one incident row (e.g. after a failed AEAT submission attempt that reverted it to draft) — surfacing to the user as an opaque 500 ("No se pudo eliminar la declaración."). Fixed the identical way: adding `onDelete="cascade"` directly to `ETGO_FDI_DECL_FK` in `src-db/database/model/tables/ETGO_FISCAL_DECL_INCIDENT.xml` (not a raw `ALTER TABLE` against the live DB — that XML is `update.database`'s actual source of truth, so a hand-run `ALTER TABLE` would be silently reverted on the next rebuild). No Java change was needed in `handleDeclDelete` itself: `OBDal.remove` issues the same `DELETE` regardless, and Postgres now cascades it. Verified locally by running `update.database` and confirming `pg_constraint.confdeltype = 'c'` for `etgo_fdi_decl_fk`, then inserting a draft declaration with an incident row and deleting the declaration directly — the incident row is removed automatically.
+
+**Real-world example — `UserRoleAssignmentHandler`'s "Rol" advanced-filter query params (ETP-5188):** the Users window's list `GET` (record id absent) gained a THIRD pre-hook concern, `applyRoleFilter`, alongside the existing `excludeContactOnlyUsers` (ETP-5019) — both run unconditionally on every `user` list fetch, in `handle()`. The frontend's generic `criteria=` mechanism cannot express "filter by composed role" at all: it would build a dotted HQL property path through the `aDUserRolesList` one-to-many collection, which is invalid HQL and 500s (confirmed empirically). So the frontend's "Rol" advanced-filter field bypasses `criteria=` entirely for this one field and instead sends three DEDICATED query params on the same `user` list `GET`:
+
+| Query param | Meaning |
+|---|---|
+| `RoleIds=<id1>,<id2>,...` | Comma-separated `AD_Role_ID`s — the fixed system role templates and/or the caller's own client's admin role. |
+| `NoRole=true` | Users with no composed role at all (and not the admin). |
+| `RoleFilterNegate=true` | Negates the ENTIRE `RoleIds`/`NoRole` combination (wraps it in `not (...)`) — no new query semantics on top of the two params above. |
+
+Together these three primitives express the frontend's 4 advanced-filter operators (see
+`etendo_schema_forge`'s `docs/generated-custom-windows/user.md` → "Users list role filter" for the
+UI side):
+
+| Operator ("Rol" field) | Query params |
+|---|---|
+| Es | `RoleIds=` and/or `NoRole=true` |
+| No es | same, plus `RoleFilterNegate=true` |
+| Está vacío | `NoRole=true` alone |
+| No está vacío | `NoRole=true&RoleFilterNegate=true` |
+
+**Why two branches for a `RoleIds` match.** Since ETP-4906, a user's actual access is never a direct
+`Default_Ad_Role_ID` match against a template — it is expressed via that user's PERSONAL role, which
+COMPOSES 1+ templates through an active `AD_Role_Inheritance` row. The one exception is the
+client-admin "Admin" role, which `UserRoleCompositionService` never lets a personal role compose —
+it is always a DIRECT `Default_Ad_Role_ID` assignment (see §8d). `buildComposedOrDirectPredicate`
+covers both shapes with one OR:
+
+```
+(e.defaultRole.id in ('ID1','ID2')) or
+(exists (select 1 from ADRoleInheritance ri where ri.role = e.defaultRole and
+         ri.active = true and ri.inheritFrom.id in ('ID1','ID2')))
+```
+
+**The "Sin rol" (`NoRole=true`) predicate** additionally excludes the client-admin role — Admin is a
+real, direct role assignment, never "no role":
+
+```
+not exists (select 1 from ADRoleInheritance ri where ri.role = e.defaultRole and ri.active = true)
+and (e.defaultRole is null or e.defaultRole.id <> '<clientAdminRoleId>')
+```
+
+`<clientAdminRoleId>` is resolved per-request from the caller's own `OBContext.getCurrentClient()`
+(`resolveClientAdminRoleId`, the same `OBCriteria` shape `SFRolesOverview#resolveTenantRoles`
+already uses) and simply omitted from the predicate — never inlined as a literal `null` — when it
+cannot be resolved.
+
+**Injection mechanism and id sanitization.** Both predicates are injected as an HQL `_neoWhere`
+predicate (`NeoCrudHelper.NEO_WHERE_PARAM`, the exact same query-param mechanism
+`excludeContactOnlyUsers` already uses on this same list `GET`) — combined with any EXISTING
+`_neoWhere` predicate (from `excludeContactOnlyUsers` or elsewhere) via `and`, while `RoleIds` and
+`NoRole` combine with `or` BETWEEN themselves (two chips of the same multi-select filter, not two
+independent filters). `RoleFilterNegate`, when present, wraps that `or`-joined combination in one
+outer `not (...)` — applied AFTER the combination is built and BEFORE it is merged into any existing
+`_neoWhere` predicate.
+
+`NEO_WHERE_PARAM` has **no bind-parameter mechanism** — `NeoCrudHelper#buildWhereClause` splices the
+predicate string into the HQL text verbatim. Every `AD_Role_ID` inlined into the predicate is
+therefore validated against `^[A-Fa-f0-9]{32}$` (`sanitizeRoleIds`, Etendo AD ids are 32 hex chars,
+case-insensitive) before being spliced in — an entry that doesn't match is logged at WARN and
+silently dropped rather than reaching the HQL string unescaped, so one malformed id in `RoleIds`
+degrades the filter instead of 500ing the whole list. `RoleFilterNegate` itself carries no id/value
+and needs no sanitization — it only decides whether to prepend the literal `"not "` wrapper, and is
+parsed with the same strict `"true"`-only (case-insensitive), anything-else-is-absent convention
+`NoRole` already uses.
+
+**No-op contract.** `applyRoleFilter` returns immediately, touching nothing, when both `RoleIds` is
+empty/absent AND `NoRole` is absent — regardless of `RoleFilterNegate` (negating an empty/no-op
+filter would otherwise wrongly match every user). Every other `user` entity concern in this class
+(the invitation flow above, the write-path guards, `excludeContactOnlyUsers`) is unaffected — this
+is purely additive to the list `GET` path.
+
+*As of this writing, `applyRoleFilter`/`sanitizeRoleIds`/`buildComposedOrDirectPredicate`/
+`buildNoRolePredicate` have no dedicated unit test in `UserRoleAssignmentHandlerTest` — this feature
+was verified live/manually against `localhost:3100` instead (see `etendo_schema_forge`'s
+`docs/plans/2026-09-11-etp-5188-role-filter-open-questions.md`, "Live verification performed").*
 
 #### 5.3.1 Post-hook writes and the `updated` audit token (ETP-5255 / ETP-5262)
 
@@ -3230,7 +3411,7 @@ Folder nodes are never filtered directly: their children are filtered first (pos
 ```json
 {
   "windowAccess": { "111": "full", "268": "read-only" },
-  "capabilities": { "showAccountingFields": true, "isAdminOrClientAdmin": true }
+  "capabilities": { "showAccountingFields": true, "isAdminOrClientAdmin": true, "isOwner": false }
 }
 ```
 
@@ -3239,12 +3420,14 @@ Folder nodes are never filtered directly: their children are filtered first (pos
 **Resolution order** (mirrors `NeoAccessHelper.hasWindowAccess(Role, String, String)`, §7 item 3):
 
 1. No role assigned → `{"windowAccess": {}, "capabilities": {}}`, without querying the database — same convention as `SFListMenu`: the role is captured once, at the very top of the request, before the servlet enters `OBContext.setAdminMode()`.
-2. System Administrator role (`"0"`) or a client-admin role (`NeoAccessHelper.isAdminOrClientAdmin(Role)`, now `public` specifically so this webhook can reuse it): every distinct window ID in the **union** of (a) `AD_Window` references from active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` rows (`resolveActiveEtendoGoWindowIds()`) and (b) windows with at least one active `AD_Window_Access` row across **any role** (`resolveWindowsWithAnyGrant()`) resolves to `"full"`. Both queries skip null window references, and the union deduplicates IDs. The grant query has no per-role or explicit client/tenant restriction and does not require a spec, menu node, or read-write grant; neither query explicitly filters `AD_Window.IsActive`. This includes permission-anchor windows such as Financial Reports, Smart Scan, and Inventory Stock Report, which have grants but no backing spec (ETP-5240). `capabilities.showAccountingFields` / `capabilities.isAdminOrClientAdmin` are both always `true`; the accounting column is never queried for this branch.
-3. Otherwise, for every active `AD_Window_Access` row the role has: `IsReadWrite = true` → `"full"`; `IsReadWrite = false` → `"read-only"`. `capabilities.showAccountingFields` is read directly off the new `AD_Role.EM_ETGO_Show_Acct_Fields` boolean extension column (ETP-4520) for the resolved role, via a native SQL lookup rather than the DAL entity model (the column was added straight to the physical table and is not yet mapped as a typed entity property). `capabilities.isAdminOrClientAdmin` is always `false` in this branch — reaching it at all already proves the bypass check in step 2 failed for this role.
+2. System Administrator role (`"0"`) or a client-admin role (`NeoAccessHelper.isAdminOrClientAdmin(Role)`, now `public` specifically so this webhook can reuse it): every distinct window ID in the **union** of (a) `AD_Window` references from active, `SPEC_TYPE = 'W'` `ETGO_SF_SPEC` rows (`resolveActiveEtendoGoWindowIds()`) and (b) windows with at least one active `AD_Window_Access` row across **any role** (`resolveWindowsWithAnyGrant()`) resolves to `"full"`. Both queries skip null window references, and the union deduplicates IDs. The grant query has no per-role or explicit client/tenant restriction and does not require a spec, menu node, or read-write grant; neither query explicitly filters `AD_Window.IsActive`. This includes permission-anchor windows such as Financial Reports, Smart Scan, and Inventory Stock Report, which have grants but no backing spec (ETP-5240). `capabilities.showAccountingFields` / `capabilities.isAdminOrClientAdmin` are both always `true`; the accounting column is never queried for this branch. **`capabilities.isOwner` is the one exception** (ETP-5395): it is always PRESENT in this branch's response too, but it is never blanket `true` — it is resolved per-user via `OwnerSupport.isOwner(userId)`, so a client-admin who also happens to be the tenant owner gets `isOwner: true`, and one who is not still gets `isOwner: false`.
+3. Otherwise, for every active `AD_Window_Access` row the role has: `IsReadWrite = true` → `"full"`; `IsReadWrite = false` → `"read-only"`. `capabilities.showAccountingFields` is read directly off the new `AD_Role.EM_ETGO_Show_Acct_Fields` boolean extension column (ETP-4520) for the resolved role, via a native SQL lookup rather than the DAL entity model (the column was added straight to the physical table and is not yet mapped as a typed entity property). `capabilities.isAdminOrClientAdmin` is always `false` in this branch — reaching it at all already proves the bypass check in step 2 failed for this role. `capabilities.isOwner` is resolved exactly the same way as in step 2 above — via `OwnerSupport.isOwner(userId)`, per-user — since ownership is orthogonal to admin/client-admin status.
 
 **`AD_Role.EM_ETGO_Show_Acct_Fields`:** a Yes/No extension column added by this module (`AD_Column_ID = A0F2D12B5B4A48C2855EE73E3E93E274`, default `N`) and exposed as a real field (`AD_Field_ID = 98C71197D0744EED96856A497E49F159`) on the classic `AD_Role` window/tab, so a functional consultant can toggle it like any other role attribute. It gates accounting-sensitive field/tab visibility in Etendo GO — e.g. the `Posted` status pill on invoice windows and the financial-account edit form's "Cuentas contables" tab — independently of per-window `AD_Window_Access`. **`resolveShowAccountingFields` above reads it as a flat stored value with no join to `AD_Role_Inheritance` — it is a DERIVED fact, not an independent one, for any role composed via `UserRoleCompositionService` (ETP-4852).** `UserRoleCompositionService#syncShowAccountingFieldsFlag` (ETP-4877), called unconditionally at the end of every `reconcileInheritances`, keeps a personal role's column in sync with whether it currently inherits from the system Finance template (`'Y'` iff yes, `'N'` otherwise — both directions, including Finance being removed). The retroactive half for personal roles that predate this sync (or were never touched by a live composition call) is `R26-tenant-owner-and-personal-role-retrofit.sql` Step 8b in `etendo_schema_forge`, plus a one-time system-level health check (Step 8a) correcting the Finance template's own column, found stale (`'N'`) on the local dev DB. Both predicates must be kept in lockstep.
 
 **`capabilities.isAdminOrClientAdmin`** (ETP-4513) is the proactive signal the frontend uses to decide whether to show admin-only settings entries — e.g. the "Configuración > Roles" menu item, backed by `SFRolesOverview` (§8c) — up front, instead of showing them to every role and handling denial only once the page itself loads.
+
+**`capabilities.isOwner`** (ETP-5395, backed by `AD_User.EM_ETGO_Is_Owner` — ETP-4830, §7 item 10) reflects whether the CURRENT USER — not the current role — is the tenant's onboarding owner. Unlike the other two capabilities above, it is resolved identically in BOTH branches of the resolution order (steps 2 and 3), via `OwnerSupport.isOwner(String)`, off the current user captured before admin mode the same way the current role is captured for the rest of this webhook. Ownership is orthogonal to admin status: a client-admin who happens to also be the tenant owner still gets `isOwner: true`, and one who is not still gets `isOwner: false`. The frontend uses it to gate "Primeros pasos" (First Steps onboarding) visibility to the owner only.
 
 ---
 
@@ -3393,6 +3576,59 @@ that separate, provisioning-side gap — as of ETP-5116, ALL 3 of these windowle
 fiscal, Modelos fiscales, and now Not Posted Documents too, via the new standalone-process
 mechanism) also have a real provisioning-side grant (see that note); this display-side proxy
 resolution remains independently needed regardless, since it serves a different endpoint/purpose.
+
+**Informes subsection — `reports`/`reportCount`/`reportsMatrix` (ETP-5402).** A PARALLEL set of
+fields, sibling to `windows`/`windowCount`/`matrix` and never merged into them, covering the exact
+9 reports the real `report-viewer` gallery shows — 8 under Finance, 1 under Inventory (confirmed
+live against a running environment, 2026-09-21; `ReportViewerPage.jsx`'s own `REPORT_PREVIEW_IMAGES`
+keys in `etendo_schema_forge` are the authoritative list). **This corrects an earlier revision of
+this section**, which wrongly included 6 rows tied to `ETGO_SF_ENTITY.ad_tab_id` pointing at the
+"Financial Account" window (`bank-statements`, `bank-reconciliation`, `cash-close`, `financial-
+account-transactions`, `financial-account-bank-connection`, `financial-accounts-page`) — none of
+which is an actual gallery card — while missing 5 real ones (`balance-sheet`, `profit-loss`,
+`report-general-ledger`, `report-journal-entries`, `report-trial-balance`) that have no
+`ETGO_SF_SPEC` row of their own at all. None of the 9 real rows is a candidate for the
+`SPEC_TYPE = 'W'` window resolution above (windowless by construction), so each row's access is
+resolved via whichever mechanism its own NEO handler actually gates on:
+
+| Row id(s) | Mechanism | Anchor |
+|---|---|---|
+| `tax-report` | Classic `AD_Process_Access` (`TaxReportHandler` → `NeoAccessHelper#hasProcessAccess`) | `8C1331B9EC14CED7E040007F010119A0` |
+| `aging-receivable` / `aging-payable` | OBUIAPP `ProcessAccess` (`AgingReportHandler`, receivable/payable tiers) | `0D37A9F6109549DEB058373EF2DAEB6A` / `EB4C4053F3B94A17A08D1DD7E89CEB7E` |
+| `balance-sheet`, `profit-loss`, `report-general-ledger`, `report-journal-entries`, `report-trial-balance` (5 rows) | `AD_Window_Access` on "Informes financieros" / Financial Reports — a real, active, tab-less pseudo-window with NO backing `ETGO_SF_SPEC`, the SAME anchor `ReportViewerPage.jsx`'s own `REPORT_CATEGORY_WINDOW_IDS.finance` already uses to gate the whole "Informes" sidebar link for Finance; these 5 reports have no finer-grained access control of their own to resolve against | `D647D118F5014D00AF47A636B2CD0DD3` |
+| `inventory-stock-report` | `AD_Window_Access` on a tab-less pseudo-window | `6346B88619F948F9A42224BDB0B239FA` |
+
+This resolution logic lives in `com.etendoerp.go.schemaforge.util.ReportAccessCatalog` — a shared
+utility, NOT duplicated per-webhook, because `SFSystemRoleTemplates` (§8f) needs the exact same
+resolution for its own `reports` field and the two must never drift on which anchor id/category/
+kind backs a given row. `ReportAccessCatalog.resolveTierMap(Role)` dispatches per row; every
+`WINDOW`-kind anchor is a pseudo-window with no backing spec (never a real, already-exposed window
+a caller might have separately resolved), so every row always does its own single-anchor query —
+there is no "reuse an already-resolved tier" shortcut to take. The classic `tax-report` row is
+resolved as strictly binary — `"full"` for any active grant, never `"read-only"` — matching
+`NeoAccessHelper#hasProcessAccess`'s own binary semantics, deliberately NOT the read/write tiering
+`IsEditableField` gives the OBUIAPP/window mechanisms.
+
+`roleJson.reports` is the same `{id, name, tier}` shape as `windows[]` (only accessible rows
+appear, sorted by name — `reportCount` mirrors `windowCount`'s "reports this role can actually
+reach" meaning); `reportsMatrix.categories[]` is the same `{name, reports: [...]}` shape as
+`matrix.categories[].windows[]`, grouped by a HARDCODED category per row (`Finance` for 8 of the
+9 rows, `Inventory` for `inventory-stock-report`) since a report row's category cannot be derived
+from the classic `AD_Menu` tree the way a real window's can.
+
+**Tax Report template grant (ETP-5402).** Confirmed live (2026-09-21) that NONE of the 4 system
+template roles held the classic `AD_Process_Access` grant for `8C1331B9EC14CED7E040007F010119A0` —
+the 114 existing grant rows were either admin/client-admin (redundant, bypassed anyway) or 8
+legacy F&B-sample-data/test roles pre-dating the template-role model. `TemplateRoleWindowAccess`
+gained a third standalone-grant mechanism, `standaloneClassicProcessGrantsByRoleId()` (distinct
+from the pre-existing OBUIAPP `standaloneProcessGrantsByRoleId()`, ETP-5116 — different table,
+`AD_Process_Access` vs. `obuiapp_process_access`), granting this process to Finance only.
+Reconciled by `EnsureSystemRoleTemplatesScript#reconcileStandaloneClassicProcessAccess`, called
+from `execute()` after the existing `reconcileStandaloneProcessAccess` — same "grant every desired
+process id directly, independent of any window grant" shape, same accepted idempotency tradeoff
+(a re-run's window-button-derived `reconcileProcessAccess` deletes-then-the-standalone-step-
+immediately-reinserts the row on the very next `update.database`, since it isn't in that method's
+own button-derived desired set — the end state is correct, it just isn't a strict no-op).
 
 ---
 
@@ -4031,6 +4267,14 @@ client/organization filtering explicitly disabled on that query, since these rol
 system client and a non-system caller's ambient readable-client set would otherwise filter their
 `AD_Window_Access` rows out entirely.
 
+**Informes `reports` field (ETP-5402).** Each role also carries a `reports` array, same `{id,
+name, tier}` shape as `windows[]`, resolved via the shared `ReportAccessCatalog` utility
+documented in §8c — required here, not just on `SFRolesOverview`, because `UserRolesTab.jsx`'s
+matrix COLUMNS (the actual per-cell access data for the common non-admin-holder case) come from
+THIS endpoint, not `SFRolesOverview` (that one is used there only for `activeWindowIds`/admin-
+holder detection). Without it, every Informes cell in that tab would silently resolve "no access"
+for every role regardless of the real grant.
+
 ---
 
 ## 8g. Debug Invitation Bypass (SFDebugInvitationBypass Webhook, ETP-4830)
@@ -4280,7 +4524,7 @@ eight audit call sites funnel through — writes the history row immediately BEF
 `EmailSafetyStore#recordAudit`, so both land in the same transaction (the DAL safety store ends a
 successful send with `SessionHandler.commitAndStart()`). The gate is declarative:
 `EmailContract#logsSendHistory()` defaults to `false` and is overridden `true` once, in
-`DefaultDocumentSendEmailContract`, so the six document-send contracts opt in automatically while
+`DefaultDocumentSendEmailContract`, so the eight document-send contracts opt in automatically while
 the account/auth family (invitation, reset password, login alert, organization joined) stays out.
 There is no contract-name list anywhere.
 
@@ -4588,6 +4832,136 @@ re-login.
 
 ---
 
+## 8m. Costing Schedule Cadence Realignment (SFCostingCadence Webhook, ETP-5370)
+
+`SFCostingCadence` (`GET /sws/neo/costingcadence[?scope=client|all]` — reached ONLY through the NEO
+pseudo-spec bridge, §4.10/§4.11) enforces the costing invariant on tenants that already exist:
+**exactly ONE active scheduled `CostingBackground` request per client, firing every 30 seconds.**
+
+> **This endpoint is the escape hatch, not the main path.** The fleet-wide correction is done by
+> `CostingCadenceStartup` (`com.etendoerp.go.startup`), which runs the same routine over every tenant
+> on application boot — and shipping the module IS a boot, so a release realigns everything with no
+> operator action. Reach for this webhook to correct ONE tenant without waiting for a release.
+> It is also what makes `scope=all` a rarely-needed path: see the scope note below.
+>
+> **The startup is ONE-SHOT per tenant; this endpoint is not.** The startup marks each tenant it
+> migrates in `ETGO_DATA_FIX_HISTORY` (`fix_id='__costing-cadence-30s__'`) and skips it from then on,
+> so it is a migration rather than a standing policy — see `CostingCadenceStartup`'s javadoc for why
+> that distinction matters once users can pick their own frequency. This webhook deliberately ignores
+> those markers: an operator asking for one tenant to be corrected means it.
+
+### Why this is a webhook and not a data-fix `.sql`
+
+This is the reusable lesson, not an implementation detail. **An `UPDATE` on `AD_PROCESS_REQUEST`
+does not change what a running instance executes.** `OBScheduler.initialize()` reads that table
+exactly ONCE, at Quartz startup; afterwards the trigger lives in Quartz's own JobStore and
+`DefaultJob.execute` rebuilds its bundle from the `JobDataMap`, never re-reading the row. The same
+conclusion was reached independently on ETP-5269 and is written up in `SFAcctProcessMonitor`'s class
+javadoc ("Refuted from source"), and the PSD2 schedule-removal data-fix records that even DELETING
+the row leaves the job firing — it just starts failing with an FK violation.
+
+Production does not restart Tomcat, so a `.sql` would leave every tenant's row claiming 30 seconds
+while the trigger kept firing every 5 minutes — worse than doing nothing, because the row would then
+be lying about what runs. The correction has to happen inside the live JVM. This is exactly the
+escape hatch the data-fixes framework documents for its own SQL-first rule (see `tenant-fixer.md`,
+"How to choose the fix mechanism"): too stateful for hand SQL → write it once in Java and expose it
+as a remediation webhook.
+
+### What it does
+
+The work lives in `OnboardingCostingScheduleService#realignCadence(String)`, next to the
+provisioning code whose row shape it has to match — one implementation, no SQL/Java drift. Per
+client:
+
+| Step | Behaviour |
+|---|---|
+| Winner | The most recently created active `SCH` request (ties broken by id, so the choice is deterministic) — it is the one onboarding or the ETP-5245 data-fix provisioned with a resolved `ob_context` for that tenant |
+| Losers | Unscheduled from Quartz, then marked `status='UNS'` + `isactive='N'`. **Never deleted** — the history stays auditable |
+| Cadence | `timing='S'`, `frequency='1'`, `SECONDLY_INTERVAL=30`, `MINUTELY_INTERVAL` cleared to `NULL` |
+| Re-arm | `OBScheduler.reschedule(...)` on the survivor — `schedule(...)` is a no-op when the Quartz job already exists, so reschedule (unschedule + delete + schedule) is the only thing that works here |
+| `COM` rows | Ignored. A completed one-shot run is execution history, not a schedule |
+
+The commit happens BEFORE the re-arm: `TriggerProvider` reads the timing columns through the
+scheduler's own JDBC connection, which cannot see an uncommitted row.
+
+**`NEXT_FIRE_TIME` must be nulled, or the new cadence is correct but dormant.** This is the one thing
+live verification caught that no unit test could. `ScheduledTriggerGenerator#getBuilder` does not
+start a rebuilt trigger from the request's start boundary when the row carries a next fire time — it
+starts it *at* that instant:
+
+```java
+if (StringUtils.isEmpty(data.nextFireTime)) { builder.startAt(getStartDate(data)); }
+else                                        { builder.startAt(getNextFireDate(data)); }
+```
+
+That column still holds the OLD trigger's next fire. Measured on the shared dev DB: the webhook ran
+at 19:55:02, the row read `1|30` immediately, and the process did not run once until **19:58:55** —
+the stale next fire — after which the 30-second cadence held exactly. Harmless when the old cadence
+was 5 minutes; a daily old cadence would have left the job idle for a day. `realignCadence` therefore
+nulls it in native SQL (the column is deliberately unmapped on the `ProcessRequest` entity — it is
+scheduler bookkeeping written by `ProcessMonitor` through `ProcessRequestData`'s XSQL) and restates
+`START_DATE`/`START_TIME` from the provisioning path's own helpers, jitter included.
+
+**The survivor is re-armed even when its row already reads 30 s.** That is deliberate, and it is the
+direct consequence of the section above: the row is not evidence about the live trigger. Re-arming is
+the only thing that can guarantee the invariant, and at a 30-second cadence resetting the trigger
+phase costs nothing. The per-client `status` still distinguishes `realigned` (the row needed
+changing) from `alreadyCorrect` (it did not).
+
+A failure on one tenant is rolled back, recorded as `failed`, and the sweep continues with the rest.
+
+### Access and scope
+
+Gated on `NeoAccessHelper.isAdminOrClientAdmin(role)`, enforced server-side.
+
+- `scope=client` (**default**) — realigns the CALLER'S OWN client only.
+- `scope=all` — sweeps every tenant in one call, and is **refused unless the caller is in the System
+  client (`'0'`)**. Letting a tenant admin re-arm other tenants' Quartz jobs would be a privilege
+  escalation, so the check is on the CLIENT, not only on the role.
+
+Refusals answer with a payload (`success:false` + `reason`), never a 403 — `NeoGoWebhookBridge` maps
+`responseVars["error"]` to HTTP 500, so a refusal must not travel as an error. Reasons:
+`notAuthorized`, `systemScopeRequired`, `schedulerUnavailable` (a node under the no-execute
+background policy leaves Quartz in standby, where schedule/reschedule silently no-op — reporting
+success there would be a lie).
+
+### Response
+
+```json
+{
+  "success": true,
+  "scope": "all",
+  "realigned": 3, "alreadyCorrect": 1, "failed": 0, "deactivated": 1,
+  "clients": [
+    { "clientId": "...", "clientName": "E2E User 1", "status": "realigned",
+      "requestId": "...", "deactivated": 0 }
+  ]
+}
+```
+
+### What it does not do
+
+**It never creates a missing schedule.** A client with zero active `SCH` requests is simply absent
+from the response. Provisioning one is a different problem with a different owner — onboarding step 8
+for new tenants, `R36-costing-background-schedule` for existing ones. Read an empty `clients` array as
+"nothing here was misconfigured", not as "every tenant is covered".
+
+Provisioning one was `R36-costing-background-schedule`'s job, and **that fix is retired as of
+ETP-5370** (`retired.json`): it hardcoded the 5-minute cadence, so any row it still created would be
+born with the value the product has moved away from. Its long-standing side problem is resolved by
+the same change — R36 INSERTed `SCH` rows and never registered them with Quartz, leaving them
+dormant until an `OBScheduler.initialize()` that never came, and `CostingCadenceStartup` now re-arms
+every surviving request on each boot, dormant ones included.
+
+### Verifying it worked
+
+The DB alone cannot prove it — that is the whole point. After calling it, check in Classic's Process
+Request window that `next_fire_time - previous_fire_time` is 30 s on the surviving row, **without
+having restarted Tomcat**. The DB-side invariant (one active `SCH` row per client at `1`/`30`) is
+necessary but not sufficient.
+
+---
+
 ## 9. Testing
 
 The module includes unit tests that run without a backend:
@@ -4602,8 +4976,8 @@ The module includes unit tests that run without a backend:
 | `SFListMenuTest` | -- | Tree building/pruning, flat search, role-based filtering (window/process/OBUIAPP-process nodes), no-role → empty menu, multi-level nesting, viewer-role identity fields (`viewerRoleId`/`viewerIsClientAdmin`) present when a role is resolved and absent when it isn't. |
 | `SFWindowAccessMapTest` | -- | Role-based windowAccess resolution (full/read-only/absent), no-role → both maps empty, admin/client-admin bypass → full access to every active Etendo GO window + every capability true, `showAccountingFields` true/false/unset/missing-role, `isAdminOrClientAdmin` true on bypass / false for a restricted role. |
 | `WidgetAccessPolicyTest` | -- | ETP-5088 dashboard widget gate: financial-account reachable by Finance only (and not by Sales/Purchasing), product reachable by every template role, null role denied without consulting the access helper, the helper always asked with `GET`, per-slug sales/purchase split, unknown/blank/null slug denied (fail closed). |
-| `SFRolesOverviewTest` | -- | Admin/client-admin access gate (no role, restricted role, System Administrator, client-admin); tenant-relative role resolution via a client-scoped `Role` criteria (not hardcoded ids), admin-first-then-fixed-name sort order, a tenant with fewer than 5 matching roles; distinct-user-count aggregation; GO-window intersection (native-only windows excluded); tier resolution (full/read-only); exception handling. Two defense-in-depth regression cases confirm the gate is genuinely `isAdminOrClientAdmin`, not "is this one of the tenant's 5 fixed roles": a caller authenticated AS one of those roles (Finance) but not admin/client-admin is still denied (empty `roles`, zero `Role` lookups), and a role with zero active `AD_User_Roles` AND zero active `AD_Window_Access` rows degrades gracefully to `userCount: 0` + an empty `windows` array for all 5 roles rather than throwing or omitting the role. **ETP-4907 additions:** missing tenant roles fall back to the system-level templates with composition-based `userCount` (`UserRoleCompositionService` constructed lazily, once, via `mockConstruction`); an active tenant role is never overridden by its template counterpart, and the composition service is never even constructed when unneeded; the `matrix` covers every GO window (including one no role can reach, resolving to `"none"`) grouped by category, and a window with no resolvable category falls back to the `"Other"` bucket. QA (Sentinel) added 3 more targeting the fallback's early-return branch: a system-template role that doesn't resolve at all (`OBDal.get` returns `null`, e.g. deleted/never-seeded) is silently omitted rather than appearing as a 5th entry with null/empty fields; a system-template role that resolves but is `IsActive = 'N'` is treated identically (also omitted, not returned with stale data); and the full degradation case — every one of the 4 templates missing/inactive — still returns a valid minimal response (just the admin card, `roles.length() == 1`) without ever constructing `UserRoleCompositionService`, confirming the fallback's laziness holds even under total non-resolution, not only when every fixed name already has a tenant role. |
-| `TemplateRoleWindowAccessTest` (ETP-4878) | -- | The real ETP-4878 permission matrix in `TemplateRoleWindowAccess` (`src/com/etendoerp/go/roles/`), DB-free (12 tests): exactly the 4 non-Admin template roles present, exact grant counts per role (Sales 13 / Purchasing 11 / Finance 27 / Inventory 13, 64 total), Asientos manuales resolves to Simple G/L Journal and never to the classic G/L Journal window (`132`), Sales has no grant for Pago, "Categoría del producto" is read-only for Sales/Purchasing but full for Finance/Inventory, no role repeats the same `AD_Window_ID` twice, `byRoleId()` returns a fresh mutable map per call. QA (Sentinel) added 3 more: the 64 grants resolve to exactly 33 DISTINCT `AD_Window_ID`s (not just a raw count that would stay 64 even under duplication); all 8 window/role pairs from the old ETP-4852 2-window smoke test survive unchanged (same full access) in the new matrix, confirming `EnsureSystemRoleTemplatesScript#removeStaleWindowAccess`'s delete path is never actually exercised by that specific migration; and at least one window (e.g. Contactos, Pedido de venta) is granted at genuinely conflicting access levels across 2+ roles — the data-level root cause behind the ETP-4852 cross-template overlap bug fixed in `UserRoleCompositionService` (see §8d and `UserRoleCompositionServiceOverlapIntegrationTest`). |
+| `SFRolesOverviewTest` | -- | Admin/client-admin access gate (no role, restricted role, System Administrator, client-admin); tenant-relative role resolution via a client-scoped `Role` criteria (not hardcoded ids), admin-first-then-fixed-name sort order, a tenant with fewer than 5 matching roles; distinct-user-count aggregation; GO-window intersection (native-only windows excluded); tier resolution (full/read-only); exception handling. Two defense-in-depth regression cases confirm the gate is genuinely `isAdminOrClientAdmin`, not "is this one of the tenant's 5 fixed roles": a caller authenticated AS one of those roles (Finance) but not admin/client-admin is still denied (empty `roles`, zero `Role` lookups), and a role with zero active `AD_User_Roles` AND zero active `AD_Window_Access` rows degrades gracefully to `userCount: 0` + an empty `windows` array for all 5 roles rather than throwing or omitting the role. **ETP-4907 additions:** missing tenant roles fall back to the system-level templates with composition-based `userCount` (`UserRoleCompositionService` constructed lazily, once, via `mockConstruction`); an active tenant role is never overridden by its template counterpart, and the composition service is never even constructed when unneeded; the `matrix` covers every GO window (including one no role can reach, resolving to `"none"`) grouped by category, and a window with no resolvable category falls back to the `"Other"` bucket. QA (Sentinel) added 3 more targeting the fallback's early-return branch: a system-template role that doesn't resolve at all (`OBDal.get` returns `null`, e.g. deleted/never-seeded) is silently omitted rather than appearing as a 5th entry with null/empty fields; a system-template role that resolves but is `IsActive = 'N'` is treated identically (also omitted, not returned with stale data); and the full degradation case — every one of the 4 templates missing/inactive — still returns a valid minimal response (just the admin card, `roles.length() == 1`) without ever constructing `UserRoleCompositionService`, confirming the fallback's laziness holds even under total non-resolution, not only when every fixed name already has a tenant role. **ETP-5402 additions (7 cases, 43 tests total):** the Informes `reports`/`reportCount`/`reportsMatrix` contract — a role with no grants at all gets an empty `reports` array; an OBUIAPP grant on the Receivables Aging process surfaces `aging-receivable` with the correct tier; a classic `AD_Process_Access` grant on `tax-report` always resolves `"full"`, never `"read-only"`, even when the grant row itself has `IsEditableField = false` (binary semantics); a `FULL` grant on the "Informes financieros" pseudo-window surfaces all 5 financial-family rows without any separate per-row grant; `inventory-stock-report` resolves via its own pseudo-window grant independent of `goWindows` membership, and never leaks into the real `windows`/`windowCount`; `reportsMatrix` groups rows by their hardcoded category (`Finance`/`Inventory`) and marks every ungranted row `"none"`. |
+| `TemplateRoleWindowAccessTest` (ETP-4878) | -- | The real ETP-4878 permission matrix in `TemplateRoleWindowAccess` (`src/com/etendoerp/go/roles/`), DB-free (12 tests): exactly the 4 non-Admin template roles present, exact grant counts per role (Sales 13 / Purchasing 11 / Finance 27 / Inventory 13, 64 total), Asientos manuales resolves to Simple G/L Journal and never to the classic G/L Journal window (`132`), Sales has no grant for Pago, "Categoría del producto" is read-only for Sales/Purchasing but full for Finance/Inventory, no role repeats the same `AD_Window_ID` twice, `byRoleId()` returns a fresh mutable map per call. QA (Sentinel) added 3 more: the 64 grants resolve to exactly 33 DISTINCT `AD_Window_ID`s (not just a raw count that would stay 64 even under duplication); all 8 window/role pairs from the old ETP-4852 2-window smoke test survive unchanged (same full access) in the new matrix, confirming `EnsureSystemRoleTemplatesScript#removeStaleWindowAccess`'s delete path is never actually exercised by that specific migration; and at least one window (e.g. Contactos, Pedido de venta) is granted at genuinely conflicting access levels across 2+ roles — the data-level root cause behind the ETP-4852 cross-template overlap bug fixed in `UserRoleCompositionService` (see §8d and `UserRoleCompositionServiceOverlapIntegrationTest`). **ETP-5402 additions (4 cases, 28 tests total):** the new `standaloneClassicProcessGrantsByRoleId()` mechanism (the Tax Report grant, §8c) — exposes exactly the 4 non-Admin template roles as keys; Finance holds exactly the one classic-process grant (`tax-report`), nothing else; Sales/Purchasing/Inventory hold zero standalone classic-process grants; the map is a fresh mutable copy per call, same "no shared mutable state between callers" contract as `standaloneProcessGrantsByRoleId()`/`byRoleId()`. |
 | `UserRoleCompositionServiceTest` | -- | **ETP-4830 items #6.1/#6.2 additions:** `createFreshPersonalRole` grants `AD_Role_OrgAccess` to both the user's real organization and the wildcard `'*'` (two distinct `RoleOrganization` saves, both scoped to the role's own client); skips the duplicate org-access row when the user's own organization already IS the wildcard; sets `Default_Ad_Client_ID`/`Default_Ad_Org_ID`/`Default_M_Warehouse_ID`/`EM_SMFSWS_Default_WS_Role_ID` on the user (warehouse resolved via a `Warehouse` criteria scoped to the user's org); and skips the org/warehouse defaults entirely (no crash) when the user has no organization at all. Pure-Mockito unit test covering `assignTemplateRoles`'s input-validation guard clauses — the slice that fails before any persistence side effect: blank user id, `null` template id list, unknown user, unknown/inactive template id, a role that is not a template, the client-admin "Admin" role rejected even if somehow marked as a template, requested-id dedup happening before the per-id validation loop (verified via a single `Role` lookup despite 3 whitespace-noisy repeats of the same id), and the two `enforceCallerClientBoundary` regression cases from REVIEW cycle 1: a caller whose client differs from the target user's is rejected with a "different client" message, while the literal System Administrator role id (`"0"`) bypasses the check and reaches the (unrelated) template-validation error instead. **ETP-4906 additions:** `getAppliedTemplateRoleIds`'s read path — blank/unknown user id rejected the same way, a user with no `Default_Ad_Role_ID` yet returns an empty list without ever calling `createPersonalRole`, a reusable personal role with 2 active `AD_Role_Inheritance` rows returns both `InheritFrom` ids in `Seqno` order, and the read path enforces the exact same `enforceCallerClientBoundary` regression pair (cross-client rejected, System Administrator bypasses) as the write path. **ETP-4830 owner-protection additions:** the 4-arg `assignTemplateRoles(String, List, Role, String)` overload rejects a non-owner `callerUserId` reassigning a `EM_ETGO_Is_Owner`-flagged user's roles (`OwnerSupport.isOwner` mocked statically); the owner reassigning their OWN roles reaches the (unrelated) template-validation error instead, proving `enforceOwnerProtection` did not block it; a target NOT flagged as owner is unaffected regardless of caller mismatch (baseline); and a `null` `callerUserId` (the 2-/3-arg overloads) skips the check entirely without ever calling `OwnerSupport` — deliberately left unmocked in that one test so a regression would surface as a loud NPE, not a silent behavior change. |
 | `UserRoleCompositionServiceIntegrationTest` | 446 | Real-DB, end-to-end proof (6 tests) of the full add/reconcile/retract lifecycle: a system-level (`AD_Client_ID = '0'`) template's `AD_Window_Access` propagates onto a per-tenant personal role purely via core's own `RoleInheritanceEventHandler`/`RoleInheritanceManager` (no hand-rolled copy in this module); removing a template on a later call retracts what it had propagated; re-running with the identical template set is a no-op (0 added, 0 removed); an empty template list on a user's FIRST-EVER composition call still creates the personal role and syncs `AD_User_Roles`/`Default_Ad_Role_ID` rather than leaving the user role-less; three occurrences of the same valid template id in one request collapse into exactly one `AD_Role_Inheritance` row instead of one per occurrence; and a recompose call mixing one still-valid template with one bogus id is rejected wholesale without mutating the inheritance/access an earlier, unrelated successful call had already applied. Extends `WeldBaseTest`, NOT plain `OBBaseTest` — role-inheritance propagation is driven by a Hibernate interceptor firing a CDI event that only `WeldBaseTest`'s Arquillian-booted container wires to an observer; under plain `OBBaseTest` the propagation silently never fires, which is a test-harness gap, not a bug in the service. |
 | `UserRoleCompositionServiceOverlapIntegrationTest` | 1181 | Real-DB proof (13 tests, `WeldBaseTest`) of the cross-template `AD_Window_Access` overlap fix AND `WindowAccessOverlapCorruptionGuard`, all 7 triggers plus BUG-2 (see §8d above): composing Finance (full) + Sales (read-only) on a shared window succeeds (no `OBSecurityException`) and resolves to full access, with `client`/`organization` on the shared row matching the personal role's own, and both templates' non-shared windows also present (a real union); the same conflicting grants requested in the OPPOSITE order still resolve to full; re-running the identical overlapping template set is a no-op; `getAppliedTemplateRoleIds` reflects a real overlapping composition. **Triggers 1-5 (B6 rounds 1-5):** a bystander role never passed to `assignTemplateRoles` (e.g. gaining 2 overlapping inheritances via a raw Classic edit) is also protected (triggers 1-2); removing one of two overlapping template inheritances from a composed role is protected on the REMOVE path (trigger 3); gaining a read-only template inheritance never downgrades an existing full grant from another active template (trigger 4); removing the template that justified a previously-widened access level correctly downgrades the row instead of staying stuck at full (trigger 5, `InheritedFrom` bookkeeping). **Triggers 6-7 (B6 rounds 6-7):** removing one of FOUR overlapping templates (2 remaining templates still overlapping on a window) no longer duplicate-INSERTs (trigger 6); updating a template's own access level in place never deletes an already-correctly-sourced dependent row (trigger 7, the `onUpdate`/`UPDATED_GRANT` path). **BUG-2 + coverage gaps (round 8):** downgrading one of two overlapping templates' own access never downgrades a dependent when the other still grants full (`testDowngradingOneOfTwoOverlappingTemplatesNeverDowngradesDependentWhenTheOtherStillGrantsFullAccess`); a single inheritance event touching 3 windows at once resolves each window's most-permissive-wins independently (`testSingleInheritanceEventAffectingMultipleWindowsResolvesEachWindowIndependently`); two guard-triggering template updates inside one shared flush do not cause Hibernate reentrancy (`testTwoGuardTriggeringTemplateUpdatesInsideASingleFlushDoNotCauseHibernateReentrancy`). Uses the real Finance/Sales system templates (not throwaway roles) plus one confirmed-unused window (`AD_Window_ID = 100`) for the shared grant, so it is independent of whatever the templates' own real grants happen to be. |
@@ -4611,7 +4985,7 @@ The module includes unit tests that run without a backend:
 | `UserRoleCompositionServiceOverlapReverificationTest` | 308 | QA (Sentinel) independent re-verification (3 tests) of the same overlap fix, deliberately NOT reusing the fix author's own integration test: 3 simultaneously-overlapping templates (Finance/Sales/Purchasing on a shared window) resolve to most-permissive-wins with the "winner" (Purchasing, full) in the middle of the composition order — ruling out a pairwise-only fix that only checks the newest template against the immediately-preceding state; and two cases seeded with the REAL ETP-4878 matrix's own access levels (not the synthetic window `100`) — Sales (full) + Inventory (read-only) on Contactos resolves to full, and Sales + Purchasing both read-only on Categoría del producto stays read-only (confirms the fix does not spuriously promote a window to full just because 2+ templates share it). Also closes a data point the original QA report got wrong: `ad_window_access_un_key` is a plain `CREATE UNIQUE INDEX` on `(ad_role_id, ad_window_id)`, invisible to a `pg_constraint`-only query — Sales already had a live pre-existing row for Contactos, so this suite seeds only the missing side instead of inserting a duplicate. |
 | `SFAssignUserRolesTest` | -- | Unit test proving the webhook wires parameters/results/errors correctly, with `UserRoleCompositionService` itself intercepted via `mockConstruction` (its real behavior is the integration test's job): access gate (no role / restricted role denied without constructing the service), the happy path (admin composes, parses a whitespace/empty-entry-noisy `TemplateRoleIds` CSV, returns the assignment summary), missing `UserId` rejected before construction, an absent `TemplateRoleIds` parameter resolving to an empty (not `null`) list meaning "revoke all", a domain `OBException` folding into a `success:false` HTTP-200 result rather than the bridge's `error`/500 path, an unexpected `RuntimeException` surfacing as the bridge's `error` field instead, and the REVIEW cycle 1 regression proving the webhook actually forwards its already-resolved `currentRole` through to `assignTemplateRoles`'s 4-arg overload — the exact wiring the tenant-boundary check depends on. **ETP-4830 addition:** a companion regression proves the webhook ALSO resolves the caller's own `AD_User_ID` (via `OBContext.getOBContext().getUser()`, stubbed on the mock context) and forwards it as the 4th argument — the wiring `enforceOwnerProtection` depends on; every pre-existing test in this file leaves `mockContext.getUser()` unstubbed (defaults to `null`), confirming `callerUserId=null` for those and that the owner-protection check stays a no-op unless a real caller identity is resolved. |
 | `SFUserRoleAssignmentsTest` (ETP-4906) | -- | Unit test mirroring `SFAssignUserRolesTest`'s `mockConstruction` convention for §8e's read endpoint: access gate denies with the mode-appropriate empty shape (bulk `{"assignments":{}}` with no `UserId`, single `{"userId":...,"templateRoleIds":[]}` with one) without constructing the service; bulk mode returns every user's assignments keyed by id, scoped to `currentRole.getClient().getId()`; single mode returns one user's ids and proves `currentRole` is forwarded into the boundary-checking overload (mirrors `SFAssignUserRolesTest`'s own forwarding regression); a cross-tenant read attempt and an unknown-user-id `OBException` both fold into the single-mode empty shape rather than the bridge's `error`/500 path; an unexpected `RuntimeException` still surfaces as `error`. |
-| `SFSystemRoleTemplatesTest` (ETP-4906) | -- | Unit test (12 tests) mirroring `SFRolesOverviewTest`'s structure for §8f's endpoint: admin/client-admin access gate (no role, restricted role, System Administrator, client-admin — all resolved without the caller's own client ever appearing in any stub); roles resolved via `OBDal.get(Role.class, id)` against the 4 fixed `SystemRoleTemplates` ids rather than a client-scoped `Role` criteria; response omits `userCount`/`isClientAdmin` entirely; Finance/Sales/Purchasing/Inventory ordering; a template id resolving to `null` or to an inactive `Role` is skipped gracefully rather than erroring; GO-window intersection (native-only windows excluded) and tier resolution (full/read-only), mirroring `SFRolesOverview`'s identical logic; exception handling. |
+| `SFSystemRoleTemplatesTest` (ETP-4906) | -- | Unit test (12 tests) mirroring `SFRolesOverviewTest`'s structure for §8f's endpoint: admin/client-admin access gate (no role, restricted role, System Administrator, client-admin — all resolved without the caller's own client ever appearing in any stub); roles resolved via `OBDal.get(Role.class, id)` against the 4 fixed `SystemRoleTemplates` ids rather than a client-scoped `Role` criteria; response omits `userCount`/`isClientAdmin` entirely; Finance/Sales/Purchasing/Inventory ordering; a template id resolving to `null` or to an inactive `Role` is skipped gracefully rather than erroring; GO-window intersection (native-only windows excluded) and tier resolution (full/read-only), mirroring `SFRolesOverview`'s identical logic; exception handling. **ETP-5402 additions (3 cases, 15 tests total):** every role has an empty `reports` array when no grants exist; a classic `tax-report` grant surfaces as `"full"` on the Finance template ONLY (Sales/Purchasing/Inventory unaffected); an "Informes financieros" pseudo-window grant surfaces all 5 financial-family reports — needed a NEW local keyed-by-role `WindowAccess`/classic-`ProcessAccess` stub helper pair, since this test class had none before (unlike `SFRolesOverviewTest`, which already had one). |
 | `NeoPseudoSpecDispatcherTest#debugInvitationBypass*` (ETP-4830) | -- | The security-critical case for §8g: flag unset AND flag explicitly `"false"` both return a plain `404` with `SFDebugInvitationBypass` never constructed and `NeoGoWebhookBridge#handle` never invoked (zero DB access, not just an early-return inside the webhook); flag `"true"` dispatches through the bridge with a real `SFDebugInvitationBypass` instance; non-`GET` is rejected even when the flag is on. Uses `System.setProperty`/`clearProperty` — `ConfigPropertyReader`'s own documented precedence puts the JVM system property first, ahead of `Openbravo.properties`/env var. |
 | `SFDebugInvitationBypassTest` (ETP-4830) | -- | Unit test mirroring `SFAssignUserRolesTest`'s shape for §8g's shim: access gate (no role / restricted role denied without touching `DebugInvitationBypassService`, injected as a plain Mockito mock via the package-private constructor); `forceAccept`/`forceStatus` delegate with the exact marshalled params, case-insensitive `Action` matching; an unknown/missing `Action` fails without touching the service; an unexpected `RuntimeException` from the service maps to the bridge's `error` field rather than escaping as a thrown exception. |
 | `DebugInvitationBypassServiceTest` (ETP-4830) | -- | Unit test for §8g's real logic, `OBDal`/`EtendoGoJwtDalHelper`/`CompanyInvitationDalHelper`/`CompanyInvitationService` all Mockito static mocks (mirrors `CompanyInvitationServiceTest`'s conventions): `forceAccept` rejects a blank email with no resolvable `AdUserId`; creates a new account via `EtendoGoJwtDalHelper#createAccount` (asserted called, proving no duplicated account-creation logic) when none exists, returning a `temporaryPassword`; reuses an existing active account without a second `createAccount` call and without a `temporaryPassword` in the response; flips a matching open invitation to `ACCEPTED` and links the account; resolves the email from `AdUserId` when `Email` is blank. `forceStatus` rejects a status outside the enum; resolves by `InvitationId` directly (skipping the email lookup entirely) or by the most recent invitation for `Email`; fails cleanly with `success:false` when no invitation matches. |
@@ -4630,8 +5004,8 @@ e.g. `UserRoleAssignmentHandlerTest`/`OwnerSupportTest`) and `src-test/src/com/e
 `resendInvitation` coverage, §8h, lives alongside its pre-existing `createInvitation`/
 `findLatestInvitationStatus` suites, same file, no separate class).
 The `NeoPseudoSpecDispatcher` routing for `userroleassignments`, `systemroletemplates`,
-`debuginvitationbypass`, `resendinvitation`, `promoteuserrole`, and `acctprocessmonitor` is
-covered by
+`debuginvitationbypass`, `resendinvitation`, `promoteuserrole`, `acctprocessmonitor`, and
+`costingcadence` is covered by
 `NeoPseudoSpecDispatcherTest` (same package), mirroring its existing per-endpoint dispatch/
 method-not-allowed test pairs — `debuginvitationbypass` additionally covers the flag-off/flag-on
 branch described in §8g (`resendinvitation` and `promoteuserrole` have no such flag to test, §8h/

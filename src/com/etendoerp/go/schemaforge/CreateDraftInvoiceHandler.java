@@ -97,6 +97,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   private static final String CHECK_ACTION = "checkDraftInvoice";
   private static final String LIST_ACTION = "listInvoices";
   private static final String PENDING_LINES_ACTION = "pendingInvoiceLines";
+  private static final String PRODUCT_PRICES_ACTION = "productPrices";
 
   private static final String SPEC_GOODS_SHIPMENT = "goods-shipment";
   private static final String SPEC_SALES_QUOTATION = "sales-quotation";
@@ -156,6 +157,11 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       return handlePendingLines(context);
     }
 
+    // POST productPrices — prices a caller-supplied list of products against a price list
+    if (PRODUCT_PRICES_ACTION.equals(fieldName) && "POST".equals(context.getHttpMethod())) {
+      return handleProductPrices(context);
+    }
+
     if (!ACTION_NAME.equals(fieldName) || !"POST".equals(context.getHttpMethod())) {
       return null;
     }
@@ -193,7 +199,6 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
           invoice = createFromOrder(recordId, lineOverrides, null);
         } else if (SPEC_SALES_QUOTATION.equals(specName)) {
           invoice = createFromOrder(recordId, lineOverrides, null);
-          markQuotationAsInvoiceCreated(recordId);
         } else if (SPEC_GOODS_SHIPMENT.equals(specName)) {
           List<String> shipmentIds = parseShipmentIds(body, recordId);
           String priceListId = body != null ? body.optString(PARAM_PRICE_LIST_ID, null) : null;
@@ -210,10 +215,28 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
           OBDal.getInstance().flush();
         }
 
+        // ETP-5381: create and confirm in a single atomic step. A draft invoice reserves nothing
+        // — c_orderline.qtyinvoiced and m_inoutline.isinvoiced are only written by C_Invoice_Post
+        // — so leaving one behind lets the same order or shipment be invoiced a second time.
+        // The id is captured BEFORE the call because ProcessInvoiceUtil commits and closes the
+        // Hibernate session, leaving `invoice` detached; `completed` is read from the reopened
+        // session, which also picks up the DocumentNo the completion may have reassigned from the
+        // document type's sequence. On failure the internal rollback reverts the whole creation.
+        String invoiceId = invoice.getId();
+        InvoiceCompletionService.completeInvoiceOrThrow(invoiceId, context.getObContext());
+        Invoice completed = OBDal.getInstance().get(Invoice.class, invoiceId);
+
+        // After completion, not before: ETGO_CI must mean "a CONFIRMED invoice exists for this
+        // quotation". Writing it first would mark the quotation even when the completion is
+        // rolled back, leaving it closed with nothing to show for it.
+        if (SPEC_SALES_QUOTATION.equals(specName)) {
+          markQuotationAsInvoiceCreated(recordId);
+        }
+
         JSONObject data = new JSONObject();
-        data.put("id", invoice.getId());
-        data.put(FIELD_DOCUMENT_NO, invoice.getDocumentNo());
-        data.put("documentStatus", invoice.getDocumentStatus());
+        data.put("id", invoiceId);
+        data.put(FIELD_DOCUMENT_NO, completed.getDocumentNo());
+        data.put("documentStatus", completed.getDocumentStatus());
 
         JSONObject responseData = new JSONObject();
         responseData.put("data", data);
@@ -227,18 +250,27 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       }
     } catch (OBException e) {
       log.warn("Error creating draft invoice from {}: {}", specName, e.getMessage());
-      try {
-        JSONObject body = new JSONObject();
-        body.put("status", "error");
-        body.put("message", e.getMessage());
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, body);
-      } catch (Exception jsonEx) {
-        return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
-      }
+      return errorResponse(HttpServletResponse.SC_BAD_REQUEST, e.getMessage());
     } catch (Exception e) {
       log.error("Error creating draft invoice from {}: {}", specName, e.getMessage(), e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
           "An internal error occurred while creating the invoice");
+    }
+  }
+
+  /**
+   * Builds the {@code {status, message}} error body every frontend caller of this action reads as
+   * {@code err.response.message}, falling back to a plain-text response if the JSON cannot be
+   * assembled.
+   */
+  private NeoResponse errorResponse(int status, String message) {
+    try {
+      JSONObject body = new JSONObject();
+      body.put("status", "error");
+      body.put("message", message);
+      return NeoResponse.error(status, body);
+    } catch (Exception jsonEx) {
+      return NeoResponse.error(status, message);
     }
   }
 
@@ -358,7 +390,12 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
   }
 
   /**
-   * Returns the uninvoiced (pending) quantity per shipment line for the given shipment.
+   * Returns the uninvoiced (pending) quantity per shipment line for the given shipment, plus
+   * each line's {@code product} and {@code salesOrderLine} — ETP-5410 follow-up: the quote
+   * feature used to fetch these from a SEPARATE {@code goodsShipmentLine?parentId=} request,
+   * adding one more round trip to every "Crear factura" modal open. They come from the same
+   * already-loaded {@link ShipmentInOut}, so returning them here costs nothing extra over the
+   * wire and lets the frontend drop that request entirely.
    * Mirrors the GREATEST(msi, direct) logic from {@code buildInvoiceStatusSql} in
    * {@link GoodsShipmentHeaderHandler} but operates at line granularity so the frontend
    * preview can show — and cap at — the remaining quantity, and so that
@@ -375,15 +412,28 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       OBContext.setAdminMode(true);
       try {
         Map<String, BigDecimal> pendingMap = computePendingQtyPerLine(recordId, true);
+        ShipmentInOut doc = OBDal.getInstance().get(ShipmentInOut.class, recordId);
+        Map<String, String[]> lineDetails = MultiDocumentInvoiceSupport.loadLineProductAndOrderLine(doc);
         JSONArray arr = new JSONArray();
         for (Map.Entry<String, BigDecimal> entry : pendingMap.entrySet()) {
           JSONObject item = new JSONObject();
           item.put("lineId", entry.getKey());
           item.put("pendingQty", entry.getValue());
+          String[] details = lineDetails.get(entry.getKey());
+          item.put("product", details != null && details[0] != null ? details[0] : JSONObject.NULL);
+          item.put("salesOrderLine", details != null && details[1] != null ? details[1] : JSONObject.NULL);
           arr.put(item);
         }
         JSONObject responseData = new JSONObject();
         responseData.put("data", arr);
+        // ETP-5410 follow-up: also resolve the price list HERE (order → BP → client default),
+        // so the caller's N=1 auto-select-Tarifa feature no longer needs a separate full
+        // single-record GET just for this one field — that GET was the single heaviest request
+        // in the "Crear factura" modal's opening waterfall.
+        if (doc != null) {
+          String resolvedPriceListId = MultiDocumentInvoiceSupport.resolveEffectivePriceListId(doc, true);
+          responseData.put("resolvedPriceListId", resolvedPriceListId != null ? resolvedPriceListId : JSONObject.NULL);
+        }
         JSONObject wrapper = new JSONObject();
         wrapper.put(KEY_RESPONSE, responseData);
         return new NeoResponse(200, wrapper);
@@ -394,6 +444,25 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
       log.error("Error computing pending invoice lines for shipment {}", recordId, e);
       return NeoResponse.error(HttpServletResponse.SC_INTERNAL_SERVER_ERROR, e.getMessage());
     }
+  }
+
+  /**
+   * Prices a caller-supplied list of products against a price list — POST {@code
+   * /goods-shipment/goodsShipment/{id}/action/productPrices}, body {@code {productIds: [...],
+   * priceListId: "..."}}. {@code recordId} is not used: this exists only so the "Crear factura"
+   * quote feature can price the handful of products its own pending lines actually reference,
+   * instead of running the generic product-browse selector (up to 500 rows) and discarding all
+   * but a few of them.
+   *
+   * <p>POST, not GET, because ACTION-endpoint dispatch never threads query-string parameters into
+   * {@link NeoContext} (only the request body reaches it) — the same reason {@link #handleCheck}
+   * already accepts POST for what is otherwise a pure read.
+   *
+   * <p>Delegates to {@link MultiDocumentInvoiceSupport#buildProductPricesResponse}, shared
+   * byte-for-byte with {@code CreatePurchaseInvoiceHandler#handleProductPrices}.
+   */
+  protected NeoResponse handleProductPrices(NeoContext context) {
+    return MultiDocumentInvoiceSupport.buildProductPricesResponse(context.getRequestBody(), log);
   }
 
   /**
@@ -783,21 +852,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    * @return non-empty list of shipment IDs to invoice
    */
   protected List<String> parseShipmentIds(JSONObject body, String recordId) {
-    List<String> ids = new java.util.ArrayList<>();
-    if (body != null && body.has(PARAM_SHIPMENT_IDS)) {
-      try {
-        JSONArray arr = body.getJSONArray(PARAM_SHIPMENT_IDS);
-        for (int i = 0; i < arr.length(); i++) {
-          ids.add(arr.getString(i));
-        }
-      } catch (Exception e) {
-        log.warn("Failed to parse shipmentIds: {}", e.getMessage());
-      }
-    }
-    if (ids.isEmpty()) {
-      ids.add(recordId);
-    }
-    return ids;
+    return MultiDocumentInvoiceSupport.parseDocumentIds(body, PARAM_SHIPMENT_IDS, recordId, log);
   }
 
   /**
@@ -962,25 +1017,8 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    *     if any ID is not found or shipments span multiple BPs
    */
   protected List<ShipmentInOut> loadAndValidateShipments(List<String> shipmentIds) {
-    List<ShipmentInOut> shipments = new java.util.ArrayList<>();
-    for (String id : shipmentIds) {
-      ShipmentInOut s = OBDal.getInstance().get(ShipmentInOut.class, id);
-      if (s == null) {
-        throw new OBException("Shipment not found: " + id);
-      }
-      shipments.add(s);
-    }
-    if (shipments.isEmpty()) {
-      throw new OBException("No shipments provided");
-    }
-
-    BusinessPartner bp = shipments.get(0).getBusinessPartner();
-    for (ShipmentInOut s : shipments) {
-      if (!s.getBusinessPartner().getId().equals(bp.getId())) {
-        throw new OBException("All shipments must belong to the same Business Partner");
-      }
-    }
-    return shipments;
+    return MultiDocumentInvoiceSupport.loadAndValidateSameBusinessPartner(shipmentIds, "Shipment not found: ",
+        "No shipments provided", "All shipments must belong to the same Business Partner");
   }
 
   /**
@@ -1158,28 +1196,7 @@ public class CreateDraftInvoiceHandler implements NeoHandler {
    */
   protected BigDecimal resolveShipmentLineQty(ShipmentInOutLine sl, boolean hasOverrides,
       Map<String, BigDecimal> lineOverrides, Map<String, BigDecimal> pendingQtyMap) {
-    if (!sl.isActive() || (hasOverrides && !lineOverrides.containsKey(sl.getId()))) {
-      return null;
-    }
-    BigDecimal movementQty = sl.getMovementQuantity();
-    if (movementQty == null || movementQty.compareTo(BigDecimal.ZERO) == 0) {
-      return null;
-    }
-    int sign = movementQty.signum();
-    BigDecimal movementQtyAbs = movementQty.abs();
-    // Fall back to movement qty magnitude when map is absent (backward-compat / no-DB path).
-    BigDecimal pendingQtyAbs = pendingQtyMap.getOrDefault(sl.getId(), movementQtyAbs)
-        .min(movementQtyAbs);
-    if (pendingQtyAbs.compareTo(BigDecimal.ZERO) <= 0) {
-      return null; // already fully invoiced
-    }
-    BigDecimal qtyAbs = hasOverrides
-        ? lineOverrides.get(sl.getId()).abs().min(pendingQtyAbs)
-        : pendingQtyAbs;
-    if (qtyAbs.compareTo(BigDecimal.ZERO) <= 0) {
-      return null;
-    }
-    return sign < 0 ? qtyAbs.negate() : qtyAbs;
+    return MultiDocumentInvoiceSupport.resolveInOutLineQty(sl, hasOverrides, lineOverrides, pendingQtyMap);
   }
 
   /**

@@ -60,6 +60,7 @@ import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.Invitation;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -452,6 +453,18 @@ class EtendoGoJwtDalHelperTest {
   @DisplayName("buildEnvironmentJson")
   class BuildEnvironmentJson {
 
+    private MockedStatic<OwnerSupport> ownerSupportMock;
+
+    @BeforeEach
+    void isolateOwnerLookup() {
+      ownerSupportMock = mockStatic(OwnerSupport.class);
+    }
+
+    @AfterEach
+    void restoreOwnerLookup() {
+      ownerSupportMock.close();
+    }
+
     @Mock private Client client;
     @Mock private Organization organization;
     @Mock private User environmentUser;
@@ -513,8 +526,8 @@ class EtendoGoJwtDalHelperTest {
 
       JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, organization, environmentUser);
 
-      // Seven original fields plus the plan badge added by ETP-4686.
-      assertEquals(8, result.length());
+      // Seven original fields plus plan and relationship metadata.
+      assertEquals(9, result.length());
     }
 
     @Test

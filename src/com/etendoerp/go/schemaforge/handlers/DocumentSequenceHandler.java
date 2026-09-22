@@ -65,10 +65,11 @@ import com.etendoerp.go.schemaforge.NeoResponse;
  * resolved at all the prefix is accepted: refusing a save because the address is not filled in
  * yet would break the very onboarding step this validation exists to serve.
  *
- * <p>It also SCOPES THE LIST. {@code AD_Sequence} holds 242 rows per provisioned tenant
- * (measured on the instance), almost all of them record-ID and internal counters that mean
- * nothing to a user looking for their invoice numbering — so the list is narrowed to the
- * caller's own client and to {@link #VISIBLE_SEQUENCE_NAMES}. See {@code applyListScope}.
+ * <p>It also SCOPES THE LIST. {@code AD_Sequence} holds ~145 rows per provisioned tenant,
+ * almost all of them record-ID and internal counters that mean nothing to a user looking for
+ * their invoice numbering — so the list is narrowed to the caller's own client and to the six
+ * document series in {@link #VISIBLE_SEQUENCE_NAMES} (ETP-5285, ETP-5364). See
+ * {@code applyListScope}.
  *
  * <p>{@code @Named} only — never a normal CDI scope. See CLAUDE.md §NeoHandler Pattern and
  * {@code docs/neo-headless-extensibility.md} §2.2: {@code lookupHandler()} reads {@code @Named}
@@ -103,42 +104,65 @@ public class DocumentSequenceHandler implements NeoHandler {
    * Adding a sequence to the product means adding its name here.
    *
    * <p>Matched on the name because that is what identifies these rows across tenants: every one
-   * of the seven was verified to exist, by this exact name, exactly once per organization, in a
-   * provisioned client.
+   * of these was verified to exist, by this exact name, exactly once per organization, in a
+   * provisioned client. The name is consequently NOT editable from the window — {@code
+   * decisions.json} classifies it {@code readOnly} — because renaming a row here would drop it
+   * out of this very allowlist and make it unreachable, silently and permanently.
    *
-   * <p><b>Every {@code DocumentNo_*} name is deliberately absent</b>, for two independent
-   * reasons.
+   * <p><b>ETP-5285 narrowed this list from seven to five; ETP-5364 completed it at six.</b> The
+   * product defines exactly six document series (purchase order {@code PC}, sales order
+   * {@code PV}, sales invoice {@code FV}, corrective sales invoice {@code FVR}, purchase invoice
+   * {@code FC}, corrective purchase invoice {@code FCR}), and all six are below. {@code AP
+   * Payment}, {@code AR Receipt}, {@code MM Shipment} and {@code Secuencia TICKETBAI} were
+   * dropped by ETP-5285: they are not document series a tenant configures on this screen.
+   * Dropping a name here only hides the row — nothing is deleted, and the numbering those
+   * sequences drive is untouched.
    *
-   * <p>They are DUPLICATED in the data — provisioning creates each twice (6912 surplus rows
-   * across 72 of 94 clients), because the client setup writes them and
-   * {@code generateOnboardingSequences} then runs Etendo's Create Sequences over the same
-   * client. Numbering survives that by accident: {@code ad_sequence_doc} increments every row
-   * matching the name and reads one back with a non-{@code STRICT} {@code SELECT INTO}, so both
-   * copies advance in lockstep and either answer is the same. Editing ONE of a pair breaks
-   * exactly that — the rows diverge, an arbitrary one still answers, and PostgreSQL relocates an
-   * updated row, so a prefix would apply intermittently.
+   * <p><b>{@code AP Invoice} ({@code FC}) was added by ETP-5364</b>, which is a change to how
+   * purchase invoices are numbered, not merely a change to this list. Stock Openbravo ships
+   * {@code AP Invoice} as {@code IsDocNoControlled='N'} with no sequence — "the number comes
+   * from outside", i.e. the supplier numbers the purchase invoice. GO now ships its own series
+   * instead: {@code GOClient/AD_SEQUENCE.xml} carries an {@code AP Invoice} sequence with prefix
+   * {@code FC}, and {@code GOClient/C_DOCTYPE.xml} points the {@code AP Invoice} doctype at it
+   * with {@code IsDocNoControlled='Y'}. Both halves are required — a sequence nothing points at
+   * would show a configurable prefix that governs no numbering at all.
    *
-   * <p>And for the one series a tenant might actually want to prefix there is nothing to
-   * configure: {@code DocumentNo_C_Invoice} numbers purchase invoices, but {@code AP Invoice}
-   * carries {@code IsDocNoControlled='N'} and no sequence in 76 of 76 doctypes across all 75
-   * clients, while every other invoice doctype has both. That is stock Openbravo semantics for
-   * "the number comes from outside" — the supplier numbers a purchase invoice, and the fallback
-   * counter only supplies a proposed value. So de-duplicating the data would NOT make these
-   * names worth exposing; do not treat that data-fix as a prerequisite for re-adding them.
+   * <p><b>Preventive only.</b> That pair reaches NEW tenants through the dataset. Tenants
+   * provisioned before ETP-5364 keep {@code IsDocNoControlled='N'} and own no {@code AP Invoice}
+   * sequence, so this window shows them five rows rather than six — the name filter matches
+   * nothing, which is the whole failure mode. Retrofitting them is a data-fix that was
+   * deliberately not written here.
    *
-   * <p>What their absence costs: the doctypes without a sequence of their own are unreachable
-   * from here — {@code AP Invoice} and {@code AP CreditMemo}, {@code MM Receipt}, plus asset and
-   * internal-movement numbering. One fallback row is SHARED by every doctype lacking a
-   * sequence, so that entry point changed all of them at once. See the window's guide.
+   * <p><b>Every {@code DocumentNo_*} name is deliberately absent.</b> {@code
+   * DocumentNo_C_Invoice} and friends are fallback counters that supply a *proposed* value for
+   * any doctype lacking a sequence of its own, so a prefix there would configure a series that
+   * is not authoritative for any document. One such row is SHARED by every doctype without a
+   * sequence, so exposing it would have changed all of them at once.
+   *
+   * <p>They were also DUPLICATED in the data until ETP-5364 — provisioning created each twice
+   * (9888 surplus rows across 103 of 125 clients), because Openbravo's {@code
+   * InitialClientSetup} creates the 97 {@code DocumentNo_*} rows for a new client and the
+   * onboarding dataset then imported 96 of the same names again. ETP-5364 drops those 96 at
+   * IMPORT time ({@code OnboardingDatasetNormalizer.TableCounterSequenceFilter}) rather than
+   * deleting them from {@code GOClient/AD_SEQUENCE.xml}, which stays complete because
+   * {@code install.source} seeds the GOClient sample client from it wholesale and never runs the
+   * client setup. A tenant provisioned from here on gets one copy of each. Already-provisioned
+   * tenants still carry both: numbering survives that by accident ({@code ad_sequence_doc}
+   * increments every row matching the name and reads one back with a non-{@code STRICT}
+   * {@code SELECT INTO}, so the copies advance together), but editing ONE of a pair breaks exactly
+   * that. Never a reason to expose these names.
+   *
+   * <p>What their absence still costs: {@code AP CreditMemo}, {@code MM Receipt}, plus asset and
+   * internal-movement numbering have no sequence of their own and stay unreachable from here.
+   * See the window's guide.
    */
   static final List<String> VISIBLE_SEQUENCE_NAMES = List.of(
-      "AR Invoice",
-      "AP Payment",
-      "AR Receipt",
-      "MM Shipment",
-      "Standard Order",
       "Purchase Order",
-      "Secuencia TICKETBAI");
+      "Standard Order",
+      "AR Invoice",
+      "Factura Rectificativa (Ventas)",
+      "AP Invoice",
+      "Factura Rectificativa (Compras)");
 
   /** Contract field name of {@code AD_Sequence.Prefix} (see the window's decisions.json). */
   static final String FIELD_PREFIX = "prefix";

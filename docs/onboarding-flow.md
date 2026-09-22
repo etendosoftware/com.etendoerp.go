@@ -207,10 +207,11 @@ form (country, fiscal ID, address) onto the newly created `AD_Org`/legal
 entity.
 
 ### `OnboardingCostingScheduleService`
-Step 8 (ETP-5190). **Non-fatal**, like every step in this chain: it always
-returns `true` and swallows errors (logs + `done` "skipped"). Creates one
-`AD_Process_Request` per client running core's `CostingBackground` process every
-5 minutes, plus a post-commit `activateSchedule(clientId)` companion called
+Step 8 (ETP-5190; cadence lowered to 30 s by ETP-5370). **Non-fatal**, like
+every step in this chain: it always returns `true` and swallows errors (logs +
+`done` "skipped"). Creates one `AD_Process_Request` per client running core's
+`CostingBackground` process every **30 seconds**, plus a post-commit
+`activateSchedule(clientId)` companion called
 right after `commitDalChanges` (not inside this chain) because the Quartz
 scheduler needs a committed row. **This is the only schedule onboarding still
 creates** — ETP-5275 removed the PSD2 bank-statement one.
@@ -237,16 +238,49 @@ Three things worth knowing before touching it:
   resolves what to cost with `ad_isorgincluded(o.id, :orgId, :clientId)` bound to
   the request's own client and organization. A System request would match only
   org `'0'` and silently cost nothing.
-- **The trigger fields are `timing='S'` + `frequency='2'` + `MINUTELY_INTERVAL=5`.**
-  `S2` is the key core's `TriggerProvider` maps to `repeatMinutelyForever`; it
-  reads the *minutely* interval, not the secondly one. Core's F&B demo client has
-  shipped exactly this shape since 2013.
+- **The trigger fields are `timing='S'` + `frequency='1'` + `SECONDLY_INTERVAL=30`.**
+  `S1` is the key core's `TriggerProvider` maps to `repeatSecondlyForever`; it
+  reads the *secondly* interval, so `MINUTELY_INTERVAL` is left unset (the
+  scheduler switches on `frequency` and reads only the matching column, so a
+  leftover minutely value is inert but makes the row match no hand-made one).
+  This shape is not invented: GOClient has been running exactly it since
+  2026-04-08, configured by hand in Classic's Process Request window and dumped
+  into `referencedata/sampledata/GOClient/AD_PROCESS_REQUEST.xml`. ETP-5370
+  lowered it from the previous `frequency='2'` + `MINUTELY_INTERVAL=5`;
+  `StoredColumnQueueScheduleStartup` deliberately still uses the 5-minute shape
+  for the queue drain — different process, cadence not in scope.
 
-**Preventive only — the corrective half was declined.** Tenants onboarded
-before this step have no costing schedule and calculate no costs until someone
-adds the Process Request by hand in Classic. That was an explicit call on
-ETP-5190 (new tenants are enough), not a pending task: there is deliberately no
-`cli/src/data-fixes/` twin, unlike steps 9 and 10.
+**Both fronts exist now — and the corrective one is a webhook, not a `.sql`.**
+ETP-5190 shipped the preventive half alone; ETP-5245 added
+`cli/src/data-fixes/sql/20260910T120000Z__R36-costing-background-schedule.sql`,
+which CREATES the missing request for already-onboarded tenants — **retired by ETP-5370**, since it
+hardcoded the 5-minute cadence and every tenant now has a schedule.
+
+ETP-5370's corrective half — realigning the cadence of requests that **already
+exist** — could not be another `.sql`, and this is the part worth remembering:
+**an `UPDATE` on `AD_PROCESS_REQUEST` does not change what a running instance
+executes.** `OBScheduler.initialize()` reads that table exactly once, at Quartz
+startup, and `DefaultJob.execute` rebuilds its bundle from Quartz's own
+`JobDataMap` — it never re-reads the row. Deactivating or even DELETING the row
+does not stop the job either (see the PSD2 schedule-removal data-fix, which
+records the resulting FK-violation noise). Production does not restart Tomcat,
+so the correction has to run inside the live JVM.
+
+It therefore lives in `OnboardingCostingScheduleService#realignCadence(String)`, and it is
+triggered TWO ways. The primary one is `CostingCadenceStartup`, an application initializer that
+sweeps every tenant on boot — **shipping this module is itself a restart**, so the release that
+changes the cadence for new tenants is the same event that realigns the existing ones, with nobody
+doing anything. It is **one-shot per tenant**: each migrated client is marked in
+`ETGO_DATA_FIX_HISTORY` (`fix_id='__costing-cadence-30s__'`) and skipped from the next boot on, so
+later restarts cost two queries and write nothing — and a frequency a user picks for themselves in
+the future is never silently reset. The secondary one is the `SFCostingCadence` webhook (NEO bridge, `costingcadence`),
+kept as the escape hatch for correcting a single tenant without waiting for a release.
+It enforces the invariant new tenants are born with: **exactly one active `SCH`
+`CostingBackground` request per client, at 30 s**, re-arming the surviving
+trigger via `OBScheduler.reschedule(...)` — always, even when the row already
+reads 30 s, because the row is not evidence about the live trigger. Redundant
+requests are unscheduled and marked `UNS` + inactive, never deleted; `COM` rows
+are execution history and are ignored.
 
 ### `OnboardingAcctdimCentrallyMaintainedService`
 Step 10 (`forceFlatAccountingDimensionVisibility`, ETP-4854, gap K1). Backfills
@@ -433,6 +467,21 @@ user through the initial setup tasks. Its progress is persisted server-side in
 `ETGO_ACCOUNT.FIRST_STEPS` (nullable `VARCHAR(1000)` JSON blob:
 `{ "v": 1, "seen": true, "completed": ["company-data", "products"] }`), so the
 checklist keeps its state across logins and devices.
+
+**Who sees it at all (owner gate, ETP-5395).** The paragraph above and the plan
+gate below both describe what a viewer of this window sees — but as of ETP-5395
+only the tenant's onboarding Owner (`AD_User.EM_ETGO_Is_Owner`, ETP-4830, §7
+item 10 of `docs/neo-headless.md`) is a viewer at all. `SFWindowAccessMap`
+exposes this per-user, not per-role, as `capabilities.isOwner` (§8b of
+`docs/neo-headless.md`); the frontend (`etendo_schema_forge`) hides the menu
+entry for a non-owner and redirects away from `/first-steps` even on a direct
+URL hit, in both directions live (no reload needed if ownership changes
+mid-session). This backend endpoint pair (`GET`/`POST
+/sws/go/onboarding/first-steps`) itself performs no owner check — the gate is
+enforced entirely client-side, on top of the existing per-account auth these
+endpoints already require. See `etendo_schema_forge`'s
+`docs/functionalidad/02-capacidades-y-flujos.md` (capability CAP-ROL-05) for
+the full frontend mechanism.
 
 ### Which steps a tenant is shown (plan gate)
 

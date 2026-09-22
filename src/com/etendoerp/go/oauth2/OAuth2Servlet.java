@@ -30,6 +30,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -45,13 +46,28 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.base.HttpBaseServlet;
 import org.openbravo.base.exception.OBException;
+import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.dal.service.OBQuery;
 import org.openbravo.erpCommon.utility.SequenceIdData;
+import org.openbravo.model.ad.access.ProcessAccess;
+import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.RoleOrganization;
+import org.openbravo.model.ad.access.User;
+import org.openbravo.model.ad.access.UserRoles;
+import org.openbravo.model.ad.access.WindowAccess;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.enterprise.Organization;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.schemaforge.data.com.etendoerp.go.schemaforge.data.OAuth2Client;
+import com.etendoerp.go.schemaforge.data.com.etendoerp.go.schemaforge.data.OAuth2Token;
+import com.etendoerp.go.session.GoSessionService;
+import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
@@ -64,15 +80,30 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *   PUT  /clients/{id}   — Update an OAuth2 client (admin only)
  *   DELETE /clients/{id} — Delete an OAuth2 client and its tokens (admin only)
  *   PUT  /clients/{id}/regenerate-secret — Regenerate client secret (admin only)
+ *   GET/POST/PUT/DELETE /api-keys[/id] — User-owned public API credentials
+ *   POST /api-keys/{id}/rotate — Rotate an owned public API credential
+ *   POST /api-keys/{id}/revoke-tokens — Revoke tokens for an owned credential
  *   POST /revoke         — Revoke all tokens for a client (admin only)
  *   POST /introspect     — Token introspection (admin only)
  *
- * Database access uses raw JDBC since DAL model classes for ETGO_OAUTH2_* tables
- * are not yet generated.
+ * Legacy administrator and token-grant persistence remains raw JDBC for compatibility. The
+ * self-service public API key lifecycle uses generated DAL entities and OBDal/OBQuery.
  */
 public class OAuth2Servlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(OAuth2Servlet.class);
+  private final GoSessionService goSessionService;
+
+  /**
+   * Creates the default servlet wired to a real, JDBC-backed session service.
+   */
+  public OAuth2Servlet() {
+    this(new GoSessionService(new JdbcGoSessionStore()));
+  }
+
+  OAuth2Servlet(GoSessionService goSessionService) {
+    this.goSessionService = goSessionService;
+  }
 
   private static final int TOKEN_EXPIRY_SECONDS = 3600;
   private static final int AUTH_CODE_EXPIRY_MS = 300_000; // 5 minutes
@@ -100,7 +131,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
     private static final String SCOPE_NEO_WRITE = "neo:write";
     private static final String SCOPE_NEO_PROCESS = "neo:process";
     private static final String SCOPE_NEO_REPORT = "neo:report";
-  private static final String ADMIN_ROLE_ID = "0";
     private static final String FIELD_ID = "id";
     private static final String FIELD_CLIENT_ID = "clientId";
     private static final String FIELD_CLIENT_ID_REQUEST = "client_id";
@@ -126,9 +156,23 @@ public class OAuth2Servlet extends HttpBaseServlet {
     private static final String DB_OAUTH2_CLIENT_ID = "etgo_oauth2_client_id";
 
   private static final String WILDCARD_SCOPE = "neo:*";
+  private static final String PATH_API_KEYS = "/api-keys";
+  private static final String PATH_API_KEY_ITEM = PATH_API_KEYS + "/[^/]+/?";
+  private static final String MESSAGE_API_KEY_NOT_FOUND = "API key not found";
+  private static final String FIELD_CLIENT_SECRET = "clientSecret";
+  private static final String FIELD_DELETED = "deleted";
+  private static final String FIELD_USER_ID = "userId";
+  private static final String FIELD_ROLE_ID = "roleId";
+  private static final String FIELD_ORG_ID = "orgId";
+  private static final String FIELD_CAPABILITIES = "capabilities";
+  private static final String FIELD_TOKENS_REVOKED = "tokensRevoked";
 
   /** In-memory store for authorization codes (short-lived, single-use). */
   private static final Map<String, AuthCodeData> AUTH_CODE_STORE = new ConcurrentHashMap<>();
+  /** Serializes the owner-scoped limit/name check with creation within this application node. */
+  private static final Map<String, Object> PUBLIC_API_KEY_LOCKS = new ConcurrentHashMap<>();
+
+  private final PublicApiKeyHandlers publicApiKeyHandlers = new PublicApiKeyHandlers();
 
   private static final Set<String> VALID_SCOPES = Collections.unmodifiableSet(
       new HashSet<>(Arrays.asList(SCOPE_NEO_READ, SCOPE_NEO_WRITE, SCOPE_NEO_PROCESS,
@@ -138,7 +182,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   // --- SQL constants ---
 
   private static final String SQL_FIND_CLIENT =
-      "SELECT etgo_oauth2_client_id, client_secret_hash, scopes, redirect_uris, ad_client_id, ad_user_id, ad_role_id "
+      "SELECT etgo_oauth2_client_id, client_secret_hash, scopes, redirect_uris, ad_client_id, ad_org_id, ad_user_id, ad_role_id "
       + "FROM etgo_oauth2_client WHERE client_identifier = ? AND isactive = 'Y'";
 
   private static final String SQL_INSERT_TOKEN =
@@ -147,13 +191,15 @@ public class OAuth2Servlet extends HttpBaseServlet {
       + "created, createdby, updated, updatedby, "
       + "etgo_oauth2_client_id, access_token_hash, refresh_token_hash, scopes, expires_at, "
       + "validity_seconds, is_revoked) "
-      + "VALUES (get_uuid(), ?, '0', 'Y', now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, 'N')";
+      + "VALUES (get_uuid(), ?, ?, 'Y', now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, 'N')";
 
   private static final String SQL_FIND_BY_REFRESH_TOKEN =
       "SELECT t.etgo_oauth2_token_id, t.etgo_oauth2_client_id, t.scopes, t.is_revoked, t.validity_seconds, "
-      + "c.ad_user_id, c.ad_role_id, c.ad_client_id AS etendo_client_id, c.isactive AS client_active "
+      + "c.ad_user_id, c.ad_role_id, COALESCE(o.ad_client_id, c.ad_client_id) AS etendo_client_id, "
+      + "c.isactive AS client_active, t.ad_org_id AS token_org_id "
       + "FROM etgo_oauth2_token t "
       + "JOIN etgo_oauth2_client c ON t.etgo_oauth2_client_id = c.etgo_oauth2_client_id "
+      + "LEFT JOIN ad_org o ON t.ad_org_id = o.ad_org_id "
       + "WHERE t.refresh_token_hash = ?";
 
   private static final String SQL_REVOKE_TOKEN_BY_ID =
@@ -168,8 +214,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
       "INSERT INTO etgo_oauth2_client "
       + "(etgo_oauth2_client_id, ad_client_id, ad_org_id, isactive, "
       + "created, createdby, updated, updatedby, "
-      + "name, client_identifier, client_secret_hash, ad_user_id, ad_role_id, scopes, redirect_uris, ad_module_id) "
-      + "VALUES (?, '0', '0', ?, now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, ?, '0')";
+      + "name, client_identifier, client_secret_hash, ad_user_id, ad_role_id, scopes, redirect_uris) "
+      + "VALUES (?, ?, ?, ?, now(), ?, now(), ?, ?, ?, ?, ?, ?, ?, ?)";
 
   private static final String SQL_UPDATE_CLIENT =
       "UPDATE etgo_oauth2_client SET name = ?, scopes = ?, redirect_uris = ?, ad_user_id = ?, ad_role_id = ?, "
@@ -203,15 +249,15 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
   private static final String SQL_FIND_CLIENT_BY_IDENTIFIER =
       "SELECT etgo_oauth2_client_id, name, client_identifier, client_secret_hash, "
-      + "ad_user_id, ad_role_id, scopes, redirect_uris, isactive "
+      + "ad_client_id, ad_org_id, ad_user_id, ad_role_id, scopes, redirect_uris, isactive "
       + "FROM etgo_oauth2_client WHERE client_identifier = ?";
 
   private static final String SQL_INSERT_DCR_CLIENT =
       "INSERT INTO etgo_oauth2_client "
       + "(etgo_oauth2_client_id, ad_client_id, ad_org_id, isactive, "
       + "created, createdby, updated, updatedby, "
-      + "name, client_identifier, client_secret_hash, ad_user_id, ad_role_id, scopes, redirect_uris, ad_module_id) "
-      + "VALUES (?, '0', '0', 'Y', now(), '0', now(), '0', ?, ?, '', '0', '0', ?, ?, '0')";
+      + "name, client_identifier, client_secret_hash, ad_user_id, ad_role_id, scopes, redirect_uris) "
+      + "VALUES (?, '0', '0', 'Y', now(), '0', now(), '0', ?, ?, '', '0', '0', ?, ?)";
 
   // --- CORS ---
 
@@ -233,8 +279,12 @@ public class OAuth2Servlet extends HttpBaseServlet {
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
-    if ("/clients".equals(path) || "/clients/".equals(path)) {
-      handleListClients(request, response);
+    if (PATH_API_KEYS.equals(path) || (PATH_API_KEYS + "/").equals(path)) {
+      publicApiKeyHandlers.handleListPublicApiKeys(request, response);
+    } else if (path != null && path.matches(PATH_API_KEY_ITEM)) {
+      publicApiKeyHandlers.handleGetPublicApiKey(request, response, extractPathSegment(path, 2));
+    } else if ("/clients".equals(path) || "/clients/".equals(path)) {
+      publicApiKeyHandlers.handleListClients(request, response);
     } else if (PATH_AUTHORIZE.equals(path) || (PATH_AUTHORIZE + "/").equals(path)) {
       handleAuthorizeGet(request, response);
     } else if ("/metadata".equals(path) || "/metadata/".equals(path)
@@ -250,10 +300,13 @@ public class OAuth2Servlet extends HttpBaseServlet {
   @Override
   public void doPost(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
+    if (handlePublicApiKeyPost(path, request, response)) {
+      return;
+    }
     if (path == null || "/token".equals(path) || "/token/".equals(path)) {
       handleTokenRequest(request, response);
     } else if ("/clients".equals(path) || "/clients/".equals(path)) {
-      handleCreateClient(request, response);
+      publicApiKeyHandlers.handleCreateClient(request, response);
     } else if ("/revoke".equals(path) || "/revoke/".equals(path)) {
       handleRevoke(request, response);
     } else if ("/introspect".equals(path) || "/introspect/".equals(path)) {
@@ -268,6 +321,23 @@ public class OAuth2Servlet extends HttpBaseServlet {
     }
   }
 
+  private boolean handlePublicApiKeyPost(String path, HttpServletRequest request,
+      HttpServletResponse response) throws IOException {
+    if (PATH_API_KEYS.equals(path) || (PATH_API_KEYS + "/").equals(path)) {
+      publicApiKeyHandlers.handleCreatePublicApiKey(request, response);
+      return true;
+    }
+    if (path != null && path.matches(PATH_API_KEYS + "/[^/]+/rotate/?")) {
+      publicApiKeyHandlers.handleRotatePublicApiKey(request, response, extractPathSegment(path, 2));
+      return true;
+    }
+    if (path != null && path.matches(PATH_API_KEYS + "/[^/]+/revoke-tokens/?")) {
+      publicApiKeyHandlers.handleRevokePublicApiKeyTokens(request, response, extractPathSegment(path, 2));
+      return true;
+    }
+    return false;
+  }
+
   @Override
   public void doPut(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
@@ -276,14 +346,21 @@ public class OAuth2Servlet extends HttpBaseServlet {
       return;
     }
 
+    if (path.matches(PATH_API_KEY_ITEM)) {
+      publicApiKeyHandlers.handleUpdatePublicApiKey(request, response, extractPathSegment(path, 2));
+    } else if (path.matches(PATH_API_KEYS + "/[^/]+/rotate/?")
+        || path.matches(PATH_API_KEYS + "/[^/]+/revoke-tokens/?")) {
+      writeError(response, HttpServletResponse.SC_METHOD_NOT_ALLOWED, ERROR_INVALID_REQUEST,
+          "Use POST for this API-key action");
+    } else
     // PUT /clients/{id}/regenerate-secret
     if (path.matches("/clients/[^/]+/regenerate-secret/?")) {
       String clientId = extractPathSegment(path, 2);
-      handleRegenerateSecret(request, response, clientId);
+      publicApiKeyHandlers.handleRegenerateSecret(request, response, clientId);
     }
     else if (path.matches("/clients/[^/]+/?")) {
       String clientId = extractPathSegment(path, 2);
-      handleUpdateClient(request, response, clientId);
+      publicApiKeyHandlers.handleUpdateClient(request, response, clientId);
     } else {
       writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_INVALID_REQUEST,
           MESSAGE_UNKNOWN_ENDPOINT + path);
@@ -293,9 +370,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
   @Override
   public void doDelete(HttpServletRequest request, HttpServletResponse response) throws IOException {
     String path = request.getPathInfo();
-    if (path != null && path.matches("/clients/[^/]+/?")) {
+    if (path != null && path.matches(PATH_API_KEY_ITEM)) {
+      publicApiKeyHandlers.handleDeletePublicApiKey(request, response, extractPathSegment(path, 2));
+    } else if (path != null && path.matches("/clients/[^/]+/?")) {
       String clientId = extractPathSegment(path, 2);
-      handleDeleteClient(request, response, clientId);
+      publicApiKeyHandlers.handleDeleteClient(request, response, clientId);
     } else {
         writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_INVALID_REQUEST,
           MESSAGE_UNKNOWN_ENDPOINT + path);
@@ -421,6 +500,451 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
   // --- Client CRUD (B3) ---
 
+  // --- User-owned public API keys ---
+
+  private final class PublicApiKeyHandlers {
+
+  private void handleListPublicApiKeys(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    try {
+      PublicApiKeyContext context = requirePublicApiKeyContext(request);
+      JSONArray keys = new JSONArray();
+      for (OAuth2Client client : ownedPublicApiKeys(context)) {
+        keys.put(publicApiKeyJson(client.getId(), client.getName(), client.getClientIdentifier(),
+            client.getScopes(), Boolean.TRUE.equals(client.isActive())));
+      }
+      JSONObject result = new JSONObject();
+      result.put("apiKeys", keys);
+      writeJsonResponse(response, HttpServletResponse.SC_OK, result);
+    } catch (AuthException e) {
+      writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
+    } catch (JSONException e) {
+      log.error("Error listing public API keys", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private void handleGetPublicApiKey(HttpServletRequest request, HttpServletResponse response,
+      String id) throws IOException {
+    try {
+      PublicApiKeyContext context = requirePublicApiKeyContext(request);
+      JSONObject key = findOwnedPublicApiKey(id, context);
+      if (key == null) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND, MESSAGE_API_KEY_NOT_FOUND);
+        return;
+      }
+      writeJsonResponse(response, HttpServletResponse.SC_OK, key);
+    } catch (AuthException e) {
+      writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
+    } catch (SQLException | JSONException e) {
+      log.error("Error reading public API key", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private void handleCreatePublicApiKey(HttpServletRequest request, HttpServletResponse response)
+      throws IOException {
+    try {
+      PublicApiKeyContext context = requirePublicApiKeyContext(request);
+      JSONObject body = parseJsonBody(request);
+      String name = PublicApiKeyPolicy.normalizeName(body.optString("name", null));
+      Set<String> capabilities = parsePublicCapabilities(body);
+      validatePublicCapabilities(context, capabilities);
+
+      String ownerKey = context.clientId + ":" + context.orgId + ":" + context.userId;
+      Object ownerLock = PUBLIC_API_KEY_LOCKS.computeIfAbsent(ownerKey, ignored -> new Object());
+      synchronized (ownerLock) {
+        if (countActivePublicApiKeys(context) >= PublicApiKeyPolicy.MAX_ACTIVE_KEYS_PER_OWNER) {
+          writeError(response, HttpServletResponse.SC_CONFLICT, ERROR_INVALID_REQUEST,
+              "The maximum number of active public API keys is "
+                  + PublicApiKeyPolicy.MAX_ACTIVE_KEYS_PER_OWNER);
+          return;
+        }
+        if (publicApiKeyNameExists(context, name)) {
+          writeError(response, HttpServletResponse.SC_CONFLICT, ERROR_INVALID_REQUEST,
+              "An active public API key with this name already exists");
+          return;
+        }
+
+        OAuth2Client client = OBProvider.getInstance().get(OAuth2Client.class);
+        String clientIdentifier = OAuth2Utils.generateClientId();
+        String plainSecret = OAuth2Utils.generateSecureToken();
+        // ETGO_OAUTH2_CLIENT is a system-level technical entity. Its AD client
+        // must remain 0; the tenant is represented by the selected organization
+        // and is validated against the authenticated JWT context below.
+        client.setClient(OBDal.getInstance().get(Client.class, "0"));
+        client.setOrganization(OBDal.getInstance().get(Organization.class, "0"));
+        client.setActive(true);
+        client.setCreatedBy(OBDal.getInstance().get(User.class, context.userId));
+        client.setUpdatedBy(OBDal.getInstance().get(User.class, context.userId));
+        client.setName(name);
+        client.setClientIdentifier(clientIdentifier);
+        client.setClientSecretHash(OAuth2Utils.hashSecret(plainSecret));
+        client.setUserContact(OBDal.getInstance().get(User.class, context.userId));
+        client.setRole(OBDal.getInstance().get(Role.class, context.roleId));
+        client.setScopes(PublicApiKeyPolicy.toStoredScopes(capabilities) + " "
+            + PublicApiKeyPolicy.ownerOrganizationMarker(context.orgId));
+        client.setRedirectURIs("[]");
+        OBDal.getInstance().save(client);
+        OBDal.getInstance().flush();
+        JSONObject result = publicApiKeyJson(client.getId(), name, clientIdentifier,
+            PublicApiKeyPolicy.toStoredScopes(capabilities), true);
+        result.put(FIELD_CLIENT_SECRET, plainSecret);
+        writeJsonResponse(response, HttpServletResponse.SC_CREATED, result);
+        auditPublicApiKeyEvent("created", client.getId(), context);
+      }
+    } catch (PublicApiKeyPolicy.InvalidRequestException | PublicApiKeyPolicy.InvalidCapabilityException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST, e.getMessage());
+    } catch (AuthException e) {
+      writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
+    } catch (SQLException | JSONException e) {
+      log.error("Error creating public API key", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private void handleUpdatePublicApiKey(HttpServletRequest request, HttpServletResponse response,
+      String id) throws IOException {
+    try {
+      PublicApiKeyContext context = requirePublicApiKeyContext(request);
+      JSONObject existing = findOwnedPublicApiKey(id, context);
+      if (existing == null) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND, MESSAGE_API_KEY_NOT_FOUND);
+        return;
+      }
+      JSONObject body = parseJsonBody(request);
+      String name = body.has("name")
+          ? PublicApiKeyPolicy.normalizeName(body.optString("name", null))
+          : existing.getString("name");
+      boolean active = body.has(FIELD_IS_ACTIVE)
+          ? body.getBoolean(FIELD_IS_ACTIVE) : existing.getBoolean(FIELD_IS_ACTIVE);
+      if (active && !name.equals(existing.getString("name"))
+          && publicApiKeyNameExists(context, name)) {
+        writeError(response, HttpServletResponse.SC_CONFLICT, ERROR_INVALID_REQUEST,
+            "An active public API key with this name already exists");
+        return;
+      }
+      OAuth2Client client = findOwnedPublicApiKeyEntity(id, context);
+      client.setName(name);
+      client.setActive(active);
+      client.setUpdatedBy(OBDal.getInstance().get(User.class, context.userId));
+      OBDal.getInstance().save(client);
+      OBDal.getInstance().flush();
+      JSONObject result = publicApiKeyJson(id, name, existing.getString(FIELD_CLIENT_ID),
+          existing.optString(FIELD_SCOPES, ""), active);
+      writeJsonResponse(response, HttpServletResponse.SC_OK, result);
+      auditPublicApiKeyEvent("updated", id, context);
+    } catch (PublicApiKeyPolicy.InvalidRequestException e) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST, e.getMessage());
+    } catch (AuthException e) {
+      writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
+    } catch (SQLException | JSONException e) {
+      log.error("Error updating public API key", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private void handleDeletePublicApiKey(HttpServletRequest request, HttpServletResponse response,
+      String id) throws IOException {
+    try {
+      PublicApiKeyContext context = requirePublicApiKeyContext(request);
+      OAuth2Client client = findOwnedPublicApiKeyEntity(id, context);
+      if (client == null) {
+        JSONObject result = new JSONObject();
+        result.put(FIELD_DELETED, false);
+        result.put(FIELD_ID, id);
+        writeJsonResponse(response, HttpServletResponse.SC_OK, result);
+        return;
+      }
+      removeTokensForClient(client);
+      OBDal.getInstance().remove(client);
+      OBDal.getInstance().flush();
+      JSONObject result = new JSONObject();
+      result.put(FIELD_DELETED, true);
+      result.put(FIELD_ID, id);
+      writeJsonResponse(response, HttpServletResponse.SC_OK, result);
+      auditPublicApiKeyEvent(FIELD_DELETED, id, context);
+    } catch (AuthException e) {
+      writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
+    } catch (SQLException | JSONException e) {
+      log.error("Error deleting public API key", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private void handleRotatePublicApiKey(HttpServletRequest request, HttpServletResponse response,
+      String id) throws IOException {
+    try {
+      PublicApiKeyContext context = requirePublicApiKeyContext(request);
+      JSONObject existing = findOwnedPublicApiKey(id, context);
+      if (existing == null) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND, MESSAGE_API_KEY_NOT_FOUND);
+        return;
+      }
+      String plainSecret = OAuth2Utils.generateSecureToken();
+      OAuth2Client client = findOwnedPublicApiKeyEntity(id, context);
+      client.setClientSecretHash(OAuth2Utils.hashSecret(plainSecret));
+      client.setUpdatedBy(OBDal.getInstance().get(User.class, context.userId));
+      OBDal.getInstance().save(client);
+      int revoked = revokePublicApiKeyTokens(client);
+      JSONObject result = publicApiKeyJson(id, existing.getString("name"),
+          existing.getString(FIELD_CLIENT_ID), existing.optString(FIELD_SCOPES, ""),
+          existing.getBoolean(FIELD_IS_ACTIVE));
+      result.put(FIELD_CLIENT_SECRET, plainSecret);
+      result.put(FIELD_TOKENS_REVOKED, revoked);
+      writeJsonResponse(response, HttpServletResponse.SC_OK, result);
+      auditPublicApiKeyEvent("rotated", id, context);
+    } catch (AuthException e) {
+      writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
+    } catch (SQLException | JSONException e) {
+      log.error("Error rotating public API key", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private void handleRevokePublicApiKeyTokens(HttpServletRequest request,
+      HttpServletResponse response, String id) throws IOException {
+    try {
+      PublicApiKeyContext context = requirePublicApiKeyContext(request);
+      if (findOwnedPublicApiKey(id, context) == null) {
+        writeError(response, HttpServletResponse.SC_NOT_FOUND, ERROR_NOT_FOUND, MESSAGE_API_KEY_NOT_FOUND);
+        return;
+      }
+      OAuth2Client client = findOwnedPublicApiKeyEntity(id, context);
+      int revoked = revokePublicApiKeyTokens(client);
+      JSONObject result = new JSONObject();
+      result.put("revoked", true);
+      result.put(FIELD_ID, id);
+      result.put(FIELD_TOKENS_REVOKED, revoked);
+      writeJsonResponse(response, HttpServletResponse.SC_OK, result);
+      auditPublicApiKeyEvent("tokens-revoked", id, context);
+    } catch (AuthException e) {
+      writeError(response, e.statusCode, ERROR_ACCESS_DENIED, e.getMessage());
+    } catch (SQLException | JSONException e) {
+      log.error("Error revoking public API key tokens", e);
+      writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, ERROR_SERVER,
+          MESSAGE_INTERNAL_SERVER_ERROR);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private JSONObject publicApiKeyJson(String id, String name, String clientIdentifier,
+      String scopes, boolean active) throws JSONException {
+    JSONObject result = new JSONObject();
+    result.put(FIELD_ID, id);
+    result.put("name", name);
+    result.put(FIELD_CLIENT_ID, clientIdentifier);
+    JSONArray capabilities = new JSONArray();
+    for (String capability : PublicApiKeyPolicy.capabilitiesForScopes(scopes)) {
+      capabilities.put(capability);
+    }
+    result.put(FIELD_CAPABILITIES, capabilities);
+    result.put(FIELD_IS_ACTIVE, active);
+    return result;
+  }
+
+  /** Emits a redacted lifecycle audit event; secrets and scope payloads are intentionally absent. */
+  private void auditPublicApiKeyEvent(String event, String keyId, PublicApiKeyContext context) {
+    log.info("public_api_key_event={} key_id={} user_id={} client_id={} org_id={}", event, keyId,
+        context.userId, context.clientId, context.orgId);
+  }
+
+  private Set<String> parsePublicCapabilities(JSONObject body) throws JSONException {
+    JSONArray values = body.optJSONArray(FIELD_CAPABILITIES);
+    if (values == null) {
+      throw new PublicApiKeyPolicy.InvalidCapabilityException("capabilities is required");
+    }
+    String[] requested = new String[values.length()];
+    for (int i = 0; i < values.length(); i++) {
+      requested[i] = values.optString(i, null);
+    }
+    return PublicApiKeyPolicy.normalizeCapabilities(requested);
+  }
+
+  private void validatePublicCapabilities(PublicApiKeyContext context, Set<String> capabilities) {
+    if (capabilities.contains(PublicApiKeyPolicy.CAPABILITY_WRITE)
+        && !hasWritableWindowAccess(context.roleId, context.clientId, context.orgId)) {
+      throw new PublicApiKeyPolicy.InvalidCapabilityException(
+          "public-api:write is not allowed for the active role");
+    }
+    if (capabilities.contains(PublicApiKeyPolicy.CAPABILITY_PROCESS)
+        && !hasProcessAccess(context.roleId, context.clientId, context.orgId)) {
+      throw new PublicApiKeyPolicy.InvalidCapabilityException(
+          "public-api:process is not allowed for the active role");
+    }
+  }
+
+  private List<OAuth2Client> ownedPublicApiKeys(PublicApiKeyContext context) {
+    OBQuery<OAuth2Client> query = OBDal.getInstance().createQuery(OAuth2Client.class,
+        "as client where client.scopes like :ownerOrganizationMarker "
+            + "and client.userContact.id = :userId and client.scopes like :publicKeyMarker "
+            + "order by client.name, client.id");
+    query.setNamedParameter("ownerOrganizationMarker",
+        "%" + PublicApiKeyPolicy.ownerOrganizationMarker(context.orgId) + "%");
+    query.setNamedParameter(FIELD_USER_ID, context.userId);
+    query.setNamedParameter("publicKeyMarker", "%" + PublicApiKeyPolicy.PUBLIC_KEY_SCOPE_MARKER + "%");
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    return query.list();
+  }
+
+  private OAuth2Client findOwnedPublicApiKeyEntity(String id, PublicApiKeyContext context)
+      throws SQLException {
+    OBQuery<OAuth2Client> query = OBDal.getInstance().createQuery(OAuth2Client.class,
+        "as client where client.id = :id and client.scopes like :ownerOrganizationMarker "
+            + "and client.userContact.id = :userId "
+            + "and client.scopes like :publicKeyMarker");
+    query.setNamedParameter("id", id);
+    query.setNamedParameter("ownerOrganizationMarker",
+        "%" + PublicApiKeyPolicy.ownerOrganizationMarker(context.orgId) + "%");
+    query.setNamedParameter(FIELD_USER_ID, context.userId);
+    query.setNamedParameter("publicKeyMarker", "%" + PublicApiKeyPolicy.PUBLIC_KEY_SCOPE_MARKER + "%");
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    query.setMaxResult(1);
+    return query.uniqueResult();
+  }
+
+  private JSONObject findOwnedPublicApiKey(String id, PublicApiKeyContext context)
+      throws SQLException, JSONException {
+    OAuth2Client client = findOwnedPublicApiKeyEntity(id, context);
+    return client == null ? null : publicApiKeyJson(client.getId(), client.getName(),
+        client.getClientIdentifier(), client.getScopes(), Boolean.TRUE.equals(client.isActive()));
+  }
+
+  private int countActivePublicApiKeys(PublicApiKeyContext context) throws SQLException {
+    int count = 0;
+    for (OAuth2Client client : ownedPublicApiKeys(context)) {
+      if (Boolean.TRUE.equals(client.isActive())) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  private boolean publicApiKeyNameExists(PublicApiKeyContext context, String name)
+      throws SQLException {
+    for (OAuth2Client client : ownedPublicApiKeys(context)) {
+      if (Boolean.TRUE.equals(client.isActive()) && client.getName() != null
+          && client.getName().trim().equalsIgnoreCase(name.trim())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private void removeTokensForClient(OAuth2Client client) {
+    OBQuery<OAuth2Token> query = OBDal.getInstance().createQuery(OAuth2Token.class,
+        "as token where token.oAuth2Client.id = :" + FIELD_CLIENT_ID);
+    query.setNamedParameter(FIELD_CLIENT_ID, client.getId());
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    for (OAuth2Token token : query.list()) {
+      OBDal.getInstance().remove(token);
+    }
+  }
+
+  private int revokePublicApiKeyTokens(OAuth2Client client) {
+    int revoked = 0;
+    OBQuery<OAuth2Token> query = OBDal.getInstance().createQuery(OAuth2Token.class,
+        "as token where token.oAuth2Client.id = :" + FIELD_CLIENT_ID
+            + " and token.revoked = false");
+    query.setNamedParameter(FIELD_CLIENT_ID, client.getId());
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    for (OAuth2Token token : query.list()) {
+      token.setRevoked(true);
+      token.setUpdatedBy(OBDal.getInstance().get(User.class, client.getUserContact().getId()));
+      OBDal.getInstance().save(token);
+      revoked++;
+    }
+    OBDal.getInstance().flush();
+    return revoked;
+  }
+
+  private boolean hasWritableWindowAccess(String roleId, String clientId, String orgId) {
+    OBQuery<WindowAccess> query = OBDal.getInstance().createQuery(WindowAccess.class,
+        "as access where access.role.id = :roleId and access.active = true "
+            + "and access.editableField = true and (access.client.id = :" + FIELD_CLIENT_ID + " "
+            + "or access.client.id = '0') and (access.organization.id = :orgId "
+            + "or access.organization.id = '0')");
+    query.setNamedParameter(FIELD_ROLE_ID, roleId);
+    query.setNamedParameter(FIELD_CLIENT_ID, clientId);
+    query.setNamedParameter(FIELD_ORG_ID, orgId);
+    query.setMaxResult(1);
+    return !query.list().isEmpty();
+  }
+
+  private boolean hasProcessAccess(String roleId, String clientId, String orgId) {
+    OBQuery<ProcessAccess> query = OBDal.getInstance().createQuery(ProcessAccess.class,
+        "as access where access.role.id = :roleId and access.active = true "
+            + "and (access.client.id = :" + FIELD_CLIENT_ID + " or access.client.id = '0') "
+            + "and (access.organization.id = :orgId or access.organization.id = '0')");
+    query.setNamedParameter(FIELD_ROLE_ID, roleId);
+    query.setNamedParameter(FIELD_CLIENT_ID, clientId);
+    query.setNamedParameter(FIELD_ORG_ID, orgId);
+    query.setMaxResult(1);
+    return !query.list().isEmpty();
+  }
+
+  private PublicApiKeyContext requirePublicApiKeyContext(HttpServletRequest request)
+      throws AuthException {
+    // ETP-4575 — qualified, like every other authenticator call in this class: the method was
+    // extracted to OAuth2RequestAuthenticator when the cookie session landed. This call site
+    // arrived from develop, where the method still lived here, so the unqualified form compiled
+    // on both sides separately and only broke once the two met.
+    DecodedJWT jwt = OAuth2RequestAuthenticator.authenticateJwt(request);
+    String userId = requiredClaim(jwt, "user");
+    String roleId = requiredClaim(jwt, "role");
+    String clientId = requiredClaim(jwt, "client");
+    String orgId = requiredClaim(jwt, "organization");
+    OBContext context = SecureWebServicesUtils.createContext(userId, roleId, orgId, null, clientId);
+    OBContext.setOBContext(context);
+    OBContext.setOBContextInSession(request, context);
+    OBContext.setAdminMode(false);
+    User user = OBDal.getInstance().get(User.class, userId);
+    Role role = OBDal.getInstance().get(Role.class, roleId);
+    Client client = OBDal.getInstance().get(Client.class, clientId);
+    Organization organization = OBDal.getInstance().get(Organization.class, orgId);
+    if (!hasActiveSession(user, role, client, organization)
+        || !roleBelongsToClient(role, clientId)) {
+      throw new AuthException(HttpServletResponse.SC_FORBIDDEN,
+          "Active session context required");
+    }
+    OBQuery<UserRoles> assignments = OBDal.getInstance().createQuery(UserRoles.class,
+        "as assignment where assignment.userContact.id = :userId "
+            + "and assignment.role.id = :roleId and assignment.active = true");
+    assignments.setNamedParameter(FIELD_USER_ID, userId);
+    assignments.setNamedParameter(FIELD_ROLE_ID, roleId);
+    assignments.setFilterOnReadableClients(false);
+    assignments.setFilterOnReadableOrganization(false);
+    if (!hasActiveRoleAssignment(assignments, clientId, orgId)
+        || (!"0".equals(roleId) && !roleHasOrganization(roleId, orgId))) {
+      throw new AuthException(HttpServletResponse.SC_FORBIDDEN,
+          "Active role is not available in this tenant");
+    }
+    return new PublicApiKeyContext(userId, roleId, clientId, orgId);
+  }
+
   /**
    * GET /oauth2/clients — List all OAuth2 clients.
    * Requires JWT auth with System Administrator role.
@@ -428,7 +952,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleListClients(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
-      requireAdmin(request);
+      OAuth2RequestAuthenticator.requireAdmin(request);
 
       Connection conn = OBDal.getInstance().getConnection();
       JSONArray clients = new JSONArray();
@@ -471,7 +995,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleCreateClient(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
-      DecodedJWT jwt = requireAdmin(request);
+      DecodedJWT jwt = OAuth2RequestAuthenticator.requireAdmin(request);
       String adminUserId = jwt.getClaim("user").asString();
 
       JSONObject body = parseJsonBody(request);
@@ -501,22 +1025,26 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String clientIdentifier = OAuth2Utils.generateClientId();
       String plainSecret = OAuth2Utils.generateSecureToken();
       String secretHash = OAuth2Utils.hashSecret(plainSecret);
+      String adClientId = requiredClaim(jwt, "client");
+      String adOrgId = requiredClaim(jwt, "organization");
 
       Connection conn = OBDal.getInstance().getConnection();
       String generatedId = SequenceIdData.getUUID();
 
       try (PreparedStatement ps = conn.prepareStatement(SQL_INSERT_CLIENT)) {
         ps.setString(1, generatedId);             // etgo_oauth2_client_id
-        ps.setString(2, isActive ? "Y" : "N");   // isactive
-        ps.setString(3, adminUserId);             // createdby
-        ps.setString(4, adminUserId);             // updatedby
-        ps.setString(5, name.trim());             // name
-        ps.setString(6, clientIdentifier);        // client_identifier
-        ps.setString(7, secretHash);              // client_secret_hash
-        ps.setString(8, adUserId.trim());         // ad_user_id
-        ps.setString(9, adRoleId.trim());         // ad_role_id
-        ps.setString(10, scopes.trim());          // scopes
-        ps.setString(11, redirectUrisJson);       // redirect_uris
+        ps.setString(2, adClientId);               // ad_client_id
+        ps.setString(3, adOrgId);                  // ad_org_id
+        ps.setString(4, isActive ? "Y" : "N");   // isactive
+        ps.setString(5, adminUserId);             // createdby
+        ps.setString(6, adminUserId);             // updatedby
+        ps.setString(7, name.trim());             // name
+        ps.setString(8, clientIdentifier);        // client_identifier
+        ps.setString(9, secretHash);              // client_secret_hash
+        ps.setString(10, adUserId.trim());        // ad_user_id
+        ps.setString(11, adRoleId.trim());        // ad_role_id
+        ps.setString(12, scopes.trim());          // scopes
+        ps.setString(13, redirectUrisJson);       // redirect_uris
         ps.executeUpdate();
       }
 
@@ -524,7 +1052,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       result.put(FIELD_ID, generatedId);
       result.put("name", name.trim());
       result.put(FIELD_CLIENT_ID, clientIdentifier);
-      result.put("clientSecret", plainSecret);
+        result.put(FIELD_CLIENT_SECRET, plainSecret);
       result.put(FIELD_AD_USER_ID, adUserId.trim());
       result.put(FIELD_AD_ROLE_ID, adRoleId.trim());
       result.put(FIELD_SCOPES, scopes.trim());
@@ -551,7 +1079,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleUpdateClient(HttpServletRequest request, HttpServletResponse response,
       String id) throws IOException {
     try {
-      DecodedJWT jwt = requireAdmin(request);
+      DecodedJWT jwt = OAuth2RequestAuthenticator.requireAdmin(request);
       String adminUserId = jwt.getClaim("user").asString();
 
       JSONObject body = parseJsonBody(request);
@@ -621,7 +1149,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleDeleteClient(HttpServletRequest request, HttpServletResponse response,
       String id) throws IOException {
     try {
-      requireAdmin(request);
+      OAuth2RequestAuthenticator.requireAdmin(request);
 
       Connection conn = OBDal.getInstance().getConnection();
 
@@ -645,7 +1173,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       }
 
       JSONObject result = new JSONObject();
-      result.put("deleted", true);
+      result.put(FIELD_DELETED, true);
       result.put(FIELD_ID, id);
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
       log.info("OAuth2 client deleted: {}", id);
@@ -669,7 +1197,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleRegenerateSecret(HttpServletRequest request, HttpServletResponse response,
       String id) throws IOException {
     try {
-      DecodedJWT jwt = requireAdmin(request);
+      DecodedJWT jwt = OAuth2RequestAuthenticator.requireAdmin(request);
       String adminUserId = jwt.getClaim("user").asString();
 
       // Check if caller wants to revoke existing tokens
@@ -713,7 +1241,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       JSONObject result = new JSONObject();
       result.put(FIELD_ID, id);
       result.put(FIELD_CLIENT_ID, existing.getString(FIELD_CLIENT_ID));
-      result.put("clientSecret", plainSecret);
+      result.put(FIELD_CLIENT_SECRET, plainSecret);
       result.put("tokensRevoked", revokeTokens);
 
       writeJsonResponse(response, HttpServletResponse.SC_OK, result);
@@ -728,6 +1256,54 @@ public class OAuth2Servlet extends HttpBaseServlet {
     }
   }
 
+  private boolean hasActiveSession(User user, Role role, Client client, Organization organization) {
+    return user != null && Boolean.TRUE.equals(user.isActive()) && role != null
+        && Boolean.TRUE.equals(role.isActive()) && client != null
+        && Boolean.TRUE.equals(client.isActive()) && organization != null
+        && Boolean.TRUE.equals(organization.isActive());
+  }
+
+  private boolean roleBelongsToClient(Role role, String clientId) {
+    return role.getClient() == null || "0".equals(role.getClient().getId())
+        || clientId.equals(role.getClient().getId());
+  }
+
+  private boolean hasActiveRoleAssignment(OBQuery<UserRoles> assignments, String clientId,
+      String orgId) {
+    for (UserRoles assignment : assignments.list()) {
+      String assignmentClientId = assignment.getClient() == null ? null : assignment.getClient().getId();
+      String assignmentOrgId = assignment.getOrganization() == null ? null : assignment.getOrganization().getId();
+      if ((clientId.equals(assignmentClientId) || "0".equals(assignmentClientId))
+          && (orgId.equals(assignmentOrgId) || "0".equals(assignmentOrgId))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean roleHasOrganization(String roleId, String orgId) {
+    OBQuery<RoleOrganization> query = OBDal.getInstance().createQuery(RoleOrganization.class,
+        "as access where access.role.id = :roleId and access.active = true "
+            + "and (access.organization.id = :orgId or access.organization.id = '0')");
+    query.setNamedParameter(FIELD_ROLE_ID, roleId);
+    query.setNamedParameter(FIELD_ORG_ID, orgId);
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    query.setMaxResult(1);
+    return !query.list().isEmpty();
+  }
+
+  private String requiredClaim(DecodedJWT jwt, String claimName) throws AuthException {
+    String value = jwt.getClaim(claimName).asString();
+    if (value == null || value.trim().isEmpty()) {
+      throw new AuthException(HttpServletResponse.SC_BAD_REQUEST,
+          "Authenticated token is missing required claim: " + claimName);
+    }
+    return value.trim();
+  }
+
+  }
+
   // --- B4: Revoke and Introspect ---
 
   /**
@@ -737,7 +1313,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleRevoke(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
-      requireAdmin(request);
+      OAuth2RequestAuthenticator.requireAdmin(request);
 
       JSONObject body = parseJsonBody(request);
       String clientIdentifier = body.optString(FIELD_CLIENT_ID, null);
@@ -780,7 +1356,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleIntrospect(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
-      requireAdmin(request);
+      OAuth2RequestAuthenticator.requireAdmin(request);
 
       JSONObject body = parseJsonBody(request);
       String token = body.optString(FIELD_TOKEN, null);
@@ -915,7 +1491,9 @@ public class OAuth2Servlet extends HttpBaseServlet {
       Set<String> requestedScopes =
           OAuth2ClientPolicy.parseScopes(authorizeRequest.scope, VALID_SCOPES);
       Set<String> allowedScopes = OAuth2ClientPolicy.parseScopes(client.scopes, VALID_SCOPES);
-      DecodedJWT jwt = authenticateJwt(authorizeRequest.jwtToken);
+      OAuth2RequestAuthenticator.AuthorizePrincipal principal =
+          OAuth2RequestAuthenticator.authenticateAuthorizeRequest(goSessionService, request,
+              authorizeRequest);
 
       String authCode = OAuth2Utils.generateAuthCode();
       String codeHash = OAuth2Utils.hashToken(authCode);
@@ -923,8 +1501,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
       AuthCodeData codeData = OAuth2AuthorizeSupport.buildAuthCodeData(
           authorizeRequest,
-          jwt.getClaim("user").asString(),
-          jwt.getClaim("role").asString(),
+          principal.userId,
+          principal.roleId,
           requestedScopes,
           allowedScopes,
           WILDCARD_SCOPE,
@@ -1014,7 +1592,13 @@ public class OAuth2Servlet extends HttpBaseServlet {
         try (ResultSet rs = ps.executeQuery()) {
           if (rs.next()) {
             tokenClient.id = rs.getString(DB_OAUTH2_CLIENT_ID);
-            tokenClient.adClientId = "0";
+            tokenClient.adClientId = rs.getString("ad_client_id");
+            // ad_org_id is NOT NULL on etgo_oauth2_token, so the organization has to be
+            // resolved here exactly as loadClient() does it: the owner_org scope wins,
+            // otherwise the organization the client itself belongs to.
+            tokenClient.adOrgId = rs.getString("ad_org_id");
+            tokenClient.ownerOrgId = StringUtils.defaultIfEmpty(
+                PublicApiKeyPolicy.ownerOrganizationId(codeData.scopes), tokenClient.adOrgId);
           }
         }
       }
@@ -1109,6 +1693,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String adUserId = null;
       String adRoleId = null;
       String adClientId = null;
+      String adOrgId = null;
       boolean revoked = false;
       boolean clientActive = false;
       long validitySeconds = OAuth2ValidityPolicy.DEFAULT_AUTHORIZE_VALIDITY_SECONDS;
@@ -1128,6 +1713,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
           adUserId = rs.getString(FIELD_DB_AD_USER_ID);
           adRoleId = rs.getString(FIELD_DB_AD_ROLE_ID);
           adClientId = rs.getString("etendo_client_id");
+          adOrgId = rs.getString("token_org_id");
           clientActive = "Y".equals(rs.getString("client_active"));
           long storedValiditySeconds = rs.getLong("validity_seconds");
           // Legacy rows predating this feature store NULL; getLong() returns 0 for NULL,
@@ -1158,6 +1744,9 @@ public class OAuth2Servlet extends HttpBaseServlet {
       ClientRecord client = new ClientRecord();
       client.id = oauth2ClientId;
       client.adClientId = adClientId;
+      client.adOrgId = adOrgId;
+      client.ownerOrgId = StringUtils.defaultIfEmpty(
+          PublicApiKeyPolicy.ownerOrganizationId(scopes), adOrgId);
       client.adUserId = adUserId;
       client.adRoleId = adRoleId;
 
@@ -1354,56 +1943,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
   }
 
   // --- Auth helpers ---
-
-  /**
-   * Authenticate a JWT Bearer token from the Authorization header.
-   *
-   * @param request the HTTP request
-   * @return decoded JWT
-   * @throws AuthException if authentication fails
-   */
-  private DecodedJWT authenticateJwt(HttpServletRequest request) throws AuthException {
-    String authHeader = request.getHeader("Authorization");
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      throw new AuthException(HttpServletResponse.SC_UNAUTHORIZED,
-          "Missing or invalid Authorization header");
-    }
-    return authenticateJwt(authHeader.substring(7));
-  }
-
-  private DecodedJWT authenticateJwt(String token) throws AuthException {
-    try {
-      return SecureWebServicesUtils.decodeToken(token);
-    } catch (Exception e) {
-      log.warn("JWT authentication failed: {}", e.getMessage());
-      throw new AuthException(HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired JWT token");
-    }
-  }
-
-  /**
-   * Authenticate JWT and verify the caller has System Administrator role (roleId = "0").
-   *
-   * @param request the HTTP request
-   * @return decoded JWT
-   * @throws AuthException if authentication or authorization fails
-   */
-  private DecodedJWT requireAdmin(HttpServletRequest request) throws AuthException {
-    DecodedJWT jwt = authenticateJwt(request);
-    String roleId = jwt.getClaim("role").asString();
-    if (!ADMIN_ROLE_ID.equals(roleId)) {
-      throw new AuthException(HttpServletResponse.SC_FORBIDDEN,
-          "System Administrator role required");
-    }
-    return jwt;
-  }
+  // JWT/admin-role authentication and the authorize-endpoint principal resolution live in
+  // OAuth2RequestAuthenticator (extracted to keep this class under the method-count limit).
 
   private boolean validateAuthorizePostRequest(HttpServletResponse response,
       OAuth2AuthorizeSupport.AuthorizeRequestData authorizeRequest) throws IOException, SQLException {
-    if (authorizeRequest.jwtToken == null || authorizeRequest.jwtToken.isEmpty()) {
-      writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
-          "JWT token is required");
-      return false;
-    }
     if (authorizeRequest.codeChallenge == null || authorizeRequest.codeChallenge.isEmpty()) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST, ERROR_INVALID_REQUEST,
           "code_challenge is required");
@@ -1412,8 +1956,6 @@ public class OAuth2Servlet extends HttpBaseServlet {
     return validateAuthorizeClientRequest(
         response, authorizeRequest.clientId, authorizeRequest.redirectUri, authorizeRequest.scope);
   }
-
-
 
   private boolean validateAuthorizeClientRequest(HttpServletResponse response, String clientId,
       String redirectUri, String scope) throws IOException, SQLException {
@@ -1482,6 +2024,11 @@ public class OAuth2Servlet extends HttpBaseServlet {
         client.scopes = rs.getString(FIELD_SCOPES);
         client.redirectUrisJson = rs.getString(FIELD_REDIRECT_URIS);
         client.adClientId = rs.getString("ad_client_id");
+        client.adOrgId = rs.getString("ad_org_id");
+        client.ownerOrgId = PublicApiKeyPolicy.ownerOrganizationId(client.scopes);
+        if (client.ownerOrgId == null || client.ownerOrgId.isEmpty()) {
+          client.ownerOrgId = client.adOrgId;
+        }
         client.adUserId = rs.getString(FIELD_DB_AD_USER_ID);
         client.adRoleId = rs.getString(FIELD_DB_AD_ROLE_ID);
         return client;
@@ -1530,18 +2077,19 @@ public class OAuth2Servlet extends HttpBaseServlet {
     Connection conn = OBDal.getInstance().getConnection();
     try (PreparedStatement ps = conn.prepareStatement(SQL_INSERT_TOKEN)) {
       ps.setString(1, client.adClientId);    // ad_client_id
-      ps.setString(2, client.adUserId);      // createdby
-      ps.setString(3, client.adUserId);      // updatedby
-      ps.setString(4, client.id);            // etgo_oauth2_client_id
-      ps.setString(5, tokenHash);            // access_token_hash
-      ps.setString(6, refreshTokenHash);     // refresh_token_hash
-      ps.setString(7, scopes);               // scopes
+      ps.setString(2, client.ownerOrgId);    // ad_org_id
+      ps.setString(3, client.adUserId);      // createdby
+      ps.setString(4, client.adUserId);      // updatedby
+      ps.setString(5, client.id);            // etgo_oauth2_client_id
+      ps.setString(6, tokenHash);            // access_token_hash
+      ps.setString(7, refreshTokenHash);     // refresh_token_hash
+      ps.setString(8, scopes);               // scopes
       if (expiresAt == null) {
-        ps.setNull(8, Types.TIMESTAMP);       // expires_at (no expiration)
+        ps.setNull(9, Types.TIMESTAMP);       // expires_at (no expiration)
       } else {
-        ps.setTimestamp(8, expiresAt);        // expires_at
+        ps.setTimestamp(9, expiresAt);        // expires_at
       }
-      ps.setLong(9, validitySeconds);         // validity_seconds
+      ps.setLong(10, validitySeconds);        // validity_seconds
       ps.executeUpdate();
     }
   }
@@ -1609,14 +2157,31 @@ public class OAuth2Servlet extends HttpBaseServlet {
     String scopes;
     String redirectUrisJson;
     String adClientId;
+    String adOrgId;
+    String ownerOrgId;
     String adUserId;
     String adRoleId;
   }
 
+  private static final class PublicApiKeyContext {
+    final String userId;
+    final String roleId;
+    final String clientId;
+    final String orgId;
+
+    PublicApiKeyContext(String userId, String roleId, String clientId, String orgId) {
+      this.userId = userId;
+      this.roleId = roleId;
+      this.clientId = clientId;
+      this.orgId = orgId;
+    }
+  }
+
   /**
-   * Exception for authentication/authorization failures with HTTP status codes.
+   * Exception for authentication/authorization failures with HTTP status codes. Package-visible so
+   * {@link OAuth2RequestAuthenticator} can throw it.
    */
-  private static class AuthException extends Exception {
+  static class AuthException extends Exception {
     final int statusCode;
 
     AuthException(int statusCode, String message) {

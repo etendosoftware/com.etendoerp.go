@@ -41,11 +41,13 @@ import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
+import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.ui.Window;
 
 import com.etendoerp.go.schemaforge.data.SFSpec;
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
+import com.etendoerp.go.schemaforge.util.OwnerSupport;
 
 /**
  * Unit tests for {@link SFWindowAccessMap}.
@@ -55,7 +57,9 @@ import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
  * {@code showAccountingFields} capability (from {@code AD_Role.EM_ETGO_Show_Acct_Fields}), and
  * the {@code isAdminOrClientAdmin} capability (ETP-4513 — mirrors
  * {@link NeoAccessHelper#isAdminOrClientAdmin} back to the frontend so it can gate admin-only
- * menu entries like "Configuración &gt; Roles" up front).
+ * menu entries like "Configuración &gt; Roles" up front), and the {@code isOwner} capability
+ * (ETP-5395 — mirrors {@link OwnerSupport#isOwner(String)} back to the frontend, identically in
+ * both the bypass and restricted-role branches, since ownership is orthogonal to admin status).
  */
 @MockitoSettings(strictness = Strictness.LENIENT)
 class SFWindowAccessMapTest {
@@ -449,6 +453,109 @@ class SFWindowAccessMapTest {
         assertNull(responseVars.get(ERROR));
         JSONObject result = new JSONObject(responseVars.get(RESULT));
         assertFalse(result.getJSONObject("capabilities").getBoolean("isAdminOrClientAdmin"));
+    }
+
+    // ── isOwner capability (ETP-5395) ────────────────────────────────────
+
+    /**
+     * A restricted (non-bypass) role still resolves {@code isOwner: true} when the current user
+     * (captured before admin mode, mirroring the current role) is flagged as the tenant owner via
+     * {@link OwnerSupport#isOwner(String)}.
+     */
+    @Test
+    @DisplayName("Restricted role resolves isOwner true for the current owner user (ETP-5395)")
+    void testIsOwnerTrueForRestrictedRoleOwnerUser() throws Exception {
+        givenRestrictedRole("role-owner-check");
+        User currentUser = mock(User.class);
+        when(currentUser.getId()).thenReturn("user-owner");
+        when(mockContext.getUser()).thenReturn(currentUser);
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+        try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
+            ownerMock.when(() -> OwnerSupport.isOwner("user-owner")).thenReturn(true);
+
+            webhook.get(parameters, responseVars);
+
+            assertNull(responseVars.get(ERROR));
+            JSONObject result = new JSONObject(responseVars.get(RESULT));
+            assertTrue(result.getJSONObject("capabilities").getBoolean("isOwner"));
+        }
+    }
+
+    /** A restricted role resolves {@code isOwner: false} for a non-owner current user. */
+    @Test
+    @DisplayName("Restricted role resolves isOwner false for a non-owner current user (ETP-5395)")
+    void testIsOwnerFalseForRestrictedRoleNonOwnerUser() throws Exception {
+        givenRestrictedRole("role-non-owner-check");
+        User currentUser = mock(User.class);
+        when(currentUser.getId()).thenReturn("user-not-owner");
+        when(mockContext.getUser()).thenReturn(currentUser);
+        stubWindowAccessRows(Collections.emptyList());
+        stubShowAcctFieldsQuery(Collections.singletonList("N"));
+
+        try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
+            ownerMock.when(() -> OwnerSupport.isOwner("user-not-owner")).thenReturn(false);
+
+            webhook.get(parameters, responseVars);
+
+            assertNull(responseVars.get(ERROR));
+            JSONObject result = new JSONObject(responseVars.get(RESULT));
+            assertFalse(result.getJSONObject("capabilities").getBoolean("isOwner"));
+        }
+    }
+
+    /**
+     * Ownership is orthogonal to admin status: an admin/client-admin bypass role whose current
+     * user IS the tenant owner still gets {@code isOwner: true} alongside the bypass's own
+     * {@code isAdminOrClientAdmin: true}.
+     */
+    @Test
+    @DisplayName("Admin/client-admin role resolves isOwner true when the current user is the owner (ETP-5395)")
+    void testIsOwnerTrueForAdminRoleOwnerUser() throws Exception {
+        givenSystemAdminRole();
+        User currentUser = mock(User.class);
+        when(currentUser.getId()).thenReturn("user-owner-admin");
+        when(mockContext.getUser()).thenReturn(currentUser);
+        stubSpecRows(Collections.emptyList());
+        stubWindowAccessRows(Collections.emptyList());
+
+        try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
+            ownerMock.when(() -> OwnerSupport.isOwner("user-owner-admin")).thenReturn(true);
+
+            webhook.get(parameters, responseVars);
+
+            assertNull(responseVars.get(ERROR));
+            JSONObject result = new JSONObject(responseVars.get(RESULT));
+            assertTrue(result.getJSONObject("capabilities").getBoolean("isOwner"));
+            assertTrue(result.getJSONObject("capabilities").getBoolean("isAdminOrClientAdmin"));
+        }
+    }
+
+    /**
+     * The bypass's blanket {@code true} capabilities do NOT extend to ownership: an admin/
+     * client-admin role whose current user is NOT the owner still gets {@code isOwner: false}.
+     */
+    @Test
+    @DisplayName("Admin/client-admin role resolves isOwner false for a non-owner current user (ETP-5395)")
+    void testIsOwnerFalseForAdminRoleNonOwnerUser() throws Exception {
+        givenClientAdminRole("role-client-admin-non-owner");
+        User currentUser = mock(User.class);
+        when(currentUser.getId()).thenReturn("user-not-owner-admin");
+        when(mockContext.getUser()).thenReturn(currentUser);
+        stubSpecRows(Collections.emptyList());
+        stubWindowAccessRows(Collections.emptyList());
+
+        try (MockedStatic<OwnerSupport> ownerMock = mockStatic(OwnerSupport.class)) {
+            ownerMock.when(() -> OwnerSupport.isOwner("user-not-owner-admin")).thenReturn(false);
+
+            webhook.get(parameters, responseVars);
+
+            assertNull(responseVars.get(ERROR));
+            JSONObject result = new JSONObject(responseVars.get(RESULT));
+            assertFalse(result.getJSONObject("capabilities").getBoolean("isOwner"));
+            assertTrue(result.getJSONObject("capabilities").getBoolean("isAdminOrClientAdmin"));
+        }
     }
 
     // ── exception handling ────────────────────────────────────────────────
