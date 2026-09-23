@@ -69,6 +69,8 @@ public final class UsageEventTypes {
   }
 
   /**
+   * Tell whether an event type is one the recorder accepts.
+   *
    * @param eventType candidate event type, possibly null
    * @return true only when {@code eventType} is one of the defined types
    */
