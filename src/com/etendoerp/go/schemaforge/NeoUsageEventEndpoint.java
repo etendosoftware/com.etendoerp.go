@@ -92,6 +92,12 @@ class NeoUsageEventEndpoint {
   static final int MAX_PROPERTY_STRING = 256;
   static final int MAX_PROPERTY_KEY = 64;
 
+  /**
+   * Deepest array/object nesting accepted before parsing. A valid body needs 3 (body, events,
+   * event) plus one for properties; the headroom is for callers, not for the parser's stack.
+   */
+  static final int MAX_JSON_DEPTH = 32;
+
   private static final long FAILURE_LOG_INTERVAL_MS = 60_000L;
 
   private static final String KEY_EVENTS = "events";
@@ -130,17 +136,55 @@ class NeoUsageEventEndpoint {
     return record(events);
   }
 
-  /** @return the events array, or null when the body is malformed */
+  /**
+   * Jettison recurses once per nesting level and, on some truncated inputs (a body that stops inside an array),
+   * forever: both end in a {@link StackOverflowError} on the request thread, which the servlet's
+   * {@code catch (Exception)} does not see. So the depth is bounded before jettison runs, and any
+   * error it still throws is a malformed body, not a 500.
+   *
+   * @return the events array, or null when the body is malformed
+   */
   static JSONArray parseEvents(String body) {
-    if (StringUtils.isBlank(body)) {
+    if (StringUtils.isBlank(body) || exceedsDepth(body, MAX_JSON_DEPTH)) {
       return null;
     }
     try {
       Object events = new JSONObject(body).opt(KEY_EVENTS);
       return events instanceof JSONArray ? (JSONArray) events : null;
-    } catch (JSONException e) {
+    } catch (JSONException | RuntimeException | StackOverflowError e) { // NOSONAR — see javadoc.
       return null;
     }
+  }
+
+  /**
+   * Linear scan for array/object nesting deeper than {@code maxDepth}, ignoring brackets
+   * inside JSON strings (escapes honoured). Cheap and total; it does not validate the JSON.
+   */
+  static boolean exceedsDepth(String body, int maxDepth) {
+    int depth = 0;
+    boolean inString = false;
+    boolean escaped = false;
+    for (int i = 0; i < body.length(); i++) {
+      char c = body.charAt(i);
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (c == '\\') {
+          escaped = true;
+        } else if (c == '"') {
+          inString = false;
+        }
+      } else if (c == '"') {
+        inString = true;
+      } else if (c == '[' || c == '{') {
+        if (++depth > maxDepth) {
+          return true;
+        }
+      } else if (c == ']' || c == '}') {
+        depth--;
+      }
+    }
+    return false;
   }
 
   private NeoResponse record(JSONArray events) {
