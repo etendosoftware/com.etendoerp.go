@@ -103,6 +103,11 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
 
   private static final String COMPLETED = "checkout.session.completed";
   private static final String ASYNC_SUCCEEDED = "checkout.session.async_payment_succeeded";
+  private static final String INVOICE_PAID = "invoice.paid";
+  // ETP-5443 added invoice.paid to SUBSCRIPTION_EVENT_TYPES, so it no longer proves the
+  // "unhandled event type" branch — this must stay a type neither CHECKOUT_PAID_EVENT_TYPES nor
+  // SUBSCRIPTION_EVENT_TYPES (EtendoGoJwtServlet) ever claims, or the fix silently invalidates it.
+  private static final String GENUINELY_UNHANDLED = "customer.created";
 
   private static final String APPLIED = "APPLIED";
   private static final String IGNORED = "IGNORED";
@@ -297,6 +302,12 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
    * Stripe delivers every event type the endpoint is subscribed to, not only the two that confirm
    * a payment. The rest are acknowledged and annotated, so the audit trail says why nothing
    * happened instead of leaving a row stuck at {@code RECEIVED}.
+   *
+   * <p>Must use a type {@code applyCheckoutEvent} claims in neither {@code CHECKOUT_PAID_EVENT_TYPES}
+   * nor {@code SUBSCRIPTION_EVENT_TYPES} — {@code invoice.paid} used to be that type, but ETP-5443
+   * added subscription-lifecycle handling for it, so it now falls into
+   * {@code testAnInvoicePaidEventThatCannotBeCorrelatedIsIgnoredAsUnresolvedSubscription}'s branch
+   * ("unresolved subscription") instead of this one.
    */
   @Test
   public void testAnUnhandledEventTypeIsAcknowledgedAndAnnotated() throws Exception {
@@ -304,13 +315,40 @@ public class CheckoutWebhookEndpointIntegrationTest extends OBBaseTest {
     String requestId = createRequest(email);
     String eventId = newEventId();
 
-    ResponseCapture response = deliver(paidEvent(eventId, "invoice.paid", requestId, email));
+    ResponseCapture response = deliver(paidEvent(eventId, GENUINELY_UNHANDLED, requestId, email));
 
     assertEquals(200, response.status);
     assertEquals(IGNORED, rawEvent(eventId, "EVENT_RESULT"));
     assertEquals("unhandled event type", rawEvent(eventId, "FAILURE_REASON"));
     assertEquals("An unhandled type must not confirm a payment", STATUS_CREATED,
         rawRequest(requestId, "CHECKOUT_STATUS"));
+  }
+
+  /**
+   * ETP-5443 — {@code invoice.paid} is now a subscription-lifecycle type ({@code
+   * SUBSCRIPTION_EVENT_TYPES}), so it is evaluated by {@code applySubscriptionLifecycle} rather
+   * than falling straight into "unhandled event type". An invoice whose subscription and customer
+   * match no stored checkout request (nothing was ever paid, so {@code STRIPE_SUBSCRIPTION}/
+   * {@code STRIPE_CUSTOMER} are unset on every row) cannot be resolved to an environment, so it
+   * must be acknowledged and ignored with its own, more specific reason — never silently applied,
+   * and never mistaken for the generic "unhandled event type" case above.
+   */
+  @Test
+  public void testAnInvoicePaidEventThatCannotBeCorrelatedIsIgnoredAsUnresolvedSubscription()
+      throws Exception {
+    String email = newEmail("unresolved-subscription");
+    String realRequestId = createRequest(email);
+    String uncorrelatedId = REQUEST_MARKER + UUID.randomUUID();
+    String eventId = newEventId();
+
+    ResponseCapture response = deliver(paidEvent(eventId, INVOICE_PAID, uncorrelatedId, email));
+
+    assertEquals(200, response.status);
+    assertTrue(new JSONObject(response.body()).getBoolean("received"));
+    assertEquals(IGNORED, rawEvent(eventId, "EVENT_RESULT"));
+    assertEquals("unresolved subscription", rawEvent(eventId, "FAILURE_REASON"));
+    assertEquals("A real request of the same account must not be touched", STATUS_CREATED,
+        rawRequest(realRequestId, "CHECKOUT_STATUS"));
   }
 
   /**
