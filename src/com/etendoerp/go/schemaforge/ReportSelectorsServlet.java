@@ -36,11 +36,11 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.base.HttpBaseServlet;
-import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.common.CorsUtils;
+import com.etendoerp.go.common.JwtAuthUtils;
 
 /**
  * Report Selectors Servlet.
@@ -157,18 +157,7 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   @Override
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     CorsUtils.apply(request, response, "GET, OPTIONS", "Authorization, Content-Type", null, false);
-
-    try {
-      authenticateJwt(request);
-    } catch (OBException e) {
-      log.warn("Unauthorized ReportSelectors request: {}", e.getMessage());
-      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
-      return;
-    } catch (Exception e) {
-      log.warn("Unauthorized ReportSelectors request: {}", e.getMessage());
-      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
-      return;
-    }
+    if (!JwtAuthUtils.authenticateOrFail(request, response, log, "report-selectors GET")) return;
 
     String pathInfo = request.getPathInfo();
     if (pathInfo == null || pathInfo.equals("/")) {
@@ -432,14 +421,6 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
         new StringBuilder("FROM c_tax WHERE isactive='Y'"
             + ACTIVE_CLIENT_NAME_SEARCH),
         ORDER_BY_NAME, true);
-  }
-
-  // ---------------------------------------------------------------------------
-  // JWT authentication — same pattern as NeoServlet, no shared state modified
-  // ---------------------------------------------------------------------------
-
-  private void authenticateJwt(HttpServletRequest request) throws Exception {
-    NeoServletSupport.authenticateJwt(request);
   }
 
   // ---------------------------------------------------------------------------
