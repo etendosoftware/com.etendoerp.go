@@ -531,18 +531,48 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
       "0D37A9F6109549DEB058373EF2DAEB6A",
       "EB4C4053F3B94A17A08D1DD7E89CEB7E");
 
+  /**
+   * ETP-5402 — the fixed universe of every classic {@code AD_Process_ID} ever granted through
+   * {@link #reconcileStandaloneClassicProcessAccess}, used to scope {@link
+   * #removeStaleStandaloneClassicProcessAccess}'s stale-removal to ONLY this id, so it can never
+   * touch a window-button-derived grant {@link #reconcileProcessAccess} wrote for the same role
+   * on the same {@code AD_Process_Access} table. Just the one id today ({@code tax-report}) — see
+   * {@code TemplateRoleWindowAccess#standaloneClassicProcessGrantsByRoleId()}'s own javadoc for
+   * the full rationale (inlined copy convention, same as {@link #ALL_STANDALONE_PROCESS_IDS}).
+   */
+  private static final Set<String> ALL_STANDALONE_CLASSIC_PROCESS_IDS = Set.of(
+      "8C1331B9EC14CED7E040007F010119A0");
+
+  /**
+   * ETP-5402 — the full role→standalone-CLASSIC-process-grant-list map, keyed by {@code
+   * AD_Role_ID}. Inlined copy of {@code TemplateRoleWindowAccess#standaloneClassicProcessGrantsByRoleId()}
+   * — every one of the four template roles is a key, even the three with an empty list (Finance
+   * gets {@code tax-report}, the other three get nothing).
+   */
+  private static Map<String, List<String>> standaloneClassicProcessGrantsByRoleId() {
+    Map<String, List<String>> map = new LinkedHashMap<>();
+    map.put(FINANCE_ROLE_ID, List.of("8C1331B9EC14CED7E040007F010119A0"));
+    map.put(SALES_ROLE_ID, Collections.emptyList());
+    map.put(PURCHASING_ROLE_ID, Collections.emptyList());
+    map.put(INVENTORY_ROLE_ID, Collections.emptyList());
+    return map;
+  }
+
   @Override
   public void execute() {
     try {
       ConnectionProvider cp = getConnectionProvider();
       Map<String, List<WindowGrant>> grantsByRoleId = windowAccessByRoleId();
       Map<String, List<String>> standaloneProcessGrantsByRoleId = standaloneProcessGrantsByRoleId();
+      Map<String, List<String>> standaloneClassicProcessGrantsByRoleId = standaloneClassicProcessGrantsByRoleId();
       for (Map.Entry<String, List<WindowGrant>> entry : grantsByRoleId.entrySet()) {
         String roleId = entry.getKey();
         ensureRole(cp, roleId, ROLE_NAMES_BY_ID.get(roleId));
         reconcileWindowAccess(cp, roleId, entry.getValue());
         reconcileProcessAccess(cp, roleId, entry.getValue());
         reconcileStandaloneProcessAccess(cp, roleId, standaloneProcessGrantsByRoleId.get(roleId));
+        reconcileStandaloneClassicProcessAccess(cp, roleId,
+            standaloneClassicProcessGrantsByRoleId.get(roleId));
       }
     } catch (Exception e) {
       handleError(e);
@@ -1032,6 +1062,82 @@ public class EnsureSystemRoleTemplatesScript extends ModuleScript {
         ps.executeUpdate();
       }
     }
+  }
+
+  /**
+   * ETP-5402 — reconciles {@code roleId}'s standalone CLASSIC {@code AD_Process_Access} grants
+   * (this script's own inlined copy of {@code TemplateRoleWindowAccess}'s classic-process matrix)
+   * — for {@code tax-report}, which gates on a classic process with no backing {@code AD_Window}
+   * button anywhere, so {@link #reconcileProcessAccess}'s window-button-derived mechanism can
+   * never reach it. Deliberately a separate, parallel mechanism from {@link
+   * #reconcileStandaloneProcessAccess} (different table: {@code AD_Process_Access}, not {@code
+   * obuiapp_process_access}) but the exact same shape: grants every desired process id directly,
+   * independent of any window grant, reusing {@link #upsertProcessAccess} (already
+   * insert-or-reactivate, generic over any classic process id) for the write half.
+   *
+   * <p>Idempotent the same way {@link #reconcileStandaloneProcessAccess} is w.r.t. FINAL state
+   * (not a strict no-op on an unchanged run — see that method's own javadoc for the accepted
+   * delete-then-reinsert cycle this mirrors, caused by {@link #reconcileProcessAccess}'s own
+   * window-button-derived {@link #removeStaleProcessAccess} not knowing about this standalone
+   * grant on the NEXT script run; that pre-existing tradeoff is unchanged here, not introduced by
+   * this ticket). Stale removal is scoped to {@link #ALL_STANDALONE_CLASSIC_PROCESS_IDS} only, so
+   * it can never delete a window-button-derived grant {@link #reconcileProcessAccess} wrote for
+   * the same role in the very same table.</p>
+   */
+  private void reconcileStandaloneClassicProcessAccess(ConnectionProvider cp, String roleId,
+      List<String> desiredProcessIds) throws Exception {
+    for (String processId : desiredProcessIds) {
+      upsertProcessAccess(cp, roleId, processId);
+    }
+    removeStaleStandaloneClassicProcessAccess(cp, roleId, desiredProcessIds);
+  }
+
+  /**
+   * Deletes every active {@code AD_Process_Access} row for {@code roleId} whose process id is in
+   * {@link #ALL_STANDALONE_CLASSIC_PROCESS_IDS} (the fixed universe this mechanism owns) but NOT
+   * in {@code desiredProcessIds}. Scoped this way — rather than "every active row not desired",
+   * unlike {@link #removeStaleProcessAccess} — so it never touches a window-button-derived grant
+   * {@link #reconcileProcessAccess} wrote for the same role on the same table.
+   */
+  private void removeStaleStandaloneClassicProcessAccess(ConnectionProvider cp, String roleId,
+      List<String> desiredProcessIds) throws Exception {
+    Set<String> desired = new HashSet<>(desiredProcessIds);
+    List<String> staleIds = new ArrayList<>();
+    for (String processId : activeClassicProcessIds(cp, roleId)) {
+      if (ALL_STANDALONE_CLASSIC_PROCESS_IDS.contains(processId) && !desired.contains(processId)) {
+        staleIds.add(processId);
+      }
+    }
+    String deleteSql = "DELETE FROM AD_Process_Access WHERE AD_Role_ID = ? AND AD_Process_ID = ? "
+        + "AND IsActive = 'Y'";
+    for (String processId : staleIds) {
+      try (PreparedStatement ps = cp.getPreparedStatement(deleteSql)) {
+        ps.setString(1, roleId);
+        ps.setString(2, processId);
+        ps.executeUpdate();
+      }
+    }
+  }
+
+  /**
+   * Every active classic {@code AD_Process_ID} currently granted to {@code roleId} — the classic
+   * counterpart of {@link #activeObuiappProcessIds}, used only by {@link
+   * #removeStaleStandaloneClassicProcessAccess}.
+   */
+  private List<String> activeClassicProcessIds(ConnectionProvider cp, String roleId)
+      throws Exception {
+    List<String> ids = new ArrayList<>();
+    String selectSql = "SELECT AD_Process_ID FROM AD_Process_Access "
+        + "WHERE AD_Role_ID = ? AND IsActive = 'Y'";
+    try (PreparedStatement ps = cp.getPreparedStatement(selectSql)) {
+      ps.setString(1, roleId);
+      try (ResultSet rs = ps.executeQuery()) {
+        while (rs.next()) {
+          ids.add(rs.getString(1));
+        }
+      }
+    }
+    return ids;
   }
 
   private boolean exists(ConnectionProvider cp, String sql, String... params) throws Exception {
