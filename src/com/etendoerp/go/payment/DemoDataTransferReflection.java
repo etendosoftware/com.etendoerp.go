@@ -4,6 +4,8 @@ package com.etendoerp.go.payment;
 import java.lang.reflect.Method;
 import java.util.Optional;
 
+import org.openbravo.model.pricing.pricelist.PriceList;
+import org.openbravo.model.pricing.pricelist.PriceListVersion;
 import org.openbravo.model.pricing.pricelist.ProductPrice;
 
 /** Reflection helpers for optional module fields used during demo data transfer. */
@@ -18,7 +20,13 @@ final class DemoDataTransferReflection {
   static void copy(Object source, Object target, String... properties) {
     for (String property : properties) {
       try {
-        Object value = source.getClass().getMethod("get" + property).invoke(source);
+        Method getter;
+        try {
+          getter = source.getClass().getMethod("get" + property);
+        } catch (NoSuchMethodException e) {
+          getter = source.getClass().getMethod("is" + property);
+        }
+        Object value = getter.invoke(source);
         if (value == null) continue;
         for (Method method : target.getClass().getMethods()) {
           if (method.getName().equals("set" + property) && method.getParameterCount() == 1) {
@@ -26,8 +34,10 @@ final class DemoDataTransferReflection {
             break;
           }
         }
-      } catch (ReflectiveOperationException ignored) {
-        // Optional module columns differ by installed module/version; their absence is not a row failure.
+      } catch (NoSuchMethodException ignored) {
+        // Optional module columns differ by installed module/version.
+      } catch (ReflectiveOperationException e) {
+        throw new IllegalStateException("Could not copy transfer property " + property, e);
       }
     }
   }
@@ -37,12 +47,8 @@ final class DemoDataTransferReflection {
    * @return sales-list classification, or empty if the relation cannot be resolved
    */
   static Optional<Boolean> salesPriceList(ProductPrice price) {
-    try {
-      Object version = price.getPriceListVersion();
-      Object list = version.getClass().getMethod("getPriceList").invoke(version);
-      return Optional.ofNullable((Boolean) list.getClass().getMethod("isSalesPriceList").invoke(list));
-    } catch (ReflectiveOperationException e) {
-      return Optional.empty();
-    }
+    PriceListVersion version = price.getPriceListVersion();
+    PriceList list = version == null ? null : version.getPriceList();
+    return list == null ? Optional.empty() : Optional.of(list.isSalesPriceList());
   }
 }

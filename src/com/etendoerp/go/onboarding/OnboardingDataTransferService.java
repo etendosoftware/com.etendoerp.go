@@ -50,8 +50,14 @@ public class OnboardingDataTransferService {
    */
   public TransferResult transfer(String sourceClientId, String targetClientId, String targetOrgId,
       boolean products, boolean contacts) {
-    if (StringUtils.isBlank(sourceClientId) || (!products && !contacts)) {
+    if (!products && !contacts) {
       return TransferResult.empty();
+    }
+    if (StringUtils.isBlank(sourceClientId)) {
+      return new TransferResult(0, 0, 1, "Source demo environment is unavailable");
+    }
+    if (sourceClientId.equals(targetClientId)) {
+      return new TransferResult(0, 0, 1, "Source and target environments are the same");
     }
     // The source is read under admin mode, but the batch must run with the destination client and
     // organization in the active context so the standard NEO import path assigns the target

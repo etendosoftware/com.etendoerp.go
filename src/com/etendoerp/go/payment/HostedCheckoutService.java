@@ -11,6 +11,7 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.UUID;
+import java.util.function.Consumer;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 
@@ -30,6 +31,12 @@ public class HostedCheckoutService {
    */
   public JSONObject createSession(String accountId, String accountEmail, String clientName,
       String origin) throws IOException, JSONException {
+    return createSession(accountId, accountEmail, clientName, origin, requestId -> { });
+  }
+
+  /** Persists request-specific local intent before contacting the payment provider. */
+  public JSONObject createSession(String accountId, String accountEmail, String clientName,
+      String origin, Consumer<String> beforeProvider) throws IOException, JSONException {
     if (!CheckoutConfiguration.isConfigured()) throw new IllegalStateException("Checkout is not configured");
     String requestId = UUID.randomUUID().toString();
     // Recorded and committed BEFORE the provider is contacted. A crash during the call below would
@@ -38,6 +45,7 @@ public class HostedCheckoutService {
     // it is the evidence that someone tried to buy something, and it is always safe to expire
     // because the checkoutUrl only reaches the browser once this method returns.
     checkoutRequestStore.recordRequested(requestId, accountId, accountEmail, clientName);
+    beforeProvider.accept(requestId);
     return createProviderSession(requestId, accountEmail, clientName, origin);
   }
 
