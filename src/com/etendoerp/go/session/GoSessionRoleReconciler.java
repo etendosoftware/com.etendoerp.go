@@ -44,7 +44,12 @@ public class GoSessionRoleReconciler {
 
   private static final Logger log = LogManager.getLogger(GoSessionRoleReconciler.class);
 
-  /** The organization and warehouse a user gets by default when entering with a role. */
+  /**
+   * The organization and warehouse a user gets by default when entering with a role.
+   *
+   * @param orgId the {@code AD_Org} id
+   * @param warehouseId the {@code M_Warehouse} id, or {@code null} when the organization has none
+   */
   public record RoleContext(String orgId, String warehouseId) {
   }
 
@@ -54,6 +59,9 @@ public class GoSessionRoleReconciler {
     /**
      * Tells whether the user may still act with a role in the given client.
      *
+     * @param userId the {@code AD_User} id
+     * @param roleId the {@code AD_Role} id
+     * @param clientId the session's {@code AD_Client} id
      * @return {@code true} when {@code roleId} is active, belongs to {@code clientId}, and the
      *     user has an active {@code AD_User_Roles} row for it
      */
@@ -62,6 +70,7 @@ public class GoSessionRoleReconciler {
     /**
      * Reads the role the user enters with by default.
      *
+     * @param userId the {@code AD_User} id
      * @return the user's {@code Default_AD_Role_ID}, or {@code null}
      */
     String findDefaultRoleId(String userId);
@@ -69,6 +78,7 @@ public class GoSessionRoleReconciler {
     /**
      * Lists the roles the user holds, used to pick a replacement when the default one is not valid.
      *
+     * @param userId the {@code AD_User} id
      * @return the user's active role ids, in the order the role list is shown to the user
      */
     List<String> findActiveRoleIds(String userId);
@@ -76,6 +86,8 @@ public class GoSessionRoleReconciler {
     /**
      * Tells whether a role can work in an organization, so the session organization can be kept.
      *
+     * @param roleId the {@code AD_Role} id
+     * @param orgId the {@code AD_Org} id, may be {@code null}
      * @return {@code true} when {@code roleId} has active access to {@code orgId}
      */
     boolean hasOrgAccess(String roleId, String orgId);
@@ -83,6 +95,8 @@ public class GoSessionRoleReconciler {
     /**
      * Picks the organization and warehouse for a role the session organization is not open to.
      *
+     * @param userId the {@code AD_User} id
+     * @param roleId the {@code AD_Role} id
      * @return the organization and warehouse environment entry would pick for this role
      */
     RoleContext deriveContext(String userId, String roleId);
