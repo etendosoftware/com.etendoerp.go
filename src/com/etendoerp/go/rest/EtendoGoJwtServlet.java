@@ -97,6 +97,7 @@ import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingCostingScheduleService;
+import com.etendoerp.go.onboarding.OnboardingWarehouseAddressService;
 import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
@@ -243,6 +244,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_FISCAL = "fiscal";
   private static final String PROGRESS_ORG_READY = "orgReady";
   private static final String PROGRESS_ORG_INFO = "orgInfo";
+  private static final String PROGRESS_WAREHOUSE_ADDRESS = "warehouseAddress";
   private static final String PROGRESS_BASELINE = "baseline";
   private static final String PROGRESS_COSTING_SCHEDULE = "costingSchedule";
   private static final String PROGRESS_BP_GROUP_ACCT_PATCH = "bpGroupAcctPatch";
@@ -338,6 +340,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingFiscalDataSetupService();
   OnboardingOrgInfoService onboardingOrgInfoService =
       new OnboardingOrgInfoService();
+  OnboardingWarehouseAddressService onboardingWarehouseAddressService =
+      new OnboardingWarehouseAddressService();
   OnboardingAcctdimCentrallyMaintainedService onboardingAcctdimCentrallyMaintainedService =
       new OnboardingAcctdimCentrallyMaintainedService();
   OnboardingAdminIdentityService onboardingAdminIdentityService =
@@ -3868,6 +3872,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!wireOrgInfo(writer, clientId, orgId, adminUserId, adminRoleId, requestData)) {
       return false;
     }
+    // Depends on AD_ORGINFO already being located by wireOrgInfo above.
+    if (!wireWarehouseAddress(writer, clientId, orgId, adminUserId, adminRoleId)) {
+      return false;
+    }
     if (!scheduleCostingBackground(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
@@ -4043,6 +4051,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String errorMessage = e.getMessage() != null ? e.getMessage()
           : "Organization info setup failed";
       sendProgress(writer, PROGRESS_ORG_INFO, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
+  boolean wireWarehouseAddress(PrintWriter writer, String clientId, String orgId,
+      String adminUserId, String adminRoleId) {
+    sendProgress(writer, PROGRESS_WAREHOUSE_ADDRESS, PROGRESS_IN_PROGRESS,
+        "Aligning warehouse address...");
+    try {
+      onboardingWarehouseAddressService.alignDefaultWarehouseAddress(clientId, orgId, adminUserId,
+          adminRoleId);
+      sendProgress(writer, PROGRESS_WAREHOUSE_ADDRESS, "done", "Warehouse address aligned");
+      return true;
+    } catch (Exception e) {
+      log.error("Error during warehouse-address alignment", e);
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Warehouse address alignment failed";
+      sendProgress(writer, PROGRESS_WAREHOUSE_ADDRESS, PROGRESS_ERROR, errorMessage);
       sendFinalResult(writer, false, errorMessage);
       return false;
     }
