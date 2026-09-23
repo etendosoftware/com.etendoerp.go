@@ -60,15 +60,19 @@ import org.openbravo.model.ad.access.WindowAccess;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
-import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.auth.DalWarehouseResolver;
+import com.etendoerp.go.auth.EnvironmentAuthOutcome;
+import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.auth.SurfacePolicy;
 import com.etendoerp.go.common.CorsUtils;
 import com.etendoerp.go.common.ProtocolErrorAdapters;
 import com.etendoerp.go.common.PublicUrlResolver;
 import com.etendoerp.go.schemaforge.data.com.etendoerp.go.schemaforge.data.OAuth2Client;
 import com.etendoerp.go.schemaforge.data.com.etendoerp.go.schemaforge.data.OAuth2Token;
+import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
+import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.JdbcGoSessionStore;
-import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
  * OAuth2 servlet handling token issuance, client CRUD, revocation, and introspection.
@@ -93,6 +97,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
   private static final Logger log = LogManager.getLogger(OAuth2Servlet.class);
   private final GoSessionService goSessionService;
+  private final EnvironmentRequestAuthenticator environmentAuthenticator;
 
   /**
    * Creates the default servlet wired to a real, JDBC-backed session service.
@@ -102,7 +107,35 @@ public class OAuth2Servlet extends HttpBaseServlet {
   }
 
   OAuth2Servlet(GoSessionService goSessionService) {
+    this(goSessionService, new EnvironmentRequestAuthenticator(
+        new GoSessionAuthenticator(goSessionService), new TenantEnvironmentLifecycleService(),
+        new DalWarehouseResolver()));
+  }
+
+  OAuth2Servlet(GoSessionService goSessionService,
+      EnvironmentRequestAuthenticator environmentAuthenticator) {
     this.goSessionService = goSessionService;
+    this.environmentAuthenticator = environmentAuthenticator;
+  }
+
+  /**
+   * ETP-5455 — the management endpoints the SPA calls (API keys, OAuth2 clients) authenticate
+   * the signed-in user through the shared environment pipeline, so they honour the cookie session
+   * and the legacy kill switch like every other surface. The OAuth2 protocol endpoints (token,
+   * revoke, introspect, register, metadata) authenticate the OAuth client by its own credentials
+   * and are deliberately not routed through it.
+   */
+  private EnvironmentAuthOutcome requireAdmin(HttpServletRequest request) throws AuthException {
+    EnvironmentAuthOutcome outcome =
+        environmentAuthenticator.identify(request, SurfacePolicy.NEO_AUXILIARY);
+    if (!outcome.isAuthenticated()) {
+      throw new AuthException(outcome.getHttpStatus(), outcome.getMessage());
+    }
+    if (!OAuth2RequestAuthenticator.ADMIN_ROLE_ID.equals(outcome.getRoleId())) {
+      throw new AuthException(HttpServletResponse.SC_FORBIDDEN,
+          "System Administrator role required");
+    }
+    return outcome;
   }
 
   private static final int TOKEN_EXPIRY_SECONDS = 3600;
@@ -908,18 +941,19 @@ public class OAuth2Servlet extends HttpBaseServlet {
 
   private PublicApiKeyContext requirePublicApiKeyContext(HttpServletRequest request)
       throws AuthException {
-    // ETP-4575 — qualified, like every other authenticator call in this class: the method was
-    // extracted to OAuth2RequestAuthenticator when the cookie session landed. This call site
-    // arrived from develop, where the method still lived here, so the unqualified form compiled
-    // on both sides separately and only broke once the two met.
-    DecodedJWT jwt = OAuth2RequestAuthenticator.authenticateJwt(request);
-    String userId = requiredClaim(jwt, "user");
-    String roleId = requiredClaim(jwt, "role");
-    String clientId = requiredClaim(jwt, "client");
-    String orgId = requiredClaim(jwt, "organization");
-    OBContext context = SecureWebServicesUtils.createContext(userId, roleId, orgId, null, clientId);
-    OBContext.setOBContext(context);
-    OBContext.setOBContextInSession(request, context);
+    // ETP-5455 — the shared environment pipeline under SurfacePolicy.NEO_DATA: it used to decode
+    // the Authorization header only, so the SPA's cookie session got 401 here (and the frontend
+    // logs out on a 401), the legacy kill switch did not apply, and a commercially blocked
+    // tenant's keys stayed manageable. The pipeline installs the request's OBContext itself.
+    EnvironmentAuthOutcome outcome =
+        environmentAuthenticator.authenticate(request, SurfacePolicy.NEO_DATA);
+    if (!outcome.isAuthenticated()) {
+      throw new AuthException(outcome.getHttpStatus(), outcome.getMessage());
+    }
+    String userId = outcome.getUserId();
+    String roleId = outcome.getRoleId();
+    String clientId = outcome.getClientId();
+    String orgId = outcome.getOrgId();
     OBContext.setAdminMode(false);
     User user = OBDal.getInstance().get(User.class, userId);
     Role role = OBDal.getInstance().get(Role.class, roleId);
@@ -952,7 +986,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleListClients(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
-      OAuth2RequestAuthenticator.requireAdmin(request);
+      requireAdmin(request);
 
       Connection conn = OBDal.getInstance().getConnection();
       JSONArray clients = new JSONArray();
@@ -995,8 +1029,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleCreateClient(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
-      DecodedJWT jwt = OAuth2RequestAuthenticator.requireAdmin(request);
-      String adminUserId = jwt.getClaim("user").asString();
+      EnvironmentAuthOutcome admin = requireAdmin(request);
+      String adminUserId = admin.getUserId();
 
       JSONObject body = parseJsonBody(request);
       String name = body.optString("name", null);
@@ -1025,8 +1059,8 @@ public class OAuth2Servlet extends HttpBaseServlet {
       String clientIdentifier = OAuth2Utils.generateClientId();
       String plainSecret = OAuth2Utils.generateSecureToken();
       String secretHash = OAuth2Utils.hashSecret(plainSecret);
-      String adClientId = requiredClaim(jwt, "client");
-      String adOrgId = requiredClaim(jwt, "organization");
+      String adClientId = admin.getClientId();
+      String adOrgId = admin.getOrgId();
 
       Connection conn = OBDal.getInstance().getConnection();
       String generatedId = SequenceIdData.getUUID();
@@ -1079,8 +1113,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleUpdateClient(HttpServletRequest request, HttpServletResponse response,
       String id) throws IOException {
     try {
-      DecodedJWT jwt = OAuth2RequestAuthenticator.requireAdmin(request);
-      String adminUserId = jwt.getClaim("user").asString();
+      String adminUserId = requireAdmin(request).getUserId();
 
       JSONObject body = parseJsonBody(request);
 
@@ -1149,7 +1182,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleDeleteClient(HttpServletRequest request, HttpServletResponse response,
       String id) throws IOException {
     try {
-      OAuth2RequestAuthenticator.requireAdmin(request);
+      requireAdmin(request);
 
       Connection conn = OBDal.getInstance().getConnection();
 
@@ -1197,8 +1230,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleRegenerateSecret(HttpServletRequest request, HttpServletResponse response,
       String id) throws IOException {
     try {
-      DecodedJWT jwt = OAuth2RequestAuthenticator.requireAdmin(request);
-      String adminUserId = jwt.getClaim("user").asString();
+      String adminUserId = requireAdmin(request).getUserId();
 
       // Check if caller wants to revoke existing tokens
       boolean revokeTokens = true;
@@ -1293,14 +1325,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
     return !query.list().isEmpty();
   }
 
-  private String requiredClaim(DecodedJWT jwt, String claimName) throws AuthException {
-    String value = jwt.getClaim(claimName).asString();
-    if (value == null || value.trim().isEmpty()) {
-      throw new AuthException(HttpServletResponse.SC_BAD_REQUEST,
-          "Authenticated token is missing required claim: " + claimName);
-    }
-    return value.trim();
-  }
+
 
   }
 
@@ -1313,7 +1338,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleRevoke(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
-      OAuth2RequestAuthenticator.requireAdmin(request);
+      requireAdmin(request);
 
       JSONObject body = parseJsonBody(request);
       String clientIdentifier = body.optString(FIELD_CLIENT_ID, null);
@@ -1356,7 +1381,7 @@ public class OAuth2Servlet extends HttpBaseServlet {
   private void handleIntrospect(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     try {
-      OAuth2RequestAuthenticator.requireAdmin(request);
+      requireAdmin(request);
 
       JSONObject body = parseJsonBody(request);
       String token = body.optString(FIELD_TOKEN, null);

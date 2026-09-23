@@ -32,32 +32,19 @@ import com.etendoerp.go.session.GoSessionService;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
 
 /**
- * Authentication helpers shared by {@link OAuth2Servlet} endpoints: legacy JWT bearer validation,
- * System Administrator role enforcement, and cookie-session resolution for the authorize endpoint.
+ * Authentication helpers for {@link OAuth2Servlet}'s authorize endpoint: cookie-session resolution
+ * with the legacy JWT (carried in the authorize body) as fallback. ETP-5455 moved the SPA-facing
+ * management endpoints (API keys, OAuth2 clients) to the shared environment pipeline, together with
+ * the header-only JWT decode and the admin check that used to live here.
  * Extracted from {@code OAuth2Servlet} to keep that class under the method-count limit.
  */
 final class OAuth2RequestAuthenticator {
 
   private static final Logger log = LogManager.getLogger(OAuth2RequestAuthenticator.class);
-  private static final String ADMIN_ROLE_ID = "0";
+  /** The System Administrator role; the OAuth2 client-management endpoints require it. */
+  static final String ADMIN_ROLE_ID = "0";
 
   private OAuth2RequestAuthenticator() {
-  }
-
-  /**
-   * Authenticate the request's {@code Authorization: Bearer <jwt>} header.
-   *
-   * @param request the HTTP request
-   * @return decoded JWT
-   * @throws OAuth2Servlet.AuthException if authentication fails
-   */
-  static DecodedJWT authenticateJwt(HttpServletRequest request) throws OAuth2Servlet.AuthException {
-    String authHeader = request.getHeader("Authorization");
-    if (authHeader == null || !authHeader.startsWith("Bearer ")) {
-      throw new OAuth2Servlet.AuthException(HttpServletResponse.SC_UNAUTHORIZED,
-          "Missing or invalid Authorization header");
-    }
-    return authenticateJwt(authHeader.substring(7));
   }
 
   static DecodedJWT authenticateJwt(String token) throws OAuth2Servlet.AuthException {
@@ -68,23 +55,6 @@ final class OAuth2RequestAuthenticator {
       throw new OAuth2Servlet.AuthException(HttpServletResponse.SC_UNAUTHORIZED,
           "Invalid or expired JWT token");
     }
-  }
-
-  /**
-   * Authenticate JWT and verify the caller has System Administrator role (roleId = "0").
-   *
-   * @param request the HTTP request
-   * @return decoded JWT
-   * @throws OAuth2Servlet.AuthException if authentication or authorization fails
-   */
-  static DecodedJWT requireAdmin(HttpServletRequest request) throws OAuth2Servlet.AuthException {
-    DecodedJWT jwt = authenticateJwt(request);
-    String roleId = jwt.getClaim("role").asString();
-    if (!ADMIN_ROLE_ID.equals(roleId)) {
-      throw new OAuth2Servlet.AuthException(HttpServletResponse.SC_FORBIDDEN,
-          "System Administrator role required");
-    }
-    return jwt;
   }
 
   /**
