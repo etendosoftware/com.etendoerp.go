@@ -126,12 +126,27 @@ abstract class AbstractFiscalHandler {
    */
   protected void guardNotAlreadySubmitted(String orgId, int year, String period, String model) {
     String clientId = OBContext.getOBContext().getCurrentClient().getId();
-    String status = declHandler().findLatestDeclarationStatus(clientId, orgId, model, year, period);
+    String status = declHandler().findLatestDeclarationStatus(clientId, declarationOrgId(), model,
+        year, period);
     if (status != null && FiscalDeclCrudHandler.SUBMITTED_STATUSES.contains(status)) {
       throw new AlreadySubmittedException(
           "This declaration was already submitted (status: " + status + ") for org=" + orgId
               + " year=" + year + " period=" + period + " model=" + model);
     }
+  }
+
+  /**
+   * The organization declarations are STORED under — the raw session org, exactly what
+   * {@link FiscalDeclCrudHandler} writes on POST and filters by on GET. Deliberately NOT the
+   * {@code orgId} {@link #dispatch} receives: that one comes from {@link #resolveEffectiveOrg},
+   * which maps a {@code *} (org {@code "0"}) session to the first leaf org so the COMPUTATION has
+   * real invoice data, but a declaration created from that same session is stored under
+   * {@code "0"}. Looking declarations up with the effective org would never find them (ETP-5438
+   * review W1: the snapshot was missed and the generate guard let a submitted declaration
+   * through). Declaration lookups use this; computations keep the effective org.
+   */
+  protected String declarationOrgId() {
+    return OBContext.getOBContext().getCurrentOrganization().getId();
   }
 
   /**
@@ -144,8 +159,8 @@ abstract class AbstractFiscalHandler {
    * Computes, from the CURRENT invoice data, the exact JSON payload this model's read endpoint
    * returns ({@code /fiscal303/boxes}, {@code /fiscal349/operators}). It is both what that read
    * serves for a non-submitted declaration and what gets persisted as the declaration's
-   * submission snapshot (ETP-5438) — one code path, so the frozen figures are byte-for-byte what
-   * the read would have returned at submission time.
+   * submission snapshot (ETP-5438) — one code path, so the frozen figures are the same payload
+   * the read would have returned at submission time (re-serialized through {@link JSONObject}).
    */
   @SuppressWarnings("java:S112")
   abstract JSONObject computeSnapshotPayload(String orgId, int year, String period)
@@ -161,8 +176,9 @@ abstract class AbstractFiscalHandler {
   @SuppressWarnings("java:S112")
   protected JSONObject snapshotOrCompute(String orgId, int year, String period) throws Exception {
     String clientId = OBContext.getOBContext().getCurrentClient().getId();
-    JSONObject snapshot =
-        declHandler().findLatestSubmittedSnapshot(clientId, orgId, getDeclModel(), year, period);
+    // Lookup on the org the declaration is stored with; the compute keeps the effective org.
+    JSONObject snapshot = declHandler().findLatestSubmittedSnapshot(clientId, declarationOrgId(),
+        getDeclModel(), year, period);
     return snapshot != null ? snapshot : computeSnapshotPayload(orgId, year, period);
   }
 

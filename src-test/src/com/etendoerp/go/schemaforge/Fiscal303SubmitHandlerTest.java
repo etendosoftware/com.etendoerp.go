@@ -580,8 +580,8 @@ public class Fiscal303SubmitHandlerTest {
       // submitted_ack.
       verify(decl).setSubmissionMethod("aeat_telematic");
       // ETP-5438: the boxes payload computed before the AEAT call is persisted as the snapshot.
-      verify(decl).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT),
-          argThat(v -> v != null && v.toString().contains("\"46\":\"123.45\"")));
+      verify(decl).setSubmittedSnapshot(
+          argThat(v -> v != null && v.contains("\"46\":\"123.45\"")));
       verify(obDal, times(1)).commitAndClose();
     }
   }
@@ -628,7 +628,7 @@ public class Fiscal303SubmitHandlerTest {
       assertTrue(body.getJSONArray("errors").getString(0).contains("No periods found"));
       verify(serviceMock.constructed().get(0), never()).submitProduction(any());
       verify(decl, never()).setDeclarationStatus(anyString());
-      verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT), any());
+      verify(decl, never()).setSubmittedSnapshot(any());
       verify(obDal, never()).commitAndClose();
     }
   }
@@ -670,7 +670,7 @@ public class Fiscal303SubmitHandlerTest {
 
       assertEquals("TEST_SUCCESS", new JSONObject(capturedBody.toString()).getString("status"));
       assertEquals(0, computeCalls[0]);
-      verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT), any());
+      verify(decl, never()).setSubmittedSnapshot(any());
     }
   }
 

@@ -501,8 +501,7 @@ class Fiscal303SubmissionSupport {
       decl.setDeclarationFileName(fileName);
       decl.setFileExternal(false);
       decl.setSubmissionMethod(SUBMISSION_METHOD_AEAT_TELEMATIC);
-      // Dynamic property: the generated FiscalDecl predates the Submitted_Snapshot column.
-      decl.set(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT, submittedSnapshot);
+      decl.setSubmittedSnapshot(submittedSnapshot);
       OBDal.getInstance().save(decl);
     } catch (Exception e) {
       AbstractFiscalHandler.log.error("Could not update declaration " + decl.getId()

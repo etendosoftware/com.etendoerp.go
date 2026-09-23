@@ -249,13 +249,13 @@ test mode has no status change to key off of).
 ### Submission snapshot (`Submitted_Snapshot`, ETP-5438)
 
 A production submission also freezes the declaration's figures: `handleSubmit` computes
-`owner.computeSnapshotPayload(orgId, year, period)` — the exact JSON `GET /fiscal303/boxes`
-returns, same code path, same effective org — right after the `.303` file is generated and
+`owner.computeSnapshotPayload(orgId, year, period)` — the same payload `GET /fiscal303/boxes`
+returns (same code path, same effective org; re-serialized through `JSONObject`) — right after the `.303` file is generated and
 **before** `submitProduction` is called. If that compute throws, the request answers `500`
 `SNAPSHOT_FAILED` and the AEAT is never contacted: once Hacienda accepts a filing it cannot be
 undone, so a declaration must not end up presented without its snapshot. On success,
-`persistSuccessfulSubmission` stores it in `ETGO_Fiscal_Decl.Submitted_Snapshot` (dynamic property
-`submittedSnapshot`) in the same single commit as the status change. From then on
+`persistSuccessfulSubmission` stores it in `ETGO_Fiscal_Decl.Submitted_Snapshot`
+(`FiscalDecl#setSubmittedSnapshot`) in the same single commit as the status change. From then on
 `GET /fiscal303/boxes` serves that snapshot instead of recomputing from the current invoices.
 Test mode takes no snapshot (it never changes the declaration). The manual presentation paths
 (`PUT /fiscal303/declarations`, both models) take the same snapshot through

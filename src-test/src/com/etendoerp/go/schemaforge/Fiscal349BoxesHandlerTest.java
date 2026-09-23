@@ -1385,14 +1385,54 @@ public class Fiscal349BoxesHandlerTest {
         .setHeader(eq("Content-Disposition"), anyString());
   }
 
+  /**
+   * ETP-5438 review W1 — a {@code *} session (org {@code "0"}): the snapshot lookup queries the
+   * org the declaration is stored under, not the effective leaf org the compute uses.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchOperatorsLooksSnapshotUpWithSessionOrgNotEffectiveOrg() throws Exception {
+    Fiscal349BoxesHandler h = org.mockito.Mockito.spy(handler);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter body = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(body));
+    String snapshot = "{\"operators\":[],\"summary\":{}}";
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient(ctxMock, "client1", "0");
+      OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus(0L, "submitted");
+      when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn(snapshot);
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      h.dispatch("operators", "leaf-org", 2026, "T1", mock(HttpServletRequest.class), resp);
+
+      verify(query).setNamedParameter("orgId", "0");
+    }
+    verify(h, org.mockito.Mockito.never())
+        .computeOperators(anyString(), org.mockito.ArgumentMatchers.anyInt(), anyString());
+    org.junit.Assert.assertEquals(new JSONObject(snapshot).toString(), body.toString());
+  }
+
   // ── test helpers (ETP-5438) ───────────────────────────────────────────
 
   private static void mockClient(MockedStatic<OBContext> ctxMock, String clientId) {
+    mockClient(ctxMock, clientId, "org1");
+  }
+
+  /** Same, with an explicit SESSION org (the org declarations are stored under). */
+  private static void mockClient(MockedStatic<OBContext> ctxMock, String clientId,
+      String sessionOrgId) {
     OBContext ctx = mock(OBContext.class);
     ctxMock.when(OBContext::getOBContext).thenReturn(ctx);
     Client client = mock(Client.class);
     when(client.getId()).thenReturn(clientId);
     when(ctx.getCurrentClient()).thenReturn(client);
+    org.openbravo.model.common.enterprise.Organization org =
+        mock(org.openbravo.model.common.enterprise.Organization.class);
+    when(org.getId()).thenReturn(sessionOrgId);
+    when(ctx.getCurrentOrganization()).thenReturn(org);
   }
 
   @SuppressWarnings("unchecked")
