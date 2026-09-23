@@ -547,14 +547,16 @@ class SupportIntegrationClientTest {
     @DisplayName("createAdkSession swallows failures without throwing")
     void createAdkSessionDoesNotThrow() {
       assertDoesNotThrow(() ->
-          SupportIntegrationClient.createAdkSession("user1", "session1", "es", "user@example.com"));
+          SupportIntegrationClient.createAdkSession(
+              "user1", "session1", "es", "user@example.com", "client1", "development"));
     }
 
     @Test
     @DisplayName("createAdkSession with null email still builds a valid request")
     void createAdkSessionNullEmailDoesNotThrow() {
       assertDoesNotThrow(() ->
-          SupportIntegrationClient.createAdkSession("user1", "session1", "es", null));
+          SupportIntegrationClient.createAdkSession(
+              "user1", "session1", "es", null, "client1", "development"));
     }
 
     @Test

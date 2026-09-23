@@ -68,6 +68,18 @@ public class OnboardingDatasetDefinitionTest {
     assertTrue(OnboardingDatasetDefinition.shouldIncludeTable("C_PERIODCONTROL"));
   }
 
+  /**
+   * ETP-5442: {@code C_ELEMENTVALUE_OPERAND} defines formula accounts (e.g. "P.G.D = P.G.C +
+   * P.G.19"). It was shipped in GOClient's sampledata but missing from this allowlist, so every
+   * tenant onboarded through GO inherited zero operand rows and the "Pérdidas y Ganancias" /
+   * "Balance de Situación" reports silently dropped every formula-total row. Regression guard
+   * against the table being dropped from {@code INCLUDED_TABLES} again.
+   */
+  @Test
+  public void testIncludesElementValueOperandTable() {
+    assertTrue(OnboardingDatasetDefinition.shouldIncludeTable("C_ELEMENTVALUE_OPERAND"));
+  }
+
   @Test
   public void testExcludedTableIsNotIncluded() {
     assertFalse(OnboardingDatasetDefinition.shouldIncludeTable("AD_ORG"));

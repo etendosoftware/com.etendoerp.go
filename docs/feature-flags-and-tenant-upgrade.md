@@ -201,6 +201,25 @@ The web client evaluates the same flags for presentation only — which pages an
 decision about permissions, data or processes is made server-side. The paywall below holds
 regardless of what the client believes.
 
+### `demo-data-transfer` (ETP-5443) — backend-only, off by default
+
+Gates the ETP-5364 demo-to-productive data transfer. Evaluated in exactly one place,
+`DemoDataTransferFlag.isEnabled()`, with an account-less context (the endpoints are routed before
+any credential is read, so every toggle point must resolve the same answer). Locally:
+`etendo.go.flags.demo-data-transfer=true` / `ETGO_FLAG_DEMO_DATA_TRANSFER=true`.
+
+| Toggle point (`EtendoGoJwtServlet`) | Flag off — the pre-ETP-5364 behaviour |
+|---|---|
+| `GET /sws/go/demo-data-transfer`, `POST /sws/go/demo-data-transfer/retry` | 404 `Unknown endpoint: <path>`, identical to a path that does not exist |
+| `recordDemoDataTransferSelection` (checkout / purchase) | the body's `dataTransfer` selection is ignored |
+| `startDemoDataTransferBestEffort` (paid onboarding commit) | no transfer started, no demo tenant looked up |
+
+The worker thread is created on first submission, so an instance with the flag off never starts
+one. No key exists in the web client's `flag-keys.js`: the First Steps row appears only when the
+status read answers 2xx, so the browser follows this evaluator instead of running a second one.
+The preconditions that must be closed before switching it on are the `deferredItems` of
+`demo-data-transfer` in the Schema Forge `flags-registry.json`.
+
 ## 2. The onboarding paywall
 
 `POST /sws/go/onboarding` gains a payment gate.
@@ -278,6 +297,13 @@ reclaimed, its attempt number is incremented, and its timestamp is renewed. The 
 30 minutes. Completion is an atomic status update guarded by that attempt number, so an old worker
 cannot close a request after a retry has taken over. This makes browser refreshes, process restarts,
 and stale workers recoverable without a schema migration or a second payment.
+
+When the paid flow requests demo-data transfer, the source rows are converted into the same NEO
+batch operations used by the Products and Contacts grid import. A product price is a linked
+`price` operation (`parentRef`) in the same atomic batch, and the destination default sales price
+list is resolved with the shared `PriceListVersionResolver`. Existing destination search keys are
+skipped before the batch, making retries idempotent. The transfer does not use `DalUtil.copy` or a
+second persistence path.
 
 ### The plan is derived from the payment, not from the decision
 
@@ -543,4 +569,5 @@ must never break the session.
 | Confirmed-payment correlation, checkout lifecycle | `com.etendoerp.go.payment.CheckoutRequestStore` (`ETGO_CHECKOUT_REQUEST`) |
 | Plan read/write | `com.etendoerp.go.payment.TenantPlanService` |
 | Gate wiring, 402 response, plan marking | `com.etendoerp.go.rest.EtendoGoJwtServlet` |
+| Demo data transfer gate / worker | `com.etendoerp.go.payment.DemoDataTransferFlag`, `DemoDataTransferService` |
 | Ownership count, `plan` in `/environments` | `com.etendoerp.go.rest.EtendoGoJwtDalHelper` |

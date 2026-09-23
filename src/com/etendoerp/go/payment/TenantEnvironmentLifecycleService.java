@@ -18,9 +18,9 @@ import java.util.Locale;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
-import org.openbravo.erpCommon.businessUtility.Preferences;
 import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.system.Client;
 
@@ -40,6 +40,7 @@ public class TenantEnvironmentLifecycleService {
   public static final String DEMO_TRIAL_STARTED_ATTRIBUTE = "ETGO_DemoTrialStartedAt";
   public static final String SUBSCRIPTION_STATUS_ATTRIBUTE = "ETGO_SubscriptionStatus";
   public static final String SUBSCRIPTION_DUE_AT_ATTRIBUTE = "ETGO_SubscriptionDueAt";
+  public static final String SUBSCRIPTION_EVENT_AT_ATTRIBUTE = "ETGO_SubscriptionEventAt";
   public static final String LEGACY_TRANSITION_STARTED_ATTRIBUTE = "ETGO_LegacyTransitionStartedAt";
   public static final String ASSOCIATED_DEMO_ATTRIBUTE = "ETGO_AssociatedDemoClientId";
   public static final String ASSOCIATED_PRODUCTIVE_ATTRIBUTE = "ETGO_AssociatedProductiveClientId";
@@ -57,6 +58,7 @@ public class TenantEnvironmentLifecycleService {
 
   private static final String PARAM_ATTRIBUTE = "attribute";
   private static final String PARAM_CLIENT_ID = "clientId";
+  private static final String PREFERENCE_CLIENT_PREDICATE = " and pref.";
   private static final Logger log = LogManager.getLogger(TenantEnvironmentLifecycleService.class);
 
   private final TenantPlanService tenantPlanService;
@@ -225,14 +227,48 @@ public class TenantEnvironmentLifecycleService {
         return false;
       }
       setPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, status.name(), client);
-      if (renewalDueAt != null) {
-        setPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE, renewalDueAt.toString(), client);
-      }
+      setPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE,
+          renewalDueAt == null ? "" : renewalDueAt.toString(), client);
       return true;
     } catch (RuntimeException e) {
       log.error("Could not update subscription projection for client {}", clientId, e);
       return false;
     }
+  }
+
+  /**
+   * Reads the stored subscription projection the lifecycle applier decides against.
+   * @param clientId environment client id
+   * @return stored status, grace anchor and last applied event instant; empty when none is stored
+   */
+  public SubscriptionLifecycleApplier.StoredState readSubscriptionState(String clientId) {
+    if (StringUtils.isBlank(clientId)) {
+      return SubscriptionLifecycleApplier.StoredState.NONE;
+    }
+    return new SubscriptionLifecycleApplier.StoredState(
+        parseSubscriptionStatus(readPreference(SUBSCRIPTION_STATUS_ATTRIBUTE, clientId), null),
+        parseInstant(readPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE, clientId)),
+        parseInstant(readPreference(SUBSCRIPTION_EVENT_AT_ATTRIBUTE, clientId)));
+  }
+
+  /**
+   * Records the provider creation instant of the last applied lifecycle event, so an older event
+   * delivered later can be recognised as stale.
+   *
+   * <p>Not committed here: the caller commits it with the status write, in one transaction.
+   * Failures propagate so the caller can roll both back.
+   * @param clientId environment client id
+   * @param eventAt provider {@code created} instant; null leaves the stored value untouched
+   */
+  public void recordSubscriptionEventAt(String clientId, Instant eventAt) {
+    if (StringUtils.isBlank(clientId) || eventAt == null) {
+      return;
+    }
+    Client client = OBDal.getInstance().get(Client.class, clientId);
+    if (client == null) {
+      throw new IllegalStateException("Client not found while recording a subscription event");
+    }
+    setPreference(SUBSCRIPTION_EVENT_AT_ATTRIBUTE, eventAt.toString(), client);
   }
 
   /**
@@ -348,14 +384,34 @@ public class TenantEnvironmentLifecycleService {
   }
 
   private void setPreference(String attribute, String value, Client client) {
-    Preferences.setPreferenceValue(attribute, value, false, client, null, null, null, null, null);
+    OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
+        "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :" + PARAM_ATTRIBUTE
+            + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_CLIENT + ".id = :" + PARAM_CLIENT_ID
+            + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_ACTIVE + " = true");
+    query.setNamedParameter(PARAM_ATTRIBUTE, attribute);
+    query.setNamedParameter(PARAM_CLIENT_ID, client.getId());
+    query.setFilterOnReadableClients(false);
+    query.setFilterOnReadableOrganization(false);
+    query.setMaxResult(1);
+    Preference preference = query.uniqueResult();
+    if (preference == null) {
+      preference = OBProvider.getInstance().get(Preference.class);
+      preference.setClient(client);
+      preference.setOrganization(null);
+      preference.setActive(true);
+      preference.setPropertyList(false);
+      preference.setAttribute(attribute);
+      preference.setSelected(true);
+    }
+    preference.setSearchKey(StringUtils.trimToEmpty(value));
+    OBDal.getInstance().save(preference);
   }
 
   private String readPreference(String attribute, String clientId) {
     OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
         "as pref where pref." + Preference.PROPERTY_ATTRIBUTE + " = :" + PARAM_ATTRIBUTE
-            + " and pref." + Preference.PROPERTY_VISIBLEATCLIENT + ".id = :" + PARAM_CLIENT_ID
-            + " and pref." + Preference.PROPERTY_ACTIVE + " = true");
+            + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_CLIENT + ".id = :" + PARAM_CLIENT_ID
+            + PREFERENCE_CLIENT_PREDICATE + Preference.PROPERTY_ACTIVE + " = true");
     query.setNamedParameter(PARAM_ATTRIBUTE, attribute);
     query.setNamedParameter(PARAM_CLIENT_ID, clientId);
     query.setFilterOnReadableClients(false);

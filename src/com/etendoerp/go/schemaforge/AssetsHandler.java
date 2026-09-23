@@ -17,6 +17,8 @@
 
 package com.etendoerp.go.schemaforge;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.text.SimpleDateFormat;
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
@@ -27,6 +29,7 @@ import javax.inject.Named;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.financialmgmt.assetmgmt.Asset;
@@ -48,6 +51,16 @@ import org.openbravo.model.financialmgmt.assetmgmt.Asset;
  * is injected into the request body before the default CRUD service persists the record
  * ({@code handle()} returns {@code null} to continue with default DataSourceServlet handling).
  *
+ * <p>On every CRUD response that includes the {@code etgoAmortizationStatus} field
+ * (GET list, GET by id, and the record echoed back by POST/PUT/PATCH), {@link #afterHandle}
+ * recomputes it to 2-decimal precision and overrides whatever value the classic DB trigger
+ * ({@code etgo_a_asset_amort_status_trg()}, PostgreSQL-only, lives in Etendo Classic and is
+ * intentionally left untouched — see ETP-5414) wrote. That trigger uses {@code ROUND(x)}
+ * with no decimal argument, so it truncates to an integer (e.g. 16.67% is persisted as
+ * {@code 17}); the UI progress bar in {@code AssetsSidebar.jsx} needs the precise value.
+ * See {@link #recomputeAmortizationStatus(JSONObject)} for the formula, which mirrors the
+ * trigger's semantics exactly except for the rounding scale.
+ *
  * <p>All other endpoints pass through to the default service unchanged.
  *
  * <p>Registered via {@code JAVA_QUALIFIER = 'assetsHandler'} on the ETGO_SF_ENTITY
@@ -63,6 +76,18 @@ public class AssetsHandler implements NeoHandler {
   private static final String FIELD_DEPRECIATION_START_DATE = "depreciationStartDate";
   private static final String FIELD_DEPRECIATION_END_DATE = "depreciationEndDate";
   private static final String FIELD_USABLE_LIFE_MONTHS = "usableLifeMonths";
+
+  // Fields backing the amortization-status recomputation. All three are real, included
+  // ETGO_SF_FIELD entries (see artifacts/assets/contract.json) so they are already present
+  // on every CRUD record response — no extra DB round-trip is needed to recompute the
+  // percentage from the response body itself.
+  private static final String FIELD_ETGO_AMORTIZATION_STATUS = "etgoAmortizationStatus";
+  private static final String FIELD_DEPRECIATION_AMT = "depreciationAmt"; // AMORTIZATIONVALUEAMT
+  private static final String FIELD_DEPRECIATED_VALUE = "depreciatedValue"; // DEPRECIATEDVALUE
+  private static final String FIELD_PREVIOUSLY_DEPRECIATED_AMT = "previouslyDepreciatedAmt"; // DEPRECIATEDPREVIOUSAMT
+
+  private static final BigDecimal HUNDRED = BigDecimal.valueOf(100);
+  private static final int PERCENTAGE_SCALE = 2;
 
   private static final String HTTP_POST = "POST";
   private static final String HTTP_PATCH = "PATCH";
@@ -115,6 +140,125 @@ public class AssetsHandler implements NeoHandler {
       log.warn("AssetsHandler: unexpected error computing depreciationEndDate — skipping", e);
     }
     return null;
+  }
+
+  /**
+   * Post-hook: recomputes {@code etgoAmortizationStatus} to 2-decimal precision on every CRUD
+   * response, replacing the integer-rounded value the classic DB trigger wrote. Never fails the
+   * parent request over this side effect — any error is logged and swallowed, leaving the
+   * trigger's value in place (degraded but safe, same pattern as the other handlers in this
+   * package).
+   */
+  @Override
+  public NeoResponse afterHandle(NeoContext context) {
+    if (context.getEndpointType() != NeoEndpointType.CRUD) {
+      return null;
+    }
+    NeoResponse previous = context.getPreviousResult();
+    if (previous == null || previous.getBody() == null) {
+      return null;
+    }
+    try {
+      JSONObject body = previous.getBody();
+      JSONArray records = extractRecordArray(body);
+      if (records != null) {
+        for (int i = 0; i < records.length(); i++) {
+          recomputeAmortizationStatus(records.optJSONObject(i));
+        }
+      } else {
+        // Flat single-record body (no "data"/"response.data" envelope).
+        recomputeAmortizationStatus(body);
+      }
+    } catch (Exception e) {
+      log.warn("AssetsHandler: could not recompute etgoAmortizationStatus — leaving "
+          + "trigger-computed value as-is: {}", e.getMessage(), e);
+    }
+    return null; // mutated in place; keep the (possibly default) previous result
+  }
+
+  /**
+   * Returns the array of record objects to recompute, handling both response shapes this
+   * handler has been observed to receive: {@code {"response": {"data": [...]}}} (classic
+   * DefaultJsonDataService envelope) and the plain {@code {"data": [...]}} shape. Returns
+   * {@code null} when the body is a single flat record (no array envelope found).
+   */
+  private static JSONArray extractRecordArray(JSONObject body) {
+    JSONObject response = body.optJSONObject("response");
+    if (response != null) {
+      JSONArray data = response.optJSONArray("data");
+      if (data != null) {
+        return data;
+      }
+    }
+    return body.optJSONArray("data");
+  }
+
+  /**
+   * Recomputes {@code etgoAmortizationStatus} on a single record, in place. No-op if the field
+   * is not present on the record (not included for the current role, or the record shape is
+   * unexpected) or if the source fields cannot be resolved.
+   *
+   * <p>Formula (mirrors {@code etgo_a_asset_amort_status_trg()} exactly, except this uses
+   * 2-decimal rounding instead of the trigger's integer {@code ROUND(x)}):
+   * <pre>
+   *   status = LEAST(ROUND((depreciatedValue + previouslyDepreciatedAmt) / depreciationAmt * 100, 2), 100)
+   *   status = 0  when depreciationAmt is null or zero (no plan defined)
+   * </pre>
+   */
+  private static void recomputeAmortizationStatus(JSONObject entry) {
+    if (entry == null || !entry.has(FIELD_ETGO_AMORTIZATION_STATUS)) {
+      return;
+    }
+    try {
+      BigDecimal denominator = optBigDecimal(entry, FIELD_DEPRECIATION_AMT);
+      if (denominator == null || denominator.compareTo(BigDecimal.ZERO) == 0) {
+        entry.put(FIELD_ETGO_AMORTIZATION_STATUS, BigDecimal.ZERO.setScale(PERCENTAGE_SCALE));
+        return;
+      }
+      BigDecimal depreciatedValue = optBigDecimalOrZero(entry, FIELD_DEPRECIATED_VALUE);
+      BigDecimal previouslyDepreciated = optBigDecimalOrZero(entry, FIELD_PREVIOUSLY_DEPRECIATED_AMT);
+      BigDecimal numerator = depreciatedValue.add(previouslyDepreciated);
+      BigDecimal percentage = numerator.multiply(HUNDRED)
+          .divide(denominator, PERCENTAGE_SCALE, RoundingMode.HALF_UP);
+      if (percentage.compareTo(HUNDRED) > 0) {
+        percentage = HUNDRED.setScale(PERCENTAGE_SCALE);
+      }
+      entry.put(FIELD_ETGO_AMORTIZATION_STATUS, percentage);
+    } catch (Exception e) {
+      log.debug("AssetsHandler: skipping etgoAmortizationStatus recompute for record {}: {}",
+          entry.opt("id"), e.getMessage());
+    }
+  }
+
+  /**
+   * Reads a numeric field from a JSON record tolerantly (jettison may surface it as a
+   * {@link Number} or as a {@link String}). Returns {@code null} if absent, JSON-null, or
+   * unparseable.
+   */
+  private static BigDecimal optBigDecimal(JSONObject entry, String key) {
+    if (entry == null || !entry.has(key) || entry.isNull(key)) {
+      return null;
+    }
+    Object raw = entry.opt(key);
+    if (raw instanceof BigDecimal) {
+      return (BigDecimal) raw;
+    }
+    if (raw instanceof Number) {
+      return BigDecimal.valueOf(((Number) raw).doubleValue());
+    }
+    try {
+      String strVal = entry.optString(key, null);
+      return strVal != null && !strVal.isEmpty() ? new BigDecimal(strVal) : null;
+    } catch (NumberFormatException e) {
+      return null;
+    }
+  }
+
+  /** Same as {@link #optBigDecimal(JSONObject, String)}, but returns {@link BigDecimal#ZERO}
+   * instead of {@code null} when the field is absent/unparseable. */
+  private static BigDecimal optBigDecimalOrZero(JSONObject entry, String key) {
+    BigDecimal value = optBigDecimal(entry, key);
+    return value != null ? value : BigDecimal.ZERO;
   }
 
   /**

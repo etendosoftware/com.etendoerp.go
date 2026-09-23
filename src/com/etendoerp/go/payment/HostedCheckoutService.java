@@ -66,14 +66,19 @@ public class HostedCheckoutService {
   private JSONObject createProviderSession(String requestId, String accountEmail, String clientName,
       String origin) throws IOException, JSONException {
     String form = buildSessionForm(requestId, accountEmail, clientName, origin);
-    HttpURLConnection connection = (HttpURLConnection) new URL(CheckoutConfiguration.apiBaseUrl() + "/v1/checkout/sessions").openConnection();
+    HttpURLConnection connection = (HttpURLConnection) new URL(CheckoutConfiguration.apiBaseUrl()
+        + "/v1/checkout/sessions").openConnection();
     connection.setRequestMethod("POST");
     connection.setDoOutput(true);
     connection.setRequestProperty("Authorization", "Bearer " + CheckoutConfiguration.secretKey());
     connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
-    try (OutputStream output = connection.getOutputStream()) { output.write(form.getBytes(StandardCharsets.UTF_8)); }
+    try (OutputStream output = connection.getOutputStream()) {
+      output.write(form.getBytes(StandardCharsets.UTF_8));
+    }
     String response = read(connection);
-    if (connection.getResponseCode() / 100 != 2) throw new IOException("Checkout provider rejected session");
+    if (connection.getResponseCode() / 100 != 2) {
+      throw new IOException("Checkout provider rejected session");
+    }
     JSONObject provider = new JSONObject(response);
     // The provider session id is the reconciliation anchor for an abandoned or lost checkout, and
     // this response is the only place it appears. Recorded before the URL is handed back.
@@ -143,14 +148,17 @@ public class HostedCheckoutService {
   private static void add(StringBuilder form, String key, String value)
       throws UnsupportedEncodingException {
     if (form.length() > 0) form.append('&');
-    form.append(URLEncoder.encode(key, StandardCharsets.UTF_8.name())).append('=').append(URLEncoder.encode(value == null ? "" : value, StandardCharsets.UTF_8.name()));
+    form.append(URLEncoder.encode(key, StandardCharsets.UTF_8.name())).append('=')
+        .append(URLEncoder.encode(value == null ? "" : value, StandardCharsets.UTF_8.name()));
   }
 
   private static String read(HttpURLConnection connection) throws IOException {
-    java.io.InputStream stream = connection.getResponseCode() / 100 == 2 ? connection.getInputStream() : connection.getErrorStream();
+    java.io.InputStream stream = connection.getResponseCode() / 100 == 2
+        ? connection.getInputStream() : connection.getErrorStream();
     StringBuilder body = new StringBuilder();
     try (BufferedReader reader = new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))) {
-      String line; while ((line = reader.readLine()) != null) body.append(line);
+      String line;
+      while ((line = reader.readLine()) != null) body.append(line);
     }
     return body.toString();
   }
