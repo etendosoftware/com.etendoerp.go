@@ -236,6 +236,60 @@ public class Fiscal303SourcesSupportTest {
     assertEquals(new BigDecimal("72.60"), row.get("total"));
   }
 
+  /**
+   * ETP-5456 QA follow-up: a rectificativa (corrective/negative) invoice posting a NEGATIVE
+   * intra-EU acquisition pair (e.g. cancelling a prior acquisition) must still net back to the
+   * real (now-negative-in-substance, but stored as {@code abs()} per the pre-existing contract)
+   * single amount after halving — the halving logic operates on {@code abs()} values exactly as
+   * the pre-fix code already did, so a negative pair is not a new risk introduced by this fix.
+   * Pinned here so a future change to the abs()-before-halve ordering trips this test.
+   */
+  @Test
+  public void testCollectSources_negativeRectificativaPairedLines_netsCorrectlyViaAbs() {
+    Invoice inv = buildInvoice("inv-rect-1", "RECT-1000001", date(2026, 3, 10), date(2026, 3, 10));
+    InvoiceTax devengado = buildInvoiceTax(inv, "-20.00", "-4.20");
+    InvoiceTax soportado = buildInvoiceTax(inv, "-20.00", "-4.20");
+
+    List<Map<String, Object>> rows = runCollectSources(
+        java.util.Arrays.asList(devengado, soportado),
+        java.util.Arrays.asList("rate-devengado-rect", "rate-soportado-rect"),
+        java.util.Arrays.asList(java.util.Arrays.asList(10, 11), java.util.Arrays.asList(36, 37)));
+
+    assertEquals(1, rows.size());
+    Map<String, Object> row = rows.get(0);
+    assertEquals(new BigDecimal("20.00"), row.get("base"));
+    assertEquals(new BigDecimal("4.20"), row.get("vat"));
+    assertEquals(new BigDecimal("24.20"), row.get("total"));
+  }
+
+  /**
+   * ETP-5456 QA follow-up — GENUINE GAP, not a regression blocker: {@code accumulateInvoiceTax}
+   * halves ANY line mapped to a box in {@code REVERSE_CHARGE_PAIRED_BOXES}, regardless of whether
+   * its AEAT-mandated counterpart line actually exists on the same invoice. A single unpaired
+   * box-10/11 line (data-integrity edge case — e.g. a partial import, or an invoice where only the
+   * devengado leg was posted) is silently halved to HALF its real amount instead of being shown in
+   * full or flagged. Pinned here as documented CURRENT behavior (not asserted as correct) so the
+   * team can decide deliberately whether to guard {@code isReverseChargePairedLine} on actual
+   * pairing presence in a follow-up ticket. Casilla computation (the actual AEAT-submitted box
+   * totals) is a separate code path and is NOT affected by this gap — this only concerns the
+   * "Facturas" tab's informational per-invoice row.
+   */
+  @Test
+  public void testCollectSources_unpairedReverseChargeLine_isSilentlyHalved_documentedGap() {
+    Invoice inv = buildInvoice("inv-unpaired-1", "REC-5000001", date(2026, 3, 11), date(2026, 3, 11));
+    InvoiceTax devengadoOnly = buildInvoiceTax(inv, "20.00", "4.20");
+
+    List<Map<String, Object>> rows = runCollectSources(devengadoOnly, "rate-devengado-only", 10, 11);
+
+    assertEquals(1, rows.size());
+    Map<String, Object> row = rows.get(0);
+    // Documents the gap: the real invoice line was 20.00/4.20, but with no matching soportado
+    // line to net against, the row is shown at HALF that amount.
+    assertEquals(new BigDecimal("10.00"), row.get("base"));
+    assertEquals(new BigDecimal("2.10"), row.get("vat"));
+    assertEquals(new BigDecimal("12.10"), row.get("total"));
+  }
+
   // ── helpers ───────────────────────────────────────────────────────────────
 
   @SuppressWarnings("unchecked")
