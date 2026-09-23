@@ -44,6 +44,7 @@ import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
+import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.system.Client;
 
@@ -617,6 +618,9 @@ class SFRefreshTokenTest {
     // The caller's OWN token (as reflected in OBContext, populated by NeoAuthenticator before
     // this webhook is reached) already carries this SAME role.
     when(mockContext.getRole()).thenReturn(currentRole);
+    Organization callerOrg = mock(Organization.class);
+    when(callerOrg.getId()).thenReturn("org-1");
+    when(mockContext.getCurrentOrganization()).thenReturn(callerOrg);
 
     OBDal obDal = mock(OBDal.class);
     when(obDal.get(User.class, "user-1")).thenReturn(callerUser);
@@ -642,6 +646,10 @@ class SFRefreshTokenTest {
     assertFalse(result.has("token"));
     assertFalse(result.has("session"));
     assertEquals(roleListData.getRoleArray().toString(), result.getJSONArray("roleList").toString());
+    // ETP-5395 — the role/org this request was authorized with: a cookie session may have just
+    // been rebound server-side, and the client has no token to read them from.
+    assertEquals("role-1", result.getString("selectedRoleId"));
+    assertEquals("org-1", result.getString("selectedOrgId"));
   }
 
   /**

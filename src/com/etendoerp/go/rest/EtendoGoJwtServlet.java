@@ -108,9 +108,11 @@ import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoLegacyBearer;
 import com.etendoerp.go.session.GoSessionRecord;
 import com.etendoerp.go.session.GoSessionSecurity;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.IssuedGoSession;
 import com.etendoerp.go.session.JdbcGoSessionStore;
+import com.etendoerp.go.session.SessionRoleRevokedException;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -365,6 +367,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private final TransactionalAuthEmailSender authEmailSender;
   private final EtendoGoSsoProviderRegistry ssoProviderRegistry;
   private final GoSessionService goSessionService;
+  // Package-visible so tests can swap the database-backed role lookups for a fake.
+  GoSessionRoleReconciler sessionRoleReconciler = new GoSessionRoleReconciler();
 
   /**
    * Creates the default servlet wired to the runtime transactional auth email sender.
@@ -4854,6 +4858,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       GoSessionRecord sessionRecord = auth.getRecord();
       Account account = EtendoGoJwtDalHelper.findActiveAccountById(sessionRecord.getAccountId());
       if (account == null) {
+        writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
+        return;
+      }
+
+      // A promote/demote since the environment was entered: report (and persist) the role the
+      // user holds now, or a reload restores a role that is gone and lands on "no access".
+      try {
+        sessionRoleReconciler.reconcile(sessionRecord);
+      } catch (SessionRoleRevokedException e) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
