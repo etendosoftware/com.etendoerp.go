@@ -110,7 +110,7 @@ class FiscalDeclCrudHandler {
    * {@code ETGO_Fiscal_Decl} (ETP-5438) — the FIGURES {@code GET /fiscal303/boxes} (Modelo 303)
    * or {@code GET /fiscal349/operators} (Modelo 349) returned for the declaration's
    * {@code (org, year, period)} at the moment it entered {@link #SUBMITTED_STATUSES}, computed
-   * server-side with the same code path in the same request (see {@link #takeSubmittedSnapshot}).
+   * server-side with the same code path in the same request (see {@link FiscalSubmittedSnapshotSupport#takeSubmittedSnapshot}).
    * Per-invoice arrays are not kept, only their row counts
    * ({@link AbstractFiscalHandler#computeSubmittedSnapshot}), so its size never grows with the
    * number of invoices.
@@ -229,35 +229,17 @@ class FiscalDeclCrudHandler {
   private static final String MISSING_ID_PARAM  = "Missing param: id";
   private static final String DECL_NOT_FOUND_PREFIX = "Declaration not found: ";
 
-  /**
-   * Computes the submission snapshot for a declaration (ETP-5438) — the figures of the model's
-   * read endpoint ({@code /fiscal303/boxes}, {@code /fiscal349/operators}) without per-invoice rows
-   * ({@link AbstractFiscalHandler#computeSubmittedSnapshot}).
-   * Wired by {@link AbstractFiscalHandler#linkSubmittedSnapshotProviders}, which dispatches on
-   * {@code model} to the matching fiscal handler: this class only owns the declaration table and
-   * has no access to the per-model compute code itself.
-   */
-  @FunctionalInterface
-  interface SubmittedSnapshotProvider {
-    /**
-     * @return the snapshot payload, or {@code null} when {@code model} has no snapshot support
-     *         (a model other than 303/349) — the transition then proceeds without one.
-     * @throws Exception when the computation fails; the submission is rejected in that case.
-     */
-    @SuppressWarnings("java:S112")
-    JSONObject compute(String model, int year, String period) throws Exception;
-  }
-
   private final NeoServlet servlet;
-  private SubmittedSnapshotProvider submittedSnapshotProvider;
+  /**
+   * ETP-5438 submission snapshot handling for this table (transition, lookup, parsing) —
+   * extracted to {@link FiscalSubmittedSnapshotSupport} to keep this class under the SonarQube
+   * {@code java:S1448} method-count threshold.
+   */
+  final FiscalSubmittedSnapshotSupport snapshots;
 
   FiscalDeclCrudHandler(NeoServlet servlet) {
     this.servlet = servlet;
-  }
-
-  /** See {@link SubmittedSnapshotProvider}. {@code null} (the default) disables snapshots. */
-  void setSubmittedSnapshotProvider(SubmittedSnapshotProvider provider) {
-    this.submittedSnapshotProvider = provider;
+    this.snapshots = new FiscalSubmittedSnapshotSupport(this, servlet);
   }
 
   void handleDeclarations(String method, HttpServletRequest request,
@@ -341,7 +323,7 @@ class FiscalDeclCrudHandler {
     decl.set(PROPERTY_DECLARATION_TYPE, requestedDeclType);
     decl.set(PROPERTY_DECL_SEQ, declSeq);
     decl.set(PROPERTY_DECLARATION_STATUS, status);
-    if (!applySubmittedSnapshotTransition(decl, null, status, "(new)", response)) {
+    if (!snapshots.applyTransition(decl, null, status, "(new)", response)) {
       return;
     }
     OBDal.getInstance().save(decl);
@@ -454,7 +436,7 @@ class FiscalDeclCrudHandler {
    * declaration" guarantee {@link #rejectRepresentation} enforces for the PUT path, extended to
    * the generate endpoints a direct API call could otherwise reach without ever going through
    * this handler's PUT at all. The boxes/operators reads are intentionally NOT gated: they serve
-   * a submitted declaration from its persisted snapshot ({@link #findLatestSubmittedSnapshot}),
+   * a submitted declaration from its persisted snapshot ({@link FiscalSubmittedSnapshotSupport#findLatestSubmittedSnapshot}),
    * or compute it live for a legacy declaration presented before snapshots existed.
    */
   String findLatestDeclarationStatus(String clientId, String orgId, String model, long year,
@@ -463,27 +445,8 @@ class FiscalDeclCrudHandler {
     return latest != null ? asString(latest.get(PROPERTY_DECLARATION_STATUS)) : null;
   }
 
-  /**
-   * ETP-5438 — the persisted submission snapshot of the MOST RECENT declaration (same "latest
-   * DECL_SEQ wins" rule as {@link #findLatestDeclarationStatus}) for the natural key, or
-   * {@code null} when that declaration is not in {@link #SUBMITTED_STATUSES}, has no snapshot
-   * (a legacy declaration presented before the column existed), or the stored value is not
-   * parseable JSON. Used by the {@code boxes}/{@code operators} reads to serve a presented
-   * declaration from its snapshot instead of recomputing it from the current invoices;
-   * {@code null} makes them fall back to the live compute.
-   */
-  JSONObject findLatestSubmittedSnapshot(String clientId, String orgId, String model, long year,
-      String period) {
-    BaseOBObject latest = findLatestDeclaration(clientId, orgId, model, year, period);
-    if (latest == null
-        || !SUBMITTED_STATUSES.contains(asString(latest.get(PROPERTY_DECLARATION_STATUS)))) {
-      return null;
-    }
-    return parseSubmittedSnapshot(latest);
-  }
-
   /** Highest-{@code DECL_SEQ} declaration for the natural key, or {@code null} when none. */
-  private BaseOBObject findLatestDeclaration(String clientId, String orgId, String model,
+  BaseOBObject findLatestDeclaration(String clientId, String orgId, String model,
       long year, String period) {
     OBQuery<BaseOBObject> query = naturalKeyQuery(clientId, orgId, model, year, period);
     long maxSeq = -1L;
@@ -522,7 +485,7 @@ class FiscalDeclCrudHandler {
     String previousStatus = asString(decl.get(PROPERTY_DECLARATION_STATUS));
     String newStatus = body.has(STATUS_KEY) ? body.getString(STATUS_KEY) : null;
     if (newStatus != null
-        && !applySubmittedSnapshotTransition(decl, previousStatus, newStatus, id, response)) {
+        && !snapshots.applyTransition(decl, previousStatus, newStatus, id, response)) {
       return;
     }
     applyDeclPutScalarFields(decl, body);
@@ -531,86 +494,9 @@ class FiscalDeclCrudHandler {
     // Echo only a snapshot taken by THIS request; read before commitAndClose() closes the session.
     boolean justSubmitted = newStatus != null && SUBMITTED_STATUSES.contains(newStatus)
         && !SUBMITTED_STATUSES.contains(previousStatus);
-    JSONObject snapshot = justSubmitted ? parseSubmittedSnapshot(decl) : null;
+    JSONObject snapshot = justSubmitted ? FiscalSubmittedSnapshotSupport.parseSubmittedSnapshot(decl) : null;
     OBDal.getInstance().commitAndClose();
     writeDeclPutResponse(response, manualDataApplied, snapshot);
-  }
-
-  /**
-   * ETP-5438 — keeps {@link #PROPERTY_SUBMITTED_SNAPSHOT} in step with a status transition:
-   * <ul>
-   *   <li>INTO {@link #SUBMITTED_STATUSES} from a non-submitted status (first presentation, manual
-   *       Registrar/Presentar on either model): takes the snapshot via
-   *       {@link #takeSubmittedSnapshot}. When it cannot be computed the whole request is rejected
-   *       with a 500 and nothing is written — a declaration is never presented without its
-   *       snapshot.</li>
-   *   <li>OUT of the submitted family ("Reactivar declaración" → {@code draft}): clears it, so a
-   *       later re-presentation takes a fresh one.</li>
-   * </ul>
-   * A submitted → submitted transition never reaches this point
-   * ({@link #rejectRepresentation} already answered 409), and a non-submitted → non-submitted one
-   * leaves the column untouched.
-   *
-   * @param previousStatus the declaration's status before this request ({@code null} on create)
-   * @return {@code false} if the request was rejected (the error response was already sent)
-   */
-  private boolean applySubmittedSnapshotTransition(BaseOBObject decl, String previousStatus,
-      String newStatus, String id, HttpServletResponse response) throws IOException {
-    boolean wasSubmitted = previousStatus != null && SUBMITTED_STATUSES.contains(previousStatus);
-    boolean willBeSubmitted = newStatus != null && SUBMITTED_STATUSES.contains(newStatus);
-    if (wasSubmitted && !willBeSubmitted) {
-      decl.set(PROPERTY_SUBMITTED_SNAPSHOT, null);
-      return true;
-    }
-    if (!willBeSubmitted || wasSubmitted) {
-      return true;
-    }
-    try {
-      takeSubmittedSnapshot(decl);
-      return true;
-    } catch (Exception e) {
-      log.error("Could not compute the submission snapshot for declaration {}", id, e);
-      servlet.sendError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
-          "The declaration could not be submitted: its figures could not be computed ("
-              + StringUtils.defaultIfBlank(e.getMessage(), e.getClass().getSimpleName())
-              + ").");
-      return false;
-    }
-  }
-
-  /**
-   * Validates {@code snapshot} against the declaration entity's own {@code submittedSnapshot}
-   * property — the same check {@code BaseOBObject#set} runs (AD length, domain type), without
-   * assigning anything (ETP-5438 QA BUG-1). Throws when the entity would reject it, including
-   * when the property is missing from the runtime model (the column not deployed yet). A
-   * declaration with no entity metadata (a unit-test double) has nothing to validate against.
-   */
-  static void validateSubmittedSnapshot(BaseOBObject decl, String snapshot) {
-    org.openbravo.base.model.Entity entity = decl.getEntity();
-    if (entity == null) {
-      return;
-    }
-    entity.getProperty(PROPERTY_SUBMITTED_SNAPSHOT).checkIsValidValue(snapshot);
-  }
-
-  /**
-   * Computes the submission snapshot for {@code decl} through the wired
-   * {@link SubmittedSnapshotProvider} and stores it on the record (no commit — the caller's
-   * transaction persists it together with the status change). A no-op when no provider is wired
-   * or the provider has no snapshot support for the declaration's model.
-   *
-   * @throws Exception when the provider fails to compute it
-   */
-  void takeSubmittedSnapshot(BaseOBObject decl) throws Exception {
-    if (submittedSnapshotProvider == null) {
-      return;
-    }
-    JSONObject snapshot = submittedSnapshotProvider.compute(
-        asString(decl.get(PROPERTY_FISCAL_MODEL)), asInt(decl.get(PROPERTY_FISCAL_YEAR)),
-        asString(decl.get(PROPERTY_PERIOD)));
-    if (snapshot != null) {
-      decl.set(PROPERTY_SUBMITTED_SNAPSHOT, snapshot.toString());
-    }
   }
 
   /**
@@ -1131,28 +1017,9 @@ class FiscalDeclCrudHandler {
     String submissionMethod = asString(decl.get(PROPERTY_SUBMISSION_METHOD));
     o.put(SUBMISSION_METHOD_KEY, StringUtils.isNotBlank(submissionMethod)
         ? submissionMethod : JSONObject.NULL);
-    JSONObject snapshot = parseSubmittedSnapshot(decl);
+    JSONObject snapshot = FiscalSubmittedSnapshotSupport.parseSubmittedSnapshot(decl);
     o.put(SUBMITTED_SNAPSHOT_KEY, snapshot != null ? snapshot : JSONObject.NULL);
     return o;
-  }
-
-  /**
-   * Parses the stored {@link #PROPERTY_SUBMITTED_SNAPSHOT} JSON string, or {@code null} when it
-   * is blank or unparseable. Unlike {@link #parseManualData} this never degrades to an empty
-   * object: {@code null} means "no snapshot", which makes every reader fall back to the live
-   * compute — an empty object would instead freeze the declaration on no figures at all.
-   */
-  static JSONObject parseSubmittedSnapshot(BaseOBObject decl) {
-    String raw = asString(decl.get(PROPERTY_SUBMITTED_SNAPSHOT));
-    if (StringUtils.isBlank(raw)) {
-      return null;
-    }
-    try {
-      return new JSONObject(raw);
-    } catch (JSONException e) {
-      log.warn("Ignoring unparseable submitted snapshot on declaration {}", decl.getId());
-      return null;
-    }
   }
 
   /**
@@ -1186,11 +1053,11 @@ class FiscalDeclCrudHandler {
         ? String.valueOf(((BaseOBObject) related).getId()) : "";
   }
 
-  private static String asString(Object value) {
+  static String asString(Object value) {
     return value != null ? String.valueOf(value) : "";
   }
 
-  private static int asInt(Object value) {
+  static int asInt(Object value) {
     if (value instanceof Number) {
       return ((Number) value).intValue();
     }

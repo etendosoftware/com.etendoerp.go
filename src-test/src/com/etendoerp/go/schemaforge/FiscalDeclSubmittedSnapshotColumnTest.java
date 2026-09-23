@@ -258,14 +258,14 @@ public class FiscalDeclSubmittedSnapshotColumnTest {
 
     JSONArray ops = handler.computeSubmittedSnapshot("org1", 2026, "T3").getJSONArray("operators");
 
-    assertEquals(0, ops.getJSONObject(0).getInt(Fiscal349BoxesHandler.ORIGIN_PURCHASES));
-    assertEquals(2, ops.getJSONObject(0).getInt(Fiscal349BoxesHandler.ORIGIN_SALES));
-    assertEquals(1, ops.getJSONObject(1).getInt(Fiscal349BoxesHandler.ORIGIN_PURCHASES));
-    assertEquals(1, ops.getJSONObject(1).getInt(Fiscal349BoxesHandler.ORIGIN_SALES));
+    assertEquals(0, ops.getJSONObject(0).getInt(Fiscal349SnapshotSupport.ORIGIN_PURCHASES));
+    assertEquals(2, ops.getJSONObject(0).getInt(Fiscal349SnapshotSupport.ORIGIN_SALES));
+    assertEquals(1, ops.getJSONObject(1).getInt(Fiscal349SnapshotSupport.ORIGIN_PURCHASES));
+    assertEquals(1, ops.getJSONObject(1).getInt(Fiscal349SnapshotSupport.ORIGIN_SALES));
     // corrective row: resolved only against the rectifications (services base -> key S)
-    assertEquals(1, ops.getJSONObject(2).getInt(Fiscal349BoxesHandler.ORIGIN_SALES));
+    assertEquals(1, ops.getJSONObject(2).getInt(Fiscal349SnapshotSupport.ORIGIN_SALES));
     // no backing row -> no counts, the column reads "—" exactly as it would live
-    assertFalse(ops.getJSONObject(3).has(Fiscal349BoxesHandler.ORIGIN_SALES));
+    assertFalse(ops.getJSONObject(3).has(Fiscal349SnapshotSupport.ORIGIN_SALES));
   }
 
   /** Guards the guard: the original 2000 length rejects a value longer than it. */
@@ -292,12 +292,12 @@ public class FiscalDeclSubmittedSnapshotColumnTest {
 
     when(entity.getProperty(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT))
         .thenReturn(snapshotProperty(committedFieldLength()));
-    FiscalDeclCrudHandler.validateSubmittedSnapshot(decl, snapshot);
+    FiscalSubmittedSnapshotSupport.validateSubmittedSnapshot(decl, snapshot);
 
     when(entity.getProperty(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT))
         .thenReturn(snapshotProperty(2000));
     try {
-      FiscalDeclCrudHandler.validateSubmittedSnapshot(decl, snapshot);
+      FiscalSubmittedSnapshotSupport.validateSubmittedSnapshot(decl, snapshot);
       fail("must reject a snapshot the column cannot hold");
     } catch (ValidationException expected) {
       // rejected before anything is filed

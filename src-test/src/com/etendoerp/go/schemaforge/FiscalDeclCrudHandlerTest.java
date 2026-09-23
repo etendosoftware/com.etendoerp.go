@@ -1658,7 +1658,7 @@ public class FiscalDeclCrudHandlerTest {
   @Test
   public void testPutFirstPresentation303TakesSnapshotAndEchoesIt() throws Exception {
     java.util.List<String> calls = new java.util.ArrayList<>();
-    handler.setSubmittedSnapshotProvider((model, year, period) -> {
+    handler.snapshots.setProvider((model, year, period) -> {
       calls.add(model + "|" + year + "|" + period);
       return new JSONObject(SNAPSHOT_303);
     });
@@ -1684,7 +1684,7 @@ public class FiscalDeclCrudHandlerTest {
   public void testPutFirstPresentation349TakesSnapshot() throws Exception {
     String snapshot349 = "{\"operators\":[],\"summary\":{\"totalE\":\"0.00\"}}";
     java.util.List<String> models = new java.util.ArrayList<>();
-    handler.setSubmittedSnapshotProvider((model, year, period) -> {
+    handler.snapshots.setProvider((model, year, period) -> {
       models.add(model);
       return new JSONObject(snapshot349);
     });
@@ -1703,7 +1703,7 @@ public class FiscalDeclCrudHandlerTest {
    */
   @Test
   public void testPutFirstPresentationSnapshotFailureRejectsAndWritesNothing() throws Exception {
-    handler.setSubmittedSnapshotProvider((model, year, period) -> {
+    handler.snapshots.setProvider((model, year, period) -> {
       throw new IllegalStateException("No TaxReport found");
     });
     BaseOBObject decl = draftDecl("303");
@@ -1722,7 +1722,7 @@ public class FiscalDeclCrudHandlerTest {
   @Test
   public void testPutReactivationClearsSnapshot() throws Exception {
     int[] calls = { 0 };
-    handler.setSubmittedSnapshotProvider((model, year, period) -> {
+    handler.snapshots.setProvider((model, year, period) -> {
       calls[0]++;
       return new JSONObject();
     });
@@ -1743,7 +1743,7 @@ public class FiscalDeclCrudHandlerTest {
   @Test
   public void testPutWithoutStatusChangeLeavesSnapshotAlone() throws Exception {
     int[] calls = { 0 };
-    handler.setSubmittedSnapshotProvider((model, year, period) -> {
+    handler.snapshots.setProvider((model, year, period) -> {
       calls[0]++;
       return new JSONObject();
     });
@@ -1758,7 +1758,7 @@ public class FiscalDeclCrudHandlerTest {
   /** A model without snapshot support (provider answers null) presents without one. */
   @Test
   public void testPutFirstPresentationUnsupportedModelProceedsWithoutSnapshot() throws Exception {
-    handler.setSubmittedSnapshotProvider((model, year, period) -> null);
+    handler.snapshots.setProvider((model, year, period) -> null);
     BaseOBObject decl = draftDecl("390");
 
     String body = putDecl(decl, "{\"status\":\"submitted\"}", null);
@@ -1833,7 +1833,7 @@ public class FiscalDeclCrudHandlerTest {
   public void testPostInSubmittedStatusTakesSnapshotBeforeSave() throws Exception {
     for (String status : new String[] { "submitted", "submitted_ext", "submitted_ack" }) {
       java.util.List<String> calls = new java.util.ArrayList<>();
-      handler.setSubmittedSnapshotProvider((model, year, period) -> {
+      handler.snapshots.setProvider((model, year, period) -> {
         calls.add(model + "|" + year + "|" + period);
         return new JSONObject(SNAPSHOT_303);
       });
@@ -1858,7 +1858,7 @@ public class FiscalDeclCrudHandlerTest {
   public void testPostInNonSubmittedStatusTakesNoSnapshot() throws Exception {
     for (String status : new String[] { "draft", "ready" }) {
       int[] calls = { 0 };
-      handler.setSubmittedSnapshotProvider((model, year, period) -> {
+      handler.snapshots.setProvider((model, year, period) -> {
         calls[0]++;
         return new JSONObject(SNAPSHOT_303);
       });
@@ -1878,7 +1878,7 @@ public class FiscalDeclCrudHandlerTest {
   @Test
   public void testPostWithoutStatusDefaultsToDraftAndTakesNoSnapshot() throws Exception {
     int[] calls = { 0 };
-    handler.setSubmittedSnapshotProvider((model, year, period) -> {
+    handler.snapshots.setProvider((model, year, period) -> {
       calls[0]++;
       return new JSONObject(SNAPSHOT_303);
     });
@@ -1897,7 +1897,7 @@ public class FiscalDeclCrudHandlerTest {
    */
   @Test
   public void testPostInSubmittedStatusSnapshotFailureRejectsAndSavesNothing() throws Exception {
-    handler.setSubmittedSnapshotProvider((model, year, period) -> {
+    handler.snapshots.setProvider((model, year, period) -> {
       throw new IllegalStateException("No TaxReport found");
     });
 
@@ -1956,14 +1956,14 @@ public class FiscalDeclCrudHandlerTest {
       when(submitted.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn(SNAPSHOT_303);
 
       when(query.list()).thenReturn(Collections.singletonList(submitted));
-      assertEquals("123.45", handler.findLatestSubmittedSnapshot("c", "o", "303", 2026L, "T1")
+      assertEquals("123.45", handler.snapshots.findLatestSubmittedSnapshot("c", "o", "303", 2026L, "T1")
           .optJSONObject("summary").optString("result"));
 
       when(submitted.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("draft");
-      assertNull(handler.findLatestSubmittedSnapshot("c", "o", "303", 2026L, "T1"));
+      assertNull(handler.snapshots.findLatestSubmittedSnapshot("c", "o", "303", 2026L, "T1"));
 
       when(query.list()).thenReturn(Collections.emptyList());
-      assertNull(handler.findLatestSubmittedSnapshot("c", "o", "303", 2026L, "T1"));
+      assertNull(handler.snapshots.findLatestSubmittedSnapshot("c", "o", "303", 2026L, "T1"));
     }
   }
 

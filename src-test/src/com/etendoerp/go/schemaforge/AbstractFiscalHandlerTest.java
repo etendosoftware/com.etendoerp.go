@@ -121,9 +121,26 @@ public class AbstractFiscalHandlerTest {
     /** Per-invoice arrays the snapshot drops; settable per test. */
     java.util.Map<String, String> excludedLists = java.util.Collections.emptyMap();
 
-    @Override
-    protected java.util.Map<String, String> snapshotExcludedLists() {
-      return excludedLists;
+    {
+      // What a real subclass does in its constructor: install its snapshot definition. The live
+      // payload comes from this stub's computeLivePayload override, never from the support.
+      snapshotSupport = new FiscalSnapshotSupport() {
+        @Override
+        public String declModel() {
+          return declModel;
+        }
+
+        @Override
+        public org.codehaus.jettison.json.JSONObject computeLivePayload(AbstractFiscalHandler handler,
+            String orgId, int year, String period) {
+          throw new UnsupportedOperationException("StubHandler overrides computeLivePayload");
+        }
+
+        @Override
+        public java.util.Map<String, String> excludedLists() {
+          return excludedLists;
+        }
+      };
     }
 
     @Override
@@ -775,7 +792,7 @@ public class AbstractFiscalHandlerTest {
     AbstractFiscalHandler.linkSubmittedSnapshotProviders(h303, h349);
 
     org.openbravo.base.structure.BaseOBObject decl349 = declFor("349");
-    h303.declHandler().takeSubmittedSnapshot(decl349);
+    h303.declHandler().snapshots.takeSubmittedSnapshot(decl349);
 
     assertEquals(java.util.Collections.singletonList("leaf-org|2026|T2"), h349.computeCalls);
     assertTrue(h303.computeCalls.isEmpty());
@@ -791,7 +808,7 @@ public class AbstractFiscalHandlerTest {
     AbstractFiscalHandler.linkSubmittedSnapshotProviders(h303);
 
     org.openbravo.base.structure.BaseOBObject decl = declFor("390");
-    h303.declHandler().takeSubmittedSnapshot(decl);
+    h303.declHandler().snapshots.takeSubmittedSnapshot(decl);
 
     assertTrue(h303.computeCalls.isEmpty());
     org.mockito.Mockito.verify(decl, org.mockito.Mockito.never())
@@ -806,7 +823,7 @@ public class AbstractFiscalHandlerTest {
     h303.declModel = "303";
     AbstractFiscalHandler.linkSubmittedSnapshotProviders(h303);
 
-    h303.declHandler().takeSubmittedSnapshot(declFor("303"));
+    h303.declHandler().snapshots.takeSubmittedSnapshot(declFor("303"));
   }
 
   /**
@@ -823,7 +840,7 @@ public class AbstractFiscalHandlerTest {
     AbstractFiscalHandler.linkSubmittedSnapshotProviders(h303);
 
     org.openbravo.base.structure.BaseOBObject decl = declFor("303");
-    h303.declHandler().takeSubmittedSnapshot(decl);
+    h303.declHandler().snapshots.takeSubmittedSnapshot(decl);
 
     org.mockito.Mockito.verify(decl).set(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT,
         "{\"boxes\":{\"46\":\"1.00\"},\"sourceCount\":2}");

@@ -98,6 +98,7 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
     super(servlet);
     this.submissionSupport = new Fiscal303SubmissionSupport(this);
     this.sourcesSupport = new Fiscal303SourcesSupport(this);
+    this.snapshotSupport = new Fiscal303SnapshotSupport();
   }
 
   @Override
@@ -174,24 +175,6 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
   @Override
   protected String getModelKey() {
     return "fiscal303";
-  }
-
-  @Override
-  protected String getDeclModel() {
-    return "303";
-  }
-
-  /** The snapshot keeps boxes + summary; the per-invoice {@code sources} become a count. */
-  @Override
-  protected java.util.Map<String, String> snapshotExcludedLists() {
-    return java.util.Collections.singletonMap("sources", "sourceCount");
-  }
-
-  /** The {@code GET /fiscal303/boxes} payload, computed live — see the base javadoc. */
-  @Override
-  JSONObject computeLivePayload(String orgId, int year, String period) throws Exception {
-    ComputeResult cr = computeBoxes(orgId, year, period);
-    return buildResponse(cr.boxes, cr.sources);
   }
 
   /** True when the declaration exists and belongs to the current client/organization. */
@@ -736,38 +719,5 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
       map.computeIfAbsent(pct, k -> new ArrayList<>()).add(r);
     }
     return map;
-  }
-
-  private JSONObject buildResponse(Map<Integer, BigDecimal> b,
-      List<Map<String, Object>> sources) throws Exception {
-    JSONObject boxes = new JSONObject();
-    for (Map.Entry<Integer, BigDecimal> e : b.entrySet()) {
-      boxes.put(String.valueOf(e.getKey()), e.getValue().toString());
-    }
-    BigDecimal accrued    = b.getOrDefault(27, BigDecimal.ZERO);
-    BigDecimal deductible = b.getOrDefault(45, BigDecimal.ZERO);
-    BigDecimal result     = b.getOrDefault(46, BigDecimal.ZERO);
-    JSONObject summary = new JSONObject();
-    summary.put("accrued",    accrued.toString());
-    summary.put("deductible", deductible.toString());
-    summary.put("result",     result.toString());
-    JSONArray sourcesArr = new JSONArray();
-    for (Map<String, Object> row : sources) {
-      JSONObject s = new JSONObject();
-      for (Map.Entry<String, Object> e : row.entrySet()) {
-        Object v = e.getValue();
-        if (v instanceof BigDecimal) {
-          s.put(e.getKey(), v.toString());
-        } else {
-          s.put(e.getKey(), v != null ? v.toString() : "");
-        }
-      }
-      sourcesArr.put(s);
-    }
-    JSONObject root = new JSONObject();
-    root.put(BOXES,     boxes);
-    root.put("summary", summary);
-    root.put("sources", sourcesArr);
-    return root;
   }
 }

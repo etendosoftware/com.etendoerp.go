@@ -57,7 +57,14 @@ import org.openbravo.module.bptaxidkey.ViesService;
 
 class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
-  private static final String OPERATORS = "operators";
+  // Package-private (not private): also read by Fiscal349SnapshotSupport.
+  static final String OPERATORS = "operators";
+  /** Payload key of the per-invoice origin rows (also the snapshot's excluded list). */
+  static final String INVOICES_KEY = "invoices";
+  /** Payload key of the corrective (Tipo Registro 2) detail rows. */
+  static final String RECTIFICATIONS_KEY = "rectifications";
+  /** Row key of an invoice/rectification's partner NIF-IVA. */
+  static final String NIF_IVA_KEY = "nifIva";
   private static final String GENERATE  = "generate";
 
   /** Row key for the operator's tax base amount, as produced by AEAT3492010ReportDao. */
@@ -80,7 +87,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
    * "registro tipo 2". See {@link #computeOperators} for why these rows are kept out of the
    * regular {@code summary}.
    */
-  private static final String RECTIFICATIVE = "rectificative";
+  static final String RECTIFICATIVE = "rectificative";
 
   /**
    * The whole VIES-validation cluster (gate, network phase, persistence), extracted for the
@@ -92,6 +99,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
   Fiscal349BoxesHandler(NeoServlet servlet) {
     super(servlet);
+    this.snapshotSupport = new Fiscal349SnapshotSupport();
   }
 
   @Override
@@ -154,113 +162,6 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
   protected String getModelKey() {
     return "fiscal349";
   }
-
-  @Override
-  protected String getDeclModel() {
-    return "349";
-  }
-
-  /**
-   * The snapshot keeps operators (one row per partner), {@code summary} and
-   * {@code rectificativeSummary} (fixed E/S/A/I totals); the per-invoice {@code invoices} and
-   * {@code rectifications} rows become counts.
-   */
-  @Override
-  protected java.util.Map<String, String> snapshotExcludedLists() {
-    java.util.Map<String, String> excluded = new java.util.LinkedHashMap<>();
-    excluded.put("invoices", "invoiceCount");
-    excluded.put("rectifications", "rectificationCount");
-    return excluded;
-  }
-
-  /** Snapshot key: how many origin purchase invoices back an operator row. */
-  static final String ORIGIN_PURCHASES = "originPurchases";
-  /** Snapshot key: how many origin sales invoices back an operator row. */
-  static final String ORIGIN_SALES = "originSales";
-  private static final String TYPE_PURCHASE = "Compra";
-  private static final String TYPE_SALES = "Venta";
-
-  /**
-   * ETP-5438 review W1 — the operators' "Origen" column counts, per operator, the purchase/sales
-   * invoices (or, for a corrective row, rectifications) behind it. The snapshot drops those rows,
-   * so the counts are folded into each operator row first ({@link #ORIGIN_PURCHASES} /
-   * {@link #ORIGIN_SALES}) — one pair per partner, so the size stays bounded. Grouping mirrors the
-   * frontend's {@code originByNif} / {@code originByRectification} ({@code FmModel349Page.jsx}):
-   * {@code nif|key}, where a rectification contributes one key per non-zero base
-   * (Venta: products E / services S, Compra: products A / services I). An operator without any
-   * matching row gets no counts (the column shows "—", as it would live).
-   */
-  @Override
-  protected void foldPerInvoiceAggregates(JSONObject payload) throws Exception {
-    JSONArray operators = payload.optJSONArray(OPERATORS);
-    if (operators == null) {
-      return;
-    }
-    Map<String, int[]> byInvoice = new HashMap<>();
-    JSONArray invoices = payload.optJSONArray("invoices");
-    for (int i = 0; invoices != null && i < invoices.length(); i++) {
-      JSONObject inv = invoices.getJSONObject(i);
-      countOrigin(byInvoice, inv.optString("nifIva") + "|" + inv.optString("key"), inv.optString("type"));
-    }
-    Map<String, int[]> byRectification = new HashMap<>();
-    JSONArray rectifications = payload.optJSONArray("rectifications");
-    for (int i = 0; rectifications != null && i < rectifications.length(); i++) {
-      JSONObject r = rectifications.getJSONObject(i);
-      for (String key : rectificationKeys(r)) {
-        countOrigin(byRectification, r.optString("nifIva") + "|" + key, r.optString("type"));
-      }
-    }
-    for (int i = 0; i < operators.length(); i++) {
-      JSONObject op = operators.getJSONObject(i);
-      Map<String, int[]> source = op.optBoolean(RECTIFICATIVE, false) ? byRectification : byInvoice;
-      int[] counts = source.get(op.optString("nif") + "|" + op.optString("key"));
-      if (counts != null) {
-        op.put(ORIGIN_PURCHASES, counts[0]);
-        op.put(ORIGIN_SALES, counts[1]);
-      }
-    }
-  }
-
-  private static void countOrigin(Map<String, int[]> counts, String nifKey, String type) {
-    int[] c = counts.computeIfAbsent(nifKey, k -> new int[2]);
-    if (TYPE_PURCHASE.equals(type)) {
-      c[0]++;
-    } else if (TYPE_SALES.equals(type)) {
-      c[1]++;
-    }
-  }
-
-  /** The AEAT349 keys a rectification row contributes to — one per non-zero base. */
-  private static List<String> rectificationKeys(JSONObject r) {
-    String type = r.optString("type");
-    String productsKey;
-    String servicesKey;
-    if (TYPE_SALES.equals(type)) {
-      productsKey = "E";
-      servicesKey = "S";
-    } else if (TYPE_PURCHASE.equals(type)) {
-      productsKey = "A";
-      servicesKey = "I";
-    } else {
-      return new ArrayList<>();
-    }
-    List<String> keys = new ArrayList<>();
-    if (r.optDouble("baseProducts", 0d) != 0d) {
-      keys.add(productsKey);
-    }
-    if (r.optDouble("baseServices", 0d) != 0d) {
-      keys.add(servicesKey);
-    }
-    return keys;
-  }
-
-  /** The {@code GET /fiscal349/operators} payload, computed live — see the base javadoc. */
-  @Override
-  JSONObject computeLivePayload(String orgId, int year, String period) throws Exception {
-    return computeOperators(orgId, year, period);
-  }
-
-  // ── operators ─────────────────────────────────────────────────────
 
   JSONObject computeOperators(String orgId, int year, String period) throws Exception {
     Organization org = OBDal.getInstance().get(Organization.class, orgId);
@@ -335,8 +236,8 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     root.put(OPERATORS, operatorsArr);
     root.put("summary",  summary);
     root.put("rectificativeSummary", buildKeyTotals(rectificativeByKey));
-    root.put("invoices", invoicesArr);
-    root.put("rectifications", rectifArr);
+    root.put(INVOICES_KEY, invoicesArr);
+    root.put(RECTIFICATIONS_KEY, rectifArr);
     root.put("orgNif",   orgNif != null ? orgNif : "");
     root.put("orgName",  org.getName());
     return root;
@@ -380,7 +281,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       row.put("date",          dateStr(r[1], sdf));
       row.put("type",          type);
       row.put("party",         str(r[2]));
-      row.put("nifIva",        str(r[3]));
+      row.put(NIF_IVA_KEY,     str(r[3]));
       row.put("originalRef",   str(r[4]));
       row.put("declaredYear",  str(r[5]));
       row.put("declaredPeriod", str(r[6]));
@@ -687,7 +588,7 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     row.put("date",   inv.getInvoiceDate() != null ? sdf.format(inv.getInvoiceDate()) : "");
     row.put("type",   type);
     row.put("party",  bp != null ? bp.getName() : "");
-    row.put("nifIva", bp != null && bp.getTaxID() != null ? bp.getTaxID() : "");
+    row.put(NIF_IVA_KEY, bp != null && bp.getTaxID() != null ? bp.getTaxID() : "");
     row.put("base",   base.toString());
     row.put("key",    resolvedKey != null ? resolvedKey : "");
     return row;

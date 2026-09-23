@@ -329,7 +329,7 @@ class Fiscal303SubmissionSupport {
     if (!testMode) {
       try {
         submittedSnapshot = owner.computeSubmittedSnapshot(orgId, year, period).toString();
-        FiscalDeclCrudHandler.validateSubmittedSnapshot(decl, submittedSnapshot);
+        FiscalSubmittedSnapshotSupport.validateSubmittedSnapshot(decl, submittedSnapshot);
       } catch (Exception e) {
         AbstractFiscalHandler.log.error("Could not compute the submission snapshot for decl="
             + declId + "; the declaration was not sent to the AEAT", e);
@@ -374,17 +374,30 @@ class Fiscal303SubmissionSupport {
 
     persistIncidentsBestEffort(decl, declId, result);
 
-    if (result.isSuccessful()) {
-      if (testMode) {
-        attachTestJustificante(decl, org, data, result);
-      } else {
-        persistSuccessfulSubmission(decl, org, data, result, submittedSnapshot);
-      }
-    }
+    persistSuccessfulOutcome(testMode, decl, org, data, result, submittedSnapshot);
 
     commitSubmissionBestEffort(declId);
 
     writeJson(response, HttpServletResponse.SC_OK, owner.buildSubmissionResultJson(result, data));
+  }
+
+  /**
+   * Stages the declaration-side effects of a SUCCESSFUL submission (nothing for a failed one):
+   * the test-labelled justificante for test mode ({@link #attachTestJustificante}), or the
+   * status/snapshot update plus justificante for production ({@link #persistSuccessfulSubmission}).
+   * Extracted from {@link #handleSubmit} to keep its cognitive complexity under the SonarQube
+   * {@code java:S3776} threshold; same branches, same order.
+   */
+  private void persistSuccessfulOutcome(boolean testMode, FiscalDecl decl, Organization org,
+      AEAT303DeclarationData data, AEAT303SubmissionResult result, String submittedSnapshot) {
+    if (!result.isSuccessful()) {
+      return;
+    }
+    if (testMode) {
+      attachTestJustificante(decl, org, data, result);
+    } else {
+      persistSuccessfulSubmission(decl, org, data, result, submittedSnapshot);
+    }
   }
 
   /**

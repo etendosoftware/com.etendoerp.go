@@ -150,66 +150,40 @@ abstract class AbstractFiscalHandler {
   }
 
   /**
+   * What this model freezes as a submission snapshot, and how it computes its live payload
+   * (ETP-5438). Assigned by each subclass constructor; see {@link FiscalSnapshotSupport}.
+   * Package-private and non-final so tests can install a double.
+   */
+  FiscalSnapshotSupport snapshotSupport;
+
+  /**
    * The bare {@code ETGO_Fiscal_Decl.model} code this handler serves ({@code "303"},
    * {@code "349"}) — not the URL segment {@link #getModelKey()} returns.
    */
-  protected abstract String getDeclModel();
+  protected String getDeclModel() {
+    return snapshotSupport.declModel();
+  }
 
   /**
    * Computes, from the CURRENT invoice data, the exact JSON payload this model's read endpoint
    * returns ({@code /fiscal303/boxes}, {@code /fiscal349/operators}) for a declaration that is
    * not served from a snapshot. {@link #computeSubmittedSnapshot} derives the snapshot from it.
+   * Passes {@code this} to the support so a Mockito spy of the handler stays in the call chain.
    */
   @SuppressWarnings("java:S112")
-  abstract JSONObject computeLivePayload(String orgId, int year, String period)
-      throws Exception;
-
-  /**
-   * The per-invoice arrays of {@link #computeLivePayload}'s payload that the submission snapshot
-   * does NOT keep, each mapped to the key under which the snapshot stores its row count instead
-   * (ETP-5438 scope decision). A period can hold tens of thousands of invoices, so keeping them
-   * would make the snapshot — and every {@code GET /declarations}, which returns it — grow without
-   * bound. Only fixed-size figures are frozen: boxes/summary for 303; operators (one row per
-   * intra-community partner) and the key totals for 349. Empty for a model with no such arrays.
-   */
-  protected java.util.Map<String, String> snapshotExcludedLists() {
-    return java.util.Collections.emptyMap();
+  JSONObject computeLivePayload(String orgId, int year, String period) throws Exception {
+    return snapshotSupport.computeLivePayload(this, orgId, year, period);
   }
 
   /**
-   * Hook run on the live payload right before its per-invoice arrays are dropped from the
-   * snapshot: lets a model keep fixed-size aggregates the UI derives from those rows (e.g. 349's
-   * per-operator origin counts). No-op by default.
-   */
-  @SuppressWarnings("java:S112")
-  protected void foldPerInvoiceAggregates(JSONObject payload) throws Exception {
-    // nothing to fold for models without per-invoice derived figures
-  }
-
-  /**
-   * ETP-5438 — the submission snapshot: {@link #computeLivePayload}'s payload (same code path, so
-   * the same figures the read returns at submission time, re-serialized through
-   * {@link JSONObject}) with every per-invoice array of {@link #snapshotExcludedLists} replaced by
-   * its row count. The single place a snapshot is built, so its size is bounded whatever the
-   * number of invoices in the period.
-   *
-   * <p><b>Known, accepted limit (349).</b> The 349 snapshot still grows with the number of
-   * OPERATOR rows (~264 chars each, one per partner and key), so beyond roughly 3,800 operator
-   * rows it exceeds the column's AD {@code FIELDLENGTH} of 1,000,000. The entity validator then
-   * rejects it and the presentation fails safely (500, nothing written) — documented rather than
-   * handled, being far beyond any realistic 349.
+   * ETP-5438 — the submission snapshot: {@link #computeLivePayload}'s payload reduced to its
+   * fixed-size figures by {@link FiscalSnapshotSupport#toSnapshot} — see there for what is kept,
+   * why, and the known 349 size limit.
    */
   @SuppressWarnings("java:S112")
   final JSONObject computeSubmittedSnapshot(String orgId, int year, String period)
       throws Exception {
-    JSONObject payload = computeLivePayload(orgId, year, period);
-    foldPerInvoiceAggregates(payload);
-    for (java.util.Map.Entry<String, String> excluded : snapshotExcludedLists().entrySet()) {
-      org.codehaus.jettison.json.JSONArray rows = payload.optJSONArray(excluded.getKey());
-      payload.remove(excluded.getKey());
-      payload.put(excluded.getValue(), rows != null ? rows.length() : 0);
-    }
-    return payload;
+    return snapshotSupport.toSnapshot(computeLivePayload(orgId, year, period));
   }
 
   /**
@@ -223,7 +197,7 @@ abstract class AbstractFiscalHandler {
   protected JSONObject snapshotOrCompute(String orgId, int year, String period) throws Exception {
     String clientId = OBContext.getOBContext().getCurrentClient().getId();
     // Lookup on the org the declaration is stored with; the compute keeps the effective org.
-    JSONObject snapshot = declHandler().findLatestSubmittedSnapshot(clientId, declarationOrgId(),
+    JSONObject snapshot = declHandler().snapshots.findLatestSubmittedSnapshot(clientId, declarationOrgId(),
         getDeclModel(), year, period);
     return snapshot != null ? snapshot : computeLivePayload(orgId, year, period);
   }
@@ -241,14 +215,14 @@ abstract class AbstractFiscalHandler {
     for (AbstractFiscalHandler h : handlers) {
       byModel.put(h.getDeclModel(), h);
     }
-    FiscalDeclCrudHandler.SubmittedSnapshotProvider provider = (model, year, period) -> {
+    FiscalSubmittedSnapshotSupport.SnapshotProvider provider = (model, year, period) -> {
       AbstractFiscalHandler owner = byModel.get(model);
       return owner != null
           ? owner.computeSubmittedSnapshot(owner.resolveEffectiveOrg(), year, period)
           : null;
     };
     for (AbstractFiscalHandler h : handlers) {
-      h.declHandler().setSubmittedSnapshotProvider(provider);
+      h.declHandler().snapshots.setProvider(provider);
     }
   }
 
