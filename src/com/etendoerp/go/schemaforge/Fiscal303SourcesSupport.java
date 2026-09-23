@@ -51,6 +51,28 @@ import org.openbravo.module.aeat303.es.report.v2014.AEAT303Report2014Dao;
  */
 class Fiscal303SourcesSupport {
 
+  /**
+   * Box numbers where an AEAT-mandated intra-EU acquisition (adquisición intracomunitaria) posts
+   * the SAME taxable base/tax amount TWICE on the SAME purchase invoice under Spanish
+   * reverse-charge accounting — once as output/devengado (box 10/11, {@code VAT_SALES_EU} in
+   * {@code Fiscal303BoxesHandler#fillSalesBoxes}) and once as input/soportado deductible (box
+   * 36/37 {@code Intracommunity_Goods} or 38/39 {@code Intracommunity_Investments} in {@code
+   * #fillPurchaseBoxes}). Each box legitimately needs the FULL individual line amount once — that
+   * casilla computation path ({@code fillGroupBoxes}/{@code applyPercentageSplit}) is untouched by
+   * this class. But THIS class's per-invoice "Facturas" tab row naively summed every matching
+   * {@code C_INVOICETAX} line, so an invoice with both paired lines showed base/vat/total exactly
+   * doubled (ETP-5456).
+   *
+   * <p>Fix mirrors {@code org.openbravo.module.aeat349.es.AEAT3492010ReportDao
+   * #getTaxBaseAmountPerBusinessPartner}, which documents the identical domain fact ("An
+   * Intracommunity purchase invoice line has two tax rates with the same rate but with opposite
+   * sign") and halves each paired line's contribution so summing both nets back to the single real
+   * amount — see {@link #accumulateInvoiceTax}. A normal single-tax-line domestic invoice never
+   * touches these box numbers, so its aggregation is unaffected.</p>
+   */
+  private static final java.util.Set<Integer> REVERSE_CHARGE_PAIRED_BOXES =
+      java.util.Set.of(10, 11, 36, 37, 38, 39);
+
   private final Fiscal303BoxesHandler owner;
 
   Fiscal303SourcesSupport(Fiscal303BoxesHandler owner) {
@@ -123,15 +145,36 @@ class Fiscal303SourcesSupport {
       Map<String, List<Integer>> rateToBoxes) {
     BigDecimal base = it.getTaxableAmount() != null ? it.getTaxableAmount().abs() : BigDecimal.ZERO;
     BigDecimal tax  = it.getTaxAmount()     != null ? it.getTaxAmount().abs()     : BigDecimal.ZERO;
-    row.put("base", owner.round(((BigDecimal) row.get("base")).add(base)));
-    row.put("vat",  owner.round(((BigDecimal) row.get("vat")).add(tax)));
     List<Integer> boxes = rateToBoxes.get(it.getTax().getId());
+    if (boxes != null && isReverseChargePairedLine(boxes)) {
+      // ETP-5456: this line is one half of an intra-EU acquisition's mandatory devengado/soportado
+      // pair on the same invoice — halve so the two paired lines net back to the real single
+      // base/tax instead of doubling it. See REVERSE_CHARGE_PAIRED_BOXES javadoc.
+      base = base.divide(BigDecimal.valueOf(2), 10, java.math.RoundingMode.HALF_UP);
+      tax  = tax.divide(BigDecimal.valueOf(2), 10, java.math.RoundingMode.HALF_UP);
+    }
+    // ETP-5456 code review (Alex, B1): accumulate at full precision here and round exactly ONCE,
+    // in finalizeInvoiceRow, after every line has been added. Rounding to scale-2 after EACH line
+    // (as this used to do) can push a halved paired-line total across a ".xx5" boundary on the
+    // intermediate result and land on the wrong cent — e.g. two paired lines of base 55.37 each
+    // (halved to 27.685 exact) rounded 27.685→27.69 after the first line, then 27.69+27.685=55.375
+    // →55.38 after the second — one cent off the correct 55.37. Accumulating unrounded and
+    // rounding only the final sum avoids that intermediate-rounding drift entirely.
+    row.put("base", ((BigDecimal) row.get("base")).add(base));
+    row.put("vat",  ((BigDecimal) row.get("vat")).add(tax));
     if (boxes != null) {
       @SuppressWarnings("unchecked")
       java.util.LinkedHashSet<Integer> bSet =
           (java.util.LinkedHashSet<Integer>) row.get(Fiscal303BoxesHandler.BOXES);
       bSet.addAll(boxes);
     }
+  }
+
+  private boolean isReverseChargePairedLine(List<Integer> boxes) {
+    for (Integer bx : boxes) {
+      if (REVERSE_CHARGE_PAIRED_BOXES.contains(bx)) return true;
+    }
+    return false;
   }
 
   void finalizeInvoiceRow(Map<String, Object> row) {
@@ -148,8 +191,13 @@ class Fiscal303SourcesSupport {
       sb.append(bx);
     }
     row.put(Fiscal303BoxesHandler.BOXES, sb.toString());
-    BigDecimal base = (BigDecimal) row.get("base");
-    BigDecimal vat  = (BigDecimal) row.get("vat");
+    // ETP-5456 (Alex, B1): base/vat arrive here at full accumulation precision (see
+    // accumulateInvoiceTax) — round each exactly once, here, before deriving total from the
+    // already-rounded values so base + vat == total always holds on the rounded figures shown.
+    BigDecimal base = owner.round((BigDecimal) row.get("base"));
+    BigDecimal vat  = owner.round((BigDecimal) row.get("vat"));
+    row.put("base", base);
+    row.put("vat",  vat);
     row.put("total", owner.round(base.add(vat)));
   }
 }
