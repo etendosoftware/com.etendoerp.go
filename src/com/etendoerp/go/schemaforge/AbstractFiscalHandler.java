@@ -177,6 +177,16 @@ abstract class AbstractFiscalHandler {
   }
 
   /**
+   * Hook run on the live payload right before its per-invoice arrays are dropped from the
+   * snapshot: lets a model keep fixed-size aggregates the UI derives from those rows (e.g. 349's
+   * per-operator origin counts). No-op by default.
+   */
+  @SuppressWarnings("java:S112")
+  protected void foldPerInvoiceAggregates(JSONObject payload) throws Exception {
+    // nothing to fold for models without per-invoice derived figures
+  }
+
+  /**
    * ETP-5438 — the submission snapshot: {@link #computeLivePayload}'s payload (same code path, so
    * the same figures the read returns at submission time, re-serialized through
    * {@link JSONObject}) with every per-invoice array of {@link #snapshotExcludedLists} replaced by
@@ -187,6 +197,7 @@ abstract class AbstractFiscalHandler {
   final JSONObject computeSubmittedSnapshot(String orgId, int year, String period)
       throws Exception {
     JSONObject payload = computeLivePayload(orgId, year, period);
+    foldPerInvoiceAggregates(payload);
     for (java.util.Map.Entry<String, String> excluded : snapshotExcludedLists().entrySet()) {
       org.codehaus.jettison.json.JSONArray rows = payload.optJSONArray(excluded.getKey());
       payload.remove(excluded.getKey());

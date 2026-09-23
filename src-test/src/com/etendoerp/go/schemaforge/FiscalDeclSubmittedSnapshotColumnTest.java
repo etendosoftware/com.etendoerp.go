@@ -58,17 +58,41 @@ public class FiscalDeclSubmittedSnapshotColumnTest {
 
   private static final String SUBMITTED_SNAPSHOT_COLUMN_ID = "3CAB7563FAEB427487E2E5BE3774D70C";
   private static final String AD_COLUMN_XML = "src-db/database/sourcedata/AD_COLUMN.xml";
+  private static final String MODULE_DIR = "com.etendoerp.go";
   /** Same length as the module's other free-text JSON columns (Feedback_Text, EM_ETGO_Payment_Intent). */
   private static final int MIN_FIELD_LENGTH = 1_000_000;
 
   /**
-   * Resolves a module file whether the tests run from the Etendo root or the module dir. The
-   * module path is tried FIRST: the Etendo root has its own core {@code src-db}, so a bare
-   * relative path would silently resolve to the core AD_COLUMN.xml there.
+   * Locates a module file from any working directory: walks up from the working directory and
+   * from this test class's code-source location, accepting either an Etendo root
+   * ({@code <dir>/modules/com.etendoerp.go/<relative>}) or the module dir itself. The Etendo-root
+   * form is tried first at every level, because the root also has a core {@code src-db} that a
+   * bare relative path would silently resolve to. Fails explicitly when nothing is found.
    */
   private static Path moduleFile(String relative) {
-    Path fromRoot = Paths.get("modules/com.etendoerp.go", relative);
-    return Files.exists(fromRoot) ? fromRoot : Paths.get(relative);
+    java.util.List<Path> starts = new java.util.ArrayList<>();
+    starts.add(Paths.get("").toAbsolutePath());
+    try {
+      starts.add(Paths.get(FiscalDeclSubmittedSnapshotColumnTest.class.getProtectionDomain()
+          .getCodeSource().getLocation().toURI()));
+    } catch (Exception e) {
+      // no usable code-source location: the working directory is still tried
+    }
+    for (Path start : starts) {
+      for (Path dir = start; dir != null; dir = dir.getParent()) {
+        Path viaRoot = dir.resolve("modules").resolve(MODULE_DIR).resolve(relative);
+        if (Files.exists(viaRoot)) {
+          return viaRoot;
+        }
+        if (dir.getFileName() != null && MODULE_DIR.equals(dir.getFileName().toString())
+            && Files.exists(dir.resolve(relative))) {
+          return dir.resolve(relative);
+        }
+      }
+    }
+    fail("Cannot locate " + MODULE_DIR + "/" + relative + " from " + starts
+        + " — run the tests from the Etendo root or the module directory");
+    return null;
   }
 
   /** The committed {@code FIELDLENGTH} of the Submitted_Snapshot AD_Column. */
@@ -202,6 +226,46 @@ public class FiscalDeclSubmittedSnapshotColumnTest {
     assertTrue("349 snapshot must not scale with invoices, was " + stored.length(),
         stored.length() < 10_000);
     snapshotProperty(committedFieldLength()).checkIsValidValue(stored);
+  }
+
+  /**
+   * ETP-5438 review W1 — the operators' "Origen" counts survive the stripping: they are folded
+   * into each operator row (per nif|key, rectifications per non-zero base) before the invoice
+   * and rectification rows are dropped.
+   */
+  @Test
+  public void snapshot349KeepsPerOperatorOriginCounts() throws Exception {
+    JSONObject live = new JSONObject();
+    live.put("operators", new JSONArray()
+        .put(new JSONObject().put("nif", "FR1").put("key", "E").put("rectificative", false))
+        .put(new JSONObject().put("nif", "IT2").put("key", "A").put("rectificative", false))
+        .put(new JSONObject().put("nif", "FR1").put("key", "S").put("rectificative", true))
+        .put(new JSONObject().put("nif", "DE3").put("key", "E").put("rectificative", false)));
+    live.put("invoices", new JSONArray()
+        .put(new JSONObject().put("nifIva", "FR1").put("key", "E").put("type", "Venta"))
+        .put(new JSONObject().put("nifIva", "FR1").put("key", "E").put("type", "Venta"))
+        .put(new JSONObject().put("nifIva", "IT2").put("key", "A").put("type", "Compra"))
+        .put(new JSONObject().put("nifIva", "IT2").put("key", "A").put("type", "Venta")));
+    live.put("rectifications", new JSONArray()
+        .put(new JSONObject().put("nifIva", "FR1").put("type", "Venta")
+            .put("baseProducts", "0.00").put("baseServices", "-10.00")));
+    Fiscal349BoxesHandler handler = new Fiscal349BoxesHandler(mock(NeoServlet.class)) {
+      @Override
+      JSONObject computeLivePayload(String orgId, int year, String period) {
+        return live;
+      }
+    };
+
+    JSONArray ops = handler.computeSubmittedSnapshot("org1", 2026, "T3").getJSONArray("operators");
+
+    assertEquals(0, ops.getJSONObject(0).getInt(Fiscal349BoxesHandler.ORIGIN_PURCHASES));
+    assertEquals(2, ops.getJSONObject(0).getInt(Fiscal349BoxesHandler.ORIGIN_SALES));
+    assertEquals(1, ops.getJSONObject(1).getInt(Fiscal349BoxesHandler.ORIGIN_PURCHASES));
+    assertEquals(1, ops.getJSONObject(1).getInt(Fiscal349BoxesHandler.ORIGIN_SALES));
+    // corrective row: resolved only against the rectifications (services base -> key S)
+    assertEquals(1, ops.getJSONObject(2).getInt(Fiscal349BoxesHandler.ORIGIN_SALES));
+    // no backing row -> no counts, the column reads "—" exactly as it would live
+    assertFalse(ops.getJSONObject(3).has(Fiscal349BoxesHandler.ORIGIN_SALES));
   }
 
   /** Guards the guard: the original 2000 length rejects a value longer than it. */

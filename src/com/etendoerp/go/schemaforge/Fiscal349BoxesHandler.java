@@ -173,6 +173,87 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     return excluded;
   }
 
+  /** Snapshot key: how many origin purchase invoices back an operator row. */
+  static final String ORIGIN_PURCHASES = "originPurchases";
+  /** Snapshot key: how many origin sales invoices back an operator row. */
+  static final String ORIGIN_SALES = "originSales";
+  private static final String TYPE_PURCHASE = "Compra";
+  private static final String TYPE_SALES = "Venta";
+
+  /**
+   * ETP-5438 review W1 — the operators' "Origen" column counts, per operator, the purchase/sales
+   * invoices (or, for a corrective row, rectifications) behind it. The snapshot drops those rows,
+   * so the counts are folded into each operator row first ({@link #ORIGIN_PURCHASES} /
+   * {@link #ORIGIN_SALES}) — one pair per partner, so the size stays bounded. Grouping mirrors the
+   * frontend's {@code originByNif} / {@code originByRectification} ({@code FmModel349Page.jsx}):
+   * {@code nif|key}, where a rectification contributes one key per non-zero base
+   * (Venta: products E / services S, Compra: products A / services I). An operator without any
+   * matching row gets no counts (the column shows "—", as it would live).
+   */
+  @Override
+  protected void foldPerInvoiceAggregates(JSONObject payload) throws Exception {
+    JSONArray operators = payload.optJSONArray(OPERATORS);
+    if (operators == null) {
+      return;
+    }
+    Map<String, int[]> byInvoice = new HashMap<>();
+    JSONArray invoices = payload.optJSONArray("invoices");
+    for (int i = 0; invoices != null && i < invoices.length(); i++) {
+      JSONObject inv = invoices.getJSONObject(i);
+      countOrigin(byInvoice, inv.optString("nifIva") + "|" + inv.optString("key"), inv.optString("type"));
+    }
+    Map<String, int[]> byRectification = new HashMap<>();
+    JSONArray rectifications = payload.optJSONArray("rectifications");
+    for (int i = 0; rectifications != null && i < rectifications.length(); i++) {
+      JSONObject r = rectifications.getJSONObject(i);
+      for (String key : rectificationKeys(r)) {
+        countOrigin(byRectification, r.optString("nifIva") + "|" + key, r.optString("type"));
+      }
+    }
+    for (int i = 0; i < operators.length(); i++) {
+      JSONObject op = operators.getJSONObject(i);
+      Map<String, int[]> source = op.optBoolean(RECTIFICATIVE, false) ? byRectification : byInvoice;
+      int[] counts = source.get(op.optString("nif") + "|" + op.optString("key"));
+      if (counts != null) {
+        op.put(ORIGIN_PURCHASES, counts[0]);
+        op.put(ORIGIN_SALES, counts[1]);
+      }
+    }
+  }
+
+  private static void countOrigin(Map<String, int[]> counts, String nifKey, String type) {
+    int[] c = counts.computeIfAbsent(nifKey, k -> new int[2]);
+    if (TYPE_PURCHASE.equals(type)) {
+      c[0]++;
+    } else if (TYPE_SALES.equals(type)) {
+      c[1]++;
+    }
+  }
+
+  /** The AEAT349 keys a rectification row contributes to — one per non-zero base. */
+  private static List<String> rectificationKeys(JSONObject r) {
+    String type = r.optString("type");
+    String productsKey;
+    String servicesKey;
+    if (TYPE_SALES.equals(type)) {
+      productsKey = "E";
+      servicesKey = "S";
+    } else if (TYPE_PURCHASE.equals(type)) {
+      productsKey = "A";
+      servicesKey = "I";
+    } else {
+      return new ArrayList<>();
+    }
+    List<String> keys = new ArrayList<>();
+    if (r.optDouble("baseProducts", 0d) != 0d) {
+      keys.add(productsKey);
+    }
+    if (r.optDouble("baseServices", 0d) != 0d) {
+      keys.add(servicesKey);
+    }
+    return keys;
+  }
+
   /** The {@code GET /fiscal349/operators} payload, computed live — see the base javadoc. */
   @Override
   JSONObject computeLivePayload(String orgId, int year, String period) throws Exception {

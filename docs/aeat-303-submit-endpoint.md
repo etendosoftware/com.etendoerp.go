@@ -269,7 +269,8 @@ A production submission also freezes the declaration's figures: `handleSubmit` c
   commit as the status change. Should storing it still fail after the filing (not expected — it
   was validated), the declaration keeps `submitted_ack`/`aeat_telematic` and is saved without a
   snapshot, so it is served live like a declaration presented before snapshots existed; the
-  failure is logged as an error, never left as a half-written record.
+  failure is logged as an error with the greppable marker `ETGO_FISCAL_SNAPSHOT_MISSING` (plus
+  the declaration id, year and period), never left as a half-written record.
 
 From then on `GET /fiscal303/boxes` returns that snapshot as-is (no `sources`) instead of
 recomputing from the current invoices. Test mode takes no snapshot (it never changes the

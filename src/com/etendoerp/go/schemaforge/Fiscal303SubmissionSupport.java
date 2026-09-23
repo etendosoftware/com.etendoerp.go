@@ -87,6 +87,8 @@ class Fiscal303SubmissionSupport {
   private static final String ERR_ALREADY_SUBMITTED = "ALREADY_SUBMITTED";
   private static final String ERR_INVALID_DECL_TYPE = "INVALID_DECL_TYPE";
   private static final String ERR_SNAPSHOT_FAILED = "SNAPSHOT_FAILED";
+  /** Log marker for a filed declaration whose snapshot could not be stored (see applySubmittedSnapshot). */
+  static final String SNAPSHOT_MISSING_MARKER = "ETGO_FISCAL_SNAPSHOT_MISSING";
 
   /**
    * Query params consumed structurally by this handler's own routing (year/period/tipo/id) —
@@ -532,9 +534,12 @@ class Fiscal303SubmissionSupport {
     try {
       decl.setSubmittedSnapshot(submittedSnapshot);
     } catch (Exception e) {
-      AbstractFiscalHandler.log.error("Declaration " + decl.getId() + " was filed with the AEAT but"
-          + " its submission snapshot could not be stored; it will be served live, like a"
-          + " declaration presented before snapshots existed", e);
+      // Distinct, greppable marker (ETP-5438 review S2): such a declaration is filed with
+      // Hacienda but NOT frozen — find it with `grep ETGO_FISCAL_SNAPSHOT_MISSING`.
+      AbstractFiscalHandler.log.error(SNAPSHOT_MISSING_MARKER + " decl=" + decl.getId() + " year="
+          + decl.getFiscalYear() + " period=" + decl.getPeriod() + " — filed with the AEAT but the"
+          + " submission snapshot could not be stored; it will be served live, like a declaration"
+          + " presented before snapshots existed", e);
     }
   }
 
