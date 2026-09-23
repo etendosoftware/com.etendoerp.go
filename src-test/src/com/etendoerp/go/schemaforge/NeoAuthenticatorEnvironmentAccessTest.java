@@ -31,7 +31,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-import java.lang.reflect.Field;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
@@ -47,6 +46,8 @@ import org.openbravo.dal.core.OBContext;
 
 import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
+import com.etendoerp.go.auth.EnvironmentRequestAuthenticator;
+import com.etendoerp.go.auth.WarehouseResolver;
 import com.etendoerp.go.oauth2.OAuth2Filter;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy.Decision;
 import com.etendoerp.go.payment.TenantEnvironmentLifecycleService;
@@ -63,8 +64,8 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * always did — a cookie session whose selected environment was {@code DEMO_TRIAL_EXPIRED} or
  * {@code SUBSCRIPTION_REQUIRED} still got full NEO access instead of {@code 402}.
  *
- * <p>{@link GoSessionAuthenticator} and {@link TenantEnvironmentLifecycleService} are swapped for
- * mocks via reflection (both are {@code private final} fields assigned at construction), and
+ * <p>{@link GoSessionAuthenticator} and {@link TenantEnvironmentLifecycleService} are mocks handed
+ * to the shared {@link EnvironmentRequestAuthenticator} pipeline (ETP-5455), and
  * {@link SecureWebServicesUtils}/{@link OBContext}/{@link OAuth2Filter} are statically stubbed, so
  * these run with no database.
  *
@@ -97,12 +98,10 @@ class NeoAuthenticatorEnvironmentAccessTest {
   @BeforeEach
   void setUp() throws Exception {
     servlet = mock(NeoServlet.class);
-    authenticator = new NeoAuthenticator(servlet);
-
     sessionAuthenticator = mock(GoSessionAuthenticator.class);
     lifecycleService = mock(TenantEnvironmentLifecycleService.class);
-    setField(authenticator, "sessionAuthenticator", sessionAuthenticator);
-    setField(authenticator, "environmentLifecycleService", lifecycleService);
+    authenticator = new NeoAuthenticator(servlet, new EnvironmentRequestAuthenticator(
+        sessionAuthenticator, lifecycleService, mock(WarehouseResolver.class)));
 
     obContextStatic = mockStatic(OBContext.class);
     swsStatic = mockStatic(SecureWebServicesUtils.class);
@@ -485,9 +484,4 @@ class NeoAuthenticatorEnvironmentAccessTest {
     return claim;
   }
 
-  private static void setField(Object target, String fieldName, Object value) throws Exception {
-    Field field = NeoAuthenticator.class.getDeclaredField(fieldName);
-    field.setAccessible(true);
-    field.set(target, value);
-  }
 }

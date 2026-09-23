@@ -41,7 +41,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
 /**
  * ETP-5195 — webhook that reissues the CALLER'S OWN NEO bearer JWT with their CURRENT
  * {@code AD_User.Default_Ad_Role_ID}, closing the "stale role claim" gap in {@code
- * com.etendoerp.go.schemaforge.NeoAuthenticator#authenticateJwt}: every NEO request rebuilds
+ * com.etendoerp.go.auth.EnvironmentRequestAuthenticator#authenticate}: every NEO request rebuilds
  * {@link OBContext} straight from the incoming token's {@code role} claim, which is whatever
  * role the token was minted with at login and is never re-derived from the DB on later
  * requests. A promote/demote ({@code UserRoleCompositionService#promoteToAdmin}/{@code
@@ -56,13 +56,13 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * {@code /webhooks/*} path, same as every sibling authored after that pattern existed.</p>
  *
  * <p><b>Security — this can only ever reissue the CALLER'S OWN token, never anyone else's.</b>
- * The caller is authenticated by {@code NeoAuthenticator#authenticateJwt} — the exact same
+ * The caller is authenticated by {@code EnvironmentRequestAuthenticator#authenticate} — the exact same
  * signature/expiry validation every other NEO request goes through — BEFORE this webhook is
  * ever reached: {@code NeoServlet#processRequest} runs {@code
  * authenticator.authenticateRequest(...)} first and unconditionally, and a failed validation
  * there writes the {@code 401} itself and returns before the pseudo-spec dispatcher (hence this
  * class) is ever consulted. {@code userId} is read ONLY from {@link OBContext#getOBContext()}'s
- * user — populated by {@code authenticateJwt} from the validated token's own {@code user}
+ * user — populated by {@code EnvironmentRequestAuthenticator#authenticate} from the validated token's own {@code user}
  * claim — and NEVER from a request parameter or body. There is deliberately no parameter that
  * could let a caller name a different target user; doing so would be a privilege-escalation
  * hole.</p>
@@ -223,7 +223,7 @@ public class SFRefreshToken extends BaseWebhookService {
 
   /**
    * Reads the caller's user id ONLY from the current {@link OBContext} -- which {@code
-   * NeoAuthenticator#authenticateJwt} populated from the already-validated token's own {@code
+   * EnvironmentRequestAuthenticator#authenticate} populated from the already-validated token's own {@code
    * user} claim before this webhook was ever reached. Never accepts it as a parameter.
    */
   private String resolveCallerUserId() {
@@ -233,7 +233,7 @@ public class SFRefreshToken extends BaseWebhookService {
 
   /**
    * ETP-5195 follow-up — {@code true} when the ROLE embedded in the caller's own current token
-   * (as reflected in {@link OBContext}, populated by {@code NeoAuthenticator#authenticateJwt}
+   * (as reflected in {@link OBContext}, populated by {@code EnvironmentRequestAuthenticator#authenticate}
    * before this webhook is ever reached) already matches the just-resolved {@code
    * Default_Ad_Role_ID}. Only the role identity is compared — not organization/warehouse — so a
    * "same role" result means the TOKEN is not stale (minting an equivalent replacement would

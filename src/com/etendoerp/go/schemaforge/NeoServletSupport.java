@@ -1,9 +1,6 @@
 package com.etendoerp.go.schemaforge;
 
-import java.util.Arrays;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 import javax.servlet.http.HttpServletRequest;
 
@@ -17,7 +14,6 @@ import org.hibernate.criterion.Restrictions;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBCriteria;
 import org.openbravo.dal.service.OBDal;
-import org.openbravo.model.common.enterprise.Warehouse;
 
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -56,34 +52,6 @@ class NeoServletSupport {
     OBContext.setOBContext(context);
     OBContext.setOBContextInSession(request, context);
     return context;
-  }
-
-  static String findAccessibleWarehouse(OBContext ctx) {
-    try {
-      OBContext.setAdminMode(true);
-      Set<String> readableOrgs = new HashSet<>(Arrays.asList(ctx.getReadableOrganizations()));
-      OBCriteria<Warehouse> criteria = OBDal.getInstance().createCriteria(Warehouse.class);
-      criteria.add(Restrictions.eq(Warehouse.PROPERTY_CLIENT, ctx.getCurrentClient()));
-      criteria.add(Restrictions.eq(Warehouse.PROPERTY_ACTIVE, true));
-      criteria.setMaxResults(50);
-      for (Warehouse warehouse : criteria.list()) {
-        String warehouseOrgId = warehouse.getOrganization().getId();
-        if (readableOrgs.contains(warehouseOrgId)) {
-          log.debug("Resolved accessible warehouse '{}' (org='{}') for user '{}'",
-              warehouse.getId(), warehouseOrgId, ctx.getUser().getId());
-          return warehouse.getId();
-        }
-      }
-      log.warn("No accessible warehouse found for user '{}' client '{}'",
-          ctx.getUser().getId(), ctx.getCurrentClient().getId());
-      return null;
-    } catch (Exception e) {
-      log.error("Error finding accessible warehouse for user '{}': {}",
-          ctx.getUser().getId(), e.getMessage(), e);
-      return null;
-    } finally {
-      OBContext.restorePreviousMode();
-    }
   }
 
   /**
