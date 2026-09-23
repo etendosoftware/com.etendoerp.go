@@ -1187,13 +1187,14 @@ public class Fiscal349BoxesHandlerTest {
     }
   }
 
-  // ── guardNotAlreadySubmitted / dispatch 409 (ETP-5438) ───────────────
+  // ── guardNotAlreadySubmitted (generate only, ETP-5438) ────────────────
   //
   // "Block re-presentation once already submitted... stop recalculating invoices" — these cover
-  // the backend defense-in-depth half of that: /fiscal349/operators and /fiscal349/generate take
-  // no declaration id (only org/year/period) and, before this fix, had no notion of any
-  // declaration's status at all, so a direct/raw call could silently recompute or regenerate an
-  // already-presented declaration even with the frontend button hidden.
+  // the backend defense-in-depth half of that: /fiscal349/generate takes no declaration id (only
+  // org/year/period) and, before this fix, had no notion of any declaration's status at all, so
+  // a direct/raw call could silently regenerate an already-presented declaration even with the
+  // frontend button hidden. The /fiscal349/operators read is intentionally NOT gated — the
+  // frontend freezes a submitted declaration from a once-per-session compute that needs it.
 
   @SuppressWarnings("unchecked")
   @Test
@@ -1300,25 +1301,33 @@ public class Fiscal349BoxesHandlerTest {
     }
   }
 
-  // ── dispatch() 409 wiring (ETP-5438) ──────────────────────────────────
+  // ── dispatch() wiring: reads open, generate 409 (ETP-5438) ────────────
 
-  @SuppressWarnings("unchecked")
+  /**
+   * ETP-5438 follow-up — {@code operators} is a pure read and must stay available for a
+   * submitted declaration: the frontend computes a submitted declaration once per browser session
+   * and freezes it from its session cache, so a 409 here made every cold-cache view show "Error
+   * de cálculo". Only {@code generate} stays blocked (see the next test).
+   */
   @Test
-  public void testDispatchOperatorsReturns409WhenAlreadySubmitted() throws Exception {
+  public void testDispatchOperatorsProceedsWhenAlreadySubmitted() throws Exception {
+    Fiscal349BoxesHandler h = org.mockito.Mockito.spy(handler);
     HttpServletRequest req = mock(HttpServletRequest.class);
     HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter body = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(body));
+    JSONObject computed = new JSONObject();
+    computed.put("operators", new JSONArray());
+    org.mockito.Mockito.doReturn(computed).when(h).computeOperators("org1", 2026, "T1");
 
-    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-      mockClient(ctxMock, "client1");
-      OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
-      BaseOBObject decl = declWithSeqAndStatus(0L, "submitted_ack");
-      when(query.list()).thenReturn(Collections.singletonList(decl));
+    // No OBContext/OBDal mocking on purpose: the read path must not even look up the
+    // declaration status — a submitted_ack declaration for the period is irrelevant to it.
+    h.dispatch("operators", "org1", 2026, "T1", req, resp);
 
-      handler.dispatch("operators", "org1", 2026, "T1", req, resp);
-    }
-
-    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT), anyString());
+    verify(servlet, org.mockito.Mockito.never())
+        .sendError(any(), org.mockito.ArgumentMatchers.anyInt(), anyString());
+    verify(h).computeOperators("org1", 2026, "T1");
+    org.junit.Assert.assertEquals(computed.toString(), body.toString());
   }
 
   @SuppressWarnings("unchecked")

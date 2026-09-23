@@ -116,7 +116,10 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {
     runDispatch(response, () -> {
       if (OPERATORS.equals(entityName)) {
-        guardNotAlreadySubmitted(orgId, year, period);
+        // Deliberately NOT guarded (ETP-5438 follow-up): operators is a pure read. The frontend
+        // freezes a submitted declaration by computing it once per browser session and serving
+        // the cached result, so this read must stay available after submission. Only the
+        // side-effecting generate (file generation) is blocked once submitted.
         JSONObject result = computeOperators(orgId, year, period);
         response.setContentType(JSON_CT);
         response.getWriter().write(result.toString());
@@ -136,7 +139,9 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
 
   /**
    * ETP-5438 — thin, model-fixed wrapper around the shared {@link
-   * AbstractFiscalHandler#guardNotAlreadySubmitted(String, int, String, String)}, so callers here
+   * AbstractFiscalHandler#guardNotAlreadySubmitted(String, int, String, String)}, applied to
+   * {@code generate} only (the {@code operators} read stays open for a submitted declaration so
+   * the frontend can render and freeze it on a cold session cache), so callers here
    * (and {@code Fiscal349BoxesHandlerTest}) don't have to repeat the {@code "349"} literal. The
    * guard logic itself (and {@code AlreadySubmittedException}) moved to the shared base class —
    * see its javadoc — once {@code Fiscal303BoxesHandler} needed the identical check.

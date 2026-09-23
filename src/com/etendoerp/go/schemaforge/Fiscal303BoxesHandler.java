@@ -134,7 +134,10 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
       HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {
     runDispatch(response, () -> {
       if (BOXES.equals(entityName)) {
-        guardNotAlreadySubmitted(orgId, year, period);
+        // Deliberately NOT guarded (ETP-5438 follow-up): boxes is a pure read. The frontend
+        // freezes a submitted declaration by computing it once per browser session and serving
+        // the cached result, so this read must stay available after submission. Only the
+        // side-effecting generate (file generation) is blocked once submitted.
         ComputeResult cr = computeBoxes(orgId, year, period);
         JSONObject result = buildResponse(cr.boxes, cr.sources);
         response.setContentType(JSON_CT);
@@ -157,11 +160,13 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
   /**
    * ETP-5438 — thin, model-fixed wrapper around the shared {@link
    * AbstractFiscalHandler#guardNotAlreadySubmitted(String, int, String, String)} (see its
-   * javadoc). {@code submit} (the real AEAT telematic filing) is deliberately NOT gated by this —
+   * javadoc). Applied to {@code generate} only — the {@code boxes} read stays open for a
+   * submitted declaration so the frontend can render (and freeze) its figures on a cold session
+   * cache. {@code submit} (the real AEAT telematic filing) is deliberately NOT gated by this —
    * it already has its own, narrower, {@code submitted_ack}-only guard in {@link
    * Fiscal303SubmissionSupport#handleSubmit} (the {@code ALREADY_SUBMITTED} check), which this
    * does not replace or widen; that endpoint is a distinct concern (idempotency of a real AEAT
-   * filing action) from "must not silently recompute/regenerate a presented declaration".
+   * filing action) from "must not silently regenerate a presented declaration".
    */
   void guardNotAlreadySubmitted(String orgId, int year, String period) {
     guardNotAlreadySubmitted(orgId, year, period, "303");

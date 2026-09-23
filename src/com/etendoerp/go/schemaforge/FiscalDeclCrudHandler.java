@@ -125,7 +125,8 @@ class FiscalDeclCrudHandler {
    * "Duplicated, deliberately, in 4 places" for the frontend side of this same tradeoff). Used
    * by {@link #rejectRepresentation} (re-presentation guard, ETP-5438) and by
    * {@link Fiscal349BoxesHandler}/{@code Fiscal303BoxesHandler} to block a raw
-   * compute/generate call against an already-presented declaration.
+   * {@code generate} call against an already-presented declaration (the boxes/operators reads
+   * stay open so the frontend can render a submitted declaration).
    */
   static final java.util.Set<String> SUBMITTED_STATUSES =
       java.util.Set.of("submitted", "submitted_ext", "submitted_ack");
@@ -398,17 +399,19 @@ class FiscalDeclCrudHandler {
    * {@link #PROPERTY_DECL_SEQ} — same "latest wins" ordinal {@link #resolveNextDeclSeq} computes
    * off) for the given natural key, or {@code null} when no declaration exists for it yet.
    *
-   * <p>ETP-5438 — {@code /fiscal349/operators}, {@code /fiscal349/generate} and their 303
-   * counterparts take no declaration id, only {@code (org, year, period)}: the natural key can
-   * legitimately have MORE THAN ONE declaration (the rectificativa flow, {@link
-   * #resolveNextDeclSeq}'s own javadoc), so "the declaration this call is about" is inherently
-   * the latest one for that period — an older, already-submitted declaration for the SAME period
-   * must not block a fresh rectificativa draft's own compute/generate. Used by {@link
-   * Fiscal349BoxesHandler}/{@code Fiscal303BoxesHandler} to reject a compute/generate call once
-   * that latest declaration is already in {@link #SUBMITTED_STATUSES} — the same "must not
-   * silently recompute/regenerate an already-presented declaration" guarantee {@link
-   * #rejectRepresentation} enforces for the PUT path, extended to the read/generate endpoints a
-   * direct API call could otherwise reach without ever going through this handler's PUT at all.
+   * <p>ETP-5438 — {@code /fiscal349/generate} and {@code /fiscal303/generate} take no
+   * declaration id, only {@code (org, year, period)}: the natural key can legitimately have MORE
+   * THAN ONE declaration (the rectificativa flow, {@link #resolveNextDeclSeq}'s own javadoc), so
+   * "the declaration this call is about" is inherently the latest one for that period — an
+   * older, already-submitted declaration for the SAME period must not block a fresh
+   * rectificativa draft's own generate. Used by {@link Fiscal349BoxesHandler}/{@code
+   * Fiscal303BoxesHandler} to reject a generate call once that latest declaration is already in
+   * {@link #SUBMITTED_STATUSES} — the same "must not silently regenerate an already-presented
+   * declaration" guarantee {@link #rejectRepresentation} enforces for the PUT path, extended to
+   * the generate endpoints a direct API call could otherwise reach without ever going through
+   * this handler's PUT at all. The boxes/operators reads are intentionally NOT gated: the
+   * frontend computes a submitted declaration once per browser session and freezes it from its
+   * session cache, which needs the read to succeed on a cold cache.
    */
   String findLatestDeclarationStatus(String clientId, String orgId, String model, long year,
       String period) {

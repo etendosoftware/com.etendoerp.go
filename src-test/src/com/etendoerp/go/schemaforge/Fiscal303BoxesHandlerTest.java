@@ -1789,12 +1789,12 @@ public class Fiscal303BoxesHandlerTest {
     }
   }
 
-  // ── guardNotAlreadySubmitted / dispatch 409 (ETP-5438) ───────────────
+  // ── guardNotAlreadySubmitted (generate only, ETP-5438) ────────────────
   //
   // Full-parity follow-up: "en todos los modelos tiene que funcionar de la misma manera" — every
-  // model's boxes/generate entity must reject once the latest declaration is already submitted,
+  // model's generate entity must reject once the latest declaration is already submitted,
   // exactly like Fiscal349BoxesHandler's own guard (moved to AbstractFiscalHandler and shared,
-  // see its javadoc). `submit` (real AEAT telematic filing) is deliberately NOT covered here — it
+  // see its javadoc). The boxes read is intentionally NOT gated (frontend freeze needs it). `submit` (real AEAT telematic filing) is deliberately NOT covered here — it
   // already has its own narrower `submitted_ack`-only guard in Fiscal303SubmissionSupport.
 
   @SuppressWarnings("unchecked")
@@ -1886,27 +1886,35 @@ public class Fiscal303BoxesHandlerTest {
     }
   }
 
-  // ── dispatch() 409 wiring (ETP-5438) ──────────────────────────────────
+  // ── dispatch() wiring: reads open, generate 409 (ETP-5438) ────────────
 
-  @SuppressWarnings("unchecked")
+  /**
+   * ETP-5438 follow-up — {@code boxes} is a pure read and must stay available for a submitted
+   * declaration: the frontend computes a submitted declaration once per browser session and
+   * freezes it from its session cache, so a 409 here made every cold-cache view show "Error de
+   * cálculo". Only {@code generate} stays blocked (see the next test).
+   */
   @Test
-  public void testDispatchBoxesReturns409WhenAlreadySubmitted() throws Exception {
+  public void testDispatchBoxesProceedsWhenAlreadySubmitted() throws Exception {
     NeoServlet servlet = mock(NeoServlet.class);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    Fiscal303BoxesHandler h = org.mockito.Mockito.spy(new Fiscal303BoxesHandler(servlet));
     HttpServletRequest req = mock(HttpServletRequest.class);
     HttpServletResponse resp = mock(HttpServletResponse.class);
+    java.io.StringWriter body = new java.io.StringWriter();
+    when(resp.getWriter()).thenReturn(new java.io.PrintWriter(body));
+    Map<Integer, BigDecimal> boxes = new HashMap<>();
+    boxes.put(46, new BigDecimal("123.45"));
+    org.mockito.Mockito.doReturn(
+            new ComputeResult(boxes, Collections.emptyList()))
+        .when(h).computeBoxes("org1", 2026, "T1");
 
-    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
-        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
-      mockClient303(ctxMock, "client1");
-      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
-      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted_ack");
-      when(query.list()).thenReturn(Collections.singletonList(decl));
+    // No OBContext/OBDal mocking on purpose: the read path must not even look up the
+    // declaration status — a submitted_ack declaration for the period is irrelevant to it.
+    h.dispatch("boxes", "org1", 2026, "T1", req, resp);
 
-      h.dispatch("boxes", "org1", 2026, "T1", req, resp);
-    }
-
-    verify(servlet).sendError(eq(resp), eq(HttpServletResponse.SC_CONFLICT), anyString());
+    verify(servlet, never()).sendError(any(), org.mockito.ArgumentMatchers.anyInt(), anyString());
+    verify(h).computeBoxes("org1", 2026, "T1");
+    org.junit.Assert.assertTrue(body.toString().contains("\"result\":\"123.45\""));
   }
 
   @SuppressWarnings("unchecked")

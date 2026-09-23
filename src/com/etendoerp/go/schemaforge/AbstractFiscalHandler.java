@@ -95,16 +95,21 @@ abstract class AbstractFiscalHandler {
   }
 
   /**
-   * ETP-5438 defense in depth, shared by every fiscal model's boxes/operators-and-generate
-   * handler — rejects a compute/generate call once the LATEST declaration for this {@code
+   * ETP-5438 defense in depth, shared by every fiscal model's generate handler — rejects a
+   * {@code generate} (file generation) call once the LATEST declaration for this {@code
    * (org, year, period, model)} natural key is already in {@link
-   * FiscalDeclCrudHandler#SUBMITTED_STATUSES}. The frontend already hides "Calcular"/"Generar
-   * fichero <N>" once {@code isSubmitted} (every {@code FmModel<N>Page.jsx}), but the NEO
-   * compute/generate entities are otherwise unaware of any declaration's status at all — they
-   * compute purely from {@code (orgId, year, period)} against LIVE invoice data — so a direct/raw
-   * call (or a future frontend regression) would silently recompute or regenerate an
-   * already-presented declaration, with no server-side guard, unlike the PUT path {@link
-   * FiscalDeclCrudHandler#rejectRepresentation} already covers.
+   * FiscalDeclCrudHandler#SUBMITTED_STATUSES}. The frontend already hides "Generar fichero <N>"
+   * once {@code isSubmitted} (every {@code FmModel<N>Page.jsx}), but the NEO generate entities
+   * are otherwise unaware of any declaration's status at all — they compute purely from
+   * {@code (orgId, year, period)} against LIVE invoice data — so a direct/raw call (or a future
+   * frontend regression) would silently regenerate an already-presented declaration, with no
+   * server-side guard, unlike the PUT path {@link FiscalDeclCrudHandler#rejectRepresentation}
+   * already covers.
+   *
+   * <p>The pure-read entities ({@code /fiscal303/boxes}, {@code /fiscal349/operators}) are
+   * deliberately NOT gated: the frontend renders a submitted declaration by computing it once
+   * per browser session and freezing that result in its session cache, so the read must keep
+   * working after submission (otherwise a cold cache shows "Error de cálculo").
    *
    * <p>Gates on the MOST RECENT declaration (highest {@code DECL_SEQ}) for the natural key, not
    * just any match — see {@link FiscalDeclCrudHandler#findLatestDeclarationStatus}'s own javadoc
