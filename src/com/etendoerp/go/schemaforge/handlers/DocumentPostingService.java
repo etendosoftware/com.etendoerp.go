@@ -26,6 +26,7 @@ import java.util.function.Function;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.criterion.Restrictions;
 import org.openbravo.base.secureApp.VariablesSecureApp;
@@ -52,7 +53,9 @@ import org.openbravo.service.db.DalConnectionProvider;
 
 import com.etendoerp.go.schemaforge.NeoContext;
 import com.etendoerp.go.schemaforge.NeoEndpointType;
+import com.etendoerp.go.schemaforge.NeoProcessService;
 import com.etendoerp.go.schemaforge.NeoResponse;
+import com.etendoerp.go.schemaforge.util.NeoMessageTranslator;
 
 /**
  * Shared post/unpost core for Etendo GO. NOT a {@code NeoHandler} — it is a plain injectable bean
@@ -158,8 +161,31 @@ public class DocumentPostingService {
     }
   }
 
-  /** Result of a post/unpost attempt. */
-  public record PostResult(boolean ok, String message) {
+  /**
+   * Result of a post/unpost attempt. {@code messageKeys} (ETP-5360) are the AD_MESSAGE search keys
+   * behind a failure {@code message}, captured before translation so a client can map the failure
+   * by identity; never {@code null}, empty when there are none.
+   */
+  public record PostResult(boolean ok, String message, List<String> messageKeys) {
+    public PostResult {
+      messageKeys = messageKeys == null ? List.of() : List.copyOf(messageKeys);
+    }
+
+    public PostResult(boolean ok, String message) {
+      this(ok, message, List.of());
+    }
+  }
+
+  /**
+   * Failure result for a caught exception (ETP-5360). Core accounting code raises raw
+   * {@code @AD_Message_Key@} tokens (e.g. {@code ResetAccounting}'s
+   * {@code @PeriodClosedForUnPosting@}); forwarding {@code e.getMessage()} verbatim showed that
+   * token in the browser. The keys are extracted first, then the text is translated in the
+   * session language.
+   */
+  private static PostResult translatedFailure(String rawMessage) {
+    return new PostResult(false, NeoMessageTranslator.safeParseTranslation(rawMessage),
+        NeoMessageTranslator.extractMessageKeys(rawMessage));
   }
 
   /**
@@ -183,7 +209,8 @@ public class DocumentPostingService {
    */
   PostResult post(String adTableId, String recordId, ConnectionProvider conn) {
     if (isUncalculatedCostInventory(adTableId, recordId)) {
-      return new PostResult(false, OBMessageUtils.messageBD(MSG_NOT_CALCULATED_COST));
+      return new PostResult(false, OBMessageUtils.messageBD(MSG_NOT_CALCULATED_COST),
+          List.of(MSG_NOT_CALCULATED_COST));
     }
     OBContext ctx = OBContext.getOBContext();
     String clientId = ctx.getCurrentClient().getId();
@@ -208,7 +235,7 @@ public class DocumentPostingService {
     } catch (Exception e) {
       rollbackQuietly(conn, con);
       log.error("Post failed for table {} record {}", adTableId, recordId, e);
-      return new PostResult(false, e.getMessage());
+      return translatedFailure(e.getMessage());
     }
   }
 
@@ -294,7 +321,7 @@ public class DocumentPostingService {
       return new PostResult(true, "Unposted (" + deleted + " entries removed)");
     } catch (Exception e) {
       log.error("Unpost failed for table {} record {}", adTableId, recordId, e);
-      return new PostResult(false, e.getMessage());
+      return translatedFailure(e.getMessage());
     }
   }
 
@@ -323,6 +350,9 @@ public class DocumentPostingService {
       JSONObject body = new JSONObject();
       body.put("success", result.ok());
       body.put("message", result.message());
+      if (!result.messageKeys().isEmpty()) {
+        body.put(NeoProcessService.MESSAGE_KEYS, new JSONArray(result.messageKeys()));
+      }
       // NOTE: pass the JSONObject itself, NOT body.toString() — that String would bind to the
       // NeoResponse.error(int, String) overload, which wraps it as a nested error.message
       // string instead of sending this flat body, silently discarding the real message from
