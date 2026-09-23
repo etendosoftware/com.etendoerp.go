@@ -97,6 +97,7 @@ import com.etendoerp.go.onboarding.OnboardingOrgInfoService;
 import com.etendoerp.go.onboarding.OnboardingMarkOrgReadyService;
 import com.etendoerp.go.onboarding.OnboardingPeriodControlService;
 import com.etendoerp.go.onboarding.OnboardingCostingScheduleService;
+import com.etendoerp.go.onboarding.OnboardingWarehouseAddressService;
 import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
@@ -161,6 +162,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String FIELD_STATUS = "status";
   private static final String FIELD_HTTP_STATUS = "httpStatus";
   private static final String FIELD_TOKEN = "token";
+  private static final String FIELD_REQUEST_ID = "requestId";
+  private static final String FIELD_DATA_TRANSFER = "dataTransfer";
+  private static final String CHECKOUT_SELECTION_ERROR = "CHECKOUT_SELECTION_ERROR";
+  private static final String CHECKOUT_SELECTION_SAVE_ERROR = "Unable to save transfer selection";
+  private static final String CHECKOUT_SELECTION_PERSIST_ERROR =
+      "Could not persist checkout transfer selection";
+  private static final String BILLING_PROVIDER_ERROR = "BILLING_PROVIDER_ERROR";
+  private static final String BILLING_SELECTION_PERSIST_ERROR =
+      "Could not persist billing transfer selection";
   private static final String FIELD_MESSAGE = "message";
   private static final String FIELD_CODE = "code";
   private static final String FIELD_USER_MESSAGE = "userMessage";
@@ -243,6 +253,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String PROGRESS_FISCAL = "fiscal";
   private static final String PROGRESS_ORG_READY = "orgReady";
   private static final String PROGRESS_ORG_INFO = "orgInfo";
+  private static final String PROGRESS_WAREHOUSE_ADDRESS = "warehouseAddress";
   private static final String PROGRESS_BASELINE = "baseline";
   private static final String PROGRESS_COSTING_SCHEDULE = "costingSchedule";
   private static final String PROGRESS_BP_GROUP_ACCT_PATCH = "bpGroupAcctPatch";
@@ -338,6 +349,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       new OnboardingFiscalDataSetupService();
   OnboardingOrgInfoService onboardingOrgInfoService =
       new OnboardingOrgInfoService();
+  OnboardingWarehouseAddressService onboardingWarehouseAddressService =
+      new OnboardingWarehouseAddressService();
   OnboardingAcctdimCentrallyMaintainedService onboardingAcctdimCentrallyMaintainedService =
       new OnboardingAcctdimCentrallyMaintainedService();
   OnboardingAdminIdentityService onboardingAdminIdentityService =
@@ -631,43 +644,86 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void handleCheckoutSession(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
     runWithPlatformAccount(request, response, "checkout-session", account -> {
-      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-      OBContext.setAdminMode(true);
-      boolean billingOwner;
-      try {
-        billingOwner = EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(account.getEmail());
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-      if (!billingOwner) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN, BILLING_OWNER_REQUIRED,
-            BILLING_OWNER_MESSAGE, BILLING_OWNER_MESSAGE);
-        return;
-      }
+      if (!requireBillingOwner(response, account)) return;
       JSONObject body = readJsonBodyOrBadRequest(request, response);
       if (body == null) return;
-      String clientName = body.optString(FIELD_CLIENT_NAME, "").trim();
-      if (clientName.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
-            CLIENT_NAME_REQUIRED, CLIENT_NAME_REQUIRED);
-        return;
-      }
+      String clientName = validatedBillingClientName(response, body);
+      if (clientName == null) return;
       // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
       final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
-      try {
-        JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
-            clientName, origin);
-        recordDemoDataTransferSelection(body, result);
-        writeResponse(response, HttpServletResponse.SC_CREATED, result);
-      } catch (IllegalStateException e) {
+      createHostedCheckoutSession(response, account, body, clientName, origin, false);
+    });
+  }
+
+  private boolean hasOwnedEnvironment(Account account) {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      return EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(account.getEmail());
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private boolean requireBillingOwner(HttpServletResponse response, Account account)
+      throws IOException {
+    if (hasOwnedEnvironment(account)) return true;
+    writeError(response, HttpServletResponse.SC_FORBIDDEN, BILLING_OWNER_REQUIRED,
+        BILLING_OWNER_MESSAGE, BILLING_OWNER_MESSAGE);
+    return false;
+  }
+
+  private String validatedBillingClientName(HttpServletResponse response, JSONObject body)
+      throws IOException {
+    String clientName = body.optString(FIELD_CLIENT_NAME, "").trim();
+    if (clientName.isEmpty()) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
+          CLIENT_NAME_REQUIRED, CLIENT_NAME_REQUIRED);
+      return null;
+    }
+    return clientName;
+  }
+
+  private void createHostedCheckoutSession(HttpServletResponse response, Account account,
+      JSONObject body, String clientName, String origin, boolean accountBillingPurchase)
+      throws IOException {
+    try {
+      JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
+          clientName, origin, requestId -> recordDemoDataTransferSelection(body, requestId));
+      addDemoDataTransferSelectionBestEffort(result, result.optString(FIELD_REQUEST_ID, ""));
+      writeResponse(response, HttpServletResponse.SC_CREATED, result);
+    } catch (IllegalStateException e) {
+      if (!CheckoutConfiguration.isConfigured()) {
         writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
             CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
-      } catch (Exception e) {
+      } else {
+        log.error(selectionPersistenceError(accountBillingPurchase), e);
+        writeCheckoutSelectionError(response);
+      }
+    } catch (RuntimeException e) {
+      log.error(selectionPersistenceError(accountBillingPurchase), e);
+      writeCheckoutSelectionError(response);
+    } catch (Exception e) {
+      if (accountBillingPurchase) {
+        log.error("Could not create account billing purchase", e);
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, BILLING_PROVIDER_ERROR,
+            "Unable to create billing purchase", "Unable to create billing purchase");
+      } else {
         log.error("Could not create hosted checkout session", e);
         writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "CHECKOUT_PROVIDER_ERROR",
             "Unable to create checkout session", "Unable to create checkout session");
       }
-    });
+    }
+  }
+
+  private String selectionPersistenceError(boolean accountBillingPurchase) {
+    return accountBillingPurchase ? BILLING_SELECTION_PERSIST_ERROR
+        : CHECKOUT_SELECTION_PERSIST_ERROR;
+  }
+
+  private void writeCheckoutSelectionError(HttpServletResponse response) throws IOException {
+    writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, CHECKOUT_SELECTION_ERROR,
+        CHECKOUT_SELECTION_SAVE_ERROR, CHECKOUT_SELECTION_SAVE_ERROR);
   }
 
   /**
@@ -677,49 +733,41 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void handleBillingPurchaseCreate(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     runWithPlatformAccount(request, response, "billing-purchase-create", account -> {
-      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-      OBContext.setAdminMode(true);
-      boolean billingOwner;
-      try {
-        billingOwner = EtendoGoJwtDalHelper.hasOwnedEnvironmentForAccountEmail(account.getEmail());
-      } finally {
-        OBContext.restorePreviousMode();
-      }
-      if (!billingOwner) {
-        writeError(response, HttpServletResponse.SC_FORBIDDEN, BILLING_OWNER_REQUIRED,
-            BILLING_OWNER_MESSAGE, BILLING_OWNER_MESSAGE);
-        return;
-      }
+      if (!requireBillingOwner(response, account)) return;
       JSONObject body = readJsonBodyOrBadRequest(request, response);
       if (body == null) return;
-      String clientName = body.optString(FIELD_CLIENT_NAME, "").trim();
-      if (clientName.isEmpty()) {
-        writeError(response, HttpServletResponse.SC_BAD_REQUEST, CODE_INVALID_REQUEST,
-            CLIENT_NAME_REQUIRED, CLIENT_NAME_REQUIRED);
-        return;
-      }
+      String clientName = validatedBillingClientName(response, body);
+      if (clientName == null) return;
       CheckoutRequest activePurchase = checkoutRequestStore
           .findActiveForAccountAndClientName(account.getId(), account.getEmail(), clientName);
       if (activePurchase != null) {
-        handleExistingBillingPurchase(response, account, activePurchase);
+        handleActiveBillingPurchase(response, account, body, activePurchase);
         return;
       }
       // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
       final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
-      try {
-        JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
-            clientName, origin);
-        recordDemoDataTransferSelection(body, result);
-        writeResponse(response, HttpServletResponse.SC_CREATED, result);
-      } catch (IllegalStateException e) {
-        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
-            CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
-      } catch (Exception e) {
-        log.error("Could not create account billing purchase", e);
-        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
-            "Unable to create billing purchase", "Unable to create billing purchase");
-      }
+      createHostedCheckoutSession(response, account, body, clientName, origin, true);
     });
+  }
+
+  private void handleActiveBillingPurchase(HttpServletResponse response, Account account,
+      JSONObject body, CheckoutRequest activePurchase) throws IOException, JSONException {
+    String status = activePurchase.getCheckoutRequestStatus();
+    if ("CREATING".equals(status) || "CREATED".equals(status)) {
+      try {
+        recordDemoDataTransferSelection(body, activePurchase.getRequest());
+      } catch (IllegalStateException e) {
+        writeError(response, HttpServletResponse.SC_CONFLICT, "TRANSFER_SELECTION_LOCKED",
+            "Transfer selection cannot change after checkout creation",
+            "Transfer selection cannot change after checkout creation");
+        return;
+      } catch (RuntimeException e) {
+        log.error(BILLING_SELECTION_PERSIST_ERROR, e);
+        writeCheckoutSelectionError(response);
+        return;
+      }
+    }
+    handleExistingBillingPurchase(response, account, activePurchase);
   }
 
   private void handleExistingBillingPurchase(HttpServletResponse response, Account account,
@@ -731,13 +779,14 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       try {
         JSONObject result = hostedCheckoutService.reopenSession(activePurchase.getRequest(),
             account.getEmail(), activePurchase.getClientName(), origin);
+        addDemoDataTransferSelectionBestEffort(result, activePurchase.getRequest());
         writeResponse(response, HttpServletResponse.SC_OK, result);
       } catch (IllegalStateException e) {
         writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE, CHECKOUT_NOT_CONFIGURED,
             CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
       } catch (Exception e) {
         log.error("Could not reopen account billing purchase", e);
-        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, BILLING_PROVIDER_ERROR,
             "Unable to reopen billing purchase", "Unable to reopen billing purchase");
       }
       return;
@@ -746,6 +795,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     result.put("purchaseId", activePurchase.getRequest());
     result.put(FIELD_STATUS, status);
     result.put(FIELD_CLIENT_NAME, activePurchase.getClientName());
+    addDemoDataTransferSelection(result, activePurchase.getRequest());
     writeResponse(response, HttpServletResponse.SC_CONFLICT, result);
   }
 
@@ -763,9 +813,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       boolean paid = checkoutRequest != null
           && checkoutRequestStore.isPaidFor(requestId, account.getId(), account.getEmail(), null);
       JSONObject result = new JSONObject();
-      result.put("requestId", requestId);
+      result.put(FIELD_REQUEST_ID, requestId);
       result.put(FIELD_STATUS, paid ? "paid" : "pending");
       if (paid) result.put(FIELD_CLIENT_NAME, checkoutRequest.getClientName());
+      if (checkoutRequest != null) addDemoDataTransferSelection(result, requestId);
       writeResponse(response, HttpServletResponse.SC_OK, result);
     });
   }
@@ -843,7 +894,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       } catch (IOException e) {
         log.error("Could not load account billing subscription", e);
-        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, BILLING_PROVIDER_ERROR,
             "Unable to load billing subscription", "Unable to load billing subscription");
         return;
       }
@@ -887,7 +938,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       } catch (IOException e) {
         log.error("Could not create a billing portal session", e);
-        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, BILLING_PROVIDER_ERROR,
             "Unable to open the billing portal", "Unable to open the billing portal");
         return;
       }
@@ -950,6 +1001,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     result.put("purchaseId", purchase.getRequest());
     result.put(FIELD_STATUS, StringUtils.defaultString(purchase.getCheckoutRequestStatus(), "UNKNOWN"));
     result.put(FIELD_CLIENT_NAME, StringUtils.defaultString(purchase.getClientName()));
+    addDemoDataTransferSelection(result, purchase.getRequest());
     if (purchase.getCreatedClient() != null) {
       result.put("createdClientId", purchase.getCreatedClient().getId());
     }
@@ -2653,7 +2705,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (session == null) return;
       try {
         writeResponse(response, HttpServletResponse.SC_OK,
-            demoDataTransferService.status(session.clientId));
+            demoDataTransferService.status(session.clientId,
+                () -> EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(
+                    authenticated.account.getEmail())));
       } catch (JSONException e) {
         log.error("Could not read demo data transfer state", e);
         writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
@@ -2661,7 +2715,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     });
   }
 
-  /** Reclaims only a failed transfer; payment and tenant provisioning are never repeated. */
+  /** Reclaims failed or stranded transfer work; payment and tenant provisioning are never repeated. */
   private void handleDemoDataTransferRetry(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
     runWithAuthenticatedContext(request, response, "retry demo data transfer", authenticated -> {
@@ -2669,7 +2723,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (session == null) return;
       try {
         writeResponse(response, HttpServletResponse.SC_OK,
-            demoDataTransferService.retry(session.clientId));
+            demoDataTransferService.retry(session.clientId,
+                EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(
+                    authenticated.account.getEmail())));
       } catch (JSONException e) {
         log.error("Could not retry demo data transfer", e);
         writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
@@ -2683,12 +2739,34 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * before ETP-5364.
    */
   void recordDemoDataTransferSelection(JSONObject body, JSONObject checkoutResult) {
+    recordDemoDataTransferSelection(body, checkoutResult.optString(FIELD_REQUEST_ID, ""));
+  }
+
+  private void recordDemoDataTransferSelection(JSONObject body, String requestId) {
     if (!DemoDataTransferFlag.isEnabled()) return;
-    JSONObject selection = body.optJSONObject("dataTransfer");
+    JSONObject selection = body.optJSONObject(FIELD_DATA_TRANSFER);
     if (selection == null) return;
-    String requestId = checkoutResult.optString("requestId", "");
     demoDataTransferService.recordSelection(requestId, selection.optBoolean(FIELD_PRODUCTS),
         selection.optBoolean(FIELD_CONTACTS));
+  }
+
+  private void addDemoDataTransferSelection(JSONObject result, String requestId)
+      throws JSONException {
+    boolean enabled = DemoDataTransferFlag.isEnabled();
+    result.put("dataTransferEnabled", enabled);
+    if (!enabled) return;
+    JSONObject selection = demoDataTransferService.selection(requestId);
+    if (selection != null) result.put(FIELD_DATA_TRANSFER, selection);
+  }
+
+  /** A projection failure after Stripe has created a session must not masquerade as provider 502. */
+  private void addDemoDataTransferSelectionBestEffort(JSONObject result, String requestId) {
+    try {
+      addDemoDataTransferSelection(result, requestId);
+    } catch (RuntimeException | JSONException e) {
+      log.error("Checkout {} was created but its transfer selection could not be projected",
+          requestId, e);
+    }
   }
 
   /** JSON-null for an absent value, so the client can tell "blank" from "not answered". */
@@ -2743,6 +2821,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         }
       } catch (Exception e) {
         log.debug("Bearer token carries no NEO session claims", e);
+      }
+    }
+    // ETP-4576 — under the cookie session there is no bearer JWT to read claims from, so the
+    // block above yields nothing and this endpoint answered 400 to every cookie-session caller
+    // (the whole product now). The session record carries the environment it was opened in, so
+    // read the tenant from there and keep the JWT branch for legacy bearer clients.
+    // `authenticate` is a pure read: it resolves the cookie and checks CSRF only for unsafe
+    // methods, so calling it on this GET neither rotates the session nor writes anything.
+    if (StringUtils.isBlank(clientId)) {
+      GoSessionAuthResult sessionAuth =
+          new GoSessionAuthenticator(goSessionService).authenticate(request);
+      if (sessionAuth.isAuthenticated()) {
+        clientId = sessionAuth.getRecord().getCtxClientId();
+        orgId = sessionAuth.getRecord().getCtxOrgId();
       }
     }
     if (StringUtils.isBlank(clientId)) {
@@ -3000,77 +3092,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     ScheduledExecutorService heartbeat = startOnboardingHeartbeat(writer);
 
     try {
-      VariablesSecureApp vars = prepareAdminContext(writer, onboardingRequest.language);
-      String clientId = resolveOrCreateClient(writer, vars, accountEmail, onboardingRequest, currencyId,
-          adminPassword);
-      if (clientId == null) {
-        return;
-      }
-
-      AdminContextData adminContext = resolveAdminContextData(clientId, writer);
-      if (adminContext == null) {
-        return;
-      }
-
-      // Joins the onboarding transaction, so a successful marker commits with the tenant. Still
-      // best-effort in the other direction: a tenant may commit unmarked rather than have
-      // provisioning rolled back over a plan marker. What must never happen quietly is exactly
-      // that case, so it is logged as an error naming the account — "paid but demo" is the
-      // symptom ETP-4966 was reported as, and this line is what makes it searchable instead of
-      // indistinguishable from a marker that was never attempted.
-      if (paidUpgrade) {
-        applyPaidUpgradeSideEffects(clientId, adminContext.starOrgId, onboardingRequest.clientName,
-            accountEmail);
-      }
-
-      // The returned flag (created vs. already-existing) is no longer used to gate downstream
-      // steps — the provisioning chain reconciles unconditionally (ETP-4428). A null return still
-      // signals a failure that already emitted its own progress/result line.
-      Boolean organizationResolved = ensureOrganization(writer, onboardingRequest.clientName, clientId,
-          adminContext, currencyId);
-      if (organizationResolved == null) {
-        return;
-      }
-
-      String orgId = resolveOrganizationId(clientId);
-      if (orgId == null) {
-        sendProgress(writer, PROGRESS_DATASET, PROGRESS_ERROR,
-            "Could not resolve organization for onboarding dataset import");
-        sendFinalResult(writer, false, "Organization not found after onboarding");
-        return;
-      }
-
-      if (!ensureOnboardingDataset(writer, clientId, orgId,
-          adminContext.adminUserId, adminContext.adminRoleId, onboardingRequest)) {
-        return;
-      }
-
-      if (paidUpgrade && (onboardingRequest.transferProducts || onboardingRequest.transferContacts)) {
-        sendProgress(writer, "data-transfer", PROGRESS_IN_PROGRESS, "Transferring selected demo data...");
-        String sourceClientId = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail);
-        OnboardingDataTransferService.TransferResult transferResult = onboardingDataTransferService.transfer(
-            sourceClientId, clientId, orgId, onboardingRequest.transferProducts,
-            onboardingRequest.transferContacts);
-        sendProgress(writer, "data-transfer", "done",
-            "Selected demo data transferred (products=" + transferResult.productsCopied()
-                + ", contacts=" + transferResult.contactsCopied() + ")");
-      }
-      if (!paidUpgrade && !tenantEnvironmentLifecycleService.markDemoReady(clientId, Instant.now())) {
-        throw new IllegalStateException("Could not initialize demo trial lifecycle");
-      }
-
-      EtendoGoDalHelper.commitDalChanges("onboarding", log);
-      completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
-          provisioningClaim);
-      // Activate the costing schedule now that its row is committed and therefore visible to the
-      // scheduler's own DB connection. Best-effort: internally swallows failures, and the SCH row
-      // is still picked up on the next scheduler initialization.
-      onboardingCostingScheduleService.activateSchedule(clientId);
-
-      sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
-      sendProgress(writer, "finalize", "done", "Environment ready");
-      sendFinalResult(writer, true, "Environment created successfully");
-      provisioningCompleted = true;
+      provisioningCompleted = executeOnboardingProvisioning(writer, preparation, adminPassword);
 
     } catch (Exception e) {
       log.error("Onboarding failed", e);
@@ -3088,6 +3110,82 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       writer.flush();
       warnWhenOnboardingStreamWasLost(writer, accountEmail);
     }
+  }
+
+  private boolean executeOnboardingProvisioning(PrintWriter writer,
+      OnboardingPreparation preparation, String adminPassword) throws Exception {
+    OnboardingRequestData onboardingRequest = preparation.request;
+    String accountId = preparation.accountId;
+    String accountEmail = preparation.accountEmail;
+    String currencyId = preparation.currencyId;
+    boolean paidUpgrade = preparation.paidUpgrade;
+    VariablesSecureApp vars = prepareAdminContext(writer, onboardingRequest.language);
+    String clientId = resolveOrCreateClient(writer, vars, accountEmail, onboardingRequest,
+        currencyId, adminPassword);
+    if (clientId == null) return false;
+    String demoSourceClientId = resolveDemoSourceClientId(accountEmail, paidUpgrade,
+        onboardingRequest, clientId);
+    AdminContextData adminContext = resolveAdminContextData(clientId, writer);
+    if (adminContext == null) return false;
+    if (paidUpgrade) {
+      applyPaidUpgradeSideEffects(clientId, adminContext.starOrgId, onboardingRequest.clientName,
+          accountEmail);
+    }
+    if (ensureOrganization(writer, onboardingRequest.clientName, clientId, adminContext,
+        currencyId) == null) return false;
+    String orgId = resolveOrganizationId(clientId);
+    if (orgId == null) {
+      sendProgress(writer, PROGRESS_DATASET, PROGRESS_ERROR,
+          "Could not resolve organization for onboarding dataset import");
+      sendFinalResult(writer, false, "Organization not found after onboarding");
+      return false;
+    }
+    if (!ensureOnboardingDataset(writer, clientId, orgId, adminContext.adminUserId,
+        adminContext.adminRoleId, onboardingRequest)) return false;
+    transferSelectedData(writer, onboardingRequest, paidUpgrade, demoSourceClientId, clientId,
+        orgId);
+    if (!paidUpgrade && !tenantEnvironmentLifecycleService.markDemoReady(clientId, Instant.now())) {
+      throw new IllegalStateException("Could not initialize demo trial lifecycle");
+    }
+    EtendoGoDalHelper.commitDalChanges("onboarding", log);
+    completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
+        preparation.provisioningClaim, demoSourceClientId);
+    onboardingCostingScheduleService.activateSchedule(clientId);
+    sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
+    sendProgress(writer, "finalize", "done", "Environment ready");
+    sendFinalResult(writer, true, "Environment created successfully");
+    return true;
+  }
+
+  private String resolveDemoSourceClientId(String accountEmail, boolean paidUpgrade,
+      OnboardingRequestData onboardingRequest, String targetClientId) {
+    boolean needsDemoSource = paidUpgrade && (DemoDataTransferFlag.isEnabled()
+        || onboardingRequest.transferProducts || onboardingRequest.transferContacts);
+    return needsDemoSource
+        ? EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail, targetClientId)
+        : null;
+  }
+
+  private void transferSelectedData(PrintWriter writer, OnboardingRequestData onboardingRequest,
+      boolean paidUpgrade, String demoSourceClientId, String clientId, String orgId) {
+    if (!shouldRunSynchronousDataTransfer(paidUpgrade, onboardingRequest.transferProducts,
+        onboardingRequest.transferContacts)) return;
+    sendProgress(writer, "data-transfer", PROGRESS_IN_PROGRESS, "Transferring selected demo data...");
+    OnboardingDataTransferService.TransferResult result = onboardingDataTransferService.transfer(
+        demoSourceClientId, clientId, orgId, onboardingRequest.transferProducts,
+        onboardingRequest.transferContacts);
+    if (result.failures() > 0) {
+      throw new IllegalStateException("Demo data transfer failed: "
+          + StringUtils.defaultIfBlank(result.failureReason(), "unknown reason"));
+    }
+    sendProgress(writer, "data-transfer", "done",
+        "Selected demo data transferred (products=" + result.productsCopied()
+            + ", contacts=" + result.contactsCopied() + ")");
+  }
+
+  static boolean shouldRunSynchronousDataTransfer(boolean paidUpgrade, boolean products,
+      boolean contacts) {
+    return paidUpgrade && !DemoDataTransferFlag.isEnabled() && (products || contacts);
   }
 
   private OnboardingPreparation prepareOnboarding(HttpServletRequest request,
@@ -3217,7 +3315,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void completeCommittedOnboarding(String accountId, String accountEmail,
       OnboardingRequestData onboardingRequest, String clientId, boolean paidUpgrade,
-      Long provisioningClaim) {
+      Long provisioningClaim, String demoSourceClientId) {
     if (paidUpgrade) {
       try {
         checkoutRequestStore.recordProvisioned(onboardingRequest.paymentToken, clientId,
@@ -3226,7 +3324,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         log.error("Environment '{}' (client {}) was provisioned but its checkout request could "
             + "not be closed", onboardingRequest.clientName, clientId, e);
       }
-      startDemoDataTransferBestEffort(onboardingRequest.paymentToken, accountEmail, clientId);
+      startDemoDataTransferBestEffort(onboardingRequest.paymentToken, accountEmail, clientId,
+          demoSourceClientId);
     }
     Account account = findAccountForCommittedOnboarding(accountId, accountEmail);
     clearOnboardingDraftBestEffort(account);
@@ -3246,9 +3345,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   void startDemoDataTransferBestEffort(String paymentToken, String accountEmail, String clientId) {
     if (!DemoDataTransferFlag.isEnabled()) return;
+    startDemoDataTransferBestEffort(paymentToken, accountEmail, clientId,
+        EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail));
+  }
+
+  private void startDemoDataTransferBestEffort(String paymentToken, String accountEmail,
+      String clientId, String demoClientId) {
+    if (!DemoDataTransferFlag.isEnabled()) return;
     try {
-      String demoClientId = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail);
-      demoDataTransferService.start(paymentToken, demoClientId, clientId);
+      String resolvedDemoClientId = StringUtils.isNotBlank(demoClientId) ? demoClientId
+          : EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail);
+      demoDataTransferService.start(paymentToken, resolvedDemoClientId, clientId);
     } catch (RuntimeException e) {
       log.error("Environment (client {}) was provisioned but its demo data transfer could not be "
           + "started", clientId, e);
@@ -3492,7 +3599,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       data.taxId = body.optString("fiscalIdValue", "").trim();
       data.paymentToken = body.optString(FIELD_PAYMENT_TOKEN, "").trim();
       data.upgradeAction = body.optString("upgradeAction", "create-productive").trim();
-      JSONObject transfer = body.optJSONObject("dataTransfer");
+      JSONObject transfer = body.optJSONObject(FIELD_DATA_TRANSFER);
       data.transferProducts = transfer != null && transfer.optBoolean(FIELD_PRODUCTS, false);
       data.transferContacts = transfer != null && transfer.optBoolean(FIELD_CONTACTS, false);
       if ("convert-demo".equalsIgnoreCase(data.upgradeAction)) {
@@ -3854,6 +3961,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!wireOrgInfo(writer, clientId, orgId, adminUserId, adminRoleId, requestData)) {
       return false;
     }
+    // Depends on AD_ORGINFO already being located by wireOrgInfo above.
+    if (!wireWarehouseAddress(writer, clientId, orgId, adminUserId, adminRoleId)) {
+      return false;
+    }
     if (!scheduleCostingBackground(writer, clientId, orgId, adminUserId, adminRoleId)) {
       return false;
     }
@@ -4029,6 +4140,25 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       String errorMessage = e.getMessage() != null ? e.getMessage()
           : "Organization info setup failed";
       sendProgress(writer, PROGRESS_ORG_INFO, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage);
+      return false;
+    }
+  }
+
+  boolean wireWarehouseAddress(PrintWriter writer, String clientId, String orgId,
+      String adminUserId, String adminRoleId) {
+    sendProgress(writer, PROGRESS_WAREHOUSE_ADDRESS, PROGRESS_IN_PROGRESS,
+        "Aligning warehouse address...");
+    try {
+      onboardingWarehouseAddressService.alignDefaultWarehouseAddress(clientId, orgId, adminUserId,
+          adminRoleId);
+      sendProgress(writer, PROGRESS_WAREHOUSE_ADDRESS, "done", "Warehouse address aligned");
+      return true;
+    } catch (Exception e) {
+      log.error("Error during warehouse-address alignment", e);
+      String errorMessage = e.getMessage() != null ? e.getMessage()
+          : "Warehouse address alignment failed";
+      sendProgress(writer, PROGRESS_WAREHOUSE_ADDRESS, PROGRESS_ERROR, errorMessage);
       sendFinalResult(writer, false, errorMessage);
       return false;
     }

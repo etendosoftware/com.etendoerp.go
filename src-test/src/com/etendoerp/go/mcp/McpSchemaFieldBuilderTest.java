@@ -1990,6 +1990,45 @@ class McpSchemaFieldBuilderTest {
       assertEquals("inventoryLine", via.getString("entity"));
     }
 
+    /** ETP-5446 — EM_ETGO_Cost is written through the product window's Cost tab (M_Costing). */
+    @Test
+    @DisplayName("a stored-computed cost column gets writableVia pointing at product/costing")
+    void costGetsWritableViaProductCosting() throws Exception {
+      Entity dalEntity = mock(Entity.class);
+      Property prop = mock(Property.class);
+      when(dalEntity.getPropertyByColumnName("EM_ETGO_Cost")).thenReturn(prop);
+      when(prop.getComputationFunction()).thenReturn("etgo_product_cost");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeAddWritableVia(fieldObj, dalEntity, "EM_ETGO_Cost");
+
+      JSONObject via = fieldObj.getJSONObject("writableVia");
+      assertEquals("product", via.getString("spec"));
+      assertEquals("costing", via.getString("entity"));
+      assertTrue(via.has("note"));
+      assertFalse(via.getString("note").trim().isEmpty());
+    }
+
+    /**
+     * ETP-5446 — the AD stores the function name as declared in the DB model
+     * ({@code ETGO_PRODUCT_COST}); the lookup must be case-insensitive and trim-tolerant.
+     */
+    @Test
+    @DisplayName("the cost computation function is matched case-insensitively and trimmed")
+    void costComputationFunctionMatchedCaseInsensitively() throws Exception {
+      Entity dalEntity = mock(Entity.class);
+      Property prop = mock(Property.class);
+      when(dalEntity.getPropertyByColumnName("EM_ETGO_Cost")).thenReturn(prop);
+      when(prop.getComputationFunction()).thenReturn("  ETGO_PRODUCT_COST ");
+
+      JSONObject fieldObj = new JSONObject();
+      invokeAddWritableVia(fieldObj, dalEntity, "EM_ETGO_Cost");
+
+      JSONObject via = fieldObj.getJSONObject("writableVia");
+      assertEquals("product", via.getString("spec"));
+      assertEquals("costing", via.getString("entity"));
+    }
+
     @Test
     @DisplayName("a regular (non-computed) column omits writableVia")
     void regularColumnOmitsWritableVia() throws Exception {

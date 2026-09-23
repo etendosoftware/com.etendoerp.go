@@ -2,8 +2,8 @@
 package com.etendoerp.go.payment;
 
 import java.util.List;
-import java.util.Optional;
 import java.util.Set;
+import java.util.function.Supplier;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -13,7 +13,6 @@ import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
-import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.base.structure.BaseOBObject;
 import org.openbravo.dal.service.OBDal;
@@ -21,17 +20,10 @@ import org.openbravo.dal.service.OBQuery;
 import org.openbravo.erpCommon.businessUtility.Preferences;
 import org.openbravo.model.ad.domain.Preference;
 import org.openbravo.model.ad.system.Client;
-import org.openbravo.model.common.businesspartner.BusinessPartner;
-import org.openbravo.model.common.businesspartner.Category;
 import org.openbravo.model.common.enterprise.Organization;
 import org.openbravo.model.common.plm.Product;
-import org.openbravo.model.common.plm.ProductCategory;
-import org.openbravo.model.pricing.pricelist.PriceListVersion;
-import org.openbravo.model.pricing.pricelist.ProductPrice;
-import org.openbravo.model.materialmgmt.cost.Costing;
-import org.openbravo.model.common.uom.UOM;
+import org.openbravo.model.financialmgmt.tax.TaxCategory;
 
-import com.etendoerp.go.schemaforge.PriceListVersionResolver;
 
 /**
  * Server-side, durable transfer from an owned demo to its newly provisioned productive tenant.
@@ -45,6 +37,8 @@ import com.etendoerp.go.schemaforge.PriceListVersionResolver;
 public class DemoDataTransferService {
   private static final Logger log = LogManager.getLogger(DemoDataTransferService.class);
   private static final String ZERO_ID = "0";
+  private static final String SOURCE_UNAVAILABLE = "Source demo environment is unavailable";
+  private static final String SAME_ENVIRONMENT = "Source and target environments are the same";
   /**
    * Kept short on purpose: the attribute is this prefix plus a 36-character checkout request UUID,
    * and {@code AD_PREFERENCE.ATTRIBUTE} holds 60 characters (the original
@@ -83,6 +77,8 @@ public class DemoDataTransferService {
    */
   private ExecutorService executor;
   private final Set<String> activeClients = ConcurrentHashMap.newKeySet();
+  private final DemoDataTransferEntityCopier entityCopier =
+      new DemoDataTransferEntityCopier(this);
 
   /** Stores user intent before redirecting to the payment provider.
    * @param requestId payment request identifier
@@ -92,9 +88,31 @@ public class DemoDataTransferService {
   public void recordSelection(String requestId, boolean products, boolean contacts) {
     if (StringUtils.isBlank(requestId)) return;
     withSystemContext(() -> {
-      setSystemPreference(SELECTION_PREFIX + requestId,
-          (products ? "Y" : "N") + (contacts ? "Y" : "N"));
+      String value = (products ? "Y" : "N") + (contacts ? "Y" : "N");
+      String existing = readClientPreference(SELECTION_PREFIX + requestId, ZERO_ID);
+      if (existing != null && !existing.equals(value)) {
+        throw new IllegalStateException("Transfer selection cannot change after checkout creation");
+      }
+      if (existing != null) return;
+      setSystemPreference(SELECTION_PREFIX + requestId, value);
       flush();
+    });
+  }
+
+  /** Returns the checkout's immutable server-side choice, or null for an older purchase.
+   * @param requestId checkout request identifier
+   * @return immutable product/contact selection, or {@code null} when absent
+   * @throws JSONException if the selection cannot be serialized
+   */
+  public JSONObject selection(String requestId) throws JSONException {
+    if (StringUtils.isBlank(requestId)) return null;
+    return withSystemResult(() -> {
+      String value = readClientPreference(SELECTION_PREFIX + requestId, ZERO_ID);
+      if (value == null) return null;
+      JSONObject result = new JSONObject();
+      result.put("products", selected(value, 0));
+      result.put("contacts", selected(value, 1));
+      return result;
     });
   }
 
@@ -104,26 +122,50 @@ public class DemoDataTransferService {
    * @param productiveClientId provisioned client identifier
    */
   public void start(String requestId, String demoClientId, String productiveClientId) {
-    if (StringUtils.isBlank(requestId) || StringUtils.isBlank(demoClientId)
-        || StringUtils.isBlank(productiveClientId)) return;
-    withSystemContext(() -> {
-      String selection = readSystemPreference(SELECTION_PREFIX + requestId);
-      if (selection == null) return;
-      Client target = OBDal.getInstance().get(Client.class, productiveClientId);
-      if (target == null) return;
-      setClientPreference(SOURCE, demoClientId, target);
-      setClientPreference(PRODUCTS, selected(selection, 0) ? "Y" : "N", target);
-      setClientPreference(CONTACTS, selected(selection, 1) ? "Y" : "N", target);
-      if (!selected(selection, 0) && !selected(selection, 1)) {
-        setClientPreference(STATUS, STATUS_SKIPPED, target);
-      } else if (!STATUS_COMPLETED.equals(readClientPreference(STATUS, productiveClientId))) {
-        setClientPreference(STATUS, STATUS_RUNNING, target);
-        setClientPreference(PRODUCTS_DONE, "0", target);
-        setClientPreference(CONTACTS_DONE, "0", target);
-      }
-      flush();
-    });
+    if (StringUtils.isBlank(requestId) || StringUtils.isBlank(productiveClientId)) return;
+    withSystemContext(() -> persistStart(requestId, demoClientId, productiveClientId));
     submitIfRunning(productiveClientId);
+  }
+
+  private void persistStart(String requestId, String demoClientId, String productiveClientId) {
+    String selection = readClientPreference(SELECTION_PREFIX + requestId, ZERO_ID);
+    if (selection == null) return;
+    Client target = OBDal.getInstance().get(Client.class, productiveClientId);
+    if (target == null) return;
+    persistSelection(target, selection, demoClientId, productiveClientId);
+    flush();
+  }
+
+  private void persistSelection(Client target, String selection, String demoClientId,
+      String productiveClientId) {
+    if (StringUtils.isNotBlank(demoClientId)) setClientPreference(SOURCE, demoClientId, target);
+    boolean productsSelected = selected(selection, 0);
+    boolean contactsSelected = selected(selection, 1);
+    setClientPreference(PRODUCTS, productsSelected ? "Y" : "N", target);
+    setClientPreference(CONTACTS, contactsSelected ? "Y" : "N", target);
+    if (!productsSelected && !contactsSelected) {
+      setClientPreference(STATUS, STATUS_SKIPPED, target);
+    } else if (StringUtils.isBlank(demoClientId)) {
+      failForMissingSource(target, productiveClientId);
+    } else if (demoClientId.equals(productiveClientId)) {
+      setClientPreference(STATUS, STATUS_FAILED, target);
+      setClientPreference(FAILURE, SAME_ENVIRONMENT, target);
+    } else if (!STATUS_COMPLETED.equals(readClientPreference(STATUS, productiveClientId))) {
+      markRunning(target);
+    }
+  }
+
+  private void failForMissingSource(Client target, String productiveClientId) {
+    log.error("Demo data transfer cannot start for productive client {}: source demo "
+        + "environment is unavailable", productiveClientId);
+    setClientPreference(STATUS, STATUS_FAILED, target);
+    setClientPreference(FAILURE, SOURCE_UNAVAILABLE, target);
+  }
+
+  private void markRunning(Client target) {
+    setClientPreference(STATUS, STATUS_RUNNING, target);
+    setClientPreference(PRODUCTS_DONE, "0", target);
+    setClientPreference(CONTACTS_DONE, "0", target);
   }
 
   /** Returns a compact persisted projection; a stranded RUNNING job is resumed on read.
@@ -132,21 +174,81 @@ public class DemoDataTransferService {
    * @throws JSONException if the status projection cannot be serialized
    */
   public JSONObject status(String productiveClientId) throws JSONException {
+    return status(productiveClientId, () -> null);
+  }
+
+  /** Reads progress and repairs a stranded transfer whose source was not persisted at kickoff.
+   * @param productiveClientId provisioned client identifier
+   * @param demoClientResolver resolves the account's only free tenant, if unambiguous
+   * @return persisted transfer status and progress
+   * @throws JSONException if the status projection cannot be serialized
+   */
+  public JSONObject status(String productiveClientId, Supplier<String> demoClientResolver)
+      throws JSONException {
+    withSystemContext(() -> {
+      if (!STATUS_RUNNING.equals(readClientPreference(STATUS, productiveClientId))) return;
+      String sourceId = readClientPreference(SOURCE, productiveClientId);
+      if (StringUtils.isNotBlank(sourceId)) return;
+      Client target = OBDal.getInstance().get(Client.class, productiveClientId);
+      if (target == null) return;
+      String resolvedDemoClientId = demoClientResolver == null ? null : demoClientResolver.get();
+      if (StringUtils.isBlank(resolvedDemoClientId)) {
+        setClientPreference(STATUS, STATUS_FAILED, target);
+        setClientPreference(FAILURE, SOURCE_UNAVAILABLE, target);
+      } else if (productiveClientId.equals(resolvedDemoClientId)) {
+        setClientPreference(STATUS, STATUS_FAILED, target);
+        setClientPreference(FAILURE, SAME_ENVIRONMENT, target);
+      } else {
+        setClientPreference(SOURCE, resolvedDemoClientId, target);
+      }
+      flush();
+    });
     JSONObject result = withSystemResult(() -> statusJson(productiveClientId));
     if (STATUS_RUNNING.equals(result.optString("status"))) submitIfRunning(productiveClientId);
     return result;
   }
 
-  /** Only a failed transfer can be retried. Completed and skipped work is immutable.
+  /** Reclaims failed or stranded work. Completed and skipped work is immutable.
    * @param productiveClientId provisioned client identifier
    * @return current transfer status and progress
    * @throws JSONException if the status projection cannot be serialized
    */
   public JSONObject retry(String productiveClientId) throws JSONException {
+    return retry(productiveClientId, null);
+  }
+
+  /** Reclaims failed or stranded work, restoring the source from the authenticated account when
+   * the original provisioning attempt could not persist it.
+   * @param productiveClientId provisioned client identifier
+   * @param resolvedDemoClientId the account's only free tenant, if unambiguous
+   * @return current transfer status and progress
+   * @throws JSONException if the status projection cannot be serialized
+   */
+  public JSONObject retry(String productiveClientId, String resolvedDemoClientId)
+      throws JSONException {
     withSystemContext(() -> {
-      if (!STATUS_FAILED.equals(readClientPreference(STATUS, productiveClientId))) return;
+      String status = readClientPreference(STATUS, productiveClientId);
+      if (!STATUS_FAILED.equals(status) && !STATUS_RUNNING.equals(status)) return;
       Client target = OBDal.getInstance().get(Client.class, productiveClientId);
       if (target == null) return;
+      String sourceId = readClientPreference(SOURCE, productiveClientId);
+      if (StringUtils.isBlank(sourceId) && StringUtils.isNotBlank(resolvedDemoClientId)
+          && !productiveClientId.equals(resolvedDemoClientId)) {
+        sourceId = resolvedDemoClientId;
+        setClientPreference(SOURCE, sourceId, target);
+      }
+      if (StringUtils.isBlank(sourceId)) {
+        setClientPreference(STATUS, STATUS_FAILED, target);
+        setClientPreference(FAILURE, SOURCE_UNAVAILABLE, target);
+        flush();
+        return;
+      }
+      if (productiveClientId.equals(sourceId)) {
+        setClientPreference(STATUS, STATUS_FAILED, target);
+        setClientPreference(FAILURE, SAME_ENVIRONMENT, target);
+        flush();
+        return;
+      }
       setClientPreference(STATUS, STATUS_RUNNING, target);
       setClientPreference(FAILURE, "", target);
       flush();
@@ -157,13 +259,18 @@ public class DemoDataTransferService {
 
   private void submitIfRunning(String productiveClientId) {
     if (!activeClients.add(productiveClientId)) return;
-    executor().submit(() -> {
-      try {
-        run(productiveClientId);
-      } finally {
-        activeClients.remove(productiveClientId);
-      }
-    });
+    try {
+      executor().submit(() -> {
+        try {
+          run(productiveClientId);
+        } finally {
+          activeClients.remove(productiveClientId);
+        }
+      });
+    } catch (RuntimeException e) {
+      activeClients.remove(productiveClientId);
+      throw e;
+    }
   }
 
   private synchronized ExecutorService executor() {
@@ -184,210 +291,59 @@ public class DemoDataTransferService {
 
   private void run(String productiveClientId) {
     try {
-      withSystemContext(() -> {
-        if (!STATUS_RUNNING.equals(readClientPreference(STATUS, productiveClientId))) return;
-        String sourceId = readClientPreference(SOURCE, productiveClientId);
-        Client target = OBDal.getInstance().get(Client.class, productiveClientId);
-        Client source = OBDal.getInstance().get(Client.class, sourceId);
-        if (target == null || source == null) throw new IllegalStateException("Transfer environment is unavailable");
-        Organization targetOrg = defaultOrganization(target.getId());
-        if (targetOrg == null) throw new IllegalStateException("Target organization is unavailable");
-        if ("Y".equals(readClientPreference(PRODUCTS, productiveClientId))) copyProducts(source, target, targetOrg);
-        if ("Y".equals(readClientPreference(CONTACTS, productiveClientId))) copyContacts(source, target, targetOrg);
-        setClientPreference(STATUS, STATUS_COMPLETED, target);
-        flush();
-      });
+      withSystemContext(() -> runInSystemContext(productiveClientId));
     } catch (RuntimeException e) {
       log.error("Demo data transfer failed for productive client {}", productiveClientId, e);
       rollbackFailedTransfer();
-      withSystemContext(() -> {
-        Client target = OBDal.getInstance().get(Client.class, productiveClientId);
-        if (target != null) {
-          setClientPreference(STATUS, STATUS_FAILED, target);
-          setClientPreference(FAILURE, StringUtils.abbreviate(StringUtils.defaultString(e.getMessage()), 240), target);
-          flush();
-        }
-      });
+      withSystemContext(() -> recordFailure(productiveClientId, e));
     }
+  }
+
+  private void runInSystemContext(String productiveClientId) {
+    if (!STATUS_RUNNING.equals(readClientPreference(STATUS, productiveClientId))) return;
+    String sourceId = readClientPreference(SOURCE, productiveClientId);
+    Client target = OBDal.getInstance().get(Client.class, productiveClientId);
+    Client source = OBDal.getInstance().get(Client.class, sourceId);
+    if (target == null || source == null) {
+      throw new IllegalStateException("Transfer environment is unavailable");
+    }
+    if (sourceId.equals(productiveClientId)) throw new IllegalStateException(SAME_ENVIRONMENT);
+    Organization targetOrg = defaultOrganization(target.getId());
+    if (targetOrg == null) throw new IllegalStateException("Target organization is unavailable");
+    if ("Y".equals(readClientPreference(PRODUCTS, productiveClientId))) {
+      copyProducts(source, target, targetOrg);
+    }
+    if ("Y".equals(readClientPreference(CONTACTS, productiveClientId))) {
+      copyContacts(source, target, targetOrg);
+    }
+    setClientPreference(STATUS, STATUS_COMPLETED, target);
+    flush();
+  }
+
+  private void recordFailure(String productiveClientId, RuntimeException error) {
+    Client target = OBDal.getInstance().get(Client.class, productiveClientId);
+    if (target == null) return;
+    setClientPreference(STATUS, STATUS_FAILED, target);
+    setClientPreference(FAILURE,
+        StringUtils.abbreviate(StringUtils.defaultString(error.getMessage()), 240), target);
+    flush();
   }
 
   private void copyProducts(Client source, Client target, Organization targetOrg) {
-    List<Product> products = query(Product.class, "as p where p.client.id = :clientId", source.getId());
-    progress(target, PRODUCTS_TOTAL, products.size());
-    int completed = 0;
-    progress(target, PRODUCTS_DONE, completed);
-    for (Product product : products) {
-      Product targetProduct = unique(Product.class, "as p where p.client.id = :clientId and p.searchKey = :key",
-          target.getId(), product.getSearchKey());
-      if (targetProduct == null) {
-        targetProduct = OBProvider.getInstance().get(Product.class);
-        targetProduct.setClient(target);
-        targetProduct.setOrganization(targetOrg);
-      }
-      copyProductFields(product, targetProduct);
-      targetProduct.setUOM(targetUom(product.getUOM(), target, targetOrg));
-      targetProduct.setProductCategory(targetProductCategory(product.getProductCategory(), target, targetOrg));
-      OBDal.getInstance().save(targetProduct);
-      copyPrices(product, targetProduct, target, targetOrg);
-      copyCurrentCost(product, targetProduct, target, targetOrg);
-      progress(target, PRODUCTS_DONE, ++completed);
-      OBDal.getInstance().flush();
-    }
+    entityCopier.copyProducts(source, target, targetOrg);
   }
 
   private void copyContacts(Client source, Client target, Organization targetOrg) {
-    List<BusinessPartner> contacts = query(BusinessPartner.class,
-        "as bp where bp.client.id = :clientId and bp.active = true", source.getId());
-    progress(target, CONTACTS_TOTAL, contacts.size());
-    int completed = 0;
-    progress(target, CONTACTS_DONE, completed);
-    for (BusinessPartner contact : contacts) {
-      BusinessPartner targetContact = unique(BusinessPartner.class,
-          "as bp where bp.client.id = :clientId and bp.searchKey = :key", target.getId(), contact.getSearchKey());
-      if (targetContact == null) {
-        targetContact = OBProvider.getInstance().get(BusinessPartner.class);
-        targetContact.setClient(target);
-        targetContact.setOrganization(targetOrg);
-      }
-      copyBusinessPartnerFields(contact, targetContact);
-      targetContact.setBusinessPartnerCategory(targetBusinessPartnerCategory(
-          contact.getBusinessPartnerCategory(), target, targetOrg));
-      OBDal.getInstance().save(targetContact);
-      progress(target, CONTACTS_DONE, ++completed);
-      OBDal.getInstance().flush();
-    }
+    entityCopier.copyContacts(source, target, targetOrg);
   }
 
-  /** Product fields mirror the import contract; prices/costing are added through their own records. */
-  private void copyProductFields(Product source, Product target) {
-    DemoDataTransferReflection.copy(source, target, SEARCH_KEY_PROPERTY, "Name", DESCRIPTION_PROPERTY, "ProductType");
+  private TaxCategory targetTaxCategory(TaxCategory source, Client target) {
+    return entityCopier.targetTaxCategory(source, target);
   }
 
-  /** UOM rows can be client-scoped; never attach a source tenant's entity to the new product. */
-  private UOM targetUom(UOM source, Client target, Organization targetOrg) {
-    if (source == null) return null;
-    UOM existing = unique(UOM.class, "as u where u.client.id = :clientId and u.name = :key",
-        target.getId(), source.getName());
-    if (existing != null) return existing;
-    UOM copy = OBProvider.getInstance().get(UOM.class);
-    copy.setClient(target); copy.setOrganization(targetOrg);
-    DemoDataTransferReflection.copy(source, copy, "Name", "Symbol", "X", "StandardPrecision", "CostingPrecision", "UOMType");
-    OBDal.getInstance().save(copy);
-    return copy;
-  }
-
-  private ProductCategory targetProductCategory(ProductCategory source, Client target,
+  private void copyPrices(Product source, Product target, Client targetClient,
       Organization targetOrg) {
-    if (source == null) return null;
-    ProductCategory existing = unique(ProductCategory.class,
-        "as c where c.client.id = :clientId and c.name = :key", target.getId(), source.getName());
-    if (existing != null) return existing;
-    ProductCategory copy = OBProvider.getInstance().get(ProductCategory.class);
-    copy.setClient(target); copy.setOrganization(targetOrg);
-    DemoDataTransferReflection.copy(source, copy, "Name", SEARCH_KEY_PROPERTY, DESCRIPTION_PROPERTY);
-    OBDal.getInstance().save(copy);
-    return copy;
-  }
-
-  /** Copies the source product's displayed sales and purchase prices onto the target defaults. */
-  private void copyPrices(Product source, Product target, Client targetClient, Organization targetOrg) {
-    List<ProductPrice> prices = query(ProductPrice.class, "as pp where pp.product.id = :clientId", source.getId());
-    boolean copiedSales = false;
-    boolean copiedPurchase = false;
-    for (ProductPrice sourcePrice : prices) {
-      Optional<Boolean> salesPriceList = DemoDataTransferReflection.salesPriceList(sourcePrice);
-      if (salesPriceList.isEmpty()) continue;
-      boolean sales = salesPriceList.get();
-      boolean alreadyCopied = sales ? copiedSales : copiedPurchase;
-      if (copyPriceIfNeeded(sourcePrice, target, targetClient, targetOrg, sales, alreadyCopied)) {
-        copiedSales |= sales;
-        copiedPurchase |= !sales;
-      }
-    }
-  }
-
-  private boolean copyPriceIfNeeded(ProductPrice sourcePrice, Product targetProduct,
-      Client targetClient, Organization targetOrg, boolean sales, boolean alreadyCopied) {
-    if (alreadyCopied) return false;
-    PriceListVersion version = targetVersion(targetClient.getId(), targetOrg.getId(), sales);
-    if (version == null) return false;
-    ProductPrice targetProductPrice = targetPrice(targetProduct.getId(), version.getId());
-    if (targetProductPrice == null) {
-      targetProductPrice = OBProvider.getInstance().get(ProductPrice.class);
-      targetProductPrice.setClient(targetClient);
-      targetProductPrice.setOrganization(targetOrg);
-      targetProductPrice.setProduct(targetProduct);
-      targetProductPrice.setPriceListVersion(version);
-    }
-    DemoDataTransferReflection.copy(sourcePrice, targetProductPrice,
-        "StandardPrice", "ListPrice", "PriceLimit");
-    targetProductPrice.setActive(true);
-    OBDal.getInstance().save(targetProductPrice);
-    return true;
-  }
-
-  /** Cost is a history row, not a product column: migrate the current row and its start date. */
-  private void copyCurrentCost(Product source, Product target, Client targetClient, Organization targetOrg) {
-    List<Costing> costs = query(Costing.class,
-        "as c where c.product.id = :clientId and c.active = true order by c.startingDate desc", source.getId());
-    if (costs.isEmpty()) return;
-    Costing sourceCost = costs.get(0);
-    Costing copy = targetCost(target.getId(), sourceCost.getStartingDate());
-    if (copy == null) {
-      copy = OBProvider.getInstance().get(Costing.class);
-      copy.setClient(targetClient);
-      copy.setOrganization(targetOrg);
-      copy.setProduct(target);
-    }
-    DemoDataTransferReflection.copy(sourceCost, copy, "Cost", "StartingDate", "EndingDate", "CostType", "Manual", "Permanent", "Production", "Currency");
-    OBDal.getInstance().save(copy);
-  }
-
-  /** Uses the same configured-default resolver as the product form/import path. */
-  private PriceListVersion targetVersion(String clientId, String orgId, boolean sales) {
-    OBContext.setOBContext(ZERO_ID, ZERO_ID, clientId, orgId);
-    try {
-      String versionId = PriceListVersionResolver.resolveDefaultVersionId(OBContext.getOBContext(), sales);
-      return StringUtils.isBlank(versionId) ? null : OBDal.getInstance().get(PriceListVersion.class, versionId);
-    } finally {
-      // The worker entered under system context. Restore it before copying the next independent row.
-      OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
-    }
-  }
-
-  private ProductPrice targetPrice(String productId, String versionId) {
-    OBQuery<ProductPrice> query = OBDal.getInstance().createQuery(ProductPrice.class,
-        "as pp where pp.product.id = :productId and pp.priceListVersion.id = :versionId");
-    query.setNamedParameter("productId", productId); query.setNamedParameter("versionId", versionId);
-    query.setFilterOnReadableClients(false); query.setFilterOnReadableOrganization(false); query.setMaxResult(1);
-    return query.uniqueResult();
-  }
-
-  private Costing targetCost(String productId, java.util.Date startingDate) {
-    OBQuery<Costing> query = OBDal.getInstance().createQuery(Costing.class,
-        "as c where c.product.id = :productId and c.startingDate = :startingDate");
-    query.setNamedParameter("productId", productId); query.setNamedParameter("startingDate", startingDate);
-    query.setFilterOnReadableClients(false); query.setFilterOnReadableOrganization(false); query.setMaxResult(1);
-    return query.uniqueResult();
-  }
-
-  /** Deliberately no CIF validation: existing demo contacts are authoritative migration input. */
-  private void copyBusinessPartnerFields(BusinessPartner source, BusinessPartner target) {
-    DemoDataTransferReflection.copy(source, target, SEARCH_KEY_PROPERTY, "Name", "TaxID", "Customer", "Vendor", "Employee",
-        "EMEtgoIsperson", "EMEtgoFirstname", "EMEtgoLastname", "EMEtgoEmail", "EMEtgoPhone", "EMEtgoWeb");
-  }
-
-  private Category targetBusinessPartnerCategory(Category source,
-      Client target, Organization targetOrg) {
-    if (source == null) return null;
-    Category existing = unique(Category.class,
-        "as c where c.client.id = :clientId and c.name = :key", target.getId(), source.getName());
-    if (existing != null) return existing;
-    Category copy = OBProvider.getInstance().get(Category.class);
-    copy.setClient(target); copy.setOrganization(targetOrg);
-    DemoDataTransferReflection.copy(source, copy, "Name", SEARCH_KEY_PROPERTY, DESCRIPTION_PROPERTY);
-    OBDal.getInstance().save(copy);
-    return copy;
+    entityCopier.copyPrices(source, target, targetClient, targetOrg);
   }
 
   private JSONObject statusJson(String clientId) throws JSONException {
@@ -402,8 +358,18 @@ public class DemoDataTransferService {
 
   private JSONObject counts(String clientId, String done, String total) throws JSONException {
     JSONObject counts = new JSONObject();
-    counts.put("completed", number(readClientPreference(done, clientId)));
-    counts.put("total", number(readClientPreference(total, clientId)));
+    String[] attributes = { done, total };
+    String[] keys = { "completed", "total" };
+    for (int index = 0; index < attributes.length; index++) {
+      String value = readClientPreference(attributes[index], clientId);
+      int parsed = 0;
+      try {
+        parsed = Integer.parseInt(StringUtils.defaultIfBlank(value, "0"));
+      } catch (NumberFormatException ignored) {
+        // An invalid progress preference is displayed as zero, as before.
+      }
+      counts.put(keys[index], parsed);
+    }
     return counts;
   }
 
@@ -411,20 +377,18 @@ public class DemoDataTransferService {
     return unique(Organization.class, "as o where o.client.id = :clientId and o.active = true and o.name <> '*'", clientId, null);
   }
 
-  private void progress(Client client, String attribute, int value) {
+  void progress(Client client, String attribute, int value) {
     setClientPreference(attribute, String.valueOf(value), client);
   }
 
   private boolean selected(String selection, int index) { return selection.length() > index && selection.charAt(index) == 'Y'; }
-  private int number(String value) { try { return Integer.parseInt(StringUtils.defaultIfBlank(value, "0")); } catch (NumberFormatException e) { return 0; } }
-
-  private <T extends BaseOBObject> List<T> query(Class<T> type, String where, String clientId) {
+  <T extends BaseOBObject> List<T> query(Class<T> type, String where, String clientId) {
     OBQuery<T> query = OBDal.getInstance().createQuery(type, where);
     query.setNamedParameter(CLIENT_ID_PARAMETER, clientId);
     query.setFilterOnReadableClients(false); query.setFilterOnReadableOrganization(false);
     return query.list();
   }
-  private <T extends BaseOBObject> T unique(Class<T> type, String where, String clientId, String key) {
+  <T extends BaseOBObject> T unique(Class<T> type, String where, String clientId, String key) {
     OBQuery<T> query = OBDal.getInstance().createQuery(type, where);
     query.setNamedParameter(CLIENT_ID_PARAMETER, clientId);
     if (key != null) query.setNamedParameter("key", key);
@@ -437,10 +401,10 @@ public class DemoDataTransferService {
   private void setSystemPreference(String attribute, String value) {
     Preferences.setPreferenceValue(attribute, value, false, OBDal.getInstance().get(Client.class, ZERO_ID), null, null, null, null, null);
   }
-  private String readSystemPreference(String attribute) { return readClientPreference(attribute, ZERO_ID); }
   private String readClientPreference(String attribute, String clientId) {
     OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
-        "as p where p.attribute = :attribute and p.visibleAtClient.id = :clientId and p.active = true");
+        "as p where p.attribute = :attribute and p.visibleAtClient.id = :clientId and p.active = true"
+            + " order by p.updated desc, p.creationDate desc, p.id desc");
     query.setNamedParameter("attribute", attribute); query.setNamedParameter(CLIENT_ID_PARAMETER, clientId);
     query.setFilterOnReadableClients(false); query.setFilterOnReadableOrganization(false); query.setMaxResult(1);
     Preference preference = query.uniqueResult();
