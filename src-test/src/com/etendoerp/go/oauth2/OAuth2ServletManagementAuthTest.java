@@ -161,7 +161,8 @@ class OAuth2ServletManagementAuthTest {
 
     Response resp = run(cookie("GET", "/api-keys", null, null));
 
-    assertEquals(402, resp.status);
+    assertEquals(402, resp.status, "a blocked tenant's API keys must be refused before the handler"
+        + " (" + Response.REACHED_HANDLER + " = the request got past authentication)");
     assertEquals("Environment access is not available: SUBSCRIPTION_REQUIRED",
         resp.description());
   }
@@ -178,12 +179,22 @@ class OAuth2ServletManagementAuthTest {
 
   // ===================== fixtures =====================
 
+  /**
+   * Runs the request. A request that gets past authentication reaches the handler, whose DAL
+   * lookups have no context in this DB-free test and throw; that is recorded as
+   * {@link Response#REACHED_HANDLER} so the assertion names what happened instead of the test
+   * dying on an unrelated NullPointerException.
+   */
   private Response run(HttpServletRequest req) throws Exception {
     Response resp = new Response();
-    if ("GET".equals(req.getMethod())) {
-      servlet.doGet(req, resp.response);
-    } else {
-      servlet.doPost(req, resp.response);
+    try {
+      if ("GET".equals(req.getMethod())) {
+        servlet.doGet(req, resp.response);
+      } else {
+        servlet.doPost(req, resp.response);
+      }
+    } catch (RuntimeException reachedHandler) {
+      resp.status = Response.REACHED_HANDLER;
     }
     return resp;
   }
@@ -244,6 +255,9 @@ class OAuth2ServletManagementAuthTest {
   }
 
   private static final class Response {
+    /** Status recorded when the request got past authentication into the handler. */
+    static final int REACHED_HANDLER = -1;
+
     final HttpServletResponse response = mock(HttpServletResponse.class);
     private final StringWriter body = new StringWriter();
     int status;
