@@ -23,6 +23,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 import javax.servlet.http.HttpServletRequest;
@@ -103,7 +104,7 @@ public final class CorsUtils {
     if (origin.equals(requestOrigin) || DEFAULT_ALLOWED_ORIGINS.contains(origin)) {
       return true;
     }
-    return resolveConfiguredOrigins().contains(origin);
+    return resolveConfiguredOrigins().stream().anyMatch(pattern -> matchesOrigin(pattern, origin));
   }
 
   private static Set<String> resolveConfiguredOrigins() {
@@ -118,6 +119,32 @@ public final class CorsUtils {
         .map(StringUtils::trimToNull)
         .filter(StringUtils::isNotBlank)
         .collect(Collectors.toSet());
+  }
+
+  /**
+   * Matches a configured origin entry against an actual request origin. A configured entry
+   * with no {@code *} must match exactly (pre-existing behavior). A {@code *} stands for
+   * exactly one hostname label (no {@code .} or {@code /}) — e.g. {@code http://*.localhost:3100}
+   * matches {@code http://goclean.localhost:3100} and {@code http://etendo.localhost:3100}, so a
+   * single entry covers every local subdomain instead of listing each one out.
+   *
+   * @param pattern a raw entry from {@code etgo.allowed.origins} / {@code ETGO_ALLOWED_ORIGINS}
+   * @param origin  the actual request origin to test
+   * @return {@code true} if {@code origin} matches {@code pattern}
+   */
+  private static boolean matchesOrigin(String pattern, String origin) {
+    if (!pattern.contains("*")) {
+      return pattern.equals(origin);
+    }
+    String[] parts = pattern.split(Pattern.quote("*"), -1);
+    StringBuilder regex = new StringBuilder();
+    for (int i = 0; i < parts.length; i++) {
+      if (i > 0) {
+        regex.append("[^./]+");
+      }
+      regex.append(Pattern.quote(parts[i]));
+    }
+    return origin.matches(regex.toString());
   }
 
   private static String buildRequestOrigin(HttpServletRequest request) {
