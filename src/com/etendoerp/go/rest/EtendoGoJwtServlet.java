@@ -2339,6 +2339,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     void execute(Account account) throws IOException, JSONException;
   }
 
+  /** Like {@link AuthenticatedAccountAction}, but also sees the cookie session, if any. */
+  @FunctionalInterface
+  private interface AuthenticatedContextAction {
+    void execute(AuthenticatedAccount authenticated) throws IOException, JSONException;
+  }
+
   /**
    * Shared request template for the draft endpoints: resolves the account,
    * runs the action, and maps failures to the standard 500 responses with a
@@ -2366,16 +2372,23 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void runWithAuthenticatedAccount(HttpServletRequest request,
       HttpServletResponse response, String actionLabel, AuthenticatedAccountAction action)
       throws IOException {
+    runWithAuthenticatedContext(request, response, actionLabel,
+        authenticated -> action.execute(authenticated.account));
+  }
+
+  private void runWithAuthenticatedContext(HttpServletRequest request,
+      HttpServletResponse response, String actionLabel, AuthenticatedContextAction action)
+      throws IOException {
     if (!hasAnyCredential(request)) {
       writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_AUTHORIZATION_HEADER);
       return;
     }
     try {
-      Account account = resolveAuthenticatedAccount(request, response);
-      if (account == null) {
+      AuthenticatedAccount authenticated = resolveAuthenticatedAccountContext(request, response);
+      if (authenticated == null) {
         return;
       }
-      action.execute(account);
+      action.execute(authenticated);
     } catch (RuntimeException e) {
       EtendoGoDalHelper.rollbackDalChanges(actionLabel, e, log);
       log.error("Request '{}' failed", actionLabel, e);
@@ -2593,7 +2606,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   /**
    * GET /sws/go/onboarding/company-data
-   * Header: Authorization: Bearer &lt;NEO session token&gt;
+   * Auth: the {@code __Host-go_session} cookie (the tenant is the session's selected
+   * environment), or a legacy {@code Authorization: Bearer &lt;NEO session token&gt;} (the tenant
+   * is the JWT's client/org claims) — see {@link #resolveTenantSession}.
    * Returns 200 with { status, companyData } where companyData is
    * { name, tradeName, taxId, address } for the caller's own tenant — each value nullable — or
    * null when the tenant has no organisation yet. Read-only: the Organization window is where
@@ -2601,8 +2616,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleGetCompanyData(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    runWithAuthenticatedAccount(request, response, "get onboarding company data", account -> {
-      TenantSession session = resolveTenantSession(request, response, account);
+    runWithAuthenticatedContext(request, response, "get onboarding company data", authenticated -> {
+      TenantSession session = resolveTenantSession(request, response, authenticated);
       if (session == null) {
         return;
       }
@@ -2636,7 +2651,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * The tenant behind the presented token.
+   * The tenant behind the presented credential.
    *
    * The onboarding endpoints authenticate an ACCOUNT, which on its own does not say which
    * environment the caller is in — an account can own several. The token the app sends from
@@ -2645,22 +2660,33 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * carries the session's own client and organization. Those claims are what scope this
    * request.
    *
-   * The claimed client is re-checked against the account that owns it: the account gate and
-   * the claim must agree, so a token cannot name a client its account does not own. Answers
-   * 400 for a pure account-session token, which has no environment to write to.
+   * A request authenticated by the {@code __Host-go_session} cookie (ADR-0001) carries no JWT:
+   * its environment is the one selected on the session record ({@code ctxClientId} /
+   * {@code ctxOrgId}, written by the session environment-select flow). The request itself is
+   * never a source for the client.
+   *
+   * The resolved client is re-checked against the account that owns it: the account gate and
+   * the claim must agree, so neither a token nor a session can name a client its account does
+   * not own. Answers 400 for a pure account session, which has no environment to write to.
    */
   private TenantSession resolveTenantSession(HttpServletRequest request,
-      HttpServletResponse response, Account account) throws IOException {
+      HttpServletResponse response, AuthenticatedAccount authenticated) throws IOException {
+    Account account = authenticated.account;
     String clientId = null;
     String orgId = null;
-    try {
-      DecodedJWT jwt = SecureWebServicesUtils.decodeToken(extractBearerToken(request));
-      if (jwt != null) {
-        clientId = jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString();
-        orgId = jwt.getClaim(JwtAuthUtils.CLAIM_ORG).asString();
+    if (authenticated.sessionRecord != null) {
+      clientId = authenticated.sessionRecord.getCtxClientId();
+      orgId = authenticated.sessionRecord.getCtxOrgId();
+    } else {
+      try {
+        DecodedJWT jwt = SecureWebServicesUtils.decodeToken(extractBearerToken(request));
+        if (jwt != null) {
+          clientId = jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString();
+          orgId = jwt.getClaim(JwtAuthUtils.CLAIM_ORG).asString();
+        }
+      } catch (Exception e) {
+        log.debug("Bearer token carries no NEO session claims", e);
       }
-    } catch (Exception e) {
-      log.debug("Bearer token carries no NEO session claims", e);
     }
     if (StringUtils.isBlank(clientId)) {
       writeError(response, HttpServletResponse.SC_BAD_REQUEST,
