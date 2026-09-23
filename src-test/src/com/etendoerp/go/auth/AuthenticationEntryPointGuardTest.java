@@ -314,19 +314,20 @@ class AuthenticationEntryPointGuardTest {
   private static Map<String, String> servletByMapping() throws IOException {
     Path sourcedata = moduleRoot().resolve(SOURCEDATA);
     Map<String, String> classById = new HashMap<>();
-    for (String record : records(read(sourcedata.resolve("AD_MODEL_OBJECT.xml")), "AD_MODEL_OBJECT")) {
-      String id = field(record, "AD_MODEL_OBJECT_ID");
-      String className = field(record, "CLASSNAME");
+    String objects = read(sourcedata.resolve("AD_MODEL_OBJECT.xml"));
+    for (String xmlRecord : records(objects, "AD_MODEL_OBJECT")) {
+      String id = field(xmlRecord, "AD_MODEL_OBJECT_ID");
+      String className = field(xmlRecord, "CLASSNAME");
       if (id != null && className != null) {
         classById.put(id, className);
       }
     }
     Map<String, String> byMapping = new TreeMap<>();
-    for (String record : records(read(sourcedata.resolve("AD_MODEL_OBJECT_MAPPING.xml")),
+    for (String xmlRecord : records(read(sourcedata.resolve("AD_MODEL_OBJECT_MAPPING.xml")),
         "AD_MODEL_OBJECT_MAPPING")) {
-      String mapping = field(record, "MAPPINGNAME");
-      String className = classById.get(field(record, "AD_MODEL_OBJECT_ID"));
-      if (mapping != null && className != null && !"N".equals(field(record, "ISACTIVE"))) {
+      String mapping = field(xmlRecord, "MAPPINGNAME");
+      String className = classById.get(field(xmlRecord, "AD_MODEL_OBJECT_ID"));
+      if (mapping != null && className != null && !"N".equals(field(xmlRecord, "ISACTIVE"))) {
         byMapping.put(mapping, className);
       }
     }
@@ -343,9 +344,9 @@ class AuthenticationEntryPointGuardTest {
     return records;
   }
 
-  private static String field(String record, String name) {
+  private static String field(String xmlRecord, String name) {
     Matcher matcher = Pattern.compile("<" + name + "><!\\[CDATA\\[(.*?)\\]\\]></" + name + ">")
-        .matcher(record);
+        .matcher(xmlRecord);
     return matcher.find() ? matcher.group(1) : null;
   }
 }
