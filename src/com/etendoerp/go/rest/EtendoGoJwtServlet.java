@@ -2227,12 +2227,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Resolve the platform account from the request's Bearer token under the
-   * system admin context. Always enters admin mode (so callers can restore it
-   * in their finally block) and writes the 401 response when the header is
-   * missing or the token does not match an active account, returning null.
+   * Resolve the platform account under the system admin context. Always enters admin mode (so
+   * callers can restore it in their finally block) and writes the error response, returning null,
+   * when the request is not authenticated.
+   *
+   * <p>A request carrying the {@code __Host-go_session} cookie (ADR-0001, the only credential the
+   * SPA sends) is resolved by {@link #resolveAuthenticatedAccountContext}, the same resolver the
+   * already-migrated endpoints use — so an unsafe method without a valid {@code X-Go-CSRF} proof
+   * answers 403 there, and a dead session 401. A request without the cookie keeps the legacy
+   * narrow bearer lookup unchanged.
    */
   private Account resolvePlatformAccount(HttpServletRequest request, HttpServletResponse response) throws IOException {
+    if (hasSessionCookie(request)) {
+      return resolveAuthenticatedAccount(request, response);
+    }
     OBContext.setOBContext("0", "0", "0", "0");
     OBContext.setAdminMode(true);
     String token = extractBearerToken(request);
@@ -2257,6 +2265,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * unauthenticated request before ever entering admin mode.
    */
   private boolean hasAnyCredential(HttpServletRequest request) {
+    return hasSessionCookie(request) || extractBearerToken(request) != null;
+  }
+
+  /** Whether the request carries the {@code __Host-go_session} cookie, whatever its value. */
+  private static boolean hasSessionCookie(HttpServletRequest request) {
     Cookie[] cookies = request.getCookies();
     if (cookies != null) {
       for (Cookie cookie : cookies) {
@@ -2265,7 +2278,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         }
       }
     }
-    return extractBearerToken(request) != null;
+    return false;
   }
 
   private AuthenticatedAccount resolveAuthenticatedAccountContext(HttpServletRequest request,
