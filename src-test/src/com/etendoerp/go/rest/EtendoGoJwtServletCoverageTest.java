@@ -21,11 +21,14 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -35,6 +38,9 @@ import java.io.BufferedReader;
 import java.io.PrintWriter;
 import java.io.StringReader;
 import java.io.StringWriter;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
@@ -51,14 +57,17 @@ import org.codehaus.jettison.json.JSONObject;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockedStatic;
+import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
+import org.openbravo.dal.service.OBDal;
+import org.openbravo.erpCommon.businessUtility.InitialClientSetup;
+import org.openbravo.erpCommon.utility.OBError;
 import org.openbravo.model.ad.access.Role;
 import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.access.UserRoles;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.currency.Currency;
 import org.openbravo.model.common.enterprise.Organization;
-import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.schemaforge.data.Account;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -712,6 +721,57 @@ public class EtendoGoJwtServletCoverageTest {
 
     assertEquals(400, resp.status);
     assertTrue(new JSONObject(resp.body()).toString().contains("clientName"));
+  }
+
+  @Test
+  public void resolveOrCreateClientReturnsTheIdFromTheCreationSession() throws Exception {
+    StringWriter stream = new StringWriter();
+    PrintWriter writer = new PrintWriter(stream);
+    VariablesSecureApp vars = mock(VariablesSecureApp.class);
+    when(vars.getSessionValue("AD_Client_ID")).thenReturn("created-client-id");
+
+    Class<?> requestType = Class.forName(
+        "com.etendoerp.go.rest.EtendoGoJwtServlet$OnboardingRequestData");
+    Constructor<?> constructor = requestType.getDeclaredConstructor();
+    constructor.setAccessible(true);
+    Object requestData = constructor.newInstance();
+    Field clientName = requestType.getDeclaredField("clientName");
+    clientName.setAccessible(true);
+    clientName.set(requestData, "Acme");
+    Field fullName = requestType.getDeclaredField("fullName");
+    fullName.setAccessible(true);
+    fullName.set(requestData, "Ada Lovelace");
+
+    Method resolver = EtendoGoJwtServlet.class.getDeclaredMethod("resolveOrCreateClient",
+        PrintWriter.class, VariablesSecureApp.class, String.class, requestType, String.class,
+        String.class);
+    resolver.setAccessible(true);
+
+    OBError success = new OBError();
+    success.setType("Success");
+
+    try (var supportMock = mockStatic(EtendoGoJwtSupport.class);
+         var setupMock = mockConstruction(InitialClientSetup.class, (setup, context) ->
+             when(setup.createClient(any(VariablesSecureApp.class), anyString(), anyString(),
+                 anyString(), anyString(), anyString(), anyString(), anyString(), anyBoolean(),
+                 isNull(), anyBoolean(), anyBoolean(), anyBoolean(), anyBoolean(), anyBoolean()))
+                 .thenAnswer(invocation -> {
+                   // InitialClientSetup.insertClient stores the actual created ID in this session.
+                   VariablesSecureApp creationVars = invocation.getArgument(0);
+                   creationVars.setSessionValue("AD_Client_ID", "created-client-id");
+                   return success;
+                 }))) {
+      supportMock.when(() -> EtendoGoJwtSupport.findClientIdByName("Acme"))
+          .thenReturn(null, "stale-name-lookup-id");
+      supportMock.when(() -> EtendoGoJwtSupport.buildClientUsername("owner@test.com", "Acme"))
+          .thenReturn("acme-admin");
+
+      Object result = resolver.invoke(servlet, writer, vars, "owner@test.com", requestData,
+          "currency-1", "temporary-password");
+
+      assertEquals("created-client-id", result);
+      supportMock.verify(() -> EtendoGoJwtSupport.findClientIdByName("Acme"));
+    }
   }
 
   @Test
