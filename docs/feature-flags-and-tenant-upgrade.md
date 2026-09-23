@@ -212,13 +212,22 @@ any credential is read, so every toggle point must resolve the same answer). Loc
 |---|---|
 | `GET /sws/go/demo-data-transfer`, `POST /sws/go/demo-data-transfer/retry` | 404 `Unknown endpoint: <path>`, identical to a path that does not exist |
 | `recordDemoDataTransferSelection` (checkout / purchase) | the body's `dataTransfer` selection is ignored |
-| `startDemoDataTransferBestEffort` (paid onboarding commit) | no transfer started, no demo tenant looked up |
+| `startDemoDataTransferBestEffort` (paid onboarding commit) | no asynchronous transfer started |
 
 The worker thread is created on first submission, so an instance with the flag off never starts
 one. No key exists in the web client's `flag-keys.js`: the First Steps row appears only when the
 status read answers 2xx, so the browser follows this evaluator instead of running a second one.
-The preconditions that must be closed before switching it on are the `deferredItems` of
-`demo-data-transfer` in the Schema Forge `flags-registry.json`.
+With the flag off, paid onboarding retains its older synchronous grid-import transfer when the
+browser explicitly selected products or contacts. With the flag on, that synchronous path is
+disabled: only the server-recorded asynchronous job copies data. Source and target client IDs
+must differ in both paths.
+
+With the flag on, checkout records `{products, contacts}` under its request ID before contacting
+Stripe. The first selection is immutable on checkout reopen. `GET /billing/purchases/{id}` and
+the billing overview include `dataTransferEnabled` and include `dataTransfer` only when a
+server-side selection exists. A flag-on older purchase with no selection therefore remains
+`NOT_REQUESTED`; the browser must not guess its choice. The recovery procedure is in
+[`demo-data-transfer-recovery.md`](demo-data-transfer-recovery.md).
 
 ## 2. The onboarding paywall
 
@@ -298,12 +307,12 @@ reclaimed, its attempt number is incremented, and its timestamp is renewed. The 
 cannot close a request after a retry has taken over. This makes browser refreshes, process restarts,
 and stale workers recoverable without a schema migration or a second payment.
 
-When the paid flow requests demo-data transfer, the source rows are converted into the same NEO
-batch operations used by the Products and Contacts grid import. A product price is a linked
-`price` operation (`parentRef`) in the same atomic batch, and the destination default sales price
-list is resolved with the shared `PriceListVersionResolver`. Existing destination search keys are
-skipped before the batch, making retries idempotent. The transfer does not use `DalUtil.copy` or a
-second persistence path.
+With `demo-data-transfer` enabled, the paid flow starts the durable transfer after provisioning
+commits. Products, their sales/purchase prices and current cost, and contacts are copied under
+target client references; global units and tax categories remain global references. Missing
+required target references fail the job with a visible reason. Existing target search keys and
+price/cost rows are updated so a retry does not duplicate them. With the flag disabled, the older
+synchronous NEO grid-import path remains available for an explicit browser selection.
 
 ### The plan is derived from the payment, not from the decision
 
