@@ -192,6 +192,12 @@ abstract class AbstractFiscalHandler {
    * {@link JSONObject}) with every per-invoice array of {@link #snapshotExcludedLists} replaced by
    * its row count. The single place a snapshot is built, so its size is bounded whatever the
    * number of invoices in the period.
+   *
+   * <p><b>Known, accepted limit (349).</b> The 349 snapshot still grows with the number of
+   * OPERATOR rows (~264 chars each, one per partner and key), so beyond roughly 3,800 operator
+   * rows it exceeds the column's AD {@code FIELDLENGTH} of 1,000,000. The entity validator then
+   * rejects it and the presentation fails safely (500, nothing written) — documented rather than
+   * handled, being far beyond any realistic 349.
    */
   @SuppressWarnings("java:S112")
   final JSONObject computeSubmittedSnapshot(String orgId, int year, String period)
