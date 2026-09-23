@@ -34,7 +34,17 @@ public class HostedCheckoutService {
     return createSession(accountId, accountEmail, clientName, origin, requestId -> { });
   }
 
-  /** Persists request-specific local intent before contacting the payment provider. */
+  /**
+   * Persists request-specific local intent before contacting the payment provider.
+   * @param accountId authenticated account id, correlated on the durable request row
+   * @param accountEmail authenticated account email
+   * @param clientName requested client name
+   * @param origin public application origin for return URLs
+   * @param beforeProvider callback invoked with the request id before contacting the provider
+   * @return checkout request id, URL, and mode
+   * @throws IOException when the provider cannot be reached or rejects the request
+   * @throws JSONException when the provider response is not valid JSON
+   */
   public JSONObject createSession(String accountId, String accountEmail, String clientName,
       String origin, Consumer<String> beforeProvider) throws IOException, JSONException {
     if (!CheckoutConfiguration.isConfigured()) throw new IllegalStateException("Checkout is not configured");

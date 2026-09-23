@@ -20,25 +20,33 @@ final class DemoDataTransferReflection {
   static void copy(Object source, Object target, String... properties) {
     for (String property : properties) {
       try {
-        Method getter;
-        try {
-          getter = source.getClass().getMethod("get" + property);
-        } catch (NoSuchMethodException e) {
-          getter = source.getClass().getMethod("is" + property);
-        }
-        Object value = getter.invoke(source);
-        if (value == null) continue;
-        for (Method method : target.getClass().getMethods()) {
-          if (method.getName().equals("set" + property) && method.getParameterCount() == 1) {
-            method.invoke(target, value);
-            break;
-          }
-        }
+        copyProperty(source, target, property);
       } catch (NoSuchMethodException ignored) {
         // Optional module columns differ by installed module/version.
       } catch (ReflectiveOperationException e) {
         throw new IllegalStateException("Could not copy transfer property " + property, e);
       }
+    }
+  }
+
+  private static void copyProperty(Object source, Object target, String property)
+      throws ReflectiveOperationException {
+    Method getter = findGetter(source, property);
+    Object value = getter.invoke(source);
+    if (value == null) return;
+    for (Method method : target.getClass().getMethods()) {
+      if (method.getName().equals("set" + property) && method.getParameterCount() == 1) {
+        method.invoke(target, value);
+        return;
+      }
+    }
+  }
+
+  private static Method findGetter(Object source, String property) throws NoSuchMethodException {
+    try {
+      return source.getClass().getMethod("get" + property);
+    } catch (NoSuchMethodException e) {
+      return source.getClass().getMethod("is" + property);
     }
   }
 
