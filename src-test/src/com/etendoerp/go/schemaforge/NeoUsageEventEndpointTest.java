@@ -48,7 +48,6 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -208,11 +207,9 @@ class NeoUsageEventEndpointTest {
     }
 
     /**
-     * KNOWN BUG (ETP-5462, reported to the developer): jettison 1.3 recurses without end on a body
-     * that stops inside an array, and on deeply nested arrays, so parseEvents() throws
-     * StackOverflowError — an Error, not the JSONException it catches — and the caller gets a 500
-     * instead of the documented 400. The nested case is a valid ~40 KB body, well under the cap.
-     * Remove @Disabled once parseEvents() maps this to null.
+     * Regression (ETP-5462): jettison 1.3 recurses without end on a body that stops inside an array,
+     * and once per level on deep nesting, so both end in StackOverflowError — an Error the servlet's
+     * catch (Exception) never sees. The nested case is a valid ~40 KB body, well under the cap.
      */
     @ParameterizedTest
     @MethodSource("com.etendoerp.go.schemaforge.NeoUsageEventEndpointTest#stackBreakingBodies")
