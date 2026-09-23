@@ -259,7 +259,7 @@ A production submission also freezes the declaration's figures: `handleSubmit` c
   sourceCount}`. A period can hold tens of thousands of invoices, and the snapshot is also
   returned by every `GET /declarations`, so per-invoice rows are never kept.
 - **Validated before filing.** The snapshot is checked against the entity's own
-  `submittedSnapshot` property (`FiscalDeclCrudHandler#validateSubmittedSnapshot` — AD length and
+  `submittedSnapshot` property (`FiscalSubmittedSnapshotSupport#validateSubmittedSnapshot` — AD length and
   domain type, without assigning it). If the compute or that check fails, the request answers
   `500` `SNAPSHOT_FAILED` and the AEAT is never contacted: once Hacienda accepts a filing it cannot
   be undone, so a declaration must not end up presented without its snapshot. The column is a
@@ -277,7 +277,7 @@ A production submission also freezes the declaration's figures: `handleSubmit` c
 From then on `GET /fiscal303/boxes` returns that snapshot as-is (no `sources`) instead of
 recomputing from the current invoices. Test mode takes no snapshot (it never changes the
 declaration). The manual presentation paths (`PUT /fiscal303/declarations`, both models) take the
-same kind of snapshot through `FiscalDeclCrudHandler#applySubmittedSnapshotTransition`; see
+same kind of snapshot through `FiscalSubmittedSnapshotSupport#applyTransition`; see
 `../../../schema_forge/docs/generated-custom-windows/fiscal-models.md` ("Freeze once presented")
 for the full contract.
 
