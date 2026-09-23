@@ -2765,6 +2765,17 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
           "The session client is not owned by this account");
       return null;
     }
+    // ETP-5455 (decision 2) — a commercially blocked environment's data is fully inaccessible,
+    // not only through NEO: every account endpoint that acts on the session's tenant is refused
+    // with the same 402 NEO answers. The account itself (billing, upgrade, /me) stays reachable so
+    // the owner can pay. null = a tenant that predates lifecycle metadata, the legacy transition.
+    EnvironmentAccessPolicy.Decision access =
+        tenantEnvironmentLifecycleService.evaluateAccess(clientId, true, Instant.now());
+    if (access != null && access != EnvironmentAccessPolicy.Decision.ALLOWED) {
+      writeError(response, SC_PAYMENT_REQUIRED,
+          "Environment access is not available: " + access.name());
+      return null;
+    }
     return new TenantSession(clientId, StringUtils.defaultIfBlank(orgId, "0"));
   }
 
