@@ -14,6 +14,13 @@ transactional email best-effort. Email delivery failure is audited by the
 transactional email safety store and does not roll back the already committed
 environment.
 
+Client resolution keeps the first name lookup for same-account resume and
+cross-account collision checks. When no client exists and `InitialClientSetup`
+creates one, onboarding uses the exact `AD_Client_ID` that setup stores in the
+request session for all later provisioning and paid-upgrade side effects. It
+does not look up the new client by name a second time; a successful setup that
+does not return that ID fails closed before provisioning continues.
+
 **Do not hardcode the step count in prose** — the list below is the source of
 truth; keep it (and this list ONLY) in sync with
 `EtendoGoJwtServlet.ensureOnboardingDataset` whenever a step is added,
