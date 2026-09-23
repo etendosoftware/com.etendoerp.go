@@ -24,6 +24,7 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.when;
 
 import org.codehaus.jettison.json.JSONObject;
@@ -79,6 +80,28 @@ public class InventoryHandlerTest {
     when(obDal.get(InventoryCount.class, RECORD_ID)).thenReturn(inventory);
     when(obDal.get(Process.class, PROCESS_ID)).thenReturn(process);
     return obDal;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Posting delegation (ETP-5360)
+  // ---------------------------------------------------------------------------
+
+  @Test
+  public void handleReturnsPostingResponseWhenServiceHandlesAction() {
+    DocumentPostingService service = mock(DocumentPostingService.class);
+    NeoContext ctx = mock(NeoContext.class);
+    NeoResponse sentinel = new NeoResponse(200, new JSONObject());
+    when(service.handleAction(ctx)).thenReturn(sentinel);
+
+    handler.setPostingService(service);
+
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      NeoResponse resp = handler.handle(ctx);
+      assertSame(sentinel, resp);
+      // Short-circuit proof: generateLines logic (which starts with OBDal.getInstance())
+      // must never run once the posting service has already handled the action.
+      dalMock.verify(OBDal::getInstance, never());
+    }
   }
 
   // ---------------------------------------------------------------------------

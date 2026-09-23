@@ -71,6 +71,7 @@ public final class OnboardingDatasetDefinition {
       "C_DOCTYPE_TRL",
       "C_ELEMENT",
       "C_ELEMENTVALUE",
+      "C_ELEMENTVALUE_OPERAND",
       "C_ELEMENTVALUE_TRL",
       "C_LOCATION",
       "C_PAYMENTTERM",
