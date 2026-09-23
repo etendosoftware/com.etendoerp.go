@@ -21,6 +21,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 import java.sql.Timestamp;
@@ -77,9 +78,16 @@ import com.etendoerp.go.schemaforge.data.CheckoutRequest;
  * <p><b>Two consequences of committing that shape the code below.</b> A commit closes the
  * Hibernate session, so any entity held across a store call is detached — ids and e-mails are
  * captured into local {@code String}s before the first call rather than read back off an entity.
- * And every store method installs a {@code (0,0,0,0)} {@link OBContext} and never restores the
- * caller's, so no test may assume its own context survived a store call; each one re-establishes
- * the context it needs.
+ * And a store call leaves the Hibernate session closed, so each fixture helper below opens the
+ * {@code (0,0,0,0)} context it needs rather than assuming one is still installed.
+ *
+ * <p><b>Group 6 pins the fourth property: the caller's {@link OBContext} survives a store call.</b>
+ * It did not always. Every method swapped in the system context and unwound with
+ * {@link OBContext#restorePreviousMode()} alone, which pops the admin-mode stack and leaves the
+ * context swap in place — so the caller silently continued as system. Harmless while the callers
+ * were the webhook (no context to lose) and the status endpoint (finished when the store returns),
+ * and not harmless at all for {@code applyPaidUpgradeSideEffects}, which calls in from the middle
+ * of onboarding and whose every later step depends on the context it established.
  *
  * <p>Assertions on committed values load fresh DAL entities rather than retaining objects from a
  * previous session, so they read committed state after bulk HQL updates.
@@ -96,6 +104,13 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
   private static final String STATUS_PROVISIONED = "PROVISIONED";
 
   private static final String ENVIRONMENT = "ETP-5045 Integration Environment";
+
+  /**
+   * A 32-character {@code ETGO_ACCOUNT_ID} that names no account. {@code ETGO_ACCOUNT_ID} is NOT
+   * NULL with an FK, so recording a request against it fails on flush — which is how Group 6 gets
+   * a store call to throw from inside, past the point where it has already swapped the context.
+   */
+  private static final String UNKNOWN_ACCOUNT_ID = "ETP5045NOSUCHACCOUNT000000000000";
 
   /**
    * An instant no write by the code under test can ever produce, so a "first-write-wins" column
@@ -118,8 +133,9 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
    * setAdminMode and restorePreviousMode", and the loop spins forever.
    *
    * <p>The loop is also unnecessary: every {@code setAdminMode} in this class and in the store is
-   * already paired in a {@code finally}, so no frame is ever left open. What does need undoing is
-   * the context the store replaced and never restored — clearing it leaves the thread clean for
+   * already paired in a {@code finally}, so no frame is ever left open. The context still needs
+   * clearing, but the store is no longer what leaves one behind — the fixture helpers in this
+   * class install {@code (0,0,0,0)} and do not restore it. Clearing it leaves the thread clean for
    * {@code OBBaseTest}'s own post-test check.
    */
   @After
@@ -534,6 +550,151 @@ public class CheckoutRequestStoreIntegrationTest extends OBBaseTest {
     assertFalse("A null correlation id names nothing", store.recordPaid(null, "cus_x", "sub_x"));
     assertFalse("A blank correlation id names nothing", store.recordPaid("   ", "cus_x",
         "sub_x"));
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Group 6 — the caller's execution context survives a store call
+  // ---------------------------------------------------------------------------------------------
+
+  /**
+   * The leak, stated as the property that was missing: a caller that hands the store a context
+   * gets that same context back.
+   *
+   * <p>Asserted with {@code assertSame} rather than by comparing client or user ids, because
+   * identity is the only assertion the old code could not have satisfied by accident: the store
+   * installs {@code (0,0,0,0)} through
+   * {@link OBContext#setOBContext(String, String, String, String)}, which builds a <em>new</em>
+   * {@link OBContext} every time. An equal-looking context would therefore still be the wrong
+   * object, and a caller whose context happened to be {@code (0,0,0,0)} too would make an
+   * id-based assertion pass over a store that restored nothing.
+   *
+   * <p>All seven entry points are exercised in one test on purpose. The capture/restore lives in a
+   * single wrapper, so seven separate tests would assert the same line seven times; what is worth
+   * pinning is that no entry point was left out of the wrapper.
+   */
+  @Test
+  public void testEveryStoreMethodGivesTheCallersContextBack() {
+    String email = newEmail("ctx-roundtrip");
+    String accountId = createAccount(email);
+    String requestId = newRequestId();
+
+    setTestUserContext();
+    OBContext caller = OBContext.getOBContext();
+    assertNotNull("Sanity: the caller must actually hold a context to lose", caller);
+
+    store.recordRequested(requestId, accountId, email, ENVIRONMENT);
+    assertSame("recordRequested must give the caller's context back", caller,
+        OBContext.getOBContext());
+
+    store.recordSessionCreated(requestId, "cs_" + requestId);
+    assertSame("recordSessionCreated must give the caller's context back", caller,
+        OBContext.getOBContext());
+
+    store.recordPaid(requestId, "cus_" + requestId, "sub_" + requestId);
+    assertSame("recordPaid must give the caller's context back", caller,
+        OBContext.getOBContext());
+
+    store.find(requestId, email);
+    assertSame("find must give the caller's context back", caller, OBContext.getOBContext());
+
+    store.findForAccount(email);
+    assertSame("findForAccount must give the caller's context back", caller,
+        OBContext.getOBContext());
+
+    store.findActiveForAccountAndClientName(email, ENVIRONMENT);
+    assertSame("findActiveForAccountAndClientName must give the caller's context back", caller,
+        OBContext.getOBContext());
+
+    store.isPaidFor(requestId, email, ENVIRONMENT);
+    assertSame("isPaidFor must give the caller's context back", caller,
+        OBContext.getOBContext());
+
+    store.claimForProvisioning(requestId, email);
+    assertSame("claimForProvisioning must give the caller's context back", caller,
+        OBContext.getOBContext());
+
+    store.findProvisioningAttempt(requestId, email);
+    assertSame("findProvisioningAttempt must give the caller's context back", caller,
+        OBContext.getOBContext());
+
+    store.recordProvisioned(requestId, null);
+    assertSame("recordProvisioned must give the caller's context back", caller,
+        OBContext.getOBContext());
+
+    store.recordFailureReason(requestId, "ETP-5045 context round-trip");
+    assertSame("recordFailureReason must give the caller's context back", caller,
+        OBContext.getOBContext());
+
+    assertEquals("Sanity: giving the context back must not have stopped the work happening as "
+        + "system — the request still walked the whole lifecycle", STATUS_PROVISIONED,
+        rawStatus(requestId));
+  }
+
+  /**
+   * {@code null} is a real previous context, not a missing one, and restoring it means restoring
+   * <em>no</em> context.
+   *
+   * <p>This is not a contrived state: the Stripe webhook endpoint is matched before the
+   * authentication chain, so on the one path the store was written for there is genuinely no
+   * {@link OBContext} on the thread. A restore that turned that into a system context would leave
+   * the thread more privileged after the call than before it — the leak inverted, and strictly
+   * worse than the leak, because it would look deliberate.
+   */
+  @Test
+  public void testAContextlessCallerIsLeftContextlessRatherThanSystem() {
+    String email = newEmail("ctx-none");
+    String accountId = createAccount(email);
+    String requestId = createRequest(accountId, email);
+
+    OBContext.setOBContext((OBContext) null);
+    assertNull("Sanity: this test is about a caller with no context at all",
+        OBContext.getOBContext());
+
+    assertNotNull("The store must still do its work without a caller context",
+        store.find(requestId, email));
+    assertNull("A read path must not hand a contextless caller a system context",
+        OBContext.getOBContext());
+
+    store.recordSessionCreated(requestId, "cs_" + requestId);
+    assertNull("A write path must not hand a contextless caller a system context either",
+        OBContext.getOBContext());
+
+    assertEquals("Sanity: the contextless write must still have been applied", "CREATED",
+        rawStatus(requestId));
+  }
+
+  /**
+   * The restore lives in a {@code finally}, so it must hold on the failure path too — and that is
+   * the path where it matters most. A caller whose store call throws goes on to handle the
+   * failure: it rolls back, annotates the request, answers the customer. Doing that as system
+   * instead of as itself is how a recoverable error turns into a second, unrelated one.
+   *
+   * <p>Also pins that the restore cannot mask the failure: the exception the body raised is the
+   * one that reaches the caller.
+   */
+  @Test
+  public void testTheCallersContextIsRestoredWhenTheStoreCallThrows() {
+    setTestUserContext();
+    OBContext caller = OBContext.getOBContext();
+    assertNotNull("Sanity: the caller must actually hold a context to lose", caller);
+
+    RuntimeException failure = null;
+    try {
+      store.recordRequested(newRequestId(), UNKNOWN_ACCOUNT_ID, newEmail("ctx-throwing"),
+          ENVIRONMENT);
+    } catch (RuntimeException e) {
+      failure = e;
+    }
+    // Read before cleaning up: rollbackAndClose() must not be what puts the context right.
+    OBContext contextAfterFailure = OBContext.getOBContext();
+
+    // The failed flush leaves the session unusable, and @After needs a working one to delete its
+    // fixtures. Nothing committed, so this discards the half-written request and nothing else.
+    OBDal.getInstance().rollbackAndClose();
+
+    assertNotNull("The fixture must genuinely fail, or this test asserts nothing at all", failure);
+    assertSame("A store call that throws must still give the caller's context back — the caller "
+        + "handles the failure next, and it must do so as itself", caller, contextAfterFailure);
   }
 
   // ---------------------------------------------------------------------------------------------

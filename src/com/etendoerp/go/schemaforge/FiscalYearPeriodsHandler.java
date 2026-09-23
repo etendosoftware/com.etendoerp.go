@@ -17,10 +17,12 @@
 package com.etendoerp.go.schemaforge;
 
 import java.time.LocalDate;
+import java.time.YearMonth;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Date;
 import java.util.Locale;
+import java.util.Map;
 
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -33,8 +35,9 @@ import org.openbravo.model.financialmgmt.calendar.Year;
 
 /**
  * Handles the Calendar-only fiscal-year range extension of the core Create Periods process.
- * January-December remains the unmodified process-100 path; this handler creates July-June
- * periods directly, letting the core C_PERIOD_TRG initialize period-control records.
+ * January-December remains the unmodified process-100 path; this handler creates
+ * April-March, July-June and October-September periods directly, letting the core
+ * C_PERIOD_TRG initialize period-control records.
  */
 final class FiscalYearPeriodsHandler {
 
@@ -46,7 +49,13 @@ final class FiscalYearPeriodsHandler {
   private static final String FIELD_FISCAL_YEAR_START = "FISCALYEARSTART";
   private static final String FIELD_CREATE_ADJUSTMENT = "CREATEADJUSTMENT";
   private static final String RANGE_JANUARY = "JANUARY";
+  private static final String RANGE_APRIL = "APRIL";
   private static final String RANGE_JULY = "JULY";
+  private static final String RANGE_OCTOBER = "OCTOBER";
+  private static final Map<String, Integer> SHIFTED_RANGE_START_MONTHS = Map.of(
+      RANGE_APRIL, 4,
+      RANGE_JULY, 7,
+      RANGE_OCTOBER, 10);
 
   boolean handles(NeoContext context) {
     return context != null && context.getEndpointType() == NeoEndpointType.ACTION
@@ -60,20 +69,22 @@ final class FiscalYearPeriodsHandler {
         ? context.getRequestBody().optJSONObject(FIELD_VALUES) : null;
     String range = values != null
         ? values.optString(FIELD_FISCAL_YEAR_START, RANGE_JANUARY) : RANGE_JANUARY;
-    if (!RANGE_JANUARY.equals(range) && !RANGE_JULY.equals(range)) {
-      return NeoResponse.error(400, "Fiscal Year Range must be January - December or July - June");
-    }
     if (RANGE_JANUARY.equals(range)) {
       if (values != null) {
         values.remove(FIELD_FISCAL_YEAR_START);
       }
       return null;
     }
-    return createJulyToJunePeriods(context, values);
+    Integer startMonth = SHIFTED_RANGE_START_MONTHS.get(range);
+    if (startMonth == null) {
+      return NeoResponse.error(400, "Fiscal Year Range must be one of: January - December, "
+          + "April - March, July - June, October - September");
+    }
+    return createShiftedFiscalPeriods(context, values, startMonth);
   }
 
-  private NeoResponse createJulyToJunePeriods(NeoContext context,
-      org.codehaus.jettison.json.JSONObject values) {
+  private NeoResponse createShiftedFiscalPeriods(NeoContext context,
+      org.codehaus.jettison.json.JSONObject values, int startMonth) {
     try {
       Year year = OBDal.getInstance().get(Year.class, context.getRecordId());
       if (year == null) {
@@ -84,17 +95,19 @@ final class FiscalYearPeriodsHandler {
       }
       int fiscalYear = Integer.parseInt(year.getFiscalYear());
       for (int periodNo = 1; periodNo <= 12; periodNo++) {
-        createPeriod(year, periodNo, LocalDate.of(fiscalYear, 7, 1).plusMonths(periodNo - 1L), "S");
+        createPeriod(year, periodNo,
+            LocalDate.of(fiscalYear, startMonth, 1).plusMonths(periodNo - 1L), "S");
       }
       if (values != null && "Y".equals(values.optString(FIELD_CREATE_ADJUSTMENT))) {
-        createPeriod(year, 13, LocalDate.of(fiscalYear + 1, 6, 30), "A");
+        LocalDate adjustmentDate = YearMonth.of(fiscalYear + 1, startMonth - 1).atEndOfMonth();
+        createPeriod(year, 13, adjustmentDate, "A");
       }
       OBDal.getInstance().flush();
       return NeoResponse.ok(new org.codehaus.jettison.json.JSONObject()
           .put("status", "success").put("message", "Periods created successfully"));
     } catch (Exception e) {
-      log.error("Error creating July-June periods for year {}", context.getRecordId(), e);
-      return NeoResponse.error(500, "Could not create July-June periods: " + e.getMessage());
+      log.error("Error creating shifted fiscal periods for year {}", context.getRecordId(), e);
+      return NeoResponse.error(500, "Could not create shifted fiscal periods: " + e.getMessage());
     }
   }
 
