@@ -26,6 +26,11 @@ public class SessionRoleRevokedException extends OBException {
 
   private static final long serialVersionUID = 1L;
 
+  /**
+   * Creates the exception.
+   *
+   * @param message why the session could not be rebound
+   */
   public SessionRoleRevokedException(String message) {
     super(message);
   }

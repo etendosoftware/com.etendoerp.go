@@ -52,31 +52,56 @@ public class GoSessionRoleReconciler {
   public interface RoleDirectory {
 
     /**
+     * Tells whether the user may still act with a role in the given client.
+     *
      * @return {@code true} when {@code roleId} is active, belongs to {@code clientId}, and the
      *     user has an active {@code AD_User_Roles} row for it
      */
     boolean isEligible(String userId, String roleId, String clientId);
 
-    /** @return the user's {@code Default_AD_Role_ID}, or {@code null} */
+    /**
+     * Reads the role the user enters with by default.
+     *
+     * @return the user's {@code Default_AD_Role_ID}, or {@code null}
+     */
     String findDefaultRoleId(String userId);
 
-    /** @return the user's active role ids, in the order the role list is shown to the user */
+    /**
+     * Lists the roles the user holds, used to pick a replacement when the default one is not valid.
+     *
+     * @return the user's active role ids, in the order the role list is shown to the user
+     */
     List<String> findActiveRoleIds(String userId);
 
-    /** @return {@code true} when {@code roleId} has active access to {@code orgId} */
+    /**
+     * Tells whether a role can work in an organization, so the session organization can be kept.
+     *
+     * @return {@code true} when {@code roleId} has active access to {@code orgId}
+     */
     boolean hasOrgAccess(String roleId, String orgId);
 
-    /** @return the organization and warehouse environment entry would pick for this role */
+    /**
+     * Picks the organization and warehouse for a role the session organization is not open to.
+     *
+     * @return the organization and warehouse environment entry would pick for this role
+     */
     RoleContext deriveContext(String userId, String roleId);
   }
 
   private final GoSessionStore store;
   private final RoleDirectory directory;
 
+  /** Creates a reconciler backed by the session table and the Application Dictionary roles. */
   public GoSessionRoleReconciler() {
     this(new JdbcGoSessionStore(), new DalRoleDirectory());
   }
 
+  /**
+   * Creates a reconciler over the given session store and role lookups.
+   *
+   * @param store where a rebound session is persisted
+   * @param directory the role lookups the rebind rules read
+   */
   public GoSessionRoleReconciler(GoSessionStore store, RoleDirectory directory) {
     this.store = store;
     this.directory = directory;

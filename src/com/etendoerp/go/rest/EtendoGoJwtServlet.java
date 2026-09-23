@@ -4839,6 +4839,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
+   * Rebinds the session to a role its user still holds, when its current one was revoked.
+   *
+   * @return {@code false} when the role was revoked and the user holds no other valid role
+   */
+  private boolean reconcileSessionRole(GoSessionRecord sessionRecord) {
+    try {
+      sessionRoleReconciler.reconcile(sessionRecord);
+      return true;
+    } catch (SessionRoleRevokedException e) {
+      return false;
+    }
+  }
+
+  /**
    * GET /sws/go/session
    * Restores the account and current environment context from the session cookie. Safe method — no
    * CSRF required. Returns { status, account, environment|null, csrfToken }; 401 when there is no
@@ -4864,9 +4878,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
       // A promote/demote since the environment was entered: report (and persist) the role the
       // user holds now, or a reload restores a role that is gone and lands on "no access".
-      try {
-        sessionRoleReconciler.reconcile(sessionRecord);
-      } catch (SessionRoleRevokedException e) {
+      if (!reconcileSessionRole(sessionRecord)) {
         writeError(response, HttpServletResponse.SC_UNAUTHORIZED, INVALID_OR_EXPIRED_TOKEN);
         return;
       }
