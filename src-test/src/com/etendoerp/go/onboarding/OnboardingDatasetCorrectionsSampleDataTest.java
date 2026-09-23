@@ -437,6 +437,55 @@ public class OnboardingDatasetCorrectionsSampleDataTest {
         1, seen.size());
   }
 
+  /**
+   * ETP-5364 — none of the six product series ships an internal, ticket-tagged description.
+   *
+   * <p>{@code artifacts/document-sequence/decisions.json} declares {@code description} as an
+   * EDITABLE column of the "Secuencia de documentos" window, so whatever sits in
+   * {@code AD_Sequence.Description} is product copy the tenant reads next to its own series — not
+   * an engineering note. Three rows carried one: both rectificativas shipped
+   * {@code "ETP-4737: sequence for the unified ... rectificative invoice"} and the new
+   * purchase-invoice series briefly shipped {@code "ETP-5364: sequence for the purchase invoice
+   * series"}.</p>
+   *
+   * <p>The guard is deliberately a ticket-key prefix rather than "must be absent": a description
+   * is a legitimate field and a future series may want real user-facing copy there. What must
+   * never ship is a {@code ETP-NNNN:} note. The corrective half for already-provisioned tenants is
+   * the {@code R39-document-sequence-clear-descriptions} data-fix, which matches on the same
+   * {@code ETP-} prefix so a tenant-authored description survives.</p>
+   *
+   * <p>Same regression path as the rest of this class — a dataset re-export from an instance where
+   * someone pasted a ticket reference into the field silently reintroduces it.</p>
+   */
+  @Test
+  public void testTheProductSeriesShipWithoutAnInternalDescription() throws Exception {
+    List<String> productSeries = new ArrayList<>();
+    productSeries.add("Purchase Order");
+    productSeries.add("Standard Order");
+    productSeries.add("AR Invoice");
+    productSeries.add("AP Invoice");
+    productSeries.add("Factura Rectificativa (Ventas)");
+    productSeries.add("Factura Rectificativa (Compras)");
+
+    List<String> seen = new ArrayList<>();
+    for (Element row : rows("AD_SEQUENCE.xml", "AD_SEQUENCE")) {
+      String name = childText(row, "NAME");
+      if (!productSeries.contains(name)) {
+        continue;
+      }
+      seen.add(name);
+
+      String description = childText(row, "DESCRIPTION");
+      assertFalse("series '" + name + "' ships a ticket-tagged DESCRIPTION (" + description
+          + "); that column is editable and visible in the Document Sequence window, so the"
+          + " tenant reads it as product copy (ETP-5364)",
+          description != null && description.trim().startsWith("ETP-"));
+    }
+
+    assertEquals("all six product series must be present in AD_SEQUENCE.xml",
+        productSeries.size(), seen.size());
+  }
+
   // ─── Starter tariffs (ETP-5190) ────────────────────────────────────────────
 
   /**
