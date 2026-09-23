@@ -69,7 +69,7 @@ import com.etendoerp.go.usageevents.UsageEventTypes;
  * {@code docs/neo-headless.md} §4.15).
  *
  * <p>The endpoint is built over its two seams: a capturing sink instead of
- * {@code UsageEventRecorder.record}, and a settable clock, so clamping and the rate-limit window are
+ * {@code UsageEventRecorder.submit}, and a settable clock, so clamping and the rate-limit window are
  * asserted exactly and nothing reaches a writer thread. {@code OBContext} is mocked statically (null
  * by default), because the who-columns must come from it and never from the body.</p>
  *

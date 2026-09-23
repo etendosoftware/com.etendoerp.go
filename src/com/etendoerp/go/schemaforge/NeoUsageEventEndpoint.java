@@ -24,6 +24,7 @@ import java.time.format.DateTimeParseException;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
@@ -116,11 +117,11 @@ class NeoUsageEventEndpoint {
   private final AtomicLong lastFailureLogAt = new AtomicLong();
 
   NeoUsageEventEndpoint() {
-    this(UsageEventRecorder::record, System::currentTimeMillis);
+    this(UsageEventRecorder::submit, System::currentTimeMillis);
   }
 
   /**
-   * @param sink  where built events go; {@link UsageEventRecorder#record} in production
+   * @param sink  where built events go; {@link UsageEventRecorder#submit} in production
    * @param clock epoch-millis source for clamping and rate limiting; a test seam
    */
   NeoUsageEventEndpoint(Consumer<UsageEvent> sink, LongSupplier clock) {
@@ -133,17 +134,17 @@ class NeoUsageEventEndpoint {
   }
 
   NeoResponse handle(HttpServletRequest request) throws IOException {
-    byte[] raw = readCapped(request);
-    if (raw == null) {
+    Optional<byte[]> raw = readCapped(request);
+    if (raw.isEmpty()) {
       return NeoResponse.error(HttpServletResponse.SC_REQUEST_ENTITY_TOO_LARGE,
           "Usage body exceeds " + MAX_BODY_BYTES + " bytes");
     }
-    JSONArray events = parseEvents(new String(raw, StandardCharsets.UTF_8));
+    JSONArray events = parseEvents(new String(raw.get(), StandardCharsets.UTF_8));
     if (events == null) {
       return NeoResponse.error(HttpServletResponse.SC_BAD_REQUEST,
           "Body must be a JSON object with an \"events\" array");
     }
-    return record(events);
+    return submitBatch(events);
   }
 
   /**
@@ -172,20 +173,11 @@ class NeoUsageEventEndpoint {
    */
   static boolean exceedsDepth(String body, int maxDepth) {
     int depth = 0;
-    boolean inString = false;
-    boolean escaped = false;
-    for (int i = 0; i < body.length(); i++) {
+    int i = 0;
+    while (i < body.length()) {
       char c = body.charAt(i);
-      if (inString) {
-        if (escaped) {
-          escaped = false;
-        } else if (c == '\\') {
-          escaped = true;
-        } else if (c == '"') {
-          inString = false;
-        }
-      } else if (c == '"') {
-        inString = true;
+      if (c == '"') {
+        i = endOfString(body, i);
       } else if (c == '[' || c == '{') {
         if (++depth > maxDepth) {
           return true;
@@ -193,11 +185,29 @@ class NeoUsageEventEndpoint {
       } else if (c == ']' || c == '}') {
         depth--;
       }
+      i++;
     }
     return false;
   }
 
-  private NeoResponse record(JSONArray events) {
+  /**
+   * @return the index of the quote closing the JSON string opened at {@code open} (escapes
+   *         honoured), or {@code body.length()} when the string is never closed
+   */
+  private static int endOfString(String body, int open) {
+    int i = open + 1;
+    while (i < body.length()) {
+      char c = body.charAt(i);
+      if (c == '"') {
+        return i;
+      }
+      // A backslash escapes the next character, so it is skipped too.
+      i += c == '\\' ? 2 : 1;
+    }
+    return body.length();
+  }
+
+  private NeoResponse submitBatch(JSONArray events) {
     int total = events.length();
     int accepted = 0;
     try {
@@ -290,7 +300,7 @@ class NeoUsageEventEndpoint {
       try {
         at = Instant.parse(value.trim()).toEpochMilli();
       } catch (DateTimeParseException | ArithmeticException e) {
-        at = now;
+        // Unparseable: at still holds now.
       }
     }
     return Instant.ofEpochMilli(Math.max(now - MAX_PAST_MS, Math.min(now + MAX_FUTURE_MS, at)));
@@ -334,14 +344,17 @@ class NeoUsageEventEndpoint {
     return new NeoResponse(HttpServletResponse.SC_ACCEPTED, body);
   }
 
-  /** @return the body, or null when it exceeds {@link #MAX_BODY_BYTES} */
-  private static byte[] readCapped(HttpServletRequest request) throws IOException {
+  /**
+   * @return the body (possibly empty), or {@link Optional#empty()} when it exceeds
+   *         {@link #MAX_BODY_BYTES}
+   */
+  private static Optional<byte[]> readCapped(HttpServletRequest request) throws IOException {
     if (request.getContentLengthLong() > MAX_BODY_BYTES) {
-      return null;
+      return Optional.empty();
     }
     try (InputStream in = request.getInputStream()) {
       byte[] bytes = in.readNBytes(MAX_BODY_BYTES + 1);
-      return bytes.length > MAX_BODY_BYTES ? null : bytes;
+      return bytes.length > MAX_BODY_BYTES ? Optional.empty() : Optional.of(bytes);
     }
   }
 

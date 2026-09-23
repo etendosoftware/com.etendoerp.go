@@ -116,7 +116,7 @@ class SessionLoginUsageTest {
 
   @Test
   void recordHandsTheEventToTheWriterWithAMeasuredDuration() {
-    SessionLoginUsage.record(SessionLoginUsage.ACTION_LOGIN, CLIENT, ORG, USER, ROLE, null,
+    SessionLoginUsage.recordLogin(SessionLoginUsage.ACTION_LOGIN, CLIENT, ORG, USER, ROLE, null,
         System.nanoTime() - 5_000_000L);
 
     ArgumentCaptor<UsageEvent> offered = ArgumentCaptor.forClass(UsageEvent.class);
@@ -129,7 +129,7 @@ class SessionLoginUsageTest {
 
   @Test
   void aStartInTheFutureNeverGivesANegativeDuration() {
-    SessionLoginUsage.record(SessionLoginUsage.ACTION_LOGIN, CLIENT, ORG, USER, ROLE, null,
+    SessionLoginUsage.recordLogin(SessionLoginUsage.ACTION_LOGIN, CLIENT, ORG, USER, ROLE, null,
         System.nanoTime() + 60_000_000_000L);
 
     ArgumentCaptor<UsageEvent> offered = ArgumentCaptor.forClass(UsageEvent.class);
@@ -140,13 +140,13 @@ class SessionLoginUsageTest {
   @Test
   void aFailingWriterNeverReachesTheLogin() {
     doThrow(new IllegalStateException("writer down")).when(writer).offer(any());
-    assertDoesNotThrow(() -> SessionLoginUsage.record(SessionLoginUsage.ACTION_COOKIE_LOGIN,
+    assertDoesNotThrow(() -> SessionLoginUsage.recordLogin(SessionLoginUsage.ACTION_COOKIE_LOGIN,
         CLIENT, ORG, USER, ROLE, "password", System.nanoTime()));
   }
 
   @Test
   void nullIdsAreAcceptedAndLeftToTheWriterDefaults() {
-    assertDoesNotThrow(() -> SessionLoginUsage.record(SessionLoginUsage.ACTION_LOGIN, null, null,
+    assertDoesNotThrow(() -> SessionLoginUsage.recordLogin(SessionLoginUsage.ACTION_LOGIN, null, null,
         null, null, null, System.nanoTime()));
     verify(writer).offer(any());
   }

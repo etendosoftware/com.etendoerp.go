@@ -113,12 +113,22 @@ public record UsageEvent(
 
   private static final Logger log = LogManager.getLogger(UsageEvent.class);
 
-  /** @return true when {@code source} is one the table's check constraint accepts */
+  /**
+   * Tell whether a source value would pass the table's check constraint.
+   *
+   * @param source candidate {@code SOURCE} value, possibly null
+   * @return true when {@code source} is one the table's check constraint accepts
+   */
   public static boolean isValidSource(String source) {
     return SOURCE_BACKEND.equals(source) || SOURCE_UI.equals(source)
         || SOURCE_AI_BFF.equals(source) || SOURCE_MCP.equals(source);
   }
 
+  /**
+   * Start a new event.
+   *
+   * @return an empty builder; see {@link Builder} for the defaults
+   */
   public static Builder builder() {
     return new Builder();
   }
@@ -156,6 +166,8 @@ public record UsageEvent(
      * <p>Total: a missing context, or any failure reading it, leaves client {@value #DEFAULT_CLIENT},
      * org {@value #DEFAULT_ORG}, user {@value #SYSTEM_USER} and no role. Recording an event is never
      * a reason for the caller to fail.</p>
+     *
+     * @return this builder
      */
     public Builder fromContext() {
       this.clientId = DEFAULT_CLIENT;
@@ -185,76 +197,155 @@ public record UsageEvent(
       return this;
     }
 
+    /**
+     * Set the {@code AD_Client_ID}; the writer defaults a null one.
+     *
+     * @param v the value, or null
+     * @return this builder
+     */
     public Builder clientId(String v) {
       this.clientId = v;
       return this;
     }
 
+    /**
+     * Set the {@code AD_Org_ID}; the writer defaults a null one.
+     *
+     * @param v the value, or null
+     * @return this builder
+     */
     public Builder orgId(String v) {
       this.orgId = v;
       return this;
     }
 
+    /**
+     * Set the {@code AD_User_ID}; the writer uses the system user for a null one.
+     *
+     * @param v the value, or null
+     * @return this builder
+     */
     public Builder userId(String v) {
       this.userId = v;
       return this;
     }
 
+    /**
+     * Set the {@code AD_Role_ID}, or null when there is none.
+     *
+     * @param v the value, or null
+     * @return this builder
+     */
     public Builder roleId(String v) {
       this.roleId = v;
       return this;
     }
 
-    /** One of {@link UsageEventTypes}; anything else is dropped by the recorder. */
+    /**
+     * Set the event type. One of {@link UsageEventTypes}; anything else is dropped by the recorder.
+     *
+     * @param v the value, or null
+     * @return this builder
+     */
     public Builder eventType(String v) {
       this.eventType = v;
       return this;
     }
 
-    /** Defaults to {@link UsageEvent#SOURCE_BACKEND}. */
+    /**
+     * Set the source of the event. Defaults to {@link UsageEvent#SOURCE_BACKEND}.
+     *
+     * @param v the value, or null
+     * @return this builder
+     */
     public Builder source(String v) {
       this.source = v;
       return this;
     }
 
+    /**
+     * Set the key that groups the events of one session or conversation.
+     *
+     * @param v the value, or null
+     * @return this builder
+     */
     public Builder sessionKey(String v) {
       this.sessionKey = v;
       return this;
     }
 
-    /** Spec, report or process the event is about. See the record javadoc for the name. */
+    /**
+     * Set the target of the event. Spec, report or process the event is about. See the record javadoc for the name.
+     *
+     * @param v the value, or null
+     * @return this builder
+     */
     public Builder target(String v) {
       this.target = v;
       return this;
     }
 
+    /**
+     * Set the action taken on the target.
+     *
+     * @param v the value, or null
+     * @return this builder
+     */
     public Builder action(String v) {
       this.action = v;
       return this;
     }
 
+    /**
+     * Set the outcome, {@link UsageEvent#OUTCOME_OK} or {@link UsageEvent#OUTCOME_ERROR}.
+     *
+     * @param v the value, or null
+     * @return this builder
+     */
     public Builder outcome(String v) {
       this.outcome = v;
       return this;
     }
 
-    /** Canonical code only — never an exception message or a stack trace. */
+    /**
+     * Set the error code. Canonical code only — never an exception message or a stack trace.
+     *
+     * @param v the value, or null
+     * @return this builder
+     */
     public Builder errorCode(String v) {
       this.errorCode = v;
       return this;
     }
 
+    /**
+     * Set how long the operation took.
+     *
+     * @param v duration in milliseconds, or null when not measured
+     * @return this builder
+     */
     public Builder durationMs(Long v) {
       this.durationMs = v;
       return this;
     }
 
-    /** Defaults to the moment {@link #build()} runs. */
+    /**
+     * Set when the event happened. Defaults to the moment {@link #build()} runs.
+     *
+     * @param v the value, or null
+     * @return this builder
+     */
     public Builder occurredAt(Instant v) {
       this.occurredAt = v;
       return this;
     }
 
+    /**
+     * Set the version of the application that produced the event.
+     *
+     * @param v the value, or null
+     * @return this builder
+     */
     public Builder appVersion(String v) {
       this.appVersion = v;
       return this;
@@ -264,6 +355,10 @@ public record UsageEvent(
      * Add one event-specific attribute. Shape, never content — see the record javadoc. Strings,
      * numbers and booleans are stored as such; any other value is stored as its string form; a null
      * key or value is ignored.
+     *
+     * @param key   attribute name
+     * @param value attribute value
+     * @return this builder
      */
     public Builder property(String key, Object value) {
       if (key != null && value != null) {
@@ -272,7 +367,12 @@ public record UsageEvent(
       return this;
     }
 
-    /** Add every entry of {@code values} as by {@link #property(String, Object)}. */
+    /**
+     * Add every entry of {@code values} as by {@link #property(String, Object)}.
+     *
+     * @param values attributes to add; null adds nothing
+     * @return this builder
+     */
     public Builder properties(Map<String, ?> values) {
       if (values != null) {
         values.forEach(this::property);
@@ -280,6 +380,11 @@ public record UsageEvent(
       return this;
     }
 
+    /**
+     * Assemble the event. Never throws.
+     *
+     * @return the immutable event, with {@code occurredAt} defaulted to now when unset
+     */
     public UsageEvent build() {
       return new UsageEvent(clientId, orgId, userId, roleId, eventType, source, sessionKey, target,
           action, outcome, errorCode, durationMs, occurredAt != null ? occurredAt : Instant.now(),

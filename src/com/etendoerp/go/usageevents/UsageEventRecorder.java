@@ -26,7 +26,7 @@ import org.openbravo.base.session.OBPropertiesProvider;
  * Public entry point for recording a usage event into {@code ETGO_USAGE_EVENT}.
  *
  * <pre>{@code
- * UsageEventRecorder.record(UsageEvent.builder()
+ * UsageEventRecorder.submit(UsageEvent.builder()
  *     .fromContext()
  *     .eventType(UsageEventTypes.AI_SUPPORT_MESSAGE)
  *     .sessionKey(conversationId)
@@ -37,7 +37,7 @@ import org.openbravo.base.session.OBPropertiesProvider;
  *
  * <h2>Recording must never break or slow the caller</h2>
  *
- * <p>{@link #record(UsageEvent)} returns immediately and never throws: it validates, then hands the
+ * <p>{@link #submit(UsageEvent)} returns immediately and never throws: it validates, then hands the
  * event to {@link UsageEventWriter}, whose thread does the INSERT on its own connection in its own
  * transaction. Call it <b>after</b> the business transaction has committed, so a rolled-back
  * operation is not recorded as done — or record it with {@link UsageEvent#OUTCOME_ERROR}.</p>
@@ -84,7 +84,7 @@ public final class UsageEventRecorder {
    * @param event the event, built on the calling thread; ignored when null or when this instance has
    *              opted out
    */
-  public static void record(UsageEvent event) {
+  public static void submit(UsageEvent event) {
     try {
       if (event == null || !isEnabled()) {
         return;

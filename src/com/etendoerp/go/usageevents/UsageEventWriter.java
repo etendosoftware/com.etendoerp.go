@@ -231,10 +231,13 @@ final class UsageEventWriter {
     }
   }
 
-  /** The writer loop. Keeps draining after {@link #shutdown()} until the queue is empty. */
+  /**
+   * The writer loop. Keeps draining after {@link #shutdown()} until the queue is empty, and stops as
+   * soon as the thread is interrupted.
+   */
   private void run() {
     List<UsageEvent> batch = new ArrayList<>(BATCH_SIZE);
-    while (accepting || !queue.isEmpty()) {
+    while ((accepting || !queue.isEmpty()) && !Thread.currentThread().isInterrupted()) {
       try {
         UsageEvent first = queue.poll(POLL_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         if (first == null) {
@@ -245,8 +248,8 @@ final class UsageEventWriter {
         flush(batch);
       } catch (InterruptedException e) {
         // Only shutdown() interrupts, past its grace period; it accounts for the queue itself.
+        // Restoring the flag ends the loop.
         Thread.currentThread().interrupt();
-        return;
       } catch (Throwable t) { // NOSONAR — the loop must survive anything a batch throws.
         log.debug("Unexpected failure in the usage event writer loop.", t);
       } finally {

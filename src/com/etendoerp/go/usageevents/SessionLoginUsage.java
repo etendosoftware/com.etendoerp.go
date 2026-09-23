@@ -59,11 +59,11 @@ public final class SessionLoginUsage {
    *                    any other value is left out
    * @param startNanos  {@link System#nanoTime()} at the start of the login handling
    */
-  public static void record(String action, String clientId, String orgId, String userId,
+  public static void recordLogin(String action, String clientId, String orgId, String userId,
       String roleId, String authMethod, long startNanos) {
     try {
       long durationMs = Math.max(0L, (System.nanoTime() - startNanos) / 1_000_000L);
-      UsageEventRecorder.record(
+      UsageEventRecorder.submit(
           event(action, clientId, orgId, userId, roleId, authMethod, durationMs));
     } catch (Throwable t) { // NOSONAR — recording a login must never affect the login.
       log.debug("Could not record a session.login usage event.", t);

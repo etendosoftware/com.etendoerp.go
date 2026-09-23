@@ -72,7 +72,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  *       and auth method from the <i>rotated</i> session record.</li>
  * </ul>
  *
- * <p>{@link SessionLoginUsage} is mocked statically and its {@code record(...)} answer snapshots the
+ * <p>{@link SessionLoginUsage} is mocked statically and its {@code recordLogin(...)} answer snapshots the
  * response at the moment it is called. That one snapshot proves two contracts at once: recording
  * happens <b>after</b> the 200 has been written (status set, body flushed), and a recording failure
  * cannot change what the caller already got. Everything else — DAL lookups, role list, token
@@ -98,7 +98,7 @@ public class EtendoGoJwtServletSessionLoginUsageTest {
 
   // ── capture ───────────────────────────────────────────────────────────
 
-  /** One {@code SessionLoginUsage.record(...)} call plus the response state at that instant. */
+  /** One {@code SessionLoginUsage.recordLogin(...)} call plus the response state at that instant. */
   private static final class RecordCall {
     String action;
     String clientId;
@@ -125,10 +125,10 @@ public class EtendoGoJwtServletSessionLoginUsageTest {
     }
   }
 
-  /** Stub {@code record(...)} to snapshot the call; optionally throw after the snapshot. */
+  /** Stub {@code recordLogin(...)} to snapshot the call; optionally throw after the snapshot. */
   private static void captureRecord(MockedStatic<SessionLoginUsage> usage, Captured resp,
       List<RecordCall> calls, boolean fail) {
-    usage.when(() -> SessionLoginUsage.record(any(), any(), any(), any(), any(), any(), anyLong()))
+    usage.when(() -> SessionLoginUsage.recordLogin(any(), any(), any(), any(), any(), any(), anyLong()))
         .thenAnswer(inv -> {
           RecordCall call = new RecordCall();
           call.action = inv.getArgument(0);

@@ -76,7 +76,11 @@ public final class UsageEventTypes {
     return eventType != null && KNOWN.contains(eventType);
   }
 
-  /** @return an immutable view of every accepted event type */
+  /**
+   * List every event type the recorder accepts.
+   *
+   * @return an immutable view of every accepted event type
+   */
   public static Set<String> all() {
     return KNOWN;
   }

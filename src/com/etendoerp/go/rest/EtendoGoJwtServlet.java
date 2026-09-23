@@ -3477,7 +3477,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private static void recordCookieEnvironmentLogin(GoSessionRecord entered, long startNanos) {
     try {
-      SessionLoginUsage.record(SessionLoginUsage.ACTION_COOKIE_LOGIN, entered.getCtxClientId(),
+      SessionLoginUsage.recordLogin(SessionLoginUsage.ACTION_COOKIE_LOGIN, entered.getCtxClientId(),
           entered.getCtxOrgId(), entered.getUserId(), entered.getRoleId(),
           entered.getAuthMethod(), startNanos);
     } catch (Exception e) { // NOSONAR — usage recording must not affect the login.
@@ -3494,7 +3494,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static void recordLegacyEnvironmentLogin(String jwtToken, long startNanos) {
     try {
       DecodedJWT claims = JWT.decode(jwtToken);
-      SessionLoginUsage.record(SessionLoginUsage.ACTION_LOGIN,
+      SessionLoginUsage.recordLogin(SessionLoginUsage.ACTION_LOGIN,
           claims.getClaim(PROGRESS_CLIENT).asString(),
           claims.getClaim(PROGRESS_ORGANIZATION).asString(),
           claims.getClaim("user").asString(),

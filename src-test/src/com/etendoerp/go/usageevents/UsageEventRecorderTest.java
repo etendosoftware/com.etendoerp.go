@@ -99,7 +99,7 @@ class UsageEventRecorderTest {
 
   @Test
   void aNullEventIsIgnored() {
-    assertDoesNotThrow(() -> UsageEventRecorder.record(null));
+    assertDoesNotThrow(() -> UsageEventRecorder.submit(null));
     verify(mockWriter, never()).offer(any());
   }
 
@@ -108,7 +108,7 @@ class UsageEventRecorderTest {
   void anExplicitFalseTurnsRecordingOff(String value) {
     openbravoProperties.setProperty(UsageEventRecorder.PROP_ENABLED, value);
     assertFalse(UsageEventRecorder.isEnabled());
-    UsageEventRecorder.record(known());
+    UsageEventRecorder.submit(known());
     verify(mockWriter, never()).offer(any());
   }
 
@@ -122,7 +122,7 @@ class UsageEventRecorderTest {
   @Test
   void anAbsentFlagMeansEnabledAndTheEventIsOffered() {
     UsageEvent event = known();
-    UsageEventRecorder.record(event);
+    UsageEventRecorder.submit(event);
     verify(mockWriter).offer(event);
   }
 
@@ -132,7 +132,7 @@ class UsageEventRecorderTest {
         .thenThrow(new IllegalStateException("not initialised"));
     assertTrue(UsageEventRecorder.isEnabled());
     UsageEvent event = known();
-    UsageEventRecorder.record(event);
+    UsageEventRecorder.submit(event);
     verify(mockWriter).offer(event);
   }
 
@@ -147,7 +147,7 @@ class UsageEventRecorderTest {
   @Test
   void aWriterThatThrowsNeverReachesTheCaller() {
     when(mockWriter.offer(any())).thenThrow(new IllegalStateException("boom"));
-    assertDoesNotThrow(() -> UsageEventRecorder.record(known()));
+    assertDoesNotThrow(() -> UsageEventRecorder.submit(known()));
   }
 
   // ── D4 rejection ──────────────────────────────────────────────────────
@@ -156,7 +156,7 @@ class UsageEventRecorderTest {
   @ValueSource(strings = { "ai.agent.messages", "UNKNOWN", "" })
   void anUnknownTypeIsDroppedAndCounted(String type) {
     long before = UsageEventRecorder.getRejectedEvents();
-    UsageEventRecorder.record(UsageEvent.builder().eventType(type).build());
+    UsageEventRecorder.submit(UsageEvent.builder().eventType(type).build());
     verify(mockWriter, never()).offer(any());
     assertEquals(before + 1, UsageEventRecorder.getRejectedEvents());
   }
@@ -164,7 +164,7 @@ class UsageEventRecorderTest {
   @Test
   void aNullTypeIsDroppedAndCounted() {
     long before = UsageEventRecorder.getRejectedEvents();
-    UsageEventRecorder.record(UsageEvent.builder().build());
+    UsageEventRecorder.submit(UsageEvent.builder().build());
     verify(mockWriter, never()).offer(any());
     assertEquals(before + 1, UsageEventRecorder.getRejectedEvents());
   }
@@ -173,7 +173,7 @@ class UsageEventRecorderTest {
   @ValueSource(strings = { "browser", "UI", "" })
   void anInvalidSourceIsDroppedAndCounted(String source) {
     long before = UsageEventRecorder.getRejectedEvents();
-    UsageEventRecorder.record(UsageEvent.builder()
+    UsageEventRecorder.submit(UsageEvent.builder()
         .eventType(UsageEventTypes.AI_AGENT_MESSAGE).source(source).build());
     verify(mockWriter, never()).offer(any());
     assertEquals(before + 1, UsageEventRecorder.getRejectedEvents());
@@ -181,7 +181,7 @@ class UsageEventRecorderTest {
 
   @Test
   void aNullSourceIsDropped() {
-    UsageEventRecorder.record(UsageEvent.builder()
+    UsageEventRecorder.submit(UsageEvent.builder()
         .eventType(UsageEventTypes.AI_AGENT_MESSAGE).source(null).build());
     verify(mockWriter, never()).offer(any());
   }
@@ -190,9 +190,9 @@ class UsageEventRecorderTest {
   void rejectionsLogAtErrorOnlyOncePerInterval() throws Exception {
     rearmRejectionLog();
     try (LogCapture logs = LogCapture.of(UsageEventRecorder.class)) {
-      UsageEventRecorder.record(UsageEvent.builder().eventType("first.bad").build());
-      UsageEventRecorder.record(UsageEvent.builder().eventType("second.bad").build());
-      UsageEventRecorder.record(UsageEvent.builder()
+      UsageEventRecorder.submit(UsageEvent.builder().eventType("first.bad").build());
+      UsageEventRecorder.submit(UsageEvent.builder().eventType("second.bad").build());
+      UsageEventRecorder.submit(UsageEvent.builder()
           .eventType(UsageEventTypes.AI_AGENT_MESSAGE).source("nope").build());
 
       List<String> errors = logs.messages(Level.ERROR);
@@ -206,7 +206,7 @@ class UsageEventRecorderTest {
   void anInvalidSourceIsReportedAsSuch() throws Exception {
     rearmRejectionLog();
     try (LogCapture logs = LogCapture.of(UsageEventRecorder.class)) {
-      UsageEventRecorder.record(UsageEvent.builder()
+      UsageEventRecorder.submit(UsageEvent.builder()
           .eventType(UsageEventTypes.AI_AGENT_MESSAGE).source("browser").build());
       String error = logs.messages(Level.ERROR).get(0);
       assertTrue(error.contains("invalid source"), error);
@@ -218,7 +218,7 @@ class UsageEventRecorderTest {
   void lineBreaksInARejectedTypeCannotForgeLogLines() throws Exception {
     rearmRejectionLog();
     try (LogCapture logs = LogCapture.of(UsageEventRecorder.class)) {
-      UsageEventRecorder.record(UsageEvent.builder()
+      UsageEventRecorder.submit(UsageEvent.builder()
           .eventType("evil\r\nFAKE ERROR line\tx").build());
       String error = logs.messages(Level.ERROR).get(0);
       assertFalse(error.contains("\r") || error.contains("\n") || error.contains("\t"), error);
@@ -246,11 +246,11 @@ class UsageEventRecorderTest {
     }, System::currentTimeMillis);
     UsageEventRecorder.setWriter(writer);
     try {
-      UsageEventRecorder.record(UsageEvent.builder().eventType("not.a.type").build());
+      UsageEventRecorder.submit(UsageEvent.builder().eventType("not.a.type").build());
       for (String type : UsageEventTypes.all()) {
         for (String source : List.of(UsageEvent.SOURCE_BACKEND, UsageEvent.SOURCE_UI,
             UsageEvent.SOURCE_AI_BFF, UsageEvent.SOURCE_MCP)) {
-          UsageEventRecorder.record(UsageEvent.builder().eventType(type).source(source).build());
+          UsageEventRecorder.submit(UsageEvent.builder().eventType(type).source(source).build());
         }
       }
       int expected = UsageEventTypes.all().size() * 4;
@@ -293,7 +293,7 @@ class UsageEventRecorderTest {
     UsageEventRecorder.setWriter(writer);
     UsageEventRecorder.shutdown();
 
-    UsageEventRecorder.record(known());
+    UsageEventRecorder.submit(known());
 
     assertEquals(1L, UsageEventRecorder.getDroppedRows());
   }
