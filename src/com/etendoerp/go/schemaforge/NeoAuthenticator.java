@@ -113,9 +113,11 @@ class NeoAuthenticator {
   /**
    * Reconstruct {@link OBContext} from a resolved cookie session, mirroring {@link #authenticateJwt}
    * but sourcing the environment from the session record instead of JWT claims. Throws when no
-   * environment has been selected on the session yet.
+   * environment has been selected on the session yet, and refuses the request when the environment
+   * access policy does not allow the selected environment.
    */
-  private void applySessionContext(HttpServletRequest request, GoSessionRecord sessionRecord) {
+  private void applySessionContext(HttpServletRequest request, GoSessionRecord sessionRecord)
+      throws CommercialAccessException {
     if (StringUtils.isAnyBlank(sessionRecord.getUserId(), sessionRecord.getRoleId(), sessionRecord.getCtxOrgId(),
         sessionRecord.getCtxClientId())) {
       throw new OBException("Session has no environment selected");
@@ -124,6 +126,7 @@ class NeoAuthenticator {
         sessionRecord.getCtxOrgId(), sessionRecord.getWarehouseId(), sessionRecord.getCtxClientId());
     OBContext.setOBContext(context);
     OBContext.setOBContextInSession(request, context);
+    enforceEnvironmentAccess(sessionRecord.getCtxClientId());
     applyRequestLanguage(request);
   }
 
@@ -223,6 +226,7 @@ class NeoAuthenticator {
     OBContext context = SecureWebServicesUtils.createContext(userId, roleId, orgId, null, clientId);
     OBContext.setOBContext(context);
     OBContext.setOBContextInSession(request, context);
+    enforceEnvironmentAccess(clientId);
     applyRequestLanguage(request);
   }
 
