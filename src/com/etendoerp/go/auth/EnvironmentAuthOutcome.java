@@ -55,21 +55,51 @@ public final class EnvironmentAuthOutcome {
   private final String message;
   private final AuthScheme scheme;
   private final OBContext context;
+  private final String userId;
+  private final String roleId;
+  private final String clientId;
+  private final String orgId;
 
   private EnvironmentAuthOutcome(Status status, String message, AuthScheme scheme,
-      OBContext context) {
+      OBContext context, String[] identity) {
     this.status = status;
     this.message = message;
     this.scheme = scheme;
     this.context = context;
+    this.userId = identity[0];
+    this.roleId = identity[1];
+    this.clientId = identity[2];
+    this.orgId = identity[3];
   }
 
-  static EnvironmentAuthOutcome authenticated(AuthScheme scheme, OBContext context) {
-    return new EnvironmentAuthOutcome(Status.AUTHENTICATED, null, scheme, context);
+  /**
+   * A request let through with the context the pipeline installed. Public so a consumer's own
+   * tests can hand it a ready outcome instead of re-mocking the whole pipeline.
+   *
+   * @param scheme   the scheme the credential was resolved as
+   * @param context  the installed context
+   * @param userId   the authenticated user
+   * @param roleId   the role the context runs with
+   * @param clientId the environment (client) of the context
+   * @param orgId    the organization of the context
+   * @return the authenticated outcome
+   */
+  public static EnvironmentAuthOutcome authenticated(AuthScheme scheme, OBContext context,
+      String userId, String roleId, String clientId, String orgId) {
+    return new EnvironmentAuthOutcome(Status.AUTHENTICATED, null, scheme, context,
+        new String[] { userId, roleId, clientId, orgId });
   }
 
-  static EnvironmentAuthOutcome refused(Status status, String message, AuthScheme scheme) {
-    return new EnvironmentAuthOutcome(status, message, scheme, null);
+  /**
+   * A refused request.
+   *
+   * @param status  why it was refused; decides the HTTP status
+   * @param message the client-safe message to answer with
+   * @param scheme  the scheme the credential was resolved as, or null when none was
+   * @return the refused outcome
+   */
+  public static EnvironmentAuthOutcome refused(Status status, String message, AuthScheme scheme) {
+    return new EnvironmentAuthOutcome(status, message, scheme, null, new String[4]);
   }
 
   /** @return true when the request may proceed; {@link #getContext()} is then set */
@@ -100,5 +130,25 @@ public final class EnvironmentAuthOutcome {
   /** @return the context installed for the request, or null when refused */
   public OBContext getContext() {
     return context;
+  }
+
+  /** @return the authenticated user, or null when refused */
+  public String getUserId() {
+    return userId;
+  }
+
+  /** @return the role the context runs with, or null when refused */
+  public String getRoleId() {
+    return roleId;
+  }
+
+  /** @return the environment (client) of the context, or null when refused */
+  public String getClientId() {
+    return clientId;
+  }
+
+  /** @return the organization of the context, or null when refused */
+  public String getOrgId() {
+    return orgId;
   }
 }

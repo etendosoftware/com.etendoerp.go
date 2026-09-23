@@ -31,6 +31,7 @@ import org.apache.logging.log4j.Logger;
 import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 
+import com.auth0.jwt.interfaces.Claim;
 import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.auth.EnvironmentAuthOutcome.Status;
 import com.etendoerp.go.oauth2.OAuth2Filter;
@@ -65,7 +66,9 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
  * </ol>
  *
  * <p>Status codes and messages are the ones the consumers answered before, so no client sees a
- * contract change — only the cases where the branches used to disagree now agree.
+ * contract change — only the cases where the branches used to disagree now agree. (One wording
+ * was unified: support used to name the missing claim; every surface now answers
+ * {@value #MSG_MISSING_CLAIMS}, still with 401.)
  */
 public class EnvironmentRequestAuthenticator {
 
@@ -131,6 +134,39 @@ public class EnvironmentRequestAuthenticator {
     } catch (RuntimeException e) {
       return refusedFor(e, resolution.identity.scheme);
     }
+  }
+
+  /**
+   * Resolves the credential exactly like {@link #authenticate} — same cookie, CSRF, kill switch,
+   * claims and OAuth2 rules, same refusals — but installs no {@link OBContext}. For a surface that
+   * builds its own per-operation context from the identity (support conversations) and so has no
+   * use for the bind step.
+   *
+   * <p>Only for policies without a commercial-access requirement: that check lives in the bind
+   * step, so resolving without binding under such a policy would skip it.
+   *
+   * @param request the incoming request
+   * @param policy  a policy whose {@link SurfacePolicy#isCommercialAccessRequired()} is false
+   * @return the outcome; when authenticated it carries the identity ids and no context
+   * @throws IllegalArgumentException if the policy requires commercial access
+   */
+  public EnvironmentAuthOutcome identify(HttpServletRequest request, SurfacePolicy policy) {
+    if (policy.isCommercialAccessRequired()) {
+      throw new IllegalArgumentException(
+          policy + " requires the commercial-access check; use authenticate()");
+    }
+    Resolution resolution;
+    try {
+      resolution = resolve(request, policy);
+    } catch (RuntimeException e) {
+      return refusedFor(e, null);
+    }
+    if (resolution.refusal != null) {
+      return resolution.refusal;
+    }
+    Identity identity = resolution.identity;
+    return EnvironmentAuthOutcome.authenticated(identity.scheme, null, identity.userId,
+        identity.roleId, identity.clientId, identity.orgId);
   }
 
   // ------------------------------------------------------------------ phase 1: resolve
@@ -202,8 +238,10 @@ public class EnvironmentRequestAuthenticator {
     return Resolution.of(identity);
   }
 
+  /** Null-safe: a claim the token does not carry reads as absent, never as an NPE. */
   private static String claim(DecodedJWT jwt, String name) {
-    return jwt.getClaim(name).asString();
+    Claim value = jwt.getClaim(name);
+    return value == null ? null : value.asString();
   }
 
   private static Resolution fromOAuth2(HttpServletRequest request, String token) {
@@ -260,7 +298,8 @@ public class EnvironmentRequestAuthenticator {
       }
     }
     NeoLanguage.applyToContext(request.getHeader(HEADER_ACCEPT_LANGUAGE));
-    return EnvironmentAuthOutcome.authenticated(identity.scheme, context);
+    return EnvironmentAuthOutcome.authenticated(identity.scheme, context, identity.userId,
+        identity.roleId, identity.clientId, identity.orgId);
   }
 
   private static OBContext createContext(Identity identity, String warehouseId) {

@@ -36,10 +36,11 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.hibernate.query.NativeQuery;
 import org.openbravo.base.HttpBaseServlet;
-import org.openbravo.base.exception.OBException;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 
+import com.etendoerp.go.auth.EnvironmentAuthOutcome;
+import com.etendoerp.go.auth.SurfacePolicy;
 import com.etendoerp.go.common.CorsUtils;
 
 /**
@@ -158,15 +159,15 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
   public void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException {
     CorsUtils.apply(request, response, "GET, OPTIONS", "Authorization, Content-Type", null, false);
 
-    try {
-      authenticateJwt(request);
-    } catch (OBException e) {
-      log.warn("Unauthorized ReportSelectors request: {}", e.getMessage());
-      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, e.getMessage());
-      return;
-    } catch (Exception e) {
-      log.warn("Unauthorized ReportSelectors request: {}", e.getMessage());
-      sendError(response, HttpServletResponse.SC_UNAUTHORIZED, "Invalid or expired token");
+    // ETP-5455 — report selectors list environment data (partners, products, accounts...), so
+    // they get NEO's commercial-access check; and the shared pipeline accepts the cookie session
+    // the SPA sends, which the old bearer-only decode answered with 401 (logging the user out).
+    EnvironmentAuthOutcome outcome =
+        NeoServletSupport.authenticate(request, SurfacePolicy.NEO_DATA);
+    if (!outcome.isAuthenticated()) {
+      log.warn("Refused ReportSelectors request ({}): {}", outcome.getHttpStatus(),
+          outcome.getMessage());
+      sendError(response, outcome.getHttpStatus(), outcome.getMessage());
       return;
     }
 
@@ -432,14 +433,6 @@ public class ReportSelectorsServlet extends HttpBaseServlet {
         new StringBuilder("FROM c_tax WHERE isactive='Y'"
             + ACTIVE_CLIENT_NAME_SEARCH),
         ORDER_BY_NAME, true);
-  }
-
-  // ---------------------------------------------------------------------------
-  // JWT authentication — same pattern as NeoServlet, no shared state modified
-  // ---------------------------------------------------------------------------
-
-  private void authenticateJwt(HttpServletRequest request) throws Exception {
-    NeoServletSupport.authenticateJwt(request);
   }
 
   // ---------------------------------------------------------------------------

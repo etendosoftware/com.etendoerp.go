@@ -21,6 +21,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -328,6 +329,50 @@ class EnvironmentRequestAuthenticatorTest {
     assertFalse(outcome.isAuthenticated());
     assertEquals(401, outcome.getHttpStatus());
     assertEquals("Invalid or expired token", outcome.getMessage());
+  }
+
+  // ============================== identify (resolve without binding) ==============================
+
+  @ParameterizedTest(name = "{0}")
+  @EnumSource(value = AuthScheme.class, names = { "COOKIE", "JWT" })
+  void identifyResolvesTheSameIdentityWithoutInstallingAContext(AuthScheme scheme) {
+    EnvironmentAuthOutcome outcome =
+        authenticator.identify(requestFor(scheme), SurfacePolicy.NEO_AUXILIARY);
+
+    assertTrue(outcome.isAuthenticated());
+    assertEquals(scheme, outcome.getScheme());
+    assertNull(outcome.getContext());
+    assertEquals(USER_ID, outcome.getUserId());
+    assertEquals(ROLE_ID, outcome.getRoleId());
+    assertEquals(CLIENT_ID, outcome.getClientId());
+    assertEquals(ORG_ID, outcome.getOrgId());
+    swsStatic.verify(() -> SecureWebServicesUtils.createContext(
+        anyString(), anyString(), anyString(), any(), anyString()), never());
+    obContextStatic.verify(() -> OBContext.setOBContext(any(OBContext.class)), never());
+  }
+
+  /** The commercial check lives in the bind step; identifying under such a policy would skip it. */
+  @ParameterizedTest(name = "{0}")
+  @EnumSource(value = SurfacePolicy.class, names = { "NEO_API", "NEO_DATA" })
+  void identifyRefusesAPolicyThatRequiresCommercialAccess(SurfacePolicy policy) {
+    HttpServletRequest request = mock(HttpServletRequest.class);
+
+    assertThrows(IllegalArgumentException.class,
+        () -> authenticator.identify(request, policy));
+    verify(sessionAuthenticator, never()).authenticate(any());
+  }
+
+  @Test
+  void identifyAppliesTheSameCredentialRulesAsAuthenticate() {
+    when(sessionAuthenticator.authenticate(any())).thenReturn(GoSessionAuthResult.csrfFailed());
+    assertEquals(403, authenticator.identify(mock(HttpServletRequest.class),
+        SurfacePolicy.NEO_AUXILIARY).getHttpStatus());
+
+    System.setProperty(LEGACY_BEARER_PROPERTY, "false");
+    EnvironmentAuthOutcome jwt =
+        authenticator.identify(requestFor(AuthScheme.JWT), SurfacePolicy.NEO_AUXILIARY);
+    assertEquals(401, jwt.getHttpStatus());
+    assertEquals("Missing or invalid Authorization header", jwt.getMessage());
   }
 
   // ============================== fixtures ==============================
