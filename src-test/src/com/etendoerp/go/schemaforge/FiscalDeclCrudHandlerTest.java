@@ -1768,6 +1768,150 @@ public class FiscalDeclCrudHandlerTest {
     assertEquals("{\"ok\":true}", body);
   }
 
+  // ── handleDeclPost: creating a declaration directly in a submitted status (ETP-5438) ──
+
+  /** Captures what a POST did: the created row, the DAL mock and the response. */
+  private static final class PostOutcome {
+    BaseOBObject decl;
+    OBDal obDal;
+    HttpServletResponse resp;
+    String body;
+  }
+
+  /**
+   * Runs a POST {@code /fiscal303/declarations} with {@code body} against an empty natural key
+   * (no existing declaration for the period, so neither the ETP-5272 draft guard nor the
+   * DECL_SEQ resolution interferes) and returns what happened.
+   */
+  @SuppressWarnings("unchecked")
+  private PostOutcome postDecl(String body) throws Exception {
+    PostOutcome outcome = new PostOutcome();
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    outcome.resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(outcome.resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body)));
+    outcome.decl = mock(BaseOBObject.class);
+    // Map-backed like a real BaseOBObject: get(property) returns what set(property, v) stored,
+    // so the snapshot provider sees the (model, year, period) the handler put on the new row.
+    java.util.Map<String, Object> props = new java.util.HashMap<>();
+    org.mockito.Mockito.doAnswer(inv -> {
+      props.put(inv.getArgument(0), inv.getArgument(1));
+      return null;
+    }).when(outcome.decl).set(anyString(), any());
+    when(outcome.decl.get(anyString())).thenAnswer(inv -> props.get(inv.<String>getArgument(0)));
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedStatic<OBProvider> providerMock = mockStatic(OBProvider.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      outcome.obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(outcome.obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(outcome.obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+      when(query.list()).thenReturn(Collections.emptyList());
+      OBProvider provider = mock(OBProvider.class);
+      providerMock.when(OBProvider::getInstance).thenReturn(provider);
+      when(provider.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL)).thenReturn(outcome.decl);
+
+      handler.handleDeclarations("POST", req, outcome.resp);
+    }
+    outcome.body = sw.toString();
+    return outcome;
+  }
+
+  private static String postBody(String status) {
+    return "{\"model\":\"303\",\"year\":2026,\"period\":\"T1\",\"status\":\"" + status + "\"}";
+  }
+
+  /**
+   * Creating a declaration straight into any submitted-family status (e.g. registering a
+   * presentation filed outside Etendo) takes the snapshot exactly once, for the new row's own
+   * (model, year, period), and stores it on the record BEFORE it is saved and committed.
+   */
+  @Test
+  public void testPostInSubmittedStatusTakesSnapshotBeforeSave() throws Exception {
+    for (String status : new String[] { "submitted", "submitted_ext", "submitted_ack" }) {
+      java.util.List<String> calls = new java.util.ArrayList<>();
+      handler.setSubmittedSnapshotProvider((model, year, period) -> {
+        calls.add(model + "|" + year + "|" + period);
+        return new JSONObject(SNAPSHOT_303);
+      });
+
+      PostOutcome out = postDecl(postBody(status));
+
+      assertEquals(status, java.util.Collections.singletonList("303|2026|T1"), calls);
+      org.mockito.InOrder order = org.mockito.Mockito.inOrder(out.decl, out.obDal);
+      order.verify(out.decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, status);
+      order.verify(out.decl).set(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT,
+          new JSONObject(SNAPSHOT_303).toString());
+      order.verify(out.obDal).save(out.decl);
+      order.verify(out.obDal).commitAndClose();
+      verify(out.resp).setStatus(HttpServletResponse.SC_CREATED);
+      verify(servlet, never()).sendError(any(), anyInt(), anyString());
+      assertTrue(status, out.body.startsWith("{"));
+    }
+  }
+
+  /** Creating a draft or ready declaration never computes a snapshot nor sets the column. */
+  @Test
+  public void testPostInNonSubmittedStatusTakesNoSnapshot() throws Exception {
+    for (String status : new String[] { "draft", "ready" }) {
+      int[] calls = { 0 };
+      handler.setSubmittedSnapshotProvider((model, year, period) -> {
+        calls[0]++;
+        return new JSONObject(SNAPSHOT_303);
+      });
+
+      PostOutcome out = postDecl(postBody(status));
+
+      assertEquals(status, 0, calls[0]);
+      verify(out.decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT), any());
+      verify(out.decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, status);
+      verify(out.obDal).save(out.decl);
+      verify(out.obDal).commitAndClose();
+      verify(out.resp).setStatus(HttpServletResponse.SC_CREATED);
+    }
+  }
+
+  /** A POST without an explicit status defaults to draft and takes no snapshot either. */
+  @Test
+  public void testPostWithoutStatusDefaultsToDraftAndTakesNoSnapshot() throws Exception {
+    int[] calls = { 0 };
+    handler.setSubmittedSnapshotProvider((model, year, period) -> {
+      calls[0]++;
+      return new JSONObject(SNAPSHOT_303);
+    });
+
+    PostOutcome out = postDecl("{\"model\":\"303\",\"year\":2026,\"period\":\"T1\"}");
+
+    assertEquals(0, calls[0]);
+    verify(out.decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "draft");
+    verify(out.decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT), any());
+    verify(out.obDal).save(out.decl);
+  }
+
+  /**
+   * When the snapshot cannot be computed, creating a submitted declaration is rejected with the
+   * same 500 as the PUT path, and the new row is never saved nor committed.
+   */
+  @Test
+  public void testPostInSubmittedStatusSnapshotFailureRejectsAndSavesNothing() throws Exception {
+    handler.setSubmittedSnapshotProvider((model, year, period) -> {
+      throw new IllegalStateException("No TaxReport found");
+    });
+
+    PostOutcome out = postDecl(postBody("submitted"));
+
+    verify(servlet).sendError(eq(out.resp), eq(HttpServletResponse.SC_INTERNAL_SERVER_ERROR),
+        org.mockito.ArgumentMatchers.contains("No TaxReport found"));
+    verify(out.decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT), any());
+    verify(out.obDal, never()).save(any());
+    verify(out.obDal, never()).commitAndClose();
+    verify(out.resp, never()).setStatus(HttpServletResponse.SC_CREATED);
+    assertEquals("", out.body);
+  }
+
   /** declToJson exposes a stored snapshot as a parsed nested object. */
   @Test
   public void testDeclToJsonExposesSubmittedSnapshot() throws Exception {
