@@ -494,6 +494,113 @@ public class OnboardingDatasetNormalizerTest {
   }
 
   /**
+   * ETP-5442: extends the exclusion above to {@code C_ELEMENTVALUE_OPERAND}. A formula account
+   * (e.g. {@code P.G.D}, "D) RESULTADO DEL EJERCICIO") carries no children in the account tree —
+   * its report amount comes exclusively from operand rows — so an operand belonging to the orphan
+   * org-specific tree must be dropped exactly like the element/element-value rows above. Without
+   * this cascade, the excluded tree's operands would be emitted pointing at element values this
+   * same filter just removed, and a real {@code DataImportService} import aborts with "Referenced
+   * object FinancialMgmtElementValue ... not present in the xml or in the database" (reproduced
+   * live before this fix, ETP-5442). Both row ids below are real GOClient data: {@code 841C6B18...}
+   * is P.G.D's "+ P.G.C" operand line owned by the wired (client-level) P.G.D
+   * ({@code 99EB7D8D...}); {@code D6D980B2...} is the identical formula line owned by the orphan
+   * (org-specific) P.G.D ({@code D123E89F...}).
+   */
+  @Test
+  public void testNormalizerExcludesOperandsOfOrgSpecificAccountElementTree() {
+    String xml = pathBackedNormalizer().buildDatasetXml();
+
+    String wiredTreeOperandId = "841C6B189D5D49C79FB542D847B32EFA";
+    String orphanTreeOperandId = "D6D980B2CC284EA08884E5C398FEAFDC";
+
+    assertTrue(xml.contains(wiredTreeOperandId));
+    assertFalse(xml.contains(orphanTreeOperandId));
+  }
+
+  /**
+   * ETP-5442 — the real GOClient dataset never exercises this branch: verified live that its 39
+   * excluded-tree operand rows reference ONLY accounts within that same tree (zero cross-tree
+   * references), so a real-data test can only prove the OWNER side is checked. An operand's owner
+   * account ({@code C_ELEMENTVALUE_ID}) and its referenced account ({@code ACCOUNT_ID}) are two
+   * independent foreign keys into {@code C_ELEMENTVALUE}; both must be excluded independently
+   * when either belongs to the orphan tree. Checking only the owner (mirroring the single-FK
+   * {@code C_ELEMENTVALUE_TRL} cascade) would let a row through whose REFERENCED account was
+   * removed, which breaks the same import the same way — a dangling FK. This synthetic fixture
+   * builds two account-element trees (wired: {@code AD_ORG_ID='0'}; orphan: org-owned) and three
+   * operand rows that isolate each combination.
+   */
+  @Test
+  public void testNormalizerExcludesOperandWhenEitherOwnerOrAccountIsOrgSpecific() throws Exception {
+    Path sampleDir = Files.createTempDirectory("onboarding-operand-cascade");
+
+    Files.write(sampleDir.resolve("C_ELEMENT.xml"),
+        ("<data>"
+            + "<C_ELEMENT>"
+            + "<C_ELEMENT_ID><![CDATA[WIRED_ELEM]]></C_ELEMENT_ID>"
+            + "<AD_ORG_ID><![CDATA[0]]></AD_ORG_ID>"
+            + "</C_ELEMENT>"
+            + "<C_ELEMENT>"
+            + "<C_ELEMENT_ID><![CDATA[ORPHAN_ELEM]]></C_ELEMENT_ID>"
+            + "<AD_ORG_ID><![CDATA[SOME_ORG]]></AD_ORG_ID>"
+            + "</C_ELEMENT>"
+            + "</data>").getBytes(StandardCharsets.UTF_8));
+
+    Files.write(sampleDir.resolve("C_ELEMENTVALUE.xml"),
+        ("<data>"
+            + "<C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[WIRED_OWNER]]></C_ELEMENTVALUE_ID>"
+            + "<C_ELEMENT_ID><![CDATA[WIRED_ELEM]]></C_ELEMENT_ID>"
+            + "</C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[WIRED_ACCOUNT]]></C_ELEMENTVALUE_ID>"
+            + "<C_ELEMENT_ID><![CDATA[WIRED_ELEM]]></C_ELEMENT_ID>"
+            + "</C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[ORPHAN_OWNER]]></C_ELEMENTVALUE_ID>"
+            + "<C_ELEMENT_ID><![CDATA[ORPHAN_ELEM]]></C_ELEMENT_ID>"
+            + "</C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[ORPHAN_ACCOUNT]]></C_ELEMENTVALUE_ID>"
+            + "<C_ELEMENT_ID><![CDATA[ORPHAN_ELEM]]></C_ELEMENT_ID>"
+            + "</C_ELEMENTVALUE>"
+            + "</data>").getBytes(StandardCharsets.UTF_8));
+
+    Files.write(sampleDir.resolve("C_ELEMENTVALUE_OPERAND.xml"),
+        ("<data>"
+            // Both sides wired -> must survive.
+            + "<C_ELEMENTVALUE_OPERAND>"
+            + "<C_ELEMENTVALUE_OPERAND_ID><![CDATA[OP_BOTH_WIRED]]></C_ELEMENTVALUE_OPERAND_ID>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[WIRED_OWNER]]></C_ELEMENTVALUE_ID>"
+            + "<ACCOUNT_ID><![CDATA[WIRED_ACCOUNT]]></ACCOUNT_ID>"
+            + "</C_ELEMENTVALUE_OPERAND>"
+            // Owner is orphan, account is wired -> must be dropped.
+            + "<C_ELEMENTVALUE_OPERAND>"
+            + "<C_ELEMENTVALUE_OPERAND_ID><![CDATA[OP_OWNER_ORPHAN]]></C_ELEMENTVALUE_OPERAND_ID>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[ORPHAN_OWNER]]></C_ELEMENTVALUE_ID>"
+            + "<ACCOUNT_ID><![CDATA[WIRED_ACCOUNT]]></ACCOUNT_ID>"
+            + "</C_ELEMENTVALUE_OPERAND>"
+            // Owner is wired, account is orphan -> must ALSO be dropped. This is the branch the
+            // real-dataset test above cannot reach.
+            + "<C_ELEMENTVALUE_OPERAND>"
+            + "<C_ELEMENTVALUE_OPERAND_ID><![CDATA[OP_ACCOUNT_ORPHAN]]></C_ELEMENTVALUE_OPERAND_ID>"
+            + "<C_ELEMENTVALUE_ID><![CDATA[WIRED_OWNER]]></C_ELEMENTVALUE_ID>"
+            + "<ACCOUNT_ID><![CDATA[ORPHAN_ACCOUNT]]></ACCOUNT_ID>"
+            + "</C_ELEMENTVALUE_OPERAND>"
+            + "</data>").getBytes(StandardCharsets.UTF_8));
+
+    String xml = new OnboardingDatasetNormalizer(sampleDir, this::mockEntityForTable)
+        .buildDatasetXml();
+
+    assertTrue("Operand whose owner and account both survive must be kept",
+        xml.contains("OP_BOTH_WIRED"));
+    assertFalse("Operand whose OWNER belongs to the excluded tree must be dropped",
+        xml.contains("OP_OWNER_ORPHAN"));
+    assertFalse("Operand whose ACCOUNT (referenced side) belongs to the excluded tree must be "
+        + "dropped too, even though its owner is in the kept tree",
+        xml.contains("OP_ACCOUNT_ORPHAN"));
+  }
+
+  /**
    * ETP-4245 (TC-40): verifies that a freshly-provisioned tenant is born with all 8 accounting
    * dimensions on {@code C_ACCTSCHEMA_ELEMENT} — the 2 mandatory ones (Organization, Account) plus
    * all 6 optional ones (Project, Bus.Partner, Product, Cost Center, User1, User2) — instead of just

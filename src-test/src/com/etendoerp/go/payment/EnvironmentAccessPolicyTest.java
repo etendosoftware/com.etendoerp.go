@@ -63,6 +63,8 @@ public class EnvironmentAccessPolicyTest {
         SubscriptionStatus.CURRENT, START.plusSeconds(365 * 24 * 60 * 60L), DEFAULTS));
     assertEquals(Decision.ALLOWED, policy.evaluate(Environment.productive(), true,
         SubscriptionStatus.CURRENT, START, DEFAULTS));
+    assertEquals(Decision.ALLOWED, policy.evaluate(Environment.productive(START), true,
+        SubscriptionStatus.CURRENT, START.plusSeconds(15 * 24 * 60 * 60L), DEFAULTS));
   }
 
   @Test
