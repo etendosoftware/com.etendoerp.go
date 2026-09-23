@@ -119,6 +119,7 @@ shape minus `declarationData`/`csv`/etc:
 | `MISSING_PRESENTER` | `400` | Production (`testMode=false`) and either `presenterNif` or `presenterName` is blank | Test mode never triggers this — presenter fields are optional there |
 | `NO_CERTIFICATE` | `409` | Production and `AEAT303SubmissionService.hasOrgCertificate(org)` is false | Checked **before** constructing `AEAT303SubmissionService` for the actual submission — session-cert upload is NOT supported by this endpoint (see below) |
 | `ALREADY_SUBMITTED` | `409` | Production and the declaration's `DeclarationStatus` is already in the submitted family (`submitted`, `submitted_ext`, `submitted_ack`) | The idempotency guard (BUG-1 fix, widened in ETP-5438) — see dedicated section below |
+| `SNAPSHOT_FAILED` | `500` | Production, file generated, but the submission snapshot (the `GET /fiscal303/boxes` payload) could not be computed | Checked **before** the AEAT call — the declaration is never sent to Hacienda without its frozen figures (ETP-5438). See "Submission snapshot" below |
 | `SUBMISSION_FAILED` | `500` (file-generation failure) or `502` (AEAT call itself threw `OBException`) | File regeneration threw, or `AEAT303SubmissionService.submitProduction`/`submitValidation` threw `OBException` (e.g. connection error, unsupported-charset gate, non-JSON response) | The one case where a raised exception maps to this code; a non-`OBException` runtime exception is a known, accepted gap (see "Known gaps") |
 
 An AEAT-side rejection that the service parses successfully (e.g. the E0100803 "double space in
@@ -226,7 +227,8 @@ locales) instead of dumping the generic AEAT error list, and — like `MISSING_P
 
 **Only a successful PRODUCTION submission mutates the declaration record**
 (`persistSuccessfulSubmission`): `DeclarationStatus` → `submitted_ack`, `DeclarationFileName` set
-to a generated justificante filename, `FileExternal` set to `false`, staged via `decl.save()`.
+to a generated justificante filename, `FileExternal` set to `false`, `Submitted_Snapshot` set to the
+boxes payload computed before the AEAT call (ETP-5438, see below), staged via `decl.save()`.
 Test-mode submissions (success or error) and failed production submissions never touch the
 declaration row — matching Classic's "test submissions leave no trace" rule.
 
@@ -243,6 +245,23 @@ declaration entity itself) is new. See the "Justificante" tab section in
 `../../../schema_forge/docs/generated-custom-windows/fiscal-models.md` and the "Phase 2.2" section
 in the plan doc for the frontend wiring that surfaces this (the `receiptRefreshTick` refresh, since
 test mode has no status change to key off of).
+
+### Submission snapshot (`Submitted_Snapshot`, ETP-5438)
+
+A production submission also freezes the declaration's figures: `handleSubmit` computes
+`owner.computeSnapshotPayload(orgId, year, period)` — the exact JSON `GET /fiscal303/boxes`
+returns, same code path, same effective org — right after the `.303` file is generated and
+**before** `submitProduction` is called. If that compute throws, the request answers `500`
+`SNAPSHOT_FAILED` and the AEAT is never contacted: once Hacienda accepts a filing it cannot be
+undone, so a declaration must not end up presented without its snapshot. On success,
+`persistSuccessfulSubmission` stores it in `ETGO_Fiscal_Decl.Submitted_Snapshot` (dynamic property
+`submittedSnapshot`) in the same single commit as the status change. From then on
+`GET /fiscal303/boxes` serves that snapshot instead of recomputing from the current invoices.
+Test mode takes no snapshot (it never changes the declaration). The manual presentation paths
+(`PUT /fiscal303/declarations`, both models) take the same snapshot through
+`FiscalDeclCrudHandler#applySubmittedSnapshotTransition`; see
+`../../../schema_forge/docs/generated-custom-windows/fiscal-models.md` ("Freeze once presented")
+for the full contract.
 
 **Single atomic commit (ETP-4456 "Phase 3" fix, commit `abf40953`, 2026-08-03).** Earlier revisions
 of `handleSubmit` issued up to 3 independent commits (incidents, declaration status, attachment) —
