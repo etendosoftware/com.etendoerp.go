@@ -1,0 +1,90 @@
+<?xml version="1.0"?>
+  <database name="TABLE ETGO_USAGE_DAILY">
+    <table name="ETGO_USAGE_DAILY" primaryKey="ETGO_USAGE_DAILY_PK">
+      <column name="ETGO_USAGE_DAILY_ID" primaryKey="true" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_CLIENT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="AD_ORG_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ISACTIVE" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[Y]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="CREATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATED" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default><![CDATA[SYSDATE]]></default>
+        <onCreateDefault/>
+      </column>
+      <column name="UPDATEDBY" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="MEASURED_CLIENT_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ETGO_BILLING_RESOURCE_ID" primaryKey="false" required="true" type="VARCHAR" size="32" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="USAGE_DAY" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="QTY" primaryKey="false" required="true" type="DECIMAL" size="20,0" autoIncrement="false">
+        <default><![CDATA[0]]></default>
+        <onCreateDefault><![CDATA[0]]></onCreateDefault>
+      </column>
+      <column name="COMPUTED_AT" primaryKey="false" required="true" type="TIMESTAMP" size="7" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="IS_SETTLED" primaryKey="false" required="true" type="CHAR" size="1" autoIncrement="false">
+        <default><![CDATA[N]]></default>
+        <onCreateDefault><![CDATA[N]]></onCreateDefault>
+      </column>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_USGDAY_CLIENT_FK">
+        <reference local="AD_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_USGDAY_CREATEDBY_FK">
+        <reference local="CREATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_CLIENT" name="ETGO_USGDAY_MEASCLIENT_FK">
+        <reference local="MEASURED_CLIENT_ID" foreign="AD_CLIENT_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_ORG" name="ETGO_USGDAY_ORG_FK">
+        <reference local="AD_ORG_ID" foreign="AD_ORG_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="ETGO_BILLING_RESOURCE" name="ETGO_USGDAY_RESOURCE_FK">
+        <reference local="ETGO_BILLING_RESOURCE_ID" foreign="ETGO_BILLING_RESOURCE_ID"/>
+      </foreign-key>
+      <foreign-key foreignTable="AD_USER" name="ETGO_USGDAY_UPDATEDBY_FK">
+        <reference local="UPDATEDBY" foreign="AD_USER_ID"/>
+      </foreign-key>
+      <index name="ETGO_USGDAY_RES_DAY_IX" unique="false">
+        <index-column name="ETGO_BILLING_RESOURCE_ID"/>
+        <index-column name="USAGE_DAY"/>
+      </index>
+      <unique name="ETGO_USGDAY_TEN_RES_DAY_UQ">
+        <unique-column name="MEASURED_CLIENT_ID"/>
+        <unique-column name="ETGO_BILLING_RESOURCE_ID"/>
+        <unique-column name="USAGE_DAY"/>
+      </unique>
+      <check name="ETGO_USGDAY_ISACTIVE_CHK"><![CDATA[ISACTIVE IN ('Y', 'N')]]></check>
+      <check name="ETGO_USGDAY_SETTLED_CHK"><![CDATA[IS_SETTLED IN ('Y', 'N')]]></check>
+    </table>
+  </database>
