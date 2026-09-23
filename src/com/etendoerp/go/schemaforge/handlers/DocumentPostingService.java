@@ -167,10 +167,30 @@ public class DocumentPostingService {
    * by identity; never {@code null}, empty when there are none.
    */
   public record PostResult(boolean ok, String message, List<String> messageKeys) {
+    /**
+     * Canonical constructor. Normalizes {@code messageKeys} to an immutable copy, and a
+     * {@code null} list to an empty one, so callers never have to null-check it.
+     *
+     * @param ok
+     *     {@code true} when the post/unpost succeeded.
+     * @param message
+     *     the user-facing outcome message, already translated to the session language.
+     * @param messageKeys
+     *     the AD_MESSAGE search keys behind {@code message}; may be {@code null}.
+     */
     public PostResult {
       messageKeys = messageKeys == null ? List.of() : List.copyOf(messageKeys);
     }
 
+    /**
+     * Convenience constructor for a result that carries no AD_MESSAGE keys (every success, and
+     * failures whose message was not built from AD_MESSAGE tokens).
+     *
+     * @param ok
+     *     {@code true} when the post/unpost succeeded.
+     * @param message
+     *     the user-facing outcome message.
+     */
     public PostResult(boolean ok, String message) {
       this(ok, message, List.of());
     }
