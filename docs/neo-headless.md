@@ -2694,6 +2694,21 @@ body exceeds 256 KB; `405` for any method other than `POST`; `401` without a val
 unexpected failure after parsing answers `202` with the unprocessed events counted as dropped —
 never `500`, so an older or newer UI degrades to "not recorded" instead of failing.
 
+**Event types.** The accepted set is closed and lives in `UsageEventTypes` (D4); a type is added
+there, with its constant in `KNOWN`, before any caller may send it. Not every type comes through
+this endpoint — some are recorded by the backend itself through `UsageEventRecorder`, with
+`source = backend`:
+
+| Event type | Recorded by | When | Columns |
+|------------|-------------|------|---------|
+| `ai.agent.message` | AI BFF, through this endpoint (defined; no caller yet) | One completed AI agent chat turn | `properties`: model, token counts |
+| `ai.support.message` | Backend (defined; no caller yet) | One completed support chat (ValerIA) turn | `properties`: model, token counts |
+| `session.login` | Backend (`SessionLoginUsage`) | One successful entry into an environment, after the credential is issued: `GET /sws/go/login?userId=` (`action = login`) and `POST /sws/go/session/environment` (`action = cookie-login`, the path the SPA uses). Never on a 4xx/5xx. | client/org/user/role of the environment entered — set explicitly, not from `OBContext`, which is the system context on both paths; `target = environment`, `outcome = ok`, `durationMs` = login handling; `properties.authMethod` = `password`/`sso` on the cookie path only |
+
+Recording is the last statement of the success path, after the response is written, and never
+throws; the INSERT happens on the recorder's writer thread, so a slow or locked
+`ETGO_USAGE_EVENT` does not slow a login.
+
 ## 5. Configuration
 
 ### 5.1 Creating a Spec

@@ -53,10 +53,17 @@ public final class UsageEventTypes {
   /** One completed support chat (ValerIA) turn, recorded by the backend with the token usage. */
   public static final String AI_SUPPORT_MESSAGE = "ai.support.message";
 
+  /**
+   * One successful entry into an environment, recorded by the backend once the environment's
+   * credential is issued ({@link SessionLoginUsage}). {@code action} tells the two paths apart.
+   */
+  public static final String SESSION_LOGIN = "session.login";
+
   /** Every accepted event type. Keep in sync with the constants above. */
   private static final Set<String> KNOWN = Set.of(
       AI_AGENT_MESSAGE,
-      AI_SUPPORT_MESSAGE);
+      AI_SUPPORT_MESSAGE,
+      SESSION_LOGIN);
 
   private UsageEventTypes() {
   }
