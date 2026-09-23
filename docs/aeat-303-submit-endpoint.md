@@ -202,9 +202,10 @@ flag) — a plain resubmission is not the correct way to correct or repeat a fil
 widened it to the full submitted family so it matches every other "already presented" guard
 (`FiscalDeclCrudHandler#rejectRepresentation` for the PUT re-presentation path and
 `AbstractFiscalHandler#guardNotAlreadySubmitted` for `generate`, both also `409`). The pure reads
-`GET /fiscal303/boxes` and `GET /fiscal349/operators` are deliberately **not** gated — the
-frontend computes a submitted declaration once per browser session from them and freezes the
-result. Full rationale: `schema_forge/docs/generated-custom-windows/fiscal-models.md`, section
+`GET /fiscal303/boxes` and `GET /fiscal349/operators` are deliberately **not** gated — for a
+submitted declaration they return its persisted submission snapshot without recomputing, and
+only a legacy one (presented before snapshots existed) is computed live, once per browser session,
+by the frontend. Full rationale: `schema_forge/docs/generated-custom-windows/fiscal-models.md`, section
 "Freeze once presented".
 
 **What it does NOT block:** test-mode (`testMode=true`) resubmissions of an already-submitted
@@ -228,7 +229,7 @@ locales) instead of dumping the generic AEAT error list, and — like `MISSING_P
 **Only a successful PRODUCTION submission mutates the declaration record**
 (`persistSuccessfulSubmission`): `DeclarationStatus` → `submitted_ack`, `DeclarationFileName` set
 to a generated justificante filename, `FileExternal` set to `false`, `Submitted_Snapshot` set to the
-boxes payload computed before the AEAT call (ETP-5438, see below), staged via `decl.save()`.
+figures-only boxes snapshot computed before the AEAT call (ETP-5438, see below), staged via `decl.save()`.
 Test-mode submissions (success or error) and failed production submissions never touch the
 declaration row — matching Classic's "test submissions leave no trace" rule.
 
@@ -263,7 +264,8 @@ A production submission also freezes the declaration's figures: `handleSubmit` c
   `500` `SNAPSHOT_FAILED` and the AEAT is never contacted: once Hacienda accepts a filing it cannot
   be undone, so a declaration must not end up presented without its snapshot. The column is a
   TEXT/CLOB with AD `FIELDLENGTH` 1,000,000 (it first shipped with 2,000, which the entity
-  validator enforced — ETP-5438 QA BUG-1).
+  validator enforced — ETP-5438 QA BUG-1). **Deploy order:** `update.database` must ship together
+  with this Java, since every declaration read touches the new `submittedSnapshot` property.
 - **Stored with the filing.** `persistSuccessfulSubmission` stores it in
   `ETGO_Fiscal_Decl.Submitted_Snapshot` (`FiscalDecl#setSubmittedSnapshot`) in the same single
   commit as the status change. Should storing it still fail after the filing (not expected — it
