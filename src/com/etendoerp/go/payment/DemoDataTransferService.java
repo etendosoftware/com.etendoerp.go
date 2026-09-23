@@ -89,7 +89,7 @@ public class DemoDataTransferService {
     if (StringUtils.isBlank(requestId)) return;
     withSystemContext(() -> {
       String value = (products ? "Y" : "N") + (contacts ? "Y" : "N");
-      String existing = readSystemPreference(SELECTION_PREFIX + requestId);
+      String existing = readClientPreference(SELECTION_PREFIX + requestId, ZERO_ID);
       if (existing != null && !existing.equals(value)) {
         throw new IllegalStateException("Transfer selection cannot change after checkout creation");
       }
@@ -107,7 +107,7 @@ public class DemoDataTransferService {
   public JSONObject selection(String requestId) throws JSONException {
     if (StringUtils.isBlank(requestId)) return null;
     return withSystemResult(() -> {
-      String value = readSystemPreference(SELECTION_PREFIX + requestId);
+      String value = readClientPreference(SELECTION_PREFIX + requestId, ZERO_ID);
       if (value == null) return null;
       JSONObject result = new JSONObject();
       result.put("products", selected(value, 0));
@@ -128,7 +128,7 @@ public class DemoDataTransferService {
   }
 
   private void persistStart(String requestId, String demoClientId, String productiveClientId) {
-    String selection = readSystemPreference(SELECTION_PREFIX + requestId);
+    String selection = readClientPreference(SELECTION_PREFIX + requestId, ZERO_ID);
     if (selection == null) return;
     Client target = OBDal.getInstance().get(Client.class, productiveClientId);
     if (target == null) return;
@@ -358,8 +358,18 @@ public class DemoDataTransferService {
 
   private JSONObject counts(String clientId, String done, String total) throws JSONException {
     JSONObject counts = new JSONObject();
-    counts.put("completed", number(readClientPreference(done, clientId)));
-    counts.put("total", number(readClientPreference(total, clientId)));
+    String[] attributes = { done, total };
+    String[] keys = { "completed", "total" };
+    for (int index = 0; index < attributes.length; index++) {
+      String value = readClientPreference(attributes[index], clientId);
+      int parsed = 0;
+      try {
+        parsed = Integer.parseInt(StringUtils.defaultIfBlank(value, "0"));
+      } catch (NumberFormatException ignored) {
+        // An invalid progress preference is displayed as zero, as before.
+      }
+      counts.put(keys[index], parsed);
+    }
     return counts;
   }
 
@@ -372,8 +382,6 @@ public class DemoDataTransferService {
   }
 
   private boolean selected(String selection, int index) { return selection.length() > index && selection.charAt(index) == 'Y'; }
-  private int number(String value) { try { return Integer.parseInt(StringUtils.defaultIfBlank(value, "0")); } catch (NumberFormatException e) { return 0; } }
-
   <T extends BaseOBObject> List<T> query(Class<T> type, String where, String clientId) {
     OBQuery<T> query = OBDal.getInstance().createQuery(type, where);
     query.setNamedParameter(CLIENT_ID_PARAMETER, clientId);
@@ -393,7 +401,6 @@ public class DemoDataTransferService {
   private void setSystemPreference(String attribute, String value) {
     Preferences.setPreferenceValue(attribute, value, false, OBDal.getInstance().get(Client.class, ZERO_ID), null, null, null, null, null);
   }
-  private String readSystemPreference(String attribute) { return readClientPreference(attribute, ZERO_ID); }
   private String readClientPreference(String attribute, String clientId) {
     OBQuery<Preference> query = OBDal.getInstance().createQuery(Preference.class,
         "as p where p.attribute = :attribute and p.visibleAtClient.id = :clientId and p.active = true"

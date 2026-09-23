@@ -409,10 +409,14 @@ final class DemoDataTransferEntityCopier {
 
   private Category targetBusinessPartnerCategory(Category source,
       Client target, Organization targetOrg) {
-    if (source == null) return null;
-    if (ZERO_ID.equals(source.getClient().getId())) return source;
-      Category existing = owner.unique(Category.class, CATEGORY_BY_NAME_QUERY, target.getId(),
-          source.getName());
+    if (source == null) {
+      return null;
+    }
+    if (ZERO_ID.equals(source.getClient().getId())) {
+      return source;
+    }
+    Category existing = owner.unique(Category.class, CATEGORY_BY_NAME_QUERY, target.getId(),
+        source.getName());
     if (existing != null) return existing;
     Category copy = OBProvider.getInstance().get(Category.class);
     copy.setClient(target); copy.setOrganization(targetOrg);

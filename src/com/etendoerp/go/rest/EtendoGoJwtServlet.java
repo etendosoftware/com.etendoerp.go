@@ -167,6 +167,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String CHECKOUT_SELECTION_SAVE_ERROR = "Unable to save transfer selection";
   private static final String CHECKOUT_SELECTION_PERSIST_ERROR =
       "Could not persist checkout transfer selection";
+  private static final String BILLING_PROVIDER_ERROR = "BILLING_PROVIDER_ERROR";
   private static final String BILLING_SELECTION_PERSIST_ERROR =
       "Could not persist billing transfer selection";
   private static final String FIELD_MESSAGE = "message";
@@ -701,7 +702,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     } catch (Exception e) {
       if (accountBillingPurchase) {
         log.error("Could not create account billing purchase", e);
-        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, BILLING_PROVIDER_ERROR,
             "Unable to create billing purchase", "Unable to create billing purchase");
       } else {
         log.error("Could not create hosted checkout session", e);
@@ -781,7 +782,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
             CHECKOUT_NOT_CONFIGURED_MESSAGE, CHECKOUT_NOT_CONFIGURED_MESSAGE);
       } catch (Exception e) {
         log.error("Could not reopen account billing purchase", e);
-        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, BILLING_PROVIDER_ERROR,
             "Unable to reopen billing purchase", "Unable to reopen billing purchase");
       }
       return;
@@ -889,7 +890,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       } catch (IOException e) {
         log.error("Could not load account billing subscription", e);
-        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, BILLING_PROVIDER_ERROR,
             "Unable to load billing subscription", "Unable to load billing subscription");
         return;
       }
@@ -933,7 +934,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         return;
       } catch (IOException e) {
         log.error("Could not create a billing portal session", e);
-        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, "BILLING_PROVIDER_ERROR",
+        writeError(response, HttpServletResponse.SC_BAD_GATEWAY, BILLING_PROVIDER_ERROR,
             "Unable to open the billing portal", "Unable to open the billing portal");
         return;
       }
@@ -3073,8 +3074,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     ScheduledExecutorService heartbeat = startOnboardingHeartbeat(writer);
 
     try {
-      provisioningCompleted = executeOnboardingProvisioning(writer, onboardingRequest,
-          accountId, accountEmail, currencyId, paidUpgrade, provisioningClaim, adminPassword);
+      provisioningCompleted = executeOnboardingProvisioning(writer, preparation, adminPassword);
 
     } catch (Exception e) {
       log.error("Onboarding failed", e);
@@ -3095,9 +3095,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   private boolean executeOnboardingProvisioning(PrintWriter writer,
-      OnboardingRequestData onboardingRequest, String accountId, String accountEmail,
-      String currencyId, boolean paidUpgrade, Long provisioningClaim, String adminPassword)
-      throws Exception {
+      OnboardingPreparation preparation, String adminPassword) throws Exception {
+    OnboardingRequestData onboardingRequest = preparation.request;
+    String accountId = preparation.accountId;
+    String accountEmail = preparation.accountEmail;
+    String currencyId = preparation.currencyId;
+    boolean paidUpgrade = preparation.paidUpgrade;
     VariablesSecureApp vars = prepareAdminContext(writer, onboardingRequest.language);
     String clientId = resolveOrCreateClient(writer, vars, accountEmail, onboardingRequest,
         currencyId, adminPassword);
@@ -3128,7 +3131,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     EtendoGoDalHelper.commitDalChanges("onboarding", log);
     completeCommittedOnboarding(accountId, accountEmail, onboardingRequest, clientId, paidUpgrade,
-        provisioningClaim, demoSourceClientId);
+        preparation.provisioningClaim, demoSourceClientId);
     onboardingCostingScheduleService.activateSchedule(clientId);
     sendProgress(writer, "finalize", PROGRESS_IN_PROGRESS, "Finalizing setup...");
     sendProgress(writer, "finalize", "done", "Environment ready");
