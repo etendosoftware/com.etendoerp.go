@@ -3124,7 +3124,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         currencyId, adminPassword);
     if (clientId == null) return false;
     String demoSourceClientId = resolveDemoSourceClientId(accountEmail, paidUpgrade,
-        onboardingRequest);
+        onboardingRequest, clientId);
     AdminContextData adminContext = resolveAdminContextData(clientId, writer);
     if (adminContext == null) return false;
     if (paidUpgrade) {
@@ -3158,11 +3158,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   private String resolveDemoSourceClientId(String accountEmail, boolean paidUpgrade,
-      OnboardingRequestData onboardingRequest) {
+      OnboardingRequestData onboardingRequest, String targetClientId) {
     boolean needsDemoSource = paidUpgrade && (DemoDataTransferFlag.isEnabled()
         || onboardingRequest.transferProducts || onboardingRequest.transferContacts);
     return needsDemoSource
-        ? EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail) : null;
+        ? EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail, targetClientId)
+        : null;
   }
 
   private void transferSelectedData(PrintWriter writer, OnboardingRequestData onboardingRequest,
