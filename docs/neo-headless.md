@@ -2686,7 +2686,7 @@ counted server-side, not reported to the caller).
 | `outcome` | `ok` or `error`; anything else → null. |
 | String fields | Must be JSON strings (a number is not coerced); clipped to their column width by the writer. |
 | `properties` | A flat object. String (clipped to 256 chars), number and boolean values are kept; a nested object, array, null or a key over 64 chars drops **that property**, not the event. Past 4 KB serialized the whole set is replaced by `{"_truncated":true}`. |
-| Rate limit | 600 events per minute per client + user + `sessionKey`, in memory and per instance (bounded map). The excess is dropped and counted. |
+| Rate limit | Two fixed one-minute windows, in memory and per instance (bounded maps); an event must pass **both**, the excess is dropped and counted. **Per session:** 600 events per client + user + `sessionKey`. **Per user:** 1200 events per client + user, whatever the `sessionKey` — the body names the session key, so the per-session limit alone can be evaded by rotating it; the per-user one is keyed only on the token. The per-session limit is checked first, so an event it refuses does not consume the user's budget. |
 | Opt-out | `usage.events.enabled=false` in `Openbravo.properties` — the endpoint still answers `202`, nothing is stored. |
 
 **Errors:** `400` only when the body is not a JSON object with an `events` array; `413` when the

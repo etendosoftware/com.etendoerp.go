@@ -79,9 +79,16 @@ class NeoUsageEventEndpoint {
 
   /** Events per user and session key per {@link #RATE_WINDOW_MS}; the excess is dropped. */
   static final int RATE_LIMIT_EVENTS = 600;
+
+  /**
+   * Events per user per {@link #RATE_WINDOW_MS}, whatever the session key. The per-session limit
+   * alone is evadable, because the body names the session key; this one is keyed only on what the
+   * token says.
+   */
+  static final int USER_RATE_LIMIT_EVENTS = 1_200;
   static final long RATE_WINDOW_MS = 60_000L;
 
-  /** Bound on the rate limiter's map, so a stream of fresh session keys cannot grow it forever. */
+  /** Bound on each rate limiter's map, so a stream of fresh keys cannot grow it forever. */
   static final int RATE_LIMIT_MAX_KEYS = 10_000;
 
   /** How far back / ahead a client clock may place an event before it is clamped. */
@@ -104,7 +111,8 @@ class NeoUsageEventEndpoint {
 
   private final Consumer<UsageEvent> sink;
   private final LongSupplier clock;
-  private final RateLimiter rateLimiter;
+  private final RateLimiter sessionRateLimiter;
+  private final RateLimiter userRateLimiter;
   private final AtomicLong lastFailureLogAt = new AtomicLong();
 
   NeoUsageEventEndpoint() {
@@ -118,8 +126,10 @@ class NeoUsageEventEndpoint {
   NeoUsageEventEndpoint(Consumer<UsageEvent> sink, LongSupplier clock) {
     this.sink = sink;
     this.clock = clock;
-    this.rateLimiter = new RateLimiter(RATE_LIMIT_EVENTS, RATE_WINDOW_MS, RATE_LIMIT_MAX_KEYS,
-        clock);
+    this.sessionRateLimiter = new RateLimiter(RATE_LIMIT_EVENTS, RATE_WINDOW_MS,
+        RATE_LIMIT_MAX_KEYS, clock);
+    this.userRateLimiter = new RateLimiter(USER_RATE_LIMIT_EVENTS, RATE_WINDOW_MS,
+        RATE_LIMIT_MAX_KEYS, clock);
   }
 
   NeoResponse handle(HttpServletRequest request) throws IOException {
@@ -211,14 +221,24 @@ class NeoUsageEventEndpoint {
     }
     JSONObject json = (JSONObject) candidate;
     UsageEvent event = toEvent(json, now);
-    if (!rateLimiter.tryAcquire(event.clientId() + '|' + event.userId() + '|'
-        + StringUtils.defaultString(event.sessionKey()))) {
+    if (!withinRateLimits(event)) {
       return false;
     }
     // Forwarded even when unknown: the recorder is where an unknown type is dropped and logged at
     // ERROR (D4). Here it only counts as dropped, so the log line is not written twice.
     sink.accept(event);
     return UsageEventTypes.isKnown(event.eventType());
+  }
+
+  /**
+   * An event must pass both limits. The per-session one is asked first on purpose: an event it
+   * refuses then costs nothing from the user's budget, so one runaway session cannot use up the
+   * allowance of the same user's other sessions.
+   */
+  private boolean withinRateLimits(UsageEvent event) {
+    String user = event.clientId() + '|' + event.userId();
+    return sessionRateLimiter.tryAcquire(user + '|' + StringUtils.defaultString(event.sessionKey()))
+        && userRateLimiter.tryAcquire(user);
   }
 
   /** Map one body event to a {@link UsageEvent}. Who-columns come from the context, never the body. */

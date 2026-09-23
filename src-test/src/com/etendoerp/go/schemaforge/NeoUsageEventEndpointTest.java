@@ -684,6 +684,51 @@ class NeoUsageEventEndpointTest {
       clock.addAndGet(NeoUsageEventEndpoint.RATE_WINDOW_MS);
       assertAccepted(postEvents(known().put("sessionKey", "s1")), 1, 0);
     }
+
+    /** Posts {@code n} known events, each under its own fresh session key. */
+    private void postWithRotatingSessionKeys(int n, String prefix, int accepted) throws Exception {
+      JSONArray batch = new JSONArray();
+      for (int i = 0; i < n; i++) {
+        batch.put(known().put("sessionKey", prefix + i));
+      }
+      assertAccepted(postEvents(batch), accepted, n - accepted);
+    }
+
+    @Test
+    void rotatingTheSessionKeyDoesNotEscapeThePerUserLimit() throws Exception {
+      int perRequest = NeoUsageEventEndpoint.MAX_EVENTS_PER_REQUEST;
+      int requests = NeoUsageEventEndpoint.USER_RATE_LIMIT_EVENTS / perRequest;
+      for (int r = 0; r < requests; r++) {
+        postWithRotatingSessionKeys(perRequest, "r" + r + "-", perRequest);
+      }
+
+      postWithRotatingSessionKeys(perRequest, "over-", 0);
+      assertEquals(NeoUsageEventEndpoint.USER_RATE_LIMIT_EVENTS, sunk.size());
+
+      clock.addAndGet(NeoUsageEventEndpoint.RATE_WINDOW_MS);
+      postWithRotatingSessionKeys(1, "next-", 1);
+    }
+
+    @Test
+    void anEventRefusedPerSessionDoesNotSpendTheUserBudget() throws Exception {
+      int perRequest = NeoUsageEventEndpoint.MAX_EVENTS_PER_REQUEST;
+      JSONArray flood = new JSONArray();
+      for (int i = 0; i < perRequest; i++) {
+        flood.put(known().put("sessionKey", "runaway"));
+      }
+      int sessionRequests = NeoUsageEventEndpoint.RATE_LIMIT_EVENTS / perRequest;
+      for (int r = 0; r < sessionRequests + 2; r++) {
+        postEvents(flood);
+      }
+
+      int left = NeoUsageEventEndpoint.USER_RATE_LIMIT_EVENTS
+          - NeoUsageEventEndpoint.RATE_LIMIT_EVENTS;
+      for (int r = 0; r < left / perRequest; r++) {
+        postWithRotatingSessionKeys(perRequest, "other" + r + "-", perRequest);
+      }
+      postWithRotatingSessionKeys(1, "last-", 0);
+      assertEquals(NeoUsageEventEndpoint.USER_RATE_LIMIT_EVENTS, sunk.size());
+    }
   }
 
   // ── failures ──────────────────────────────────────────────────────────
