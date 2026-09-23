@@ -744,15 +744,20 @@ digits are not in that class at all.
 
 ## Which tenant an onboarding endpoint writes to
 
-Applies to every account-authenticated onboarding endpoint — `/onboarding/first-steps`,
-`/onboarding/company-data` and `/onboarding/draft`.
+Applies to every account-authenticated onboarding endpoint that is scoped to a tenant — today
+`/onboarding/company-data`. `/onboarding/first-steps` and `/onboarding/draft` are stored on the
+account itself and do not resolve a tenant.
 
 The onboarding endpoints authenticate an **account**, and an account can own several
-environments — so the account alone does not say which tenant to write to. The token the app
-sends from inside an environment is the NEO session JWT (the branch
-`findActiveAccountByBearerToken` resolves through the `user` claim), and it carries the
-session's own `client` and `organization` claims. Those scope the request.
+environments — so the account alone does not say which tenant to write to. `resolveTenantSession`
+takes the tenant from the credential, never from the request params or body:
 
-`resolveTenantSession` then re-checks the claimed client against the account that owns it, so a
-token can never name a client its account does not own. A pure account-session token, which has
-no environment behind it, is answered `400`.
+| Credential | Tenant source |
+|---|---|
+| `__Host-go_session` cookie (ADR-0001, what the SPA sends) | the session record's selected environment (`ctxClientId` / `ctxOrgId`, set by the environment-select flow); any bearer on the same request is ignored |
+| Legacy `Authorization: Bearer` NEO session JWT (the branch `findActiveAccountByBearerToken` resolves through the `user` claim) | the JWT's own `client` and `organization` claims |
+
+Both paths then run the same checks. No client (a cookie session with no environment selected
+yet, or a pure account-session token) is answered `400`. The client is re-checked against the
+account that owns it (`clientBelongsToAccountEmail`), so neither a token nor a session can name a
+client its account does not own — `403` otherwise. A blank organization defaults to `"0"`.
