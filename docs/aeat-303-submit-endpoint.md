@@ -118,7 +118,7 @@ shape minus `declarationData`/`csv`/etc:
 | (none — plain `sendError`, no JSON body) | `404` | `id` doesn't resolve to a declaration belonging to the current client/org (`belongsTo`) | Same as above — no JSON body |
 | `MISSING_PRESENTER` | `400` | Production (`testMode=false`) and either `presenterNif` or `presenterName` is blank | Test mode never triggers this — presenter fields are optional there |
 | `NO_CERTIFICATE` | `409` | Production and `AEAT303SubmissionService.hasOrgCertificate(org)` is false | Checked **before** constructing `AEAT303SubmissionService` for the actual submission — session-cert upload is NOT supported by this endpoint (see below) |
-| `ALREADY_SUBMITTED` | `409` | Production and the declaration's `DeclarationStatus` is already `submitted_ack` | The idempotency guard (BUG-1 fix) — see dedicated section below |
+| `ALREADY_SUBMITTED` | `409` | Production and the declaration's `DeclarationStatus` is already in the submitted family (`submitted`, `submitted_ext`, `submitted_ack`) | The idempotency guard (BUG-1 fix, widened in ETP-5438) — see dedicated section below |
 | `SUBMISSION_FAILED` | `500` (file-generation failure) or `502` (AEAT call itself threw `OBException`) | File regeneration threw, or `AEAT303SubmissionService.submitProduction`/`submitValidation` threw `OBException` (e.g. connection error, unsupported-charset gate, non-JSON response) | The one case where a raised exception maps to this code; a non-`OBException` runtime exception is a known, accepted gap (see "Known gaps") |
 
 An AEAT-side rejection that the service parses successfully (e.g. the E0100803 "double space in
@@ -182,7 +182,9 @@ certificate at all, so this restriction only ever affects production submissions
 ## Idempotency guard (`ALREADY_SUBMITTED` — BUG-1 fix)
 
 **What it blocks:** a production (`testMode=false`) submission of a declaration whose
-`ETGO_Fiscal_Decl.DeclarationStatus` is already `submitted_ack` is rejected outright —
+`ETGO_Fiscal_Decl.DeclarationStatus` is already in the submitted family
+(`FiscalDeclCrudHandler.SUBMITTED_STATUSES`: `submitted`, `submitted_ext`, `submitted_ack`) is
+rejected outright —
 `409 Conflict`, `errorCode: "ALREADY_SUBMITTED"` — **before** `AEAT303SubmissionService` is even
 constructed. This is verified in `Fiscal303SubmitHandlerTest.
 testHandleSubmit_alreadySubmittedDeclaration_blocksResubmission` via Mockito's
@@ -195,7 +197,16 @@ submission to the live AEAT service**. Per the AEAT protocol, a genuine repeat p
 same declaration must be filed as a "complementaria" (a distinct declaration type with its own
 flag) — a plain resubmission is not the correct way to correct or repeat a filing.
 
-**What it does NOT block:** test-mode (`testMode=true`) resubmissions of an already-`submitted_ack`
+**Scope widened in ETP-5438.** The original BUG-1 guard only matched `submitted_ack`; ETP-5438
+widened it to the full submitted family so it matches every other "already presented" guard
+(`FiscalDeclCrudHandler#rejectRepresentation` for the PUT re-presentation path and
+`AbstractFiscalHandler#guardNotAlreadySubmitted` for `generate`, both also `409`). The pure reads
+`GET /fiscal303/boxes` and `GET /fiscal349/operators` are deliberately **not** gated — the
+frontend computes a submitted declaration once per browser session from them and freezes the
+result. Full rationale: `schema_forge/docs/generated-custom-windows/fiscal-models.md`, section
+"Freeze once presented".
+
+**What it does NOT block:** test-mode (`testMode=true`) resubmissions of an already-submitted
 declaration are explicitly allowed — ServValiDos never mutates declaration status (see
 "Persistence" below), so re-validating an already-submitted declaration is harmless. This is
 covered by its own dedicated test
