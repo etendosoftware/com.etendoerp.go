@@ -45,7 +45,7 @@ public final class EnvironmentAuthOutcome {
       this.httpStatus = httpStatus;
     }
 
-    /** @return the HTTP status a consumer must answer with */
+    /** Returns the HTTP status a consumer must answer with. */
     public int getHttpStatus() {
       return httpStatus;
     }
@@ -102,52 +102,52 @@ public final class EnvironmentAuthOutcome {
     return new EnvironmentAuthOutcome(status, message, scheme, null, new String[4]);
   }
 
-  /** @return true when the request may proceed; {@link #getContext()} is then set */
+  /** Returns true when the request may proceed; {@link #getContext()} is then set. */
   public boolean isAuthenticated() {
     return status == Status.AUTHENTICATED;
   }
 
-  /** @return the outcome kind */
+  /** Returns the outcome kind. */
   public Status getStatus() {
     return status;
   }
 
-  /** @return the HTTP status to answer with when the request is refused */
+  /** Returns the HTTP status to answer with when the request is refused. */
   public int getHttpStatus() {
     return status.getHttpStatus();
   }
 
-  /** @return the client-safe error message, or null when authenticated */
+  /** Returns the client-safe error message, or null when authenticated. */
   public String getMessage() {
     return message;
   }
 
-  /** @return the scheme the credential was resolved as, or null when none was resolved */
+  /** Returns the scheme the credential was resolved as, or null when none was resolved. */
   public AuthScheme getScheme() {
     return scheme;
   }
 
-  /** @return the context installed for the request, or null when refused */
+  /** Returns the context installed for the request, or null when refused. */
   public OBContext getContext() {
     return context;
   }
 
-  /** @return the authenticated user, or null when refused */
+  /** Returns the authenticated user, or null when refused. */
   public String getUserId() {
     return userId;
   }
 
-  /** @return the role the context runs with, or null when refused */
+  /** Returns the role the context runs with, or null when refused. */
   public String getRoleId() {
     return roleId;
   }
 
-  /** @return the environment (client) of the context, or null when refused */
+  /** Returns the environment (client) of the context, or null when refused. */
   public String getClientId() {
     return clientId;
   }
 
-  /** @return the organization of the context, or null when refused */
+  /** Returns the organization of the context, or null when refused. */
   public String getOrgId() {
     return orgId;
   }

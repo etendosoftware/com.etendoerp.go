@@ -28,6 +28,8 @@ import org.openbravo.dal.core.OBContext;
 public interface WarehouseResolver {
 
   /**
+   * Finds a warehouse of the context's client that belongs to one of its readable organizations.
+   *
    * @param context the context whose warehouse is not readable
    * @return an accessible warehouse id, or null when the client has none
    */

@@ -101,6 +101,9 @@ public class EnvironmentRequestAuthenticator {
   }
 
   /**
+   * Wiring with explicit collaborators, for callers that already hold a session service and for
+   * tests.
+   *
    * @param sessionAuthenticator resolves the {@code __Host-go_session} cookie
    * @param lifecycleService     answers the commercial access decision for a client
    * @param warehouseResolver    repairs a context whose warehouse the role cannot read

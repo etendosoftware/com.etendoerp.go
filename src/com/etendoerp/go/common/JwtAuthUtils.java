@@ -35,9 +35,9 @@ import com.etendoerp.go.auth.SurfacePolicy;
  * <p>ETP-5455 — it used to carry its own copy of the cookie-then-Bearer resolution, which is how
  * those servlets ended up without the commercial-access check NEO applies: the copy had never been
  * given it. It is now the shared {@link EnvironmentRequestAuthenticator} pipeline under
- * {@link SurfacePolicy#NEO_DATA}. The bearer-only {@code authenticate(HttpServletRequest)} primitive
- * that also lived here — reachable by nobody, and a way around the legacy kill switch for whoever
- * called it next — is gone.
+ * {@link SurfacePolicy#NEO_DATA}. The bearer-only {@code authenticate(HttpServletRequest)}
+ * primitive that also lived here — reachable by nobody, and a way around the legacy kill switch
+ * for whoever called it next — is gone.
  */
 public class JwtAuthUtils {
 

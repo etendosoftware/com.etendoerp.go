@@ -51,12 +51,12 @@ public enum SurfacePolicy {
     this.oauth2Allowed = oauth2Allowed;
   }
 
-  /** @return whether a commercially blocked environment is refused with 402 on this surface */
+  /** Returns whether a commercially blocked environment is refused with 402 on this surface. */
   public boolean isCommercialAccessRequired() {
     return commercialAccessRequired;
   }
 
-  /** @return whether an opaque OAuth2 client-credentials token is accepted on this surface */
+  /** Returns whether an opaque OAuth2 client-credentials token is accepted on this surface. */
   public boolean isOAuth2Allowed() {
     return oauth2Allowed;
   }
