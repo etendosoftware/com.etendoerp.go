@@ -116,11 +116,11 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
       HttpServletRequest request, HttpServletResponse response) throws FiscalHandlerException {
     runDispatch(response, () -> {
       if (OPERATORS.equals(entityName)) {
-        // Deliberately NOT guarded (ETP-5438 follow-up): operators is a pure read. The frontend
-        // freezes a submitted declaration by computing it once per browser session and serving
-        // the cached result, so this read must stay available after submission. Only the
+        // Deliberately NOT guarded (ETP-5438): operators is a pure read. A submitted declaration
+        // is served from its persisted submission snapshot (never recomputed); a legacy submitted
+        // one without a snapshot, and every draft/ready one, is computed live. Only the
         // side-effecting generate (file generation) is blocked once submitted.
-        JSONObject result = computeOperators(orgId, year, period);
+        JSONObject result = snapshotOrCompute(orgId, year, period);
         response.setContentType(JSON_CT);
         response.getWriter().write(result.toString());
       } else if (GENERATE.equals(entityName)) {
@@ -153,6 +153,17 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
   @Override
   protected String getModelKey() {
     return "fiscal349";
+  }
+
+  @Override
+  protected String getDeclModel() {
+    return "349";
+  }
+
+  /** The {@code GET /fiscal349/operators} payload, computed live — see the base javadoc. */
+  @Override
+  JSONObject computeSnapshotPayload(String orgId, int year, String period) throws Exception {
+    return computeOperators(orgId, year, period);
   }
 
   // ── operators ─────────────────────────────────────────────────────

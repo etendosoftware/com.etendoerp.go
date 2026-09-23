@@ -1304,15 +1304,13 @@ public class Fiscal349BoxesHandlerTest {
   // ── dispatch() wiring: reads open, generate 409 (ETP-5438) ────────────
 
   /**
-   * ETP-5438 follow-up — {@code operators} is a pure read and must stay available for a
-   * submitted declaration: the frontend computes a submitted declaration once per browser session
-   * and freezes it from its session cache, so a 409 here made every cold-cache view show "Error
-   * de cálculo". Only {@code generate} stays blocked (see the next test).
+   * ETP-5438 — {@code operators} stays available for a submitted declaration. A legacy submitted
+   * declaration without a snapshot keeps the live compute (no data-fix, product decision).
    */
+  @SuppressWarnings("unchecked")
   @Test
-  public void testDispatchOperatorsProceedsWhenAlreadySubmitted() throws Exception {
+  public void testDispatchOperatorsComputesLiveWhenSubmittedWithoutSnapshot() throws Exception {
     Fiscal349BoxesHandler h = org.mockito.Mockito.spy(handler);
-    HttpServletRequest req = mock(HttpServletRequest.class);
     HttpServletResponse resp = mock(HttpServletResponse.class);
     StringWriter body = new StringWriter();
     when(resp.getWriter()).thenReturn(new PrintWriter(body));
@@ -1320,14 +1318,49 @@ public class Fiscal349BoxesHandlerTest {
     computed.put("operators", new JSONArray());
     org.mockito.Mockito.doReturn(computed).when(h).computeOperators("org1", 2026, "T1");
 
-    // No OBContext/OBDal mocking on purpose: the read path must not even look up the
-    // declaration status — a submitted_ack declaration for the period is irrelevant to it.
-    h.dispatch("operators", "org1", 2026, "T1", req, resp);
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus(0L, "submitted_ack");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      h.dispatch("operators", "org1", 2026, "T1", mock(HttpServletRequest.class), resp);
+    }
 
     verify(servlet, org.mockito.Mockito.never())
         .sendError(any(), org.mockito.ArgumentMatchers.anyInt(), anyString());
     verify(h).computeOperators("org1", 2026, "T1");
     org.junit.Assert.assertEquals(computed.toString(), body.toString());
+  }
+
+  /**
+   * ETP-5438 — a submitted declaration WITH a snapshot is served from it and the live compute is
+   * never reached.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchOperatorsServesSnapshotWithoutComputingWhenSubmitted() throws Exception {
+    Fiscal349BoxesHandler h = org.mockito.Mockito.spy(handler);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter body = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(body));
+    String snapshot = "{\"operators\":[{\"nif\":\"FR1\",\"base\":\"10.00\"}],\"summary\":{}}";
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus(0L, "submitted");
+      when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn(snapshot);
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      h.dispatch("operators", "org1", 2026, "T1", mock(HttpServletRequest.class), resp);
+    }
+
+    verify(h, org.mockito.Mockito.never())
+        .computeOperators(anyString(), org.mockito.ArgumentMatchers.anyInt(), anyString());
+    org.junit.Assert.assertEquals(new JSONObject(snapshot).toString(), body.toString());
   }
 
   @SuppressWarnings("unchecked")

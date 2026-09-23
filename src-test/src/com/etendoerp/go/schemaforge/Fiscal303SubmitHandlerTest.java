@@ -122,7 +122,7 @@ public class Fiscal303SubmitHandlerTest {
 
   @Before
   public void setUp() {
-    handler = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    handler = snapshotStubbed(mock(NeoServlet.class));
   }
 
   // ── resolveNrcForSubmission ─────────────────────────────────────────────────
@@ -245,7 +245,7 @@ public class Fiscal303SubmitHandlerTest {
   @Test
   public void testGetSubmitReturns405AndNeverDispatches() throws Exception {
     NeoServlet servlet = mock(NeoServlet.class);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    Fiscal303BoxesHandler h = snapshotStubbed(servlet);
     HttpServletRequest req = mock(HttpServletRequest.class);
     HttpServletResponse res = mock(HttpServletResponse.class);
 
@@ -261,7 +261,7 @@ public class Fiscal303SubmitHandlerTest {
   public void testGetOnReadEntitiesPassesTheMethodGate() throws Exception {
     for (String entity : Arrays.asList("boxes", "generate", "modified")) {
       NeoServlet servlet = mock(NeoServlet.class);
-      Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+      Fiscal303BoxesHandler h = snapshotStubbed(servlet);
       HttpServletRequest req = mock(HttpServletRequest.class);
       HttpServletResponse res = mock(HttpServletResponse.class);
 
@@ -405,7 +405,7 @@ public class Fiscal303SubmitHandlerTest {
   @Test
   public void testHandleSubmit_missingIdReturns400() throws IOException {
     NeoServlet servlet = mock(NeoServlet.class);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    Fiscal303BoxesHandler h = snapshotStubbed(servlet);
     HttpServletRequest req = mock(HttpServletRequest.class);
     HttpServletResponse res = mock(HttpServletResponse.class);
     when(req.getParameter("year")).thenReturn("2026");
@@ -422,7 +422,7 @@ public class Fiscal303SubmitHandlerTest {
   @Test
   public void testHandleSubmit_declarationNotFoundReturns404() throws IOException {
     NeoServlet servlet = mock(NeoServlet.class);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    Fiscal303BoxesHandler h = snapshotStubbed(servlet);
     HttpServletRequest req = mock(HttpServletRequest.class);
     HttpServletResponse res = mock(HttpServletResponse.class);
     when(req.getParameter("year")).thenReturn("2026");
@@ -448,7 +448,7 @@ public class Fiscal303SubmitHandlerTest {
     HttpServletRequest req = requestFor("2026", "T2", "decl-1",
         "{\"testMode\":false}");
     NeoServlet servlet = mock(NeoServlet.class);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    Fiscal303BoxesHandler h = snapshotStubbed(servlet);
 
     try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
@@ -473,7 +473,7 @@ public class Fiscal303SubmitHandlerTest {
     HttpServletRequest req = requestFor("2026", "T2", "decl-1",
         "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
     NeoServlet servlet = mock(NeoServlet.class);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    Fiscal303BoxesHandler h = snapshotStubbed(servlet);
 
     try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
         MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
@@ -502,7 +502,7 @@ public class Fiscal303SubmitHandlerTest {
     HttpServletResponse res = responseCapturing(capturedBody);
     HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}");
     NeoServlet servlet = mock(NeoServlet.class);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    Fiscal303BoxesHandler h = snapshotStubbed(servlet);
     FiscalDecl decl = matchingDecl("client1", "org1");
 
     AEAT303SubmissionResult validationResult = new AEAT303SubmissionResult();
@@ -543,7 +543,7 @@ public class Fiscal303SubmitHandlerTest {
     HttpServletRequest req = requestFor("2026", "T2", "decl-1",
         "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
     NeoServlet servlet = mock(NeoServlet.class);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    Fiscal303BoxesHandler h = snapshotStubbed(servlet);
     FiscalDecl decl = matchingDecl("client1", "org1");
     when(decl.getId()).thenReturn("decl-1");
 
@@ -579,7 +579,98 @@ public class Fiscal303SubmitHandlerTest {
       // disambiguating this path from the two manual "Presentado" paths that also land on
       // submitted_ack.
       verify(decl).setSubmissionMethod("aeat_telematic");
+      // ETP-5438: the boxes payload computed before the AEAT call is persisted as the snapshot.
+      verify(decl).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT),
+          argThat(v -> v != null && v.toString().contains("\"46\":\"123.45\"")));
       verify(obDal, times(1)).commitAndClose();
+    }
+  }
+
+  /**
+   * ETP-5438 — when the snapshot cannot be computed the production filing is aborted BEFORE the
+   * AEAT is contacted: once Hacienda accepts a filing it cannot be undone, and a declaration must
+   * never end up presented without its frozen figures.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_productionSnapshotFails_neverCallsAeatNorMutatesDeclaration()
+      throws Exception {
+    StringWriter capturedBody = new StringWriter();
+    HttpServletResponse res = responseCapturing(capturedBody);
+    HttpServletRequest req = requestFor("2026", "T2", "decl-1",
+        "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class)) {
+      @Override
+      JSONObject computeSnapshotPayload(String orgId, int year, String period) {
+        throw new IllegalStateException("No periods found");
+      }
+    };
+    FiscalDecl decl = matchingDecl("client1", "org1");
+    when(decl.getId()).thenReturn("decl-1");
+
+    try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedConstruction<AEAT303SubmissionService> serviceMock =
+            mockConstruction(AEAT303SubmissionService.class, (mockService, ctx) ->
+                when(mockService.hasOrgCertificate(any())).thenReturn(true))) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
+      when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
+      stubFileGeneration(obDal);
+
+      h.handle("submit", "POST", req, res);
+
+      verify(res).setStatus(HttpServletResponse.SC_INTERNAL_SERVER_ERROR);
+      JSONObject body = new JSONObject(capturedBody.toString());
+      assertEquals("ERROR", body.getString("status"));
+      assertEquals("SNAPSHOT_FAILED", body.getString("errorCode"));
+      assertTrue(body.getJSONArray("errors").getString(0).contains("No periods found"));
+      verify(serviceMock.constructed().get(0), never()).submitProduction(any());
+      verify(decl, never()).setDeclarationStatus(anyString());
+      verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT), any());
+      verify(obDal, never()).commitAndClose();
+    }
+  }
+
+  /** ETP-5438 — test mode never changes the declaration, so it computes no snapshot at all. */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_testMode_takesNoSnapshot() throws Exception {
+    StringWriter capturedBody = new StringWriter();
+    HttpServletResponse res = responseCapturing(capturedBody);
+    HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}");
+    int[] computeCalls = { 0 };
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class)) {
+      @Override
+      JSONObject computeSnapshotPayload(String orgId, int year, String period) {
+        computeCalls[0]++;
+        return new JSONObject();
+      }
+    };
+    FiscalDecl decl = matchingDecl("client1", "org1");
+    when(decl.getId()).thenReturn("decl-1");
+    AEAT303SubmissionResult testResult = new AEAT303SubmissionResult();
+    testResult.setStatus(AEAT303SubmissionResult.Status.SUCCESS);
+    testResult.setTestMode(true);
+
+    try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedConstruction<AEAT303SubmissionService> serviceMock =
+            mockConstruction(AEAT303SubmissionService.class, (mockService, ctx) ->
+                when(mockService.submitValidation(anyString(), anyString(), anyString(),
+                    anyString())).thenReturn(testResult))) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
+      when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
+      stubFileGeneration(obDal);
+
+      h.handle("submit", "POST", req, res);
+
+      assertEquals("TEST_SUCCESS", new JSONObject(capturedBody.toString()).getString("status"));
+      assertEquals(0, computeCalls[0]);
+      verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT), any());
     }
   }
 
@@ -591,7 +682,7 @@ public class Fiscal303SubmitHandlerTest {
     HttpServletRequest req = requestFor("2026", "T2", "decl-1",
         "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
     NeoServlet servlet = mock(NeoServlet.class);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    Fiscal303BoxesHandler h = snapshotStubbed(servlet);
     FiscalDecl decl = matchingDecl("client1", "org1");
 
     AEAT303SubmissionResult errorResult = new AEAT303SubmissionResult();
@@ -655,7 +746,7 @@ public class Fiscal303SubmitHandlerTest {
   public void testHandleSubmit_unexpectedRuntimeExceptionFromAeatService_reportsUnwrappedCause()
       throws Exception {
     NeoServlet servlet = mock(NeoServlet.class);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    Fiscal303BoxesHandler h = snapshotStubbed(servlet);
     HttpServletRequest req = requestFor("2026", "T2", "decl-1",
         "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
     HttpServletResponse res = mock(HttpServletResponse.class);
@@ -699,7 +790,7 @@ public class Fiscal303SubmitHandlerTest {
     StringWriter capturedBody = new StringWriter();
     HttpServletResponse res = responseCapturing(capturedBody);
     NeoServlet servlet = mock(NeoServlet.class);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    Fiscal303BoxesHandler h = snapshotStubbed(servlet);
     HttpServletRequest req = requestFor("2026", "T2", "decl-1",
         "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
     FiscalDecl decl = matchingDecl("client1", "org1");
@@ -742,7 +833,7 @@ public class Fiscal303SubmitHandlerTest {
     StringWriter capturedBody = new StringWriter();
     HttpServletResponse res = responseCapturing(capturedBody);
     NeoServlet servlet = mock(NeoServlet.class);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    Fiscal303BoxesHandler h = snapshotStubbed(servlet);
     HttpServletRequest req = requestFor("2026", "T2", "decl-1",
         "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
     FiscalDecl decl = matchingDecl("client1", "org1");
@@ -819,7 +910,7 @@ public class Fiscal303SubmitHandlerTest {
     HttpServletRequest req = requestFor("2026", "T2", "decl-1",
         "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
     NeoServlet servlet = mock(NeoServlet.class);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    Fiscal303BoxesHandler h = snapshotStubbed(servlet);
     FiscalDecl decl = matchingDecl("client1", "org1");
     // Declaration was already successfully submitted (via some path) in a prior call.
     when(decl.getDeclarationStatus()).thenReturn(declarationStatus);
@@ -861,7 +952,7 @@ public class Fiscal303SubmitHandlerTest {
     HttpServletResponse res = responseCapturing(capturedBody);
     HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}");
     NeoServlet servlet = mock(NeoServlet.class);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    Fiscal303BoxesHandler h = snapshotStubbed(servlet);
     FiscalDecl decl = matchingDecl("client1", "org1");
     // Already submitted_ack from a prior PRODUCTION call — must not block a TEST-mode re-check.
     when(decl.getDeclarationStatus()).thenReturn("submitted_ack");
@@ -914,7 +1005,7 @@ public class Fiscal303SubmitHandlerTest {
     HttpServletRequest req = requestFor("2026", "T2", "decl-1",
         "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
     NeoServlet servlet = mock(NeoServlet.class);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    Fiscal303BoxesHandler h = snapshotStubbed(servlet);
     FiscalDecl decl = matchingDecl("client1", "org1");
 
     try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
@@ -956,7 +1047,7 @@ public class Fiscal303SubmitHandlerTest {
     HttpServletRequest req = requestFor("2026", "T2", "decl-1",
         "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
     NeoServlet servlet = mock(NeoServlet.class);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    Fiscal303BoxesHandler h = snapshotStubbed(servlet);
     FiscalDecl decl = matchingDecl("client1", "org1");
 
     try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
@@ -995,7 +1086,7 @@ public class Fiscal303SubmitHandlerTest {
     HttpServletRequest req = requestFor("2026", "T2", "decl-1",
         "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
     NeoServlet servlet = mock(NeoServlet.class);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(servlet);
+    Fiscal303BoxesHandler h = snapshotStubbed(servlet);
     FiscalDecl decl = matchingDecl("client1", "org1");
 
     try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
@@ -1036,7 +1127,7 @@ public class Fiscal303SubmitHandlerTest {
       throws Exception {
     HttpServletResponse res = responseCapturing(new StringWriter());
     HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}");
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    Fiscal303BoxesHandler h = snapshotStubbed(mock(NeoServlet.class));
     FiscalDecl decl = matchingDecl("client1", "org1");
 
     AEAT303SubmissionResult validationResult = new AEAT303SubmissionResult();
@@ -1076,7 +1167,7 @@ public class Fiscal303SubmitHandlerTest {
       throws Exception {
     HttpServletResponse res = responseCapturing(new StringWriter());
     HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}");
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    Fiscal303BoxesHandler h = snapshotStubbed(mock(NeoServlet.class));
     FiscalDecl decl = matchingDecl("client1", "org1");
 
     AEAT303SubmissionResult validationResult = new AEAT303SubmissionResult();
@@ -1116,7 +1207,7 @@ public class Fiscal303SubmitHandlerTest {
   public void testHandleSubmit_testModeSuccessWithNullPdf_neverAttempsToAttach() throws Exception {
     HttpServletResponse res = responseCapturing(new StringWriter());
     HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}");
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    Fiscal303BoxesHandler h = snapshotStubbed(mock(NeoServlet.class));
     FiscalDecl decl = matchingDecl("client1", "org1");
 
     AEAT303SubmissionResult validationResult = new AEAT303SubmissionResult();
@@ -1153,7 +1244,7 @@ public class Fiscal303SubmitHandlerTest {
     HttpServletResponse res = responseCapturing(new StringWriter());
     HttpServletRequest req = requestFor("2026", "T2", "decl-1",
         "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    Fiscal303BoxesHandler h = snapshotStubbed(mock(NeoServlet.class));
     FiscalDecl decl = matchingDecl("client1", "org1");
 
     AEAT303SubmissionResult prodResult = new AEAT303SubmissionResult();
@@ -1200,7 +1291,7 @@ public class Fiscal303SubmitHandlerTest {
       throws Exception {
     HttpServletResponse res = responseCapturing(new StringWriter());
     HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}");
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    Fiscal303BoxesHandler h = snapshotStubbed(mock(NeoServlet.class));
     FiscalDecl decl = matchingDecl("client1", "org1");
 
     AEAT303SubmissionResult errorResult = new AEAT303SubmissionResult();
@@ -1238,7 +1329,7 @@ public class Fiscal303SubmitHandlerTest {
     HttpServletResponse res = responseCapturing(new StringWriter());
     HttpServletRequest req = requestFor("2026", "T2", "decl-1",
         "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    Fiscal303BoxesHandler h = snapshotStubbed(mock(NeoServlet.class));
     FiscalDecl decl = matchingDecl("client1", "org1");
 
     AEAT303SubmissionResult errorResult = new AEAT303SubmissionResult();
@@ -1282,7 +1373,7 @@ public class Fiscal303SubmitHandlerTest {
   public void testHandleSubmit_testModeAeatError_persistsIncidents() throws Exception {
     HttpServletResponse res = responseCapturing(new StringWriter());
     HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}");
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    Fiscal303BoxesHandler h = snapshotStubbed(mock(NeoServlet.class));
     FiscalDecl decl = matchingDecl("client1", "org1");
     when(decl.getId()).thenReturn("decl-1");
 
@@ -1333,7 +1424,7 @@ public class Fiscal303SubmitHandlerTest {
   public void testHandleSubmit_testModeSuccess_clearsIncidentsWithNoInsert() throws Exception {
     HttpServletResponse res = responseCapturing(new StringWriter());
     HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}");
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    Fiscal303BoxesHandler h = snapshotStubbed(mock(NeoServlet.class));
     FiscalDecl decl = matchingDecl("client1", "org1");
     when(decl.getId()).thenReturn("decl-1");
 
@@ -1394,7 +1485,7 @@ public class Fiscal303SubmitHandlerTest {
     HttpServletResponse res = responseCapturing(new StringWriter());
     HttpServletRequest req = requestFor("2026", "T2", "decl-1",
         "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    Fiscal303BoxesHandler h = snapshotStubbed(mock(NeoServlet.class));
     FiscalDecl decl = matchingDecl("client1", "org1");
     when(decl.getId()).thenReturn("decl-1");
 
@@ -1462,7 +1553,7 @@ public class Fiscal303SubmitHandlerTest {
   public void testHandleSubmit_testModeAeatErrorAndWarning_persistsBothSeverities() throws Exception {
     HttpServletResponse res = responseCapturing(new StringWriter());
     HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}");
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    Fiscal303BoxesHandler h = snapshotStubbed(mock(NeoServlet.class));
     FiscalDecl decl = matchingDecl("client1", "org1");
     when(decl.getId()).thenReturn("decl-1");
 
@@ -1518,7 +1609,7 @@ public class Fiscal303SubmitHandlerTest {
   public void testHandleSubmit_successAfterMixedAttempt_clearsBothSeverities() throws Exception {
     HttpServletResponse res = responseCapturing(new StringWriter());
     HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}");
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    Fiscal303BoxesHandler h = snapshotStubbed(mock(NeoServlet.class));
     FiscalDecl decl = matchingDecl("client1", "org1");
     when(decl.getId()).thenReturn("decl-1");
 
@@ -1576,7 +1667,7 @@ public class Fiscal303SubmitHandlerTest {
     HttpServletResponse res = responseCapturing(new StringWriter());
     HttpServletRequest req = requestFor("2026", "T2", "decl-1",
         "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    Fiscal303BoxesHandler h = snapshotStubbed(mock(NeoServlet.class));
     FiscalDecl decl = matchingDecl("client1", "org1");
     when(decl.getId()).thenReturn("decl-1");
 
@@ -1635,7 +1726,7 @@ public class Fiscal303SubmitHandlerTest {
   public void testHandleSubmit_testModeFullSuccessPath_commitsExactlyOnce() throws Exception {
     HttpServletResponse res = responseCapturing(new StringWriter());
     HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}");
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    Fiscal303BoxesHandler h = snapshotStubbed(mock(NeoServlet.class));
     FiscalDecl decl = matchingDecl("client1", "org1");
     when(decl.getId()).thenReturn("decl-1");
 
@@ -1703,7 +1794,7 @@ public class Fiscal303SubmitHandlerTest {
     extraParams.put("IBAN", new String[]{"ES1234567890123456789012"});
     HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}", extraParams);
     when(req.getParameter("tipo")).thenReturn("U");
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    Fiscal303BoxesHandler h = snapshotStubbed(mock(NeoServlet.class));
     FiscalDecl decl = matchingDecl("client1", "org1");
 
     AEAT303SubmissionResult validationResult = new AEAT303SubmissionResult();
@@ -1738,7 +1829,7 @@ public class Fiscal303SubmitHandlerTest {
     extraParams.put("IBAN", new String[]{"ES1234567890123456789012"});
     // BIC is deliberately absent from the request.
     HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}", extraParams);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    Fiscal303BoxesHandler h = snapshotStubbed(mock(NeoServlet.class));
     FiscalDecl decl = matchingDecl("client1", "org1");
 
     AEAT303SubmissionResult validationResult = new AEAT303SubmissionResult();
@@ -1779,7 +1870,7 @@ public class Fiscal303SubmitHandlerTest {
     extraParams.put("tipo", new String[]{"U"});
     extraParams.put("id", new String[]{"decl-1"});
     HttpServletRequest req = requestFor("2026", "T2", "decl-1", "{\"testMode\":true}", extraParams);
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    Fiscal303BoxesHandler h = snapshotStubbed(mock(NeoServlet.class));
     FiscalDecl decl = matchingDecl("client1", "org1");
 
     AEAT303SubmissionResult validationResult = new AEAT303SubmissionResult();
@@ -1817,7 +1908,7 @@ public class Fiscal303SubmitHandlerTest {
     HttpServletRequest req =
         requestFor("2026", "T2", "decl-1", "{\"testMode\":true}", Collections.emptyMap());
     when(req.getParameter("tipo")).thenReturn("U");
-    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class));
+    Fiscal303BoxesHandler h = snapshotStubbed(mock(NeoServlet.class));
     FiscalDecl decl = matchingDecl("client1", "org1");
 
     AEAT303SubmissionResult validationResult = new AEAT303SubmissionResult();
@@ -1986,6 +2077,27 @@ public class Fiscal303SubmitHandlerTest {
       result.put("file", SAMPLE_303_CONTENT);
       return result;
     }
+  }
+
+  /**
+   * ETP-5438 — the {@code GET /fiscal303/boxes} payload a production submission snapshots before
+   * calling the AEAT. Stubbed because the real compute needs the AEAT303 accounting helpers.
+   */
+  private static final String SNAPSHOT_JSON =
+      "{\"boxes\":{\"46\":\"123.45\"},\"summary\":{\"result\":\"123.45\"},\"sources\":[]}";
+
+  /**
+   * A handler whose snapshot compute returns {@link #SNAPSHOT_JSON}. An anonymous subclass rather
+   * than a Mockito spy: {@code Fiscal303SubmissionSupport} keeps a reference to the handler that
+   * constructed it, which is the original object, not a spy copy.
+   */
+  private static Fiscal303BoxesHandler snapshotStubbed(NeoServlet servlet) {
+    return new Fiscal303BoxesHandler(servlet) {
+      @Override
+      JSONObject computeSnapshotPayload(String orgId, int year, String period) throws Exception {
+        return new JSONObject(SNAPSHOT_JSON);
+      }
+    };
   }
 
   private static FiscalDecl matchingDecl(String clientId, String orgId) {

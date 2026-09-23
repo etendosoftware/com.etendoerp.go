@@ -86,6 +86,7 @@ class Fiscal303SubmissionSupport {
   private static final String ERR_SUBMISSION_FAILED = "SUBMISSION_FAILED";
   private static final String ERR_ALREADY_SUBMITTED = "ALREADY_SUBMITTED";
   private static final String ERR_INVALID_DECL_TYPE = "INVALID_DECL_TYPE";
+  private static final String ERR_SNAPSHOT_FAILED = "SNAPSHOT_FAILED";
 
   /**
    * Query params consumed structurally by this handler's own routing (year/period/tipo/id) —
@@ -312,6 +313,28 @@ class Fiscal303SubmissionSupport {
       return;
     }
 
+    // ETP-5438 — a production filing freezes the declaration on a snapshot of the exact
+    // GET /fiscal303/boxes payload. It is computed BEFORE the AEAT call: once Hacienda accepts
+    // the filing there is no going back, so a declaration whose figures cannot be computed must
+    // never reach the AEAT at all. Test mode never changes the declaration, so it takes none.
+    String submittedSnapshot = null;
+    if (!testMode) {
+      try {
+        submittedSnapshot = owner.computeSnapshotPayload(orgId, year, period).toString();
+      } catch (Exception e) {
+        AbstractFiscalHandler.log.error("Could not compute the submission snapshot for decl="
+            + declId + "; the declaration was not sent to the AEAT", e);
+        writeJson(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR,
+            owner.buildFailureJson(false, ERR_SNAPSHOT_FAILED,
+                "The declaration was not submitted: its figures could not be computed ("
+                    + StringUtils.defaultIfBlank(
+                        NeoMessageTranslator.safeParseTranslation(e.getMessage()),
+                        e.getClass().getSimpleName())
+                    + ")."));
+        return;
+      }
+    }
+
     AEAT303DeclarationData data = AEAT303DeclarationDataExtractor.extract(fileContent);
     String nrcToSubmit =
         Fiscal303BoxesHandler.resolveNrcForSubmission(data.getDeclarationType(), nrc);
@@ -346,7 +369,7 @@ class Fiscal303SubmissionSupport {
       if (testMode) {
         attachTestJustificante(decl, org, data, result);
       } else {
-        persistSuccessfulSubmission(decl, org, data, result);
+        persistSuccessfulSubmission(decl, org, data, result, submittedSnapshot);
       }
     }
 
@@ -458,7 +481,8 @@ class Fiscal303SubmissionSupport {
   /**
    * Persists the outcome of a successful PRODUCTION submission: declaration status →
    * {@code submitted_ack}, declaration file name set to the justificante file,
-   * {@code submissionMethod} → {@link #SUBMISSION_METHOD_AEAT_TELEMATIC} (ETP-4755), and the PDF
+   * {@code submissionMethod} → {@link #SUBMISSION_METHOD_AEAT_TELEMATIC} (ETP-4755), the
+   * submission snapshot {@link #handleSubmit} computed before calling the AEAT (ETP-5438), and the PDF
    * attached (best-effort — see {@link #attachJustificante}). Never called for test-mode results
    * (see {@link #attachTestJustificante} for that path, which attaches the PDF too but never
    * touches the declaration record) or failed submissions (see {@link #handleSubmit}).
@@ -469,7 +493,7 @@ class Fiscal303SubmissionSupport {
    * atomicity fix).</p>
    */
   private void persistSuccessfulSubmission(FiscalDecl decl, Organization org,
-      AEAT303DeclarationData data, AEAT303SubmissionResult result) {
+      AEAT303DeclarationData data, AEAT303SubmissionResult result, String submittedSnapshot) {
     String fileName = "justificante-303-" + Fiscal303BoxesHandler.safeFileToken(data.getFiscalYear())
         + "-" + Fiscal303BoxesHandler.safeFileToken(data.getPeriod()) + ".pdf";
     try {
@@ -477,6 +501,8 @@ class Fiscal303SubmissionSupport {
       decl.setDeclarationFileName(fileName);
       decl.setFileExternal(false);
       decl.setSubmissionMethod(SUBMISSION_METHOD_AEAT_TELEMATIC);
+      // Dynamic property: the generated FiscalDecl predates the Submitted_Snapshot column.
+      decl.set(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT, submittedSnapshot);
       OBDal.getInstance().save(decl);
     } catch (Exception e) {
       AbstractFiscalHandler.log.error("Could not update declaration " + decl.getId()

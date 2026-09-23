@@ -1889,32 +1889,95 @@ public class Fiscal303BoxesHandlerTest {
   // ── dispatch() wiring: reads open, generate 409 (ETP-5438) ────────────
 
   /**
-   * ETP-5438 follow-up — {@code boxes} is a pure read and must stay available for a submitted
-   * declaration: the frontend computes a submitted declaration once per browser session and
-   * freezes it from its session cache, so a 409 here made every cold-cache view show "Error de
-   * cálculo". Only {@code generate} stays blocked (see the next test).
+   * ETP-5438 — {@code boxes} is a pure read and stays available for a submitted declaration. A
+   * legacy submitted declaration (presented before snapshots existed, so no snapshot) keeps the
+   * live compute — no data-fix for those, product decision. Only {@code generate} is blocked.
    */
+  @SuppressWarnings("unchecked")
   @Test
-  public void testDispatchBoxesProceedsWhenAlreadySubmitted() throws Exception {
+  public void testDispatchBoxesComputesLiveWhenSubmittedWithoutSnapshot() throws Exception {
     NeoServlet servlet = mock(NeoServlet.class);
     Fiscal303BoxesHandler h = org.mockito.Mockito.spy(new Fiscal303BoxesHandler(servlet));
-    HttpServletRequest req = mock(HttpServletRequest.class);
     HttpServletResponse resp = mock(HttpServletResponse.class);
     java.io.StringWriter body = new java.io.StringWriter();
     when(resp.getWriter()).thenReturn(new java.io.PrintWriter(body));
     Map<Integer, BigDecimal> boxes = new HashMap<>();
     boxes.put(46, new BigDecimal("123.45"));
-    org.mockito.Mockito.doReturn(
-            new ComputeResult(boxes, Collections.emptyList()))
+    org.mockito.Mockito.doReturn(new ComputeResult(boxes, Collections.emptyList()))
         .when(h).computeBoxes("org1", 2026, "T1");
 
-    // No OBContext/OBDal mocking on purpose: the read path must not even look up the
-    // declaration status — a submitted_ack declaration for the period is irrelevant to it.
-    h.dispatch("boxes", "org1", 2026, "T1", req, resp);
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted_ack");
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      h.dispatch("boxes", "org1", 2026, "T1", mock(HttpServletRequest.class), resp);
+    }
 
     verify(servlet, never()).sendError(any(), org.mockito.ArgumentMatchers.anyInt(), anyString());
     verify(h).computeBoxes("org1", 2026, "T1");
     org.junit.Assert.assertTrue(body.toString().contains("\"result\":\"123.45\""));
+  }
+
+  /**
+   * ETP-5438 — a submitted declaration WITH a snapshot is served from it, byte for byte, and the
+   * live compute is never reached: an invoice added/removed after submission cannot change it.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchBoxesServesSnapshotWithoutComputingWhenSubmitted() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = org.mockito.Mockito.spy(new Fiscal303BoxesHandler(servlet));
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    java.io.StringWriter body = new java.io.StringWriter();
+    when(resp.getWriter()).thenReturn(new java.io.PrintWriter(body));
+    String snapshot = "{\"boxes\":{\"46\":\"99.00\"},\"summary\":{\"result\":\"99.00\"},\"sources\":[]}";
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject decl = declWithSeqAndStatus303(0L, "submitted");
+      when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn(snapshot);
+      when(query.list()).thenReturn(Collections.singletonList(decl));
+
+      h.dispatch("boxes", "org1", 2026, "T1", mock(HttpServletRequest.class), resp);
+    }
+
+    verify(h, never()).computeBoxes(anyString(), org.mockito.ArgumentMatchers.anyInt(), anyString());
+    org.junit.Assert.assertEquals(new JSONObject(snapshot).toString(), body.toString());
+  }
+
+  /**
+   * ETP-5438 — a stale snapshot on a declaration that is no longer submitted (latest DECL_SEQ is
+   * a draft) is ignored: drafts always compute live.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testDispatchBoxesComputesLiveWhenLatestIsDraft() throws Exception {
+    NeoServlet servlet = mock(NeoServlet.class);
+    Fiscal303BoxesHandler h = org.mockito.Mockito.spy(new Fiscal303BoxesHandler(servlet));
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    when(resp.getWriter()).thenReturn(new java.io.PrintWriter(new java.io.StringWriter()));
+    org.mockito.Mockito.doReturn(new ComputeResult(new HashMap<>(), Collections.emptyList()))
+        .when(h).computeBoxes("org1", 2026, "T1");
+
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockClient303(ctxMock, "client1");
+      OBQuery<BaseOBObject> query = mockDeclQuery303(dalMock);
+      BaseOBObject newerDraft = declWithSeqAndStatus303(1L, "draft");
+      BaseOBObject olderSubmitted = declWithSeqAndStatus303(0L, "submitted");
+      when(olderSubmitted.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT))
+          .thenReturn("{\"boxes\":{}}");
+      when(query.list()).thenReturn(Arrays.asList(newerDraft, olderSubmitted));
+
+      h.dispatch("boxes", "org1", 2026, "T1", mock(HttpServletRequest.class), resp);
+    }
+
+    verify(h).computeBoxes("org1", 2026, "T1");
   }
 
   @SuppressWarnings("unchecked")

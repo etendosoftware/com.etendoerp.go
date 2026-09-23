@@ -18,6 +18,7 @@ package com.etendoerp.go.schemaforge;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -1611,6 +1612,215 @@ public class FiscalDeclCrudHandlerTest {
     verify(servlet, never()).sendError(any(), anyInt(), anyString());
     verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "draft");
     assertEquals("{\"ok\":true}", sw.toString());
+  }
+
+  // ── submission snapshot (ETP-5438) ─────────────────────────────────
+
+  private static final String SNAPSHOT_303 =
+      "{\"boxes\":{\"46\":\"123.45\"},\"summary\":{\"result\":\"123.45\"},\"sources\":[]}";
+
+  /** Runs a PUT {@code body} against {@code decl} and returns the response body. */
+  private String putDecl(BaseOBObject decl, String body, OBDal[] obDalOut) throws Exception {
+    HttpServletRequest req = mock(HttpServletRequest.class);
+    HttpServletResponse resp = mock(HttpServletResponse.class);
+    StringWriter sw = new StringWriter();
+    when(resp.getWriter()).thenReturn(new PrintWriter(sw));
+    when(req.getParameter("id")).thenReturn("decl1");
+    when(req.getReader()).thenReturn(new BufferedReader(new StringReader(body)));
+    try (MockedStatic<OBContext> ctxMock = mockStatic(OBContext.class);
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      mockContext(ctxMock, "client1", "org1");
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL, "decl1")).thenReturn(decl);
+      handler.handleDeclarations("PUT", req, resp);
+      if (obDalOut != null) {
+        obDalOut[0] = obDal;
+      }
+    }
+    return sw.toString();
+  }
+
+  private BaseOBObject draftDecl(String model) {
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("draft");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_MODEL)).thenReturn(model);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_YEAR)).thenReturn(2026L);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_PERIOD)).thenReturn("T1");
+    return decl;
+  }
+
+  /**
+   * Manual Registrar/Presentar of a Modelo 303 (draft -> submitted): the snapshot is computed
+   * through the provider for the declaration's own (model, year, period), stored on the record
+   * in the same transaction as the status change, and echoed in the PUT response.
+   */
+  @Test
+  public void testPutFirstPresentation303TakesSnapshotAndEchoesIt() throws Exception {
+    java.util.List<String> calls = new java.util.ArrayList<>();
+    handler.setSubmittedSnapshotProvider((model, year, period) -> {
+      calls.add(model + "|" + year + "|" + period);
+      return new JSONObject(SNAPSHOT_303);
+    });
+    BaseOBObject decl = draftDecl("303");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn(SNAPSHOT_303);
+    OBDal[] obDal = new OBDal[1];
+
+    String body = putDecl(decl, "{\"status\":\"submitted\",\"submissionMethod\":\"manual_no_receipt\"}", obDal);
+
+    assertEquals(java.util.Collections.singletonList("303|2026|T1"), calls);
+    verify(decl).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT),
+        eq(new JSONObject(SNAPSHOT_303).toString()));
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "submitted");
+    verify(obDal[0]).commitAndClose();
+    JSONObject out = new JSONObject(body);
+    assertTrue(out.getBoolean("ok"));
+    assertEquals("123.45",
+        out.getJSONObject("submittedSnapshot").getJSONObject("boxes").getString("46"));
+  }
+
+  /** Same for a Modelo 349 manual presentation (draft -> submitted_ack). */
+  @Test
+  public void testPutFirstPresentation349TakesSnapshot() throws Exception {
+    String snapshot349 = "{\"operators\":[],\"summary\":{\"totalE\":\"0.00\"}}";
+    java.util.List<String> models = new java.util.ArrayList<>();
+    handler.setSubmittedSnapshotProvider((model, year, period) -> {
+      models.add(model);
+      return new JSONObject(snapshot349);
+    });
+    BaseOBObject decl = draftDecl("349");
+
+    putDecl(decl, "{\"status\":\"submitted_ack\",\"submissionMethod\":\"manual_ack\"}", null);
+
+    assertEquals(java.util.Collections.singletonList("349"), models);
+    verify(decl).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT),
+        eq(new JSONObject(snapshot349).toString()));
+  }
+
+  /**
+   * When the snapshot cannot be computed the presentation is rejected (500) and NOTHING is
+   * written: no status change, no commit — a declaration is never presented without one.
+   */
+  @Test
+  public void testPutFirstPresentationSnapshotFailureRejectsAndWritesNothing() throws Exception {
+    handler.setSubmittedSnapshotProvider((model, year, period) -> {
+      throw new IllegalStateException("No TaxReport found");
+    });
+    BaseOBObject decl = draftDecl("303");
+    OBDal[] obDal = new OBDal[1];
+
+    putDecl(decl, "{\"status\":\"submitted\"}", obDal);
+
+    verify(servlet).sendError(any(), eq(HttpServletResponse.SC_INTERNAL_SERVER_ERROR),
+        org.mockito.ArgumentMatchers.contains("No TaxReport found"));
+    verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS), any());
+    verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT), any());
+    verify(obDal[0], never()).commitAndClose();
+  }
+
+  /** "Reactivar declaración" (submitted -> draft) clears the snapshot and computes nothing. */
+  @Test
+  public void testPutReactivationClearsSnapshot() throws Exception {
+    int[] calls = { 0 };
+    handler.setSubmittedSnapshotProvider((model, year, period) -> {
+      calls[0]++;
+      return new JSONObject();
+    });
+    BaseOBObject decl = declOwnedBy("client1", "org1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted_ack");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMISSION_METHOD)).thenReturn("manual_ack");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn(SNAPSHOT_303);
+
+    String body = putDecl(decl, "{\"status\":\"draft\"}", null);
+
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT, null);
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "draft");
+    assertEquals(0, calls[0]);
+    assertEquals("{\"ok\":true}", body);
+  }
+
+  /** A PUT that does not change the status (e.g. a manualData save) never touches the snapshot. */
+  @Test
+  public void testPutWithoutStatusChangeLeavesSnapshotAlone() throws Exception {
+    int[] calls = { 0 };
+    handler.setSubmittedSnapshotProvider((model, year, period) -> {
+      calls[0]++;
+      return new JSONObject();
+    });
+    BaseOBObject decl = draftDecl("303");
+
+    putDecl(decl, "{\"manualData\":{\"identification\":{}}}", null);
+
+    assertEquals(0, calls[0]);
+    verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT), any());
+  }
+
+  /** A model without snapshot support (provider answers null) presents without one. */
+  @Test
+  public void testPutFirstPresentationUnsupportedModelProceedsWithoutSnapshot() throws Exception {
+    handler.setSubmittedSnapshotProvider((model, year, period) -> null);
+    BaseOBObject decl = draftDecl("390");
+
+    String body = putDecl(decl, "{\"status\":\"submitted\"}", null);
+
+    verify(decl).set(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS, "submitted");
+    verify(decl, never()).set(eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT), any());
+    assertEquals("{\"ok\":true}", body);
+  }
+
+  /** declToJson exposes a stored snapshot as a parsed nested object. */
+  @Test
+  public void testDeclToJsonExposesSubmittedSnapshot() throws Exception {
+    BaseOBObject decl = mock(BaseOBObject.class);
+    when(decl.getId()).thenReturn("decl1");
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn(SNAPSHOT_303);
+
+    JSONObject json = handler.declToJson(decl);
+
+    assertEquals("123.45",
+        json.getJSONObject("submittedSnapshot").getJSONObject("summary").getString("result"));
+  }
+
+  /**
+   * No snapshot (never submitted, or a legacy declaration presented before the column existed)
+   * and an unparseable one both come back as JSON null — never an empty object, which would
+   * freeze the declaration on no figures at all.
+   */
+  @Test
+  public void testDeclToJsonMissingOrCorruptSnapshotIsNull() throws Exception {
+    BaseOBObject missing = mock(BaseOBObject.class);
+    BaseOBObject corrupt = mock(BaseOBObject.class);
+    when(corrupt.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn("{not json");
+
+    assertTrue(handler.declToJson(missing).isNull("submittedSnapshot"));
+    assertTrue(handler.declToJson(corrupt).isNull("submittedSnapshot"));
+  }
+
+  /** findLatestSubmittedSnapshot only answers for a SUBMITTED latest declaration. */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testFindLatestSubmittedSnapshotRequiresSubmittedLatest() {
+    try (MockedStatic<OBDal> dalMock = mockStatic(OBDal.class)) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      OBQuery<BaseOBObject> query = mock(OBQuery.class);
+      when(obDal.createQuery(eq(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL), anyString()))
+          .thenReturn(query);
+      BaseOBObject submitted = mock(BaseOBObject.class);
+      when(submitted.get(FiscalDeclCrudHandler.PROPERTY_DECL_SEQ)).thenReturn(0L);
+      when(submitted.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("submitted");
+      when(submitted.get(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT)).thenReturn(SNAPSHOT_303);
+
+      when(query.list()).thenReturn(Collections.singletonList(submitted));
+      assertEquals("123.45", handler.findLatestSubmittedSnapshot("c", "o", "303", 2026L, "T1")
+          .optJSONObject("summary").optString("result"));
+
+      when(submitted.get(FiscalDeclCrudHandler.PROPERTY_DECLARATION_STATUS)).thenReturn("draft");
+      assertNull(handler.findLatestSubmittedSnapshot("c", "o", "303", 2026L, "T1"));
+
+      when(query.list()).thenReturn(Collections.emptyList());
+      assertNull(handler.findLatestSubmittedSnapshot("c", "o", "303", 2026L, "T1"));
+    }
   }
 
   // ── findLatestDeclarationStatus (ETP-5438) ───────────────────────────

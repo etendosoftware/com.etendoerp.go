@@ -105,6 +105,33 @@ public class AbstractFiscalHandlerTest {
     protected String getModelKey() {
       return "stub";
     }
+
+    /** Declaration model code this stub answers for; settable per test. */
+    String declModel = "stub";
+    /** Payload returned by computeSnapshotPayload; {@code null} makes it throw. */
+    org.codehaus.jettison.json.JSONObject livePayload;
+    /** Every (orgId, year, period) computeSnapshotPayload was called with. */
+    final java.util.List<String> computeCalls = new java.util.ArrayList<>();
+
+    @Override
+    protected String getDeclModel() {
+      return declModel;
+    }
+
+    @Override
+    org.codehaus.jettison.json.JSONObject computeSnapshotPayload(String orgId, int year,
+        String period) {
+      computeCalls.add(orgId + "|" + year + "|" + period);
+      if (livePayload == null) {
+        throw new IllegalStateException("compute failed");
+      }
+      return livePayload;
+    }
+
+    @Override
+    protected String resolveEffectiveOrg() {
+      return "leaf-org";
+    }
   }
 
   private static final String AD_MESSAGE_KEY = "@AEAT349_Phone_Contact_Mandatory@";
@@ -711,5 +738,66 @@ public class AbstractFiscalHandlerTest {
         assertTrue(e.getMessage().contains("client1"));
       }
     }
+  }
+
+  // ── submission snapshot wiring (ETP-5438) ───────────────────────────
+
+  private static org.openbravo.base.structure.BaseOBObject declFor(String model) {
+    org.openbravo.base.structure.BaseOBObject decl =
+        mock(org.openbravo.base.structure.BaseOBObject.class);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_MODEL)).thenReturn(model);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_FISCAL_YEAR)).thenReturn(2026L);
+    when(decl.get(FiscalDeclCrudHandler.PROPERTY_PERIOD)).thenReturn("T2");
+    return decl;
+  }
+
+  /**
+   * Every declaration PUT arrives through /fiscal303/declarations, so EACH handler's CRUD delegate
+   * must route the snapshot to the handler owning the declaration's model, with the org resolved
+   * exactly like the read endpoint resolves it.
+   */
+  @Test
+  public void testLinkSubmittedSnapshotProvidersRoutesByDeclarationModel() throws Exception {
+    StubHandler h303 = new StubHandler(servlet, false);
+    h303.declModel = "303";
+    h303.livePayload = new org.codehaus.jettison.json.JSONObject("{\"boxes\":{}}");
+    StubHandler h349 = new StubHandler(servlet, false);
+    h349.declModel = "349";
+    h349.livePayload = new org.codehaus.jettison.json.JSONObject("{\"operators\":[]}");
+    AbstractFiscalHandler.linkSubmittedSnapshotProviders(h303, h349);
+
+    org.openbravo.base.structure.BaseOBObject decl349 = declFor("349");
+    h303.declHandler().takeSubmittedSnapshot(decl349);
+
+    assertEquals(java.util.Collections.singletonList("leaf-org|2026|T2"), h349.computeCalls);
+    assertTrue(h303.computeCalls.isEmpty());
+    org.mockito.Mockito.verify(decl349).set(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT,
+        "{\"operators\":[]}");
+  }
+
+  /** A model no handler serves gets no snapshot, and nothing is computed. */
+  @Test
+  public void testLinkSubmittedSnapshotProvidersUnknownModelTakesNoSnapshot() throws Exception {
+    StubHandler h303 = new StubHandler(servlet, false);
+    h303.declModel = "303";
+    AbstractFiscalHandler.linkSubmittedSnapshotProviders(h303);
+
+    org.openbravo.base.structure.BaseOBObject decl = declFor("390");
+    h303.declHandler().takeSubmittedSnapshot(decl);
+
+    assertTrue(h303.computeCalls.isEmpty());
+    org.mockito.Mockito.verify(decl, org.mockito.Mockito.never())
+        .set(org.mockito.ArgumentMatchers.eq(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT),
+            org.mockito.ArgumentMatchers.any());
+  }
+
+  /** A failing compute propagates, so the caller can reject the submission. */
+  @Test(expected = IllegalStateException.class)
+  public void testLinkSubmittedSnapshotProvidersPropagatesComputeFailure() throws Exception {
+    StubHandler h303 = new StubHandler(servlet, false);
+    h303.declModel = "303";
+    AbstractFiscalHandler.linkSubmittedSnapshotProviders(h303);
+
+    h303.declHandler().takeSubmittedSnapshot(declFor("303"));
   }
 }
