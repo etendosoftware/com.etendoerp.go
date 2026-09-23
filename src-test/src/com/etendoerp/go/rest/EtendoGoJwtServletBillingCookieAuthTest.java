@@ -23,6 +23,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
@@ -315,18 +316,15 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
   }
 
   /**
-   * A cookie with the right name but a blank value is {@code NO_SESSION}, not a credential at all
-   * — {@code resolveAuthenticatedAccountContext} then falls to its OWN legacy branch: the WIDE
-   * {@code findActiveAccountByBearerToken} lookup gated by {@code GoLegacyBearer}, not the narrow
-   * {@code findActiveAccountByPlatformToken} the fully-cookie-absent branch in
-   * {@code resolvePlatformAccount} uses. Same status code (200) either way, different DAL call.
+   * A cookie with the right name but a blank value is {@code NO_SESSION}, not a credential at all,
+   * so it must not change which Bearer billing accepts. ETP-5455 — this used to send billing down
+   * the cookie resolver's WIDE {@code findActiveAccountByBearerToken} lookup, which accepts
+   * environment JWTs and so bypassed the platform-token-only rule; the single account resolver
+   * keeps billing on the narrow {@code findActiveAccountByPlatformToken} lookup either way.
    */
   @Test
-  public void blankCookieValueFallsBackToTheWideBearerBranch() throws Exception {
+  public void blankCookieValueIsNoCredentialAndKeepsBillingOnThePlatformLookup() throws Exception {
     Fixture fixture = new Fixture();
-    Account bearerAccount = mock(Account.class);
-    when(bearerAccount.getId()).thenReturn(ACCOUNT_ID);
-    when(bearerAccount.getEmail()).thenReturn(ACCOUNT_EMAIL);
     when(fixture.requestStore.findSubscriptionForAccount(ACCOUNT_ID, ACCOUNT_EMAIL)).thenReturn(null);
 
     HttpServletRequest req = mock(HttpServletRequest.class);
@@ -339,9 +337,11 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
     ResponseCapture resp = mockResponse();
     try (MockedStatic<OBContext> ctx = mockStatic(OBContext.class);
         MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
-      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken(PLATFORM_TOKEN))
-          .thenReturn(bearerAccount);
+      dal.when(() -> EtendoGoJwtDalHelper.findActiveAccountByPlatformToken(PLATFORM_TOKEN))
+          .thenReturn(fixture.account);
       fixture.servlet.doGet(req, resp.response);
+      dal.verify(() -> EtendoGoJwtDalHelper.findActiveAccountByBearerToken(anyString()),
+          never());
     }
 
     assertEquals(200, resp.status);
