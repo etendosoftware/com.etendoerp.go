@@ -944,6 +944,9 @@ final class McpSchemaFieldBuilder {
         "Set on the sale price list (M_ProductPrice where issopricelist='Y')."));
     map.put("etgo_product_purchase_price", new WritableVia("product", "price",
         "Set on the purchase price list (M_ProductPrice where issopricelist='N')."));
+    map.put("etgo_product_cost", new WritableVia("product", "costing",
+        "Record a standard cost line on the product (M_Costing); average costs are "
+            + "calculated by the costing engine and cannot be written."));
     map.put("etgo_product_stock", new WritableVia("physical-inventory", "inventoryLine",
         "Create a physical-inventory/inventory header, add this line with the counted "
             + "quantity, then process the document — stock is never written directly."));
