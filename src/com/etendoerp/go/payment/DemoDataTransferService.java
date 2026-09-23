@@ -45,7 +45,12 @@ import com.etendoerp.go.schemaforge.PriceListVersionResolver;
 public class DemoDataTransferService {
   private static final Logger log = LogManager.getLogger(DemoDataTransferService.class);
   private static final String ZERO_ID = "0";
-  private static final String SELECTION_PREFIX = "ETGO_DemoDataTransferSelection.";
+  /**
+   * Kept short on purpose: the attribute is this prefix plus a 36-character checkout request UUID,
+   * and {@code AD_PREFERENCE.ATTRIBUTE} holds 60 characters (the original
+   * {@code ETGO_DemoDataTransferSelection.} made 67).
+   */
+  static final String SELECTION_PREFIX = "ETGO_DDTSelection.";
   private static final String STATUS = "ETGO_DemoDataTransferStatus";
   private static final String SOURCE = "ETGO_DemoDataTransferSource";
   private static final String PRODUCTS = "ETGO_DemoDataTransferProducts";
@@ -72,11 +77,11 @@ public class DemoDataTransferService {
       "description", "productType", "uOM", "salesPrice", "purchasePrice", "cost",
       "costStartingDate", "category");
 
-  private final ExecutorService executor = Executors.newSingleThreadExecutor(runnable -> {
-    Thread thread = new Thread(runnable, "etgo-demo-data-transfer");
-    thread.setDaemon(true);
-    return thread;
-  });
+  /**
+   * Created on the first submission, never at construction: the servlet builds this service at
+   * init, and with flag {@code demo-data-transfer} off nothing may start a worker thread.
+   */
+  private ExecutorService executor;
   private final Set<String> activeClients = ConcurrentHashMap.newKeySet();
 
   /** Stores user intent before redirecting to the payment provider.
@@ -152,13 +157,29 @@ public class DemoDataTransferService {
 
   private void submitIfRunning(String productiveClientId) {
     if (!activeClients.add(productiveClientId)) return;
-    executor.submit(() -> {
+    executor().submit(() -> {
       try {
         run(productiveClientId);
       } finally {
         activeClients.remove(productiveClientId);
       }
     });
+  }
+
+  private synchronized ExecutorService executor() {
+    if (executor == null) {
+      executor = Executors.newSingleThreadExecutor(runnable -> {
+        Thread thread = new Thread(runnable, "etgo-demo-data-transfer");
+        thread.setDaemon(true);
+        return thread;
+      });
+    }
+    return executor;
+  }
+
+  /** @return whether the worker executor has been created — for tests of the lazy start. */
+  synchronized boolean hasExecutor() {
+    return executor != null;
   }
 
   private void run(String productiveClientId) {

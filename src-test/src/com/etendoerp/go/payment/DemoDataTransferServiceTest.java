@@ -18,6 +18,8 @@
 package com.etendoerp.go.payment;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -32,6 +34,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 
 import org.codehaus.jettison.json.JSONObject;
 import org.junit.jupiter.api.AfterEach;
@@ -113,10 +116,27 @@ class DemoDataTransferServiceTest {
     service.recordSelection(REQUEST_ID, true, false);
 
     preferencesStatic.verify(() -> Preferences.setPreferenceValue(
-        "ETGO_DemoDataTransferSelection." + REQUEST_ID, "YN", false,
+        DemoDataTransferService.SELECTION_PREFIX + REQUEST_ID, "YN", false,
         system, null, null, null, null, null));
     verify(obDal).flush();
     verify(obDal).commitAndClose();
+  }
+
+  @Test
+  void keepsTheSelectionPreferenceKeyWithinTheAttributeColumn() {
+    // ETP-5443: AD_PREFERENCE.ATTRIBUTE is VARCHAR(60) and the key is the prefix plus a checkout
+    // request UUID (HostedCheckoutService mints UUID.randomUUID().toString(), 36 chars).
+    String key = DemoDataTransferService.SELECTION_PREFIX + UUID.randomUUID();
+    assertTrue(key.length() <= 60, () -> key + " is " + key.length() + " chars");
+  }
+
+  @Test
+  void createsNoWorkerThreadUntilWorkIsSubmitted() throws Exception {
+    // ETP-5443: the servlet builds this service at init; with flag demo-data-transfer off nothing
+    // is ever submitted, so no executor may exist. Status reads with no RUNNING job stay lazy too.
+    givenPreferenceReads(null, null, null, null, null, null);
+    service.status(TARGET_ID);
+    assertFalse(service.hasExecutor());
   }
 
   @Test

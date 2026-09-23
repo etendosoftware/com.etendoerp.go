@@ -81,6 +81,7 @@ import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.SubscriptionEventOutcome;
 import com.etendoerp.go.payment.SubscriptionLifecycleApplier;
 import com.etendoerp.go.payment.StripeCustomerPortalService;
+import com.etendoerp.go.payment.DemoDataTransferFlag;
 import com.etendoerp.go.payment.DemoDataTransferService;
 import com.etendoerp.go.schemaforge.data.CheckoutRequest;
 import com.etendoerp.go.payment.CheckoutWebhookProcessor;
@@ -426,7 +427,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleGetFirstSteps(request, response);
     } else if (isPath(path, PATH_ONBOARDING_COMPANY_DATA)) {
       handleGetCompanyData(request, response);
-    } else if (isPath(path, "/demo-data-transfer")) {
+    } else if (isPath(path, "/demo-data-transfer") && DemoDataTransferFlag.isEnabled()) {
       handleDemoDataTransferStatus(request, response);
     } else if (isPath(path, "/environments")) {
       handleEnvironments(request, response);
@@ -601,7 +602,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       handleBillingPurchaseCreate(request, response);
     } else if (isPath(path, "/billing/subscription/portal")) {
       handleBillingPortal(request, response);
-    } else if (isPath(path, "/demo-data-transfer/retry")) {
+    } else if (isPath(path, "/demo-data-transfer/retry") && DemoDataTransferFlag.isEnabled()) {
       handleDemoDataTransferRetry(request, response);
     } else if (isPath(path, "/checkout/sessions")) {
       handleCheckoutSession(request, response);
@@ -2676,8 +2677,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     });
   }
 
-  /** Persists checkout selection before the hosted-provider redirect loses browser state. */
-  private void recordDemoDataTransferSelection(JSONObject body, JSONObject checkoutResult) {
+  /**
+   * Persists checkout selection before the hosted-provider redirect loses browser state. A no-op
+   * with flag {@code demo-data-transfer} off, where the body's selection is ignored as it was
+   * before ETP-5364.
+   */
+  void recordDemoDataTransferSelection(JSONObject body, JSONObject checkoutResult) {
+    if (!DemoDataTransferFlag.isEnabled()) return;
     JSONObject selection = body.optJSONObject("dataTransfer");
     if (selection == null) return;
     String requestId = checkoutResult.optString("requestId", "");
@@ -3216,18 +3222,37 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       try {
         checkoutRequestStore.recordProvisioned(onboardingRequest.paymentToken, clientId,
             provisioningClaim);
-        String demoClientId = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail);
-        demoDataTransferService.start(onboardingRequest.paymentToken, demoClientId, clientId);
       } catch (RuntimeException e) {
         log.error("Environment '{}' (client {}) was provisioned but its checkout request could "
             + "not be closed", onboardingRequest.clientName, clientId, e);
       }
+      startDemoDataTransferBestEffort(onboardingRequest.paymentToken, accountEmail, clientId);
     }
     Account account = findAccountForCommittedOnboarding(accountId, accountEmail);
     clearOnboardingDraftBestEffort(account);
     String normalizedLanguage = StringUtils.trimToNull(onboardingRequest.language);
     sendAuthEmailBestEffort("environment-ready",
         () -> authEmailSender.sendEnvironmentReady(account, clientId, normalizedLanguage));
+  }
+
+  /**
+   * Starts the demo-to-productive transfer for a freshly provisioned paid tenant. Does nothing with
+   * flag {@code demo-data-transfer} off. Best-effort in its own right: a failure here is logged as
+   * a transfer failure, never as an unclosed checkout, and never reaches the onboarding caller.
+   *
+   * @param paymentToken the checkout request id the selection was recorded under
+   * @param accountEmail authenticated account email, used to find the account's demo tenant
+   * @param clientId {@code AD_CLIENT_ID} of the productive environment just provisioned
+   */
+  void startDemoDataTransferBestEffort(String paymentToken, String accountEmail, String clientId) {
+    if (!DemoDataTransferFlag.isEnabled()) return;
+    try {
+      String demoClientId = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail);
+      demoDataTransferService.start(paymentToken, demoClientId, clientId);
+    } catch (RuntimeException e) {
+      log.error("Environment (client {}) was provisioned but its demo data transfer could not be "
+          + "started", clientId, e);
+    }
   }
 
   /**
