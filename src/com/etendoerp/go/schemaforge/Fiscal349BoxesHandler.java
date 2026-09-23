@@ -160,9 +160,22 @@ class Fiscal349BoxesHandler extends AbstractFiscalHandler {
     return "349";
   }
 
+  /**
+   * The snapshot keeps operators (one row per partner), {@code summary} and
+   * {@code rectificativeSummary} (fixed E/S/A/I totals); the per-invoice {@code invoices} and
+   * {@code rectifications} rows become counts.
+   */
+  @Override
+  protected java.util.Map<String, String> snapshotExcludedLists() {
+    java.util.Map<String, String> excluded = new java.util.LinkedHashMap<>();
+    excluded.put("invoices", "invoiceCount");
+    excluded.put("rectifications", "rectificationCount");
+    return excluded;
+  }
+
   /** The {@code GET /fiscal349/operators} payload, computed live — see the base javadoc. */
   @Override
-  JSONObject computeSnapshotPayload(String orgId, int year, String period) throws Exception {
+  JSONObject computeLivePayload(String orgId, int year, String period) throws Exception {
     return computeOperators(orgId, year, period);
   }
 

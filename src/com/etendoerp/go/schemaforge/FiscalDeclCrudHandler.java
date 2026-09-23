@@ -107,10 +107,13 @@ class FiscalDeclCrudHandler {
   static final String PROPERTY_SUBMISSION_METHOD = "submissionMethod";
   /**
    * Java property for the {@code Submitted_Snapshot} TEXT column added to
-   * {@code ETGO_Fiscal_Decl} (ETP-5438) — the exact JSON payload {@code GET /fiscal303/boxes}
-   * (Modelo 303) or {@code GET /fiscal349/operators} (Modelo 349) returned for the declaration's
+   * {@code ETGO_Fiscal_Decl} (ETP-5438) — the FIGURES {@code GET /fiscal303/boxes} (Modelo 303)
+   * or {@code GET /fiscal349/operators} (Modelo 349) returned for the declaration's
    * {@code (org, year, period)} at the moment it entered {@link #SUBMITTED_STATUSES}, computed
    * server-side with the same code path in the same request (see {@link #takeSubmittedSnapshot}).
+   * Per-invoice arrays are not kept, only their row counts
+   * ({@link AbstractFiscalHandler#computeSubmittedSnapshot}), so its size never grows with the
+   * number of invoices.
    * Once presented, a declaration is served from this snapshot and never recomputed from the
    * current invoices; "Reactivar declaración" (back to draft) clears it. {@code null} on every
    * declaration that was never submitted AND on legacy declarations presented before this column
@@ -227,8 +230,9 @@ class FiscalDeclCrudHandler {
   private static final String DECL_NOT_FOUND_PREFIX = "Declaration not found: ";
 
   /**
-   * Computes the submission snapshot for a declaration (ETP-5438) — the same JSON payload the
-   * model's read endpoint returns ({@code /fiscal303/boxes}, {@code /fiscal349/operators}).
+   * Computes the submission snapshot for a declaration (ETP-5438) — the figures of the model's
+   * read endpoint ({@code /fiscal303/boxes}, {@code /fiscal349/operators}) without per-invoice rows
+   * ({@link AbstractFiscalHandler#computeSubmittedSnapshot}).
    * Wired by {@link AbstractFiscalHandler#linkSubmittedSnapshotProviders}, which dispatches on
    * {@code model} to the matching fiscal handler: this class only owns the declaration table and
    * has no access to the per-model compute code itself.
@@ -572,6 +576,21 @@ class FiscalDeclCrudHandler {
               + ").");
       return false;
     }
+  }
+
+  /**
+   * Validates {@code snapshot} against the declaration entity's own {@code submittedSnapshot}
+   * property — the same check {@code BaseOBObject#set} runs (AD length, domain type), without
+   * assigning anything (ETP-5438 QA BUG-1). Throws when the entity would reject it, including
+   * when the property is missing from the runtime model (the column not deployed yet). A
+   * declaration with no entity metadata (a unit-test double) has nothing to validate against.
+   */
+  static void validateSubmittedSnapshot(BaseOBObject decl, String snapshot) {
+    org.openbravo.base.model.Entity entity = decl.getEntity();
+    if (entity == null) {
+      return;
+    }
+    entity.getProperty(PROPERTY_SUBMITTED_SNAPSHOT).checkIsValidValue(snapshot);
   }
 
   /**

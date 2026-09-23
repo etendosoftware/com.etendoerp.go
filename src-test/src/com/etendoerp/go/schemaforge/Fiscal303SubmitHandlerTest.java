@@ -601,7 +601,7 @@ public class Fiscal303SubmitHandlerTest {
         "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
     Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class)) {
       @Override
-      JSONObject computeSnapshotPayload(String orgId, int year, String period) {
+      JSONObject computeLivePayload(String orgId, int year, String period) {
         throw new IllegalStateException("No periods found");
       }
     };
@@ -633,6 +633,192 @@ public class Fiscal303SubmitHandlerTest {
     }
   }
 
+  /**
+   * A realistic live boxes payload — 40 boxes plus {@code sourceRows} per-invoice source rows
+   * (~200 chars each), i.e. what GET /fiscal303/boxes returns for a busy period.
+   */
+  private static JSONObject bigLivePayload(int sourceRows) throws Exception {
+    JSONObject boxes = new JSONObject();
+    for (int i = 1; i <= 40; i++) {
+      boxes.put(String.valueOf(i), "12345.67");
+    }
+    org.codehaus.jettison.json.JSONArray sources = new org.codehaus.jettison.json.JSONArray();
+    for (int i = 0; i < sourceRows; i++) {
+      sources.put(new JSONObject().put("id", "7CF823B7ACC4404DADAF0F658F1172BD")
+          .put("ref", "FV2026/" + i).put("date", "2026-09-15").put("type", "Venta")
+          .put("party", "Cliente Ejemplo de Pruebas SL").put("base", "1000.00").put("vat", "210.00")
+          .put("total", "1210.00").put("boxes", "7,9"));
+    }
+    return new JSONObject().put("boxes", boxes).put("summary", new JSONObject().put("result", "0"))
+        .put("sources", sources);
+  }
+
+  private static org.openbravo.base.model.Property snapshotProperty(int fieldLength) {
+    org.openbravo.base.model.Property p = new org.openbravo.base.model.Property();
+    p.setName(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT);
+    p.setColumnName("Submitted_Snapshot");
+    p.setDomainType(new org.openbravo.base.model.domaintype.StringDomainType());
+    p.setFieldLength(fieldLength);
+    // An owning entity, as in the runtime model: ValidationException builds its message from it.
+    org.openbravo.base.model.Entity owner = new org.openbravo.base.model.Entity();
+    owner.setName(FiscalDeclCrudHandler.ENTITY_FISCAL_DECL);
+    p.setEntity(owner);
+    org.openbravo.base.validation.StringPropertyValidator v =
+        new org.openbravo.base.validation.StringPropertyValidator();
+    v.setProperty(p);
+    v.initialize();
+    p.setValidator(v);
+    return p;
+  }
+
+  /**
+   * ETP-5438 QA BUG-1 — a snapshot the column cannot hold (validated through the entity's REAL
+   * property validator) fails as SNAPSHOT_FAILED BEFORE the AEAT is contacted, instead of the
+   * filing succeeding and the declaration update failing afterwards. The column is deliberately
+   * shrunk to 100 chars here: a real snapshot is size-bounded (no per-invoice rows) and fits.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_productionSnapshotTooLongForColumn_neverCallsAeat() throws Exception {
+    StringWriter capturedBody = new StringWriter();
+    HttpServletResponse res = responseCapturing(capturedBody);
+    HttpServletRequest req = requestFor("2026", "T2", "decl-1",
+        "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class)) {
+      @Override
+      JSONObject computeLivePayload(String orgId, int year, String period) throws Exception {
+        return bigLivePayload(60);
+      }
+    };
+    FiscalDecl decl = matchingDecl("client1", "org1");
+    when(decl.getId()).thenReturn("decl-1");
+    org.openbravo.base.model.Entity entity = mock(org.openbravo.base.model.Entity.class);
+    when(decl.getEntity()).thenReturn(entity);
+    when(entity.getProperty(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT))
+        .thenReturn(snapshotProperty(100));
+
+    try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedConstruction<AEAT303SubmissionService> serviceMock =
+            mockConstruction(AEAT303SubmissionService.class, (mockService, ctx) ->
+                when(mockService.hasOrgCertificate(any())).thenReturn(true))) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
+      when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
+      stubFileGeneration(obDal);
+
+      h.handle("submit", "POST", req, res);
+
+      assertEquals("SNAPSHOT_FAILED", new JSONObject(capturedBody.toString()).getString("errorCode"));
+      verify(serviceMock.constructed().get(0), never()).submitProduction(any());
+      verify(decl, never()).setDeclarationStatus(anyString());
+      verify(decl, never()).setSubmittedSnapshot(any());
+    }
+  }
+
+  /**
+   * ETP-5438 — a busy period (5,000 source invoices, ~1 MB live payload) still yields a small,
+   * bounded snapshot: the per-invoice sources are replaced by their count, it passes the real
+   * property validator at the committed column length and is persisted with the filing.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_productionRealisticSnapshot_validatedAndPersisted() throws Exception {
+    StringWriter capturedBody = new StringWriter();
+    HttpServletResponse res = responseCapturing(capturedBody);
+    HttpServletRequest req = requestFor("2026", "T2", "decl-1",
+        "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
+    Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class)) {
+      @Override
+      JSONObject computeLivePayload(String orgId, int year, String period) throws Exception {
+        return bigLivePayload(5000);
+      }
+    };
+    FiscalDecl decl = matchingDecl("client1", "org1");
+    when(decl.getId()).thenReturn("decl-1");
+    org.openbravo.base.model.Entity entity = mock(org.openbravo.base.model.Entity.class);
+    when(decl.getEntity()).thenReturn(entity);
+    when(entity.getProperty(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT))
+        .thenReturn(snapshotProperty(1_000_000));
+    AEAT303SubmissionResult prodResult = new AEAT303SubmissionResult();
+    prodResult.setStatus(AEAT303SubmissionResult.Status.SUCCESS);
+    prodResult.setTestMode(false);
+
+    try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedConstruction<AEAT303SubmissionService> serviceMock =
+            mockConstruction(AEAT303SubmissionService.class, (mockService, ctx) -> {
+              when(mockService.hasOrgCertificate(any())).thenReturn(true);
+              when(mockService.submitProduction(any())).thenReturn(prodResult);
+            })) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
+      when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
+      stubFileGeneration(obDal);
+
+      h.handle("submit", "POST", req, res);
+
+      assertEquals("SUCCESS", new JSONObject(capturedBody.toString()).getString("status"));
+      ArgumentCaptor<String> stored = ArgumentCaptor.forClass(String.class);
+      verify(decl).setSubmittedSnapshot(stored.capture());
+      JSONObject snapshot = new JSONObject(stored.getValue());
+      assertFalse(snapshot.has("sources"));
+      assertEquals(5000, snapshot.getInt("sourceCount"));
+      assertEquals("12345.67", snapshot.getJSONObject("boxes").getString("7"));
+      assertTrue("snapshot must be size-bounded, was " + stored.getValue().length(),
+          stored.getValue().length() < 4000);
+      verify(decl).setDeclarationStatus("submitted_ack");
+    }
+  }
+
+  /**
+   * ETP-5438 QA BUG-1 — should storing the snapshot still fail AFTER Hacienda accepted the filing,
+   * the declaration must not be left half-updated: it keeps submitted_ack/aeat_telematic and is
+   * saved (served live, like a legacy declaration) — the failure is logged, not propagated.
+   */
+  @SuppressWarnings("unchecked")
+  @Test
+  public void testHandleSubmit_snapshotSetFailsAfterFiling_declarationStillFullySubmitted()
+      throws Exception {
+    StringWriter capturedBody = new StringWriter();
+    HttpServletResponse res = responseCapturing(capturedBody);
+    HttpServletRequest req = requestFor("2026", "T2", "decl-1",
+        "{\"testMode\":false,\"presenterNif\":\"B12345678\",\"presenterName\":\"ACME SA\"}");
+    Fiscal303BoxesHandler h = snapshotStubbed(mock(NeoServlet.class));
+    FiscalDecl decl = matchingDecl("client1", "org1");
+    when(decl.getId()).thenReturn("decl-1");
+    org.mockito.Mockito.doThrow(new org.openbravo.base.validation.ValidationException())
+        .when(decl).setSubmittedSnapshot(anyString());
+    AEAT303SubmissionResult prodResult = new AEAT303SubmissionResult();
+    prodResult.setStatus(AEAT303SubmissionResult.Status.SUCCESS);
+    prodResult.setTestMode(false);
+
+    try (MockedStatic<OBContext> ctxMock = mockContext("client1", "org1");
+        MockedStatic<OBDal> dalMock = mockStatic(OBDal.class);
+        MockedConstruction<AEAT303SubmissionService> serviceMock =
+            mockConstruction(AEAT303SubmissionService.class, (mockService, ctx) -> {
+              when(mockService.hasOrgCertificate(any())).thenReturn(true);
+              when(mockService.submitProduction(any())).thenReturn(prodResult);
+            })) {
+      OBDal obDal = mock(OBDal.class);
+      dalMock.when(OBDal::getInstance).thenReturn(obDal);
+      when(obDal.get(FiscalDecl.class, "decl-1")).thenReturn(decl);
+      when(obDal.get(Organization.class, "org1")).thenReturn(mock(Organization.class));
+      stubFileGeneration(obDal);
+
+      h.handle("submit", "POST", req, res);
+
+      assertEquals("SUCCESS", new JSONObject(capturedBody.toString()).getString("status"));
+      verify(decl).setDeclarationStatus("submitted_ack");
+      verify(decl).setSubmissionMethod("aeat_telematic");
+      verify(decl).setFileExternal(false);
+      verify(obDal).save(decl);
+      verify(obDal, times(1)).commitAndClose();
+    }
+  }
+
   /** ETP-5438 — test mode never changes the declaration, so it computes no snapshot at all. */
   @SuppressWarnings("unchecked")
   @Test
@@ -643,7 +829,7 @@ public class Fiscal303SubmitHandlerTest {
     int[] computeCalls = { 0 };
     Fiscal303BoxesHandler h = new Fiscal303BoxesHandler(mock(NeoServlet.class)) {
       @Override
-      JSONObject computeSnapshotPayload(String orgId, int year, String period) {
+      JSONObject computeLivePayload(String orgId, int year, String period) {
         computeCalls[0]++;
         return new JSONObject();
       }
@@ -2094,7 +2280,7 @@ public class Fiscal303SubmitHandlerTest {
   private static Fiscal303BoxesHandler snapshotStubbed(NeoServlet servlet) {
     return new Fiscal303BoxesHandler(servlet) {
       @Override
-      JSONObject computeSnapshotPayload(String orgId, int year, String period) throws Exception {
+      JSONObject computeLivePayload(String orgId, int year, String period) throws Exception {
         return new JSONObject(SNAPSHOT_JSON);
       }
     };

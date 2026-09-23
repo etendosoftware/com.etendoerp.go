@@ -157,19 +157,48 @@ abstract class AbstractFiscalHandler {
 
   /**
    * Computes, from the CURRENT invoice data, the exact JSON payload this model's read endpoint
-   * returns ({@code /fiscal303/boxes}, {@code /fiscal349/operators}). It is both what that read
-   * serves for a non-submitted declaration and what gets persisted as the declaration's
-   * submission snapshot (ETP-5438) — one code path, so the frozen figures are the same payload
-   * the read would have returned at submission time (re-serialized through {@link JSONObject}).
+   * returns ({@code /fiscal303/boxes}, {@code /fiscal349/operators}) for a declaration that is
+   * not served from a snapshot. {@link #computeSubmittedSnapshot} derives the snapshot from it.
    */
   @SuppressWarnings("java:S112")
-  abstract JSONObject computeSnapshotPayload(String orgId, int year, String period)
+  abstract JSONObject computeLivePayload(String orgId, int year, String period)
       throws Exception;
+
+  /**
+   * The per-invoice arrays of {@link #computeLivePayload}'s payload that the submission snapshot
+   * does NOT keep, each mapped to the key under which the snapshot stores its row count instead
+   * (ETP-5438 scope decision). A period can hold tens of thousands of invoices, so keeping them
+   * would make the snapshot — and every {@code GET /declarations}, which returns it — grow without
+   * bound. Only fixed-size figures are frozen: boxes/summary for 303; operators (one row per
+   * intra-community partner) and the key totals for 349. Empty for a model with no such arrays.
+   */
+  protected java.util.Map<String, String> snapshotExcludedLists() {
+    return java.util.Collections.emptyMap();
+  }
+
+  /**
+   * ETP-5438 — the submission snapshot: {@link #computeLivePayload}'s payload (same code path, so
+   * the same figures the read returns at submission time, re-serialized through
+   * {@link JSONObject}) with every per-invoice array of {@link #snapshotExcludedLists} replaced by
+   * its row count. The single place a snapshot is built, so its size is bounded whatever the
+   * number of invoices in the period.
+   */
+  @SuppressWarnings("java:S112")
+  final JSONObject computeSubmittedSnapshot(String orgId, int year, String period)
+      throws Exception {
+    JSONObject payload = computeLivePayload(orgId, year, period);
+    for (java.util.Map.Entry<String, String> excluded : snapshotExcludedLists().entrySet()) {
+      org.codehaus.jettison.json.JSONArray rows = payload.optJSONArray(excluded.getKey());
+      payload.remove(excluded.getKey());
+      payload.put(excluded.getValue(), rows != null ? rows.length() : 0);
+    }
+    return payload;
+  }
 
   /**
    * ETP-5438 — the payload the read endpoint serves: the persisted submission snapshot when the
    * latest declaration for the natural key is submitted and has one, otherwise a live
-   * {@link #computeSnapshotPayload}. A submitted declaration WITHOUT a snapshot (a legacy one,
+   * {@link #computeLivePayload}. A submitted declaration WITHOUT a snapshot (a legacy one,
    * presented before snapshots existed) deliberately keeps the live compute — no data-fix for
    * those, product decision. Drafts/ready declarations always compute live.
    */
@@ -179,7 +208,7 @@ abstract class AbstractFiscalHandler {
     // Lookup on the org the declaration is stored with; the compute keeps the effective org.
     JSONObject snapshot = declHandler().findLatestSubmittedSnapshot(clientId, declarationOrgId(),
         getDeclModel(), year, period);
-    return snapshot != null ? snapshot : computeSnapshotPayload(orgId, year, period);
+    return snapshot != null ? snapshot : computeLivePayload(orgId, year, period);
   }
 
   /**
@@ -198,7 +227,7 @@ abstract class AbstractFiscalHandler {
     FiscalDeclCrudHandler.SubmittedSnapshotProvider provider = (model, year, period) -> {
       AbstractFiscalHandler owner = byModel.get(model);
       return owner != null
-          ? owner.computeSnapshotPayload(owner.resolveEffectiveOrg(), year, period)
+          ? owner.computeSubmittedSnapshot(owner.resolveEffectiveOrg(), year, period)
           : null;
     };
     for (AbstractFiscalHandler h : handlers) {

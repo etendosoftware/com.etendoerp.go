@@ -108,9 +108,9 @@ public class AbstractFiscalHandlerTest {
 
     /** Declaration model code this stub answers for; settable per test. */
     String declModel = "stub";
-    /** Payload returned by computeSnapshotPayload; {@code null} makes it throw. */
+    /** Payload returned by computeLivePayload; {@code null} makes it throw. */
     org.codehaus.jettison.json.JSONObject livePayload;
-    /** Every (orgId, year, period) computeSnapshotPayload was called with. */
+    /** Every (orgId, year, period) computeLivePayload was called with. */
     final java.util.List<String> computeCalls = new java.util.ArrayList<>();
 
     @Override
@@ -118,8 +118,16 @@ public class AbstractFiscalHandlerTest {
       return declModel;
     }
 
+    /** Per-invoice arrays the snapshot drops; settable per test. */
+    java.util.Map<String, String> excludedLists = java.util.Collections.emptyMap();
+
     @Override
-    org.codehaus.jettison.json.JSONObject computeSnapshotPayload(String orgId, int year,
+    protected java.util.Map<String, String> snapshotExcludedLists() {
+      return excludedLists;
+    }
+
+    @Override
+    org.codehaus.jettison.json.JSONObject computeLivePayload(String orgId, int year,
         String period) {
       computeCalls.add(orgId + "|" + year + "|" + period);
       if (livePayload == null) {
@@ -799,5 +807,25 @@ public class AbstractFiscalHandlerTest {
     AbstractFiscalHandler.linkSubmittedSnapshotProviders(h303);
 
     h303.declHandler().takeSubmittedSnapshot(declFor("303"));
+  }
+
+  /**
+   * ETP-5438 scope decision — the snapshot the manual PUT path takes through the provider drops
+   * the model's per-invoice arrays and keeps their row counts, so it never grows with invoices.
+   */
+  @Test
+  public void testLinkedProviderSnapshotDropsPerInvoiceArrays() throws Exception {
+    StubHandler h303 = new StubHandler(servlet, false);
+    h303.declModel = "303";
+    h303.excludedLists = java.util.Collections.singletonMap("sources", "sourceCount");
+    h303.livePayload = new org.codehaus.jettison.json.JSONObject(
+        "{\"boxes\":{\"46\":\"1.00\"},\"sources\":[{\"ref\":\"A\"},{\"ref\":\"B\"}]}");
+    AbstractFiscalHandler.linkSubmittedSnapshotProviders(h303);
+
+    org.openbravo.base.structure.BaseOBObject decl = declFor("303");
+    h303.declHandler().takeSubmittedSnapshot(decl);
+
+    org.mockito.Mockito.verify(decl).set(FiscalDeclCrudHandler.PROPERTY_SUBMITTED_SNAPSHOT,
+        "{\"boxes\":{\"46\":\"1.00\"},\"sourceCount\":2}");
   }
 }

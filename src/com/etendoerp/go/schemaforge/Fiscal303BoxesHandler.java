@@ -181,9 +181,15 @@ class Fiscal303BoxesHandler extends AbstractFiscalHandler {
     return "303";
   }
 
+  /** The snapshot keeps boxes + summary; the per-invoice {@code sources} become a count. */
+  @Override
+  protected java.util.Map<String, String> snapshotExcludedLists() {
+    return java.util.Collections.singletonMap("sources", "sourceCount");
+  }
+
   /** The {@code GET /fiscal303/boxes} payload, computed live — see the base javadoc. */
   @Override
-  JSONObject computeSnapshotPayload(String orgId, int year, String period) throws Exception {
+  JSONObject computeLivePayload(String orgId, int year, String period) throws Exception {
     ComputeResult cr = computeBoxes(orgId, year, period);
     return buildResponse(cr.boxes, cr.sources);
   }
