@@ -3624,6 +3624,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return trimmed.charAt(0) + "***" + trimmed.substring(at);
   }
 
+  /**
+   * Resolves an owned client for resume, or creates one and returns the exact ID recorded by
+   * {@link InitialClientSetup} in the session. The created path must not resolve by name again:
+   * a second name lookup could return a different client than the one just provisioned.
+   */
   private String resolveOrCreateClient(PrintWriter writer, VariablesSecureApp vars,
       String accountEmail, OnboardingRequestData requestData, String currencyId,
       String adminPassword) throws Exception {
@@ -3636,7 +3641,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
 
     String clientUser = EtendoGoJwtSupport.buildClientUsername(accountEmail, requestData.clientName);
-    if (!createClient(vars, currencyId, requestData.clientName, clientUser, adminPassword, writer)) {
+    String createdClientId = createClient(vars, currencyId, requestData.clientName, clientUser,
+        adminPassword, writer);
+    if (createdClientId == null) {
       return null;
     }
     // InitialClientSetup names the admin AD_User after its username (the email).
@@ -3649,7 +3656,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // carry a client-name suffix) right after creation, same best-effort pattern as the display
     // name override above.
     EtendoGoJwtSupport.applyClientAdminEmail(clientUser, accountEmail);
-    return EtendoGoJwtSupport.findClientIdByName(requestData.clientName);
+    // InitialClientSetup records the exact client it created in the session. Carry that ID
+    // forward instead of resolving by name again, which could select a different same-named
+    // client if the name lookup changes after creation.
+    return createdClientId;
   }
 
   private boolean validateExistingClient(PrintWriter writer, String clientName,
@@ -3669,7 +3679,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     return true;
   }
 
-  private boolean createClient(VariablesSecureApp vars, String currencyId, String clientName,
+  private String createClient(VariablesSecureApp vars, String currencyId, String clientName,
       String clientUser, String adminPassword, PrintWriter writer) {
     InitialClientSetup clientSetup = new InitialClientSetup();
     OBError clientResult = clientSetup.createClient(vars, currencyId, clientName, clientUser,
@@ -3686,10 +3696,19 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       log.error("Client creation failed for '{}': {}", clientName, errorMsg);
       sendProgress(writer, PROGRESS_CLIENT, PROGRESS_ERROR, errorMsg);
       sendFinalResult(writer, false, errorMsg, ERROR_CODE_CLIENT_CREATION_FAILED);
-      return false;
+      return null;
+    }
+    String createdClientId = StringUtils.trimToNull(vars.getSessionValue("AD_Client_ID"));
+    if (createdClientId == null) {
+      String errorMessage = "Client creation succeeded but did not return the created client ID";
+      log.error("Client creation for '{}' returned success without AD_Client_ID in session",
+          clientName);
+      sendProgress(writer, PROGRESS_CLIENT, PROGRESS_ERROR, errorMessage);
+      sendFinalResult(writer, false, errorMessage, ERROR_CODE_CLIENT_CREATION_FAILED);
+      return null;
     }
     sendProgress(writer, PROGRESS_CLIENT, "done", "Client created successfully");
-    return true;
+    return createdClientId;
   }
 
   private AdminContextData resolveAdminContextData(String clientId,
