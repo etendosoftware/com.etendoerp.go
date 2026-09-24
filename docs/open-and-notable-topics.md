@@ -577,6 +577,9 @@ at zero. `PlanQuotaSchemaInvariantTest` guards the schema side (mutation-tested)
 guard the evaluator except this paragraph.** `ETGO_PLAN_QUOTA` is also the only new table with
 `ISDELETEABLE='Y'`, because deleting the last quota row is how an operator restores unlimited.
 
+The rest of the quota definition ETP-5051 inherits is in §5.5–§5.9; usage per subscription, which
+no ticket owns yet, is in §5.10–§5.12.
+
 ### 🟠 5.2 ETP-5047: correlate to the OPEN row
 
 `STRIPE_SUBSCRIPTION_ID` is deliberately **not unique**: a plan change updates the item on the same
@@ -598,6 +601,103 @@ current row (`END_DATE`) and inserts a successor, preserving price history. `PEN
   unread.
 - **Lifecycle webhooks update the row's status and grace anchor only** (§3.7): no period window,
   no event watermark on the row, no closing on cancel, no re-subscription. ETP-5047 owns the rest.
+
+**Quota definition — owner ETP-5051.**
+
+Facts checked against the DDL, `SubscriptionService` and the PRD on 2026-09-24; the ETP-5051 scope
+is quoted from its Jira text as read that day.
+
+### 🟠 5.5 Consumption window = the subscription billing period — decided, but no row carries one yet
+
+**Decided, not open.** There is deliberately no period column on `ETGO_PLAN_QUOTA`. The PRD fixes
+the window (§4 decisions table, "Consumption window: the **subscription billing period**, never the
+calendar month"; restated in the invariants table), and ETP-5051 reads it from
+`ETGO_SUBSCRIPTION.CURRENT_PERIOD_START` / `CURRENT_PERIOD_END`. An upgrade does not reset it — the
+Stripe anchor is preserved (PRD §8, ETP-5053).
+
+**What ETP-5051 must know:** today **no subscription row carries a billing period.**
+`SubscriptionService.openSubscription` writes neither column; `applyLifecycleStatus` only ever
+*nulls* `CURRENT_PERIOD_START` and writes `CURRENT_PERIOD_END` as the lifecycle **grace anchor**
+(set on `PAST_DUE`, cleared to null on `CURRENT` and `EXPIRED` — §3.7). So an `active` row has both
+columns null. Populating the real Stripe period (and splitting it from the grace anchor) is
+ETP-5047's call per §3.7; the evaluator cannot be built on these columns until that happens.
+
+### 🔴 5.6 Stock versus flow aggregation over the period — owned by nobody
+
+The same problem as §1.1/§1.2, one level up. `ETGO_USAGE_DAILY` stores one `QTY` per tenant,
+resource and `USAGE_DAY`. Summing the days of a period is right for a **flow** (posted sales
+invoices) and wrong for a **stock** (active users, productive environments — daily snapshots): 5
+users every day for 30 days sums to 150. ETP-5050 delivers daily counts only (its design §10
+excludes "rollup of any kind — SUM or MAX over a period") and ETP-5051 does not define it either.
+
+**To decide:** an aggregation per **resource** — proposal: a column on `ETGO_BILLING_RESOURCE`
+(`sum` for flows, `max` or `last` for stocks). It is a property of what is measured, not of the
+quota, so it does not belong on `ETGO_PLAN_QUOTA`. `ETGO_BILLING_RESOURCE.COUNTING_MODE` (`D`
+declarative HQL / `S` named strategy) says how a day is counted, not how days combine, so nothing
+existing covers it.
+
+### 🔴 5.7 `ETGO_PLAN_QUOTA.CONSUMPTION_SOURCE` means something else in ETP-5051
+
+ETP-5046 shipped `CONSUMPTION_SOURCE` (String, list reference `ETGO_QuotaConsumptionSource`, single
+`AD_REF_LIST` value `sum`, check `ETGO_PLNQTA_SOURCE_CHK`: `NULL OR = 'sum'`) — i.e. an aggregation.
+ETP-5051 defines the field as the **data source**: the daily aggregate (lagged by up to a day)
+versus a live count at evaluation time. The two meanings do not overlap, and aggregation belongs on
+the resource anyway (§5.6).
+
+**To decide in ETP-5051, before any quota row uses the column:** its values, then change the check
+constraint, the `AD_REF_LIST` values and the reference description together. It is cheap now — no
+`ETGO_PLAN_QUOTA` row exists anywhere (no sourcedata, no data-fix creates one) — and a data
+migration once operators have filled it in.
+
+### 🟠 5.8 A quota on a yearly plan is a yearly quota
+
+`ETGO_PLAN_INTERVAL_CHK` allows `month` and `year`, and the window is the billing period (§5.5), so
+`INCLUDED_QTY` on a `year` plan is consumed over the whole year, not per month. Correct by the
+design, surprising to an operator. **Must be stated** in the operator docs and in the **Plans** /
+**Quotas** window help when ETP-5051 makes quotas live. (Annual intervals are also listed as
+deferred in PRD §16, yet the schema already accepts them.)
+
+### 🔴 5.9 A subscription with no current period needs a defined answer
+
+Beyond §5.5's "no row has a period yet", two cases stay periodless by nature: rows backfilled by
+R37 (`CURRENT_PERIOD_START` always NULL, design §7.0) and a `canceled` row (`CURRENT_PERIOD_END`
+cleared, `END_DATE` still null — §3.7). **To decide in ETP-5051:** what the evaluator does with no
+window — skip, treat as unlimited, or use the last known period. Latent today only because
+`legacy-productive` has no quota rows (§5.1); the first quota on a plan such a tenant can be on
+makes it live.
+
+**Usage per subscription — owner: the ticket that introduces usage-based charging.**
+
+PRD §3 and §16 defer overage charging "with its own PRD"; period history could also fit ETP-5047 or
+ETP-5048.
+
+### 🔴 5.10 There is no per-subscription or per-period usage figure, stored or planned
+
+`ETGO_USAGE_DAILY` (`MEASURED_CLIENT_ID`, `ETGO_BILLING_RESOURCE_ID`, `USAGE_DAY`, `QTY`,
+`IS_SETTLED`) has no link to a subscription. It joins one only **by value**:
+`ETGO_SUBSCRIPTION.ENVIRONMENT_CLIENT_ID = MEASURED_CLIENT_ID` and `USAGE_DAY` inside the period.
+ETP-5051 computes that on the fly, for evaluation only; ETP-5048's reconciliation covers payments
+and subscription status, not usage. **To decide:** whether a period's usage is ever stored, and by
+whom.
+
+### 🔴 5.11 Past billing periods cannot be reconstructed locally — cheap now, impossible later
+
+`ETGO_SUBSCRIPTION` has one period slot and no history; once ETP-5047 fills it, each renewal will
+overwrite it. `ETGO_BILLING_EVENT` does not keep invoice periods either: `PAYLOAD_SUMMARY`'s
+allow-list (`WebhookPayloadSummary`) is `id, customer, subscription, livemode, payment_status,
+amount_total, currency, mode` — no `period_start`/`period_end`. So "usage in the last billed
+period" needs Stripe's invoice dates, and any overage billing, which bills a **closed** period,
+needs a local period history. **To decide:** a small period-history table, or recording the invoice
+period on the `invoice.paid` billing event. Starting to record now costs little; periods that were
+never recorded cannot be backfilled from local data.
+
+### 🔴 5.12 The would-have-billed report is scheduled in the PRD and excluded by its owner
+
+PRD §14 assigns "would-have-billed report. Shadow mode" to **ETP-5050** (PRD §6 motivates the
+historical backfill by shadow mode). ETP-5050's design (`plans/2026-09-15-etp-5050-usage-measurement-design.md` §10) lists
+"Rollup of any kind — SUM or MAX over a period, the would-have-billed figure, price" as **out of
+scope**. Nobody delivers it now. **To decide:** which ticket owns it — it also depends on §5.6
+(how days combine) and §5.5 (which period).
 
 ---
 
