@@ -384,7 +384,9 @@ public class OnboardingProvisioningClaimIntegrationTest extends OBBaseTest {
   private String createPaidRequest(String email, String clientName) {
     String accountId = accountIdFor(email);
     String requestId = MARKER + UUID.randomUUID().toString().replace("-", "");
-    fixtureStore.recordRequested(requestId, accountId, email, clientName);
+    // A current purchase always records its environment source; this one has no demo source.
+    fixtureStore.recordRequested(requestId, accountId, email, clientName, null, true, false,
+        false);
     fixtureStore.recordSessionCreated(requestId, "cs_" + requestId);
     fixtureStore.recordPaid(requestId, "cus_" + requestId, "sub_" + requestId);
     return requestId;
