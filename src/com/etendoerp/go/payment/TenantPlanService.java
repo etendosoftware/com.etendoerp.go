@@ -153,7 +153,7 @@ public class TenantPlanService {
    * <p>Called right after the tenant's subscription row has been opened successfully, so that a
    * newly paid tenant lands directly in the post-cutover state instead of carrying two answers to
    * the same question. It is the runtime twin of statement 3 of the R37 backfill data-fix
-   * ({@code 20260918T120000Z__R37-tenant-subscription-backfill.sql}), which does the same thing for
+   * ({@code 20260924T150000Z__R37-tenant-subscription-backfill.sql}), which does the same thing for
    * tenants that predate the subscription model — same policy, same scoping, so the fleet converges
    * from both ends.
    *

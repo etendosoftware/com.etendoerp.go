@@ -47,7 +47,7 @@ import org.openbravo.test.base.OBBaseTest;
  * ETP-5046 — runs the REAL backfill SQL, twice, against the real database.
  *
  * <p>The fix under test is
- * {@code schema_forge/cli/src/data-fixes/sql/20260918T120000Z__R37-tenant-subscription-backfill.sql}:
+ * {@code schema_forge/cli/src/data-fixes/sql/20260924T150000Z__R37-tenant-subscription-backfill.sql}:
  * it gives every tenant that carries the legacy {@code AD_Preference ETGO_TenantPlan='productive'}
  * marker, but no open subscription, one open {@code ETGO_SUBSCRIPTION} row on the grandfathered
  * {@code legacy-productive} plan.
@@ -93,7 +93,7 @@ public class SubscriptionBackfillIdempotencyIntegrationTest extends OBBaseTest {
 
   /** Path of the fix, relative to whichever ancestor directory holds the sibling repository. */
   private static final String SQL_RELATIVE_PATH = "schema_forge/cli/src/data-fixes/sql/"
-      + "20260918T120000Z__R37-tenant-subscription-backfill.sql";
+      + "20260924T150000Z__R37-tenant-subscription-backfill.sql";
 
   /** The grandfathered plan the fix insists on, shipped as sourcedata with this exact id. */
   private static final String LEGACY_PLAN_VALUE = "legacy-productive";
