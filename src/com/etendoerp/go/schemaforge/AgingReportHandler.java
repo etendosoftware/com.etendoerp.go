@@ -535,7 +535,9 @@ public class AgingReportHandler implements NeoHandler {
         .createQuery(AcctSchema.class,
             "exists (from OrganizationAcctSchema oas where oas.accountingSchema=this"
                 + " and oas.organization.id=:" + PARAM_ORG_ID + " and oas.active=true)"
-                + " and active=true")
+                // Deterministic pick when an org is linked to several schemas; same order
+                // as TaxReportHandler and ReportSelectorsServlet so all three agree.
+                + " and active=true order by id")
         .setNamedParameter(PARAM_ORG_ID, orgId)
         .setMaxResult(1)
         .uniqueResult();

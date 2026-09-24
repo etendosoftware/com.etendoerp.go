@@ -24,6 +24,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -406,6 +407,45 @@ class ReportSelectorsServletTest {
       servlet.doGet(request, response);
 
       verify(response).setStatus(HttpServletResponse.SC_OK);
+    }
+
+    /**
+     * ETP-5483: without selectedOrgId, the currency ORDER BY still has no reference to it —
+     * unchanged from before — so it must never be bound on either query (Hibernate would
+     * reject an attempt to bind a name absent from the query text).
+     */
+    @Test
+    @DisplayName("currency query without selectedOrgId never binds it (order unchanged)")
+    @SuppressWarnings("unchecked")
+    void currencyQueryWithoutSelectedOrgIdDoesNotBindIt() throws Exception {
+      configureAuthenticatedGet("currency");
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      verify(countQuery, never()).setParameter(eq("selectedOrgId"), any());
+      verify(dataQuery, never()).setParameter(eq("selectedOrgId"), any());
+      // clientId (the pre-existing default-currency ordering) is still bound on the data query.
+      verify(dataQuery).setParameter("clientId", TEST_CLIENT_ID);
+    }
+
+    /**
+     * ETP-5483: with selectedOrgId, the org-currency-first ORDER BY references it, so it must
+     * be bound as a real parameter on the data query — but never on the count query, whose SQL
+     * (SELECT COUNT(*) FROM ...) never includes an ORDER BY at all.
+     */
+    @Test
+    @DisplayName("currency query with selectedOrgId binds it on the data query only")
+    @SuppressWarnings("unchecked")
+    void currencyQueryWithSelectedOrgIdBindsDataQueryOnly() throws Exception {
+      configureAuthenticatedGet("currency");
+      when(request.getParameter("selectedOrgId")).thenReturn("AABB1122CCDD3344");
+
+      servlet.doGet(request, response);
+
+      verify(response).setStatus(HttpServletResponse.SC_OK);
+      verify(dataQuery).setParameter("selectedOrgId", "AABB1122CCDD3344");
+      verify(countQuery, never()).setParameter(eq("selectedOrgId"), any());
     }
   }
 

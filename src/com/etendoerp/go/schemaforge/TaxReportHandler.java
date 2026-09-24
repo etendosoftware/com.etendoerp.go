@@ -37,6 +37,10 @@ import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
+import org.openbravo.model.ad.system.Client;
+import org.openbravo.model.common.currency.Currency;
+import org.openbravo.model.common.enterprise.Organization;
+import org.openbravo.model.financialmgmt.accounting.coa.AcctSchema;
 
 import com.etendoerp.go.schemaforge.util.NeoAccessHelper;
 import com.etendoerp.go.schemaforge.util.NeoReportParam;
@@ -137,8 +141,9 @@ public class TaxReportHandler implements NeoHandler {
         NeoReportParam.optional(PARAM_ORG_ID, NeoReportParam.TYPE_STRING,
             "Organization id to report on. Default: the session's organization."),
         NeoReportParam.optional(PARAM_CURRENCY_ID, NeoReportParam.TYPE_STRING,
-            "Currency id whose symbol labels the amounts. Amounts are not converted. Default: "
-                + "the client's currency."),
+            "Currency id (C_Currency) every amount is CONVERTED to, so invoices issued in other "
+                + "currencies are summed in one currency (same as Classic and the SPA). Default: "
+                + "the organization's general-ledger currency, else the client's currency."),
         NeoReportParam.optional(PARAM_SHOW_DETAILS, NeoReportParam.TYPE_BOOLEAN,
             "Include the per-invoice detail rows alongside the summaries (default: false)."),
         NeoReportParam.optional(PARAM_GROUP_BY_BP, NeoReportParam.TYPE_BOOLEAN,
@@ -249,6 +254,14 @@ public class TaxReportHandler implements NeoHandler {
     p.bpNameType       = body.optString(PARAM_BP_NAME_TYPE, "commercial");
     p.orgId            = resolveOrgId(body);
     p.currencyId       = body.optString(PARAM_CURRENCY_ID, "");
+    if (p.currencyId.isEmpty()) {
+      // Without a target currency nothing is converted and a USD invoice is added to a EUR
+      // one as if they were the same money. The SPA always sends one; an MCP caller that
+      // omits it gets the org's general-ledger currency (falling back to the client's), as the
+      // parameter description promises. p.orgId is already resolved above, so the report stays
+      // scoped to the same organization the query itself filters on.
+      p.currencyId     = resolveDefaultCurrencyId(p.orgId);
+    }
     p.currencySymbol   = resolveCurrencySymbol(p.currencyId);
     return p;
   }
@@ -301,8 +314,10 @@ public class TaxReportHandler implements NeoHandler {
   //   - source == target returns the amount untouched (invoices already in the target
   //     currency keep their exact value, no rounding), and
   //   - a NULL rate delegates to the standard c_conversion_rate lookup ('S'/Spot).
-  // A NULL target currency would blank out every amount, so with no currency selected
-  // the raw columns are emitted exactly as before.
+  // A NULL target currency would blank out every amount, so the raw columns are only
+  // emitted when there is truly no currency to convert to — parseParams already fell back
+  // to the org's general-ledger currency, then the client's, so in practice that is only the
+  // System client (which has neither).
   private static ConversionClauses buildConversionClauses(String dateColumn, ReportParams p) {
     ConversionClauses cc = new ConversionClauses();
     cc.convertCurrency = !p.currencyId.isEmpty();
@@ -655,6 +670,10 @@ public class TaxReportHandler implements NeoHandler {
     meta.put(PARAM_DATE_TYPE,    p.dateType);
     meta.put(PARAM_TX_TYPE,      p.transactionType);
     meta.put(PARAM_TAX_TYPE,     p.taxType);
+    // The currency every amount was converted to (the caller's, or the resolved default —
+    // the org's general-ledger currency, else the client's), so a caller can tell which
+    // money the figures are in without guessing from the symbol.
+    meta.put(PARAM_CURRENCY_ID,  p.currencyId);
     meta.put("currencySymbol",   p.currencySymbol);
     meta.put(PARAM_SHOW_DETAILS, p.showDetails);
     meta.put(PARAM_GROUP_BY_BP,  p.groupByBp);
@@ -706,6 +725,91 @@ public class TaxReportHandler implements NeoHandler {
   private static String currencyConvert(String amountExpr, String dateColumn) {
     return "C_CURRENCY_CONVERT_RATE(" + amountExpr + ", i.c_currency_id, ?, "
         + dateColumn + ", NULL, ?, '0', crd.rate)";
+  }
+
+  /**
+   * The currency amounts are converted to when the caller does not pick one.
+   *
+   * <p>The report is org-scoped ({@code p.orgId}, defaulting to the session organization — see
+   * {@link #resolveOrgId}), so the default must follow that organization's own accounting, not
+   * just the client's base currency: a multi-org tenant can have an org whose general ledger is
+   * booked in a different currency than {@code AD_Client.C_Currency_ID}. Precedence:
+   * <ol>
+   *   <li>the organization's general-ledger / accounting-schema currency
+   *       ({@link #resolveOrgAcctSchemaCurrency});</li>
+   *   <li>the session client's own currency ({@code AD_Client.C_Currency_ID});</li>
+   *   <li>{@code ""} — only the System client (or an org/client combination with neither)
+   *       reaches this, in which case amounts stay in each document's own currency,
+   *       unconverted.</li>
+   * </ol>
+   *
+   * @param orgId the organization the report is scoped to
+   * @return the resolved currency's id, or {@code ""} when neither the org nor the client has one
+   */
+  private String resolveDefaultCurrencyId(String orgId) {
+    Currency orgCurrency = resolveOrgAcctSchemaCurrency(orgId);
+    if (orgCurrency != null) {
+      return orgCurrency.getId();
+    }
+    try {
+      OBContext.setAdminMode(true);
+      Client client = OBContext.getOBContext().getCurrentClient();
+      Currency clientCurrency = client != null ? client.getCurrency() : null;
+      return clientCurrency != null ? clientCurrency.getId() : "";
+    } catch (Exception e) {
+      log.warn("Could not resolve the client's default currency for the tax report", e);
+      return "";
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  /**
+   * Resolves {@code orgId}'s accounting-schema currency — the organization's own general-ledger
+   * currency, tried before falling back to the client's.
+   *
+   * <p>Duplicates (rather than shares) {@code AgingReportHandler#resolveAcctSchemaForOrg}'s exact
+   * precedence (ETP-4918): {@code Organization.getGeneralLedger()} first — a plain FK dereference
+   * — falling back to the first active {@code OrganizationAcctSchema} link when the FK carries no
+   * currency. Not extracted into a shared helper because Aging's equivalent method is exercised by
+   * reflection-based whitebox tests ({@code AgingReportHandlerTest}) that must stay untouched; see
+   * {@code AgingReportHandler#resolveAcctSchemaForOrg}'s own javadoc for the full rationale.
+   *
+   * @param orgId the organization to resolve, or {@code null}/empty for none
+   * @return the resolved currency, or {@code null} when the org has none, cannot be resolved, or
+   *     the lookup itself fails (logged and swallowed — this is a best-effort default, not a hard
+   *     requirement, so a lookup failure falls through to the client's currency instead of failing
+   *     the whole report)
+   */
+  private static Currency resolveOrgAcctSchemaCurrency(String orgId) {
+    if (orgId == null || orgId.isEmpty()) {
+      return null;
+    }
+    try {
+      OBContext.setAdminMode(true);
+      Organization org = OBDal.getInstance().get(Organization.class, orgId);
+      AcctSchema ledger = org != null ? org.getGeneralLedger() : null;
+      if (ledger != null && ledger.getCurrency() != null) {
+        return ledger.getCurrency();
+      }
+      AcctSchema schema = OBDal.getInstance()
+          .createQuery(AcctSchema.class,
+              "exists (from OrganizationAcctSchema oas where oas.accountingSchema=this"
+                  + " and oas.organization.id=:" + PARAM_ORG_ID + " and oas.active=true)"
+                  // Deterministic pick when an org is linked to several schemas; same order
+                  // as AgingReportHandler and ReportSelectorsServlet so all three agree.
+                  + " and active=true order by id")
+          .setNamedParameter(PARAM_ORG_ID, orgId)
+          .setMaxResult(1)
+          .uniqueResult();
+      return schema != null ? schema.getCurrency() : null;
+    } catch (Exception e) {
+      log.warn("Could not resolve the org's accounting-schema currency for the tax report "
+          + "(org {})", orgId, e);
+      return null;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   private String resolveCurrencySymbol(String currencyId) {
