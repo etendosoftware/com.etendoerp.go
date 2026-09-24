@@ -36,6 +36,7 @@ import com.etendoerp.go.session.GoNeoAuth;
 import com.etendoerp.go.session.GoSessionAuthResult;
 import com.etendoerp.go.session.GoSessionAuthenticator;
 import com.etendoerp.go.session.GoSessionRecord;
+import com.etendoerp.go.session.GoSessionRoleReconciler;
 import com.etendoerp.go.session.GoSessionService;
 import com.etendoerp.go.session.JdbcGoSessionStore;
 import com.etendoerp.go.schemaforge.data.SFSpec;
@@ -58,6 +59,7 @@ class NeoAuthenticator {
       new GoSessionAuthenticator(new GoSessionService(new JdbcGoSessionStore()));
   private final TenantEnvironmentLifecycleService environmentLifecycleService =
       new TenantEnvironmentLifecycleService();
+  private final GoSessionRoleReconciler sessionRoleReconciler = new GoSessionRoleReconciler();
 
   NeoAuthenticator(NeoServlet servlet) {
     this.servlet = servlet;
@@ -122,6 +124,9 @@ class NeoAuthenticator {
         sessionRecord.getCtxClientId())) {
       throw new OBException("Session has no environment selected");
     }
+    // The session's role was bound at environment entry; a promote/demote since then must not
+    // leave the request authorized with a role the user no longer holds.
+    sessionRoleReconciler.reconcile(sessionRecord);
     OBContext context = SecureWebServicesUtils.createContext(sessionRecord.getUserId(), sessionRecord.getRoleId(),
         sessionRecord.getCtxOrgId(), sessionRecord.getWarehouseId(), sessionRecord.getCtxClientId());
     OBContext.setOBContext(context);
