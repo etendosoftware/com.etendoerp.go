@@ -48,6 +48,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
 import org.openbravo.base.provider.OBProvider;
+import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
 import org.openbravo.dal.service.OBQuery;
 import org.openbravo.model.ad.access.User;
@@ -546,10 +547,16 @@ class EtendoGoJwtDalHelperTest {
   class BuildEnvironmentJson {
 
     private MockedStatic<OwnerSupport> ownerSupportMock;
+    // ETP-5488 wrapped TenantEnvironmentLifecycleService.readPreference in
+    // OBContext.setAdminMode()/restorePreviousMode(); this class never touched OBContext before
+    // and has no live session, so the real static methods NPE. mockStatic() turns both into
+    // no-ops — buildEnvironmentJson's admin-mode plumbing isn't what these tests exercise.
+    private MockedStatic<OBContext> obContextMock;
 
     @BeforeEach
     void isolateOwnerLookup() {
       ownerSupportMock = mockStatic(OwnerSupport.class);
+      obContextMock = mockStatic(OBContext.class);
       when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
       when(preferenceQuery.uniqueResult()).thenReturn(null);
     }
@@ -557,6 +564,7 @@ class EtendoGoJwtDalHelperTest {
     @AfterEach
     void restoreOwnerLookup() {
       ownerSupportMock.close();
+      obContextMock.close();
     }
 
     @Mock private Client client;
