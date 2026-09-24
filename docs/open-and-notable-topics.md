@@ -79,9 +79,10 @@ Things to know while it is active:
   (§5.1): once ETP-5051 enforces quotas they will not be capped. Their subscription row snapshots
   the charged price id but no amount/currency (the plan has none). Moving them to a real plan is a
   plan change (ETP-5053).
-- **The list shows the grandfathered plan's own copy** — `ETGO_PLAN.NAME`/`DESCRIPTION` of
-  `legacy-productive` ("Legacy Productive (grandfathered)"). Edit the row if buyers should see
-  something else.
+- **The list shows the grandfathered plan's own name** — `ETGO_PLAN.NAME` of `legacy-productive`
+  ("Legacy Productive (grandfathered)"); edit the row if buyers should see something else. Its
+  `description` is always sent **empty**: the row's `DESCRIPTION` is operator documentation that
+  names `etendo.go.checkout.price.id`, so it is never shown to a buyer (the row is kept as is).
 - **Two price sources can disagree.** The typed billing offer (`etendo.go.billing.offer.*`,
   `GET /sws/go/billing/offers`) is a separate configuration from the Stripe price. The upgrade page
   quotes the catalog (Stripe) and uses the offer only when the catalog cannot answer, but any other

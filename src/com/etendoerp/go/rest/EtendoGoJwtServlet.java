@@ -732,6 +732,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * leaves the plan out: offering a plan whose price nobody could verify is the one thing this list
    * must not do, and a 500 would break the page for a problem the buyer cannot act on.
    *
+   * <p>The description is sent empty: the grandfathered row's {@code DESCRIPTION} documents the
+   * fallback for operators and is not buyer-facing copy.
+   *
    * @param legacy the active grandfathered plan row
    * @return the JSON view, or null when the configured price cannot be quoted
    */
@@ -749,7 +752,10 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     JSONObject item = new JSONObject();
     item.put(FIELD_PLAN_KEY, legacy.getSearchKey());
     item.put("name", StringUtils.defaultString(legacy.getName()));
-    item.put("description", StringUtils.defaultString(legacy.getDescription()));
+    // Deliberately empty, never the row's DESCRIPTION: that text is operator documentation
+    // ("Grandfathered plan ... sold only via the legacy price fallback ... etendo.go.checkout...")
+    // and would put internal configuration keys in front of a buyer on the upgrade page.
+    item.put("description", "");
     item.put("displayPrice", displayPrice.toPlainString());
     item.put(FIELD_CURRENCY, price.getCurrency());
     item.put("billingInterval", StringUtils.defaultString(price.getInterval()));

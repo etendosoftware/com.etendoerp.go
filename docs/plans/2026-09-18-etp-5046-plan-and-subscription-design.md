@@ -223,7 +223,8 @@ While it holds:
 - `GET /sws/go/plans` lists exactly `legacy-productive`, with `displayPrice` / `currency` /
   `billingInterval` read from Stripe via `StripePriceService.retrieveConfiguredPrice()` — never
   from the typed billing offer. If Stripe cannot quote it, the plan is left out (logged), never a
-  500.
+  500. Its `description` is sent **empty**: the row's `DESCRIPTION` documents the fallback for
+  operators (it names `etendo.go.checkout.price.id`) and is not buyer copy; the row is unchanged.
 - A checkout naming `legacy-productive`, or naming no plan, is sold at that configured price, and
   the request records `legacy-productive` as its plan and the configured price id as its
   `STRIPE_PRICE_ID`. The subscription opened after payment snapshots that charged price id (the
@@ -246,7 +247,7 @@ They return only on an environment that has neither a priced plan nor the legacy
 
 **What it costs**, recorded in `open-and-notable-topics.md`: fallback buyers land on
 `legacy-productive`, which has no quota rows and is therefore **unlimited**; the plan list shows the
-grandfathered plan's own name and description; and the typed billing offer
+grandfathered plan's own name (with an empty description, see above); and the typed billing offer
 (`etendo.go.billing.offer.*`) can disagree with the Stripe price the checkout actually charges.
 
 ## 7. Backfill

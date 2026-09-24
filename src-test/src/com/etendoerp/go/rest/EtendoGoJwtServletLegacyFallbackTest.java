@@ -94,7 +94,10 @@ public class EtendoGoJwtServletLegacyFallbackTest {
     JSONObject plan = plans.getJSONObject(0);
     assertEquals(LEGACY_KEY, plan.getString("planKey"));
     assertEquals("Productive (legacy)", plan.getString("name"));
-    assertEquals("Grandfathered plan", plan.getString("description"));
+    // The row's DESCRIPTION is operator documentation naming internal configuration keys; it
+    // must never reach the buyer, so the fallback sends an empty description instead.
+    assertEquals("", plan.getString("description"));
+    assertFalse(plan.toString().contains("etendo.go.checkout"));
     // Minor units converted with the currency's own exponent, as a string (no float re-rounding).
     assertEquals("29.00", plan.getString("displayPrice"));
     assertEquals("EUR", plan.getString("currency"));
@@ -234,7 +237,9 @@ public class EtendoGoJwtServletLegacyFallbackTest {
     Plan legacy = mock(Plan.class);
     when(legacy.getSearchKey()).thenReturn(LEGACY_KEY);
     when(legacy.getName()).thenReturn("Productive (legacy)");
-    when(legacy.getDescription()).thenReturn("Grandfathered plan");
+    when(legacy.getDescription()).thenReturn("Grandfathered plan for pre-catalog productive "
+        + "tenants. Sold only via the legacy price fallback: at etendo.go.checkout.price.id while "
+        + "no plan has a provider price; the first priced plan retires it.");
     PlanCatalogService catalog = mock(PlanCatalogService.class);
     when(catalog.findLegacyFallbackPlan()).thenReturn(Optional.of(legacy));
     return catalog;
