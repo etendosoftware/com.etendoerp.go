@@ -57,6 +57,11 @@ public class JdbcGoSessionStore implements GoSessionStore {
       "UPDATE etgo_go_session SET is_revoked = 'Y', updated = now(), updatedby = '0' "
       + "WHERE etgo_go_session_id = ? AND is_revoked = 'N'";
 
+  private static final String TOUCH_EXPIRES_AT_SQL =
+      "UPDATE etgo_go_session SET expires_at = ?, updated = now(), updatedby = '0' "
+      + "WHERE etgo_go_session_id = ? AND is_revoked = 'N' AND expires_at = ? "
+      + "AND absolute_expires_at > ?";
+
   private static final String SELECT_COLUMNS =
       "SELECT etgo_go_session_id, etgo_account_id, session_token_hash, csrf_token, refresh_token_hash, "
       + "auth_method, ad_user_id, ad_role_id, ctx_client_id, ctx_org_id, m_warehouse_id, "
@@ -86,6 +91,21 @@ public class JdbcGoSessionStore implements GoSessionStore {
         int nextIndex = bindMutableFields(ps, 1, sessionRecord);
         ps.setString(nextIndex, sessionRecord.getId());
         ps.executeUpdate();
+      }
+    });
+  }
+
+  @Override
+  public boolean touchExpiresAt(String sessionId, Instant expectedExpiresAt, Instant nextExpiresAt) {
+    return OBDal.getInstance().getSession().doReturningWork(connection -> {
+      try (PreparedStatement ps = connection.prepareStatement(TOUCH_EXPIRES_AT_SQL)) {
+        ps.setTimestamp(1, toTimestamp(nextExpiresAt));
+        ps.setString(2, sessionId);
+        ps.setTimestamp(3, toTimestamp(expectedExpiresAt));
+        // JVM clock, not the database's now(): every expiry column is written from the JVM clock,
+        // so comparing against it keeps both sides in the same time zone.
+        ps.setTimestamp(4, toTimestamp(Instant.now()));
+        return ps.executeUpdate() == 1;
       }
     });
   }
