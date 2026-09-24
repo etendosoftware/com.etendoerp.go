@@ -549,11 +549,17 @@ class EtendoGoJwtDalHelperTest {
     // The environment lifecycle reads its preferences in admin mode (ETP-5488), which needs a
     // real context; a unit test has none.
     private MockedStatic<org.openbravo.dal.core.OBContext> obContextMock;
+    // With the context mocked, the lifecycle reaches its legacy-trial branch, which reads the
+    // Etendo configuration. Loading it here, in a JVM without a configured environment, left the
+    // config provider without a location for the integration tests that run after this class in
+    // the same JVM (OBBaseTest.initializeDisabledTestCases -> Paths.get(null)).
+    private MockedStatic<com.etendoerp.go.common.ConfigPropertyReader> configMock;
 
     @BeforeEach
     void isolateOwnerLookup() {
       ownerSupportMock = mockStatic(OwnerSupport.class);
       obContextMock = mockStatic(org.openbravo.dal.core.OBContext.class);
+      configMock = mockStatic(com.etendoerp.go.common.ConfigPropertyReader.class);
       when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
       when(preferenceQuery.uniqueResult()).thenReturn(null);
     }
@@ -562,6 +568,7 @@ class EtendoGoJwtDalHelperTest {
     void restoreOwnerLookup() {
       ownerSupportMock.close();
       obContextMock.close();
+      configMock.close();
     }
 
     @Mock private Client client;
