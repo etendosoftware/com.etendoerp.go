@@ -366,7 +366,7 @@ public class ReconciliationHandler implements NeoHandler {
           + "   AND ft.processed = 'Y'"
           + "   AND ft.fin_financial_account_id = ?"
           + "   AND (CAST(? AS date) IS NULL OR ft.statementdate >= ?)"
-          + "   AND (CAST(? AS date) IS NULL OR ft.statementdate <= ?)";
+          + "   AND (CAST(? AS date) IS NULL OR ft.statementdate < CAST(? AS date) + 1)";
 
   private static final String CANDIDATES_ORDER =
       " ORDER BY ft.statementdate ASC, ft.line ASC";
@@ -398,7 +398,7 @@ public class ReconciliationHandler implements NeoHandler {
           + "   AND inv.ad_client_id = ?"
           + "   AND inv.ad_org_id = ANY (?)"
           + "   AND (CAST(? AS date) IS NULL OR inv.dateinvoiced >= ?)"
-          + "   AND (CAST(? AS date) IS NULL OR inv.dateinvoiced <= ?)"
+          + "   AND (CAST(? AS date) IS NULL OR inv.dateinvoiced < CAST(? AS date) + 1)"
           + " GROUP BY ps.fin_payment_schedule_id, inv.c_invoice_id, inv.documentno,"
           + "          inv.dateinvoiced, bp.name, inv.c_currency_id, cur.iso_code"
           + " HAVING SUM(psd.amount) > 0"
@@ -435,7 +435,7 @@ public class ReconciliationHandler implements NeoHandler {
       sql.append(" AND bsl.datetrx >= ?");
     }
     if (StringUtils.isNotBlank(dateTo)) {
-      sql.append(" AND bsl.datetrx <= ?");
+      sql.append(" AND bsl.datetrx < CAST(? AS date) + 1");
     }
     if (StringUtils.isNotBlank(q)) {
       // Search the SAME unified description (standard + C43) shown in the column.
