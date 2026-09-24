@@ -72,7 +72,7 @@ public class HostedCheckoutService {
   public static final class CheckoutNotConfiguredException extends IllegalStateException {
     private static final long serialVersionUID = 1L;
 
-    CheckoutNotConfiguredException(String message) {
+    public CheckoutNotConfiguredException(String message) {
       super(message);
     }
   }

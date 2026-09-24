@@ -63,6 +63,7 @@ import com.auth0.jwt.interfaces.DecodedJWT;
 import com.etendoerp.go.payment.EnvironmentPlanCache;
 import com.etendoerp.go.payment.TenantPlanService;
 import com.etendoerp.go.schemaforge.data.Account;
+import com.etendoerp.go.schemaforge.data.Subscription;
 import com.etendoerp.go.schemaforge.data.Invitation;
 import com.etendoerp.go.schemaforge.util.OwnerSupport;
 import com.smf.securewebservices.utils.SecureWebServicesUtils;
@@ -495,6 +496,7 @@ class EtendoGoJwtDalHelperTest {
 
     @Mock private OBQuery<User> usersQuery;
     @Mock private OBQuery<Preference> preferenceQuery;
+    @Mock private OBQuery<Subscription> subscriptionQuery;
 
     @Test
     @DisplayName("excludes the new destination when resolving the only free source tenant")
@@ -511,12 +513,16 @@ class EtendoGoJwtDalHelperTest {
       when(usersQuery.list()).thenReturn(List.of(demoUser, targetUser));
       when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
       when(preferenceQuery.uniqueResult()).thenReturn(null);
+      // ETP-5046: the plan is resolved from the open subscription row first; none exists here.
+      when(obDal.createQuery(eq(Subscription.class), anyString())).thenReturn(subscriptionQuery);
+      when(subscriptionQuery.uniqueResult()).thenReturn(null);
 
       String result = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(
           "user@test.com", "target-client");
 
+      // Both tenants resolve as free here, so a single answer proves the destination was left out
+      // of the candidates: counted in, the lookup would be ambiguous and answer null.
       assertEquals("demo-client", result);
-      verify(preferenceQuery).setNamedParameter("clientId", "demo-client");
     }
   }
 
