@@ -18,6 +18,7 @@ package com.etendoerp.go.rest;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -192,6 +193,29 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
   }
 
   @Test
+  void flagOffPaidOnboardingDoesNotResolveADemoSource() throws Exception {
+    flagIs(false);
+    try (MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      assertNull(resolveDemoSourceClientId(true));
+      dal.verifyNoInteractions();
+    }
+  }
+
+  @Test
+  void flagOnResolvesDemoSourceWithoutCountingTheNewTargetAsFree() throws Exception {
+    flagIs(true);
+    try (MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
+      dal.when(() -> EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(
+          ACCOUNT_EMAIL, CLIENT_ID)).thenReturn("demo-client");
+
+      assertEquals("demo-client", resolveDemoSourceClientId(true));
+
+      dal.verify(() -> EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(
+          ACCOUNT_EMAIL, CLIENT_ID));
+    }
+  }
+
+  @Test
   void flagOnPaidOnboardingStartsTheTransferFromTheAccountsDemo() {
     flagIs(true);
     try (MockedStatic<EtendoGoJwtDalHelper> dal = mockStatic(EtendoGoJwtDalHelper.class)) {
@@ -200,24 +224,6 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
       servlet.startDemoDataTransferBestEffort(REQUEST_ID, ACCOUNT_EMAIL, CLIENT_ID);
     }
     verify(transferService).start(REQUEST_ID, "demo-client", CLIENT_ID);
-  }
-
-  @Test
-  void flagOnRoutesSelectedPaidDataOnlyThroughTheAsyncWorker() {
-    flagIs(true);
-
-    assertFalse(EtendoGoJwtServlet.shouldRunSynchronousDataTransfer(true, true, true));
-    assertFalse(EtendoGoJwtServlet.shouldRunSynchronousDataTransfer(true, true, false));
-  }
-
-  @Test
-  void flagOffKeepsTheExistingSynchronousCopyOnlyForPaidSelectedData() {
-    flagIs(false);
-
-    assertTrue(EtendoGoJwtServlet.shouldRunSynchronousDataTransfer(true, true, false));
-    assertTrue(EtendoGoJwtServlet.shouldRunSynchronousDataTransfer(true, false, true));
-    assertFalse(EtendoGoJwtServlet.shouldRunSynchronousDataTransfer(true, false, false));
-    assertFalse(EtendoGoJwtServlet.shouldRunSynchronousDataTransfer(false, true, true));
   }
 
   @Test
@@ -242,6 +248,13 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
         "addDemoDataTransferSelection", JSONObject.class, String.class);
     method.setAccessible(true);
     method.invoke(servlet, purchase, REQUEST_ID);
+  }
+
+  private String resolveDemoSourceClientId(boolean paidUpgrade) throws Exception {
+    Method method = EtendoGoJwtServlet.class.getDeclaredMethod("resolveDemoSourceClientId",
+        String.class, boolean.class, String.class);
+    method.setAccessible(true);
+    return (String) method.invoke(servlet, ACCOUNT_EMAIL, paidUpgrade, CLIENT_ID);
   }
 
   private static JSONObject selectionBody() throws Exception {

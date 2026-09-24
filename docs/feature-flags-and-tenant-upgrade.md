@@ -217,10 +217,9 @@ any credential is read, so every toggle point must resolve the same answer). Loc
 The worker thread is created on first submission, so an instance with the flag off never starts
 one. No key exists in the web client's `flag-keys.js`: the First Steps row appears only when the
 status read answers 2xx, so the browser follows this evaluator instead of running a second one.
-With the flag off, paid onboarding retains its older synchronous grid-import transfer when the
-browser explicitly selected products or contacts. With the flag on, that synchronous path is
-disabled: only the server-recorded asynchronous job copies data. Source and target client IDs
-must differ in both paths.
+With the flag off, paid onboarding still provisions the productive environment, but ignores any
+demo-data selection and starts no transfer. With the flag on, only the server-recorded asynchronous
+job copies data. Source and target client IDs must differ.
 
 With the flag on, checkout records `{products, contacts}` under its request ID before contacting
 Stripe. The first selection is immutable on checkout reopen. `GET /billing/purchases/{id}` and
