@@ -700,9 +700,9 @@ class EtendoGoJwtDalHelperTest {
       when(preference.getVisibleAtClient()).thenReturn(preferenceTenant);
       when(preference.getSearchKey()).thenReturn(TenantPlanService.PLAN_PRODUCTIVE);
       @SuppressWarnings("unchecked")
-      OBQuery<Preference> preferenceQuery = mock(OBQuery.class);
-      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
-      when(preferenceQuery.list()).thenReturn(List.of(preference));
+      OBQuery<Preference> tenantPlanQuery = mock(OBQuery.class);
+      when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(tenantPlanQuery);
+      when(tenantPlanQuery.list()).thenReturn(List.of(preference));
 
       JSONObject result = EtendoGoJwtDalHelper.buildEnvironmentJson(client, null, environmentUser,
           EnvironmentPlanCache.of(List.of("C-4"), Map.of()));

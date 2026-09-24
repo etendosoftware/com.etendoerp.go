@@ -40,7 +40,6 @@ public class HostedCheckoutService {
 
   private static final String REQUEST_ID_FIELD = "requestId";
   private static final String SUBSCRIPTION_FIELD = "subscription";
-  private static final String SESSIONS_PATH = "/v1/checkout/sessions";
 
   CheckoutRequestStore checkoutRequestStore = new CheckoutRequestStore();
   PlanCatalogService planCatalogService = new PlanCatalogService();
@@ -356,7 +355,8 @@ public class HostedCheckoutService {
     String mode = modeOf(price);
     String form = buildSessionForm(requestId, accountEmail, clientName, origin, price.getId(),
         planKey, mode);
-    StripeResponse response = stripeApiClient.postForm(SESSIONS_PATH, form, idempotencyKey);
+    StripeResponse response = stripeApiClient.postForm("/v1/checkout/sessions", form,
+        idempotencyKey);
     if (!response.isSuccess()) {
       log.error("Checkout provider refused a session for plan '{}' with status {} and code '{}'",
           planKey, response.status(), response.errorCode());
@@ -385,7 +385,7 @@ public class HostedCheckoutService {
   }
 
   private JSONObject retrieveSession(String sessionId) throws IOException {
-    StripeResponse response = stripeApiClient.get(SESSIONS_PATH + "/"
+    StripeResponse response = stripeApiClient.get("/v1/checkout/sessions/"
         + URLEncoder.encode(sessionId, StandardCharsets.UTF_8.name()));
     if (!response.isSuccess()) {
       throw new IOException("Could not retrieve existing checkout session");
