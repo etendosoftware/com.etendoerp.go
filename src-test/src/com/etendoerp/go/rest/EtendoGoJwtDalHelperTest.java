@@ -554,10 +554,14 @@ class EtendoGoJwtDalHelperTest {
   class BuildEnvironmentJson {
 
     private MockedStatic<OwnerSupport> ownerSupportMock;
+    private MockedStatic<org.openbravo.dal.core.OBContext> contextMock;
 
     @BeforeEach
     void isolateOwnerLookup() {
       ownerSupportMock = mockStatic(OwnerSupport.class);
+      // The plan and lifecycle reads enter admin mode (ETP-5046 subscription and fallback reads,
+      // ETP-5488 lifecycle preferences), which needs no real session in a unit test.
+      contextMock = mockStatic(org.openbravo.dal.core.OBContext.class);
       when(obDal.createQuery(eq(Preference.class), anyString())).thenReturn(preferenceQuery);
       when(preferenceQuery.uniqueResult()).thenReturn(null);
     }
@@ -565,6 +569,7 @@ class EtendoGoJwtDalHelperTest {
     @AfterEach
     void restoreOwnerLookup() {
       ownerSupportMock.close();
+      contextMock.close();
     }
 
     @Mock private Client client;
