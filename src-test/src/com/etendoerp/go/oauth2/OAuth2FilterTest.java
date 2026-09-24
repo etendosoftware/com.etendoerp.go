@@ -60,6 +60,7 @@ import org.mockito.quality.Strictness;
 import org.openbravo.dal.service.OBDal;
 
 import com.etendoerp.go.common.PublicUrlResolver;
+import com.etendoerp.go.session.GoSessionSecurity;
 
 /**
  * Unit tests for {@link OAuth2Filter}.
@@ -192,6 +193,50 @@ class OAuth2FilterTest {
     printWriter.flush();
     assertTrue(responseBody.toString().contains("invalid_request"));
     assertTrue(responseBody.toString().contains("Missing or malformed"));
+  }
+
+  /**
+   * ETP-4576 — the browser SPA authenticates with the {@code __Host-} cookie session and sends
+   * no Authorization header at all, so rejecting here cut off every in-app MCP conversation
+   * before the servlet could resolve the cookie. The filter validates OAuth2 tokens and has
+   * none to validate, so it must defer.
+   */
+  @Test
+  @DisplayName("doFilter: no Authorization header but a Go session cookie passes through")
+  void doFilterGoSessionCookiePassesThrough() throws Exception {
+    when(httpRequest.getMethod()).thenReturn("POST");
+    when(httpRequest.getHeader("Authorization")).thenReturn(null);
+    when(httpRequest.getCookies()).thenReturn(new javax.servlet.http.Cookie[] {
+        new javax.servlet.http.Cookie("locale", "es_ES"),
+        new javax.servlet.http.Cookie(GoSessionSecurity.COOKIE_NAME, "opaque-session-token"),
+    });
+
+    filter.doFilter(httpRequest, httpResponse, filterChain);
+
+    verify(filterChain).doFilter(httpRequest, httpResponse);
+    verify(httpResponse, never()).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+  }
+
+  /**
+   * The pass-through above is gated on the cookie on purpose: a request carrying NEITHER
+   * credential must still get this filter's own 401, including the {@code error} field of
+   * {@code WWW-Authenticate} that an MCP client's OAuth discovery reads.
+   */
+  @Test
+  @DisplayName("doFilter: cookies without the session cookie still return 401")
+  void doFilterUnrelatedCookiesStillRejected() throws Exception {
+    when(httpRequest.getMethod()).thenReturn("POST");
+    when(httpRequest.getHeader("Authorization")).thenReturn(null);
+    when(httpRequest.getCookies()).thenReturn(new javax.servlet.http.Cookie[] {
+        new javax.servlet.http.Cookie("locale", "es_ES"),
+    });
+
+    filter.doFilter(httpRequest, httpResponse, filterChain);
+
+    verify(httpResponse).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
+    verify(filterChain, never()).doFilter(any(), any());
+    printWriter.flush();
+    assertTrue(responseBody.toString().contains("invalid_request"));
   }
 
   /**

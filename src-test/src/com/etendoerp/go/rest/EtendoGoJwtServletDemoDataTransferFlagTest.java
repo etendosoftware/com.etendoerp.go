@@ -252,9 +252,9 @@ class EtendoGoJwtServletDemoDataTransferFlagTest {
 
   private void projectSelection(JSONObject purchase) throws Exception {
     Method method = EtendoGoJwtServlet.class.getDeclaredMethod(
-        "addDemoDataTransferSelection", JSONObject.class, String.class);
+        "addDemoDataTransferSelection", JSONObject.class, String.class, String.class);
     method.setAccessible(true);
-    method.invoke(servlet, purchase, REQUEST_ID);
+    method.invoke(servlet, purchase, REQUEST_ID, DEMO_CLIENT_ID);
   }
 
   private static JSONObject selectionBody() throws Exception {
