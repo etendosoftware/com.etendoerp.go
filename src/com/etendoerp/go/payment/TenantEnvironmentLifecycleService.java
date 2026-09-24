@@ -142,7 +142,7 @@ public class TenantEnvironmentLifecycleService {
         Instant renewalDueAt = parseInstant(
             readPreference(SUBSCRIPTION_DUE_AT_ATTRIBUTE, clientId));
         return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE, null,
-            subscriptionStatus, renewalDueAt);
+            subscriptionStatus, renewalDueAt, false);
       }
       String startedAt = readPreference(DEMO_TRIAL_STARTED_ATTRIBUTE, clientId);
       if (StringUtils.isBlank(startedAt)
@@ -153,6 +153,7 @@ public class TenantEnvironmentLifecycleService {
         return null;
       }
       String associatedProductiveClientId = readPreference(ASSOCIATED_PRODUCTIVE_ATTRIBUTE, clientId);
+      boolean associatedWithProductive = StringUtils.isNotBlank(associatedProductiveClientId);
       EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus =
           EnvironmentAccessPolicy.SubscriptionStatus.NONE;
       Instant renewalDueAt = null;
@@ -165,7 +166,7 @@ public class TenantEnvironmentLifecycleService {
         }
       }
       return new EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType.DEMO,
-          Instant.parse(startedAt), subscriptionStatus, renewalDueAt);
+          Instant.parse(startedAt), subscriptionStatus, renewalDueAt, associatedWithProductive);
     } catch (RuntimeException e) {
       log.warn("Could not resolve environment lifecycle for client {}", clientId, e);
       return null;
@@ -349,6 +350,16 @@ public class TenantEnvironmentLifecycleService {
       Instant now) {
     EnvironmentSnapshot snapshot = resolve(clientId);
     if (snapshot == null) {
+      // A legacy demo can have an association marker without a lifecycle start timestamp. The
+      // association itself is enough to revoke demo access; a null snapshot would otherwise take
+      // the compatibility path that allows tenants predating lifecycle metadata.
+      if (StringUtils.isNotBlank(clientId)
+          && StringUtils.isNotBlank(readPreference(ASSOCIATED_PRODUCTIVE_ATTRIBUTE, clientId))) {
+        EnvironmentAccessPolicy policy = new EnvironmentAccessPolicy();
+        return policy.evaluate(EnvironmentAccessPolicy.Environment.associatedDemo(null, null),
+            activeMembership, EnvironmentAccessPolicy.SubscriptionStatus.NONE, now,
+            configuration());
+      }
       return null;
     }
     EnvironmentAccessPolicy.Environment environment = snapshot.toPolicyEnvironment();
@@ -427,13 +438,16 @@ public class TenantEnvironmentLifecycleService {
     private final Instant trialStartedAt;
     private final EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus;
     private final Instant renewalDueAt;
+    private final boolean associatedWithProductive;
 
     EnvironmentSnapshot(EnvironmentAccessPolicy.EnvironmentType type, Instant trialStartedAt,
-        EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus, Instant renewalDueAt) {
+        EnvironmentAccessPolicy.SubscriptionStatus subscriptionStatus, Instant renewalDueAt,
+        boolean associatedWithProductive) {
       this.type = type;
       this.trialStartedAt = trialStartedAt;
       this.subscriptionStatus = subscriptionStatus;
       this.renewalDueAt = renewalDueAt;
+      this.associatedWithProductive = associatedWithProductive;
     }
 
     public EnvironmentAccessPolicy.EnvironmentType getType() {
@@ -452,14 +466,21 @@ public class TenantEnvironmentLifecycleService {
       return renewalDueAt;
     }
 
+    public boolean isAssociatedWithProductive() {
+      return associatedWithProductive;
+    }
+
     /**
      * Converts the stored projection to the provider-neutral policy input.
      *
      * @return the provider-neutral policy environment
      */
     public EnvironmentAccessPolicy.Environment toPolicyEnvironment() {
-      return type == EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE
-          ? EnvironmentAccessPolicy.Environment.productive(renewalDueAt)
+      if (type == EnvironmentAccessPolicy.EnvironmentType.PRODUCTIVE) {
+        return EnvironmentAccessPolicy.Environment.productive(renewalDueAt);
+      }
+      return associatedWithProductive
+          ? EnvironmentAccessPolicy.Environment.associatedDemo(trialStartedAt, renewalDueAt)
           : EnvironmentAccessPolicy.Environment.demo(trialStartedAt, renewalDueAt);
     }
   }

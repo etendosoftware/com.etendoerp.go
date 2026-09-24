@@ -314,6 +314,39 @@ required target references fail the job with a visible reason. Existing target s
 price/cost rows are updated so a retry does not duplicate them. With the flag disabled, the older
 synchronous NEO grid-import path remains available for an explicit browser selection.
 
+### Company profile transfer during paid provisioning (ETP-5443)
+
+Paid provisioning resolves the account's free/demo client before copying its company profile:
+
+- With exactly one free/demo client, its unique active business organization is the source. The
+  profile is copied to the exact organization created for the productive client in this paid
+  onboarding attempt.
+- If multiple free/demo clients exist, or the identified demo client has zero or multiple active
+  business organizations, paid provisioning fails. It does not guess which source organization to
+  use or silently continue with a partial profile.
+- If no free/demo client exists, paid provisioning remains allowed and the company profile copy is
+  skipped.
+
+When a source organization exists, the copied profile comprises its name, trade name, and business
+type (`AD_Org.Name`, `AD_Org.Social_Name`, and `AD_Org.ETGO_Business_Type`); tax ID and fiscal
+address including its country (`AD_OrgInfo.TaxID` and the linked location); and company logo
+(`AD_OrgInfo.Your_Company_Document_Image`). The logo is copied to a new `AD_Image` row owned by the
+target client, so the productive organization does not depend on an image row owned by the demo
+client. The target is identified by the productive client created in this paid onboarding attempt,
+not by organization name. This keeps the profile on the intended target even when another
+organization has the same name.
+
+After the paid productive environment has been provisioned successfully and the demo environment
+has been associated with it, the account loses access to that demo environment. This does not
+revoke access to the successfully provisioned productive tenant.
+
+When a source demo organization exists, this profile setup is required for paid productive
+provisioning. It does not depend on whether the account selected product or contact transfer, and it
+is not gated by the optional `demo-data-transfer` feature flag. That flag controls the optional
+demo-data transfer described above; turning it off must not suppress the company profile copy. The
+target's currency is retained from paid onboarding and its ledger configuration; currency is not
+copied from the demo organization.
+
 ### The plan is derived from the payment, not from the decision
 
 `isProductive()` is `true` when — and only when — the request was not refused **and** the payment

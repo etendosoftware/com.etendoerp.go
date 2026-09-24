@@ -50,6 +50,7 @@ import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONObject;
+import org.openbravo.base.exception.OBException;
 import org.openbravo.base.secureApp.VariablesSecureApp;
 import org.openbravo.dal.core.OBContext;
 import org.hibernate.criterion.Restrictions;
@@ -100,6 +101,7 @@ import com.etendoerp.go.onboarding.OnboardingCostingScheduleService;
 import com.etendoerp.go.onboarding.OnboardingWarehouseAddressService;
 import com.etendoerp.go.common.SpanishTaxIdValidator;
 import com.etendoerp.go.onboarding.OnboardingCompanyDataService;
+import com.etendoerp.go.onboarding.OnboardingCompanyProfileTransferService;
 import com.etendoerp.go.onboarding.OnboardingSequenceGeneratorService;
 import com.etendoerp.go.schemaforge.data.Account;
 import com.etendoerp.go.schemaforge.data.AccountIdentity;
@@ -337,6 +339,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   OnboardingDataTransferService onboardingDataTransferService =
       new OnboardingDataTransferService();
   OnboardingCompanyDataService onboardingCompanyDataService = new OnboardingCompanyDataService();
+  OnboardingCompanyProfileTransferService onboardingCompanyProfileTransferService =
+      new OnboardingCompanyProfileTransferService();
   OnboardingAccountingWiringService onboardingAccountingWiringService =
       new OnboardingAccountingWiringService();
   OnboardingPeriodControlService onboardingPeriodControlService =
@@ -3142,6 +3146,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     if (!ensureOnboardingDataset(writer, clientId, orgId, adminContext.adminUserId,
         adminContext.adminRoleId, onboardingRequest)) return false;
+    if (paidUpgrade) {
+      transferDemoCompanyProfile(accountEmail, clientId, orgId);
+    }
     transferSelectedData(writer, onboardingRequest, paidUpgrade, demoSourceClientId, clientId,
         orgId);
     if (!paidUpgrade && !tenantEnvironmentLifecycleService.markDemoReady(clientId, Instant.now())) {
@@ -3155,6 +3162,31 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     sendProgress(writer, "finalize", "done", "Environment ready");
     sendFinalResult(writer, true, "Environment created successfully");
     return true;
+  }
+
+  /**
+   * Revokes the account's demo and copies its company profile into the paid environment. The
+   * onboarding destination is still free at this point, so it is excluded from the candidates.
+   */
+  private void transferDemoCompanyProfile(String accountEmail, String clientId, String orgId) {
+    Set<String> freeTenantIds =
+        EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail(accountEmail, clientId);
+    if (freeTenantIds.size() > 1) {
+      throw new OBException("Multiple demo environments are linked to this account; "
+          + "the company profile source is ambiguous");
+    }
+    if (freeTenantIds.isEmpty()) {
+      log.info("No free demo environment is available for paid onboarding account {}; "
+          + "company profile transfer is skipped", maskEmail(accountEmail));
+      return;
+    }
+    String sourceClientId = freeTenantIds.iterator().next();
+    if (!tenantEnvironmentLifecycleService.associateDemoWithProductive(sourceClientId, clientId)) {
+      throw new OBException("Could not revoke demo access after paid onboarding");
+    }
+    onboardingCompanyProfileTransferService.copy(sourceClientId, clientId, orgId);
+    log.info("Copied company profile from demo client {} to productive client {} organization {}",
+        sourceClientId, clientId, orgId);
   }
 
   private String resolveDemoSourceClientId(String accountEmail, boolean paidUpgrade,
