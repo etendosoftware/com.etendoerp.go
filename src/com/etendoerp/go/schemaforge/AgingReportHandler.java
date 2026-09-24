@@ -74,9 +74,9 @@ public class AgingReportHandler implements NeoHandler {
   private static final String DEFAULT_COL4       = "120";
   private static final String BUCKET_SENTINEL    = "99999";
   private static final String DATE_FORMAT        = "yyyy-MM-dd";
-  private static final String REC_OR_PAY_RECEIVABLES = "RECEIVABLES";
-  private static final String REC_OR_PAY_PAYABLES     = "PAYABLES";
-  private static final String PARAM_REC_OR_PAY   = "recOrPay";
+  protected static final String REC_OR_PAY_RECEIVABLES = "RECEIVABLES";
+  protected static final String REC_OR_PAY_PAYABLES     = "PAYABLES";
+  protected static final String PARAM_REC_OR_PAY   = "recOrPay";
   private static final String PARAM_CURRENT_DATE = "currentDate";
   private static final String PARAM_COLUMN1      = "column1";
   private static final String PARAM_COLUMN2      = "column2";
@@ -95,7 +95,7 @@ public class AgingReportHandler implements NeoHandler {
    * Receivables"), not by name-matching. Do not repoint this constant at a different-looking
    * process without re-confirming that same FK chain (ETP-4510, follow-up to BUG-3).
    */
-  private static final String AGING_RECEIVABLE_PROCESS_ID = "0D37A9F6109549DEB058373EF2DAEB6A";
+  protected static final String AGING_RECEIVABLE_PROCESS_ID = "0D37A9F6109549DEB058373EF2DAEB6A";
 
   /**
    * OBUIAPP process id for the classic "Aging Balance Process Definition for Payables" process —
@@ -108,7 +108,7 @@ public class AgingReportHandler implements NeoHandler {
    * javadoc — "Informe Antigüedad de Cobros"/"Informe Antigüedad de Pagos" are both listed among
    * the windowless rows, same category as "Documentos no contabilizados").
    */
-  private static final String AGING_PAYABLE_PROCESS_ID = "EB4C4053F3B94A17A08D1DD7E89CEB7E";
+  protected static final String AGING_PAYABLE_PROCESS_ID = "EB4C4053F3B94A17A08D1DD7E89CEB7E";
 
   /**
    * Whether the role may use the aging report at all, for either side.
@@ -243,15 +243,15 @@ public class AgingReportHandler implements NeoHandler {
     // was correctly taken into account.
     String gatedProcessId;
     if ("POST".equals(method)) {
-      gatedProcessId = resolveGatedProcessId(context.getRequestBody());
+      JSONObject body = context.getRequestBody();
+      String requested = body == null ? null : body.optString(PARAM_REC_OR_PAY, null);
+      gatedProcessId = resolveGatedProcessId(resolveRecOrPay(requested));
     } else if ("GET".equals(method)) {
       Map<String, String> queryParams = context.getQueryParams();
-      String recOrPay = queryParams == null
-          ? REC_OR_PAY_RECEIVABLES
-          : queryParams.getOrDefault(PARAM_REC_OR_PAY, REC_OR_PAY_RECEIVABLES);
-      gatedProcessId = resolveGatedProcessId(recOrPay);
+      String requested = queryParams == null ? null : queryParams.get(PARAM_REC_OR_PAY);
+      gatedProcessId = resolveGatedProcessId(resolveRecOrPay(requested));
     } else {
-      gatedProcessId = AGING_RECEIVABLE_PROCESS_ID;
+      gatedProcessId = resolveGatedProcessId(resolveRecOrPay(null));
     }
     if (!NeoAccessHelper.hasObuiappProcessAccess(gatedProcessId)) {
       return NeoResponse.error(403, "Access denied");
@@ -266,20 +266,38 @@ public class AgingReportHandler implements NeoHandler {
   }
 
   /**
-   * Resolves which OBUIAPP process a POST request's {@code recOrPay} body param must be gated
-   * on. Mirrors {@link #executeReport}'s own {@code recOrPay} default (RECEIVABLES) so the gate
-   * and the actual query always agree on which side is being served.
+   * Hook for a sibling handler that always serves one fixed side of this report, regardless of
+   * what the request asked for (ETP-5483: {@code AgingPayableReportHandler}, which keeps
+   * {@code recOrPay} out of its own contract entirely and must never fall through to the
+   * receivables default).
    *
-   * @param body the POST request body, or {@code null} (the 400 for a missing body is raised
-   *     later in {@link #executeReport}, after the gate — a missing body still defaults to
-   *     RECEIVABLES for gating purposes)
-   * @return the receivables or payables OBUIAPP process id, matching {@code recOrPay}
+   * <p>{@code null} (the default here) means "read {@code recOrPay} from the request as before" —
+   * {@link #resolveRecOrPay} then applies this handler's own RECEIVABLES default.
+   *
+   * @return {@code REC_OR_PAY_RECEIVABLES}/{@code REC_OR_PAY_PAYABLES} to force that side, or
+   *     {@code null} to honor whatever the request asked for
    */
-  private static String resolveGatedProcessId(JSONObject body) {
-    String recOrPay = body == null
+  protected String forcedRecOrPay() {
+    return null;
+  }
+
+  /**
+   * Resolves the effective {@code recOrPay} for this request: {@link #forcedRecOrPay()} when a
+   * subclass fixes one side, otherwise the requested value, defaulting to RECEIVABLES when absent
+   * or blank — the same default this handler has always applied.
+   *
+   * @param requestedRecOrPay the raw {@code recOrPay} from the POST body or GET query param, or
+   *     {@code null} when absent
+   * @return the effective {@code RECEIVABLES}/{@code PAYABLES} value to serve and gate on
+   */
+  protected String resolveRecOrPay(String requestedRecOrPay) {
+    String forced = forcedRecOrPay();
+    if (forced != null) {
+      return forced;
+    }
+    return (requestedRecOrPay == null || requestedRecOrPay.isEmpty())
         ? REC_OR_PAY_RECEIVABLES
-        : body.optString(PARAM_REC_OR_PAY, REC_OR_PAY_RECEIVABLES);
-    return resolveGatedProcessId(recOrPay);
+        : requestedRecOrPay;
   }
 
   /**
@@ -301,11 +319,30 @@ public class AgingReportHandler implements NeoHandler {
   // GET — describe parameters
   // -------------------------------------------------------------------------
 
+  /**
+   * The MCP tool's display name. Overridden by {@code AgingPayableReportHandler} (ETP-5483) so
+   * the two sibling report tools do not both describe themselves as the generic "Aging Report".
+   *
+   * @return the report's display name
+   */
+  protected String reportName() {
+    return "Aging Report";
+  }
+
+  /**
+   * The MCP tool's description. Overridden by {@code AgingPayableReportHandler} (ETP-5483).
+   *
+   * @return the report's description
+   */
+  protected String reportDescription() {
+    return "Aging schedule for receivables or payables, grouped by business partner";
+  }
+
   private NeoResponse describeReport() {
     try {
       JSONObject desc = new JSONObject();
-      desc.put("name", "Aging Report");
-      desc.put("description", "Aging schedule for receivables or payables, grouped by business partner");
+      desc.put("name", reportName());
+      desc.put("description", reportDescription());
 
       // Rendered from reportParameters(), the single declaration of this report's contract.
       // Hand-maintaining a second copy here is what let glId and showDetails go undocumented.
@@ -333,7 +370,7 @@ public class AgingReportHandler implements NeoHandler {
         return NeoResponse.error(400, "Request body is required");
       }
 
-      String recOrPay    = body.optString(PARAM_REC_OR_PAY, REC_OR_PAY_RECEIVABLES);
+      String recOrPay    = resolveRecOrPay(body.optString(PARAM_REC_OR_PAY, null));
       String dateStr     = body.optString(PARAM_CURRENT_DATE, "");
       boolean showDetails = body.optBoolean(PARAM_SHOW_DETAILS, false);
 

@@ -294,4 +294,44 @@ class ReportHandlerAccessGateTest {
       assertNotEquals(AGING_RECEIVABLE_PROCESS_ID, AGING_PAYABLE_PROCESS_ID);
     }
   }
+
+  // ── aging-payable (ETP-5483) ────────────────────────────────────────────
+
+  @Nested
+  @DisplayName("AgingPayableReportHandler")
+  class AgingPayableReport {
+
+    private final AgingPayableReportHandler handler = new AgingPayableReportHandler();
+
+    /**
+     * Unlike {@link AgingReportHandler}, this sibling serves ONLY the payables side, so its
+     * declaration must be narrow — the receivables grant alone must not be enough.
+     */
+    @Test
+    @DisplayName("only the payables grant is enough; the receivables grant alone is not")
+    void onlyPayablesGrantIsEnough() {
+      accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(AGING_PAYABLE_PROCESS_ID))
+          .thenReturn(true);
+      accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(AGING_RECEIVABLE_PROCESS_ID))
+          .thenReturn(false);
+      assertTrue(handler.isAccessibleForCurrentRole());
+
+      accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(AGING_PAYABLE_PROCESS_ID))
+          .thenReturn(false);
+      accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(AGING_RECEIVABLE_PROCESS_ID))
+          .thenReturn(true);
+      assertFalse(handler.isAccessibleForCurrentRole(),
+          "A receivables-only role must NOT be offered the payables-only tool");
+    }
+
+    @Test
+    @DisplayName("POST without the payables grant is refused with 403")
+    void postWithoutGrantIsRefused() {
+      accessMock.when(() -> NeoAccessHelper.hasObuiappProcessAccess(anyString())).thenReturn(false);
+
+      NeoResponse response = handler.handle(context("POST"));
+
+      assertEquals(403, response.getHttpStatus());
+    }
+  }
 }
