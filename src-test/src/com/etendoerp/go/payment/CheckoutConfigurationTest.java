@@ -25,16 +25,16 @@ import org.openbravo.base.session.OBPropertiesProvider;
  *
  * <p>{@code isConfigured()} used to require a price id as well, so a true answer additionally
  * proved that <em>a purchasable thing existed</em>. That guarantee moved to the Subscription Plan
- * Catalog, and deliberately did not acquire a fallback: a fallback price is a price nobody
- * reviewed, selected exactly at the moment the intended configuration is missing — the one moment
- * it must not be charged. These specs pin that the price setting is gone rather than merely
- * unused, because a lingering read of it would quietly reintroduce exactly that.
+ * Catalog plus the legacy price fallback ({@link PlanCatalogService#isLegacyFallbackActive()}).
+ * The price setting still exists, but only as that fallback's input: it must never again be a
+ * condition of "checkout is configured", or a deployment selling priced plans would need a
+ * leftover legacy price to sell anything at all.
  */
 class CheckoutConfigurationTest {
 
   private static final String SECRET_KEY_PROPERTY = "etendo.go.checkout.secret.key";
   private static final String WEBHOOK_SECRET_PROPERTY = "etendo.go.checkout.webhook.secret";
-  private static final String RETIRED_PRICE_PROPERTY = "etendo.go.checkout.price.id";
+  private static final String LEGACY_PRICE_PROPERTY = "etendo.go.checkout.price.id";
   private static final String CONNECT_TIMEOUT_PROPERTY = "etendo.go.checkout.connect.timeout.ms";
   private static final String READ_TIMEOUT_PROPERTY = "etendo.go.checkout.read.timeout.ms";
 
@@ -56,7 +56,7 @@ class CheckoutConfigurationTest {
     }
     System.clearProperty(SECRET_KEY_PROPERTY);
     System.clearProperty(WEBHOOK_SECRET_PROPERTY);
-    System.clearProperty(RETIRED_PRICE_PROPERTY);
+    System.clearProperty(LEGACY_PRICE_PROPERTY);
     System.clearProperty(CONNECT_TIMEOUT_PROPERTY);
     System.clearProperty(READ_TIMEOUT_PROPERTY);
   }
@@ -68,20 +68,34 @@ class CheckoutConfigurationTest {
     System.setProperty(WEBHOOK_SECRET_PROPERTY, "whsec_abc");
 
     assertTrue(CheckoutConfiguration.isConfigured(),
-        "no price setting exists any more, so requiring one would make checkout permanently"
-            + " unconfigured");
+        "a deployment selling priced plans has no legacy price, so requiring one would make it"
+            + " permanently unconfigured");
   }
 
   @Test
-  @DisplayName("the retired price setting is not consulted, even when it is present")
-  void theRetiredPriceSettingIsIgnored() {
-    // Set to a value that would once have been used. What is purchasable comes from the plan
-    // plan catalog now; a read of this key sneaking back in is exactly the fallback the ticket forbids.
-    System.setProperty(RETIRED_PRICE_PROPERTY, "price_LEFTOVER");
+  @DisplayName("the legacy price setting neither enables nor is required for checkout")
+  void theLegacyPriceSettingDoesNotDecideWhetherCheckoutIsConfigured() {
+    // Present: still configured (it is only the fallback's input)...
+    System.setProperty(LEGACY_PRICE_PROPERTY, "price_LEGACY");
+    System.setProperty(SECRET_KEY_PROPERTY, "sk_test_abc");
+    System.setProperty(WEBHOOK_SECRET_PROPERTY, "whsec_abc");
+    assertTrue(CheckoutConfiguration.isConfigured());
+    assertEquals("price_LEGACY", CheckoutConfiguration.priceId());
+
+    // ...and on its own it configures nothing: a price without credentials cannot be charged.
+    System.clearProperty(SECRET_KEY_PROPERTY);
+    assertFalse(CheckoutConfiguration.isConfigured());
+  }
+
+  @Test
+  @DisplayName("without the legacy price setting the fallback input reads as blank")
+  void anAbsentLegacyPriceReadsAsBlank() {
     System.setProperty(SECRET_KEY_PROPERTY, "sk_test_abc");
     System.setProperty(WEBHOOK_SECRET_PROPERTY, "whsec_abc");
 
     assertTrue(CheckoutConfiguration.isConfigured());
+    assertTrue(CheckoutConfiguration.priceId().isBlank(),
+        "a blank price is what keeps the legacy fallback inactive");
   }
 
   @Test

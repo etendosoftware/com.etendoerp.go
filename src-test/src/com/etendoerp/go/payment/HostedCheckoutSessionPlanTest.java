@@ -34,9 +34,10 @@ import com.etendoerp.go.schemaforge.data.Plan;
  * Specs for how a Checkout Session decides what it charges (ETP-5046).
  *
  * <p>Before this ticket the price came from a deployment property. It now comes from the
- * Subscription Plan Catalog row named by the {@code planKey} the browser sent, and there is
- * deliberately <b>no fallback</b>: a fallback price is a price nobody reviewed, selected exactly
- * when the intended configuration is missing.
+ * Subscription Plan Catalog row named by the {@code planKey} the browser sent. The deployment
+ * property survives only as the narrow, self-retiring <b>legacy price fallback</b> for the
+ * grandfathered plan, pinned separately in {@link HostedCheckoutLegacyFallbackTest}; a named,
+ * priced plan is never charged it.
  *
  * <p>Two refusals must stay distinguishable, because they mean opposite things to the person on
  * the other end — "your request named something that is not for sale" versus "this deployment has
