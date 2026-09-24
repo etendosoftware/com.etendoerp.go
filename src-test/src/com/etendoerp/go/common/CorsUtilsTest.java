@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import javax.servlet.http.HttpServletRequest;
 import javax.servlet.http.HttpServletResponse;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -195,6 +196,82 @@ class CorsUtilsTest {
       assertFalse(CorsUtils.isAllowedOrigin(request, origin),
           origin + " must not be trusted by default — widening the list is what "
               + "etgo.allowed.origins is for");
+    }
+  }
+
+  /**
+   * A configured entry (etgo.allowed.origins / ETGO_ALLOWED_ORIGINS) with no {@code *} must
+   * still match exactly (pre-existing behavior). A {@code *} stands for exactly one hostname
+   * label — e.g. {@code http://*.localhost:3100} covers every {@code *.localhost} dev origin
+   * (goclean.localhost, etendo.localhost, ...) from a single entry, instead of listing each one.
+   */
+  @Nested
+  @DisplayName("isAllowedOrigin — configured origins (etgo.allowed.origins)")
+  class ConfiguredOriginAllowlist {
+
+    private static final String PROPERTY = "etgo.allowed.origins";
+
+    @AfterEach
+    void clearConfiguredOrigins() {
+      System.clearProperty(PROPERTY);
+    }
+
+    @Test
+    void exactConfiguredOriginIsAllowed() {
+      System.setProperty(PROPERTY, "http://mycustomhost.example:4000");
+      when(request.getRequestURL()).thenReturn(new StringBuffer("http://server:8080/api"));
+
+      assertTrue(CorsUtils.isAllowedOrigin(request, "http://mycustomhost.example:4000"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "http://goclean.localhost:3100",
+        "http://etendo.localhost:3100",
+        "http://anything.localhost:3100",
+    })
+    void wildcardConfiguredOriginMatchesEverySubdomain(String origin) {
+      System.setProperty(PROPERTY, "http://*.localhost:3100");
+      when(request.getRequestURL()).thenReturn(new StringBuffer("http://server:8080/api"));
+
+      assertTrue(CorsUtils.isAllowedOrigin(request, origin),
+          origin + " must match the http://*.localhost:3100 wildcard entry");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "http://goclean.localhost:9999", // wrong port
+        "https://goclean.localhost:3100", // wrong scheme
+        "http://a.b.localhost:9999", // * matches one label only, not "a.b" (also off the default port)
+        "http://evil.example:3100",
+    })
+    void wildcardConfiguredOriginRejectsEverythingElse(String origin) {
+      System.setProperty(PROPERTY, "http://*.localhost:3100");
+      when(request.getRequestURL()).thenReturn(new StringBuffer("http://server:8080/api"));
+
+      assertFalse(CorsUtils.isAllowedOrigin(request, origin),
+          origin + " must not match http://*.localhost:3100");
+    }
+
+    @Test
+    void wildcardRequiresAtLeastOneLabelInPlaceOfTheStar() {
+      // A non-default port keeps this isolated from DEFAULT_ALLOWED_ORIGINS, which already
+      // trusts plain http://localhost:3100 regardless of any configured entry.
+      System.setProperty(PROPERTY, "http://*.example:9000");
+      when(request.getRequestURL()).thenReturn(new StringBuffer("http://server:8080/api"));
+
+      assertFalse(CorsUtils.isAllowedOrigin(request, "http://example:9000"),
+          "the bare host with no subdomain label must not satisfy the * in http://*.example:9000");
+    }
+
+    @Test
+    void multipleConfiguredOriginsIncludingAWildcardAreAllComaSeparated() {
+      System.setProperty(PROPERTY, "http://localhost:3100,http://*.localhost:3100,http://*.example:9000");
+      when(request.getRequestURL()).thenReturn(new StringBuffer("http://server:8080/api"));
+
+      assertTrue(CorsUtils.isAllowedOrigin(request, "http://goclean.localhost:3100"));
+      assertTrue(CorsUtils.isAllowedOrigin(request, "http://team.example:9000"));
+      assertFalse(CorsUtils.isAllowedOrigin(request, "http://team.example:9001"));
     }
   }
 }

@@ -16,6 +16,8 @@
  */
 package com.etendoerp.go.session;
 
+import java.time.Instant;
+
 /**
  * Persistence port for {@link GoSessionRecord} (ETP-4575).
  *
@@ -38,6 +40,19 @@ public interface GoSessionStore {
    * @param sessionRecord the record to update
    */
   void update(GoSessionRecord sessionRecord);
+
+  /**
+   * Atomically extends the idle expiration of an active session.
+   *
+   * <p>The update is conditional on the expiry observed by the caller so concurrent requests cannot
+   * overwrite a newer expiration with a stale value.</p>
+   *
+   * @param sessionId the session identifier
+   * @param expectedExpiresAt the expiry read by the caller
+   * @param nextExpiresAt the new idle expiry
+   * @return {@code true} when the session was updated
+   */
+  boolean touchExpiresAt(String sessionId, Instant expectedExpiresAt, Instant nextExpiresAt);
 
   /**
    * Atomically consume an active session and insert its rotated successor.

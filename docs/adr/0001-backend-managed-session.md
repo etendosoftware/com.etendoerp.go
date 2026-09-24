@@ -142,6 +142,18 @@ Set-Cookie: __Host-go_session=<opaque>; Secure; HttpOnly; Path=/; SameSite=Lax
   revoke the whole rotation family (follow `ROTATED_FROM_ID` lineage) and force re-login.
 - Expiry is enforced on both `EXPIRES_AT` (idle) and `ABSOLUTE_EXPIRES_AT` (hard cap).
 
+**Amendment (ETP-5395) — role revoked by an admin: rebind, do not rotate.** "Privilege change"
+above means one the *session owner* initiates (environment entry, role switch). When an *admin*
+promotes or demotes the user, the session's role is no longer theirs, and every request carrying
+the cookie kept being authorized with it until logout (a demoted admin kept admin data for up to
+12 h). `GoSessionRoleReconciler` now checks the session's role on every cookie-authenticated
+request (`NeoAuthenticator`, `GET /sws/go/session`, the OAuth2 authorize step). A revoked role is
+replaced **in place** (`GoSessionStore.update`) with the user's default role, or their first
+eligible one; no eligible role ⇒ `401`. The session is not rotated: rotation reissues the cookie
+and the CSRF token, and every other open tab's next write would fail with `403`. Rotating would
+not defend against fixation either, because the trigger is an admin action, not a login.
+Details: `docs/neo-headless.md` §8l.
+
 ### D7 — Legacy Bearer during rollout (measured, reversible)
 
 Behind a **feature flag**, the backend keeps accepting both legacy browser Bearer paths (platform
