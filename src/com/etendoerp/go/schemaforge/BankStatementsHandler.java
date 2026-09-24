@@ -23,6 +23,7 @@ import static com.etendoerp.go.schemaforge.BankStatementsSupport.codedError;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.mapLineRow;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.deriveStatementStatus;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.formatDate;
+import static com.etendoerp.go.schemaforge.BankStatementsSupport.formatInstant;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.isBlankLine;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.nullSafeBigDecimal;
 import static com.etendoerp.go.schemaforge.BankStatementsSupport.parseAmount;
@@ -245,6 +246,15 @@ public class BankStatementsHandler implements NeoHandler {
   // source of truth, no on-the-fly SUM/COUNT. The slim subquery only derives the
   // period (min/max transaction date), which is still computed from the lines and
   // used by the name fallback below.
+  //
+  // ETP-5447 — the order is total: transaction date DESC, then creation DESC, then id DESC.
+  // It keeps the shape Classic uses for this tab: the AD tab declares
+  // HQL_OrderByClause = -transactionDate, and DefaultJsonDataService always appends `id`, which
+  // AdvancedQueryBuilder.getOrderByClause flips to `-id` when every sort column is descending, so
+  // Classic sorts `transactionDate DESC, id DESC`. That is deterministic but arbitrary (a UUID
+  // says nothing about when a statement arrived), so `created` takes over as the tiebreak between
+  // statements sharing a transaction date, and the id stays only as the last resort that keeps
+  // the order stable across reloads. The previous `importdate DESC` alone left ties unordered.
   private static final String STATEMENTS_SQL =
       "SELECT bs.fin_bankstatement_id,"
           + "       bs.documentno,"
@@ -255,6 +265,7 @@ public class BankStatementsHandler implements NeoHandler {
           + "       bs.statementdate,"
           + "       bs.processed,"
           + "       bs.posted,"
+          + "       bs.created,"
           + "       bs.em_etgo_line_count,"
           + "       bs.em_etgo_matched_count,"
           + "       bs.em_etgo_total_in,"
@@ -273,7 +284,7 @@ public class BankStatementsHandler implements NeoHandler {
           + "  ) agg ON agg.fin_bankstatement_id = bs.fin_bankstatement_id"
           + " WHERE bs.fin_financial_account_id = ?"
           + "   AND bs.isactive = 'Y'"
-          + " ORDER BY bs.importdate DESC";
+          + " ORDER BY bs.statementdate DESC, bs.created DESC, bs.fin_bankstatement_id DESC";
 
   // SELECT + FROM + JOINs shared by the single- and multi-statement line queries.
   // The WHERE/ORDER tail is appended per variant (single id vs IN-list for export).
@@ -483,6 +494,11 @@ public class BankStatementsHandler implements NeoHandler {
    * non-blank line, then runs {@link #processStatement} so the lines become
    * available for reconciliation exactly like an imported statement.
    *
+   * <p>{@code FIN_Financial_Account_ID}, {@code name}, {@code transactionDate},
+   * {@code importDate} and at least one line are required (400
+   * {@code Missing required field: <field>} otherwise, see {@link #validateCreateBody});
+   * {@code fileName}, {@code notes} and {@code process} are optional.
+   *
    * <p>Body shape:
    * <pre>
    * {
@@ -635,7 +651,8 @@ public class BankStatementsHandler implements NeoHandler {
    * {@code ?action=update} — edits a draft statement's header and replaces all
    * its lines with the ones in the body. Same body shape as create plus the
    * {@code "id"} of the statement to edit. Only drafts can be edited; passing
-   * {@code "process": true} also runs it after saving.
+   * {@code "process": true} also runs it after saving. {@code name} and both header
+   * dates are required, exactly as on create (see {@link #validateHeaderDates}).
    */
   private NeoResponse handleUpdate(NeoContext context) {
     JSONObject body = context.getRequestBody();
@@ -646,6 +663,8 @@ public class BankStatementsHandler implements NeoHandler {
       if (StringUtils.isBlank(body.optString(FIELD_NAME, null))) {
         return NeoResponse.error(400, MSG_MISSING_FIELD + FIELD_NAME);
       }
+      NeoResponse invalidDates = validateHeaderDates(body);
+      if (invalidDates != null) return invalidDates;
       JSONArray bodyLines = body.optJSONArray(FIELD_LINES);
       boolean hasBodyLines = bodyLines != null && bodyLines.length() > 0;
       // ETP-4921 — a reactivated statement can already carry matched lines (never sent in the
@@ -854,6 +873,8 @@ public class BankStatementsHandler implements NeoHandler {
     if (StringUtils.isBlank(body.optString(FIELD_NAME, null))) {
       return NeoResponse.error(400, MSG_MISSING_FIELD + FIELD_NAME);
     }
+    NeoResponse invalidDates = validateHeaderDates(body);
+    if (invalidDates != null) return invalidDates;
     JSONArray lines = body.optJSONArray(FIELD_LINES);
     if (lines == null || lines.length() == 0) {
       return NeoResponse.error(400, MSG_LINE_REQUIRED);
@@ -862,10 +883,28 @@ public class BankStatementsHandler implements NeoHandler {
   }
 
   /**
+   * ETP-5447 — both header dates of a manual statement are required. Returns the 400
+   * {@code Missing required field: transactionDate|importDate} for the first one that is
+   * blank OR unparseable, else {@code null}. An unparseable value is treated as missing
+   * because persisting it would need a substitute, and the substitute used to be
+   * {@code new Date()}: a cleared field silently became TODAY. Shared by create and update.
+   */
+  static NeoResponse validateHeaderDates(JSONObject body) {
+    if (parseIsoDate(body.optString(FIELD_TRANSACTION_DATE, null), null) == null) {
+      return NeoResponse.error(400, MSG_MISSING_FIELD + FIELD_TRANSACTION_DATE);
+    }
+    if (parseIsoDate(body.optString(FIELD_IMPORT_DATE, null), null) == null) {
+      return NeoResponse.error(400, MSG_MISSING_FIELD + FIELD_IMPORT_DATE);
+    }
+    return null;
+  }
+
+  /**
    * Builds a {@link FIN_BankStatement} for the manual-create flow from the
    * request body. Same header fields as Classic's manual statement: name,
-   * import/transaction dates, file name and notes (all but name optional). The
-   * document type is always the account's BSF type.
+   * import/transaction dates, file name and notes. Name and both dates are
+   * required — the caller has already run {@link #validateCreateBody}; file name
+   * and notes are optional. The document type is always the account's BSF type.
    */
   FIN_BankStatement newManualBankStatement(FIN_FinancialAccount account, JSONObject body) {
     FIN_BankStatement statement = OBProvider.getInstance().get(FIN_BankStatement.class);
@@ -884,13 +923,15 @@ public class BankStatementsHandler implements NeoHandler {
    * Applies the user-editable header fields (name, import/transaction dates,
    * file name and notes) from the request body onto a statement. Shared by the
    * manual create and update flows so both treat the header identically. Blank
-   * file name / notes clear the field, mirroring an edit that removed them.
+   * file name / notes clear the field, mirroring an edit that removed them. The
+   * dates have no fallback: both callers validate them first
+   * ({@link #validateHeaderDates}), so a missing date is a 400, never TODAY (ETP-5447).
    */
   private void applyEditableHeader(FIN_BankStatement statement, JSONObject body) {
     String name = body.optString(FIELD_NAME, null);
     statement.setName(StringUtils.isNotBlank(name) ? truncate(name, 60) : null);
-    statement.setImportdate(parseIsoDate(body.optString(FIELD_IMPORT_DATE, null), new Date()));
-    statement.setTransactionDate(parseIsoDate(body.optString(FIELD_TRANSACTION_DATE, null), new Date()));
+    statement.setImportdate(parseIsoDate(body.optString(FIELD_IMPORT_DATE, null), null));
+    statement.setTransactionDate(parseIsoDate(body.optString(FIELD_TRANSACTION_DATE, null), null));
     String fileName = body.optString(FIELD_FILE_NAME, null);
     statement.setFileName(StringUtils.isNotBlank(fileName) ? truncate(fileName, 255) : null);
     String notes = body.optString(FIELD_NOTES, null);
@@ -1217,6 +1258,9 @@ public class BankStatementsHandler implements NeoHandler {
           row.put(FIELD_NOTES, StringUtils.trimToEmpty(rs.getString(FIELD_NOTES)));
           row.put(FIELD_IMPORT_DATE, formatDate(rs.getTimestamp("importdate")));
           row.put(FIELD_TRANSACTION_DATE, formatDate(rs.getTimestamp("statementdate")));
+          // Full UTC instant (ms precision), not a civil date: the client re-sorts on it as the
+          // tiebreak between statements sharing a transaction date (ETP-5447).
+          row.put("created", formatInstant(rs.getTimestamp("created")));
           boolean processed = "Y".equalsIgnoreCase(rs.getString(FIELD_PROCESSED));
           row.put(FIELD_PROCESSED, StringUtils.trimToEmpty(rs.getString(FIELD_PROCESSED)));
           row.put("posted", StringUtils.trimToEmpty(rs.getString("posted")));

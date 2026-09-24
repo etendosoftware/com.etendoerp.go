@@ -25,6 +25,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.LinkedHashMap;
@@ -302,6 +303,29 @@ public final class BankStatementsSupport {
   }
 
   /**
+   * Fixed-width UTC instant with millisecond precision. Deliberately not {@code Instant#toString}
+   * or {@code ISO_INSTANT}: both drop a zero fraction, so {@code ...:05Z} and {@code ...:05.123Z}
+   * would compare lexicographically in the wrong order ({@code '.'} sorts before {@code 'Z'}) —
+   * and the frontend orders these strings as-is (see {@code clientSort.js}).
+   */
+  private static final DateTimeFormatter AUDIT_INSTANT =
+      DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
+
+  /**
+   * Formats an audit timestamp ({@code created}) as a full UTC instant, e.g.
+   * {@code 2026-06-04T13:05:09.123Z}. Unlike {@link #formatDate}, which renders a business (civil)
+   * date/time, an audit column IS an instant, so it carries its zone and keeps sub-second
+   * precision: it is used as a sort tiebreak between statements sharing a transaction date
+   * (ETP-5447), where two statements created within the same second must still order.
+   *
+   * @param ts the timestamp to format (may be {@code null})
+   * @return the fixed-width UTC instant, or {@code ""} when {@code ts} is {@code null}
+   */
+  public static String formatInstant(Timestamp ts) {
+    return ts == null ? "" : AUDIT_INSTANT.format(Instant.ofEpochMilli(ts.getTime()));
+  }
+
+  /**
    * Parses an ISO-8601 instant (e.g. {@code 2026-06-04T00:00:00Z}) sent by the frontend as UTC
    * midnight for a chosen calendar day (see {@code ManualStatementModal.jsx}'s {@code toIsoUtc}: it
    * deliberately picks UTC midnight so the calendar day survives regardless of the caller's
@@ -328,8 +352,9 @@ public final class BankStatementsSupport {
       // Zone-less ISO (`2026-06-04T10:00:00`, or a bare `2026-06-04`): Instant.parse rejects it
       // for want of an offset. Since ETP-5100 that is the shape NEO itself emits, so a value
       // this API handed out and got echoed back must round-trip rather than silently collapse
-      // to `fallback` — which, being `new Date()` at both call sites in BankStatementsHandler,
-      // would substitute TODAY for the statement's real day and look like nothing went wrong.
+      // to `fallback`. The manual-statement header passes a null fallback and rejects the
+      // request (ETP-5447), so a lost value there would surface as a spurious 400 — and a caller
+      // passing `new Date()` would silently substitute TODAY for the statement's real day.
       // Only the calendar day is read here anyway, so the prefix is the whole datum.
       calendarDay = parseCalendarDayPrefix(iso);
       if (calendarDay == null) return fallback;
