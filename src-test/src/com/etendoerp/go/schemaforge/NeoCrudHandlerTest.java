@@ -818,16 +818,15 @@ class NeoCrudHandlerTest {
   }
 
   // -------------------------------------------------------------------------
-  // buildReadOnlyFieldRejectedResponse tests (via reflection, IMP-28 clause 2)
+  // NeoReadOnlyFieldResponse tests (IMP-28 clause 2)
   // -------------------------------------------------------------------------
 
   @Nested
-  @DisplayName("buildReadOnlyFieldRejectedResponse")
+  @DisplayName("NeoReadOnlyFieldResponse")
   class BuildReadOnlyFieldRejectedResponse {
 
-    private NeoResponse invokeBuildResponse(ReadOnlyFieldRejectedException e) throws Exception {
-      return (NeoResponse) invokePrivate(handler, "buildReadOnlyFieldRejectedResponse",
-          new Class<?>[] { ReadOnlyFieldRejectedException.class }, e);
+    private NeoResponse invokeBuildResponse(ReadOnlyFieldRejectedException e) {
+      return NeoReadOnlyFieldResponse.build(e);
     }
 
     @Test
@@ -887,7 +886,7 @@ class NeoCrudHandlerTest {
 
       assertNotNull(result);
       assertEquals(422, result.getHttpStatus(),
-          "must be routed through buildReadOnlyFieldRejectedResponse, not the generic 500 path");
+          "must be routed through NeoReadOnlyFieldResponse, not the generic 500 path");
       assertEquals("read_only_field", result.getBody().getString("error"));
       assertEquals("salePrice", result.getBody().getString("field"));
     }

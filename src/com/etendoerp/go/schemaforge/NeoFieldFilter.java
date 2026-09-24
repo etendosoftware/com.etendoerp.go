@@ -471,15 +471,12 @@ public class NeoFieldFilter {
     Iterator<String> keys = body.keys();
     while (keys.hasNext()) {
       String key = keys.next();
-      if (isMetadataKey(key)) {
-        continue;
-      }
-      String propertyName = apiKeyToPropName.getOrDefault(key, key);
-      if (NeoServerOwnedFields.isServerOwned(propertyName)) {
-        continue;
-      }
-      if (includedFields.contains(propertyName) && !writableFields.contains(propertyName)) {
-        throw new ReadOnlyFieldRejectedException(key);
+      if (!isMetadataKey(key)) {
+        String propertyName = apiKeyToPropName.getOrDefault(key, key);
+        if (!NeoServerOwnedFields.isServerOwned(propertyName)
+            && includedFields.contains(propertyName) && !writableFields.contains(propertyName)) {
+          throw new ReadOnlyFieldRejectedException(key);
+        }
       }
     }
   }
