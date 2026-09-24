@@ -66,7 +66,7 @@ import com.etendoerp.go.session.GoSessionService;
  * <p>The plan list and checkout decide on the same predicate
  * ({@link PlanCatalogService#isLegacyFallbackActive()}), so the list can never offer something
  * checkout refuses. While the fallback is on, the list is exactly {@code legacy-productive}, quoted
- * from the configured <em>Stripe</em> price — never from the typed billing offer — so the amount
+ * from the configured <em>Stripe</em> price — never from a typed amount — so the amount
  * shown is the amount charged. When Stripe cannot quote it the plan is left out; the page must
  * never get a 500 for a problem the buyer cannot act on.
  */

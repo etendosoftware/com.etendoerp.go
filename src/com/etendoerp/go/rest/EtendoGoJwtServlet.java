@@ -728,9 +728,9 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * Projects the grandfathered plan onto the browser's view of it, quoting the configured legacy
    * Stripe price — the one checkout will charge under the fallback.
    *
-   * <p>The price comes from Stripe, never from the typed billing offer
-   * ({@code etendo.go.billing.offer.*}), so the amount shown is the amount charged. A failed lookup
-   * leaves the plan out: offering a plan whose price nobody could verify is the one thing this list
+   * <p>The price comes from Stripe ({@link StripePriceService#retrieveConfiguredPrice()}, the same
+   * lookup {@code BillingOfferConfiguration} derives the billing offer from), never from a typed
+   * amount, so the amount shown is the amount charged. A failed lookup leaves the plan out: offering a plan whose price nobody could verify is the one thing this list
    * must not do, and a 500 would break the page for a problem the buyer cannot act on.
    *
    * <p>The description is sent empty: the grandfathered row's {@code DESCRIPTION} documents the
