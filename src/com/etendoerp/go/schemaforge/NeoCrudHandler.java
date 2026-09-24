@@ -192,6 +192,11 @@ class NeoCrudHandler {
       if (neoContext == null) {
         return;
       }
+      NeoResponse validationError = validateClientWriteRequest(neoContext);
+      if (validationError != null) {
+        servlet.writeResponse(response, validationError);
+        return;
+      }
     }
     NeoResponse neoResponse = dispatchCrudRequest(entity, neoContext, request, response);
     if (neoResponse != null) {
@@ -232,6 +237,25 @@ class NeoCrudHandler {
       servlet.sendError(response, HttpServletResponse.SC_BAD_REQUEST,
           "Invalid JSON body: " + e.getMessage());
       return null;
+    }
+  }
+
+  /**
+   * Validates the original REST write body before a handler can enrich it with server-owned
+   * values. Filtering later in the CRUD path remains responsible only for the persistence body.
+   */
+  NeoResponse validateClientWriteRequest(NeoContext context) {
+    try {
+      Tab adTab = context.getAdTab();
+      if (adTab == null || adTab.getTable() == null) {
+        return null;
+      }
+      NeoFieldFilter filter = NeoFieldFilter.forEntity(context.getSfEntity(),
+          adTab.getTable().getName());
+      filter.validateClientWriteRequest(context.getRequestBody());
+      return null;
+    } catch (ReadOnlyFieldRejectedException e) {
+      return buildReadOnlyFieldRejectedResponse(e);
     }
   }
 
