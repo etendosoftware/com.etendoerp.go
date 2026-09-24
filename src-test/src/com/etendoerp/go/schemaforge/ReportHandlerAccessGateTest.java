@@ -500,4 +500,59 @@ class ReportHandlerAccessGateTest {
       assertEquals(403, spied.handle(context("POST")).getHttpStatus());
     }
   }
+
+  // ── profit-loss (ETP-5483 slice 5) ──────────────────────────────────────
+
+  @Nested
+  @DisplayName("ProfitLossReportHandler")
+  class ProfitLossReport {
+
+    private final ProfitLossReportHandler handler = new ProfitLossReportHandler();
+
+    @Test
+    @DisplayName("declares access as the grant on the Financial Reports pseudo-window")
+    void declaresWindowGrant() {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+              ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID))
+          .thenReturn(true);
+      assertTrue(handler.isAccessibleForCurrentRole());
+
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(
+              ReportAccessCatalog.FINANCIAL_REPORTS_WINDOW_ID))
+          .thenReturn(false);
+      assertFalse(handler.isAccessibleForCurrentRole());
+    }
+
+    @Test
+    @DisplayName("POST without the grant is refused with 403")
+    void postWithoutGrantIsRefused() {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
+
+      assertEquals(403, handler.handle(context("POST")).getHttpStatus());
+    }
+
+    @Test
+    @DisplayName("GET without the grant does not leak the description")
+    void getWithoutGrantDoesNotLeakTheDescription() throws Exception {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(false);
+
+      NeoResponse response = handler.handle(context("GET"));
+
+      assertEquals(403, response.getHttpStatus());
+    }
+
+    /**
+     * Regression guard mirroring the InventoryStockReportHandler defect: {@code handle()} must
+     * ask the overridable declaration, not repeat the grant check inline.
+     */
+    @Test
+    @DisplayName("handle() asks isAccessibleForCurrentRole(), not a second copy of the rule")
+    void handleDelegatesToTheDeclaration() {
+      accessMock.when(() -> NeoAccessHelper.hasWindowAccess(anyString())).thenReturn(true);
+      ProfitLossReportHandler spied = spy(new ProfitLossReportHandler());
+      doReturn(false).when(spied).isAccessibleForCurrentRole();
+
+      assertEquals(403, spied.handle(context("POST")).getHttpStatus());
+    }
+  }
 }
