@@ -97,10 +97,6 @@
         <default/>
         <onCreateDefault/>
       </column>
-      <column name="ETGO_PLAN_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
-        <default/>
-        <onCreateDefault/>
-      </column>
       <column name="DEMO_CLIENT_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
         <default/>
         <onCreateDefault/>
@@ -118,6 +114,10 @@
         <onCreateDefault><![CDATA[N]]></onCreateDefault>
       </column>
       <column name="STRIPE_PRICE_ID" primaryKey="false" required="false" type="VARCHAR" size="255" autoIncrement="false">
+        <default/>
+        <onCreateDefault/>
+      </column>
+      <column name="ETGO_PLAN_ID" primaryKey="false" required="false" type="VARCHAR" size="32" autoIncrement="false">
         <default/>
         <onCreateDefault/>
       </column>
