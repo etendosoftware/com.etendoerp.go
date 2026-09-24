@@ -161,6 +161,8 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
     when(existing.getClientName()).thenReturn("Acme Corp");
     when(fixture.requestStore.findActiveForAccountAndClientName(ACCOUNT_ID, ACCOUNT_EMAIL, "Acme Corp"))
         .thenReturn(existing);
+    when(fixture.requestStore.hasRecordedDemoSelection("req-1", ACCOUNT_ID, ACCOUNT_EMAIL))
+        .thenReturn(true);
 
     String foreignBody = new JSONObject()
         .put("clientName", "Acme Corp")
@@ -184,6 +186,7 @@ public class EtendoGoJwtServletBillingCookieAuthTest {
     // and that the row it acted on belongs to the session's account, never the foreign body ids.
     assertEquals(409, resp.status);
     verify(fixture.requestStore).findActiveForAccountAndClientName(ACCOUNT_ID, ACCOUNT_EMAIL, "Acme Corp");
+    verify(fixture.requestStore).hasRecordedDemoSelection("req-1", ACCOUNT_ID, ACCOUNT_EMAIL);
     verifyNoMoreInteractions(fixture.requestStore);
   }
 

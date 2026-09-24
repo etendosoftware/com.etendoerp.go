@@ -40,6 +40,17 @@ class OnboardingCompanyProfileTransferServiceTest {
   private static final String TARGET_ORG_ID = "productive-org";
 
   @Test
+  void skipsCompanyProfileTransferWhenThePaidPurchaseHasNoDemoSource() {
+    try (MockedStatic<OBDal> dalStatic = mockStatic(OBDal.class);
+        MockedStatic<OBContext> contextStatic = mockStatic(OBContext.class)) {
+      new OnboardingCompanyProfileTransferService().copy(null, TARGET_CLIENT_ID, TARGET_ORG_ID);
+
+      dalStatic.verifyNoInteractions();
+      contextStatic.verifyNoInteractions();
+    }
+  }
+
+  @Test
   void copiesProfileToExactTargetOrganizationWithANewTargetOwnedAddress() {
     OBDal dal = mock(OBDal.class);
     OBProvider provider = mock(OBProvider.class);

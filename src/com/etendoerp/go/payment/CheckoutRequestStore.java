@@ -89,6 +89,28 @@ public class CheckoutRequestStore {
    */
   public void recordRequested(String requestId, String accountId, String accountEmail,
       String clientName) {
+    recordRequested(requestId, accountId, accountEmail, clientName, null, false, false, false);
+  }
+
+  /** Compatibility entry point for existing callers that explicitly selected a demo. */
+  public void recordRequested(String requestId, String accountId, String accountEmail,
+      String clientName, String demoClientId) {
+    recordRequested(requestId, accountId, accountEmail, clientName, demoClientId, true,
+        false, false);
+  }
+
+  /** Records the immutable environment source and transfer choices for a new purchase. */
+  public void recordRequested(String requestId, String accountId, String accountEmail,
+      String clientName, String demoClientId, boolean demoSelectionRecorded,
+      boolean transferProducts, boolean transferContacts) {
+    recordRequested(requestId, accountId, accountEmail, clientName, demoClientId,
+        demoSelectionRecorded, transferProducts, transferContacts, null);
+  }
+
+  /** Records the immutable source, transfer choices, and price for a new purchase. */
+  public void recordRequested(String requestId, String accountId, String accountEmail,
+      String clientName, String demoClientId, boolean demoSelectionRecorded,
+      boolean transferProducts, boolean transferContacts, String stripePriceId) {
     runAsSystem(() -> {
       CheckoutRequest request = OBProvider.getInstance().get(CheckoutRequest.class);
       request.setClient(OBDal.getInstance().get(Client.class, ZERO_ID));
@@ -97,6 +119,12 @@ public class CheckoutRequestStore {
       request.setEtendoGoAccount(OBDal.getInstance().get(Account.class, accountId));
       request.setAccountEmail(StringUtils.trimToEmpty(accountEmail));
       request.setClientName(StringUtils.trimToEmpty(clientName));
+      request.setDemoClient(StringUtils.isBlank(demoClientId) ? null
+          : OBDal.getInstance().get(Client.class, StringUtils.trimToEmpty(demoClientId)));
+      request.setDemoSelectionRecorded(demoSelectionRecorded);
+      request.setTransferProducts(transferProducts);
+      request.setTransferContacts(transferContacts);
+      request.setStripePrice(StringUtils.trimToNull(stripePriceId));
       request.setCheckoutRequestStatus(STATUS_CREATING);
       request.setCreatingAt(new Date());
       request.setProvisioningAttempts(0L);
@@ -116,6 +144,13 @@ public class CheckoutRequestStore {
    * @param stripeSessionId the {@code cs_...} Checkout Session id
    */
   public void recordSessionCreated(String requestId, String stripeSessionId) {
+    if (findStripeSessionId(requestId) != null) return;
+    recordSessionCreated(requestId, null, stripeSessionId);
+  }
+
+  /** Advances the persisted provider session only from the expected predecessor. */
+  public void recordSessionCreated(String requestId, String expectedSessionId,
+      String stripeSessionId) {
     runAsSystem(() -> {
       CheckoutRequest request = findByRequestId(requestId);
       if (request == null) {
@@ -123,7 +158,16 @@ public class CheckoutRequestStore {
             requestId);
         return;
       }
-      if (request.getStripeSession() == null && StringUtils.isNotBlank(stripeSessionId)) {
+      String currentSessionId = StringUtils.trimToNull(request.getStripeSession());
+      String expected = StringUtils.trimToNull(expectedSessionId);
+      if (StringUtils.isBlank(stripeSessionId)) {
+        throw new IllegalArgumentException("Stripe session ID is required");
+      }
+      if (!StringUtils.equals(currentSessionId, stripeSessionId)
+          && !StringUtils.equals(currentSessionId, expected)) {
+        throw new IllegalStateException("Stripe checkout session changed during retry");
+      }
+      if (!StringUtils.equals(currentSessionId, stripeSessionId)) {
         request.setStripeSession(stripeSessionId);
       }
       if (advance(request, STATUS_CREATED) && request.getCreatedAt() == null) {
@@ -241,6 +285,81 @@ public class CheckoutRequestStore {
   }
 
   /**
+   * Returns the demo selected for this purchase, scoped to the authenticated account identity.
+   *
+   * <p>The selection is part of the durable checkout request so a provisioning retry keeps the
+   * same source even after browser state is gone or the account adds another demo environment.
+   * A null result means this is a legacy checkout that predates the selection field, or that no
+   * request matches the supplied account.
+   *
+   * @param requestId checkout request correlation id
+   * @param accountId immutable platform account id
+   * @param accountEmail authenticated platform account email
+   * @return selected demo client id, or {@code null} for a legacy/unmatched request
+   */
+  public String findDemoClientId(String requestId, String accountId, String accountEmail) {
+    CheckoutRequest request = find(requestId, accountId, accountEmail);
+    return request == null || request.getDemoClient() == null
+        ? null : request.getDemoClient().getId();
+  }
+
+  /** Returns whether this request predates persisted demo selection. */
+  public boolean hasRecordedDemoSelection(String requestId, String accountId, String accountEmail) {
+    CheckoutRequest request = find(requestId, accountId, accountEmail);
+    return request != null && Boolean.TRUE.equals(request.isDemoSelectionRecorded());
+  }
+
+  /** Verifies that a retry uses the immutable demo selection of the original checkout. */
+  public boolean matchesDemoSelection(String requestId, String accountId,
+      String accountEmail, String demoClientId) {
+    CheckoutRequest request = find(requestId, accountId, accountEmail);
+    if (request == null || !Boolean.TRUE.equals(request.isDemoSelectionRecorded())) return false;
+    String persistedDemoClientId = request.getDemoClient() == null
+        ? null : request.getDemoClient().getId();
+    return StringUtils.equals(StringUtils.trimToNull(persistedDemoClientId),
+        StringUtils.trimToNull(demoClientId));
+  }
+
+  /** Reads transfer intent from the same durable purchase row as its demo source. */
+  public TransferSelection findTransferSelection(String requestId, String accountId,
+      String accountEmail) {
+    CheckoutRequest request = find(requestId, accountId, accountEmail);
+    return request == null ? null : new TransferSelection(
+        Boolean.TRUE.equals(request.isTransferProducts()),
+        Boolean.TRUE.equals(request.isTransferContacts()));
+  }
+
+  /** Immutable product/contact selection stored with a purchase. */
+  public static final class TransferSelection {
+    private final boolean products;
+    private final boolean contacts;
+
+    private TransferSelection(boolean products, boolean contacts) {
+      this.products = products;
+      this.contacts = contacts;
+    }
+
+    public boolean isProducts() { return products; }
+    public boolean isContacts() { return contacts; }
+  }
+
+  /** Returns the last provider session recorded for an existing purchase. */
+  public String findStripeSessionId(String requestId) {
+    return runAsSystem(() -> {
+      CheckoutRequest request = findByRequestId(requestId);
+      return request == null ? null : StringUtils.trimToNull(request.getStripeSession());
+    });
+  }
+
+  /** Returns the immutable Stripe Price selected when the purchase was first created. */
+  public String findStripePriceId(String requestId) {
+    return runAsSystem(() -> {
+      CheckoutRequest request = findByRequestId(requestId);
+      return request == null ? null : StringUtils.trimToNull(request.getStripePrice());
+    });
+  }
+
+  /**
    * Lists recent purchase attempts for one account without exposing provider fields.
    * @param accountEmail authenticated account email
    * @return recent checkout requests for the account
@@ -274,7 +393,9 @@ public class CheckoutRequestStore {
       if (StringUtils.isBlank(accountId) || StringUtils.isBlank(accountEmail)) return List.of();
       OBQuery<CheckoutRequest> query = OBDal.getInstance().createQuery(CheckoutRequest.class,
           "as cr where cr.etendoGoAccount.id = :accountId"
-              + " and lower(cr.accountEmail) = lower(:accountEmail) order by cr.creationDate desc");
+              + " and lower(cr.accountEmail) = lower(:accountEmail)"
+              + " and cr.checkoutRequestStatus in ('PAID', 'PROVISIONING', 'PROVISIONED')"
+              + " order by cr.creationDate desc");
       query.setNamedParameter(PARAM_ACCOUNT_ID, StringUtils.trimToEmpty(accountId));
       query.setNamedParameter(PARAM_ACCOUNT_EMAIL, StringUtils.trimToEmpty(accountEmail));
       query.setFilterOnReadableClients(false);

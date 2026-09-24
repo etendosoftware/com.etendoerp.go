@@ -77,6 +77,7 @@ import com.etendoerp.go.payment.HostedCheckoutService;
 import com.etendoerp.go.payment.CheckoutConfiguration;
 import com.etendoerp.go.payment.BillingEventStore;
 import com.etendoerp.go.payment.BillingOfferConfiguration;
+import com.etendoerp.go.payment.StripePriceService;
 import com.etendoerp.go.payment.CheckoutRequestStore;
 import com.etendoerp.go.payment.EnvironmentAccessPolicy;
 import com.etendoerp.go.payment.SubscriptionEventOutcome;
@@ -151,6 +152,7 @@ import com.smf.securewebservices.utils.SecureWebServicesUtils;
 public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private static final Logger log = LogManager.getLogger(EtendoGoJwtServlet.class);
+  private final StripePriceService stripePriceService = new StripePriceService();
 
   private static final String HASH_ALGORITHM = "SHA-256";
   private static final int SALT_BYTES = 16;
@@ -161,6 +163,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private static final String UTF_8 = "UTF-8";
   private static final String FIELD_EMAIL = "email";
   private static final String FIELD_CLIENT_NAME = "clientName";
+  private static final String FIELD_DEMO_CLIENT_ID = "demoClientId";
   private static final String FIELD_STATUS = "status";
   private static final String FIELD_HTTP_STATUS = "httpStatus";
   private static final String FIELD_TOKEN = "token";
@@ -647,15 +650,26 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
 
   private void handleCheckoutSession(HttpServletRequest request, HttpServletResponse response)
       throws IOException {
-    runWithPlatformAccount(request, response, "checkout-session", account -> {
+    runWithAuthenticatedContext(request, response, "checkout-session", authenticated -> {
+      Account account = authenticated.account;
       if (!requireBillingOwner(response, account)) return;
       JSONObject body = readJsonBodyOrBadRequest(request, response);
       if (body == null) return;
       String clientName = validatedBillingClientName(response, body);
       if (clientName == null) return;
+      CheckoutRequest activePurchase = checkoutRequestStore
+          .findActiveForAccountAndClientName(account.getId(), account.getEmail(), clientName);
+      if (activePurchase != null) {
+        handleExistingBillingPurchase(response, account, activePurchase);
+        return;
+      }
+      CheckoutSelection selection = resolveCheckoutSelection(request, response, authenticated,
+          body);
+      if (selection == null) return;
       // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
       final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
-      createHostedCheckoutSession(response, account, body, clientName, origin, false);
+      createHostedCheckoutSession(response, account, body, clientName, origin, selection,
+          false);
     });
   }
 
@@ -689,11 +703,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   private void createHostedCheckoutSession(HttpServletResponse response, Account account,
-      JSONObject body, String clientName, String origin, boolean accountBillingPurchase)
-      throws IOException {
+      JSONObject body, String clientName, String origin, CheckoutSelection selection,
+      boolean accountBillingPurchase) throws IOException {
     try {
+      // The source, transfer choice and Stripe Price are persisted on the purchase row, and the
+      // flag-gated transfer selection is recorded before the provider is contacted.
       JSONObject result = hostedCheckoutService.createSession(account.getId(), account.getEmail(),
-          clientName, origin, requestId -> recordDemoDataTransferSelection(body, requestId));
+          clientName, origin, selection.demoClientId, selection.transferProducts,
+          selection.transferContacts,
+          requestId -> recordDemoDataTransferSelection(body, requestId, selection));
       addDemoDataTransferSelectionBestEffort(result, result.optString(FIELD_REQUEST_ID, ""));
       writeResponse(response, HttpServletResponse.SC_CREATED, result);
     } catch (IllegalStateException e) {
@@ -736,7 +754,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    */
   private void handleBillingPurchaseCreate(HttpServletRequest request,
       HttpServletResponse response) throws IOException {
-    runWithPlatformAccount(request, response, "billing-purchase-create", account -> {
+    runWithAuthenticatedContext(request, response, "billing-purchase-create", authenticated -> {
+      Account account = authenticated.account;
       if (!requireBillingOwner(response, account)) return;
       JSONObject body = readJsonBodyOrBadRequest(request, response);
       if (body == null) return;
@@ -748,9 +767,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         handleActiveBillingPurchase(response, account, body, activePurchase);
         return;
       }
+      CheckoutSelection selection = resolveCheckoutSelection(request, response, authenticated,
+          body);
+      if (selection == null) return;
       // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
       final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
-      createHostedCheckoutSession(response, account, body, clientName, origin, true);
+      createHostedCheckoutSession(response, account, body, clientName, origin, selection,
+          true);
     });
   }
 
@@ -759,7 +782,11 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String status = activePurchase.getCheckoutRequestStatus();
     if ("CREATING".equals(status) || "CREATED".equals(status)) {
       try {
-        recordDemoDataTransferSelection(body, activePurchase.getRequest());
+        // Only a purchase that recorded a demo source may carry a transfer selection.
+        String persistedDemoClientId = activePurchase.getDemoClient() == null
+            ? null : activePurchase.getDemoClient().getId();
+        recordDemoDataTransferSelection(body, activePurchase.getRequest(),
+            new CheckoutSelection(persistedDemoClientId, false, false));
       } catch (IllegalStateException e) {
         writeError(response, HttpServletResponse.SC_CONFLICT, "TRANSFER_SELECTION_LOCKED",
             "Transfer selection cannot change after checkout creation",
@@ -777,6 +804,13 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   private void handleExistingBillingPurchase(HttpServletResponse response, Account account,
       CheckoutRequest activePurchase) throws IOException, JSONException {
     String status = activePurchase.getCheckoutRequestStatus();
+    if (!checkoutRequestStore.hasRecordedDemoSelection(activePurchase.getRequest(),
+        account.getId(), account.getEmail())) {
+      writeError(response, HttpServletResponse.SC_CONFLICT, "PURCHASE_SELECTION_UNAVAILABLE",
+          "This purchase predates the saved environment selection. Start a new purchase to continue.",
+          "This purchase predates the saved environment selection. Start a new purchase to continue.");
+      return;
+    }
     if ("CREATING".equals(status) || "CREATED".equals(status)) {
       // Billing redirects are server-owned. Never trust a browser-supplied Origin as a return URL.
       final String origin = PublicUrlResolver.resolveConfiguredAppBaseUrl();
@@ -795,11 +829,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       }
       return;
     }
-    JSONObject result = new JSONObject();
-    result.put("purchaseId", activePurchase.getRequest());
-    result.put(FIELD_STATUS, status);
-    result.put(FIELD_CLIENT_NAME, activePurchase.getClientName());
-    addDemoDataTransferSelection(result, activePurchase.getRequest());
+    JSONObject result = buildBillingPurchaseJson(activePurchase);
     writeResponse(response, HttpServletResponse.SC_CONFLICT, result);
   }
 
@@ -819,7 +849,12 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       JSONObject result = new JSONObject();
       result.put(FIELD_REQUEST_ID, requestId);
       result.put(FIELD_STATUS, paid ? "paid" : "pending");
-      if (paid) result.put(FIELD_CLIENT_NAME, checkoutRequest.getClientName());
+      if (paid) {
+        result.put(FIELD_CLIENT_NAME, checkoutRequest.getClientName());
+        if (checkoutRequest.getDemoClient() != null) {
+          result.put(FIELD_DEMO_CLIENT_ID, checkoutRequest.getDemoClient().getId());
+        }
+      }
       if (checkoutRequest != null) addDemoDataTransferSelection(result, requestId);
       writeResponse(response, HttpServletResponse.SC_OK, result);
     });
@@ -857,16 +892,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       throws IOException {
     runWithPlatformAccount(request, response, "billing-offers", account -> {
       try {
-        BillingOfferConfiguration.Offer offer = BillingOfferConfiguration.current();
+        BillingOfferConfiguration.Offer offer =
+            BillingOfferConfiguration.current(stripePriceService);
         JSONObject result = new JSONObject();
         result.put("code", "productive-tenant");
+        result.put("priceId", offer.getPriceId());
         result.put("amountMinor", offer.getAmountMinor());
         result.put(FIELD_CURRENCY, offer.getCurrency());
         result.put("interval", offer.getInterval());
         writeResponse(response, HttpServletResponse.SC_OK, result);
-      } catch (JSONException e) {
-        log.error("JSON error building billing offer", e);
-        writeError(response, HttpServletResponse.SC_INTERNAL_SERVER_ERROR, INTERNAL_ERROR);
+      } catch (IllegalStateException | IOException | JSONException e) {
+        log.warn("Could not retrieve configured Stripe billing price", e);
+        writeError(response, HttpServletResponse.SC_SERVICE_UNAVAILABLE,
+            "BILLING_OFFER_UNAVAILABLE", "The current price is temporarily unavailable",
+            "The current price is temporarily unavailable");
       }
     });
   }
@@ -1005,9 +1044,15 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     result.put("purchaseId", purchase.getRequest());
     result.put(FIELD_STATUS, StringUtils.defaultString(purchase.getCheckoutRequestStatus(), "UNKNOWN"));
     result.put(FIELD_CLIENT_NAME, StringUtils.defaultString(purchase.getClientName()));
+    if (purchase.getDemoClient() != null) {
+      result.put(FIELD_DEMO_CLIENT_ID, purchase.getDemoClient().getId());
+    }
+    String createdClientId = purchase.getCreatedClient() == null
+        ? null : purchase.getCreatedClient().getId();
+    result.put("clientId", createdClientId == null ? JSONObject.NULL : createdClientId);
     addDemoDataTransferSelection(result, purchase.getRequest());
     if (purchase.getCreatedClient() != null) {
-      result.put("createdClientId", purchase.getCreatedClient().getId());
+      result.put("createdClientId", createdClientId);
     }
     if (purchase.getFailureReason() != null) {
       result.put("failureReason", purchase.getFailureReason());
@@ -2742,16 +2787,179 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * with flag {@code demo-data-transfer} off, where the body's selection is ignored as it was
    * before ETP-5364.
    */
-  void recordDemoDataTransferSelection(JSONObject body, JSONObject checkoutResult) {
-    recordDemoDataTransferSelection(body, checkoutResult.optString(FIELD_REQUEST_ID, ""));
+  void recordDemoDataTransferSelection(JSONObject body, JSONObject checkoutResult,
+      CheckoutSelection selection) {
+    recordDemoDataTransferSelection(body, checkoutResult.optString(FIELD_REQUEST_ID, ""),
+        selection);
   }
 
-  private void recordDemoDataTransferSelection(JSONObject body, String requestId) {
-    if (!DemoDataTransferFlag.isEnabled()) return;
-    JSONObject selection = body.optJSONObject(FIELD_DATA_TRANSFER);
-    if (selection == null) return;
-    demoDataTransferService.recordSelection(requestId, selection.optBoolean(FIELD_PRODUCTS),
-        selection.optBoolean(FIELD_CONTACTS));
+  /** A purchase without a demo source never records a transfer selection. */
+  private void recordDemoDataTransferSelection(JSONObject body, String requestId,
+      CheckoutSelection selection) {
+    if (!DemoDataTransferFlag.isEnabled() || selection == null
+        || StringUtils.isBlank(selection.demoClientId)) return;
+    JSONObject transferSelection = body.optJSONObject(FIELD_DATA_TRANSFER);
+    if (transferSelection == null) return;
+    demoDataTransferService.recordSelection(requestId,
+        transferSelection.optBoolean(FIELD_PRODUCTS), transferSelection.optBoolean(FIELD_CONTACTS));
+  }
+
+  private static String optionalDemoClientId(JSONObject body) {
+    return StringUtils.trimToNull(body.optString(FIELD_DEMO_CLIENT_ID, ""));
+  }
+
+  /** Resolves purchase source from authenticated context, ignoring stale state for production. */
+  private CheckoutSelection resolveCheckoutSelection(HttpServletRequest request,
+      HttpServletResponse response, AuthenticatedAccount authenticated, JSONObject body)
+      throws IOException {
+    String sessionClientId = currentSessionClientId(request, response, authenticated);
+    if (sessionClientId == null) return null;
+    if (StringUtils.isNotBlank(sessionClientId) && isProductiveClient(sessionClientId)) {
+      return new CheckoutSelection(null, false, false);
+    }
+    String demoClientId = optionalDemoClientId(body);
+    if (StringUtils.isNotBlank(sessionClientId) && isFreeClient(sessionClientId)
+        && demoClientId == null) {
+      writeError(response, HttpServletResponse.SC_BAD_REQUEST, "DEMO_SELECTION_REQUIRED",
+          "Select the trial environment to use for this purchase.",
+          "Select the trial environment to use for this purchase.");
+      return null;
+    }
+    if (demoClientId != null && !isOwnedFreeDemoClient(demoClientId,
+        authenticated.account.getEmail())) {
+      writeInvalidDemoSelection(response);
+      return null;
+    }
+    JSONObject transfer = body.optJSONObject("dataTransfer");
+    return new CheckoutSelection(demoClientId,
+        demoClientId != null && transfer != null && transfer.optBoolean(FIELD_PRODUCTS, false),
+        demoClientId != null && transfer != null && transfer.optBoolean(FIELD_CONTACTS, false));
+  }
+
+  private String currentSessionClientId(HttpServletRequest request, HttpServletResponse response,
+      AuthenticatedAccount authenticated) throws IOException {
+    String clientId = authenticated.sessionRecord == null ? null
+        : StringUtils.trimToNull(authenticated.sessionRecord.getCtxClientId());
+    if (authenticated.sessionRecord == null) {
+      try {
+        DecodedJWT jwt = SecureWebServicesUtils.decodeToken(extractBearerToken(request));
+        if (jwt != null) clientId = StringUtils.trimToNull(
+            jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString());
+      } catch (Exception e) {
+        log.debug("Bearer token carries no environment context for checkout", e);
+      }
+    }
+    if (clientId == null) return "";
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      if (!EtendoGoJwtDalHelper.clientBelongsToAccountEmail(clientId,
+          authenticated.account.getEmail())) {
+        writeError(response, HttpServletResponse.SC_FORBIDDEN,
+            "The session client is not owned by this account");
+        return null;
+      }
+      return clientId;
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private boolean isProductiveClient(String clientId) {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      return TenantPlanService.PLAN_PRODUCTIVE.equals(tenantPlanService.resolvePlan(clientId));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private boolean isFreeClient(String clientId) {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      return TenantPlanService.PLAN_FREE.equals(tenantPlanService.resolvePlan(clientId));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private boolean isOwnedFreeDemoClient(String demoClientId, String accountEmail) {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      Client client = OBDal.getInstance().get(Client.class, demoClientId);
+      return client != null
+          && EtendoGoJwtDalHelper.clientBelongsToAccountEmail(demoClientId, accountEmail)
+          && TenantPlanService.PLAN_FREE.equals(tenantPlanService.resolvePlan(demoClientId));
+    } finally {
+      OBContext.restorePreviousMode();
+    }
+  }
+
+  private void writeInvalidDemoSelection(HttpServletResponse response) throws IOException {
+    writeError(response, HttpServletResponse.SC_BAD_REQUEST, "INVALID_DEMO_SELECTION",
+        "The selected trial environment is unavailable.",
+        "The selected trial environment is unavailable.");
+  }
+
+  private static final class CheckoutSelection {
+    private final String demoClientId;
+    private final boolean transferProducts;
+    private final boolean transferContacts;
+
+    private CheckoutSelection(String demoClientId, boolean transferProducts,
+        boolean transferContacts) {
+      this.demoClientId = demoClientId;
+      this.transferProducts = transferProducts;
+      this.transferContacts = transferContacts;
+    }
+  }
+
+  private boolean validateCheckoutDemoSelection(HttpServletResponse response, String accountEmail,
+      String demoClientId, boolean requireSelectionWhenAvailable) throws IOException {
+    Set<String> freeDemoClientIds = findFreeDemoClientIdsForAccount(accountEmail);
+    if (StringUtils.isBlank(demoClientId)
+        && (!requireSelectionWhenAvailable || freeDemoClientIds.isEmpty())) {
+      return true;
+    }
+    if (StringUtils.isNotBlank(demoClientId) && freeDemoClientIds.contains(demoClientId)) return true;
+    String errorMessage = StringUtils.isBlank(demoClientId)
+            ? "Choose a demo environment before continuing with payment."
+            : "The selected demo environment is not available for this account. Refresh the environment list and try again.";
+    writeError(response, HttpServletResponse.SC_BAD_REQUEST, "INVALID_DEMO_SELECTION",
+        errorMessage, errorMessage);
+    return false;
+  }
+
+  /**
+   * Determines whether this purchase starts from an authenticated productive environment.
+   * The browser cannot nominate the origin: only the authenticated session record or signed JWT
+   * context is considered, and the client is verified against the account before classification.
+   * A null return means the authenticated context named a client the account does not own.
+   */
+  private Boolean isAuthenticatedProductiveOrigin(HttpServletRequest request,
+      HttpServletResponse response, AuthenticatedAccount authenticated, Account account)
+      throws IOException {
+    String clientId = authenticated.sessionRecord == null ? null
+        : StringUtils.trimToNull(authenticated.sessionRecord.getCtxClientId());
+    if (clientId == null) {
+      try {
+        DecodedJWT jwt = SecureWebServicesUtils.decodeToken(extractBearerToken(request));
+        if (jwt != null) clientId = StringUtils.trimToNull(
+            jwt.getClaim(JwtAuthUtils.CLAIM_CLIENT).asString());
+      } catch (Exception e) {
+        log.debug("Authenticated platform token has no environment client claim");
+      }
+    }
+    if (StringUtils.isBlank(clientId) || ZERO_ID.equals(clientId)) return Boolean.FALSE;
+    if (!EtendoGoJwtDalHelper.clientBelongsToAccountEmail(clientId, account.getEmail())) {
+      writeError(response, HttpServletResponse.SC_FORBIDDEN,
+          "The authenticated environment is not owned by this account");
+      return null;
+    }
+    return !findFreeDemoClientIdsForAccount(account.getEmail()).contains(clientId);
   }
 
   private void addDemoDataTransferSelection(JSONObject result, String requestId)
@@ -2911,12 +3119,6 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       if (!tenantEnvironmentLifecycleService.markProductive(clientId)) {
         log.error("Paid environment '{}' (client {}) could not be marked in the lifecycle "
             + "projection", clientName, clientId);
-      }
-      String demoClientId = EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail);
-      if (demoClientId != null && !tenantEnvironmentLifecycleService
-          .associateDemoWithProductive(demoClientId, clientId)) {
-        log.error("Paid environment '{}' (client {}) could not be associated with demo {}",
-            clientName, clientId, demoClientId);
       }
       revertTestModeForProductiveTenantBestEffort(clientId);
     }
@@ -3127,8 +3329,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     String clientId = resolveOrCreateClient(writer, vars, accountEmail, onboardingRequest,
         currencyId, adminPassword);
     if (clientId == null) return false;
-    String demoSourceClientId = resolveDemoSourceClientId(accountEmail, paidUpgrade,
-        onboardingRequest, clientId);
+    String demoSourceClientId = resolveDemoSourceClientId(paidUpgrade, onboardingRequest);
     AdminContextData adminContext = resolveAdminContextData(clientId, writer);
     if (adminContext == null) return false;
     if (paidUpgrade) {
@@ -3147,7 +3348,7 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     if (!ensureOnboardingDataset(writer, clientId, orgId, adminContext.adminUserId,
         adminContext.adminRoleId, onboardingRequest)) return false;
     if (paidUpgrade) {
-      transferDemoCompanyProfile(accountEmail, clientId, orgId);
+      transferDemoCompanyProfile(accountEmail, demoSourceClientId, clientId, orgId);
     }
     transferSelectedData(writer, onboardingRequest, paidUpgrade, demoSourceClientId, clientId,
         orgId);
@@ -3165,37 +3366,28 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
   }
 
   /**
-   * Revokes the account's demo and copies its company profile into the paid environment. The
-   * onboarding destination is still free at this point, so it is excluded from the candidates.
+   * Revokes the demo selected on the purchase and copies its company profile into the paid
+   * environment. A purchase without a demo source (productive origin) skips both.
    */
-  private void transferDemoCompanyProfile(String accountEmail, String clientId, String orgId) {
-    Set<String> freeTenantIds =
-        EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail(accountEmail, clientId);
-    if (freeTenantIds.size() > 1) {
-      throw new OBException("Multiple demo environments are linked to this account; "
-          + "the company profile source is ambiguous");
-    }
-    if (freeTenantIds.isEmpty()) {
-      log.info("No free demo environment is available for paid onboarding account {}; "
+  private void transferDemoCompanyProfile(String accountEmail, String sourceClientId,
+      String clientId, String orgId) {
+    if (StringUtils.isBlank(sourceClientId)) {
+      log.info("No demo environment was selected for paid onboarding account {}; "
           + "company profile transfer is skipped", maskEmail(accountEmail));
       return;
     }
-    String sourceClientId = freeTenantIds.iterator().next();
     if (!tenantEnvironmentLifecycleService.associateDemoWithProductive(sourceClientId, clientId)) {
-      throw new OBException("Could not revoke demo access after paid onboarding");
+      throw new OBException("Could not close access to the selected demo environment after payment");
     }
     onboardingCompanyProfileTransferService.copy(sourceClientId, clientId, orgId);
     log.info("Copied company profile from demo client {} to productive client {} organization {}",
         sourceClientId, clientId, orgId);
   }
 
-  private String resolveDemoSourceClientId(String accountEmail, boolean paidUpgrade,
-      OnboardingRequestData onboardingRequest, String targetClientId) {
-    boolean needsDemoSource = paidUpgrade && (DemoDataTransferFlag.isEnabled()
-        || onboardingRequest.transferProducts || onboardingRequest.transferContacts);
-    return needsDemoSource
-        ? EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail, targetClientId)
-        : null;
+  /** A paid setup always starts from the demo persisted on its purchase, never an inferred one. */
+  private static String resolveDemoSourceClientId(boolean paidUpgrade,
+      OnboardingRequestData onboardingRequest) {
+    return paidUpgrade ? StringUtils.trimToNull(onboardingRequest.demoClientId) : null;
   }
 
   private void transferSelectedData(PrintWriter writer, OnboardingRequestData onboardingRequest,
@@ -3264,6 +3456,34 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return null;
     }
     boolean paidUpgrade = paywallOutcome == PaywallOutcome.PAID;
+    if (paidUpgrade) {
+      boolean selectionRecorded = checkoutRequestStore.hasRecordedDemoSelection(
+          onboardingRequest.paymentToken, accountId, accountEmail);
+      if (!selectionRecorded) {
+        writeError(response, HttpServletResponse.SC_CONFLICT,
+            "PURCHASE_SELECTION_UNAVAILABLE",
+            "This purchase predates the saved environment selection. Start a new purchase to continue.",
+            "This purchase predates the saved environment selection. Start a new purchase to continue.");
+        return null;
+      }
+      String persistedDemoClientId = checkoutRequestStore.findDemoClientId(
+          onboardingRequest.paymentToken, accountId, accountEmail);
+      Set<String> currentFreeDemoClientIds = findFreeDemoClientIdsForAccount(accountEmail);
+      try {
+        onboardingRequest.demoClientId = resolvePaidDemoClientId(selectionRecorded,
+            persistedDemoClientId, currentFreeDemoClientIds);
+      } catch (IllegalArgumentException e) {
+        writeError(response, HttpServletResponse.SC_CONFLICT, "DEMO_SELECTION_REQUIRED",
+            e.getMessage(), e.getMessage());
+        return null;
+      }
+      CheckoutRequestStore.TransferSelection transferSelection = checkoutRequestStore
+          .findTransferSelection(onboardingRequest.paymentToken, accountId, accountEmail);
+      onboardingRequest.transferProducts = onboardingRequest.demoClientId != null
+          && transferSelection != null && transferSelection.isProducts();
+      onboardingRequest.transferContacts = onboardingRequest.demoClientId != null
+          && transferSelection != null && transferSelection.isContacts();
+    }
     Long provisioningClaim = claimPaidProvisioning(paidUpgrade, onboardingRequest, accountId,
         accountEmail, response);
     if (paidUpgrade && provisioningClaim == null) {
@@ -3271,6 +3491,38 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     }
     return new OnboardingPreparation(accountId, accountEmail, onboardingRequest, currencyId,
         paidUpgrade, provisioningClaim);
+  }
+
+  /** Resolves a paid purchase's fixed demo source and rejects missing or stale selections. */
+  static String resolvePaidDemoClientId(boolean selectionRecorded, String persistedDemoClientId) {
+    if (!selectionRecorded) {
+      throw new IllegalStateException("Paid purchase has no recorded demo selection");
+    }
+    return StringUtils.trimToNull(persistedDemoClientId);
+  }
+
+  static String resolvePaidDemoClientId(boolean selectionRecorded, String persistedDemoClientId,
+      Set<String> currentFreeDemoClientIds) {
+    String selected = resolvePaidDemoClientId(selectionRecorded, persistedDemoClientId);
+    if (selected == null) return null;
+    if (selected != null) {
+      if (currentFreeDemoClientIds == null || !currentFreeDemoClientIds.contains(selected)) {
+        throw new IllegalArgumentException(
+            "The demo selected for this paid setup is no longer available. Contact support before retrying.");
+      }
+      return selected;
+    }
+    return null;
+  }
+
+  private Set<String> findFreeDemoClientIdsForAccount(String accountEmail) {
+    OBContext.setOBContext(ZERO_ID, ZERO_ID, ZERO_ID, ZERO_ID);
+    OBContext.setAdminMode(true);
+    try {
+      return EtendoGoJwtDalHelper.findFreeTenantIdsByAccountEmail(accountEmail);
+    } finally {
+      OBContext.restorePreviousMode();
+    }
   }
 
   /**
@@ -3304,8 +3556,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
       return attempt == null ? 0L : attempt;
     }
     writeError(response, HttpServletResponse.SC_CONFLICT, "PROVISIONING_ALREADY_IN_PROGRESS",
-        "This environment is already being created",
-        "This environment is already being created. Please wait for it to finish.");
+        "Setup is still running for this environment",
+        "Setup is still running for this environment. Refresh its status before trying again.");
     return null;
   }
 
@@ -3356,8 +3608,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
         log.error("Environment '{}' (client {}) was provisioned but its checkout request could "
             + "not be closed", onboardingRequest.clientName, clientId, e);
       }
-      startDemoDataTransferBestEffort(onboardingRequest.paymentToken, accountEmail, clientId,
-          demoSourceClientId);
+      startDemoDataTransferBestEffort(onboardingRequest.paymentToken, demoSourceClientId,
+          clientId, accountId, accountEmail);
     }
     Account account = findAccountForCommittedOnboarding(accountId, accountEmail);
     clearOnboardingDraftBestEffort(account);
@@ -3372,22 +3624,20 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
    * a transfer failure, never as an unclosed checkout, and never reaches the onboarding caller.
    *
    * @param paymentToken the checkout request id the selection was recorded under
-   * @param accountEmail authenticated account email, used to find the account's demo tenant
+   * @param demoClientId exact source selected on the checkout request
    * @param clientId {@code AD_CLIENT_ID} of the productive environment just provisioned
    */
-  void startDemoDataTransferBestEffort(String paymentToken, String accountEmail, String clientId) {
-    if (!DemoDataTransferFlag.isEnabled()) return;
-    startDemoDataTransferBestEffort(paymentToken, accountEmail, clientId,
-        EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail));
-  }
-
-  private void startDemoDataTransferBestEffort(String paymentToken, String accountEmail,
-      String clientId, String demoClientId) {
-    if (!DemoDataTransferFlag.isEnabled()) return;
+  void startDemoDataTransferBestEffort(String paymentToken, String demoClientId, String clientId,
+      String accountId, String accountEmail) {
+    if (!DemoDataTransferFlag.isEnabled() || StringUtils.isBlank(demoClientId)) return;
     try {
-      String resolvedDemoClientId = StringUtils.isNotBlank(demoClientId) ? demoClientId
-          : EtendoGoJwtDalHelper.findOnlyFreeTenantIdByAccountEmail(accountEmail);
-      demoDataTransferService.start(paymentToken, resolvedDemoClientId, clientId);
+      CheckoutRequestStore.TransferSelection selection = checkoutRequestStore
+          .findTransferSelection(paymentToken, accountId, accountEmail);
+      if (selection != null) {
+        demoDataTransferService.recordSelection(paymentToken, selection.isProducts(),
+            selection.isContacts());
+      }
+      demoDataTransferService.start(paymentToken, demoClientId, clientId);
     } catch (RuntimeException e) {
       log.error("Environment (client {}) was provisioned but its demo data transfer could not be "
           + "started", clientId, e);
@@ -5297,6 +5547,8 @@ public class EtendoGoJwtServlet extends EtendoGoCorsServlet {
     // ETGO_CHECKOUT_REQUEST (CheckoutRequestStore): a token the Stripe webhook confirmed is what
     // makes the resulting environment productive (ETP-4966, durable since ETP-5045).
     private String paymentToken;
+    // Resolved only from the account-scoped checkout row; onboarding never trusts a browser value.
+    private String demoClientId;
     private String upgradeAction;
     private boolean transferProducts;
     private boolean transferContacts;

@@ -30,8 +30,8 @@ public class HostedCheckoutService {
    * @throws JSONException when the provider response is not valid JSON
    */
   public JSONObject createSession(String accountId, String accountEmail, String clientName,
-      String origin) throws IOException, JSONException {
-    return createSession(accountId, accountEmail, clientName, origin, requestId -> { });
+      String demoClientId, String origin) throws IOException, JSONException {
+    return createSession(accountId, accountEmail, clientName, origin, demoClientId, false, false);
   }
 
   /**
@@ -47,16 +47,45 @@ public class HostedCheckoutService {
    */
   public JSONObject createSession(String accountId, String accountEmail, String clientName,
       String origin, Consumer<String> beforeProvider) throws IOException, JSONException {
+    return createSession(accountId, accountEmail, clientName, origin, null, false, false,
+        beforeProvider);
+  }
+
+  /** Creates a checkout bound to an immutable demo source and transfer selection. */
+  public JSONObject createSession(String accountId, String accountEmail, String clientName,
+      String origin, String demoClientId, boolean transferProducts, boolean transferContacts)
+      throws IOException, JSONException {
+    return createSession(accountId, accountEmail, clientName, origin, demoClientId,
+        transferProducts, transferContacts, requestId -> { });
+  }
+
+  /**
+   * Creates a checkout bound to an immutable demo source, transfer selection and Stripe Price,
+   * running {@code beforeProvider} with the request id once the row is committed and before the
+   * provider is contacted.
+   */
+  public JSONObject createSession(String accountId, String accountEmail, String clientName,
+      String origin, String demoClientId, boolean transferProducts, boolean transferContacts,
+      Consumer<String> beforeProvider) throws IOException, JSONException {
     if (!CheckoutConfiguration.isConfigured()) throw new IllegalStateException("Checkout is not configured");
+    StripePriceService.Price price = new StripePriceService().retrieveConfiguredPrice();
     String requestId = UUID.randomUUID().toString();
     // Recorded and committed BEFORE the provider is contacted. A crash during the call below would
     // otherwise leave a session at Stripe that nothing on this side can name, and therefore that no
     // reconciliation could ever find. The row is deliberately not rolled back when the call fails:
     // it is the evidence that someone tried to buy something, and it is always safe to expire
     // because the checkoutUrl only reaches the browser once this method returns.
-    checkoutRequestStore.recordRequested(requestId, accountId, accountEmail, clientName);
+    checkoutRequestStore.recordRequested(requestId, accountId, accountEmail, clientName,
+        demoClientId, true, transferProducts, transferContacts, price.getId());
     beforeProvider.accept(requestId);
-    return createProviderSession(requestId, accountEmail, clientName, origin);
+    return createProviderSession(requestId, accountEmail, clientName, origin, price,
+        initialIdempotencyKey(requestId), null);
+  }
+
+  /** Compatibility entry point for checkouts that do not select a demo environment. */
+  public JSONObject createSession(String accountId, String accountEmail, String clientName,
+      String origin) throws IOException, JSONException {
+    return createSession(accountId, accountEmail, clientName, origin, null, false, false);
   }
 
   /**
@@ -78,18 +107,48 @@ public class HostedCheckoutService {
   public JSONObject reopenSession(String requestId, String accountEmail, String clientName,
       String origin) throws IOException, JSONException {
     if (!CheckoutConfiguration.isConfigured()) throw new IllegalStateException("Checkout is not configured");
-    return createProviderSession(requestId, accountEmail, clientName, origin);
+    String priceId = checkoutRequestStore.findStripePriceId(requestId);
+    if (priceId == null) {
+      throw new IllegalStateException("The original checkout price is unavailable");
+    }
+    String sessionId = checkoutRequestStore.findStripeSessionId(requestId);
+    if (sessionId == null) {
+      StripePriceService.Price price = new StripePriceService().retrievePrice(priceId);
+      return createProviderSession(requestId, accountEmail, clientName, origin, price,
+          initialIdempotencyKey(requestId), null);
+    }
+    JSONObject existing = retrieveSession(sessionId);
+    if (!sessionId.equals(existing.optString("id", ""))) {
+      throw new IOException("Stripe returned a different existing checkout session");
+    }
+    String sessionStatus = existing.optString("status", "");
+    if ("open".equals(sessionStatus)) {
+      String originalMode = existing.optString("mode", "");
+      if (originalMode.isEmpty()) {
+        throw new IOException("Stripe returned an existing session without its checkout mode");
+      }
+      return buildResult(requestId, existing.optString("url", ""), priceId, originalMode);
+    }
+    if (!"expired".equals(sessionStatus)) {
+      throw new IllegalStateException("The existing checkout session is not reopenable");
+    }
+    StripePriceService.Price price = new StripePriceService().retrievePrice(priceId);
+    return createProviderSession(requestId, accountEmail, clientName, origin, price,
+        replacementIdempotencyKey(requestId, sessionId), sessionId);
   }
 
   private JSONObject createProviderSession(String requestId, String accountEmail, String clientName,
-      String origin) throws IOException, JSONException {
-    String form = buildSessionForm(requestId, accountEmail, clientName, origin);
+      String origin, StripePriceService.Price price, String idempotencyKey,
+      String expectedSessionId) throws IOException, JSONException {
+    String mode = "once".equals(price.getInterval()) ? "payment" : "subscription";
+    String form = buildSessionForm(requestId, accountEmail, clientName, origin, price.getId(), mode);
     HttpURLConnection connection = (HttpURLConnection) new URL(CheckoutConfiguration.apiBaseUrl()
         + "/v1/checkout/sessions").openConnection();
     connection.setRequestMethod("POST");
     connection.setDoOutput(true);
     connection.setRequestProperty("Authorization", "Bearer " + CheckoutConfiguration.secretKey());
     connection.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+    connection.setRequestProperty("Idempotency-Key", idempotencyKey);
     try (OutputStream output = connection.getOutputStream()) {
       output.write(form.getBytes(StandardCharsets.UTF_8));
     }
@@ -98,14 +157,55 @@ public class HostedCheckoutService {
       throw new IOException("Checkout provider rejected session");
     }
     JSONObject provider = new JSONObject(response);
+    String providerSessionId = provider.optString("id", "");
+    String providerUrl = provider.optString("url", "");
+    if (providerSessionId.isEmpty() || providerUrl.isEmpty()) {
+      throw new IOException("Checkout provider returned an incomplete session");
+    }
     // The provider session id is the reconciliation anchor for an abandoned or lost checkout, and
     // this response is the only place it appears. Recorded before the URL is handed back.
-    checkoutRequestStore.recordSessionCreated(requestId, provider.optString("id", ""));
+    checkoutRequestStore.recordSessionCreated(requestId, expectedSessionId, providerSessionId);
     JSONObject result = new JSONObject();
     result.put("requestId", requestId);
-    result.put("checkoutUrl", provider.optString("url", ""));
-    result.put("mode", CheckoutConfiguration.mode());
+    result.put("checkoutUrl", providerUrl);
+    result.put("mode", mode);
+    result.put("priceId", price.getId());
     return result;
+  }
+
+  private JSONObject retrieveSession(String sessionId) throws IOException, JSONException {
+    HttpURLConnection connection = (HttpURLConnection) new URL(CheckoutConfiguration.apiBaseUrl()
+        + "/v1/checkout/sessions/" + sessionId).openConnection();
+    connection.setRequestMethod("GET");
+    connection.setConnectTimeout(StripePriceService.CONNECT_TIMEOUT_MS);
+    connection.setReadTimeout(StripePriceService.READ_TIMEOUT_MS);
+    connection.setRequestProperty("Authorization", "Bearer " + CheckoutConfiguration.secretKey());
+    String response = read(connection);
+    if (connection.getResponseCode() / 100 != 2) {
+      throw new IOException("Could not retrieve existing checkout session");
+    }
+    return new JSONObject(response);
+  }
+
+  private JSONObject buildResult(String requestId, String checkoutUrl, String priceId, String mode)
+      throws JSONException {
+    if (checkoutUrl == null || checkoutUrl.isEmpty()) {
+      throw new IllegalStateException("The checkout provider returned no session URL");
+    }
+    JSONObject result = new JSONObject();
+    result.put("requestId", requestId);
+    result.put("checkoutUrl", checkoutUrl);
+    result.put("mode", mode);
+    result.put("priceId", priceId);
+    return result;
+  }
+
+  static String initialIdempotencyKey(String requestId) {
+    return "checkout:" + requestId + ":initial";
+  }
+
+  static String replacementIdempotencyKey(String requestId, String expiredSessionId) {
+    return "checkout:" + requestId + ":after:" + expiredSessionId;
   }
 
   /**
@@ -125,11 +225,23 @@ public class HostedCheckoutService {
    */
   static String buildSessionForm(String requestId, String accountEmail, String clientName,
       String origin) throws UnsupportedEncodingException {
+    return buildSessionForm(requestId, accountEmail, clientName, origin,
+        CheckoutConfiguration.priceId(), CheckoutConfiguration.mode());
+  }
+
+  static String buildSessionForm(String requestId, String accountEmail, String clientName,
+      String origin, String priceId) throws UnsupportedEncodingException {
+    return buildSessionForm(requestId, accountEmail, clientName, origin, priceId,
+        CheckoutConfiguration.mode());
+  }
+
+  static String buildSessionForm(String requestId, String accountEmail, String clientName,
+      String origin, String priceId, String mode) throws UnsupportedEncodingException {
     String success = origin + "/upgrade?checkout=success&requestId=" + requestId;
     String cancel = origin + "/upgrade?checkout=cancelled&requestId=" + requestId;
     StringBuilder form = new StringBuilder();
-    add(form, "mode", CheckoutConfiguration.mode());
-    add(form, "line_items[0][price]", CheckoutConfiguration.priceId());
+    add(form, "mode", mode);
+    add(form, "line_items[0][price]", priceId);
     add(form, "line_items[0][quantity]", "1");
     add(form, "success_url", success);
     add(form, "cancel_url", cancel);
@@ -146,7 +258,7 @@ public class HostedCheckoutService {
     // The sandbox product is not configured for Stripe Managed Payments. Keep the
     // Checkout contract explicit until Product selects an eligible tax code.
     add(form, "managed_payments[enabled]", "false");
-    if ("subscription".equals(CheckoutConfiguration.mode())) {
+    if ("subscription".equals(mode)) {
       add(form, "subscription_data[metadata][request_id]", requestId);
       // Skip the card when a promotion code brings the total to 0, so a 100%-off code does not make
       // the buyer enter card details for a charge that will never happen. Stripe evaluates this per
