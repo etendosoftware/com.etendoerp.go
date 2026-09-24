@@ -59,7 +59,6 @@ import org.mockito.MockedStatic;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
-import org.openbravo.base.exception.OBException;
 import org.openbravo.base.provider.OBProvider;
 import org.openbravo.dal.core.OBContext;
 import org.openbravo.dal.service.OBDal;
@@ -67,13 +66,16 @@ import org.openbravo.model.ad.access.User;
 import org.openbravo.model.ad.system.Client;
 import org.openbravo.model.common.enterprise.Organization;
 
+import com.etendoerp.go.common.JwtAuthUtils;
 import com.etendoerp.go.schemaforge.data.ETGOSurveyResponse;
 
 /**
  * Unit tests for {@link SurveyConfigServlet}.
  *
- * <p>Covers: doOptions 204, doGet JWT-auth guards (OBException / generic
- * Exception -&gt; 401), the happy-path response shape (global settings,
+ * <p>Covers: doOptions 204, doGet/doPost auth guards backed by
+ * {@link com.etendoerp.go.common.JwtAuthUtils#authenticateOrFail}
+ * (cookie session, legacy bearer, and CSRF-rejected/invalid-session as a single
+ * {@code false} outcome the servlet must abort on), the happy-path response shape (global settings,
  * per-survey config grouped by survey key, and canned responses grouped by
  * survey/language with their score range), the empty-row cases,
  * internal-error handling (500), and (ETP-4352 GDPR remediation) doPost
@@ -127,7 +129,7 @@ class SurveyConfigServletTest {
   private MockedStatic<OBDal> obDalMock;
   private MockedStatic<OBProvider> obProviderMock;
   private MockedStatic<OBContext> obContextMock;
-  private MockedStatic<NeoServletSupport> neoSupportMock;
+  private MockedStatic<JwtAuthUtils> jwtAuthMock;
   private MockedStatic<com.etendoerp.go.common.CorsUtils> corsMock;
 
   private StringWriter stringWriter;
@@ -145,7 +147,7 @@ class SurveyConfigServletTest {
     obDalMock = mockStatic(OBDal.class);
     obProviderMock = mockStatic(OBProvider.class);
     obContextMock = mockStatic(OBContext.class);
-    neoSupportMock = mockStatic(NeoServletSupport.class);
+    jwtAuthMock = mockStatic(JwtAuthUtils.class);
     corsMock = mockStatic(com.etendoerp.go.common.CorsUtils.class);
 
     obDalMock.when(OBDal::getInstance).thenReturn(obDal);
@@ -165,7 +167,7 @@ class SurveyConfigServletTest {
   @AfterEach
   void tearDown() {
     corsMock.close();
-    neoSupportMock.close();
+    jwtAuthMock.close();
     obContextMock.close();
     obProviderMock.close();
     obDalMock.close();
@@ -177,14 +179,18 @@ class SurveyConfigServletTest {
   }
 
   private void authenticated() throws Exception {
-    neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any())).thenReturn(null);
+    jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
+        .thenReturn(true);
   }
 
-  /** Authenticates the request AND returns a real (mocked) {@link OBContext} carrying
-   * client/organization/user, as {@code doPost}'s {@code handleSubmitResponse} needs those to
-   * stamp the persisted {@link ETGOSurveyResponse} — unlike {@link #authenticated()}, which
-   * returns {@code null} because {@code doGet} never reads the returned context. The three
-   * objects are also kept in fields so the assertions can compare identity, not just ids. */
+  /** Authenticates the request AND makes {@link OBContext#getOBContext()} return a real (mocked)
+   * {@link OBContext} carrying client/organization/user, as {@code doPost}'s
+   * {@code handleSubmitResponse} needs those to stamp the persisted {@link ETGOSurveyResponse} —
+   * unlike {@link #authenticated()}, which stubs no context because {@code doGet} never reads one.
+   * {@code JwtAuthUtils.authenticateOrFail} itself sets the OBContext as a side effect on a real
+   * request; here it's mocked away, so the context is wired directly onto the static
+   * {@code OBContext.getOBContext()} accessor the servlet reads afterward. The three objects are
+   * also kept in fields so the assertions can compare identity, not just ids. */
   private void authenticatedWithContext(String clientId, String orgId, String userId) throws Exception {
     OBContext ctx = mock(OBContext.class);
     contextClient = mock(Client.class);
@@ -196,7 +202,9 @@ class SurveyConfigServletTest {
     when(ctx.getCurrentClient()).thenReturn(contextClient);
     when(ctx.getCurrentOrganization()).thenReturn(contextOrganization);
     when(ctx.getUser()).thenReturn(contextUser);
-    neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any())).thenReturn(ctx);
+    jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
+        .thenReturn(true);
+    obContextMock.when(OBContext::getOBContext).thenReturn(ctx);
   }
 
   private static HttpServletRequest requestWithBody(String pathInfo, String body) throws Exception {
@@ -231,27 +239,27 @@ class SurveyConfigServletTest {
   class DoGetAuthTests {
 
     @Test
-    @DisplayName("returns 401 when JWT authentication throws OBException")
-    void authFailureOBException() throws Exception {
-      neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any()))
-          .thenThrow(new OBException("bad token"));
+    @DisplayName("authenticateOrFail returning false aborts the request: config is never built")
+    void authenticateOrFailFalseAbortsRequest() throws Exception {
+      jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
+          .thenReturn(false);
 
       servlet.doGet(request, response);
 
-      verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-      assertTrue(getResponseBody().contains("bad token"));
+      // JwtAuthUtils.authenticateOrFail owns writing the error response (401/403) itself — the
+      // servlet only has to stop. Assert the handler body never ran.
+      verify(response, never()).setStatus(HttpServletResponse.SC_OK);
+      verify(obDal, never()).getSession();
     }
 
     @Test
-    @DisplayName("returns 401 when JWT authentication throws a generic Exception")
-    void authFailureGenericException() throws Exception {
-      neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any()))
-          .thenThrow(new RuntimeException("unexpected"));
+    @DisplayName("authenticateOrFail returning true (cookie session or legacy bearer) runs the handler")
+    void authenticateOrFailTrueRunsHandler() throws Exception {
+      authenticated();
 
       servlet.doGet(request, response);
 
-      verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-      assertTrue(getResponseBody().contains("Invalid or expired token"));
+      verify(response).setStatus(HttpServletResponse.SC_OK);
     }
   }
 
@@ -473,29 +481,32 @@ class SurveyConfigServletTest {
   class DoPostAuthTests {
 
     @Test
-    @DisplayName("returns 401 when JWT authentication throws OBException")
-    void authFailureOBException() throws Exception {
+    @DisplayName("authenticateOrFail returning false aborts the request: no response is persisted "
+        + "(covers both an invalid/expired session and a POST rejected for a missing/wrong "
+        + "X-Go-CSRF header — both are 403/401 decisions JwtAuthUtils makes and reports itself)")
+    void authenticateOrFailFalseAbortsRequest() throws Exception {
       HttpServletRequest req = requestWithBody("/response", "{\"surveyKey\":\"nps\"}");
-      neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any()))
-          .thenThrow(new OBException("bad token"));
+      jwtAuthMock.when(() -> JwtAuthUtils.authenticateOrFail(any(), any(), any(), anyString()))
+          .thenReturn(false);
 
       servlet.doPost(req, response);
 
-      verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-      assertTrue(getResponseBody().contains("bad token"));
+      verify(response, never()).setStatus(HttpServletResponse.SC_CREATED);
+      verify(obDal, never()).save(any());
+      verify(obDal, never()).flush();
     }
 
     @Test
-    @DisplayName("returns 401 when JWT authentication throws a generic Exception")
-    void authFailureGenericException() throws Exception {
+    @DisplayName("authenticateOrFail returning true (valid session + valid X-Go-CSRF, or legacy "
+        + "bearer) lets the response be persisted using the OBContext resolved after auth")
+    void authenticateOrFailTruePersistsResponse() throws Exception {
+      authenticatedWithContext("CLIENT-1", "ORG-1", "USER-1");
       HttpServletRequest req = requestWithBody("/response", "{\"surveyKey\":\"nps\"}");
-      neoSupportMock.when(() -> NeoServletSupport.authenticateJwt(any()))
-          .thenThrow(new RuntimeException("unexpected"));
 
       servlet.doPost(req, response);
 
-      verify(response).setStatus(HttpServletResponse.SC_UNAUTHORIZED);
-      assertTrue(getResponseBody().contains("Invalid or expired token"));
+      verify(response).setStatus(HttpServletResponse.SC_CREATED);
+      verify(obDal).save(surveyResponse);
     }
   }
 

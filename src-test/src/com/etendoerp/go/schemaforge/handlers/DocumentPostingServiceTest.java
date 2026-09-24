@@ -476,6 +476,85 @@ public class DocumentPostingServiceTest {
     }
   }
 
+  /**
+   * ETP-5436: {@code STATUS_DocumentDisabled} ('D') on a Goods Movement
+   * ({@code acct.tableName == "M_Movement"}) is rewritten to the same
+   * {@code NotCalculatedCost} {@code AD_MESSAGE} text ETP-5360 already uses for Physical
+   * Inventory — reused as-is rather than a second, hand-written EN/ES pair (see
+   * {@link DocumentPostingService}'s {@code MSG_NOT_CALCULATED_COST} javadoc). No separate
+   * EN/ES test needed here: the message text now comes entirely from the mocked
+   * {@code OBMessageUtils.messageBD} call, which already follows {@code OBContext}'s language
+   * (proven generically by ETP-5360's own tests) — this test only needs to prove the rewrite
+   * itself fires for this status/table pair.
+   */
+  @Test
+  public void postRewritesDocumentDisabledMessageForMovementWithNotCalculatedCost() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    acct.tableName = "M_Movement";
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_DocumentDisabled);
+    OBError err = new OBError();
+    err.setMessage("Document disabled");
+    when(acct.getMessageResult()).thenReturn(err);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class);
+        MockedStatic<OBMessageUtils> msgMock = mockStatic(OBMessageUtils.class)) {
+      stubObContext(obc, "en_US");
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+      msgMock.when(() -> OBMessageUtils.messageBD("NotCalculatedCost"))
+          .thenReturn("Cost has not yet been calculated for all products in the document.");
+
+      DocumentPostingService.PostResult r = svc.post("259", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Cost has not yet been calculated for all products in the document.", r.message());
+    }
+  }
+
+  /**
+   * ETP-5436 scoping guard: {@code STATUS_DocumentDisabled} on a NON-M_Movement table must
+   * NOT be rewritten — core's own message passes through untouched, proving the
+   * {@code TABLE_M_MOVEMENT} check actually scopes the rewrite.
+   */
+  @Test
+  public void postDoesNotRewriteDocumentDisabledMessageForNonMovementTable() throws Exception {
+    DocumentPostingService svc = new DocumentPostingService();
+
+    ConnectionProvider conn = mock(ConnectionProvider.class);
+    Connection con = mock(Connection.class);
+    when(conn.getTransactionConnection()).thenReturn(con);
+
+    AcctServer acct = mock(AcctServer.class);
+    acct.errors = 1;
+    acct.tableName = "C_Invoice";
+    when(acct.post(anyString(), eq(false), any(), any(), any())).thenReturn(true);
+    when(acct.getStatus()).thenReturn(AcctServer.STATUS_DocumentDisabled);
+    OBError err = new OBError();
+    err.setMessage("Document disabled");
+    when(acct.getMessageResult()).thenReturn(err);
+
+    try (MockedStatic<OBContext> obc = mockStatic(OBContext.class);
+        MockedStatic<AcctServer> acctStatic = mockStatic(AcctServer.class)) {
+      stubObContext(obc, "en_US");
+      acctStatic.when(() -> AcctServer.get(anyString(), anyString(), anyString(), any(ConnectionProvider.class)))
+          .thenReturn(acct);
+
+      DocumentPostingService.PostResult r = svc.post("259", "rec-1", conn);
+
+      assertFalse(r.ok());
+      assertEquals("Document disabled", r.message());
+    }
+  }
+
   @Test
   public void unpostReturnsOkWhenResetAccountingRuns() {
     DocumentPostingService svc = new DocumentPostingService();

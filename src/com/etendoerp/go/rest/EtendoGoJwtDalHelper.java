@@ -551,9 +551,24 @@ final class EtendoGoJwtDalHelper {
    *     tenants
    */
   public static String findOnlyFreeTenantIdByAccountEmail(String accountEmail) {
+    return findOnlyFreeTenantIdByAccountEmail(accountEmail, null);
+  }
+
+  /**
+   * Returns the account's only free tenant, excluding a client that is the onboarding destination.
+   * The destination is still free while its demo source is resolved, so it must not make the
+   * source lookup ambiguous.
+   *
+   * @param accountEmail authenticated platform account email
+   * @param excludedClientId client id to omit from source candidates
+   * @return the only remaining free client id, or {@code null} when unresolved
+   */
+  public static String findOnlyFreeTenantIdByAccountEmail(String accountEmail,
+      String excludedClientId) {
     Set<String> freeClientIds = new HashSet<>();
     for (User environmentUser : findEnvironmentUsersByAccountEmail(accountEmail)) {
       String clientId = environmentUser.getClient().getId();
+      if (clientId.equals(excludedClientId)) continue;
       if (TenantPlanService.PLAN_FREE.equals(TENANT_PLAN_SERVICE.resolvePlan(clientId))) {
         freeClientIds.add(clientId);
       }

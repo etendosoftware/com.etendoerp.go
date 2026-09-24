@@ -148,6 +148,48 @@ class McpRoutingException extends OBException {
   }
 
   /**
+   * The entity has no AD tab, so no tool that works off one can serve it (ETP-5405).
+   *
+   * <p>Sixteen active, included entities are backed by a handler rather than by a window and carry
+   * {@code ad_tab_id IS NULL}. {@code neo_list} and {@code neo_get} route those through the handler
+   * and never reach this; the tools that genuinely need a tab to answer — {@code neo_schema} and
+   * the write and defaults paths, which describe or fill a tab's fields — cannot, and used to say
+   * so as a bare {@code IllegalArgumentException} that the catch-all rendered as
+   * {@code 500 server_error "No AD_Tab linked to entity: header"}.</p>
+   *
+   * <p>A 500 is the wrong answer twice over: it reads as an instance fault rather than a
+   * configuration one, and the blind-agent run on ETP-5405 showed what it costs — the agent took
+   * the 500 plus its "re-sending will not help" hint as proof the capability was broken, abandoned
+   * the spec that was built for its question, and spent eight further calls reassembling the answer
+   * by hand. The distinction this draws is the one the agent needed: with a handler the entity is
+   * readable and only this tool is wrong, so the hint names the tools that do work; with no handler
+   * it is genuinely unserviceable and the configuration is at fault.</p>
+   *
+   * @param entityName the entity that carries no tab
+   * @param hasHandler whether a {@code NeoHandler} is registered for it
+   * @return the exception to throw
+   */
+  static McpRoutingException entityHasNoTab(String entityName, boolean hasHandler) {
+    if (hasHandler) {
+      return new McpRoutingException(
+          "Entity '" + entityName + "' is served by a dedicated handler, not by a window, so this "
+              + "tool has no field metadata to work from",
+          McpConstants.STATUS_METHOD_NOT_ALLOWED, McpConstants.ERROR_METHOD_NOT_ALLOWED, null,
+          List.of(),
+          "Read it with neo_list or neo_get, which route through the handler. There is no field "
+              + "schema to fetch and it cannot be written through the generic tools.",
+          McpConstants.SEE_ALSO_READING);
+    }
+    return new McpRoutingException(
+        "Entity '" + entityName + "' has no window and no handler behind it, so nothing can serve "
+            + "it",
+        McpConstants.STATUS_UNPROCESSABLE, McpConstants.ERROR_VALIDATION, null, List.of(),
+        "This is a configuration fault in the entity, not in the call. Call neo_discover for an "
+            + "entity that is serviceable.",
+        McpConstants.SEE_ALSO_READING);
+  }
+
+  /**
    * The entity does not enable the HTTP verb this tool maps to (ETP-4254).
    *
    * <p>Kept out of the {@code validation_error} bucket for the reason {@link
